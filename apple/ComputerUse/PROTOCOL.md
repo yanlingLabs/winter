@@ -1177,15 +1177,29 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   remote panel's elements, and whether the service takes a posted ⌘⇧G and the typed path — the cu-live chrome rows "a
   native Open panel — ⌘⇧G and the path …" and "… — the skill's §19 recipe …" measure both against `input.files[0].name`
   (the §19 row goes on in the Go to folder field when `type` stops there; both close the sheet in a `finally`).
-- File panels' floors (the review, MED-2; `Core/CUCore+FilePanel.swift`), each closing a way around the others — a
-  protected location being the save floor's list plus, for a panel, anything in a hidden folder of the home or a keychain
-  (`CUFloors.isProtectedPanelPath`): (1) text for ANY sheet or panel (`type`, `paste`, `setValue` — an Open panel's Go to
-  folder field too) naming one is refused `save_path` before it is sent; (2) after a `type`/`paste`/`setValue`/text `key`,
-  the VALUE of the named field and of the focus is judged whole (a path assembled over several calls), cleared when the
-  field takes a value, and refused; (3) a press that makes the panel CHOOSE — its default button (any but Cancel when it
-  names none), Return, Enter or ⌘O in it, a double-click or Open/Confirm on an item — first reads what it would choose (the
-  selected items' `AXURL`, `AXFilename`, title, description, value; its fields' and pop-ups' values) and a protected one
-  refuses the press.
+- File panels' floors (the reviews, MED-2 and the security re-review; `Core/CUCore+FilePanel.swift`), each closing a way
+  around the others. A protected location: the save floor's names anywhere (shell startup files, agent config files,
+  `.ssh`, `LaunchAgents`, `LaunchDaemons`, `.winter`, `.winter-dev`, `.claude`), and under the home any hidden folder or
+  file and `Library/Keychains` / `Library/Cookies` — the SAME set `upload-paths.ts` uses (a test reads the Swift lists and
+  keeps them equal) — judged on the CANONICAL path: `~` expanded, a relative path made absolute against the panel's folder
+  when it says (`AXDocument`/`AXURL`), else judged by its names alone (`../.aws` is protected), `.` and `..` resolved,
+  symlinks resolved by `realpath` on the longest existing prefix, `/System/Volumes/Data` dropped, compared without case.
+  (1) Text for ANY sheet or panel (`type`, `paste`, `setValue`, a typing `key`) is refused `save_path` BEFORE it is sent
+  when it names one alone, after the field's current value, or after what was typed into that panel since its last choice
+  (per target, so a path split over calls into a Go to folder field accessibility doesn't show is judged whole); (2) after
+  the write, the named field's and the focus's VALUE is judged, cleared when it takes a value, and refused; (3) an act
+  that CHOOSES — the default button (any but Cancel when it names none), Return, Enter, ⌘O or ⌘↓ into the panel, a Return
+  inside typed or pasted text, a double-click or Open/Confirm on an item — first reads what it would choose (selected
+  items' `AXURL`/`AXFilename`/title/description/value, fields, pop-ups, what was typed) and a protected one refuses it;
+  when nothing can be judged (nothing readable, the 600-element cap, or relative text onto a folder it can't see) and text
+  was sent into that panel, it fails CLOSED ("the user can pick the file themselves") — with nothing typed (the user's own
+  navigation) it goes ahead; (4) a `drag` whose source is a file item (an `AXURL` on it, two parents or two levels of
+  children) is refused for a protected file before anything moves.
+- Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
+  routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
+  record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise
+  judged by names alone and fails closed at the choice), and whether `realpath` on a path inside a TCC-protected folder
+  (Desktop, Documents, Downloads) raises a privacy prompt for the helper.
 - A key with the keyboard focus already in a sheet or panel (no `into`) is watched like one aimed there with `into`: no
   sheet or window opened, focus, value, selection and caret range unchanged → "nothing new appeared in the panel after …".
   Both only in a FILE panel (a Save panel's name field, a service-drawn sheet, or the shape: a search field, a pop-up and an

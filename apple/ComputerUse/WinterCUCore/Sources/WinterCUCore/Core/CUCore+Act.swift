@@ -404,13 +404,20 @@ extension CUCore {
             return o
         case .key(let a):
             try refuseProtectedChoice(p.action, t)
+            // One typing key into a panel: judged with what was typed there before it (a path keyed character by character).
+            if let chord = try? CUKeyChord.parse(a.combo), Self.producesText(chord), case .character(let ch) = chord.key,
+               !chord.modifiers.contains(.command) {
+                try refuseProtectedPanelText(String(ch), into: a.into.flatMap { try? element($0, in: t) }, t)
+            }
             let o = try keyChecked(a, t) { try key(a, p, t, token) }
             if let chord = try? CUKeyChord.parse(a.combo), Self.producesText(chord) {
                 try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
             }
             return o
         case .scroll(let a): return try scroll(a, p, t, token)
-        case .drag(let a): return try drag(a, p, t, token)
+        case .drag(let a):
+            try refuseProtectedDrag(a, t)
+            return try drag(a, p, t, token)
         case .select(let a): return try select(a, p, t, token)
         case .action(let a):
             try refuseProtectedChoice(p.action, t)
@@ -1303,7 +1310,7 @@ extension CUCore {
         if info.secure { throw secureRefusal() }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: a.value, pid: t.pid, ax: ax)
         // Any sheet or panel — an Open panel's Go to folder field too, not only a Save panel's (the review, MED-2).
-        try refuseProtectedPanelText(a.value, into: e, t)
+        try refuseProtectedPanelText(a.value, into: e, t, replacing: true)
         t.noteTargeted(e, at: clock.nowMs())
         announceTarget(t, info, pressing: false)
         cursor(t, "type", at: info.center)

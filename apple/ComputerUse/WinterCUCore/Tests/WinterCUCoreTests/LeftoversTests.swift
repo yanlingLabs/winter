@@ -810,18 +810,31 @@ final class LeftoversTests: XCTestCase {
         XCTAssertNotNil(aws, "a hidden folder of the home too")
     }
 
-    func testAPathAssembledOverSeveralCallsIsJudgedByTheFieldsValueAndCleared() async throws {
+    func testAPathAssembledOverSeveralCallsIsRefusedBeforeTheLastPartIsSent() async throws {
         world()
         let (sheet, _) = openPanel()
-        let field = goToField(sheet, value: "~/.s")
+        let field = goToField(sheet, value: "~/Library/Key")
+        ax.makeSettable(field, kAXValueAttribute)
+        ax.focus(pid: pid, on: field)
+        ax.put(field, [kAXFocusedAttribute: true])
+        let said = await refusal(.type(CUTypeAction(text: "chains/login.keychain-db", into: ref(field))))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "typed")
+        XCTAssertTrue(poster.entries.filter { $0.type == .keyDown }.isEmpty, "nothing was sent")
+    }
+
+    /// What the field holds AFTER the keys (an app that completes a path itself) is judged too: cleared and refused.
+    func testAFieldThatEndsUpNamingAProtectedPathIsClearedAndRefused() async throws {
+        world()
+        let (sheet, _) = openPanel()
+        let field = goToField(sheet, value: "")
         ax.makeSettable(field, kAXValueAttribute)
         ax.focus(pid: pid, on: field)
         ax.put(field, [kAXFocusedAttribute: true])
         poster.onPost = { [unowned self] e in
-            guard e.type == .keyDown, !e.unicode.isEmpty else { return }
-            ax.put(field, [kAXValueAttribute: (ax.string(field, kAXValueAttribute) ?? "") + e.unicode])
+            guard e.type == .keyDown else { return }
+            ax.put(field, [kAXValueAttribute: "~/.ssh/id_ed25519"])  // completed by the app
         }
-        let said = await refusal(.type(CUTypeAction(text: "sh/id_ed25519", into: ref(field))))
+        let said = await refusal(.type(CUTypeAction(text: "x", into: ref(field))))
         XCTAssertTrue(said?.contains("panel field now names a protected location") ?? false, said ?? "typed")
         XCTAssertTrue(said?.contains("it was cleared") ?? false, said ?? "")
         XCTAssertEqual(ax.string(field, kAXValueAttribute), "")
@@ -866,6 +879,98 @@ final class LeftoversTests: XCTestCase {
         let open = ax.element(sheet, kAXDefaultButtonAttribute)!
         let said = await refusal(.click(CUClickAction(ref: ref(open))))
         XCTAssertTrue(said?.contains("panel would choose a protected location") ?? false, said ?? "pressed")
+    }
+
+    // MARK: the re-review's bypasses
+
+    /// HIGH: a path split over calls (~/Library/Key, then chains/login.keychain-db + Return) — the path assembled over calls is judged BEFORE anything is
+    /// sent, with the field's value and with what was typed into the panel; in a Go to field accessibility shows, and in
+    /// one it doesn't (the keys into the file list).
+    func testAPathFinishedWithAReturnIsJudgedWholeBeforeSending() async throws {
+        world()
+        let (sheet, files) = openPanel()
+        let field = goToField(sheet)
+        ax.focus(pid: pid, on: field)
+        ax.put(field, [kAXFocusedAttribute: true])
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown, !e.unicode.isEmpty, e.unicode != "\r", e.unicode != "\n" else { return }
+            ax.put(field, [kAXValueAttribute: (ax.string(field, kAXValueAttribute) ?? "") + e.unicode])
+        }
+        _ = try await act(.type(CUTypeAction(text: "~/Library/Key", into: ref(field))))
+        let n = poster.entries.count
+        let said = await refusal(.type(CUTypeAction(text: "chains/login.keychain-db\n", into: ref(field))))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "typed")
+        XCTAssertEqual(poster.entries.count, n, "nothing was sent")
+        // The same through the file list, the Go to field unseen: what was typed into the panel decides.
+        world()
+        let (_, list) = openPanel()
+        _ = try await act(.type(CUTypeAction(text: "~/Library/Key", into: ref(list))))
+        let m = poster.entries.count
+        let unseen = await refusal(.type(CUTypeAction(text: "chains/login.keychain-db\r", into: ref(list))))
+        XCTAssertNotNil(unseen, "refused")
+        XCTAssertEqual(poster.entries.count, m, "nothing was sent")
+        let keyed = await refusal(.key(CUKeyAction(combo: "h", into: ref(list))))
+        XCTAssertNil(keyed, "one harmless character")
+        _ = files
+    }
+
+    func testCmdDownAndCmdOChooseLikeReturn() async throws {
+        world()
+        let (_, files) = openPanel()
+        _ = selectItem(in: files, url: "file:///Users/someone/.ssh/id_ed25519")
+        for combo in ["cmd+down", "cmd+o", "enter"] {
+            let said = await refusal(.key(CUKeyAction(combo: combo)))
+            XCTAssertTrue(said?.contains("panel would choose a protected location") ?? false, "\(combo): \(said ?? "pressed")")
+        }
+    }
+
+    /// LOW: nothing readable to judge after text went into the panel — the choice fails closed; with nothing typed (the
+    /// user's own navigation), it goes ahead.
+    func testAChoiceThatCantBeReadAfterTypingFailsClosed() async throws {
+        world()
+        let (sheet, files) = openPanel()
+        let open = ax.element(sheet, kAXDefaultButtonAttribute)!
+        _ = await refusal(.click(CUClickAction(ref: ref(open))))
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"), "nothing typed: pressed")
+        world()
+        let (sheet2, files2) = openPanel()
+        _ = try await act(.type(CUTypeAction(text: "pkg.zip", into: ref(files2))))
+        let said = await refusal(.click(CUClickAction(ref: ref(ax.element(sheet2, kAXDefaultButtonAttribute)!))))
+        XCTAssertTrue(said?.contains("can't be read, and text was typed into it") ?? false, said ?? "pressed")
+        XCTAssertTrue(said?.contains("the user can pick the file themselves") ?? false)
+        _ = (files, sheet)
+    }
+
+    func testADragOfAProtectedFileIsRefused() async throws {
+        world()
+        let (_, files) = openPanel()
+        let item = selectItem(in: files, url: "file:///Users/someone/.ssh/id_ed25519")
+        let said = await refusal(.drag(CUDragAction(from: CUDragEnd(ref: ref(item)), to: CUDragEnd(ref: ref(fileButton)))))
+        XCTAssertTrue(said?.contains("the drag's source is a protected location") ?? false, said ?? "dragged")
+        XCTAssertFalse(poster.entries.contains { $0.type == .leftMouseDown }, "nothing moved")
+        ax.put(item, [kAXURLAttribute: URL(string: "file:///Users/someone/Downloads/pkg.zip")! as CFURL])
+        let harmless = await refusal(.drag(CUDragAction(from: CUDragEnd(ref: ref(item)), to: CUDragEnd(ref: ref(fileButton)))))
+        XCTAssertFalse(harmless?.contains("the drag's source") ?? false, harmless ?? "")
+    }
+
+    func testCanonicalFormsCantGetAroundTheFloor() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("winter-canon-\(UUID().uuidString)")
+        let home = root.appendingPathComponent("u")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".aws"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Downloads"), withIntermediateDirectories: true)
+        try "k".write(to: home.appendingPathComponent(".aws/credentials"), atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("Downloads/creds"), withDestinationURL: home.appendingPathComponent(".aws"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let h = home.path
+        XCTAssertTrue(CUFloors.isProtectedPanelPath(h + "/Downloads/creds/credentials", home: h), "a symlink into a hidden folder")
+        XCTAssertTrue(CUFloors.isProtectedPanelPath(h.uppercased() + "/.AWS/CREDENTIALS", home: h), "another case")
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("/System/Volumes/Data" + h + "/.aws/credentials", home: h), "the Data volume's firmlink")
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("../.aws/credentials", home: h), "a relative climb, no folder known")
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("../.aws/credentials", home: h, base: h + "/Downloads"), "resolved against the panel's folder")
+        XCTAssertTrue(CUFloors.isProtectedPanelPath(h + "/Downloads/../.aws/x", home: h), ". and .. resolved")
+        XCTAssertFalse(CUFloors.isProtectedPanelPath("../Downloads/pkg.zip", home: h, base: h + "/Downloads"))
+        XCTAssertFalse(CUFloors.isProtectedPanelPath(h + "/Downloads/pkg.zip", home: h))
+        XCTAssertTrue(CUFloors.isProtectedPanelPath("/USERS/someone/.SSH/ID_RSA", home: "/Users/u"), "the save list, any case")
     }
 
     func testProtectedPanelPaths() {

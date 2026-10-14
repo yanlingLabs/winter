@@ -2,7 +2,7 @@
 // diffs, the site floor's rows and rule matching, upload paths, the screenshot scale mapping, key combos, URL checks,
 // the committed page-runtime bundle (stale = fail), and the tool description with and without vision.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderPageRuntimeModule } from "../../../../scripts/build-page-runtime";
@@ -16,7 +16,7 @@ import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry"
 import { fitsBudget, imageSize, scaleFor, toCss } from "../../src/computer-use/browser/scale";
 import { ruleAllowsSite, siteCardSummary, siteRow } from "../../src/computer-use/browser/site-policy";
 import { bodyLines, diffState, FULL_STATE_BYTE_CAP, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, printedState, type TabNode, siteToolsLine } from "../../src/computer-use/browser/state-format";
-import { checkUploadPaths, isSecretPath, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
+import { checkUploadPaths, isSecretPath, PROTECTED_CONFIG_NAMES, PROTECTED_FOLDER_NAMES, SECRET_LIBRARY_FOLDERS, SHELL_STARTUP_NAMES, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
 import { computerV2Description } from "../../src/computer-use/description";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import { FakeCdpTransport, fakeJpeg } from "./browser-fake-transport";
@@ -309,6 +309,24 @@ describe("upload paths", () => {
     const aws = said(join(userHome, ".aws", "credentials"));
     expect(aws).toContain("is a protected file (in a hidden folder of the home, or a keychain) — it can't be uploaded, and must not be copied to be");
     expect(aws).not.toContain("$TMPDIR");
+  });
+  test("the protected set is the helper's: the Swift lists and the TypeScript ones are the same", () => {
+    const swiftDir = join(import.meta.dir, "..", "..", "..", "..", "apple", "ComputerUse", "WinterCUCore", "Sources", "WinterCUCore");
+    const floors = readFileSync(join(swiftDir, "Floors", "Floors.swift"), "utf8") + readFileSync(join(swiftDir, "Core", "CUCore+FilePanel.swift"), "utf8");
+    const swiftSet = (name: string): string[] => {
+      const m = new RegExp(`static let ${name}: Set<String> = \\[([\\s\\S]*?)\\]`).exec(floors);
+      expect(m).not.toBeNull();
+      return [...m![1]!.matchAll(/"([^"]+)"/g)].map((x) => x[1]!).sort();
+    };
+    expect(swiftSet("shellStartupNames")).toEqual([...SHELL_STARTUP_NAMES].sort());
+    expect(swiftSet("protectedFolderNames")).toEqual([...PROTECTED_FOLDER_NAMES].sort());
+    expect(swiftSet("protectedConfigNames")).toEqual([...PROTECTED_CONFIG_NAMES].sort());
+    expect(swiftSet("secretLibraryFolders")).toEqual([...SECRET_LIBRARY_FOLDERS].sort());
+  });
+  test("secret paths: any case; the save floor's names anywhere", () => {
+    expect(isSecretPath("/USERS/U/.SSH/id_ed25519", "/Users/u")).toBe(true);
+    expect(isSecretPath("/Volumes/x/LaunchAgents/a.plist", "/Users/u")).toBe(true);
+    expect(isSecretPath("/opt/x/.zshrc", "/Users/u")).toBe(true);
   });
   test("secret paths: a home dot segment or a keychain; nothing outside the home", () => {
     expect(isSecretPath("/Users/u/.ssh/id_ed25519", "/Users/u")).toBe(true);
