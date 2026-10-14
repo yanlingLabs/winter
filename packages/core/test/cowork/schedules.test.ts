@@ -175,3 +175,50 @@ test("cancel on a second handle after due snapshot cannot materialize the cancel
   }) as any;
   f.time(1000); f.schedules.tick(); expect(f.schedules.status(a.workspaceId, a.scheduleId).occurrences).toEqual([]); expect(f.schedules.get(a.workspaceId, a.scheduleId).state).toBe("cancelled");
 });
+test("cancelled schedules free live capacity while terminal metadata stays readable", () => {
+  const f = fixture(), live: ReturnType<typeof f.create>[] = [];
+  for (let i = 0; i < 100; i++) live.push(f.create(f.definition, `live-${i}`));
+  expect(() => f.create(f.definition, "full")).toThrow("schedule_limit");
+  const first = live[0]!; f.schedules.cancel(first.workspaceId, first.scheduleId, 1);
+  const replacement = f.create(f.definition, "replacement"); expect(replacement.state).toBe("enabled");
+  expect(f.schedules.status(first.workspaceId, first.scheduleId).schedule.state).toBe("cancelled");
+  expect(f.schedules.create("fixture", first.workspaceId, "live-0", f.definition).state).toBe("cancelled");
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_schedules WHERE workspace_id=?").get(first.workspaceId)).toEqual({ n: 101 });
+  expect(() => f.create(f.definition, "full-again")).toThrow("schedule_limit");
+});
+test("one shared calendar budget bounds all jobs and planning never holds a write transaction", () => {
+  const f = fixture(), a = f.create({ ...f.definition, timing: { kind: "recurring", spec: "* * * * *" } }, "cron-a"), b = f.create({ ...f.definition, timing: { kind: "recurring", spec: "* * * * *" } }, "cron-b");
+  let formats = 0;
+  const bounded = new CoworkSchedules(f.records, f.grants, () => 600000, undefined, { steps: 3, formats: 6, observeFormat: () => { formats++; expect(f.db.db.inTransaction).toBe(false); } });
+  const total = () => [a, b].flatMap(value => bounded.status(value.workspaceId, value.scheduleId).occurrences).reduce((sum, value) => sum + value.missedCount + 1, 0);
+  bounded.tick(); expect(formats).toBe(6); expect(total()).toBe(3); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_schedule_quarantines").get()).toEqual({ n: 0 });
+  formats = 0; bounded.tick(); expect(formats).toBe(6); expect(total()).toBe(6);
+  // Oldest durable cursors naturally give the second job the next pass's admission.
+  expect(bounded.get(a.workspaceId, a.scheduleId).nextDue).toBe(240000); expect(bounded.get(b.workspaceId, b.scheduleId).nextDue).toBe(240000);
+});
+test("calendar budget debt remains retryable and catch-up progress is durable without duplicate counts", () => {
+  const f = fixture(), a = f.create({ ...f.definition, timing: { kind: "recurring", spec: "* * * * *" } });
+  const tiny = new CoworkSchedules(f.records, f.grants, () => 60000000, undefined, { steps: 1, formats: 1 });
+  tiny.tick(); expect(tiny.get(a.workspaceId, a.scheduleId).nextDue).toBe(60000); expect(tiny.status(a.workspaceId, a.scheduleId).occurrences).toEqual([]);
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_schedule_quarantines").get()).toEqual({ n: 0 });
+  const normal = new CoworkSchedules(f.records, f.grants, () => 60000000);
+  normal.tick(); expect(normal.status(a.workspaceId, a.scheduleId).occurrences[0]!.missedCount).toBe(255); expect(normal.get(a.workspaceId, a.scheduleId).nextDue).toBe(257 * 60000);
+  const db = openRuntimeStateDb(f.home); handles.push(db); const restored = new CoworkSchedules(new CoworkRepository(db), f.grants, () => 60000000);
+  restored.recover(); restored.tick(); expect(restored.status(a.workspaceId, a.scheduleId).occurrences[0]!.missedCount).toBe(511);
+  restored.tick(); restored.tick(); const row = restored.status(a.workspaceId, a.scheduleId).occurrences[0]!;
+  expect(row.missedCount).toBe(999); expect(row.latestDueAt).toBe(60000000); expect(restored.get(a.workspaceId, a.scheduleId).nextDue).toBe(60060000);
+});
+test("read-only inspection of an unknown poisoned row cannot claim durable quarantine", () => {
+  const f = fixture(), a = f.create(); f.db.db.run("UPDATE cowork_schedules SET definition_json='{poison' WHERE schedule_id=?", [a.scheduleId]);
+  const readonly = openRuntimeStateDb(f.home, { readonly: true }); handles.push(readonly); const audit = new CoworkSchedules(new CoworkRepository(readonly), f.grants);
+  expect(() => audit.status(a.workspaceId, a.scheduleId)).toThrow();
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_schedule_quarantines").get()).toEqual({ n: 0 });
+  expect(f.db.db.query("SELECT definition_json FROM cowork_schedules WHERE schedule_id=?").get(a.scheduleId)).toEqual({ definition_json: "{poison" });
+});
+test("overflowed persisted interval is invalid data and cannot starve healthy work", () => {
+  const f = fixture(), healthy = f.create(), poison = f.create(f.definition, "overflow-poison");
+  f.db.db.run("UPDATE cowork_schedules SET definition_json=? WHERE schedule_id=?", [JSON.stringify({ ...f.definition, timing: { kind: "recurring", spec: "every 999999999999999999999d" } }), poison.scheduleId]);
+  f.time(5000); f.schedules.tick();
+  expect(f.schedules.status(poison.workspaceId, poison.scheduleId).schedule.state).toBe("quarantined");
+  expect(f.schedules.status(healthy.workspaceId, healthy.scheduleId).occurrences[0]!.missedCount).toBe(4);
+});

@@ -11,7 +11,13 @@ const canonical = (value: unknown): string => JSON.stringify(value, (_key, item)
 const schedule = (row: Row): CoworkSchedule => {
   if (typeof row.definition_json !== "string" || Buffer.byteLength(row.definition_json) > 32 * 1024) throw new CoworkError("invalid_request");
   const definition = CoworkScheduleDefinition.parse(JSON.parse(row.definition_json));
-  try { new Intl.DateTimeFormat("en-US", { timeZone: definition.timezone }); if (definition.timing.kind === "recurring") parseSpec(definition.timing.spec); }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: definition.timezone });
+    if (definition.timing.kind === "recurring") {
+      const parsed = parseSpec(definition.timing.spec);
+      if (parsed.kind === "interval" && (!Number.isSafeInteger(parsed.ms) || parsed.ms <= 0 || parsed.ms > 8640000000000000)) throw new CoworkError("invalid_request");
+    }
+  }
   catch { throw new CoworkError("invalid_request"); }
   return { scheduleId: row.schedule_id, workspaceId: row.workspace_id, definition, state: row.state, revision: row.revision, nextDue: row.next_due, createdAt: row.created_at };
 };
@@ -20,8 +26,25 @@ const matches = (field: CronField, value: number) => field.any || field.values.h
 
 export const MAX_COWORK_SCHEDULES_PER_WORKSPACE = 100;
 export const MAX_COWORK_CRON_FORMATS = 4096;
+export const MAX_COWORK_CALENDAR_STEPS_PER_PASS = 256;
+export class CoworkCalendarBudgetExhausted extends CoworkError {
+  constructor() { super("schedule_budget_exhausted"); }
+}
+/** Host-only test seam; limits can narrow, never raise the production pass ceilings. */
+export interface CoworkCalendarLimits { formats?: number; steps?: number; observeFormat?: () => void }
+export class CoworkCalendarBudget {
+  private formats: number;
+  private steps: number;
+  constructor(private readonly limits: CoworkCalendarLimits = {}) {
+    this.formats = limits.formats ?? MAX_COWORK_CRON_FORMATS;
+    this.steps = limits.steps ?? MAX_COWORK_CALENDAR_STEPS_PER_PASS;
+    if (![this.formats, this.steps].every(value => Number.isSafeInteger(value) && value > 0) || this.formats > MAX_COWORK_CRON_FORMATS || this.steps > MAX_COWORK_CALENDAR_STEPS_PER_PASS) throw new CoworkError("invalid_request");
+  }
+  step(): void { if (this.steps <= 0) throw new CoworkCalendarBudgetExhausted(); this.steps--; }
+  format(): void { if (this.formats <= 0) throw new CoworkCalendarBudgetExhausted(); this.formats--; this.limits.observeFormat?.(); }
+}
 /** Saved timezone cron fires each local date/hour/minute tuple once across a fold. */
-export function nextCoworkScheduleTime(specText: string, timezone: string, from: number, observeFormat?: () => void): number {
+export function nextCoworkScheduleTime(specText: string, timezone: string, from: number, observeFormat?: () => void, passBudget?: CoworkCalendarBudget): number {
   try {
     if (!Number.isSafeInteger(from) || from < 0 || from > 8640000000000000) throw new CoworkError("invalid_request");
     const spec = parseSpec(specText);
@@ -37,7 +60,8 @@ export function nextCoworkScheduleTime(specText: string, timezone: string, from:
     if (spec.dow.any && domValues && !Array.from({ length: 12 }, (_, i) => i + 1).some(month => matches(spec.mon, month) && [...domValues].some(day => day <= new Date(Date.UTC(2000, month, 0)).getUTCDate()))) throw new CoworkError("invalid_request");
     let formats = 0;
     const partsAt = (at: number) => {
-      if (++formats > MAX_COWORK_CRON_FORMATS) throw new CoworkError("invalid_request");
+      if (++formats > MAX_COWORK_CRON_FORMATS) throw new CoworkCalendarBudgetExhausted();
+      passBudget?.format();
       observeFormat?.(); return Object.fromEntries(formatter.formatToParts(at).map(part => [part.type, Number(part.value)]));
     };
     const wall = (parts: Record<string, number>) => Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour!, parts.minute!);
@@ -71,7 +95,7 @@ export function nextCoworkScheduleTime(specText: string, timezone: string, from:
 export class CoworkSchedules {
   private closed = false;
   private readonly authority: CoworkAuthority;
-  constructor(readonly records: CoworkRepository, grants: CoworkGrantResolver, private readonly now = () => Date.now(), private readonly branch?: (workspaceId: string, sourceId: string) => string | undefined) {
+  constructor(readonly records: CoworkRepository, grants: CoworkGrantResolver, private readonly now = () => Date.now(), private readonly branch?: (workspaceId: string, sourceId: string) => string | undefined, private readonly calendarLimits?: CoworkCalendarLimits) {
     this.authority = new CoworkAuthority(records, grants);
   }
   private one(sql: string, ...values: any[]): Row | null { return this.records.rs.db.query(sql).get(...values) as Row | null; }
@@ -140,7 +164,7 @@ export class CoworkSchedules {
       const expectedPolicy = definition.target.kind === "conversation" ? this.records.binding(definition.target.sessionId).policy : this.records.policy(workspaceId).defaultPolicy;
       // Policies are not ranked; no client can save an escalation as a scheduled default.
       if (definition.policy !== expectedPolicy) throw new CoworkError("authority_denied");
-      if ((this.one("SELECT count(*) AS n FROM cowork_schedules WHERE workspace_id=?", workspaceId)?.n ?? 0) >= MAX_COWORK_SCHEDULES_PER_WORKSPACE) throw new CoworkError("schedule_limit");
+      if ((this.one("SELECT count(*) AS n FROM cowork_schedules s WHERE workspace_id=? AND state='enabled' AND NOT EXISTS (SELECT 1 FROM cowork_schedule_quarantines q WHERE q.schedule_id=s.schedule_id)", workspaceId)?.n ?? 0) >= MAX_COWORK_SCHEDULES_PER_WORKSPACE) throw new CoworkError("schedule_limit");
       const at = this.now(), next = definition.timing.kind === "once" ? definition.timing.at : nextCoworkScheduleTime(definition.timing.spec, definition.timezone, at);
       const scheduleId = `schedule_${randomUUID()}`;
       this.run("INSERT INTO cowork_schedules VALUES(?,?,?,?,?,?,?,'enabled',1,?)", scheduleId, workspaceId, principalId, requestId, digest, canonical(definition), next, at);
@@ -162,30 +186,44 @@ export class CoworkSchedules {
   /** Materialize one durable pending record and accumulate all missed occurrences. */
   reconcileDue(): void {
     if (this.closed) return;
-    const at = this.now();
+    const at = this.now(), budget = new CoworkCalendarBudget(this.calendarLimits);
     const rows = this.all("SELECT * FROM cowork_schedules s WHERE state='enabled' AND next_due<=? AND NOT EXISTS (SELECT 1 FROM cowork_schedule_quarantines q WHERE q.schedule_id=s.schedule_id) ORDER BY next_due,schedule_id", at);
     for (const row of rows) {
-      try { this.tx(() => {
-        if (this.closed || this.quarantined(row.schedule_id)) return;
-        // A cancel/new timer cursor may commit after the initial snapshot on another handle.
-        const current = this.raw(row.workspace_id, row.schedule_id);
-        if (current.state !== "enabled" || current.next_due === null || current.next_due > at) return;
-        const value = schedule(current), definition = value.definition;
-        let due = current.next_due as number, latest = due, count = 1, next: number | null = null;
+      try {
+        // Calendar planning consumes one pass-wide budget OUTSIDE the write transaction.
+        // Every computed successor permits committing that occurrence exactly once; an
+        // exhausted search leaves the first unprocessed cursor intact for a later tick.
+        const value = schedule(row), definition = value.definition;
+        const due = row.next_due as number;
+        let latest = due, count = 1, next: number | null = null;
         if (definition.timing.kind === "recurring") {
           const parsed = parseSpec(definition.timing.spec);
           if (parsed.kind === "interval") { count = Math.floor((at - due) / parsed.ms) + 1; latest = due + (count - 1) * parsed.ms; next = latest + parsed.ms; }
           else {
-            next = nextCoworkScheduleTime(definition.timing.spec, definition.timezone, due);
-            // Bound each timer pass, preserving the unprocessed cursor for the next pass.
-            while (next <= at && count < 1000) { latest = next; count++; next = nextCoworkScheduleTime(definition.timing.spec, definition.timezone, next); }
+            count = 0; next = due;
+            try {
+              while (next <= at) {
+                budget.step();
+                const successor = nextCoworkScheduleTime(definition.timing.spec, definition.timezone, next, undefined, budget);
+                latest = next; next = successor; count++;
+              }
+            } catch (error) { if (!(error instanceof CoworkCalendarBudgetExhausted)) throw error; }
+            if (!count) continue; // Retryable resource debt, never invalid-schedule quarantine.
           }
         }
-        const pending = this.one("SELECT * FROM cowork_schedule_occurrences WHERE schedule_id=? AND state='pending'", value.scheduleId);
-        if (pending) this.run("UPDATE cowork_schedule_occurrences SET latest_due_at=?,missed_count=missed_count+? WHERE occurrence_id=?", latest, count, pending.occurrence_id);
-        else this.run("INSERT INTO cowork_schedule_occurrences VALUES(?,?,?,?,?,'pending',NULL,NULL)", `occurrence_${randomUUID()}`, value.scheduleId, due, latest, count - 1);
-        this.run("UPDATE cowork_schedules SET next_due=? WHERE schedule_id=?", next, value.scheduleId);
-      }); } catch (error) {
+        this.tx(() => {
+          if (this.closed || this.quarantined(row.schedule_id)) return;
+          // Recheck the exact planned definition/cursor: cancellation or another timer may
+          // commit on another handle after planning, and never gains duplicate accounting.
+          const current = this.raw(row.workspace_id, row.schedule_id);
+          if (current.state !== "enabled" || current.next_due !== due || current.definition_json !== row.definition_json) return;
+          const pending = this.one("SELECT * FROM cowork_schedule_occurrences WHERE schedule_id=? AND state='pending'", value.scheduleId);
+          if (pending) this.run("UPDATE cowork_schedule_occurrences SET latest_due_at=?,missed_count=missed_count+? WHERE occurrence_id=?", latest, count, pending.occurrence_id);
+          else this.run("INSERT INTO cowork_schedule_occurrences VALUES(?,?,?,?,?,'pending',NULL,NULL)", `occurrence_${randomUUID()}`, value.scheduleId, due, latest, count - 1);
+          this.run("UPDATE cowork_schedules SET next_due=? WHERE schedule_id=?", next, value.scheduleId);
+        });
+      } catch (error) {
+        if (error instanceof CoworkCalendarBudgetExhausted) continue;
         if (error instanceof SyntaxError || (error instanceof CoworkError && error.code === "invalid_request") || (error instanceof Error && error.name === "ZodError")) this.quarantine(row);
         else throw error; // Store failure is not a bad schedule, and must not invent quarantine.
       }
