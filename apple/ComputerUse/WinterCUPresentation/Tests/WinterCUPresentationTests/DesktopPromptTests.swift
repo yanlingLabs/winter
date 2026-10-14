@@ -233,19 +233,38 @@ import XCTest
         XCTAssertEqual(g.panelSize.height, g.pill.maxY + DesktopIslandGeometry.margin)
     }
 
-    func testTheBirthGrowsOutOfTheHousingThenTheNeckPartsAndThePillRests() {
+    func testTheBirthIsADripThatSnapsThenSpreadsIntoThePillAndSettles() {
         let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, pillWidth: 340, slot: 0)
-        func stem(_ t: Double) -> DesktopIslandGeometry.Blob? {
-            g.blobs(at: t).first { $0.rect.minY < 0 && $0.rect.width < g.source.width }
-        }
-        XCTAssertEqual(stem(0.42)?.rect.maxY ?? 0, g.pill.midY, accuracy: 0.5, "the mass reaches down to the pill")
-        XCTAssertLessThanOrEqual(stem(1)?.rect.maxY ?? 0, g.source.maxY - 10,
-                                 "the neck has parted and pulled back up inside the housing")
-        let resting = g.blobs(at: 1).last!
-        XCTAssertEqual(resting.rect, g.pill, "the pill rests where it is drawn crisp")
-        XCTAssertEqual(DesktopIslandGeometry.crispAlpha(1), 1)
-        XCTAssertEqual(DesktopIslandGeometry.contentAlpha(0.5), 0, "no words while it is still being born")
-        XCTAssertEqual(DesktopIslandGeometry.contentAlpha(1), 1)
+        let fluid = DesktopIslandFluid(geometry: g)
+        XCTAssertEqual(fluid.frame(at: 0).blobs.count, 1, "at first only the housing itself")
+        let drip = fluid.frame(at: 0.25)
+        XCTAssertGreaterThan(drip.blobs.filter { $0.kind == .ellipse }.count, 1, "a tail of drops hangs from the housing")
+        XCTAssertGreaterThan(drip.blur, 5, "the drops melt into one surface")
+        let free = fluid.frame(at: 0.5)
+        XCTAssertEqual(free.blobs.count, 2, "the tail is gone: the housing and the free drop")
+        XCTAssertLessThan(free.blur, 1, "too little melt left to join the drop and the housing again")
+        let widest = stride(from: 0.45, through: 1.0, by: 0.01).map { fluid.frame(at: $0).pill.width }.max()!
+        XCTAssertGreaterThan(widest, g.pill.width + 4, "it spreads past its rest and wobbles back, like a liquid")
+        let rest = fluid.frame(at: DesktopIslandFluid.settle)
+        XCTAssertEqual(rest.pill.width, g.pill.width, accuracy: 1)
+        XCTAssertEqual(rest.pill.height, g.pill.height, accuracy: 1)
+        XCTAssertEqual(rest.pill.midY, g.pill.midY, accuracy: 0.5)
+        XCTAssertEqual(rest.crisp, 1)
+        XCTAssertEqual(rest.content, 1)
+        XCTAssertEqual(rest.blur, 0)
+        XCTAssertEqual(fluid.frame(at: 0.3).content, 0, "no words while it is still a drip")
+    }
+
+    func testTheWayBackPlaysTheBirthBackwardsFaster() {
+        let state = DesktopIslandState(secondsLeft: 60)
+        let born = Date(timeIntervalSince1970: 1000)
+        state.bornAt = born
+        XCTAssertEqual(state.seconds(at: born.addingTimeInterval(0.5)), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(state.seconds(at: born.addingTimeInterval(9)), DesktopIslandFluid.settle, "held at rest")
+        state.returningAt = born.addingTimeInterval(9)
+        XCTAssertEqual(state.seconds(at: born.addingTimeInterval(9.25)),
+                       DesktopIslandFluid.settle - 0.25 * DesktopIslandFluid.returnSpeed, accuracy: 1e-9)
+        XCTAssertEqual(state.seconds(at: born.addingTimeInterval(20)), 0, "back inside the housing")
     }
 
     func testWithoutAHousingItIsBornFromTheTopEdgeAndASecondPromptFloats() {
@@ -253,10 +272,13 @@ import XCTest
         XCTAssertFalse(g.sourceIsHousing)
         XCTAssertEqual(g.source.height, 0)
         XCTAssertEqual(g.pill.minY, 34, "below the menu bar")
-        XCTAssertEqual(g.blobs(at: 1).count, 1, "only the pill remains")
+        XCTAssertEqual(DesktopIslandFluid(geometry: g).frame(at: DesktopIslandFluid.settle).blobs.count, 1,
+                       "only the pill remains: the bead at the top edge was drawn back")
         let second = DesktopIslandGeometry.make(housing: nil, menuBarHeight: 24, pillWidth: 340, slot: 1)
         XCTAssertTrue(second.floating)
-        XCTAssertEqual(second.blobs(at: 1).map(\.rect), [second.pill])
+        let floating = DesktopIslandFluid(geometry: second).frame(at: DesktopIslandFluid.settle)
+        XCTAssertEqual(floating.blobs.count, 1)
+        XCTAssertEqual(floating.pill.width, second.pill.width, accuracy: 1)
         XCTAssertEqual(DesktopIslandGeometry.panelTop(slot: 1, housing: nil, menuBarHeight: 24),
                        24 + 10 + 44 + 10 - DesktopIslandGeometry.margin, "its pill sits 10 pt under the first one's")
     }

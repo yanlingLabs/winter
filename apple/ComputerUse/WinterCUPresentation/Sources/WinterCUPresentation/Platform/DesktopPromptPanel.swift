@@ -72,8 +72,11 @@ final class DesktopPromptPanel: NSPanel {
             shown = true
             if NSApp.isHidden { NSApp.unhideWithoutActivation() }
             panel.orderFrontRegardless()
-            // Drawn as nothing first, then born on the next turn of the run loop.
-            DispatchQueue.main.async { [state] in state.open = true }
+            // Born now; the frame driver stops once the liquid has settled.
+            state.bornAt = Date()
+            DispatchQueue.main.asyncAfter(deadline: .now() + DesktopIslandFluid.settle + 0.05) { [state] in
+                if state.returningAt == nil { state.still = true }
+            }
         }
     }
 
@@ -83,13 +86,14 @@ final class DesktopPromptPanel: NSPanel {
     func close() {
         shown = false
         let panel = panel
-        guard state.answeredHere, state.open, !reduceMotion else {
+        guard state.answeredHere, state.bornAt != nil, !reduceMotion else {
             panel.orderOut(nil)
             panel.close()
             return
         }
-        state.open = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + DesktopIslandView.duration) {
+        state.returningAt = Date()
+        state.still = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + DesktopIslandFluid.settle / DesktopIslandFluid.returnSpeed + 0.05) {
             panel.orderOut(nil)
             panel.close()
         }
