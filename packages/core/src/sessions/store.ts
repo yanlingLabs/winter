@@ -1,3 +1,4 @@
+import { CoworkError } from "../cowork/types";
 import { fullSyncInstructionFd } from "../cowork/instruction-fullsync";
 import { Database } from "bun:sqlite";
 import { openSync, closeSync, fstatSync, constants, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -668,6 +669,7 @@ export class SessionStore {
    * ordinary session append behavior is unchanged. Completed OS flush requests are
    * not proof of storage hardware behavior after power loss. */
   flushLog(sessionId: string): void {
+    if (process.platform !== "darwin" || process.arch !== "arm64") throw new CoworkError("unsupported_topology");
     const row = this.db.query("SELECT scope FROM sessions WHERE session_id=?").get(sessionId) as { scope: string } | null;
     if (!row) throw new Error("unknown session");
     const path = this.logPath(row.scope, sessionId);
@@ -913,6 +915,14 @@ export class SessionStore {
       | { scope: string } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     return this.logPath(row.scope, sessionId);
+  }
+
+  /** Trusted binding adapter: autocommitted session creation plus its initial event
+   * must precede a canonical Cowork bind. A caller transaction/empty sync row is not ready. */
+  hasCommittedSession(sessionId: string): boolean {
+    if (this.db.inTransaction) return false;
+    const row = this.db.query<{ last_seq: number }, [string]>("SELECT last_seq FROM sessions WHERE session_id=?").get(sessionId);
+    return row !== null && row.last_seq >= 1;
   }
 
   /** Index existence after constructor recovery; never inferred from a missing/unreadable log. */

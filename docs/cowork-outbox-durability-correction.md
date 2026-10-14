@@ -32,11 +32,14 @@ OS requests. Expected sequence:
 
 1. Open the canonical, existing conversation log and hold its containing directory.
    Never recreate a missing log or directory as a durability shortcut.
-2. Require the reviewed supported-filesystem policy using the held identities.
-   Unsupported filesystems must leave the exact outbox delivery pending.
-3. Complete the helper's reviewed file flush request. Sync directory metadata by
-   its reviewed APFS rule: measured directory FULLFSYNC if supported, or the
-   explicitly reviewed file FULLFSYNC plus ordinary directory fsync combination.
+2. Require Darwin/arm64 explicitly before opening flush descriptors, then verify
+   owned regular file/held directory identities. There is no filesystem-type
+   allowlist/check in this implementation.
+3. Complete the exact reviewed file and directory FULLFSYNC requests. Any failed
+   request refuses ACK; no ordinary-fsync or unsupported-operation fallback is
+   used. Only disposable APFS behavior was measured. ExFAT/SMB refusal or other
+   filesystem success has not been demonstrated, and is not inferred from this
+   strict OS-return-value check.
 4. Only after these calls succeed, acknowledge that immutable workspace change
    and its exact JSONL event sequence. A failure leaves the first delivery pending
    and blocks later changes in that logical conversation.
@@ -111,3 +114,49 @@ WinterKit ServerMessage.swift:95/110 catches strict enum errors per frame and
 returns unknownEvent; WinterClient.swift:236/241 routes subsequent lines and
 :302 emits the unknown frame without closing the transport. Swift runtime testing
 was not performed.
+
+## Follow-up binding and maintenance review
+
+B1: `bindConversation` requires a mandatory trusted committed-session port; no
+optional/default-true path exists. The production adapter is the actual open
+SessionStore's `hasCommittedSession`, which requires an index row with initial
+event sequence >=1 outside any open index transaction. Session creation/index
+commit must finish first; binding follows synchronously, without an await or
+reentrant lifecycle operation and while that same host-owned store remains open.
+The stores are separate databases; no cross-database atomic commit is claimed.
+Binding rechecks the port inside its canonical transaction. Pure authority-unit
+fixtures declare explicit inventories; actual outbox integration uses real rows
+and checks absent, empty and uncommitted-row rejection. No production Cowork
+session create/bind caller is implemented or enabled by this API correction.
+
+B2/B4: Retry windows use a monotonic performance clock rather than Date.now.
+Drain metrics report `deferred` sessions during backoff distinctly from new
+failures. Actual expiry/reset coverage also changes the wall clock to ensure it
+cannot prematurely expire a retry. Recovery clears the backoff. New metadata does
+not by itself reset a failure for the first immutable pending change.
+
+B3: Boot reaping and live deletion now share the same canonical retirement hook.
+The boot path is wired before its reaper runs. An actual disposable old session
+reaper test checks both runtime-cleanup notification and canonical fanout cleanup.
+
+B5: Pruning errors report `pruneBlocked` separately after successful delivery and
+ACK; they cannot mark those deliveries failed or install message retry backoff.
+Actual disposable SQL trigger failure tests pin this separation.
+
+B6: The OS/architecture guard is explicit, but a filesystem-type admission policy
+is not implemented. Current evidence is measured APFS OS-request completion, not
+an ExFAT/SMB denial test, proof for other filesystems, or hardware power-cut proof.
+Exact reviewed native/SQLite primitives remain byte-identical.
+
+Follow-up verification: 660 tests passed / 2 skipped / 0 failed with 4859 assertions
+across 26 files. The skips are the unsupported-host-only case on this Darwin/arm64
+machine and the existing candidate SDK confined-posture fixture gate. Core,
+protocol and CLI typechecks pass. The three reviewed durability/descriptor helper
+hashes remain unchanged.
+
+The broader context regression now distinguishes a rejected same-connection
+nested write (context_unavailable, policy/workspace unchanged) from a real second
+SQLite connection's committed policy change. WAL snapshot isolation preserves one
+coherent old plan while its read transaction is open; the next plan sees the new
+revision. A separate actual external-connection commit across the protected-reader
+await is refused by final canonical revalidation. No nested-write guard was relaxed.

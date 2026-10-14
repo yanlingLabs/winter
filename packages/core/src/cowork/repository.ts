@@ -4,6 +4,9 @@ import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { CoworkError, isTerminalOperationStatus, type OperationStatus, type CapabilityCeiling, type ConversationBinding, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
 
+/** Host-owned index dependency. Never RPC/guest data; caller must commit the actual
+ * session creation first and bind synchronously while that SessionStore remains open. */
+export interface CoworkCommittedSessions { hasCommittedSession(sessionId: string): boolean }
 export interface WorkspaceChange {
   changeId: string; workspaceId: string; operationId: string; revision: number; kind: string; payload: unknown;
 }
@@ -232,9 +235,13 @@ export class CoworkRepository {
       return { workspaceId, value: this.policy(workspaceId), kind: "workspace_policy_changed" };
     });
   }
-  bindConversation(context: MutationContext, workspaceId: string, input: { sessionId: string; sourceId: string; relativeCwd?: string }): MutationReceipt<ConversationBinding> {
+  bindConversation(context: MutationContext, workspaceId: string, input: { sessionId: string; sourceId: string; relativeCwd?: string }, sessions: CoworkCommittedSessions): MutationReceipt<ConversationBinding> {
     const normalized = { sessionId: id(input.sessionId), sourceId: id(input.sourceId), relativeCwd: relativeCoworkPath(input.relativeCwd ?? ".") };
+    // The two stores cannot share an atomic transaction. Require committed index creation
+    // before entering canonical binding, with no await/reentrancy or permissive fallback.
+    if (!sessions || typeof sessions.hasCommittedSession !== "function" || sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
     return this.mutate(context, "conversation.bind", id(workspaceId), normalized, () => {
+      if (sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
       const current = this.get(workspaceId), selected = this.source(workspaceId, normalized.sourceId), policy = this.policy(workspaceId);
       if (current.ownership === "standalone" && current.ownerId !== normalized.sessionId) throw new CoworkError("authority_denied");
       if (selected.state !== "ready" || selected.desired !== "present") throw new CoworkError("source_unavailable");

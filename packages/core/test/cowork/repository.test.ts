@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -79,21 +80,21 @@ test("stale callback cannot resurrect a revoked source or cross workspace owners
 });
 test("standalone reserves one immutable conversation identity; Project bindings share files but preserve policy", () => {
   const { store } = open(), one = create(store, [folder], "standalone"), selected = one.value.sources[0]!;
-  code(() => store.bindConversation(context("early", 1), one.workspaceId, { sessionId: one.value.workspace.ownerId, sourceId: selected.sourceId }), "source_unavailable");
+  code(() => store.bindConversation(context("early", 1), one.workspaceId, { sessionId: one.value.workspace.ownerId, sourceId: selected.sourceId }, authorityFixtureSessions(one.value.workspace.ownerId)), "source_unavailable");
   ready(store, one.workspaceId);
-  code(() => store.bindConversation(context("foreign", 1), one.workspaceId, { sessionId: "foreign", sourceId: selected.sourceId }), "authority_denied");
-  store.bindConversation(context("own", 1), one.workspaceId, { sessionId: one.value.workspace.ownerId, sourceId: selected.sourceId });
+  code(() => store.bindConversation(context("foreign", 1), one.workspaceId, { sessionId: "foreign", sourceId: selected.sourceId }, authorityFixtureSessions("foreign")), "authority_denied");
+  store.bindConversation(context("own", 1), one.workspaceId, { sessionId: one.value.workspace.ownerId, sourceId: selected.sourceId }, authorityFixtureSessions(one.value.workspace.ownerId));
   const project = create(store, [repo], "project", "project"); ready(store, project.workspaceId);
   const sourceId = project.value.sources[0]!.sourceId;
-  store.bindConversation(context("a", 1), project.workspaceId, { sessionId: "session-a", sourceId });
+  store.bindConversation(context("a", 1), project.workspaceId, { sessionId: "session-a", sourceId }, authorityFixtureSessions("session-a"));
   store.updatePolicy(context("default", 2), project.workspaceId, { defaultPolicy: "plan" });
-  store.bindConversation(context("b", 3), project.workspaceId, { sessionId: "session-b", sourceId });
+  store.bindConversation(context("b", 3), project.workspaceId, { sessionId: "session-b", sourceId }, authorityFixtureSessions("session-b"));
   expect(store.binding("session-a").policy).toBe("auto"); expect(store.binding("session-b").policy).toBe("plan");
   expect(store.binding("session-a").workspaceId).toBe(store.binding("session-b").workspaceId);
 });
 test("outbox fanout survives reopen; receipt retry neither duplicates change nor alters result", () => {
   const a = open(), made = create(a.store); ready(a.store, made.workspaceId);
-  a.store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId });
+  a.store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId }, authorityFixtureSessions("session-a"));
   const change = a.store.updatePolicy(context("policy", 2), made.workspaceId, { publication: "manual" });
   const b = open(a.home), pending = b.store.pendingChanges("session-a");
   expect(pending).toHaveLength(2);
@@ -107,8 +108,8 @@ test("outbox fanout survives reopen; receipt retry neither duplicates change nor
 test("authority rechecks live grants, rejects paired folder grants and cross-workspace peer access", () => {
   const { store } = open(), made = create(store); ready(store, made.workspaceId);
   const sourceId = made.value.sources[0]!.sourceId;
-  store.bindConversation(context("a", 1), made.workspaceId, { sessionId: "session-a", sourceId });
-  store.bindConversation(context("b", 2), made.workspaceId, { sessionId: "session-b", sourceId });
+  store.bindConversation(context("a", 1), made.workspaceId, { sessionId: "session-a", sourceId }, authorityFixtureSessions("session-a"));
+  store.bindConversation(context("b", 2), made.workspaceId, { sessionId: "session-b", sourceId }, authorityFixtureSessions("session-b"));
   let revoked = false;
   const authority = new CoworkAuthority(store, { folder: () => ({ rootIdentity: "fixture-root", writable: true, revoked }), repository: () => undefined });
   authority.requirePeer({ kind: "runtime", id: "runtime-a", sessionId: "session-a", workspaceId: made.workspaceId }, "session-b");
@@ -149,7 +150,7 @@ test("outbox preserves commit order when timestamps tie and random change IDs so
   const { db } = open(); let sequence = 999;
   const store = new CoworkRepository(db, () => "2026-10-11T00:00:00.000Z", prefix => `${prefix}_${sequence--}`);
   const made = create(store); ready(store, made.workspaceId);
-  store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId });
+  store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId }, authorityFixtureSessions("session-a"));
   store.updatePolicy(context("policy", 2), made.workspaceId, { publication: "manual" });
   expect(store.pendingChanges("session-a").map(value => value.revision)).toEqual([2, 3]);
   const authority = new CoworkAuthority(store, { folder: () => undefined, repository: () => undefined });
@@ -159,7 +160,7 @@ test("outbox preserves commit order when timestamps tie and random change IDs so
 
 test("source readiness commits a durable notification and duplicate acknowledgment is inert", () => {
   const { store, db } = open(), made = create(store); const initial = ready(store, made.workspaceId);
-  store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId });
+  store.bindConversation(context("bind", 1), made.workspaceId, { sessionId: "session-a", sourceId: made.value.sources[0]!.sourceId }, authorityFixtureSessions("session-a"));
   const added = store.addSource(context("add", 2), made.workspaceId, repo);
   const epoch = store.refreshEpoch(made.workspaceId, initial.incarnationId, initial.leaseEpoch);
   const before = store.pendingChanges("session-a").length;

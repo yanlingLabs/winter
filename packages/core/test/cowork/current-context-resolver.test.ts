@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { CoworkCurrentContextResolver, CoworkContextResolverError, COWORK_SHARED_INSTRUCTION_VIEW, type CoworkInstructionReadRequest, type CoworkInstructionReadResult, type CoworkInstructionFile, type CoworkInstructionTier, type CoworkProtectedInstructionReader } from "../../src/cowork/current-context-resolver";
@@ -25,7 +26,7 @@ function fixture(kind: "folder" | "githubRepository" = "githubRepository") {
   const created = records.create({ principalId: "fixture", requestId: "create" }, { ownership: "project", title: "credential-value injected title", ceiling: caps, sources: [selection(kind)] });
   const workspaceId = created.workspaceId, initial = records.sources(workspaceId)[0]!;
   const epoch = records.beginIncarnation(workspaceId, "incarnation", 1); records.acknowledgeSource(epoch, initial.sourceId, initial.revision, "ready");
-  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, workspaceId, { sessionId: "logical-parent", sourceId: initial.sourceId, relativeCwd: "starting/directory" });
+  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, workspaceId, { sessionId: "logical-parent", sourceId: initial.sourceId, relativeCwd: "starting/directory" }, authorityFixtureSessions("logical-parent"));
   const sessions = new RuntimeSessionRecords(db, () => "2026-10-13T00:00:00.000Z");
   sessions.create({ winterSessionId: "logical-parent", runtimeKind: "winter-agent", backendSessionId: "backend-current", providerId: "fixture", modelRef: "fixture-model",
     backendRoot: "/private/protected/backend", transcriptProjectKey: "private-key", memoryProjectKey: "private-key", tempProjectKey: "private-key",
@@ -383,4 +384,16 @@ test("aliased immediate parents bind requested AND admitted identities and depth
     return value;
   }).resolve(f.lookup);
   expect(snapshot.revision).toMatch(/^context:[a-f0-9]{64}$/);
+});
+
+test("real external connection policy commit across reader await is refused by final canonical revalidation", async () => {
+  const f = fixture(), externalDb = openRuntimeStateDb(f.home); databases.push(externalDb);
+  const external = new CoworkRepository(externalDb), before = f.plan().revision;
+  await rejected(resolver(f, async request => {
+    const value = reply(request); await Promise.resolve();
+    external.updatePolicy({ principalId: "fixture", requestId: "external-reader-commit", expectedRevision: external.get(f.workspaceId).configRevision }, f.workspaceId, { publication: "manual" });
+    return value;
+  }).resolve(f.lookup));
+  expect(f.records.policy(f.workspaceId).publication).toBe("manual");
+  expect(f.plan().revision).not.toBe(before);
 });

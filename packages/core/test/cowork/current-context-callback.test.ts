@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -27,8 +28,9 @@ function reply(request: CoworkInstructionReadRequest, sharedText = "shared guida
   ];
   return { request: structuredClone(request), tiers: "admitted-only", blocks, files: blocks.map(block => ({ ...block, depth: 0 })) };
 }
-/** Real canonical DB/repository/runtime records; only the protected reader and
- * live owner/grant ports are doubles. No guest filesystem/native admission proof. */
+/** Real canonical DB/repository/runtime records with an explicit authority-unit
+ * session inventory; protected reader/live owner/grant ports are doubles.
+ * No host session-index, guest filesystem or native admission proof. */
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "winter-context-callback-")); roots.push(home);
   const db = openRuntimeStateDb(home); databases.push(db);
@@ -41,7 +43,7 @@ function fixture() {
   const source = records.sources(workspaceId)[0]!, root = coworkGuestSourceRoot(source);
   const epoch = records.beginIncarnation(workspaceId, "incarnation", 1);
   records.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
-  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, workspaceId, { sessionId: "logical-parent", sourceId: source.sourceId, relativeCwd: "directory" });
+  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, workspaceId, { sessionId: "logical-parent", sourceId: source.sourceId, relativeCwd: "directory" }, authorityFixtureSessions("logical-parent"));
   const sessions = new RuntimeSessionRecords(db, () => "2026-10-14T00:00:00.000Z");
   sessions.create({ winterSessionId: "logical-parent", runtimeKind: "winter-agent", backendSessionId: "backend-current", providerId: "fixture", modelRef: "fixture",
     backendRoot: "/private/protected/backend", transcriptProjectKey: "private-key", memoryProjectKey: "private-key", tempProjectKey: "private-key",

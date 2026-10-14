@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +28,7 @@ function fixture(kind: "folder" | "repository" = "folder") {
     sources: [selection] });
   const epoch = records.beginIncarnation(created.workspaceId, "incarnation", 1), source = records.sources(created.workspaceId)[0]!;
   records.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
-  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, created.workspaceId, { sessionId: "conversation", sourceId: source.sourceId, relativeCwd: "repo/subdir" });
+  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, created.workspaceId, { sessionId: "conversation", sourceId: source.sourceId, relativeCwd: "repo/subdir" }, authorityFixtureSessions("conversation"));
   let revoked = false, resume = false, backend = "backend-stable", model = "winter-test/echo", boot = "12345678-1234-1234-1234-123456789abc", root = "root";
   const authority = new CoworkAuthority(records, { folder: () => ({ rootIdentity: root, writable: true, revoked }), repository: () => ({ readable: true, writable: true, revoked }) });
   const deps = { records, authority, identity: () => ({ backendSessionId: backend, model, resume }), bootId: () => boot };
@@ -161,7 +162,7 @@ test("failed input acknowledgment stops subsequent queued input instead of repla
 });
 test("two canonical conversations cannot share a backend/store lifetime by mistaken identity mapping", () => {
   const f = fixture();
-  f.records.bindConversation({ principalId: "fixture", requestId: "bind-two", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { sessionId: "conversation-two", sourceId: f.source.sourceId });
+  f.records.bindConversation({ principalId: "fixture", requestId: "bind-two", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { sessionId: "conversation-two", sourceId: f.source.sourceId }, authorityFixtureSessions("conversation-two"));
   const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { return channel(launch).port; } } });
   host.spawn("conversation"); expect(() => host.spawn("conversation-two")).toThrow("authority_denied"); host.stop();
 });

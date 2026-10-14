@@ -1,3 +1,5 @@
+import { Database } from "bun:sqlite";
+import { reapEmptySessions } from "../../src/sessions/reaper";
 import { afterEach, expect, test as bunTest } from "bun:test";
 import { mkdtempSync, rmSync, statfsSync, renameSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +8,7 @@ import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, LineDecoder, ConnWriter, PROT
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "../../src/cowork/service";
-import { CoworkWorkspaceEvents, workspaceEventInput } from "../../src/cowork/workspace-events";
+import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents, workspaceEventInput } from "../../src/cowork/workspace-events";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { readHistoryPage } from "../../src/sessions/history";
@@ -38,7 +40,7 @@ function fixture(two = false) {
   records.acknowledgeSource(epoch, sourceId, 1, "ready");
   const sessions = [store.createSession("global", { mode: "code" })];
   if (two) sessions.push(store.createSession("global", { mode: "code" }));
-  for (const [i, sessionId] of sessions.entries()) records.bindConversation(context(`bind-${i}`, records.get(workspaceId).configRevision), workspaceId, { sessionId, sourceId });
+  for (const [i, sessionId] of sessions.entries()) records.bindConversation(context(`bind-${i}`, records.get(workspaceId).configRevision), workspaceId, { sessionId, sourceId }, store);
   let hub = new SessionHub(store), scope = new Set([workspaceId]);
   const host: CoworkHostPorts = { principal: connection => connection.role === "remote"
     ? { kind: "paired-user", id: "phone", workspaceIds: scope, repositoryAuthorities: new Set() }
@@ -63,7 +65,7 @@ test("actual host mutations deliver commit-ordered stable changes to two logical
   f.update("first"); f.update("second");
   const pending = f.records.pendingChanges(f.sessions[0]!);
   expect(pending[0]!.changeId > pending[1]!.changeId).toBe(true); // reverse IDs and tied timestamps
-  expect(f.pump().drain()).toEqual({ delivered: 4, blocked: 0 });
+  expect(f.pump().drain()).toEqual({ delivered: 4, blocked: 0, deferred: 0, pruneBlocked: 0 });
   for (const sessionId of f.sessions) {
     const delivered = changes(f.store, sessionId).slice(-2);
     expect(delivered.map(event => "workspaceChangeId" in event && event.workspaceChangeId)).toEqual(pending.map(change => change.changeId));
@@ -79,19 +81,19 @@ test("actual host mutations deliver commit-ordered stable changes to two logical
   }
   expect(live.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type))).toHaveLength(2);
   expect(f.store.list().some(row => row.sessionId === "$system")).toBe(false);
-  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
 });
 
 for (const phase of ["before-append", "after-append"] as const) test(`restart recovers crash ${phase} without duplicate event or reordered later change`, () => {
   const f = fixture(); f.pump().drain(); f.update("first"); f.update("second");
   const pending = f.records.pendingChanges(f.sessions[0]!);
   const broken = new CoworkWorkspaceEvents(f.records, f.store, f.hub, at => { if (at === phase) throw new Error("injected crash"); });
-  expect(broken.drain()).toEqual({ delivered: 0, blocked: 1 });
+  expect(broken.drain()).toEqual({ delivered: 0, blocked: 1, deferred: 0, pruneBlocked: 0 });
   expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(2);
   expect(changes(f.store, f.sessions[0]!).filter(event => "workspaceChangeId" in event && event.workspaceChangeId === pending[0]!.changeId)).toHaveLength(phase === "after-append" ? 1 : 0);
-  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 2, blocked: 0 });
+  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 2, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(changes(f.store, f.sessions[0]!).slice(-2).map(event => "workspaceChangeId" in event && event.workspaceChangeId)).toEqual(pending.map(change => change.changeId));
-  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
 });
 
 test("requested source revocation remains unavailable/restartRequired; exact controller ACK is separately attributed", () => {
@@ -131,7 +133,7 @@ test("legacy payloads become safe refetch hints; hostile nested payload extras d
 test("missing logical session is retired durably without deleting workspace data or growing new deliveries", () => {
   const f = fixture(); f.pump().drain(); f.update("missing");
   f.store.deleteSession(f.sessions[0]!);
-  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(f.records.pendingChanges(f.sessions[0]!)).toEqual([]);
   expect(f.records.binding(f.sessions[0]!).state).toBe("deleted");
   f.update("after-deletion"); expect(f.records.pendingChanges(f.sessions[0]!)).toEqual([]);
@@ -202,7 +204,7 @@ test("session index rebuild replays display events without recreating or widenin
   f.reopen(true);
   expect(f.records.binding(f.sessions[0]!)).toEqual(binding);
   expect(f.records.policy(f.workspaceId)).toEqual(policy);
-  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 });
+  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(changes(f.store, f.sessions[0]!).filter(event => "workspaceChangeId" in event && event.workspaceChangeId === pending[0]!.changeId)).toHaveLength(1);
 });
 
@@ -211,7 +213,7 @@ test("workspace with no logical conversations retains canonical changes without 
   const made = f.records.create(context("unattached-workspace"), { ownership: "project", title: "Unattached", sources: [selection], ceiling });
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE workspace_id=?").get(made.workspaceId)!.n).toBe(1);
   expect(f.records.pendingChangeSessions()).toEqual([]);
-  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+  expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(f.store.list()).toHaveLength(1);
 });
 
@@ -229,7 +231,7 @@ test("actual owned JSONL and held APFS-directory fullsync complete before delive
   expect(Bun.version).toBe("1.3.14"); expect(Bun.revision.startsWith("0d9b296a")).toBe(true);
   const fsType = statfsSync(f.home).type; expect(fsType).toBe(0x1a);
   f.update("fullsync-log"); const pending = f.records.pendingChanges(f.sessions[0]!)[0]!;
-  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 });
+  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
   const acknowledged = f.db.db.query<{ event_seq: number }, [string, string]>("SELECT event_seq FROM cowork_outbox_deliveries WHERE session_id=? AND change_id=?").get(f.sessions[0]!, pending.changeId)!;
   expect(acknowledged.event_seq).toBe(changes(f.store, f.sessions[0]!).at(-1)!.seq);
   console.info(JSON.stringify({ fixture: "cowork-outbox-fullsync", bun: Bun.version, bunRevision: Bun.revision,
@@ -249,21 +251,21 @@ test("more than 100 pending changes stay ordered across bounded passes and prune
   const f = fixture(); f.pump().drain();
   for (let i = 0; i < 125; i++) f.update(`change-${i}`);
   const pending = f.records.pendingChanges(f.sessions[0]!);
-  const pump = f.pump(); expect(pump.drain()).toEqual({ delivered: 100, blocked: 0 });
+  const pump = f.pump(); expect(pump.drain()).toEqual({ delivered: 100, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(25);
-  expect(pump.drain()).toEqual({ delivered: 25, blocked: 0 });
+  expect(pump.drain()).toEqual({ delivered: 25, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(changes(f.store, f.sessions[0]!).slice(-125).map(event => "workspaceChangeId" in event && event.workspaceChangeId)).toEqual(pending.map(change => change.changeId));
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox_deliveries WHERE session_id=? AND state='delivered'").get(f.sessions[0]!)!.n).toBe(100);
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE workspace_id=?").get(f.workspaceId)!.n).toBe(103); // unbound creation/source ACK/operation ACK + latest100 receipts
-  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0 });
+  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
 });
 
 test("a failed live conversation backs off without appending duplicates or suppressing another conversation", () => {
   const f = fixture(true); f.pump().drain(); f.update("backoff");
   let attempts = 0;
   const pump = new CoworkWorkspaceEvents(f.records, f.store, f.hub, (_phase, sessionId) => { if (sessionId === f.sessions[0]!) { attempts++; throw new Error("injected crash"); } });
-  expect(pump.drain()).toEqual({ delivered: 1, blocked: 1 });
-  expect(pump.drain()).toEqual({ delivered: 0, blocked: 0 });
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 1, deferred: 0, pruneBlocked: 0 });
+  expect(pump.drain()).toEqual({ delivered: 0, blocked: 0, deferred: 1, pruneBlocked: 0 });
   expect(attempts).toBe(1);
   expect(f.records.pendingChanges(f.sessions[0]!)).toHaveLength(1);
   expect(f.records.pendingChanges(f.sessions[1]!)).toEqual([]);
@@ -275,12 +277,12 @@ test("structural restart reconciliation handles legacy optional fields and diffe
   const change = f.records.pendingChanges(f.sessions[0]!)[0]!;
   f.db.db.run("UPDATE cowork_outbox SET payload_json='{}' WHERE change_id=?", [change.changeId]);
   const pump = new CoworkWorkspaceEvents(f.records, f.store, f.hub, phase => { if (phase === "after-append") throw new Error("injected crash"); });
-  expect(pump.drain()).toEqual({ delivered: 0, blocked: 1 });
+  expect(pump.drain()).toEqual({ delivered: 0, blocked: 1, deferred: 0, pruneBlocked: 0 });
   const path = f.store.transcriptPath(f.sessions[0]!);
   const raw = readFileSync(path, "utf8").trimEnd().split("\n");
   raw[raw.length - 1] = JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(raw.at(-1)!)).reverse()));
   writeFileSync(path, raw.join("\n") + "\n");
-  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 });
+  f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
   expect(changes(f.store, f.sessions[0]!).filter(event => "workspaceChangeId" in event && event.workspaceChangeId === change.changeId)).toHaveLength(1);
 });
 
@@ -290,6 +292,80 @@ test("actual outbox mutations and delivery ACK restore the preexisting shared co
   const prior = settings(); expect(prior[0]).toBe(1);
   f.pump().drain(); expect(settings()).toEqual(prior);
   f.update("scoped-fullsync"); expect(settings()).toEqual(prior);
-  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0 }); expect(settings()).toEqual(prior);
+  expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 }); expect(settings()).toEqual(prior);
   f.records.abandonConversation(f.sessions[0]!); expect(settings()).toEqual(prior);
+});
+
+test("bind requires the actual committed session row before canonical admission, with no absent dependency fallback", () => {
+  const f = fixture(), revision = f.records.get(f.workspaceId).configRevision;
+  const bind = (sessionId: string, requestId: string, sessions = f.store) => f.records.bindConversation(context(requestId, revision), f.workspaceId, { sessionId, sourceId: f.sourceId }, sessions);
+  expect(() => bind("missing-session", "absent")).toThrow("authority_denied");
+  expect(() => f.records.bindConversation(context("no-port", revision), f.workspaceId, { sessionId: f.sessions[0]!, sourceId: f.sourceId }, undefined as any)).toThrow("authority_denied");
+  const uuid = "11111111-2222-4333-8444-555555555555";
+  f.store.createSynced(uuid, { scope: "global", mode: "chat" });
+  expect(f.store.hasCommittedSession(uuid)).toBe(false);
+  expect(() => bind(uuid, "empty-index-row")).toThrow("authority_denied");
+  let pendingId = "";
+  const index = (f.store as unknown as { db: Database }).db;
+  index.transaction(() => {
+    pendingId = f.store.createSession("global", { mode: "code" });
+    expect(f.store.hasCommittedSession(pendingId)).toBe(false);
+    expect(() => bind(pendingId, "index-transaction-open")).toThrow("authority_denied");
+  })();
+  expect(f.records.get(f.workspaceId).configRevision).toBe(revision);
+  expect(f.store.hasCommittedSession(pendingId)).toBe(true);
+  expect(bind(pendingId, "after-commit").value.sessionId).toBe(pendingId);
+  expect(f.records.binding(pendingId).state).toBe("active");
+});
+
+test("monotonic retry expiry reports deferred work and successful retry resets backoff despite wall-clock changes", () => {
+  const f = fixture(); f.pump().drain(); f.update("monotonic-retry");
+  let monotonic = 0, crash = true;
+  const pump = new CoworkWorkspaceEvents(f.records, f.store, f.hub, () => { if (crash) throw new Error("injected crash"); }, () => monotonic);
+  expect(pump.drain()).toEqual({ delivered: 0, blocked: 1, deferred: 0, pruneBlocked: 0 });
+  monotonic = 999;
+  const wallNow = Date.now;
+  try {
+    Date.now = () => wallNow() + 10_000_000;
+    expect(pump.drain()).toEqual({ delivered: 0, blocked: 0, deferred: 1, pruneBlocked: 0 });
+    Date.now = () => wallNow() - 10_000_000;
+    expect(pump.drain()).toEqual({ delivered: 0, blocked: 0, deferred: 1, pruneBlocked: 0 });
+  } finally { Date.now = wallNow; }
+  monotonic = 1000; crash = false;
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
+  f.update("after-recovery");
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
+});
+
+test("shared boot/live deletion hook reaps an actual old session and retires its conversation fanout", () => {
+  const f = fixture(); const runtimeDeletes: string[] = [];
+  const hook = createCoworkSessionDeletionHook(f.records, id => runtimeDeletes.push(id));
+  const now = f.store.list()[0]!.createdAt + 600_001;
+  reapEmptySessions({ store: f.store, attachedCount: () => 0, home: f.home, now: () => now, onDelete: hook });
+  expect(runtimeDeletes).toEqual(f.sessions);
+  expect(f.store.hasSession(f.sessions[0]!)).toBe(false);
+  expect(f.records.binding(f.sessions[0]!).state).toBe("deleted");
+  expect(f.records.pendingChanges(f.sessions[0]!)).toEqual([]);
+  f.update("after-boot-reap"); expect(f.records.pendingChangeSessions()).toEqual([]);
+  expect(f.records.get(f.workspaceId).state).toBe("retained");
+});
+
+test("actual SQL pruning failure is separate from successful delivery and does not back off new pending events", () => {
+  const f = fixture(); f.pump().drain();
+  for (let i = 0; i < 100; i++) f.update(`retention-${i}`);
+  f.pump().drain();
+  f.db.db.run("CREATE TEMP TRIGGER fixture_prune_failure BEFORE DELETE ON cowork_outbox_deliveries WHEN OLD.state='delivered' BEGIN SELECT RAISE(FAIL,'fixture_prune_failure'); END");
+  const pump = f.pump(); f.update("prune-failure");
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 1 });
+  expect(f.records.pendingChanges(f.sessions[0]!)).toEqual([]);
+  f.update("next-delivery");
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 1 });
+  f.db.db.run("DROP TRIGGER fixture_prune_failure"); f.update("prune-recovered");
+  expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
+});
+
+bunTest.skipIf(process.platform === "darwin" && process.arch === "arm64")("unsupported host refuses Cowork log flush explicitly without a native flush fallback", () => {
+  const f = fixture();
+  expect(() => f.store.flushLog(f.sessions[0]!)).toThrow("unsupported_topology");
+  expect(f.store.lastSeq(f.sessions[0]!)).toBe(1);
 });

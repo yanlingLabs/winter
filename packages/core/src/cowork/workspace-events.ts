@@ -44,6 +44,17 @@ export function workspaceEventInput(sessionId: string, change: WorkspaceChange):
   return event;
 }
 
+/** Called only after host session deletion; shared by boot reaping and live cleanup. */
+export function createCoworkSessionDeletionHook(records: CoworkRepository | undefined, runtimeDelete?: (sessionId: string) => void) {
+  return (sessionId: string): void => {
+    try { runtimeDelete?.(sessionId); }
+    finally {
+      try { records?.abandonConversation(sessionId); }
+      catch { console.error("[cowork] conversation notification cleanup pending"); }
+    }
+  };
+}
+
 export interface WorkspaceEventCrashPoint {
   /** Test-only crash windows. Never supplied by a client or runtime frame. */
   (phase: "before-append" | "after-append", sessionId: string, changeId: string): void;
@@ -57,20 +68,20 @@ export class CoworkWorkspaceEvents {
   private failures = new Map<string, { attempts: number; retryAt: number }>();
   private timer?: ReturnType<typeof setInterval>;
   constructor(private readonly records: CoworkRepository, private readonly store: SessionStore,
-    private readonly hub: SessionHub, private readonly crashPoint?: WorkspaceEventCrashPoint) {}
+    private readonly hub: SessionHub, private readonly crashPoint?: WorkspaceEventCrashPoint, private readonly retryNow: () => number = () => performance.now()) {}
 
-  drain(): { delivered: number; blocked: number } {
-    if (this.draining) return { delivered: 0, blocked: 0 };
+  drain(): { delivered: number; blocked: number; deferred: number; pruneBlocked: number } {
+    if (this.draining) return { delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 };
     if (this.records.rs.db.inTransaction) throw new CoworkError("recovery_required");
     this.draining = true;
-    let delivered = 0, blocked = 0;
+    let delivered = 0, blocked = 0, deferred = 0, pruneBlocked = 0;
     try {
       const pendingSessions = this.records.pendingChangeSessions();
       const pendingSet = new Set(pendingSessions);
       for (const sessionId of this.failures.keys()) if (!pendingSet.has(sessionId)) this.failures.delete(sessionId);
       for (const sessionId of pendingSessions) {
         const failure = this.failures.get(sessionId);
-        if (failure && failure.retryAt > Date.now()) continue;
+        if (failure && failure.retryAt > this.retryNow()) { deferred++; continue; }
         try {
           if (!this.store.hasSession(sessionId)) {
             this.records.abandonConversation(sessionId);
@@ -102,16 +113,17 @@ export class CoworkWorkspaceEvents {
             this.records.acknowledgeChange(sessionId, change.changeId, event.seq);
             delivered++;
           }
-          this.records.pruneDeliveredChanges(sessionId);
           this.failures.delete(sessionId);
+          // Receipt retention is housekeeping after successful ACK, not a delivery failure.
+          try { this.records.pruneDeliveredChanges(sessionId); } catch { pruneBlocked++; }
         } catch {
           const attempts = Math.min((failure?.attempts ?? 0) + 1, 10);
-          this.failures.set(sessionId, { attempts, retryAt: Date.now() + Math.min(300_000, 1000 * 2 ** (attempts - 1)) });
+          this.failures.set(sessionId, { attempts, retryAt: this.retryNow() + Math.min(300_000, 1000 * 2 ** (attempts - 1)) });
           blocked++;
         } // Leave the exact delivery pending. No raw host errors enter events/logs.
       }
     } finally { this.draining = false; }
-    return { delivered, blocked };
+    return { delivered, blocked, deferred, pruneBlocked };
   }
   start(): void {
     if (this.timer) return;

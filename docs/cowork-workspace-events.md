@@ -11,7 +11,13 @@ refusals and native execution holds remain independent.
 Workspace mutations commit their authority changes, operation receipt, safe
 change snapshot and per-conversation outbox deliveries together in runtime-state
 SQLite. `pendingChanges` reads commit sequence, never timestamps or minted IDs.
-The daemon drains at startup, every second, and after workspace RPCs. No
+The daemon drains at startup, every second, and after workspace RPCs. Canonical
+binding requires an explicit trusted committed-session port. The actual store
+adapter requires a completed initial event/index row outside an open index
+transaction; creation must commit before synchronous bind, with the same store
+still open and no await/reentrant lifecycle operation in between. This is ordering
+across two databases, not a cross-store atomic transaction. The actual production
+Cowork session create/bind caller remains unimplemented. No
 conversation is fabricated for an unbound workspace; its canonical journal stays
 in the workspace database for explicit snapshot/watch handling later.
 
@@ -38,6 +44,8 @@ log with an existing row is a recovery failure, never grounds to recreate storag
 Deleted conversations cannot accumulate new fanout. A live payload mismatch or
 append/flush/ACK failure keeps its first failed delivery pending, prevents later
 changes overtaking it, and backs off retries from one second to five minutes.
+Retry timing uses a monotonic clock. Drain reports backed-off sessions as
+`deferred`, while post-ACK retention failures report `pruneBlocked` independently.
 Other conversations continue. Keep the latest 100 delivered receipts per logical
 conversation; prune older journal rows only after no conversation delivery still
 references them. Journal entries created without any conversation are retained. Host errors are not copied into events. A read/index
@@ -120,8 +128,16 @@ separation, denied runtime/import authorship, and revoked remote scope.
 
 `pnpm protocol:generate` emits 89 fixtures. Core, protocol and CLI typechecks pass.
 The frozen baseline passed 404 tests across 15 files; durability/review corrections
-pass 413 tests across 16 files, adding actual owned-FD flush, scoped SQLite setting
-restoration, deletion/backoff/pruning and structural replay coverage. Swift
+previously passed 413 tests across 16 files. Follow-up committed-binding and
+maintenance review now passes 660 tests with 2 explicit skips across 26 files,
+including actual owned-FD flush, scoped SQLite setting restoration,
+deleted-session cleanup, monotonic retry metrics, pruning isolation, structural
+replay and genuine external-connection context revalidation. Swift
 round-trip/reducer test sources are present but Swift builds, GUI/test-host runs,
 compiled-daemon verification, native/VM execution and release/activation were not
 performed under this source task's restrictions.
+
+The Cowork-only log flush path explicitly refuses hosts other than Darwin/arm64.
+It has no filesystem-type check: failed OS flush requests refuse ACK without
+fallback. Only actual disposable APFS requests were measured; other filesystems,
+including ExFAT/SMB rejection, remain unverified.
