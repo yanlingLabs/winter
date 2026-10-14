@@ -715,6 +715,7 @@ final class GatewayGateTests: XCTestCase {
             "workspace.policy.get",
 
         ]
+        for method in ["workspace.output.list", "workspace.file.stat", "workspace.file.read", "workspace.file.readRange"] { XCTAssertFalse(Gateway.remoteAllowedMethods.contains(method)) }
         XCTAssertEqual(Gateway.remoteAllowedMethods.count, 40)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
                        "Swift remote allowlist drifted from the forty — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")

@@ -93,6 +93,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
   ];
 
   test("REMOTE_ALLOWED_METHODS is EXACTLY the forty names", () => {
+    for (const method of ["workspace.output.list", "workspace.file.stat", "workspace.file.read", "workspace.file.readRange"]) expect(REMOTE_ALLOWED_METHODS.has(method)).toBe(false);
     expect(REMOTE_ALLOWED_METHODS.size).toBe(40);
     for (const m of FORTY) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);

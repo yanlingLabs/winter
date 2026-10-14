@@ -47,7 +47,7 @@ export type OperationStatus = "pending" | "applied" | "blocked" | "failed" | "su
 /** Superseded receipts never become applied later, including multi-source creation receipts. */
 export const isTerminalOperationStatus = (status: OperationStatus): boolean => ["applied", "failed", "superseded"].includes(status);
 export interface GuestEpoch { workspaceId: string; incarnationId: string; leaseEpoch: number; configRevision: number; grantRevision: number }
-export type CoworkErrorCode = "not_found" | "revision_conflict" | "stale_cursor" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment" | "unsupported_topology" | "response_too_large" | "schedule_limit" | "schedule_budget_exhausted";
+export type CoworkErrorCode = "not_found" | "revision_conflict" | "stale_cursor" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment" | "unsupported_topology" | "response_too_large" | "file_missing" | "file_unavailable" | "stale_file" | "file_incomplete" | "schedule_limit" | "schedule_budget_exhausted";
 export class CoworkError extends Error {
   constructor(readonly code: CoworkErrorCode, readonly currentRevision?: number) { super(code); this.name = "CoworkError"; }
 }

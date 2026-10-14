@@ -1,0 +1,216 @@
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, fstatSync, readSync, realpathSync, type BigIntStats } from "node:fs";
+import { join } from "node:path";
+import { COWORK_FILE_CHUNK_MAX_BYTES, CoworkOutputPath, type CoworkParams } from "@yanlinglabs/winter-protocol";
+import { AT_FDCWD, FdError, mkdirAt, openDirAt } from "../computer-use/browser/fd-fs";
+import { CoworkAuthority, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
+import { type CoworkCommittedSessions, CoworkRepository } from "./repository";
+import { durableCoworkTransaction } from "./durable-transaction";
+import { fullSyncInstructionFd } from "./instruction-fullsync";
+import { openOutputAt } from "./output-fs";
+import { CoworkError } from "./types";
+
+type Identity = { device: string; inode: string; uid: number; mode: number };
+type Row = Record<string, any>;
+type Entry = { fd: number; parent: number; name: string; relative: string | null; identity: Identity };
+interface Tree { entries: Entry[]; directory: number; close(): void }
+const same = (a: Identity, b: Identity) => a.device === b.device && a.inode === b.inode && a.uid === b.uid && a.mode === b.mode;
+const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const fail = (code: "file_unavailable" | "authority_denied" | "invalid_request" | "stale_file" | "file_missing" | "file_incomplete" = "file_unavailable"): never => { throw new CoworkError(code); };
+const component = (value: string) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value) && value !== "." && value !== "..";
+function identity(fd: number): Identity {
+  const st = fstatSync(fd, { bigint: true });
+  if (!st.isDirectory()) fail();
+  return { device: String(st.dev), inode: String(st.ino), uid: Number(st.uid), mode: Number(st.mode & 0o7777n) };
+}
+
+/** A host user reader for canonical shared outputs only. No initializer is routed
+ * over RPC, no missing-storage seed, guest path translation, filesystem listing,
+ * VM access, source readiness change or ordinary Code OUTDIR fallback. */
+export class CoworkOutputs {
+  private readonly home: string;
+  private readonly authority: CoworkAuthority;
+  constructor(readonly records: CoworkRepository, home: string, grants: CoworkGrantResolver,
+    /** Trusted race/fault instrumentation only; never settings or RPC input. */
+    private readonly checkpoint: (phase: string) => void = () => {}) {
+    if (process.platform !== "darwin" || process.arch !== "arm64") throw new CoworkError("unsupported_topology");
+    this.home = realpathSync(home);
+    if (realpathSync(records.rs.path) !== join(this.home, "runtimes", "runtime-state.db")) fail("authority_denied");
+    this.authority = new CoworkAuthority(records, grants);
+  }
+  private one(sql: string, ...args: any[]): Row | null { return this.records.rs.db.query<Row, any[]>(sql).get(...args); }
+  private run(sql: string, ...args: any[]) { this.records.rs.db.run(sql, args); }
+  private workspace(workspaceId: string): void {
+    if (!component(workspaceId)) fail("invalid_request");
+    const workspace = this.records.get(workspaceId);
+    if (!["standalone", "project"].includes(workspace.ownership) || !["retained", "archived"].includes(workspace.state)) fail("authority_denied");
+  }
+  private user(principal: CoworkPrincipal, workspaceId: string): void {
+    if (principal.kind !== "local-user") fail("authority_denied");
+    this.workspace(workspaceId); this.authority.requireWorkspace(principal, workspaceId, "read");
+  }
+  private root(workspaceId: string, sessionId: string): string {
+    if (!component(sessionId)) fail("invalid_request");
+    return `cowork/workspaces/${workspaceId}/shared/outputs/${sessionId}`;
+  }
+  private binding(workspaceId: string, sessionId: string, initialize = false): void {
+    const binding = this.records.binding(sessionId);
+    if (binding.workspaceId !== workspaceId || (initialize && binding.state !== "active")) fail("authority_denied");
+    // Deleted conversation tombstones deliberately retain output ownership/data.
+  }
+  private directoryRecord(relative: string, actual: Identity, create: boolean, created: boolean, homeId: string): boolean {
+    const record = this.one("SELECT * FROM cowork_output_directories WHERE relative_path=?", relative);
+    if (record) {
+      if (record.home_id !== homeId || !same(JSON.parse(record.identity_json), actual)) fail();
+      return false;
+    }
+    // Shared ancestors may already belong to another canonical storage owner.
+    const guidance = this.one("SELECT identity_json FROM cowork_instruction_directories WHERE relative_path=?", relative);
+    const volume = this.one("SELECT * FROM cowork_volume_directories WHERE relative_path=? AND state='created'", relative);
+    const admitted = guidance ? same(JSON.parse(guidance.identity_json), actual) : volume && same({ device: volume.device, inode: volume.inode, uid: volume.uid, mode: volume.mode }, actual);
+    if (!create || (!created && !admitted && relative !== ".")) fail();
+    return true;
+  }
+  private tree(workspaceId: string, sessionId: string, create = false): Tree & { newEntries: Entry[] } {
+    const homeId = this.records.recordedHomeIdentity(), entries: Entry[] = [], newEntries: Entry[] = [];
+    const close = () => { for (const entry of entries.splice(0).reverse()) closeSync(entry.fd); };
+    const remember = (fd: number, parent: number, name: string, relative: string | null) => {
+      try { const actual = identity(fd), entry = { fd, parent, name, relative, identity: actual }; entries.push(entry); return entry; }
+      catch (error) { closeSync(fd); throw error; }
+    };
+    try {
+      let fd = openDirAt(AT_FDCWD, "/"); remember(fd, AT_FDCWD, "/", null);
+      for (const name of this.home.split("/").filter(Boolean)) { const parent = fd; fd = openDirAt(parent, name); remember(fd, parent, name, null); }
+      const home = entries.at(-1)!; home.relative = ".";
+      if (home.identity.uid !== process.geteuid?.() || home.identity.mode !== 0o700) fail();
+      if (this.directoryRecord(".", home.identity, create, false, homeId)) newEntries.push(home);
+      let relative = "";
+      for (const name of this.root(workspaceId, sessionId).split("/")) {
+        relative = relative ? `${relative}/${name}` : name;
+        const parent = fd, created = create ? mkdirAt(parent, name, 0o700) : false;
+        fd = openDirAt(parent, name); const entry = remember(fd, parent, name, relative);
+        if (entry.identity.uid !== process.geteuid?.() || entry.identity.mode !== 0o700) fail();
+        if (this.directoryRecord(relative, entry.identity, create, created, homeId)) newEntries.push(entry);
+        if (created) { fullSyncInstructionFd(fd); fullSyncInstructionFd(parent); }
+        this.checkpoint("directory-opened");
+      }
+      return { entries, directory: fd, newEntries, close };
+    } catch (error) { close(); if (error instanceof CoworkError) throw error; return fail(); }
+  }
+  private assertTree(tree: Tree, newlyCreated: readonly Entry[] = []): void {
+    const homeId = this.records.recordedHomeIdentity();
+    for (const entry of tree.entries) {
+      if (!same(identity(entry.fd), entry.identity)) fail();
+      let current = -1;
+      try { current = openDirAt(entry.parent, entry.name); if (!same(identity(current), entry.identity)) fail(); }
+      finally { if (current >= 0) closeSync(current); }
+      if (entry.relative !== null && !newlyCreated.includes(entry)) this.directoryRecord(entry.relative, entry.identity, false, false, homeId);
+    }
+  }
+  /** Trusted future storage owner only: creates a NEW canonical output directory
+   * for an already bound, committed logical conversation. Cross-store ordering is
+   * synchronous: store.createSession commit precedes this call; no caller-owned
+   * transaction, await, reentrant lifecycle change or unverified session inventory.
+   * Unknown preexisting directories and crash orphans require explicit recovery. */
+  initialize(workspaceId: string, sessionId: string, sessions: CoworkCommittedSessions): void {
+    if (this.records.rs.db.inTransaction) fail("authority_denied");
+    this.workspace(workspaceId); this.binding(workspaceId, sessionId, true);
+    if (!sessions || typeof sessions.hasCommittedSession !== "function" || sessions.hasCommittedSession(sessionId) !== true || this.records.get(workspaceId).state !== "retained") fail("authority_denied");
+    if (this.one("SELECT 1 FROM cowork_output_locations WHERE session_id=?", sessionId)) throw new CoworkError("request_conflict");
+    const homeId = this.records.recordedHomeIdentity(), tree = this.tree(workspaceId, sessionId, true);
+    try {
+      this.assertTree(tree, tree.newEntries); this.checkpoint("before-owner-commit");
+      durableCoworkTransaction(this.records.rs, () => {
+        this.workspace(workspaceId); this.binding(workspaceId, sessionId, true);
+        if (sessions.hasCommittedSession(sessionId) !== true || this.records.recordedHomeIdentity() !== homeId || this.records.get(workspaceId).state !== "retained") fail("authority_denied");
+        this.assertTree(tree, tree.newEntries);
+        for (const entry of tree.newEntries) this.run("INSERT INTO cowork_output_directories VALUES(?,?,?)", entry.relative, homeId, JSON.stringify(entry.identity));
+        this.run("INSERT INTO cowork_output_locations VALUES(?,?,?,?,?,1,?)", `output-${randomUUID()}`, homeId, workspaceId, sessionId, this.root(workspaceId, sessionId), new Date().toISOString());
+      });
+    } catch (error) { if (error instanceof CoworkError) throw error; fail(); }
+    finally { tree.close(); }
+  }
+  private owner(workspaceId: string, locationId: string, expectedRevision: number): Row {
+    this.workspace(workspaceId);
+    const row = this.one("SELECT * FROM cowork_output_locations WHERE workspace_id=? AND location_id=?", workspaceId, locationId);
+    if (!row) return fail("authority_denied");
+    if (row.home_id !== this.records.recordedHomeIdentity() || row.relative_path !== this.root(workspaceId, row.session_id)) fail("authority_denied");
+    this.binding(workspaceId, row.session_id);
+    if (row.revision !== expectedRevision) throw new CoworkError("revision_conflict", row.revision);
+    return row;
+  }
+  /** Canonical DB inventory, never filesystem listing or discovery/enrollment. */
+  list(principal: CoworkPrincipal, request: CoworkParams<"workspace.output.list">) {
+    this.user(principal, request.workspaceId);
+    const limit = request.limit ?? 100;
+    const inventory = () => hash([request.workspaceId, this.records.recordedHomeIdentity(), this.one("SELECT COUNT(*) AS count, MAX(rowid) AS watermark FROM cowork_output_locations WHERE workspace_id=?", request.workspaceId)]);
+    const generation = inventory(); let after = "";
+    if (request.cursor) {
+      const match = /^([a-f0-9]{64}):(output-[a-f0-9-]{36})$/.exec(request.cursor);
+      if (!match) return fail("invalid_request");
+      if (match[1] !== generation) throw new CoworkError("stale_cursor");
+      after = match[2]!; this.owner(request.workspaceId, after, 1);
+    }
+    const rows = this.records.rs.db.query<Row, [string, string, number]>("SELECT * FROM cowork_output_locations WHERE workspace_id=? AND location_id>? ORDER BY location_id LIMIT ?").all(request.workspaceId, after, limit + 1);
+    const page = rows.slice(0, limit), locations = page.map(row => {
+      this.owner(request.workspaceId, row.location_id, row.revision);
+      return { workspaceId: request.workspaceId, sessionId: row.session_id as string, locationId: row.location_id as string, kind: "conversation-outputs" as const, revision: row.revision as number };
+    });
+    this.user(principal, request.workspaceId);
+    if (inventory() !== generation) throw new CoworkError("stale_cursor");
+    return { locations, nextCursor: rows.length > limit ? `${generation}:${locations.at(-1)!.locationId}` : null };
+  }
+  private stamp(st: BigIntStats, row: Row): string {
+    if (!st.isFile() || st.nlink !== 1n || st.uid !== BigInt(process.geteuid?.() ?? -1) || st.size < 0n || st.size > BigInt(Number.MAX_SAFE_INTEGER)) fail();
+    // An optimistic kernel metadata generation, NOT a content SHA-256 claim.
+    return hash([row.location_id, row.revision, String(st.dev), String(st.ino), String(st.size), String(st.mtimeNs), String(st.ctimeNs), String(st.mode), String(st.nlink), String(st.uid)]);
+  }
+  private file<T>(principal: CoworkPrincipal, request: CoworkParams<"workspace.file.stat">, body: (fd: number, row: Row, generation: string, bytes: number) => T): T {
+    this.user(principal, request.workspaceId);
+    const row = this.owner(request.workspaceId, request.locationId, request.expectedLocationRevision);
+    const parts = CoworkOutputPath.parse(request.relativePath).split("/"), filename = parts.pop()!;
+    const tree = this.tree(request.workspaceId, row.session_id); let fd = -1;
+    try {
+      let parent = tree.directory;
+      for (const name of parts) {
+        const child = openDirAt(parent, name);
+        try { const actual = identity(child); if (actual.uid !== process.geteuid?.()) fail(); tree.entries.push({ fd: child, parent, name, relative: null, identity: actual }); }
+        catch (error) { closeSync(child); throw error; }
+        parent = child;
+      }
+      this.assertTree(tree); this.checkpoint("before-file-open"); fd = openOutputAt(parent, filename);
+      const before = fstatSync(fd, { bigint: true }), generation = this.stamp(before, row);
+      // Refuse cross-device entries instead of treating an unexpected mount as backing content.
+      if (String(before.dev) !== tree.entries.at(-1)!.identity.device) fail();
+      this.checkpoint("file-opened"); const result = body(fd, row, generation, Number(before.size));
+      this.checkpoint("after-file-read");
+      if (this.stamp(fstatSync(fd, { bigint: true }), row) !== generation) fail("stale_file");
+      this.assertTree(tree);
+      const current = openOutputAt(parent, filename);
+      try { if (this.stamp(fstatSync(current, { bigint: true }), row) !== generation) fail("stale_file"); }
+      finally { closeSync(current); }
+      this.user(principal, request.workspaceId); this.owner(request.workspaceId, request.locationId, request.expectedLocationRevision);
+      return result;
+    } catch (error) {
+      if (error instanceof CoworkError) throw error;
+      if (error instanceof FdError && error.code === "ENOENT") fail("file_missing");
+      return fail();
+    } finally { if (fd >= 0) closeSync(fd); tree.close(); }
+  }
+  stat(principal: CoworkPrincipal, request: CoworkParams<"workspace.file.stat">) {
+    return this.file(principal, request, (_fd, row, generation, bytes) => ({ workspaceId: request.workspaceId, locationId: request.locationId, relativePath: request.relativePath, locationRevision: row.revision as number, generation, bytes, kind: "file" as const }));
+  }
+  read(principal: CoworkPrincipal, request: CoworkParams<"workspace.file.readRange">) {
+    const maxBytes = request.maxBytes ?? 65536;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > COWORK_FILE_CHUNK_MAX_BYTES || !Number.isSafeInteger(request.offset) || request.offset < 0) fail("invalid_request");
+    return this.file(principal, request, (fd, row, generation, bytes) => {
+      if (generation !== request.expectedGeneration) fail("stale_file");
+      if (request.offset > bytes) fail("invalid_request");
+      const count = Math.min(maxBytes, bytes - request.offset), content = Buffer.alloc(count); let read = 0;
+      while (read < count) { const got = readSync(fd, content, read, count - read, request.offset + read); if (got === 0) fail("file_incomplete"); read += got; }
+      const nextOffset = request.offset + read;
+      return { workspaceId: request.workspaceId, locationId: request.locationId, relativePath: request.relativePath, locationRevision: row.revision as number, generation, bytes, kind: "file" as const,
+        offset: request.offset, nextOffset, eof: nextOffset === bytes, contentBase64: content.toString("base64"), encoding: "base64" as const };
+    });
+  }
+}

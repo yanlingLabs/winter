@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -192,5 +192,20 @@ export function migrateCoworkScheduleQuarantineSchema(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cowork_schedule_quarantines (
     schedule_id TEXT PRIMARY KEY REFERENCES cowork_schedules(schedule_id),
     reason TEXT NOT NULL CHECK(reason='invalid_schedule'), quarantined_at INTEGER NOT NULL
+  );`);
+}
+
+/** Recorded host-backed output locations; neither directory contents nor manifests create authority. */
+export function migrateCoworkOutputSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_output_directories (
+    relative_path TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id), identity_json TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS cowork_output_locations (
+    location_id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id),
+    workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+    session_id TEXT NOT NULL UNIQUE REFERENCES cowork_conversations(session_id),
+    relative_path TEXT NOT NULL UNIQUE REFERENCES cowork_output_directories(relative_path),
+    revision INTEGER NOT NULL CHECK(revision=1), created_at TEXT NOT NULL,
+    UNIQUE(workspace_id,session_id)
   );`);
 }
