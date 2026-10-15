@@ -390,19 +390,62 @@ extension CUCore {
     // MARK: dispatch (pid queue)
 
     func perform(_ p: TargetActParams, on t: CUTarget, token: CUCancellation.Token) throws -> ActOutcome {
+        // Any act of the agent's in a file panel arms its fail-closed choice — after this act's own checks (a choosing
+        // press on a panel only the user navigated is judged as theirs).
+        let actedIn = panelOfAct(p.action, t)
+        defer { notePanelAct(actedIn, t) }
         switch p.action {
-        case .click(let a): return pickerHinted(try click(a, p, t, token), a, t)
+        case .click(let a):
+            try refuseProtectedChoice(p.action, t)
+            return pickerHinted(try click(a, p, t, token), a, t)
         case .setValue(let a):
             if let o = try setValueOfWebSelect(a, p, t, token) { return o }
-            return try setValue(a, p, t, token)
-        case .type(let a): return try type(a, p, t, token)
-        case .paste(let a): return try paste(a, p, t, token)
-        case .key(let a): return try keyChecked(a, t) { try key(a, p, t, token) }
+            let named = try? element(a.ref, in: t)
+            let before = panelFieldValues(named, t)
+            let o = try setValue(a, p, t, token)
+            try refuseProtectedPanelValue(named, t, before: before)
+            return o
+        case .type(let a):
+            let named = a.into.flatMap { try? element($0, in: t) }
+            let before = panelFieldValues(named, t)
+            let o = try type(a, p, t, token)
+            try refuseProtectedPanelValue(named, t, before: before)
+            return o
+        case .paste(let a):
+            let named = a.into.flatMap { try? element($0, in: t) }
+            let before = panelFieldValues(named, t)
+            let o = try paste(a, p, t, token)
+            try refuseProtectedPanelValue(named, t, before: before)
+            return o
+        case .key(let a):
+            try refuseProtectedChoice(p.action, t)
+            if let chord = try? CUKeyChord.parse(a.combo), chord.modifiers == [.command], case .character(let v) = chord.key,
+               Character(String(v).lowercased()) == "v" {
+                try refuseProtectedClipboard(into: a.into.flatMap { try? element($0, in: t) }, t)
+            }
+            // One typing key into a panel: judged with what was typed there before it (a path keyed character by character).
+            if let chord = try? CUKeyChord.parse(a.combo), Self.producesText(chord), case .character(let ch) = chord.key,
+               !chord.modifiers.contains(.command) {
+                try refuseProtectedPanelText(String(ch), into: a.into.flatMap { try? element($0, in: t) }, t)
+            }
+            let named = a.into.flatMap { try? element($0, in: t) }
+            let typing = (try? CUKeyChord.parse(a.combo)).map(Self.producesText) ?? false
+            let before = typing ? panelFieldValues(named, t) : [:]
+            let o = try keyChecked(a, t) { try key(a, p, t, token) }
+            if typing { try refuseProtectedPanelValue(named, t, before: before) }
+            return o
         case .scroll(let a): return try scroll(a, p, t, token)
-        case .drag(let a): return try drag(a, p, t, token)
+        case .drag(let a):
+            try refuseProtectedDrag(a, t)
+            return try drag(a, p, t, token)
         case .select(let a): return try select(a, p, t, token)
-        case .action(let a): return try axAction(a, p, t, token)
-        case .menu(let a): return try menu(a, p, t, token)
+        case .action(let a):
+            try refuseProtectedChoice(p.action, t)
+            return try axAction(a, p, t, token)
+        case .menu(let a):
+            // Edit ▸ Paste (or Paste and Match Style) with the focus in a file panel: the clipboard judged as for ⌘V.
+            if let last = a.path.last, CUPasteMenu.isPasteTitle(last) { try refuseProtectedClipboard(into: nil, t) }
+            return try menu(a, p, t, token)
         case .hover(let a): return try hover(a, p, t, token)
         }
     }
@@ -1292,6 +1335,8 @@ extension CUCore {
         let info = ElementInfo(e, ax)
         if info.secure { throw secureRefusal() }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: a.value, pid: t.pid, ax: ax)
+        // Any sheet or panel — an Open panel's Go to folder field too, not only a Save panel's (the review, MED-2).
+        try refuseProtectedPanelText(a.value, into: e, t, replacing: true)
         t.noteTargeted(e, at: clock.nowMs())
         announceTarget(t, info, pressing: false)
         cursor(t, "type", at: info.center)
@@ -1384,6 +1429,8 @@ extension CUCore {
             try guardUnnamedTarget(e, wf, text: text, t)
         }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: text, pid: t.pid, ax: ax)
+        // Into ANY sheet or panel (an Open panel too): a path naming a protected location is refused before it is sent.
+        try refuseProtectedPanelText(text, into: e, t)
         return (e, g)
     }
 
@@ -1452,7 +1499,7 @@ extension CUCore {
         let synth = self.synth(p)
         let chars = Array(text)
         var sent = 0
-        let keyPid = keyboardTarget(t, focused: e)
+        let keyPid = keyDeliveryPid(t, focused: e)
         let valueBefore = e.flatMap { ax.string($0, kAXValueAttribute) }
         // Watched for the focus leaving the field: only when it starts in it, and until a Tab (or a Return that
         // moves it) — those move the focus on purpose.
@@ -1494,6 +1541,12 @@ extension CUCore {
         // window on another Space may not be redrawn, so a screenshot is no proof either): say so, with what the
         // input target's before/after does show — never leave the model to guess from a stale picture.
         if let e, !readsBack(e, t, value: valueBefore) {
+            // Not a text field at all (a list, a table, a button — the open panel, 2026-10-14: "/" into the Open panel's
+            // file list was called an editor that hides its text): said as that.
+            if t.accessible, !editableElement(e), hiddenInputWords(e, t) == nil {
+                CULog.act.notice("type in \(t.appName, privacy: .public): the keys went to an element that is not a text field")
+                return typed.noting(Self.notATextFieldWords(focusWords(e, t), chars: chars.count, inPanel: inSheetOrPanel(e, t)))
+            }
             let after = ax.string(e, kAXValueAttribute)
             let moved = after != nil && after != valueBefore
             CULog.act.notice("type in \(t.appName, privacy: .public): the editor hides its text — input target \(moved ? "changed" : "unchanged", privacy: .public)")
@@ -1506,6 +1559,15 @@ extension CUCore {
             return typed.noting("received: \(received.words)")
         }
         return typed.noting("received: unverifiable (no field to read it back from)")
+    }
+
+    /// What typing into an element that is not a text field received: nothing to read back, and what such keys do. Pure.
+    static func notATextFieldWords(_ label: String, chars: Int, inPanel: Bool) -> String {
+        let keys = chars == 1 ? "the character went" : "the \(chars) characters went"
+        let what = inPanel
+            ? "(in a panel they may be its own keys: a file Open or Save panel opens Go to folder on \"/\" or \"~\")"
+            : "(a list or table selects by typed letters; elsewhere they may be shortcuts)"
+        return "received: unverifiable — \(label) is not a text field, so \(keys) to it as keys and nothing can be read back \(what) — check state() for what changed"
     }
 
     /// "typed N of M characters; then the focus moved to [x] (after “…”)" — the counts in the sentence itself.
@@ -1796,6 +1858,63 @@ extension CUCore {
         guard AXUIElementGetPid(f, &pid) == .success, pid != t.pid, sys.isContentProcess(pid, of: t.pid) else { return t.pid }
         CULog.act.notice("keys in \(t.appName, privacy: .public): pid events → \(self.sys.processName(pid: pid) ?? "content process", privacy: .public) \(pid, privacy: .public)")
         return pid
+    }
+
+    /// Where keys and typed characters are POSTED: `keyboardTarget`, except for an element in a SHEET whose content
+    /// macOS's Open/Save panel service draws — then that service (the open panel, 2026-10-14: Chrome's Open panel ran in
+    /// `openAndSavePanelService`, keys posted to Chrome never reached it — ⌘⇧G opened no Go to folder and once ran
+    /// Chrome's own Find). Only `type` and `key` post here; every other use of `keyboardTarget` (web content, the
+    /// editing-shortcut emulation) is unchanged.
+    func keyDeliveryPid(_ t: CUTarget, focused: AXUIElement?) -> pid_t {
+        let base = keyboardTarget(t, focused: focused)
+        guard base == t.pid, let service = panelServicePid(t, focused: focused) else { return base }
+        CULog.act.notice("keys in \(t.appName, privacy: .public): the focus is in a sheet the Open/Save panel service draws — pid events → \(service, privacy: .public)")
+        return service
+    }
+
+    /// The panel service instance drawing the sheet `focused` (else the reported focus) lies in; nil when it is in no
+    /// sheet, or no element from it up to its sheet is the service's own — an IN-PROCESS sheet (an alert, a Save sheet
+    /// the app draws itself) keeps its keys in the app, whatever service runs for another of its windows (the review of
+    /// the open panel, MED-1).
+    func panelServicePid(_ t: CUTarget, focused: AXUIElement?) -> pid_t? {
+        guard t.accessible, let e = focused ?? reportedFocus(t), inSheet(e) else { return nil }
+        let services = sys.openSavePanelServices()
+        guard !services.isEmpty else { return nil }
+        // The element's own process and its ancestors' up to the sheet: the service's when accessibility names the remote
+        // view's owner.
+        var pids: [pid_t] = []
+        var cur: AXUIElement? = e
+        for _ in 0..<60 {
+            guard let c = cur else { break }
+            var owner: pid_t = 0
+            if AXUIElementGetPid(c, &owner) == .success, owner > 0, !pids.contains(owner) { pids.append(owner) }
+            if ax.string(c, kAXRoleAttribute) == kAXSheetRole { break }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return Self.choosePanelService(services, hostPid: t.pid, elementPids: pids)
+    }
+
+    /// `e` lies in an `AXSheet` (a few dozen levels up at most).
+    func inSheet(_ e: AXUIElement) -> Bool {
+        var cur: AXUIElement? = e
+        for _ in 0..<60 {
+            guard let c = cur else { return false }
+            let role = ax.string(c, kAXRoleAttribute)
+            if role == kAXSheetRole { return true }
+            if role == kAXWindowRole { return false }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return false
+    }
+
+    /// Which panel service instance draws the sheet. Pure. Only one that accessibility names as the owner of the element
+    /// or of an ancestor up to its sheet — never by elimination (a running instance proves nothing about THIS sheet) — and
+    /// never one known to serve another app.
+    static func choosePanelService(_ services: [CUPanelService], hostPid: pid_t, elementPids: [pid_t]) -> pid_t? {
+        for ep in elementPids where ep != hostPid {
+            if let s = services.first(where: { $0.pid == ep }), s.responsible == nil || s.responsible == hostPid { return ep }
+        }
+        return nil
     }
 
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
@@ -2442,7 +2561,7 @@ extension CUCore {
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
-        let keyPid = keyboardTarget(t, focused: e)
+        let keyPid = keyDeliveryPid(t, focused: e)
         let blips = CUKeyBlips(self, p, t, why: "keys")
         defer { blips.end() }
         // Return in a field of the window's toolbar (a browser's address field; not a find bar, where Return finds
@@ -2955,7 +3074,7 @@ extension CUCore {
     func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
         let focused = g.explicit ?? reportedFocus(t)
-        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyboardTarget(t, focused: focused))
+        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyDeliveryPid(t, focused: focused))
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded

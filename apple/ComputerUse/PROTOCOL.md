@@ -1216,3 +1216,109 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 - A `target.act` can take up to ~0.4 s longer per element it lands on. The press pulse now plays with the real click.
 - An Esc during the wait (the call's `cancel`) stops the act before its input, focus move, rung-4 activation or
   background link open, and answers `cancelled`.
+
+**Pending** (the open panel, 2026-10-14; no wire change — the controller folds it into the next helper version's row):
+- Measured on a live session (Chrome's Open panel from a page's upload button): the panel is drawn by macOS's
+  `com.apple.appkit.xpc.openAndSavePanelService` (its own process, launchd its parent, started the second of the click),
+  shown in Chrome's sheet window and bridged into Chrome's tree as a `sheet`. Keys are posted to Chrome's pid; ⌘⇧G with the
+  panel's file list focused never opened Go to folder — in the background, after `requestForeground`, and after a live
+  screenshot — and once ran Chrome's own Find.
+- Keys, typed characters and a paste's ⌘V into a SHEET drawn by that service go to the service's own process (`target.act`
+  `key`/`type`/`paste`, and `setValue`'s typing fallback; `keyboardTarget`'s other uses unchanged) — only when
+  accessibility names a running instance as the owner of the element or of an ancestor up to its sheet, never by
+  elimination and never one serving another app: an IN-PROCESS sheet (its elements the app's own) keeps its keys in the
+  app whatever service runs for another window (the review, MED-1). UNMEASURED: which pid accessibility reports for the
+  remote panel's elements, and whether the service takes a posted ⌘⇧G and the typed path — the cu-live chrome rows "a
+  native Open panel — ⌘⇧G and the path …" and "… — the skill's §19 recipe …" measure both against `input.files[0].name`
+  (the §19 row goes on in the Go to folder field when `type` stops there; both close the sheet in a `finally`).
+- File panels' floors (the reviews, MED-2 and the security re-review; `Core/CUCore+FilePanel.swift`), each closing a way
+  around the others. A protected location: the save floor's names anywhere (shell startup files, agent config files,
+  `.ssh`, `LaunchAgents`, `LaunchDaemons`, `.winter`, `.winter-dev`, `.claude`), and under the home any hidden folder or
+  file and `Library/Keychains` / `Library/Cookies` — the SAME set `upload-paths.ts` uses (a test reads the Swift lists and
+  keeps them equal) — judged on the CANONICAL path: `~` expanded, a relative path made absolute against the panel's folder
+  when it says (`AXDocument`/`AXURL`), else judged by its names alone (`../.aws` is protected), `.` and `..` resolved,
+  symlinks resolved by `realpath` on the longest existing prefix, `/System/Volumes/Data` dropped, compared without case.
+  (1) Text for ANY sheet or panel (`type`, `paste`, `setValue`, a typing `key`) is refused `save_path` BEFORE it is sent
+  when it names one alone, after the field's current value, or after what was typed into that panel since its last choice
+  (per target, so a path split over calls into a Go to folder field accessibility doesn't show is judged whole); (2) after
+  the write, the named field's and the focus's VALUE is judged, cleared when it takes a value, and refused; (3) an act
+  that CHOOSES — the default button (any but Cancel when it names none), Return, Enter, ⌘O or ⌘↓ into the panel, a Return
+  inside typed or pasted text, a double-click or Open/Confirm on an item — first reads what it would choose (selected
+  items' `AXURL`/`AXFilename`/title/description/value, fields, pop-ups, what was typed) and a protected one refuses it;
+  when nothing can be judged (nothing readable, the 600-element cap, or relative text onto a folder it can't see) and text
+  was sent into that panel, it fails CLOSED ("the user can pick the file themselves") — with nothing typed (the user's own
+  navigation) it goes ahead; (4) a `drag` whose source is a file item (an `AXURL` on it, two parents or two levels of
+  children) is refused for a protected file before anything moves.
+- The third security pass: ⌘V into a sheet or panel judges the clipboard's string (with the field's value and the panel's
+  typed text) and each file URL on it before the key is sent, and records the string as typed; ANY agent act in a panel
+  (a click, a key, the sidebar, ⌘⇧., a disclosure triangle) arms its fail-closed choice — only the user's own navigation
+  (no agent act there since it opened) passes unreadable; an item with no URL gets a path from its row and its
+  `AXDisclosedByRow` parents (`.ssh/id_ed25519`); a double-click whose point nothing answers for, or a choosing key with
+  the focus not shown in the panel, while a sheet is open on the bound window, is judged as a choice in that sheet and
+  fails closed when unreadable; a drag's source is judged by its name too, and a file item in Finder or a panel whose
+  path can't be read is refused; a relative path's names always count, the panel's folder known or not. The resolver
+  never stats or resolves anything under `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Library/Mobile Documents`,
+  `~/Library/CloudStorage`, `/Volumes`, `/Network`, `/net` or `/home` (macOS would ask the user before the helper reads
+  there): such a path is judged LEXICALLY. Residual: a symlink planted INSIDE one of those folders (e.g.
+  `~/Downloads/x` → `~/.ssh`) is not followed, so a path through it is judged by its own names only. `upload` refuses a
+  file with another hard link (`nlink > 1`), at the check and again at the private copy's open.
+- The fourth pass (over-refusal): every file-panel floor and the fail-closed arming apply to REAL file panels only — a
+  sheet or panel that names itself `NSOpenPanel`/`NSSavePanel` (`AXIdentifier`), is drawn by the panel service, has a
+  Save panel's name field, or hosts a file browser (an item with a file `AXURL`, or a search field, a folder pop-up and
+  an outline or browser); an alert ("Don't ask again" and OK), Print, or Return with any other sheet up act exactly as
+  before. The choice reads the SELECTION first, from the browsers themselves (the focus and its parents, the panel's
+  first three levels; `AXSelectedRows`/`AXSelectedChildren`): a readable selection or field is enough, whatever the
+  600-element walk reached; it fails closed only when neither can be read. A bare "Cookies" or "Keychains" is no
+  protected name (the Library rule is for paths under `~/Library` only). Edit ▸ Paste (or Paste and Match Style) through
+  `menu` into a file panel judges the clipboard as ⌘V does.
+- The fifth pass: the text, value and protected-path floors (and the Return-in-text choice check on the typed path)
+  judge in ANY sheet or dialog again — a real in-process Open panel can show none of a file panel's marks; they refuse
+  only protected paths, and in a sheet that is no recognised file panel the choice judges only what reads as a path (an
+  alert's or Print's labels and pop-ups are no file names). Only the fail-closed arming, the open-sheet choice and the
+  unreadable-choice refusal need a recognised file panel. The OUTERMOST sheet on the window is the panel (a nested Go to
+  folder sheet is judged with the panel's typed text). The file-panel verdict is cached per sheet: a yes for its life, a
+  no for a second.
+- The sixth pass: outside a recognised file panel, text and values are judged only by their path-like tokens (starting
+  with / or ~, or holding a /; a `.pem`, `.p12` or `.key` among them; any component exactly a secret name) and by bare
+  tokens EXACTLY one of `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`, `.npmrc`, `.pgpass`, `id_rsa`,
+  `id_ed25519`, `id_ecdsa`, `id_dsa`, `credentials`, `login.keychain-db` — never the names-only rule on a bare word
+  ("Update .gitignore", "see .env.example", "wait...", ".NET 8" are typed); a field there is NEVER cleared (refused, left
+  as it is). The choice outside a recognised panel also judges the selected item's name, its parent rows' names and the
+  folder pop-up against that exact list (a click-only way into `.ssh`); a Find panel's ".gitignore" goes ahead.
+- The seventh pass: outside a recognised file panel a bare word counts only when it is exactly a secret dot-name (`.ssh`,
+  `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`, `.npmrc`, `.pgpass`, `.git-credentials`, `.azure`), an `id_*` key name
+  (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`) or a `*.keychain-db` — "credentials" is an ordinary word ("fix login
+  credentials", OK on a "Credentials" row), protected only as a component of an absolute or `~` path under `.aws`; the
+  full path rules apply only to tokens starting with / or ~, a relative token with a / only by its components' exact
+  secret names (".github/workflows/ci.yml", "src/.eslintrc", "https://site/.well-known/…", "certs/server.key" pass;
+  "foo/.ssh/id_ed25519" does not). The choice's ROW path outside a recognised panel (never text) also counts `.config/gh`
+  and anything under `Library/Keychains`. Residual: a panel that fails the scope test, reached by clicks alone, with no
+  `AXURL` and a secret that matches none of these names (a project's `.env`, a token file under another name) is not
+  refused — the scope test recognises every file panel measured so far.
+- The eighth pass: outside a recognised file panel the floors judge only what the agent itself types or pastes there
+  (and the choice also its selection, rows and folder pop-up) — never a value the sheet already held: a Git client's
+  settings sheet prefilled with "SSH key: ~/.ssh/id_ed25519" takes OK and Return, and text added to that field is judged
+  alone. The panel state (typed text per target, file-panel verdicts per sheet) is read and written under one lock: acts
+  on two apps' queues at once share it.
+- Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
+  routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
+  record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise
+  judged by names alone and fails closed at the choice), and whether `realpath` on a path inside a TCC-protected folder
+  (Desktop, Documents, Downloads) raises a privacy prompt for the helper.
+- A key with the keyboard focus already in a sheet or panel (no `into`) is watched like one aimed there with `into`: no
+  sheet or window opened, focus, value, selection and caret range unchanged → "nothing new appeared in the panel after …".
+  Both only in a FILE panel (a Save panel's name field, a service-drawn sheet, or the shape: a search field, a pop-up and an
+  outline or browser), never for a caret move (arrows, ⌘-arrows), ⌘C, Space or ⌘⇧. (the review, LOW-1). A chord
+  with ⌘, ⌃ or ⌥ adds that it went to the app itself, which may run its own command or drop it while a panel is up, and
+  names the way into an Open or Save panel: the full path typed into its file list (Go to folder opens on "/" or "~"),
+  then Return.
+- A new window that is a sheet on the bound window (not in the app's accessibility windows; a sheet child of the bound
+  window with that window id or the same frame) is said to be in the state already — never "useWindow(id)", which bound
+  it with no accessibility. On a web browser bound as an app it adds the tab route: `browsers.tab({ url })` and
+  `upload(ref, paths)` on the page's file input, no dialog (a file from outside the working folder copied into $TMPDIR
+  first, never a key, credential or dotfile — `upload`'s own refusal says so, and only for a file no floor protects: a
+  file in Winter's home, on the read-deny list, or in a hidden folder of the home or a keychain is refused plainly —
+  the review, MED-3).
+- Typing into an element that is not a text field (no text role, not editable, no editable ancestor, not a page's hidden
+  input) says "… is not a text field, so the characters went to it as keys and nothing can be read back" — never "<App>
+  doesn't expose this editor's text".

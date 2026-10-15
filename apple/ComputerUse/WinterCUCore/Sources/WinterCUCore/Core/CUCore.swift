@@ -636,6 +636,12 @@ public final class CUCore: @unchecked Sendable {
     var guardianNoted: ((String) -> Void)?
     /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
+    /// Per target: what was typed into a file panel since its last choice (`CUCore+FilePanel.swift`). Acts run on per-pid
+    /// queues, two apps' at once: read and written under `panelStateLock` only.
+    var panelTypedStore: [String: CUPanelTyped] = [:]
+    /// Per sheet: is it a file panel (`isFilePanel`), and when that was decided. Under `panelStateLock`.
+    var filePanelVerdicts: [AXIdentity: (yes: Bool, atMs: Double)] = [:]
+    let panelStateLock = NSLock()
     /// Floor F's words for a browser's dialogs, as a test says (live: the browser's own locale packs — `remoteDebuggingWords`).
     var remoteDebuggingWordsOverride: ((CUTarget) -> CURemoteDebuggingWords)?
     /// Tests: told each time Floor F's words are read ahead for a target (`warmRemoteDebuggingWords`).
@@ -1131,12 +1137,39 @@ public final class CUCore: @unchecked Sendable {
             axInfo[w.id] = (w.title, ax.string(w.element, kAXSubroleAttribute))
         }
         let documentKinds: Set<String> = [kAXStandardWindowSubrole, kAXDialogSubrole, "AXSystemDialog"]
+        // The bound window's sheets: a sheet is a window of its own to the window server, but accessibility shows it
+        // inside the window it is attached to — so it is in this state already, and useWindow(its id) binds a window
+        // with no accessibility (the open panel, 2026-10-14: Chrome's Open panel, `sheet "open"` in the state, was
+        // announced as a new window "Open" and useWindow on it bound it capture-only, twice).
+        let sheets: [AXUIElement] = (try? windowElement(t)).map { win in
+            ax.elements(win, kAXChildrenAttribute).filter { ax.string($0, kAXRoleAttribute) == kAXSheetRole }
+        } ?? []
         return fresh.compactMap { w -> String? in
             let title = !w.title.isEmpty ? w.title : (axInfo[w.id]?.title ?? "")
             guard !title.isEmpty, w.frame.width >= 200, w.frame.height >= 120 else { return nil }
             if let sub = axInfo[w.id]?.subrole, !documentKinds.contains(sub) { return nil }
+            if axInfo[w.id] == nil, sheets.contains(where: { Self.isSheet($0, of: w, ax: ax) }) {
+                let said = "\(t.appName)'s \u{201C}\(title.prefix(80))\u{201D} opened as a sheet on the bound window — it is in this state (its sheet), so act on its refs here; useWindow(\(w.id)) would bind it with no accessibility"
+                return isWebBrowser(t) ? said + "; " + Self.webFileInputHint : said
+            }
             return "new \(t.appName) window \u{201C}\(title.prefix(80))\u{201D} (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
         }.prefix(3).map { $0 }
+    }
+
+    /// What a browser bound as an APP is told when a sheet opens on it (an Open panel from a page's file input, most
+    /// often): the tab route puts the file in with no dialog. (The helper does not know whether Winter reaches this
+    /// browser's tabs: said as a way to try.)
+    static let webFileInputHint = "if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first — never a key, credential or dotfile)"
+
+    /// The sheet element `sheet` is the window-server window `w`: by its window id when accessibility gives that one, or
+    /// by its frame (within a point or two — a sheet's window and its element cover the same rectangle; a sheet whose
+    /// content another process draws may answer its parent's id, or none).
+    static func isSheet(_ sheet: AXUIElement, of w: CUWindowServerWindow, ax: CUAXBackend) -> Bool {
+        if ax.windowID(sheet) == w.id { return true }
+        guard let f = ax.frame(sheet) else { return false }
+        let slack: CGFloat = 2
+        return abs(f.minX - w.frame.minX) <= slack && abs(f.minY - w.frame.minY) <= slack
+            && abs(f.width - w.frame.width) <= slack && abs(f.height - w.frame.height) <= slack
     }
 
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {

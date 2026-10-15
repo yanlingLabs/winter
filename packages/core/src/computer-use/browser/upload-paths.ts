@@ -10,6 +10,7 @@
 // copies go when the session ends, and every leftover at the daemon's next start.
 import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { AutomationFailure } from "../errors";
 
@@ -25,6 +26,38 @@ export interface UploadRoots {
   home: string;
   /** The sandbox's read-deny list for the session (`sandboxConfigFor(home, cwd).filesystem.denyRead`). */
   denyRead: readonly string[];
+  /** The user's home folder (tests); `os.homedir()` otherwise. */
+  userHome?: string;
+}
+
+// The protected set, the SAME as the helper's file-panel floor (`apple/ComputerUse/WinterCUCore/Sources/WinterCUCore/
+// Floors/Floors.swift` and `Core/CUCore+FilePanel.swift`; `browser-units.test.ts` reads those files and keeps the lists
+// equal): the save floor's names anywhere, and under the user's home any hidden folder or file and `Library/<these>`.
+export const SHELL_STARTUP_NAMES: readonly string[] = [
+  ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".bashrc", ".bash_profile", ".bash_login",
+  ".bash_logout", ".profile", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout", ".inputrc", "config.fish",
+];
+export const PROTECTED_FOLDER_NAMES: readonly string[] = [".ssh", "LaunchAgents", "LaunchDaemons", ".winter", ".winter-dev", ".claude"];
+export const PROTECTED_CONFIG_NAMES: readonly string[] = [".claude.json", ".winter.json"];
+export const SECRET_LIBRARY_FOLDERS: readonly string[] = ["Keychains", "Cookies"];
+
+const lowerSet = (xs: readonly string[]): Set<string> => new Set(xs.map((x) => x.toLowerCase()));
+
+/** A file no upload advice may point at (a real path; compared without case, as APFS does): a shell startup file, an
+ *  agent config file or anything in a protected folder, anywhere; under the user's home, any folder or file whose name
+ *  starts with "." (.ssh, .aws, .gnupg, .config, .netrc, .env …) or `Library/Keychains` / `Library/Cookies`. Pure. */
+export function isSecretPath(path: string, userHome: string): boolean {
+  const p = path.toLowerCase();
+  const names = p.split(sep).filter((s) => s.length > 0);
+  const last = names.at(-1);
+  if (last !== undefined && (lowerSet(SHELL_STARTUP_NAMES).has(last) || lowerSet(PROTECTED_CONFIG_NAMES).has(last))) return true;
+  if (names.some((n) => lowerSet(PROTECTED_FOLDER_NAMES).has(n))) return true;
+  if (p.includes("/.config/fish/")) return true;
+  const h = userHome.toLowerCase();
+  if (!inside(p, h) || p === h) return false;
+  const rel = p.slice(h.length).split(sep).filter((s) => s.length > 0);
+  if (rel.some((seg) => seg.startsWith("."))) return true;
+  return rel[0] === "library" && rel[1] !== undefined && lowerSet(SECRET_LIBRARY_FOLDERS).has(rel[1]);
 }
 
 const real = (p: string): string | undefined => { try { return realpathSync(p); } catch { return undefined; } };
@@ -63,11 +96,20 @@ export function checkUploadFiles(input: unknown, roots: UploadRoots): CheckedUpl
     if (path === undefined) throw new AutomationFailure("NotAllowed", `${shown}: no such file`);
     const st = statSync(path);
     if (!st.isFile()) throw new AutomationFailure("NotAllowed", `${shown} is not a regular file`);
-    if (!allowedRoots.some((r) => inside(path, r))) {
-      throw new AutomationFailure("NotAllowed", `${shown} is outside this session's working directory and temp directory — only files from those can be uploaded`);
-    }
+    // A hard link is the same file under another name (one in the working folder may be ~/.ssh's key): where it really
+    // lives can't be told, so it is refused plainly — never with the copy advice (the third security pass).
+    if (st.nlink > 1) throw new AutomationFailure("NotAllowed", `${shown} has another hard link to it, so where it really lives can't be told — it can't be uploaded`);
+    // The floors first, wherever the file is: a protected file is refused plainly — never with the copy advice below,
+    // which would be a recipe for taking it out (the review of the open panel, MED-3).
     if (inside(path, home)) throw new AutomationFailure("NotAllowed", `${shown} is inside Winter's own home — it can't be uploaded`);
     if (denied.some((d) => inside(path, d))) throw new AutomationFailure("NotAllowed", `${shown} is on the sandbox's read-deny list — it can't be uploaded`);
+    const secret = isSecretPath(path, real(roots.userHome ?? homedir()) ?? (roots.userHome ?? homedir()));
+    if (!allowedRoots.some((r) => inside(path, r))) {
+      if (secret) throw new AutomationFailure("NotAllowed", `${shown} is a protected file (in a hidden folder of the home, or a keychain) — it can't be uploaded, and must not be copied to be`);
+      // The way on is said (the open panel, 2026-10-14: a zip under the home folder sent the model to the native Open
+      // panel) — only for a file no floor protects.
+      throw new AutomationFailure("NotAllowed", `${shown} is outside this session's working directory and temp directory — only files from those can be uploaded: copy it into $TMPDIR first (with your shell), then upload the copy`);
+    }
     total += st.size;
     if (total > UPLOAD_MAX_BYTES) throw new AutomationFailure("NotAllowed", `upload() takes at most ${UPLOAD_MAX_BYTES / (1024 * 1024)} MiB of files at once`);
     out.push({ path, dev: st.dev, ino: st.ino, size: st.size });
@@ -102,6 +144,7 @@ export function stageUploads(files: readonly CheckedUpload[], home: string, sess
       }
       const st = fstatSync(src);
       if (!st.isFile() || st.dev !== f.dev || st.ino !== f.ino) throw new AutomationFailure("NotAllowed", `${basename(f.path)} changed while it was being uploaded — try again`);
+      if (st.nlink > 1) throw new AutomationFailure("NotAllowed", `${basename(f.path)} has another hard link to it, so where it really lives can't be told — it can't be uploaded`);
       const dest = join(dir, name);
       dst = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       for (;;) {

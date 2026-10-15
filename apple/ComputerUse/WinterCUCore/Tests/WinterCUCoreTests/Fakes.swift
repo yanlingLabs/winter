@@ -348,6 +348,9 @@ final class FakeSystem: CUSystemBackend {
     /// How long ago each process started (a launch's).
     var ages: [pid_t: TimeInterval] = [:]
     func processAge(pid: pid_t) -> TimeInterval? { ages[pid] }
+    /// The Open/Save panel service instances running.
+    var panelServices: [CUPanelService] = []
+    func openSavePanelServices() -> [CUPanelService] { panelServices }
     func warpCursor(to p: CGPoint) { warpedTo.append(p) }
 
     static func window(_ id: UInt32, pid: pid_t, _ frame: CGRect, owner: String = "App", layer: Int = 0) -> CUWindowServerWindow {

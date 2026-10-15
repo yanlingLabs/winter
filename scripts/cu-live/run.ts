@@ -72,7 +72,7 @@ import {
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
 import { adapterScenarios, adaptersDryRun } from "./adapters";
 import { expectedCardSummary, FIXTURE_APP, HELPER_OWNER, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type PromptObservation, type Scenario } from "./scenarios";
-import { CFT_DEFAULT_APP, CHROME_SCENARIOS, describeChromePlan, needsChrome, runningChromeForTesting, type ChromeObservation } from "./chrome";
+import { CFT_DEFAULT_APP, CHROME_SCENARIOS, describeChromePlan, needsChrome, PANEL_FILE_NAME, runningChromeForTesting, withPanelFile, type ChromeObservation } from "./chrome";
 import { ChromeRig } from "./chrome-rig";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
@@ -781,6 +781,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let realApps: RealAppsRun | undefined;
   /** The `chrome` group's browser instances and page server (`chrome-rig.ts`), when a chrome scenario runs. */
   let chromeRig: ChromeRig | undefined;
+  /** The open-panel rows' file (in the run's temp dir), written when the chrome group's rig comes up. */
+  let panelFile: string | undefined;
   let baseline: FocusBaseline | undefined;
   let offspaceMethod = "?";
   let activateUser: () => Promise<void> = async () => { throw new Error("the helper is not up yet"); };
@@ -1151,7 +1153,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const rig =s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
         // The chrome group's diagnostic row: attributes before, a focus trace through the action.
         if (s.chromeTrace === true) chromeRig?.beginTrace(Math.min(timeout, 9_000));
-        const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
+        const code = panelFile === undefined ? s : { ...s, code: withPanelFile(s.code, panelFile) };
+        const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(code), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
         await userWorks;
         await userLeaves;
@@ -1247,6 +1250,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         results.push({ name: "chrome: preflight", group: "chrome", status: "fail", ms: 0, checks: [check("Chrome for Testing is there and not running", false, why)] });
         scenarios = scenarios.filter((x) => !needsChrome(x));
       } else {
+        panelFile = join(root, "panel", PANEL_FILE_NAME);
+        mkdirSync(join(root, "panel"), { recursive: true });
+        writeFileSync(panelFile, "Winter's open-panel probe\n");
         chromeRig = new ChromeRig({
           app, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), outDir: OUT_DIR, tool: built.tool, log, sh: (cmd, args) => sh(cmd, args),
           activateUser: () => activateUser(), activateAsUser: async (pid) => { await bringToFront(pid, "Chrome for Testing (shown once, as the user)", undefined, true); },
