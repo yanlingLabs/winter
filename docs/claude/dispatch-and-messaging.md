@@ -1,6 +1,6 @@
 # Dispatch and messaging
 
-*Read this before touching mid-turn pushes, turn pairing, Dispatch's children, SendMessage/ListAgents/TaskStop, or ListSessions.*
+*Read this before touching mid-turn pushes, turn pairing, Dispatch's children, SendMessage/ListAgents/TaskStop, ListSessions, or the Mac pill's command mode and terminal.*
 
 ## The fold: a push made while a turn runs joins it
 
@@ -47,3 +47,13 @@ The `sessions` server's `session_spawn` runs `packages/core/src/agent/dispatch-c
 ## MCP servers connect after spawn
 
 MCP servers (the daemon's `winter__<key>` ones and user/project servers) connect after the child spawns, so the FIRST turn may wait up to ~2 s while they come up; later turns do not.
+
+## The Mac pill's command mode and terminal
+
+The Dispatch pill (`apple/Winter/Sources/DispatchPill/`) runs a typed line as a shell command when it is one — no prefix. All Mac-app side: the daemon never sees the line, its output or the run.
+
+- **Detection** (`Terminal/ShellCommandLine.swift`, pure): a command only when the whole text tokenizes as a complete shell line (balanced quotes and substitutions, no trailing `|`/`&&`/redirection, compound openers closed), the first word of every simple command resolves (login-shell PATH, a path to an executable, a builtin/reserved word, an alias), and every argument starting `/`, `~`, `./`, `../` exists. `DispatchPillCommandMode` re-judges each edit debounced on a background queue, memoized by text; the purple stays sticky between verdicts; Return and Delete evaluate synchronously on a memo miss. Ghost completion (first word ≥ 2 chars, case-sensitive; path words from their directory) — Tab inserts it (`ComposerTextView.ghostSuffix`).
+- **Delete to opt out** (`CommandModeSuppression`): Delete at the end, nothing selected, mode on → nothing deleted, the text recorded and no longer a command; the mode returns when the text differs from the record AND validates. The record clears on a run, a send or Clear Draft.
+- **The shell** (`Terminal/LoginShell.swift`): `pw_shell`, then `$SHELL`, else `/bin/zsh`. PATH and alias names come from a probe shaped like the daemon's `login-shell-path.ts` (`-l -c`, the rc file sourced quietly, markers, own process group, 5 s deadline, refreshed every 10 min). A run is `<shell> -l -c '<rc prelude> __winter_line=$1; set --; eval "$__winter_line"' <name> <line>` in a SwiftTerm PTY (`Terminal/CommandRun.swift`), cwd = the session's directory when it exists, else home; environment = a login shell's minimum (`loginShellEnvironment`), never Winter's variables. No sandbox, no approval. Under unit tests the environment is `.inert` and no test spawns a shell.
+- **Runs and windows**: `CommandRunStore` owns the runs (≤ 8 kept; finished ones pruned oldest first), their pills (`CommandPillsView`, a row under the child pills in the floating stack) and their `TerminalWindowController`s (a `PillChromeWindow`). The emulator belongs to the run: closing the window unparents it, the process keeps going, reopening shows the scrollback. Stop and app quit signal the whole process group (HUP, TERM, then KILL). "Add to transcript" sends `terminalTranscriptMessage` (header, fenced `$ cmd` + output stripped of ANSI, last 400 lines / 30k chars) through the composer's `onSubmit`.
+- Nothing logs a command line, its output, or a PATH value.
