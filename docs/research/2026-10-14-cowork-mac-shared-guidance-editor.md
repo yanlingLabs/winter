@@ -33,9 +33,11 @@ review. An unknown outcome (transport loss, an invalid receipt, `recovery_requir
 keeps that exact attempt for explicit retry through further typing, navigation and
 reconnect, and also offers "Abandon unconfirmed save": the host answers
 `recovery_required` forever to a failed journaled operation's request ID, so retry
-alone can strand a draft. Abandon refreshes first, then forgets the attempt and
-clears the draft's base, so no save can be sent until the user has reviewed the
-host's current content; the draft is never discarded. A refresh that finds the host
+alone can strand a draft. Abandon refreshes first. If that read fails, the abandon
+is refused and the save stays pending, because the model cannot tell whether the host
+already applied it. Otherwise it forgets the attempt and clears the draft's base, so
+no save can be sent until the user has reviewed the host's current content; the
+draft is never discarded. A refresh that finds the host
 exactly one revision past the attempt's base with the SHA-256 of the attempt's bytes
 settles it as applied (no receipt is invented; its operation ID is unknown). A
 matching host receipt establishes the recorded save only; it does not establish
@@ -47,8 +49,11 @@ refusal message about the draft as sent are retired by the next edit or refresh.
 workspace selected while another workspace's guidance operation is in flight has
 its read queued and run when that operation ends.
 
-The draft is edited in a plain-text `NSTextView` (a private representable in
-`CoworkWorkspaceView.swift`, shaped like `ComposerTextView`), not `TextEditor`, so
+The draft is edited in a plain-text `NSTextView` (WinterKit's `ScopedUndoTextView`
+in a private representable in `CoworkWorkspaceView.swift`, shaped like
+`ComposerTextView`). It keeps its own undo history, so a model-driven replacement of
+the draft clears only the editor's stack, never the window's, which the composer and
+settings fields share. It is not `TextEditor`, so
 that quote and dash substitution, autocorrection, text replacement and completion,
 link and data detection, smart insert/delete and inline predictions are all off and
 no system feature can rewrite a byte the user did not type.
@@ -74,3 +79,10 @@ Validation in this lane is source/API inspection and `git diff --check` only.
 Winter home or Keychain was invoked.** Swift compilation, fake-test execution,
 rendering and integration behavior remain unverified until separately admitted
 ordinary CI. No push, release, activation or native execution is claimed.
+
+Later status (2026-10-15): the PR #39 review fixes were compiled and run. The
+WinterProtocol and WinterKit `swift test` suites pass, and a build-only `xcodebuild`
+of the app succeeds. No app was launched, and no `xcodebuild test`, GUI, live home,
+daemon or Keychain was used. Whether the app's Edit menu reaches the editor's
+`undo:`/`redo:` through the responder chain is still a live-gate check. The
+statements above describe this lane as it was frozen.
