@@ -9,7 +9,7 @@ import WinterCUPresentation
 //   cu-presentation-demo --list                 windows you can pick (id, app, frame)
 //   cu-presentation-demo --window <id> [--seconds 30] [--no-mirror] [--no-esc]
 //   cu-presentation-demo --render-island <dir>  the desktop-switch island rendered OFFSCREEN to PNG files
-//   cu-presentation-demo --show-island [--seconds 20]
+//   cu-presentation-demo --show-island [--seconds 20] [--hover lift|glow]
 //                                               the island shown for real, as a prompt would show it (answers
 //                                               are printed; nothing switches)
 //   cu-presentation-demo --render-gallery <dir> [--no-gifs]
@@ -23,6 +23,7 @@ struct Options {
     var galleryDir: String?
     var islandDir: String?
     var showIsland = false
+    var hover: CUDesktopIslandButtonHover = .lift
     var gifs = true
     var list = false
     var windowID: CGWindowID?
@@ -46,6 +47,10 @@ func parse(_ args: [String]) -> Options? {
             guard i < args.count else { return nil }
             o.islandDir = args[i]
         case "--show-island": o.showIsland = true
+        case "--hover":
+            i += 1
+            guard i < args.count, let style = CUDesktopIslandButtonHover(rawValue: args[i]) else { return nil }
+            o.hover = style
         case "--no-gifs": o.gifs = false
         case "--window":
             i += 1
@@ -79,7 +84,7 @@ func describe(_ info: [String: Any]) -> (id: CGWindowID, pid: pid_t, app: String
 }
 
 let usage = "usage: cu-presentation-demo --list | --window <id> [--seconds N] [--no-mirror] [--no-esc]"
-    + " | --render-gallery <dir> [--no-gifs] | --render-island <dir> | --show-island [--seconds N]"
+    + " | --render-gallery <dir> [--no-gifs] | --render-island <dir> | --show-island [--seconds N] [--hover lift|glow]"
 guard let options = parse(Array(CommandLine.arguments.dropFirst())) else {
     FileHandle.standardError.write((usage + "\n").data(using: .utf8)!)
     exit(2)
@@ -118,6 +123,7 @@ if options.showIsland {
     app.setActivationPolicy(.accessory)
     let seconds = options.seconds
     MainActor.assumeIsolated {
+        CUDesktopIslandButtonHover.current = options.hover
         let prompts = CUDesktopPromptController.live()
         islandPrompts = prompts
         let request = CUDesktopPromptRequest(

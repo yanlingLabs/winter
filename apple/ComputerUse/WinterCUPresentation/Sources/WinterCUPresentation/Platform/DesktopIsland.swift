@@ -157,6 +157,17 @@ struct IslandFrameView: View {
     @ObservedObject var state: DesktopIslandState
     var reduceMotion = false
 
+    /// The button under the pointer, judged against the resting row (the buttons sit at its trailing end).
+    private var hoveredButton: DesktopIslandRow.Answer? {
+        guard let p = state.pointer, frame.content > 0.9, state.returningAt == nil else { return nil }
+        let pill = geometry.pill
+        let half = DesktopIslandRow.button / 2 + 2
+        let check = CGPoint(x: pill.maxX - DesktopIslandRow.trailing - DesktopIslandRow.button / 2, y: pill.midY)
+        let cross = CGPoint(x: check.x - DesktopIslandRow.button - DesktopIslandRow.spacing, y: pill.midY)
+        func over(_ c: CGPoint) -> Bool { abs(p.x - c.x) <= half && abs(p.y - c.y) <= half }
+        return over(check) ? .switchNow : over(cross) ? .refuse : nil
+    }
+
     /// The pointer is over the resting pill: it grows a little (`DesktopIslandGeometry.hoverScale`), like the Dispatch
     /// pill.
     private var pillHovered: Bool {
@@ -191,7 +202,7 @@ struct IslandFrameView: View {
             // (the buttons ride its edge), blurred by how far the spring still has to travel, clipped to the shape,
             // a hairline edge and its shadow.
             let shape = Capsule(style: .continuous)
-            DesktopIslandRow(model: model, state: state)
+            DesktopIslandRow(model: model, state: state, hovered: hoveredButton)
                 .frame(width: max(pill.width, 0), height: geometry.pill.height)
                 .frame(width: max(pill.width, 0), height: max(pill.height, 0))
                 .blur(radius: DesktopIslandGeometry.morphBlur(size: pill.size, target: geometry.pill.size)
@@ -219,6 +230,9 @@ struct IslandFrameView: View {
 struct DesktopIslandRow: View {
     let model: CUDesktopPromptModel
     @ObservedObject var state: DesktopIslandState
+    var hovered: Answer?
+
+    enum Answer { case refuse, switchNow }
 
     static let blue = Color(red: 0.04, green: 0.52, blue: 1.0)
     static let leading: CGFloat = 20
@@ -237,10 +251,10 @@ struct DesktopIslandRow: View {
                 .truncationMode(.middle)
             Spacer(minLength: Self.spacerMin)
             Button { answer(state.onRefuse) } label: { Image(systemName: "xmark") }
-                .buttonStyle(IslandCircleButtonStyle(fill: .white, glyph: .black))
+                .buttonStyle(IslandCircleButtonStyle(fill: .white, glyph: .black, hovered: hovered == .refuse))
                 .accessibilityLabel("Don't switch")
             Button { answer(state.onSwitch) } label: { Image(systemName: "checkmark") }
-                .buttonStyle(IslandCircleButtonStyle(fill: Self.blue, glyph: .white))
+                .buttonStyle(IslandCircleButtonStyle(fill: Self.blue, glyph: .white, hovered: hovered == .switchNow))
                 .accessibilityLabel("Switch now")
         }
         .padding(.leading, Self.leading)
@@ -253,16 +267,35 @@ struct DesktopIslandRow: View {
     }
 }
 
+/// How a button answers the pointer: TRIAL (user 2026-10-15, choosing between the two) — `CUDesktopIslandButtonHover`.
+public enum CUDesktopIslandButtonHover: String, Sendable, CaseIterable {
+    /// The fill brightens (a light fill takes a soft grey wash instead).
+    case lift
+    /// A soft glow of the button's own colour.
+    case glow
+    /// The style the pills use (the demo's `--hover` sets it).
+    @MainActor public static var current: CUDesktopIslandButtonHover = .lift
+}
+
 struct IslandCircleButtonStyle: ButtonStyle {
     let fill: Color
     let glyph: Color
+    var hovered = false
+    var lightFill: Bool { fill == .white }
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        let style = MainActor.assumeIsolated { CUDesktopIslandButtonHover.current }
+        let lift = hovered && style == .lift
+        let glow = hovered && style == .glow
+        return configuration.label
             .font(.system(size: 12, weight: .bold))
             .foregroundStyle(glyph)
             .frame(width: DesktopIslandRow.button, height: DesktopIslandRow.button)
             .background(Circle().fill(fill))
+            .overlay(Circle().fill(lightFill ? Color.black.opacity(0.1) : Color.white.opacity(0.18)).opacity(lift ? 1 : 0))
+            .shadow(color: fill.opacity(glow ? 0.75 : 0), radius: 6)
+            .shadow(color: fill.opacity(glow ? 0.45 : 0), radius: 14)
+            .animation(.easeOut(duration: 0.15), value: hovered)
             .scaleEffect(configuration.isPressed ? 0.9 : 1)
             .opacity(configuration.isPressed ? 0.8 : 1)
             .contentShape(Circle())
@@ -288,6 +321,15 @@ public enum CUDesktopIslandGallery {
         }
         let hovered = try frame(t: DesktopIslandFluid.settle, housing: housing, slot: 0, hover: true)
         out.append(try write(hovered, directory.appendingPathComponent("island-hover@2x.png")))
+        let was = CUDesktopIslandButtonHover.current
+        defer { CUDesktopIslandButtonHover.current = was }
+        for style in CUDesktopIslandButtonHover.allCases {
+            CUDesktopIslandButtonHover.current = style
+            for (name, button) in [("check", DesktopIslandRow.Answer.switchNow), ("cross", .refuse)] {
+                let image = try frame(t: DesktopIslandFluid.settle, housing: housing, slot: 0, button: button)
+                out.append(try write(image, directory.appendingPathComponent("island-hover-\(style.rawValue)-\(name)@2x.png")))
+            }
+        }
         let times = stride(from: 0.0, through: 1.2, by: 0.1).map { $0 }
         let frames = try times.map { try frame(t: $0, housing: housing, slot: 0) }
         out.append(try write(try filmstrip(frames), directory.appendingPathComponent("island-birth-filmstrip@2x.png")))
@@ -301,7 +343,8 @@ public enum CUDesktopIslandGallery {
     }
 
     /// - Parameter t: seconds into the birth.
-    @MainActor static func frame(t: Double, housing: CGSize?, slot: Int, hover: Bool = false) throws -> CGImage {
+    @MainActor static func frame(t: Double, housing: CGSize?, slot: Int, hover: Bool = false,
+                                 button: DesktopIslandRow.Answer? = nil) throws -> CGImage {
         let model = CUDesktopPromptModel(CUDesktopPromptRequest(promptId: "g", sessionId: "s", app: "Google Chrome",
                                                                 bundleId: "com.google.Chrome", reason: "",
                                                                 timeoutMs: 60_000), now: 0)
@@ -309,6 +352,11 @@ public enum CUDesktopIslandGallery {
         let geometry = DesktopIslandGeometry.make(housing: housing, menuBarHeight: 24,
                                                   pillWidth: DesktopIslandGeometry.pillWidth(for: model.headline), slot: slot)
         if hover { state.pointer = CGPoint(x: geometry.pill.midX, y: geometry.pill.midY) }
+        if let button {
+            let check = geometry.pill.maxX - DesktopIslandRow.trailing - DesktopIslandRow.button / 2
+            let x = button == .switchNow ? check : check - DesktopIslandRow.button - DesktopIslandRow.spacing
+            state.pointer = CGPoint(x: x, y: geometry.pill.midY)
+        }
         let bar = housing?.height ?? 24
         let lead: CGFloat = slot > 0 ? bar + 20 : 0
         let scene = ZStack(alignment: .top) {
