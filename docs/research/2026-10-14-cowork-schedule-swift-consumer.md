@@ -82,13 +82,14 @@ command, test host, app, GUI, live Winter home/daemon/Keychain, guest, provider 
 was used. `git diff --check` and targeted source/wire-inventory inspection were
 performed. The repository protocol checklist was read; no new method/event schema
 or event fixture is introduced, so no code generation is needed for this mirror.
-
-Later status (2026-10-15): these tests now compile and pass under `swift test` in
-WinterKit, and a build-only `xcodebuild` of the app succeeds. No app, GUI, live home,
-daemon or Keychain was used. The statement above describes this lane as it was frozen.
 WinterProtocol tests, WinterKit tests and an app build remain required under a
 separately authorized build lane. Source inspection does not prove Swift compilation,
 SwiftUI lifecycle behavior, transport execution or guest execution.
+
+Later status (2026-10-15): these tests now compile and pass under `swift test` in
+WinterProtocol and WinterKit, and a build-only `xcodebuild` of the app succeeds. No
+app, GUI, live home, daemon or Keychain was used. The statements above describe this
+lane as it was frozen.
 
 ## Deliberate remaining contract limits
 

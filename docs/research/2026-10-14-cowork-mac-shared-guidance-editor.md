@@ -17,9 +17,12 @@ Malformed or unavailable content cannot become an editable blank seed.
 
 Drafts are held per workspace in the existing model, not per conversation or in
 a new memory store. They survive navigation and transport reconnect/refetch while
-that model lives. They are not persisted across app termination. A read failure
-keeps drafts and any pending save; guidance failure does not discard a complete
-source/policy generation or change its pagination/retry behavior.
+that model lives. A workspace listing drops the draft of a workspace that is no
+longer listed, unless it is the selected workspace, a guidance operation is running
+for it, or it has a save still pending. Drafts are not persisted across app
+termination. A read failure keeps drafts and any pending save; guidance failure
+does not discard a complete source/policy generation or change its
+pagination/retry behavior.
 
 Save captures one immutable request ID, expected instruction revision, expected
 digest and content before awaiting transport. A save's failure is classified by
