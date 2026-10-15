@@ -398,6 +398,30 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertFalse(mode.displaysCommand("hello there"), "…both ways")
     }
 
+    func testReturnJudgesTheFilesystemAsItIsNotAsItWas() {
+        var nodes = ShellCommandLineTests.fileSystem.nodes
+        let fileSystem = MutableFileSystem(nodes: nodes)
+        let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: ["open"],
+                                                       homeDirectory: "/Users/u", fileSystem: fileSystem)
+        let mode = DispatchPillCommandMode(environment: environment, workingDirectory: { "/tmp" })
+        mode.evaluateNowForTesting("open /tmp/later.md")
+        XCTAssertFalse(mode.isActive(for: "open /tmp/later.md"))
+        nodes["/tmp/later.md"] = .file
+        fileSystem.nodes = nodes
+        XCTAssertTrue(mode.isCommandNow("open /tmp/later.md"), "the file appeared; the draft did not change")
+    }
+
+    /// A filesystem a test can change between two questions.
+    private final class MutableFileSystem: ShellFileSystem {
+        var nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]
+        init(nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]) { self.nodes = nodes }
+        private var fake: ShellCommandLineTests.FakeShellFileSystem { .init(nodes: nodes) }
+        func exists(_ path: String) -> Bool { fake.exists(path) }
+        func isDirectory(_ path: String) -> Bool { fake.isDirectory(path) }
+        func isExecutableFile(_ path: String) -> Bool { fake.isExecutableFile(path) }
+        func entries(ofDirectory path: String) -> [String]? { fake.entries(ofDirectory: path) }
+    }
+
     func testTheDebouncedPathPublishesTheVerdict() {
         let mode = makeMode()
         mode.draftChanged("ls /tmp")
@@ -478,6 +502,8 @@ final class DispatchPillCommandRunTests: XCTestCase {
     func testTheOptOutSendsTheCommandAsAMessage() async {
         let (pill, sent) = makePill()
         pill.adapter.composerDraft = "make"
+        XCTAssertFalse(pill.handleDeleteBackwardAtEnd(), "not shown as a command yet: an ordinary delete")
+        pill.commandMode.evaluateNowForTesting("make")
         XCTAssertTrue(pill.handleDeleteBackwardAtEnd(), "Delete at the end opts out instead of deleting")
         pill.submit("make")
         for _ in 0..<20 where sent().isEmpty { await Task.yield() }
@@ -572,5 +598,24 @@ final class ComposerCommandHooksTests: XCTestCase {
         view.setSelectedRange(NSRange(location: 0, length: 2))
         view.doCommand(by: #selector(NSResponder.deleteBackward(_:)))
         XCTAssertEqual(view.string, "", "a selection deletes as ever")
+    }
+}
+
+/// The terminal window's emulator is laid out inside the terminal's padding on every resize — never left at
+/// zero size.
+@MainActor
+final class TerminalPaddingViewTests: XCTestCase {
+    func testTheEmulatorFillsThePaddedArea() {
+        let container = TerminalPaddingView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let terminal = NSView()
+        container.terminal = terminal
+        container.addSubview(terminal)
+        container.needsLayout = true
+        container.layoutSubtreeIfNeeded()
+        let p = TerminalStyle.padding
+        XCTAssertEqual(terminal.frame, NSRect(x: p.left, y: p.bottom, width: 600 - p.left - p.right,
+                                              height: 300 - p.top - p.bottom))
+        container.setFrameSize(NSSize(width: 800, height: 500))
+        XCTAssertEqual(terminal.frame.width, 800 - p.left - p.right, "a resize re-lays it out")
     }
 }

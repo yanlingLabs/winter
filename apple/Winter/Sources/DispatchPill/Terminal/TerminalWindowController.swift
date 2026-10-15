@@ -293,15 +293,29 @@ private struct TerminalHost: NSViewRepresentable {
     }
 }
 
-/// Lays the emulator out inside `TerminalStyle.padding`.
+/// Lays the emulator out inside `TerminalStyle.padding` — on a layout pass and on every resize (a frame change
+/// alone does not promise a layout pass to a view with no constraints).
 final class TerminalPaddingView: NSView {
-    weak var terminal: NSView?
+    weak var terminal: NSView? {
+        didSet { layoutTerminal() }
+    }
 
     override func layout() {
         super.layout()
+        layoutTerminal()
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        layoutTerminal()
+    }
+
+    private func layoutTerminal() {
         let p = TerminalStyle.padding
-        terminal?.frame = NSRect(x: p.left, y: p.bottom,
-                                 width: max(1, bounds.width - p.left - p.right),
-                                 height: max(1, bounds.height - p.top - p.bottom))
+        let width = bounds.width - p.left - p.right, height = bounds.height - p.top - p.bottom
+        // Not before the window has given this view a real size: a running program would be told its terminal
+        // shrank to nothing (a SIGWINCH to a 1×1 grid) on the way to its real size.
+        guard width >= 40, height >= 40 else { return }
+        terminal?.frame = NSRect(x: p.left, y: p.bottom, width: width, height: height)
     }
 }

@@ -241,7 +241,7 @@ struct DispatchPillComposerBar: View {
                 PillSendStopButton(
                     isRunning: running,
                     canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                    runsCommand: commandMode.isActive(for: draft),
+                    runsCommand: commandMode.displaysCommand(draft),
                     onSend: { controller.submit(adapter.composerDraft) },
                     onStop: { controller.interrupt() }
                 )

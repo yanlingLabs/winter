@@ -252,6 +252,16 @@ targets:
             fi
             ditto "${SRC_DIR}/${SRC_NAME}" "${DEST}/${DEST_NAME}"
           done
+      - name: Embed SwiftTerm licence notice
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # The Dispatch pill's terminal links SwiftTerm (MIT, pinned in `packages:` above), whose licence asks
+          # that its notice ship with every copy — so the app carries it beside CEF's and Monaco's. The text is a
+          # committed copy of the pinned tag's LICENSE: refresh it whenever the pin moves.
+          DEST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/Licenses"
+          mkdir -p "${DEST}"
+          ditto "${SRCROOT}/Support/Licenses/SWIFTTERM-LICENSE.txt" "${DEST}/SWIFTTERM-LICENSE.txt"
       - name: Embed Monaco editor assets
         basedOnDependencyAnalysis: false
         script: |

@@ -35,8 +35,10 @@ struct CommandModeSuppression: Equatable {
 /// completion after the caret. Validation never blocks typing: each edit schedules one evaluation, debounced,
 /// on a background queue (the stat calls run there), and the verdict is memoized by text. Until a new verdict
 /// lands the last one stands (`displaysCommand`), so the purple does not flicker off on every keystroke.
-/// Return and Delete — actions, not typing — ask synchronously when the memo has no answer yet
-/// (`isCommandNow`), so they act on the text as it is.
+/// Return re-judges the text synchronously (`isCommandNow`): the world can change under an unchanged draft —
+/// the file a path names may appear after the last keystroke. Delete, a repeating typing key, acts on what is
+/// shown and never blocks. The memo is keyed by text alone (the working directory rarely changes under a
+/// draft; a Return always looks again).
 @MainActor
 final class DispatchPillCommandMode: ObservableObject {
     /// The draft the published state belongs to.
@@ -84,10 +86,11 @@ final class DispatchPillCommandMode: ObservableObject {
         text == evaluatedText ? ghost : nil
     }
 
-    /// Validity NOW — the memo, or a synchronous evaluation (Return and Delete are actions, not typing).
+    /// Command mode NOW, judged afresh — Return's question. A synchronous evaluation (a few stat calls): Return
+    /// is one action, not typing, and the answer must be about the filesystem as it is at the press.
     func isCommandNow(_ text: String) -> Bool {
-        let valid = memo[text] ?? evaluate(text).valid
-        return suppression.isCommandMode(text: text, isValid: valid)
+        guard !text.isEmpty else { return false }
+        return suppression.isCommandMode(text: text, isValid: evaluate(text).valid)
     }
 
     /// Every edit of the draft.
@@ -120,9 +123,9 @@ final class DispatchPillCommandMode: ObservableObject {
     /// Delete/Backspace from the composer (caret at the end, nothing selected — the text view checks).
     /// True when consumed: command mode was on, and the opt-out is recorded instead of a character deleted.
     func deleteBackward(text: String, caretAtEnd: Bool, hasSelection: Bool) -> Bool {
-        guard !text.isEmpty else { return false }
-        let valid = memo[text] ?? evaluate(text).valid
-        let consumed = suppression.deleteBackward(text: text, isValid: valid, caretAtEnd: caretAtEnd,
+        // What the composer shows as purple decides — never a fresh evaluation: Delete repeats as it is held.
+        guard !text.isEmpty, displaysCommand(text) else { return false }
+        let consumed = suppression.deleteBackward(text: text, isValid: true, caretAtEnd: caretAtEnd,
                                                   hasSelection: hasSelection)
         if consumed {
             lastDisplayed = false
