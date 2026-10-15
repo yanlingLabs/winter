@@ -149,6 +149,10 @@ final class CommandLineEnvironment: @unchecked Sendable {
         var commandNames: [String]
         var homeDirectory: String
         var fileSystem: ShellFileSystem
+        /// Whole-command validation on zsh's completion system (`ZshCompletion.swift`).
+        var wholeCommandCheck: Bool = false
+        /// Who answers it — nil while the engine is not ready (or unavailable): the prose guard decides then.
+        var completion: ShellCompletionSource?
 
         func context(workingDirectory: String) -> ShellCommandContext {
             ShellCommandContext(pathDirectories: pathDirectories, aliases: aliases, homeDirectory: homeDirectory,
@@ -184,12 +188,14 @@ final class CommandLineEnvironment: @unchecked Sendable {
                                isLive: false, shell: "/bin/zsh", runEnvironment: [:])
     }
 
-    /// A synthetic shell (tests).
+    /// A synthetic shell (tests). With no `completion`, only the structural rules apply.
     static func fixed(pathDirectories: [String], commandNames: [String], aliases: Set<String> = [],
-                      homeDirectory: String, fileSystem: ShellFileSystem) -> CommandLineEnvironment {
+                      homeDirectory: String, fileSystem: ShellFileSystem,
+                      completion: ShellCompletionSource? = nil) -> CommandLineEnvironment {
         CommandLineEnvironment(snapshot: Snapshot(enabled: true, pathDirectories: pathDirectories, aliases: aliases,
                                                   commandNames: commandNames.sorted(), homeDirectory: homeDirectory,
-                                                  fileSystem: fileSystem),
+                                                  fileSystem: fileSystem, wholeCommandCheck: completion != nil,
+                                                  completion: completion),
                                isLive: false, shell: "/bin/zsh", runEnvironment: [:])
     }
 
@@ -207,7 +213,7 @@ final class CommandLineEnvironment: @unchecked Sendable {
         let path = (inherited + ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"])
             .filter { seen.insert($0).inserted }
         let snapshot = Snapshot(enabled: true, pathDirectories: path, aliases: [], commandNames: [],
-                                homeDirectory: home, fileSystem: LiveShellFileSystem())
+                                homeDirectory: home, fileSystem: LiveShellFileSystem(), wholeCommandCheck: true)
         return CommandLineEnvironment(snapshot: snapshot, isLive: true, shell: shell,
                                       runEnvironment: loginShellEnvironment(from: processEnvironment, home: home,
                                                                             user: user, shell: shell))
@@ -242,7 +248,14 @@ final class CommandLineEnvironment: @unchecked Sendable {
         if let parsed {
             names = commandNamesOnPath(parsed.path)
         }
+        // The completion engine starts once the PATH its completion functions run tools from is known.
+        var engineEnvironment = runEnvironment
+        engineEnvironment["PATH"] = (parsed?.path ?? current.pathDirectories).joined(separator: ":")
+        engineEnvironment["GIT_OPTIONAL_LOCKS"] = "0" // completing never takes a repository's index lock
+        let engine = ZshCompletionEngine(environment: engineEnvironment)
+        engine.warmUp()
         lock.lock()
+        current.completion = engine
         if let parsed {
             current.pathDirectories = parsed.path
             current.aliases = parsed.aliases

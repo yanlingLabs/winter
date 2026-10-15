@@ -77,14 +77,20 @@ struct ShellWord: Equatable {
     var wasQuoted: Bool
     /// The word holds a `$`/backtick expansion — its value is unknown until run time.
     var hasExpansion: Bool
+    /// Where the word sits in the line as typed, in characters: `line.prefix(end)` is the line up to and including
+    /// it — what the completion engine is asked about.
+    var start: Int
+    var end: Int
 
     init(text: String, leadingTildeUnquoted: Bool = false, hasUnquotedGlob: Bool = false,
-         wasQuoted: Bool = false, hasExpansion: Bool = false) {
+         wasQuoted: Bool = false, hasExpansion: Bool = false, start: Int = 0, end: Int = 0) {
         self.text = text
         self.leadingTildeUnquoted = leadingTildeUnquoted
         self.hasUnquotedGlob = hasUnquotedGlob
         self.wasQuoted = wasQuoted
         self.hasExpansion = hasExpansion
+        self.start = start
+        self.end = end
     }
 }
 
@@ -127,11 +133,12 @@ func shellTokenize(_ line: String) -> ShellTokenization {
     var glob = false
     var quoted = false
     var expansion = false
+    var wordStart = 0
 
     func flushWord() {
         guard inWord else { return }
         tokens.append(.word(ShellWord(text: current, leadingTildeUnquoted: tildeUnquoted, hasUnquotedGlob: glob,
-                                      wasQuoted: quoted, hasExpansion: expansion)))
+                                      wasQuoted: quoted, hasExpansion: expansion, start: wordStart, end: i)))
         current = ""
         inWord = false
         tildeUnquoted = false
@@ -141,7 +148,10 @@ func shellTokenize(_ line: String) -> ShellTokenization {
     }
 
     func startWord() {
-        if !inWord { inWord = true }
+        if !inWord {
+            inWord = true
+            wordStart = i
+        }
     }
 
     while i < chars.count {
@@ -227,8 +237,8 @@ func shellTokenize(_ line: String) -> ShellTokenization {
             i += op.count
         default:
             if !inWord, c == "~" { tildeUnquoted = true }
-            if c == "*" || c == "?" || c == "[" { glob = true }
             startWord()
+            if c == "*" || c == "?" || c == "[" { glob = true }
             current.append(c)
             i += 1
         }
@@ -555,7 +565,11 @@ func shellFirstWordResolves(_ line: String, context: ShellCommandContext) -> Boo
 ///   is plausibly a command — its first word resolves (or is itself the path being typed).
 ///
 /// What it returns is ready to insert: shell-special characters in it are backslash-escaped.
-func shellCompletion(for line: String, context: ShellCommandContext, commandNames: [String]) -> String? {
+///
+/// With a `source` (zsh's completion system), an ARGUMENT word completes from it instead — real subcommands,
+/// branches, targets, files — falling back to the directory listing only when zsh cannot answer in time.
+func shellCompletion(for line: String, context: ShellCommandContext, commandNames: [String],
+                     source: ShellCompletionSource? = nil, deadline: Date = .distantFuture) -> String? {
     guard !line.isEmpty, line.count <= 1000, let lastChar = line.last, !lastChar.isWhitespace else { return nil }
     // The word being typed: everything after the last unquoted break. A word with quotes or escapes in it
     // is not completed (inserting into a quoted word needs the quote's own rules).
@@ -567,6 +581,15 @@ func shellCompletion(for line: String, context: ShellCommandContext, commandName
     // The line up to the word must tokenize (no open quote swallowing it).
     guard case .complete(let tokensBefore) = shellTokenize(before) else { return nil }
     let isFirstWord = !tokensBefore.contains { if case .word = $0 { return true } else { return false } }
+
+    if !isFirstWord, let source, shellFirstWordResolves(before, context: context),
+       let capture = source.capture(buffer: line, directory: context.workingDirectory, deadline: deadline) {
+        let candidates = capture.hits.filter { $0.hasPrefix(word) && $0 != word }
+        guard !candidates.isEmpty, !capture.hits.contains(word) else { return nil }
+        let common = shellCommonPrefix(candidates)
+        guard common.count > word.count else { return nil }
+        return shellEscapedForInsertion(String(common.dropFirst(word.count)))
+    }
 
     if shellTextLooksLikePath(word) {
         if !isFirstWord, !shellFirstWordResolves(before, context: context) { return nil }

@@ -90,7 +90,7 @@ final class DispatchPillCommandMode: ObservableObject {
     /// is one action, not typing, and the answer must be about the filesystem as it is at the press.
     func isCommandNow(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
-        return suppression.isCommandMode(text: text, isValid: evaluate(text).valid)
+        return suppression.isCommandMode(text: text, isValid: evaluate(text, ghost: false).valid)
     }
 
     /// Every edit of the draft.
@@ -143,19 +143,28 @@ final class DispatchPillCommandMode: ObservableObject {
 
     // MARK: Evaluation
 
-    private func evaluate(_ text: String) -> (valid: Bool, ghost: String?) {
-        let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory())
+    private func evaluate(_ text: String, ghost: Bool = true) -> (valid: Bool, ghost: String?) {
+        let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory(), ghost: ghost)
         remember(text, valid: result.valid)
         return result
     }
 
     nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment,
-                                     workingDirectory: String) -> (valid: Bool, ghost: String?) {
+                                     workingDirectory: String, ghost wantsGhost: Bool = true) -> (valid: Bool, ghost: String?) {
         let snapshot = environment.snapshot()
         guard snapshot.enabled else { return (false, nil) }
         let context = snapshot.context(workingDirectory: workingDirectory)
-        let valid = shellLineIsCommand(text, context: context)
-        let ghost = shellCompletion(for: text, context: context, commandNames: snapshot.commandNames)
+        // The structural rules first (cheap); then, for a line that passes them, whole-command validation on
+        // zsh's completion system within its budget — the prose guard when zsh cannot answer.
+        var valid = shellLineIsCommand(text, context: context)
+        if valid, snapshot.wholeCommandCheck {
+            valid = shellCompletionCheckPasses(text, context: context, source: snapshot.completion,
+                                               deadline: Date().addingTimeInterval(shellCompletionCheckBudget))
+        }
+        guard wantsGhost else { return (valid, nil) }
+        let ghost = shellCompletion(for: text, context: context, commandNames: snapshot.commandNames,
+                                    source: snapshot.completion,
+                                    deadline: Date().addingTimeInterval(shellCompletionGhostBudget))
         return (valid, ghost)
     }
 
