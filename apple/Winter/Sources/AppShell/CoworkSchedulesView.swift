@@ -15,7 +15,7 @@ import WinterProtocol
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Schedules").font(.headline)
+                Text("Schedules").font(Typography.paneTitle)
                 Spacer()
                 Button("Refresh schedules", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
             }
@@ -27,7 +27,7 @@ import WinterProtocol
             if let error = model.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             if let receipt = model.lastCancellation {
                 Text("Cancellation recorded for \(receipt.scheduleId). Check occurrence status for any uncertain effects.")
-                    .font(.caption).textSelection(.enabled)
+                    .font(Typography.caption()).textSelection(.enabled)
             }
             if model.schedules.isEmpty && !model.busy && !model.isUnsupported { Text("No schedules on this page.").foregroundStyle(.secondary) }
             ForEach(model.schedules, id: \.scheduleId) { value in
@@ -35,15 +35,15 @@ import WinterProtocol
                     switch value {
                     case let .schedule(record):
                         Text(record.definition.prompt).lineLimit(2)
-                        Text("\(record.state.rawValue) · revision \(record.revision)").font(.caption)
-                        Text(timing(record.definition)).font(.caption).foregroundStyle(.secondary)
-                        Text(nextDue(record)).font(.caption).foregroundStyle(.secondary)
-                        Text("Approvals: \(record.definition.policy.rawValue) · source: \(record.definition.sourceId)").font(.caption).textSelection(.enabled)
+                        Text("\(record.state.rawValue) · revision \(record.revision)").font(Typography.caption())
+                        Text(timing(record.definition)).font(Typography.caption()).foregroundStyle(.secondary)
+                        Text(nextDue(record)).font(Typography.caption()).foregroundStyle(.secondary)
+                        Text("Approvals: \(record.definition.policy.rawValue) · source: \(record.definition.sourceId)").font(Typography.caption()).textSelection(.enabled)
                     case let .quarantined(record):
                         Text("Schedule quarantined").foregroundStyle(.red)
-                        Text("invalid_schedule · revision \(record.revision)\(record.cancelled ? " · cancelled" : "")").font(.caption)
+                        Text("invalid_schedule · revision \(record.revision)\(record.cancelled ? " · cancelled" : "")").font(Typography.caption())
                     }
-                    Text(value.scheduleId).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(value.scheduleId).font(Typography.captionMono()).foregroundStyle(.secondary).textSelection(.enabled)
                     HStack {
                         Button("Details") { Task { await model.inspect(scheduleId: value.scheduleId) } }
                             .accessibilityLabel("Details for schedule \(value.scheduleId)")
@@ -77,27 +77,27 @@ import WinterProtocol
     }
     private func detail(_ value: CoworkScheduleStatus) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Occurrence status").font(.headline)
-            Text(value.schedule.scheduleId).font(.caption).textSelection(.enabled)
+            Text("Occurrence status").font(Typography.paneTitle)
+            Text(value.schedule.scheduleId).font(Typography.caption()).textSelection(.enabled)
             Text("Execution: \(value.execution.rawValue)").foregroundStyle(.secondary)
             if case let .schedule(record) = value.schedule {
                 Text(record.definition.prompt).textSelection(.enabled)
-                Text("Target: \(target(record.definition.target))").font(.caption).textSelection(.enabled)
-                Text("Timezone: \(record.definition.timezone) · overlap: \(record.definition.overlap.rawValue)").font(.caption)
-                if let branch = record.definition.branchPrecondition { Text("Required branch: \(branch)").font(.caption).textSelection(.enabled) }
-                Text("Saved ceiling — network: \(record.definition.savedCeiling.network)").font(.caption)
-                Text("Tools: \(record.definition.savedCeiling.toolClasses.joined(separator: ", "))").font(.caption).textSelection(.enabled)
-                Text("Host services: \(record.definition.savedCeiling.hostServices.joined(separator: ", "))").font(.caption).textSelection(.enabled)
-                Text("Connectors: \(record.definition.savedCeiling.connectors.joined(separator: ", "))").font(.caption).textSelection(.enabled)
+                Text("Target: \(target(record.definition.target))").font(Typography.caption()).textSelection(.enabled)
+                Text("Timezone: \(record.definition.timezone) · overlap: \(record.definition.overlap.rawValue)").font(Typography.caption())
+                if let branch = record.definition.branchPrecondition { Text("Required branch: \(branch)").font(Typography.caption()).textSelection(.enabled) }
+                Text("Saved ceiling — network: \(record.definition.savedCeiling.network)").font(Typography.caption())
+                Text("Tools: \(record.definition.savedCeiling.toolClasses.joined(separator: ", "))").font(Typography.caption()).textSelection(.enabled)
+                Text("Host services: \(record.definition.savedCeiling.hostServices.joined(separator: ", "))").font(Typography.caption()).textSelection(.enabled)
+                Text("Connectors: \(record.definition.savedCeiling.connectors.joined(separator: ", "))").font(Typography.caption()).textSelection(.enabled)
             } else { Text("The invalid definition is retained by the host and is not shown here.").foregroundStyle(.secondary) }
             if value.occurrences.isEmpty { Text("No recorded occurrences.").foregroundStyle(.secondary) }
             ForEach(value.occurrences, id: \.occurrenceId) { occurrence in
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(occurrence.state.rawValue) · missed: \(occurrence.missedCount)")
-                    Text("First due: \(date(occurrence.dueAt)); latest coalesced: \(date(occurrence.latestDueAt))").font(.caption)
-                    if let reason = occurrence.reason { Text(reason.rawValue).font(.caption).foregroundStyle(.secondary) }
-                    if occurrence.state == .uncertain { Text("Recovery required. A completed effect is not confirmed.").font(.caption).foregroundStyle(.red) }
-                    Text(occurrence.occurrenceId).font(.caption2).textSelection(.enabled)
+                    Text("First due: \(date(occurrence.dueAt)); latest coalesced: \(date(occurrence.latestDueAt))").font(Typography.caption())
+                    if let reason = occurrence.reason { Text(reason.rawValue).font(Typography.caption()).foregroundStyle(.secondary) }
+                    if occurrence.state == .uncertain { Text("Recovery required. A completed effect is not confirmed.").font(Typography.caption()).foregroundStyle(.red) }
+                    Text(occurrence.occurrenceId).font(Typography.captionMono()).textSelection(.enabled)
                 }
             }
         }.padding().frame(maxWidth: .infinity, alignment: .leading)
