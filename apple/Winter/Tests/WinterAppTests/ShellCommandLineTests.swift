@@ -333,21 +333,38 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertNil(loginShellParseProbe("\(loginShellPathStart)\(loginShellPathEnd)"), "an empty PATH is no PATH")
     }
 
-    func testARunHandsTheLineOverAsAnArgumentNeverInTheScript() {
+    func testARunIsAnInteractiveLoginShellThatGetsTheLineFromItsEnvironmentNeverAScript() {
         let line = #"echo "it's"; rm -rf "$HOME/x" `whoami`"#
-        let zsh = loginShellRunInvocation(shell: "/opt/homebrew/bin/zsh", line: line)
-        // The fd-closing trampoline first, then the user's own shell.
+        let zsh = loginShellSessionInvocation(shell: "/opt/homebrew/bin/zsh", line: line, shimDirectory: "/tmp/shim")
+        // The fd-closing trampoline first, then the user's own shell — interactive, login.
         XCTAssertEqual(zsh.executable, "/bin/zsh")
         XCTAssertEqual(Array(zsh.arguments.prefix(5)), ["-f", "-c", loginShellRunTrampoline, "winter-run", "/opt/homebrew/bin/zsh"])
         XCTAssertTrue(loginShellRunTrampoline.contains("<3->"), "every descriptor above 2 is closed")
-        let shell = Array(zsh.arguments.dropFirst(5))
-        XCTAssertEqual(Array(shell.prefix(2)), ["-l", "-c"])
-        XCTAssertEqual(shell.last, line, "the line is the last argument, verbatim")
-        XCTAssertFalse(shell[2].contains("whoami"), "and never spliced into the script")
-        XCTAssertTrue(shell[2].contains(".zshrc"), "the rc file is sourced, as the probe does")
-        XCTAssertTrue(shell[2].hasSuffix(#"eval "$__winter_line""#))
-        let fish = loginShellRunInvocation(shell: "/opt/homebrew/bin/fish", line: "ls")
-        XCTAssertEqual(Array(fish.arguments.dropFirst(4)), ["/opt/homebrew/bin/fish", "-l", "-c", "ls"])
+        XCTAssertEqual(Array(zsh.arguments.dropFirst(5)), ["-l", "-i"])
+        XCTAssertEqual(zsh.environment["ZDOTDIR"], "/tmp/shim", "the startup shim")
+        XCTAssertEqual(zsh.environment[loginShellLineVariable], line, "the line rides in the environment, verbatim")
+        XCTAssertEqual(Set(zsh.files.keys), [".zshenv", ".zprofile", ".zshrc", ".zlogin"])
+        for (name, contents) in zsh.files {
+            XCTAssertFalse(contents.contains("whoami"), "\(name): the line is never spliced into a script")
+            XCTAssertTrue(contents.contains("builtin source ${ZDOTDIR:-$HOME}/\(name)"), "\(name) sources the user's own")
+        }
+        XCTAssertFalse(zsh.arguments.contains { $0.contains("whoami") })
+        XCTAssertTrue(zsh.files[".zshenv"]!.contains("builtin unset \(loginShellLineVariable)"),
+                      "read and unset before the user's own files run")
+        let zlogin = zsh.files[".zlogin"]!
+        XCTAssertTrue(zlogin.contains("add-zle-hook-widget line-init __winter_run_line"), "typed in at the first prompt")
+        XCTAssertTrue(zlogin.contains("rm -rf -- $__winter_shim"), "the shim deletes itself")
+
+        let bash = loginShellSessionInvocation(shell: "/bin/bash", line: line, shimDirectory: "/tmp/shim")
+        XCTAssertEqual(Array(bash.arguments.dropFirst(5)), ["--rcfile", "/tmp/shim/bashrc", "-i"])
+        XCTAssertEqual(bash.environment[loginShellLineVariable], line)
+        XCTAssertFalse(bash.files["bashrc"]!.contains("whoami"))
+        XCTAssertTrue(bash.files["bashrc"]!.contains(".bash_profile"), "what a login shell reads")
+
+        let fish = loginShellSessionInvocation(shell: "/opt/homebrew/bin/fish", line: "ls", shimDirectory: "/tmp/shim")
+        XCTAssertEqual(Array(fish.arguments.dropFirst(4).prefix(4)), ["/opt/homebrew/bin/fish", "-l", "-i", "--init-command"])
+        XCTAssertEqual(fish.environment[loginShellLineVariable], "ls")
+        XCTAssertTrue(fish.files.isEmpty)
     }
 
     func testTheRunEnvironmentIsTheLoginShellsNotTheApps() {
@@ -550,7 +567,22 @@ final class DispatchPillCommandRunTests: XCTestCase {
 
         let orphan = pill.commandRuns.start(command: "ls", workingDirectory: "/tmp",
                                             environment: pill.commandMode.environment, sessionId: nil)
-        XCTAssertFalse(pill.commandRuns.canAddToTranscript(orphan), "no session at run time: nothing to add to")
+        XCTAssertEqual(pill.commandRuns.transcriptTarget(orphan), .currentConversation)
+        XCTAssertTrue(pill.commandRuns.canAddToTranscript(orphan), "no session at run time: the current conversation")
+        let viaComposer = await pill.commandRuns.addToTranscript(orphan)
+        XCTAssertTrue(viaComposer)
+        XCTAssertEqual(sent().count, 1, "through the pill's own send — which creates the conversation if need be")
+        XCTAssertTrue(sent().first?.hasPrefix("I ran this in my terminal in /tmp") == true)
+        XCTAssertEqual(delivered.count, 1, "never a session's own send")
+    }
+
+    func testTheTranscriptTargetRule() {
+        XCTAssertEqual(commandTranscriptTarget(recordedSessionId: "s1", recordedSessionExists: { _ in true }),
+                       .recordedSession("s1"))
+        XCTAssertEqual(commandTranscriptTarget(recordedSessionId: "s1", recordedSessionExists: { _ in false }),
+                       .unavailable, "only a recorded session that is gone disables the button")
+        XCTAssertEqual(commandTranscriptTarget(recordedSessionId: nil, recordedSessionExists: { _ in false }),
+                       .currentConversation)
     }
 
     func testAMessageStillSends() async {

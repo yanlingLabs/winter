@@ -329,6 +329,11 @@ final class DispatchPillController: ObservableObject {
         commandMode.workingDirectory = { [weak self] in
             self?.commandDirectory() ?? commandEnvironment.homeDirectory
         }
+        // A run that recorded no session adds to the transcript the way the composer sends: the pill's current
+        // conversation at click time, created if there is none.
+        commandRuns.onSendToCurrentConversation = { [weak self] text in
+            await self?.onSubmit?(text) ?? false
+        }
     }
 
     // MARK: - The SwiftUI tree (exists only while the pill is up)

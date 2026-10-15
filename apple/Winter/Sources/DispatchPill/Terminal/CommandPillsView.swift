@@ -5,7 +5,8 @@ import SwiftUI
 // ARRIVE differently: a session pill rises out of the main pill; a command pill types itself on, growing from
 // its leading edge while the `$ command` appears character by character behind a terminal cursor.
 
-/// PURE (`ShellCommandLineTests`): what a command pill draws for its run.
+/// PURE (`ShellCommandLineTests`): what a command pill draws for its run's LINE (`CommandRun.commandOutcome`);
+/// whether the shell is still open after it is `CommandRun.shellIsLive`.
 enum CommandPillStatus: Equatable {
     case running
     case succeeded
@@ -84,6 +85,7 @@ struct CommandPillsView: View {
                 CommandPill(run: run,
                             onOpen: { store.openWindow(run.id) },
                             onStop: { store.stop(run.id) },
+                            onEnd: { store.endShell(run.id) },
                             onDismiss: { store.dismiss(run.id) })
                     .frame(width: layout.pillWidth, height: DispatchPillMetrics.childRowHeight)
                     .transition(.commandPill)
@@ -94,19 +96,21 @@ struct CommandPillsView: View {
     }
 }
 
-/// One run: a terminal cursor while it works (then a check, or a quiet red mark), `$ command` in the
-/// terminal's mono, and a stop or × at the trailing end.
+/// One run: a terminal cursor while its line works (then a check, or a quiet red mark — with a small purple
+/// prompt beside it while the shell is still open), `$ command` in the terminal's mono, and at the trailing end a
+/// stop (the line), an end (the open shell) or × (all done).
 private struct CommandPill: View {
     @ObservedObject var run: CommandRun
     let onOpen: () -> Void
     let onStop: () -> Void
+    let onEnd: () -> Void
     let onDismiss: () -> Void
 
     /// How many characters of the command have typed on so far.
     @State private var typed = 0
     @State private var hovering = false
 
-    private var status: CommandPillStatus { CommandPillStatus(run.outcome) }
+    private var status: CommandPillStatus { CommandPillStatus(run.commandOutcome) }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -126,9 +130,11 @@ private struct CommandPill: View {
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
         .contentShape(Capsule())
         .animation(.easeInOut(duration: 0.3), value: status)
+        .animation(.easeInOut(duration: 0.3), value: run.shellIsLive)
         .onTapGesture(perform: onOpen)
         .onHover { hovering = $0 }
-        .help("$ \(run.command) — open its terminal")
+        .help(run.shellIsLive ? "$ \(run.command) — its shell is still open; click to type in it"
+                              : "$ \(run.command) — open its terminal")
         .task { await typeOn() }
     }
 
@@ -152,6 +158,20 @@ private struct CommandPill: View {
 
     @ViewBuilder
     private var statusMark: some View {
+        HStack(spacing: 3) {
+            lineMark
+            if run.shellIsLive {
+                // The shell is still open: a small prompt caret, steady.
+                Text("›")
+                    .font(Typography.labelMono(.bold))
+                    .foregroundStyle(Theme.commandPurple)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var lineMark: some View {
         switch status {
         case .running:
             // A terminal cursor, blinking — the run is working.
@@ -188,7 +208,17 @@ private struct CommandPill: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("Stop this command")
+            .help("Stop this command (Ctrl-C) — the shell stays open")
+        } else if run.shellIsLive {
+            Button(action: onEnd) {
+                Image(systemName: "power")
+                    .font(Typography.caption(.bold))
+                    .foregroundStyle(Color.white.opacity(hovering ? 0.85 : 0.55))
+                    .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("End this shell")
         } else {
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
