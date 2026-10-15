@@ -34,7 +34,7 @@ struct CoworkWorkspaceView: View {
                         } label: {
                             VStack(alignment: .leading) {
                                 Label(workspace.title, systemImage: workspace.ownership == .project ? "folder.badge.person.crop" : "square.stack")
-                                Text("\(workspace.state) · \(workspace.power)").font(.caption).foregroundStyle(.secondary)
+                                Text("\(workspace.state) · \(workspace.power)").font(Typography.caption()).foregroundStyle(.secondary)
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }.buttonStyle(.plain)
                         .accessibilityLabel("\(workspace.ownership == .project ? "Project" : "Workspace") \(workspace.title), \(workspace.state), \(workspace.power)")
@@ -53,22 +53,22 @@ struct CoworkWorkspaceView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Cowork workspaces").font(.title2.bold())
+                    Text("Cowork workspaces").font(Typography.heading(.bold))
                     Label("Conversations are not available yet", systemImage: "info.circle")
                     Text("You can inspect and manage recorded workspace sources here. Cowork execution is waiting for the backend to be ready.").foregroundStyle(.secondary)
                     if !model.capabilities.provisioning {
                         Text("Creating workspaces and adding sources is waiting for storage and folder sharing to be available.")
-                            .font(.callout).foregroundStyle(.secondary)
+                            .font(Typography.label()).foregroundStyle(.secondary)
                     }
                     if model.busy { ProgressView("Updating workspaces…") }
                     if let error = model.error { Text(error).foregroundStyle(.red).textSelection(.enabled).accessibilityLabel("Workspace error: \(error)") }
                     if let operation = model.operation {
                         Text("Recorded change: \(operation.status)\(operation.terminal ? "" : " — awaiting acknowledgment")")
-                            .font(.callout).textSelection(.enabled)
+                            .font(Typography.label()).textSelection(.enabled)
                     }
                     if let workspace = model.selected {
-                        Text(workspace.ownership == .project ? "Project" : "Standalone workspace").font(.caption).foregroundStyle(.secondary)
-                        Text(workspace.title).font(.title3.bold())
+                        Text(workspace.ownership == .project ? "Project" : "Standalone workspace").font(Typography.caption()).foregroundStyle(.secondary)
+                        Text(workspace.title).font(Typography.bodyLarge(.bold))
                         Text("State: \(workspace.state) · VM: \(workspace.power)")
                         HStack {
                             TextField("Workspace title", text: $rename)
@@ -83,7 +83,7 @@ struct CoworkWorkspaceView: View {
                             guidanceEditor(guidance)
                         }
                         HStack {
-                            Text("Sources").font(.headline)
+                            Text("Sources").font(Typography.paneTitle)
                             Spacer()
                             Button("Add folder…") { pickFolder(creating: false) }.disabled(!model.capabilities.provisioning || selecting)
                             Button("Add repository…") {}.disabled(true).help("GitHub source authorization is not available yet.").disabled(!model.capabilities.provisioning || selecting)
@@ -91,9 +91,9 @@ struct CoworkWorkspaceView: View {
                         ForEach(model.sources, id: \.sourceId) { source in
                             VStack(alignment: .leading, spacing: 5) {
                                 Label(source.label, systemImage: source.kind == .folder ? "folder" : "chevron.left.forwardslash.chevron.right")
-                                Text("\(source.state) · \(source.access) · \(source.trust)").font(.caption)
+                                Text("\(source.state) · \(source.access) · \(source.trust)").font(Typography.caption())
                                 if source.reason == "access_revoked" { Text("Access was revoked. Dependent work is blocked.").foregroundStyle(.orange) }
-                                if source.restartRequired { Text("A workspace restart is required to finish applying this change. Removed or revoked access is already blocked.").font(.caption) }
+                                if source.restartRequired { Text("A workspace restart is required to finish applying this change. Removed or revoked access is already blocked.").font(Typography.caption()) }
                                 HStack {
                                     Button("Remove") { sourceToRemove = source; revoke = false }
                                         .disabled(source.desired == "removed" || model.sources.filter { $0.desired == "present" }.count <= 1)
@@ -236,7 +236,7 @@ struct CoworkWorkspaceView: View {
 
     private var creation: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Create workspace").font(.title2)
+            Text("Create workspace").font(Typography.heading())
             TextField("Title", text: $title)
             Toggle("Reusable Project workspace", isOn: $project)
             Text("Choose at least one host-authorized source.").foregroundStyle(.secondary)
