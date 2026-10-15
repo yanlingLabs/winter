@@ -119,30 +119,43 @@ extension CUFloors {
         pathsMentioned(in: text).contains { isProtectedPanelPath($0, home: home, base: base) }
     }
 
-    /// Secret files and folders named EXACTLY (any case) — what a bare word outside a recognised file panel must match to
-    /// count (the sixth pass: "Update .gitignore", ".NET 8" or "wait..." in a commit sheet are no paths).
-    public static let secretExactNames: Set<String> = [
-        ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc", ".npmrc", ".pgpass",
-        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials", "login.keychain-db",
+    /// Secret folders and files named EXACTLY (any case) — what a bare word outside a recognised file panel must match to
+    /// count: dot-names, the `id_*` key names, and `*.keychain-db` (the seventh pass: "credentials" is an ordinary word —
+    /// it counts only as a path component under `.aws` in an absolute or `~` path).
+    public static let secretDotNames: Set<String> = [
+        ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc", ".npmrc", ".pgpass", ".git-credentials", ".azure",
     ]
+    public static let secretKeyNames: Set<String> = ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
 
-    /// Text in a sheet or dialog that is NO recognised file panel: only its path-like tokens (starting with / or ~, or
-    /// holding a /) are judged as paths — a `.pem`, `.p12` or `.key` among them too — and a bare token only when it is
-    /// exactly one of `secretExactNames`. Never the names-only rule on a bare word.
+    /// A name that is exactly a secret one. Pure.
+    public static func isSecretName(_ raw: String) -> Bool {
+        let n = raw.lowercased()
+        return secretDotNames.contains(n) || secretKeyNames.contains(n) || n.hasSuffix(".keychain-db")
+    }
+
+    /// Text in a sheet or dialog that is NO recognised file panel: tokens starting with / or ~ get the full path rules
+    /// (and a `.pem`, `.p12` or `.key` file); a relative token holding a / only its components' exact secret names; a bare
+    /// token only an exact secret name. Never the names-only rule on a word (".github/workflows/ci.yml", "src/.eslintrc",
+    /// "certs/server.key", "fix login credentials" are fine).
     public static func outsidePanelTextIsProtected(_ text: String, home: String = NSHomeDirectory(), base: String? = nil) -> Bool {
         let tokens = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).map(String.init)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         for tok in tokens + (trimmed.contains(" ") && (trimmed.hasPrefix("/") || trimmed.hasPrefix("~")) ? [trimmed] : []) {
             var t = tok
             if let u = URL(string: t), u.isFileURL { t = u.path }
-            if t.hasPrefix("/") || t.hasPrefix("~") || t.contains("/") {
+            let components = t.split(separator: "/").map(String.init)
+            if t.hasPrefix("/") || t.hasPrefix("~") {
                 if isProtectedPanelPath(t, home: home, base: base) { return true }
-                if t.split(separator: "/").contains(where: { secretExactNames.contains($0.lowercased()) }) { return true }
+                if components.contains(where: isSecretName) { return true }
                 let low = t.lowercased()
                 if low.hasSuffix(".pem") || low.hasSuffix(".p12") || low.hasSuffix(".key") { return true }
                 continue
             }
-            if secretExactNames.contains(t.lowercased()) { return true }
+            if t.contains("/") {
+                if components.contains(where: isSecretName) { return true }
+                continue
+            }
+            if isSecretName(t) { return true }
         }
         return false
     }
@@ -150,8 +163,16 @@ extension CUFloors {
     /// A bare item name (a selected row's, a folder pop-up's) that is exactly a secret name — judged outside recognised
     /// file panels too ("id_ed25519, 411 bytes" names "id_ed25519").
     public static func exactSecretName(_ raw: String) -> Bool {
-        let name = (raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: ", ").first ?? raw).lowercased()
-        return secretExactNames.contains(name)
+        isSecretName(raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: ", ").first ?? raw)
+    }
+
+    /// A path built from rows' names (outside a recognised panel): an exact secret name in it, or `.config/gh`, anything
+    /// under `Library/Keychains`. Pure.
+    public static func rowPathIsSecret(_ path: String) -> Bool {
+        let names = path.split(separator: "/").map { String($0).lowercased() }
+        if names.contains(where: isSecretName) { return true }
+        let pairs = zip(names, names.dropFirst())
+        return pairs.contains { $0 == ".config" && $1 == "gh" } || pairs.contains { $0 == "library" && $1 == "keychains" }
     }
 
     /// One thing a panel would choose — a file URL, a path, or an item's bare name — is protected.
@@ -550,7 +571,7 @@ extension CUCore {
         let judge: (String) -> Bool = { raw in
             if raw.hasPrefix(Self.rowPathMark) {
                 let path = String(raw.dropFirst(Self.rowPathMark.count))
-                return file ? CUFloors.isProtectedPanelPath(path, base: base) : path.split(separator: "/").contains { CUFloors.exactSecretName(String($0)) }
+                return file ? CUFloors.isProtectedPanelPath(path, base: base) : CUFloors.rowPathIsSecret(path)
             }
             return file ? (CUFloors.panelChoiceIsProtected(raw) || CUFloors.typedPanelPathIsProtected(raw, base: base))
                         : (CUFloors.outsidePanelTextIsProtected(raw, base: base) || CUFloors.exactSecretName(raw))

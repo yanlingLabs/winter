@@ -1231,6 +1231,16 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   ("Update .gitignore", "see .env.example", "wait...", ".NET 8" are typed); a field there is NEVER cleared (refused, left
   as it is). The choice outside a recognised panel also judges the selected item's name, its parent rows' names and the
   folder pop-up against that exact list (a click-only way into `.ssh`); a Find panel's ".gitignore" goes ahead.
+- The seventh pass: outside a recognised file panel a bare word counts only when it is exactly a secret dot-name (`.ssh`,
+  `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`, `.npmrc`, `.pgpass`, `.git-credentials`, `.azure`), an `id_*` key name
+  (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`) or a `*.keychain-db` — "credentials" is an ordinary word ("fix login
+  credentials", OK on a "Credentials" row), protected only as a component of an absolute or `~` path under `.aws`; the
+  full path rules apply only to tokens starting with / or ~, a relative token with a / only by its components' exact
+  secret names (".github/workflows/ci.yml", "src/.eslintrc", "https://site/.well-known/…", "certs/server.key" pass;
+  "foo/.ssh/id_ed25519" does not). The choice's ROW path outside a recognised panel (never text) also counts `.config/gh`
+  and anything under `Library/Keychains`. Residual: a panel that fails the scope test, reached by clicks alone, with no
+  `AXURL` and a secret that matches none of these names (a project's `.env`, a token file under another name) is not
+  refused — the scope test recognises every file panel measured so far.
 - Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
   routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
   record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise

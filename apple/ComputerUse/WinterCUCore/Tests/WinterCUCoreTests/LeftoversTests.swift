@@ -1272,24 +1272,64 @@ final class LeftoversTests: XCTestCase {
     }
 
     func testOutsidePanelText() {
-        for ok in ["Update .gitignore", "see .env.example", "wait...", ".NET 8", "server.key", "notes credentials.txt"] {
+        for ok in ["Update .gitignore", "see .env.example", "wait...", ".NET 8", "server.key", "notes credentials.txt",
+                   "fix login credentials", "Credentials", ".github/workflows/ci.yml", "src/.eslintrc",
+                   "https://site/.well-known/security.txt", "certs/server.key"] {
             XCTAssertFalse(CUFloors.outsidePanelTextIsProtected(ok), ok)
         }
-        for bad in ["~/.ssh/id_rsa", "copy /tmp/x.pem", ".aws", "Credentials", "src/certs/server.key", "file:///Users/u/.netrc"] {
+        for bad in ["~/.ssh/id_rsa", "copy /tmp/x.pem", ".aws", "foo/.ssh/id_ed25519", "file:///Users/u/.netrc",
+                    "/Users/u/.aws/credentials", "~/.aws/credentials", "login.keychain-db", "id_ecdsa", ".git-credentials", ".azure"] {
             XCTAssertTrue(CUFloors.outsidePanelTextIsProtected(bad), bad)
         }
+        XCTAssertTrue(CUFloors.rowPathIsSecret(".config/gh/hosts.yml"))
+        XCTAssertTrue(CUFloors.rowPathIsSecret("Library/Keychains/login"))
+        XCTAssertFalse(CUFloors.rowPathIsSecret("Projects/Credentials"))
+        XCTAssertFalse(CUFloors.rowPathIsSecret(".config/nvim/init.lua"))
+    }
+
+    func testOrdinaryWordsInADialogAreTypedAndAnOKOnCredentialsGoesAhead() async throws {
+        world()
+        let (_, field) = commitSheet()
+        let said = await refusal(.type(CUTypeAction(text: "fix login credentials in .github/workflows/ci.yml and certs/server.key", into: ref(field))))
+        XCTAssertNil(said)
+        XCTAssertEqual(ax.string(field, kAXValueAttribute), "fix login credentials in .github/workflows/ci.yml and certs/server.key")
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":AXValue") }, "untouched")
+        let still = await refusal(.type(CUTypeAction(text: " foo/.ssh/id_ed25519", into: ref(field))))
+        XCTAssertNotNil(still, "a secret component still counts")
+        // OK on a row titled "Credentials" in a chooser that is no recognised file panel.
+        world()
+        _ = unmarkedChooser(selected: "Credentials", folder: "Work")
+        let ok = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNil(ok)
+    }
+
+    func testAClickOnlyWayIntoKeychainsOrGhConfigIsRefused() async throws {
+        world()
+        _ = unmarkedChooser(selected: "login", folder: "Home", parent: "Keychains", grandparent: "Library")
+        let keychains = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNotNil(keychains, "Library/Keychains/login")
+        world()
+        _ = unmarkedChooser(selected: "gh", folder: "Home", parent: ".config")
+        let gh = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNotNil(gh, ".config/gh")
     }
 
     /// A real panel that fails the scope test, navigated by clicks into ".ssh" (no URLs): its selected item's and its
     /// folder pop-up's exact secret names refuse the choice; a Find panel's ".gitignore" goes ahead.
-    private func unmarkedChooser(selected: String, folder: String, parent: String? = nil) -> AXUIElement {
+    private func unmarkedChooser(selected: String, folder: String, parent: String? = nil, grandparent: String? = nil) -> AXUIElement {
         let sheet = fakeElement(98_420), list = fakeElement(98_421), row = fakeElement(98_422), popUp = fakeElement(98_423), parentRow = fakeElement(98_424)
         ax.put(window, [kAXChildrenAttribute: [web, sheet]])
         ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400), extra: [kAXParentAttribute: window, kAXChildrenAttribute: [popUp, list]])
         ax.add(popUp, role: kAXPopUpButtonRole, frame: CGRect(x: 300, y: 50, width: 120, height: 20), extra: [kAXParentAttribute: sheet, kAXValueAttribute: folder])
         var rowExtra: [String: Any] = [kAXParentAttribute: list]
         if let parent {
-            ax.add(parentRow, role: kAXRowRole, title: parent, frame: CGRect(x: 120, y: 80, width: 560, height: 20), extra: [kAXParentAttribute: list])
+            var parentExtra: [String: Any] = [kAXParentAttribute: list]
+            if let grandparent {
+                let g = fakeElement(98_425)
+                ax.add(g, role: kAXRowRole, title: grandparent, frame: CGRect(x: 120, y: 60, width: 560, height: 20), extra: [kAXParentAttribute: list])
+                parentExtra[kAXDisclosedByRowAttribute] = g
+            }
+            ax.add(parentRow, role: kAXRowRole, title: parent, frame: CGRect(x: 120, y: 80, width: 560, height: 20), extra: parentExtra)
             rowExtra[kAXDisclosedByRowAttribute] = parentRow
         }
         ax.add(row, role: kAXRowRole, title: selected, frame: CGRect(x: 120, y: 100, width: 560, height: 20), extra: rowExtra)
