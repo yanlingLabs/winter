@@ -77,12 +77,23 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
     func close() { window.close() }
 
-    private func focusTerminal() {
-        // The emulator joins the window on SwiftUI's first layout pass — one hop later.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.run.terminalView.window === self.window else { return }
-            self.window.makeFirstResponder(self.run.terminalView)
+    /// Keyboard to the emulator. It joins the window on SwiftUI's layout pass, which can take more than one hop, so
+    /// this retries briefly (every 50 ms, up to 1 s) instead of giving up when the first hop finds it not attached yet.
+    private func focusTerminal(attempt: Int = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0 : 0.05)) { [weak self] in
+            guard let self else { return }
+            let terminal = self.run.terminalView
+            if terminal.window === self.window {
+                if self.window.firstResponder !== terminal { self.window.makeFirstResponder(terminal) }
+            } else if attempt < 20 {
+                self.focusTerminal(attempt: attempt + 1)
+            }
         }
+    }
+
+    /// Back to the window (a click on it, Cmd-` …): the keyboard goes to the emulator again.
+    func windowDidBecomeKey(_ notification: Notification) {
+        focusTerminal()
     }
 
     func windowWillClose(_ notification: Notification) {

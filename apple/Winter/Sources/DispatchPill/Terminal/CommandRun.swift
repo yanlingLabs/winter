@@ -15,6 +15,14 @@ final class WinterTerminalView: LocalProcessTerminalView {
     var onData: ((ArraySlice<UInt8>) -> Void)?
     var onExit: ((Int32?) -> Void)?
 
+    // The keyboard: a click anywhere in the terminal makes it the window's first responder (SwiftUI's hosting view
+    // around it would otherwise keep it), and it takes the first click of a window that isn't key yet.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        if window?.firstResponder !== self { window?.makeFirstResponder(self) }
+        super.mouseDown(with: event)
+    }
+
     override func dataReceived(slice: ArraySlice<UInt8>) {
         onData?(slice)
         super.dataReceived(slice: slice)
