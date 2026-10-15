@@ -9,7 +9,7 @@ import WinterProtocol
 /// with `{}`, and records everything the client sent. The test injects commands with `feed`.
 final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Sendable {
     enum AttachAnswer {
-        case link(String, protocolVersion: Int = BrowserLinkProtocol.version)
+        case link(String, protocolVersion: Int = BrowserLinkProtocol.version, features: [String]? = nil)
         case methodNotFound
         case protocolMismatch
     }
@@ -19,6 +19,28 @@ final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Senda
     private let lock = NSLock()
     private var _sent: [String] = []
     private let attachAnswer: AttachAnswer
+    /// Feature `headless`: what a `browserLink.headless` request is answered with — the JSON after `"id":N,`
+    /// (`"result":{…}` or `"error":{…}`).
+    private var _headlessResponse = #""result":{}"#
+    var headlessResponse: String {
+        get { lock.withLock { _headlessResponse } }
+        set { lock.withLock { _headlessResponse = newValue } }
+    }
+    /// When set, `browserLink.headless` requests are held unanswered until `releaseHeadless()`.
+    private var _holdHeadless = false
+    private var heldHeadlessIds: [Int] = []
+    var holdHeadless: Bool {
+        get { lock.withLock { _holdHeadless } }
+        set { lock.withLock { _holdHeadless = newValue } }
+    }
+    func releaseHeadless() {
+        let (ids, response): ([Int], String) = lock.withLock {
+            _holdHeadless = false
+            defer { heldHeadlessIds = [] }
+            return (heldHeadlessIds, _headlessResponse)
+        }
+        for id in ids { feed(#"{"jsonrpc":"2.0","id":\#(id),\#(response)}"#) }
+    }
 
     var sent: [String] { lock.withLock { _sent } }
 
@@ -41,13 +63,22 @@ final class FakeLinkDaemon: WinterTransport, SentLineRecording, @unchecked Senda
             feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"ok":true}}"#)
         case BrowserLinkProtocol.Method.attach:
             switch attachAnswer {
-            case .link(let linkId, let version):
-                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"\#(linkId)","protocol":\#(version)}}"#)
+            case .link(let linkId, let version, let features):
+                let named = features.map { list in
+                    #","features":["# + list.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+                } ?? ""
+                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"\#(linkId)","protocol":\#(version)\#(named)}}"#)
             case .methodNotFound:
                 feed(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32601,"message":"method not found"}}"#)
             case .protocolMismatch:
                 feed(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32602,"message":"protocol","data":{"code":"protocol_mismatch","expected":99}}}"#)
             }
+        case BrowserLinkProtocol.Method.headless:
+            let held: Bool = lock.withLock {
+                if _holdHeadless { heldHeadlessIds.append(id); return true }
+                return false
+            }
+            if !held { feed(#"{"jsonrpc":"2.0","id":\#(id),\#(headlessResponse)}"#) }
         default:
             feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
         }
@@ -86,6 +117,26 @@ final class FakeLinkHandler: BrowserLinkHandler {
     func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier) {
         commands.append(command)
         if let answer = answer(command) { reply(answer) } else { held.append(reply) }
+    }
+}
+
+/// A recording handler that also takes feature `headless`'s commands.
+@MainActor
+final class FakeHeadlessLinkHandler: BrowserLinkHandler {
+    var attached: [String] = []
+    var commands: [BrowserLinkCommand] = []
+    var headless: [BrowserLinkHeadlessCommand] = []
+    var answer: (BrowserLinkHeadlessCommand) -> BrowserLinkReply = { _ in .empty }
+
+    func browserLinkAttached(linkId: String) { attached.append(linkId) }
+    func browserLinkLost() {}
+    func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier) {
+        commands.append(command)
+        reply(.empty)
+    }
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
+        headless.append(command)
+        reply(answer(command))
     }
 }
 
@@ -167,6 +218,29 @@ final class BrowserLinkClientTests: XCTestCase {
         // Never a session attach on this connection.
         XCTAssertFalse(daemon.methods.contains("hub.attach"))
         XCTAssertFalse(daemon.methods.contains { $0.hasPrefix("session.") })
+        // The app names its features; a daemon that names none leaves none in use.
+        XCTAssertEqual(attach?["features"] as? [String], BrowserLinkProtocol.features)
+        XCTAssertEqual(link.daemonFeatures, [])
+    }
+
+    /// Feature `watchOnly`: the features in use are the ones BOTH sides named.
+    func testTheFeaturesInUseAreTheOnesBothSidesNamed() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1", features: ["watchOnly", "teleport"]))
+        let handler = FakeLinkHandler()
+        let link = makeLink(Daemons([daemon]), handler: handler)
+        link.start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        XCTAssertEqual(link.daemonFeatures, ["watchOnly"])
+
+        // An app configured to name none sends no `features` at all (an older daemon's schema never sees the key).
+        let quiet = FakeLinkDaemon(attach: .link("L2", features: ["watchOnly"]))
+        let other = FakeLinkHandler()
+        let plain = makeLink(Daemons([quiet]), handler: other) { $0.features = [] }
+        plain.start()
+        await eventually("attached") { other.attached == ["L2"] }
+        let attach = quiet.requests("browserLink.attach").first?["params"] as? [String: Any]
+        XCTAssertNil(attach?["features"])
+        XCTAssertEqual(plain.daemonFeatures, [])
     }
 
     func testACommandReachesTheHandlerAndItsAnswerIsOneResult() async throws {
@@ -582,6 +656,14 @@ final class BrowserLinkCommandTests: XCTestCase {
                        .tabEnsure(sessionId: "s", tabId: "t", url: "https://x/"))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t"}}"#),
                        .tabEnsure(sessionId: "s", tabId: "t", url: nil))
+        // Feature `watchOnly`: a watch-only hold is read beside the op; anything else is a full hold.
+        let watch = try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t","watchOnly":true}}"#).get()
+        XCTAssertEqual(watch.op, .tabEnsure(sessionId: "s", tabId: "t", url: nil))
+        XCTAssertTrue(watch.watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t","watchOnly":false}}"#).get().watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t","watchOnly":"yes"}}"#).get().watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.ensure","params":{"sessionId":"s","tabId":"t"}}"#).get().watchOnly)
+        XCTAssertFalse(try parse(#"{"linkId":"L","cmdId":"c","op":"tab.release","params":{"tabId":"t","watchOnly":true}}"#).get().watchOnly)
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.release","params":{"tabId":"t"}}"#), .tabRelease(tabId: "t"))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tab.close","params":{"tabId":"t"}}"#), .tabClose(tabId: "t"))
         XCTAssertEqual(try op(#"{"linkId":"L","cmdId":"c","op":"tabs.live","params":{}}"#), .tabsLive)

@@ -757,11 +757,13 @@ export function App({
   useEffect(() => {
     const coalescer = makeDeltaCoalescer(dispatch, coalesceTimers);
     const unsubscribe = bridge.subscribe((e) => {
+      // ComputerV2 wake triggers: the pair reaches every harness (the session list's mark) — only this session's here.
+      if ((e.type === "wake_armed" || e.type === "wake_ended") && e.sessionId !== sessionId) return;
       coalescer.push(e);
       if (resumeTargetSeq !== undefined && e.seq >= resumeTargetSeq) setResuming(false);
     });
     return () => { unsubscribe(); coalescer.dispose(); };
-  }, [bridge, resumeTargetSeq, coalesceTimers]);
+  }, [bridge, resumeTargetSeq, coalesceTimers, sessionId]);
 
   // Ticking clock so elapsed/spinner chrome advances between real events (legacy 120ms tick twin).
   useEffect(() => {

@@ -25,16 +25,23 @@
 /// Winter down. Failure degrades to a placeholder plus a log line, never `exit()`. (`cefsimple`'s
 /// `return 1` shape is right for a sample whose only job is CEF, and wrong for a host app.)
 
+#import <IOSurface/IOSurfaceRef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /// `CefInitialize` with `external_message_pump = true`, plus the pump this file owns.
 ///
-/// **It `dlopen`s the framework itself**, from `Contents/Frameworks` via
-/// `CefScopedLibraryLoader::LoadInMain()` — the framework is NEVER linked directly, which
-/// `include/wrapper/cef_library_loader.h` documents as a requirement of the macOS sandbox
-/// implementation rather than a style choice. The loader used to be exported here as
+/// **It `dlopen`s the framework itself, BY PATH** — `frameworkDir` is the `Chromium Embedded
+/// Framework.framework` directory, which lives in the nested Winter Headless helper
+/// (`Contents/Helpers/Winter Headless.app/Contents/Frameworks`, the user's ruling: one Chromium), not
+/// where `CefScopedLibraryLoader::LoadInMain()` would look (`Contents/Frameworks`) — and it is handed
+/// to CEF as `framework_dir_path`, beside `subprocessPath` (the base "Winter Helper" next to it). The
+/// framework is NEVER linked directly, which `include/wrapper/cef_library_loader.h` documents as a
+/// requirement of the macOS sandbox implementation rather than a style choice. Every Chromium
+/// subprocess's sandbox reads only inside Winter.app's bundle, which holds the helper, so they may
+/// load it from there. The loader used to be exported here as
 /// `WinterCEFLoadLibrary`, with a caller obligation ("nothing else in this header may be called
 /// before this returns YES") that nobody had and nobody needed: every other entry point guards on
 /// initialisation, and this one loads the library on its own. It is `static` in the implementation
@@ -48,6 +55,7 @@ extern "C" {
 BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
+                        const char *frameworkDir,
                         const char *subprocessPath);
 
 /// YES once `CefInitialize` has succeeded. `CefShutdown` is terminal for a process — CEF cannot be
@@ -356,16 +364,24 @@ typedef NS_ENUM(int, WinterCEFCDPStatus) {
 typedef void (^WinterCEFCDPStatusCompletion)(WinterCEFCDPStatus status, NSString *payloadJSON);
 
 /// **Run one DevTools method for the browser link** — on the tab's own session, or, with
-/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe), which
-/// `ExecuteDevToolsMethod` cannot address: that case is sent raw with `SendDevToolsMessage`.
+/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe). Both are sent raw with
+/// `SendDevToolsMessage` (`paramsJSON` placed in the message as given, once checked to be one object that starts
+/// with `{` and nests at most 100 deep; a method or session id that is not UTF-8 is refused with its own sentence).
 ///
 /// Same registry and the same always-answers contract as `WinterCEFExecuteCDP` (the completion fires
 /// exactly once, error never silence), and the same producer posture: **this validates nothing** —
 /// the allowlist and the world rules are the link's (`CDPTabGate`), applied before this is reached.
 ///
-/// Every message id on a browser — this door's, both of its paths', and `WinterCEFExecuteCDP`'s — is
-/// drawn from ONE per-browser counter, so a raw message can never reuse an id CEF assigned (or the
-/// reverse) and settle the wrong call.
+/// **Registered BEFORE it is sent.** A method the browser process answers by itself
+/// (`Page.handleJavaScriptDialog`, for one) answers inside the send, and a registration made after it
+/// would miss that answer and leave the call waiting for its timeout. A child session's RESULT, which
+/// CEF's own parser drops, is settled by the raw observer, read by slicing (never a full parse: Foundation
+/// refuses JSON Chromium writes, such as a lone surrogate) — and one that can't be read is settled as an
+/// error, never left to time out. A call to a child session that detaches before answering fails then.
+///
+/// Every message id on a browser — this door's and `WinterCEFExecuteCDP`'s — is drawn from ONE
+/// per-browser counter, so a raw message can never reuse an id CEF assigned (or the reverse) and
+/// settle the wrong call.
 void WinterCEFSendCDP(NSView *parent,
                      const char *method,
                      const char *paramsJSON,
@@ -485,6 +501,23 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags);
 /// raw observer makes on every message before it parses one (results and the tab's own events go to
 /// the structured callbacks). `message` is the message's JSON text. No CEF anywhere.
 NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message);
+
+/// **Test seam.** The raw observer's decision for one message (`HandleRawDevToolsMessage`), against calls 1…20
+/// pending on a browser with no CEF (15 and 16 of them sent to child session `AB12CD`): `consumed=<0|1>`, then a
+/// `settled <id> ok=<0|1> <payload>` row for each call it settled and an `event <session> <method> <params>` row for each
+/// event it delivered, `;`-joined. Leaves no state.
+NSString *WinterCEFRawMessageTranscriptWithNoCEFAnywhere(NSString *message);
+
+/// **Test seam.** The door's own body (`SendCDPOver`, `WinterCEFSendCDP` with the send injected) driven through its
+/// cases with no CEF — an answer inside the send, a child's result Foundation can't parse, a child's error answered
+/// later, a child session detaching before it answers, and every refusal — one `status=<n> <payload>` row per answer,
+/// `\n`-joined. Leaves no state.
+NSString *WinterCEFSendCDPTranscriptWithNoCEFAnywhere(void);
+
+/// **Test seam.** The raw message `WinterCEFSendCDP` sends for these arguments, or `nil` when it refuses them. No
+/// CEF anywhere.
+NSString *WinterCEFRawDevToolsMessageWithNoCEFAnywhere(int messageId, const char *method, const char *paramsJSON,
+                                                      const char *cdpSessionId);
 
 /// **Test seam.** The printing switch's decision, run with no CEF over the four cases a build can present
 /// — the preference not registered, registered but not settable, set but refused, set — as
@@ -786,6 +819,182 @@ void WinterCEFShutdown(void);
 /// leak into every test that runs after it (`CEFRuntimeTests`), and what keeps
 /// `WinterCEFRuntime.isRetryable` honest.
 BOOL WinterCEFDidShutdown(void);
+
+// ---------------------------------------------------------------------------------------------------
+// ComputerV2 Phase 4 — **Winter Headless**: the windowless mode. Used ONLY by the Winter Headless helper
+// app (`Sources/HeadlessHelper`), a separate background-only process the daemon spawns over a pipe. Winter
+// itself never calls any of this, and nothing above changes behaviour because it exists.
+//
+// A headless tab is keyed exactly like a panel tab — by an `NSView` — but the view is a bare KEY the helper
+// allocates and never puts in a window: every entry point above resolves a tab through the bridge attached
+// to its key, never through a window handle, so `WinterCEFSendCDP`, the observers, the native-UI flags and
+// `WinterCEFCloseBrowser` work on a windowless browser unchanged. The browser itself has no NSWindow and no
+// NSView (`SetAsWindowless`), paints into a buffer nobody reads, and lives in its session's own in-memory
+// request context.
+// ---------------------------------------------------------------------------------------------------
+
+/// The view every headless browser reports while nobody views it — the agent's: 1280×800 at a device scale factor of 1.
+/// A presentation lays the page out in the panel's size instead while it lasts (`WinterCEFHeadlessSetPresentation`),
+/// within these bounds: at least MinWidth×MinHeight CSS pixels, at most MaxPixels device pixels a side.
+enum {
+  WinterCEFHeadlessViewWidth = 1280,
+  WinterCEFHeadlessViewHeight = 800,
+  WinterCEFHeadlessViewMinWidth = 320,
+  WinterCEFHeadlessViewMinHeight = 240,
+  WinterCEFHeadlessViewMaxPixels = 8192,
+};
+
+/// `CefInitialize` for the headless helper: the framework loaded BY PATH (`frameworkDir` is the
+/// `Chromium Embedded Framework.framework` directory), windowless rendering enabled, `mainBundlePath` the app
+/// bundle whose `Contents/Frameworks` holds `frameworkDir` and the "Winter Helper" bundles (the subprocesses
+/// derive the same outer bundle from their own location, and the two must agree), `subprocessPath` the base
+/// "Winter Helper" executable, `rootCachePath` a directory of the helper's own. The global request context is
+/// in-memory (no `cache_path`). The message loop is the external pump on the caller's `[NSApp run]` (the app
+/// must conform to `CefAppProtocol`). Returns NO with `WinterCEFLastError` on failure. Call once, on the main
+/// thread, before anything else here.
+BOOL WinterCEFInitializeHeadless(int argc,
+                                 char **argv,
+                                 const char *frameworkDir,
+                                 const char *mainBundlePath,
+                                 const char *subprocessPath,
+                                 const char *rootCachePath);
+
+/// YES once CEF's global context is up — the helper accepts no command before then.
+BOOL WinterCEFHeadlessReady(void);
+
+/// Create a windowless browser keyed by `key` (a bare `NSView` the caller keeps for the tab's life and never
+/// shows) in `sessionId`'s request context — made on first use with no `cache_path` (in memory: nothing the
+/// session's pages store reaches the disk) and printing off, before any of its browsers is created. Asynchronous
+/// like `WinterCEFCreateBrowser`: `WinterCEFBrowserIdentifierForParent(key)` turns non-zero once it exists.
+/// Every native-UI flag (`WinterCEFAutomationNativeUI`) should be set on `key` at once and never cleared:
+/// nobody can see or answer this browser's UI. Its pop-ups are refused (no pop-up observer is ever set).
+void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId);
+
+/// The headless browser's LOCAL-NETWORK rule (the helper's `HeadlessNetworkRule`): true when a request to `url` —
+/// as Chromium canonicalised it — must be refused. Installed by the helper before `WinterCEFInitializeHeadless`, and
+/// applied to every request a headless browser makes: a navigation and each of its redirects (`OnBeforeBrowse`), and
+/// every other load, a sub-resource, a fetch, a service worker's (`OnBeforeResourceLoad`, `OnResourceRedirect`) —
+/// cancelled before any socket opens. Called on CEF's UI and IO threads: it must be pure. Unset, every request is
+/// refused (fail closed).
+typedef bool (*WinterCEFHeadlessRequestRule)(const char *url);
+void WinterCEFHeadlessSetRequestRule(WinterCEFHeadlessRequestRule rule);
+
+/// What a headless page tried and the helper refused, reported on the main thread with the browser's identifier and
+/// a kind: "popup" (it tried to open a window) or "local-network" (a request the rule refused). Never the URL.
+void WinterCEFHeadlessSetNoticeObserver(void (^observer)(int browserId, const char *kind));
+
+/// Forget `sessionId`'s request context: its cookies are deleted and the context released. The caller closes
+/// the session's browsers first (`WinterCEFCloseBrowser`); a browser still open keeps its context alive until
+/// it closes. A creation still waiting for the context is dropped. Unknown sessions are a no-op.
+void WinterCEFHeadlessDisposeContext(const char *sessionId);
+
+/// Forget every session's request context — the helper's last step before `WinterCEFShutdown`, so no context is
+/// still referenced from here when CEF shuts down.
+void WinterCEFHeadlessDisposeAllContexts(void);
+
+/// How many sessions have a request context right now (for the helper's logs and tests).
+int WinterCEFHeadlessContextCount(void);
+
+// ---- Presentation (`Sources/HeadlessPresent`): a headless tab shown to Winter.app through the GPU ----------------
+//
+// Every headless browser is created with accelerated off-screen rendering (`shared_texture_enabled`): CEF composites
+// on the GPU and hands each frame over as a BORROWED IOSurface, valid only during the callback. Nobody looks at it
+// until a presentation does; a browser's rendering mode is fixed at creation, so this is what lets any live tab be
+// shown later without reloading it.
+
+/// Every view or popup frame of every headless browser, synchronously on the CEF UI (main) thread while the borrowed
+/// `surface` is valid: the observer must finish reading it (a GPU copy waited on) before it returns. `type` 0 is the
+/// view, 1 a popup widget (a `<select>` list). With it, the view the frame was painted at: its CSS size and device scale
+/// (a popup's: the view's now). `nil` stops it.
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface, int cssWidth,
+                                                        int cssHeight, double scale));
+
+/// A browser's popup widget: `kind` 0 hidden, 1 shown, 2 moved to (x, y, width, height) in CSS pixels. `nil` stops it.
+void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind, int x, int y, int width, int height));
+
+/// The page's cursor changed (`cef_cursor_type_t`). `nil` stops it.
+void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int cursorType));
+
+/// Lay `key`'s browser out in a view of `cssWidth`×`cssHeight` CSS pixels (≤ 0: the agent's fixed view), render it at
+/// `scale` device pixels per CSS pixel and at `frameRate` frames a second, and repaint it now. A presentation asks for
+/// the panel's size in points at the screen's backing scale while it lasts, and puts the agent's view back after (0, 0,
+/// 1.0, the helper's own rate): nothing of the page is reloaded — it sees a window resize and a device-pixel-ratio change,
+/// as a browser window does on a new display. Size and scale settle together: a change is applied at most once per
+/// 300 ms (the newest wish wins), since two quick ones stall CEF's windowless painting. Clamped to the view's bounds.
+void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, double scale, int frameRate);
+
+/// The view `key`'s browser is laid out in now (as applied: a wish still settling is not counted). NO for no browser.
+BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale);
+
+/// A headless browser's view changed, as applied (`WinterCEFHeadlessSetPresentation`, after its settle): its CSS size
+/// and device scale. Main thread. `nil` stops it.
+void WinterCEFHeadlessSetViewObserver(void (^observer)(int browserId, int cssWidth, int cssHeight, double scale));
+
+// ---- Presentation, version 2: IME, edit commands, page dialogs and file choosers for the person in control ----------
+
+/// Where the IME composition of each headless browser is drawn: its range in the field and one rect per composed
+/// character (view CSS pixels). `nil` stops it.
+void WinterCEFHeadlessSetImeObserver(void (^observer)(int browserId, int rangeStart, int rangeEnd, NSArray<NSValue *> *rects));
+
+/// The IME edits a composition in `key`'s browser: `kind` 1 set (`text` marked, selection inside it), 2 commit (`text`
+/// inserted), 3 finish (keep the marked text), 4 cancel. Ranges of -1 mean none. Main thread.
+void WinterCEFHeadlessIme(NSView *key, int kind, NSString *text, int selectionStart, int selectionEnd,
+                          int replacementStart, int replacementEnd);
+
+/// An edit command in `key`'s browser's focused frame: 1 copy, 2 cut, 3 paste (`text` put in at the caret — this
+/// process never reads the pasteboard), 4 select all, 5 undo, 6 redo, 7 delete. Main thread.
+void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text);
+
+/// A headless browser's page dialog was held (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload) — still answered by
+/// DevTools or `WinterCEFResolveHeldDialog` — and when it went away (answered, dismissed, the page moved on). `origin`
+/// is the raising page's `scheme://host[:port]` (empty when it has none). `nil` stops them.
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText,
+                                                         NSString *origin),
+                                         void (^closed)(int browserId));
+
+/// The dialog `key`'s browser holds now, if any.
+BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message,
+                                    NSString **defaultText, NSString **origin);
+
+/// A headless browser's main-frame address or title changed (both given, as now). `nil` stops it. Main thread.
+void WinterCEFHeadlessSetPageObserver(void (^observer)(int browserId, NSString *url, NSString *title));
+
+/// `key`'s browser's main-frame address and title as last reported (NO before the first report).
+BOOL WinterCEFHeadlessCurrentPage(NSView *key, NSString **url, NSString **title);
+
+/// A headless browser's page asks for files: the handler answers YES to answer it later
+/// (`WinterCEFHeadlessResolveFileChooser`), NO to leave it to the default (cancelled). `mode` 0 open, 1 open multiple,
+/// 2 folder, 3 save; `accept` the page's filters. `nil` stops it.
+void WinterCEFHeadlessSetFileChooserHandler(BOOL (^handler)(int browserId, int requestId, int mode, NSArray<NSString *> *accept));
+
+/// Answer a file chooser the handler took: the files, or nil / empty to cancel. Once; later answers are ignored.
+void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *paths);
+
+/// A window the page opens (with a user gesture) while a presentation's person holds the browser — a sign-in window, as
+/// a rule: the adopter answers the key of a new tab to create it under (CEF creates the browser itself, so the page
+/// keeps its `window.opener`), or nil to refuse it as every other window is. Main thread. `nil` stops it.
+void WinterCEFHeadlessSetPopupAdopter(NSView *(^adopter)(int openerBrowserId, NSString *url));
+
+/// A headless browser is closing (the page closed a window it opened, or Winter closed it). Main thread. `nil` stops it.
+void WinterCEFHeadlessSetClosedObserver(void (^observer)(int browserId));
+
+/// A presentation's person holds `key`'s browser (YES) or no longer does: while they do, it may take focus (an
+/// automated tab otherwise refuses it), which the page's IME events need.
+void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control);
+
+/// Cancel every file chooser still waiting for an answer in browser `browserId` (0: in every browser).
+void WinterCEFHeadlessCancelFileChoosers(int browserId);
+
+/// One HUMAN input event for `key`'s browser, through CEF's own host input (never DevTools): `kind` as
+/// `WinterPresentInput*` (Sources/HeadlessPresent/WinterPresentWire.h), coordinates in CSS pixels of the view,
+/// `modifiers` CEF's EVENTFLAG_* bits. Main thread.
+void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,
+                                unsigned modifiers, int windowsKeyCode, int nativeKeyCode, unsigned short character,
+                                unsigned short unmodifiedCharacter);
+
+/// What turning printing off on `sessionId`'s context came to ("disabled", "absent", "not-settable",
+/// "refused: …", "pending" before the context is initialised, "" for an unknown session).
+NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId);
 
 #ifdef __cplusplus
 }

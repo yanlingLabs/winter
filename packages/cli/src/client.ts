@@ -285,7 +285,9 @@ export class WinterClient {
     };
   }
 
-  async createSession(scope: string, opts?: { cwd?: string; approvalPolicy?: ApprovalPolicy }): Promise<{ sessionId: string; trusted: boolean }> {
+  /** `model` (optional) is the one-shot per-session model choice -- a provider-qualified tag the daemon
+   *  validates and stamps at creation (`session.create`'s own `model`); `winter -p --model` sends it. */
+  async createSession(scope: string, opts?: { cwd?: string; approvalPolicy?: ApprovalPolicy; model?: string }): Promise<{ sessionId: string; trusted: boolean }> {
     const r = this.validated(SessionCreateResult, await this.request(METHODS.sessionCreate, { scope, ...opts }), METHODS.sessionCreate);
     return { sessionId: r.sessionId, trusted: r.trusted };
   }

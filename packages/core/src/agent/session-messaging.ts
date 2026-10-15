@@ -430,9 +430,10 @@ export class SessionMessaging {
  * RUNNING a turn on a child that folds (agent SDK 0.0.44) is STEERED — the message is pushed now and the
  * child takes it into that turn after its current tool call (or runs it as its next turn, if the turn ends
  * first); anything else — an idle or finished target, or one whose steer would not reach the running turn
- * (`foldsQueuedInput` false) — goes through `send`, the session's own queue.
+ * (`foldsQueuedInput` false) — goes through `send`, the session's own queue. The same door rules carry a ComputerV2
+ * wake trigger's message (`computer-use/wakes/delivery.ts`, under its own `clientName`).
  */
-async function deliverInto(driver: MessagingDriverHandle, text: string): Promise<{ queued: boolean; steered: boolean; behind: number }> {
+export async function deliverInto(driver: MessagingDriverHandle, text: string, clientName: string = MESSAGING_CLIENT_NAME): Promise<{ queued: boolean; steered: boolean; behind: number }> {
   const live = driver.state === undefined || driver.state === "live";
   // FIFO with the session's own queue: messages the daemon already holds behind the running turn (the
   // user's queued sends) run first, so a message is never steered PAST them — it queues behind them.
@@ -440,10 +441,10 @@ async function deliverInto(driver: MessagingDriverHandle, text: string): Promise
   if (live && driver.turnRunning && behind === 0 && driver.foldsQueuedInput === true && driver.steer !== undefined) {
     // What actually happened, not what was asked: a steer that found no running turn (it ended meanwhile)
     // or was held for a provider switch is not "in the running turn".
-    const { injected } = await driver.steer(text, MESSAGING_CLIENT_NAME);
+    const { injected } = await driver.steer(text, clientName);
     return { queued: false, steered: injected, behind: 0 };
   }
-  const { queued } = await driver.send(text, MESSAGING_CLIENT_NAME);
+  const { queued } = await driver.send(text, clientName);
   return { queued, steered: false, behind: queued ? behind : 0 };
 }
 

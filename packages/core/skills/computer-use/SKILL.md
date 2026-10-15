@@ -369,3 +369,40 @@ const visits = await browsers.history({ browser: 'chrome', query: 'flight bookin
 if (visits.length > 0) await browsers.open(visits[0].url, { browser: 'chrome' });
 else print('nothing in the history matches');
 ```
+
+## 18. When the user has to act first: arm a wake trigger and end your turn
+
+The user must fill in and submit a form, approve something, or answer an email before you can go on, and it may take a while. Arm a trigger on the element they will use, then END YOUR TURN telling them what you are waiting for. When they do it, you get a `<computer-wake>` message and carry on. For a sign-in or a code they must enter now, use `waitForUser()` instead (section 16).
+
+```js
+const store = await browsers.tab({ url: 'https://dashboard.example.com/listing' });
+const submit = await refOf(store, 'Submit for review');
+const wake = await store.wakeWhen({ clicked: submit }, { note: 'publish the listing once it is submitted' });
+print('waiting for the user to submit - ' + wake.id);
+```
+
+Then reply: "Fill in the remaining fields and press Submit for review - I'll continue as soon as you do." In the wake, your refs are stale: bind the target again if your handle is gone and call `state()`. `wakes.list()` shows what is armed, and `wake.cancel()` stops one you no longer need. `NotAllowed` says when a condition is already true (nothing to wait for) or when the app was allowed for one call only.
+
+## 19. Put a file into an upload field
+
+On a web page, skip the Open panel: bind the page as a tab and hand the file to its file input with `upload`. No dialog opens. `upload` takes files from the working folder or `$TMPDIR` only, so first copy a file from anywhere else with your shell (`cp ~/Downloads/extension-1.2.0.zip "$TMPDIR/"`). Never copy a key, a credential, a dotfile or anything `upload` refuses as protected: that refusal is final.
+
+```js
+const store = await browsers.tab({ url: 'https://dashboard.example.com/listing' });
+await store.click(await refOf(store, 'Upload new package'));
+// The click's line names the file input: "upload([31], paths) puts the files in". 31 is that ref.
+await store.upload(31, ['/tmp/winter-session-s/extension-1.2.0.zip']);
+await store.state();
+```
+
+Only in a native app, or a browser you can't bind as a tab, use the Open panel. It opens as a SHEET on the app's window and is in that window's state (a `sheet` holding the folder's file list): stay bound to the window, and never call `useWindow()` with the panel's own window id. This way is UNMEASURED until the live check "chrome app: a native Open panel" passes. Type the file's whole path into the panel's file list: "/" opens Go to folder with the path, and Return selects the file.
+
+```js
+const chrome = await apps.open('Google Chrome');
+// [21] is the panel's file list in the state.
+await chrome.type('/Users/me/Downloads/extension-1.2.0.zip', { into: 21 });
+await chrome.key('return');
+await chrome.state();
+```
+
+Then click the panel's Open button (its ref is in the state) if the panel is still there. If `type` stops because the focus moved to the Go to folder field, type the rest into that field with `into`. If nothing changed, call `requestForeground(reason)` and try once more. If the user refuses, ask them to choose the file (`waitForUser`).

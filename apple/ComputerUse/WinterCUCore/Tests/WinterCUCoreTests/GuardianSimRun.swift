@@ -35,6 +35,13 @@ enum SimKind {
     case userOpens(pid_t, Double)
     /// The user launches an app themselves (Spotlight: the keys, then Return); it comes forward `after` ms later.
     case userLaunch(Double)
+    /// Hand-written plans only (round 19, the review's MEDIUM 2): the user double-clicks an item in T's (Finder's) window —
+    /// 0 an application, 1 a document (each launches), 2 a folder (launches nothing) — and an app of theirs starts
+    /// `startAfter` ms later (something of theirs launched it), coming forward `forwardAfter` ms after its start.
+    case finderLaunch(Int, startAfter: Double, forwardAfter: Double)
+    /// Hand-written plans only (round 19, the review's H1): an act of the agent's in flight on T raises T's window 78 on
+    /// desktop 300 — T is in front already, and macOS moves there: the agent's own doing.
+    case targetRaisedOnItsOtherDesktop
     case banner(pid_t)
     case prompt(Bool)
     // session s2 (inside the world's events)
@@ -85,8 +92,11 @@ enum SimKind {
         case .secureEntry(let on): return "Terminal's Secure Keyboard Entry \(on ? "on" : "off")"
         case .mainWindow(let a, let id): return "\(n(a))'s main window becomes \(id)"
         case .selfActivate(let a): return "\(n(a)) activates itself"
+        case .targetRaisedOnItsOtherDesktop: return "the agent's act in flight raises T's window on desktop 300"
         case .userOpens(let a, let ms): return "the user opens \(n(a)) (Spotlight, a launcher, a link — no switch input), it comes forward \(Int(ms)) ms later"
         case .userLaunch(let ms): return "the user launches an app (Spotlight), which comes forward \(Int(ms)) ms later"
+        case .finderLaunch(let item, let start, let fwd):
+            return "the user double-clicks \(["an application", "a document", "a folder"][item]) in Finder; an app of theirs starts \(Int(start)) ms later, forward \(Int(fwd)) ms after"
         case .banner(let a): return "a notification banner about \(n(a)) appears"
         case .prompt(let on): return "the helper's prompt panel \(on ? "shows" : "hides")"
         case .visit(let ms): return "session s2 visits T2's desktop for \(Int(ms)) ms"
@@ -113,11 +123,16 @@ struct SimPlan {
     var seed: UInt64
     var flagsSeen = true
     var steps: [SimStep]
+    /// T's bundle: Finder by default (its acts can open any app); another one makes T's acts open only T, the default
+    /// browser (S, Safari) and the mail app — X (Terminal) is then outside every act's reach (round 14's queue item 1).
+    var targetBundle = "com.apple.finder"
 
     /// Hand-authored: steps at fixed times (their random details from `seed`).
-    static func scripted(seed: UInt64, flagsSeen: Bool = true, _ steps: [(Double, SimKind)]) -> SimPlan {
+    static func scripted(seed: UInt64, flagsSeen: Bool = true, targetBundle: String = "com.apple.finder",
+                         _ steps: [(Double, SimKind)]) -> SimPlan {
         var r = SimRNG(seed)
-        return SimPlan(seed: seed, flagsSeen: flagsSeen, steps: steps.map { SimStep(at: $0.0, kind: $0.1, seed: r.next()) })
+        return SimPlan(seed: seed, flagsSeen: flagsSeen, steps: steps.map { SimStep(at: $0.0, kind: $0.1, seed: r.next()) },
+                       targetBundle: targetBundle)
     }
 
     static func generate(seed: UInt64, count: Int) -> SimPlan {
@@ -202,6 +217,25 @@ final class SimRun {
     var userLaunchSeq: pid_t = 0
     var coldSeq: pid_t = 0
     var openVisit: CUOpenVisit?
+    /// The user's click into T during an act (round 18): armed per act from its own generator, so the plans' draws stay.
+    var midActArmed = false
+    lazy var midActRng = SimRNG(plan.seed ^ 0x1D_AC75)
+    /// How often an act is armed for it (WINTER_CU_SIM_MID_ACT; 0 — off — by default: the ratchet runs every surveyed range
+    /// at 0.2 too, a standing run since round 19, while the hand-written plans keep their own steps).
+    static let midActChance = Double(ProcessInfo.processInfo.environment["WINTER_CU_SIM_MID_ACT"] ?? "") ?? 0
+
+    /// The user clicks into T's window a few ms after the act's first event to T (once per armed act).
+    func userClickMidAct() {
+        let w = world
+        guard midActArmed, w.lock.withLock({ w.actOnT && !w.actWorkSeen }) else { return }
+        midActArmed = false
+        let after = midActRng.double(1, 15)
+        var r = SimRNG(midActRng.next())
+        w.schedule(after: after, "the user clicks into T mid-act") { [unowned self] in
+            w.log("the user clicks into T while the agent's act on it runs")
+            self.click(at: CGPoint(x: 700, y: 210), r: &r)
+        }
+    }
 
     var trace: [String] { world.trace }
     var violation: String? { world.violation }
@@ -237,7 +271,10 @@ final class SimRun {
         ax.makeSettable(tWindow, kAXMainAttribute)
         ax.add(field, role: kAXTextFieldRole, frame: CGRect(x: 520, y: 60, width: 200, height: 24), extra: [kAXWindowAttribute: tWindow])
         ax.put(ax.application(SimPid.target), [kAXWindowsAttribute: [tWindow]])
-        ax.focus(pid: SimPid.target, on: field)
+        // (Round 19, M2 — round 17's H1 exercised: T's field starts UNFOCUSED and settable, so an act that names it places
+        // the focus first — a press or click, else the write — and waits for it in simulated time; the focus lands a few
+        // ms after the write or the click, as an app's does.)
+        ax.makeSettable(field, kAXFocusedAttribute)
         _ = win(78, SimPid.target, 97_008)
         let vWindow = win(61, SimPid.visited, 97_010)
         ax.put(ax.application(SimPid.visited), [kAXWindowsAttribute: [vWindow], kAXFocusedWindowAttribute: vWindow])
@@ -263,9 +300,34 @@ final class SimRun {
             }
             for (pid, els) in apps { ax.put(ax.application(pid), [kAXWindowsAttribute: els]) }
         }
+        // I6 in flight (round 17, the review of round 16's H1): an act on T that began before the user worked in it must
+        // stop reaching T the moment they do — the world's own moment, whatever the engine knew.
+        let tTokens: Set<String> = ["\(SimPid.target)", "97002", "97030", "97031"]
+        let isT = { (token: Substring) -> Bool in
+            if tTokens.contains(String(token)) { return true }
+            guard let id = byToken[String(token)] else { return false }
+            return w.lock.withLock { w.wins[id]?.pid } == SimPid.target
+        }
+        // (Round 18, round 17's H1 exercised: the user clicks into T while an act on it runs — scheduled from the act's own
+        // first event to T, a few ms on, so it lands during the act's next wait.)
+        let midAct = { w.onMidAct?() }
+        // (Round 19, M2: the field's focus lands 5–60 ms after the write or the click that places it — its own generator.)
+        var focusRng = SimRNG(plan.seed ^ 0xF0C5_1A2D)
+        let field = self.field
+        let focusLands = {
+            let ms = focusRng.double(5, 60)
+            w.schedule(after: ms, "T's field takes the focus") { ax.focus(pid: SimPid.target, on: field); w.log("T's field has the focus") }
+        }
+        let inFlightCheck = { (what: String) in
+            // (Sticky: once they started working in T during the act, it holds after they leave T too — the review of
+            // round 17, M1.)
+            guard w.lock.withLock({ w.actOnT }), w.userWorks(in: SimPid.target) || w.lock.withLock({ w.actWorkSeen }) else { return }
+            w.lock.withLock { w.fail("I6 (in flight): the agent's \(what) reached T after the user started working in it") }
+        }
         ax.onPerform = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            if isT(parts[0]), parts[1] != "AXRaise" { inFlightCheck("accessibility action \(parts[1])"); midAct() }  // (a raise: a restore's)
             // A raise (a restore's or an act's: no cause either way — the engine counts the act itself); an action on an
             // agent target's element: an event of the agent's (the latest its last cause can be).
             if parts[1] == "AXRaise", let id = byToken[String(parts[0])] { w.raised(id) }
@@ -276,6 +338,10 @@ final class SimRun {
         ax.onSet = { what in
             let parts = what.split(separator: ":")
             guard parts.count == 2 else { return }
+            // (Not AXFrontmost: an activation of T is a restore of the user's place — the guardian's, judged by I1–I5 — never
+            // the act's input.)
+            if isT(parts[0]), parts[1] != "AXFrontmost" { inFlightCheck("accessibility write \(parts[1])"); midAct() }
+            if parts[0] == "97002", parts[1] == kAXFocusedAttribute { focusLands() }
             if parts[1] == "AXFrontmost", let pid = pid_t(parts[0]) {
                 w.engineActivates(pid, how: "AXFrontmost", refusable: false)
             } else if parts[1] == "AXMain", let id = byToken[String(parts[0])] {
@@ -288,9 +354,26 @@ final class SimRun {
         core = CUCore(events: nil, clock: clock, skyLight: focusSkyLight(), poster: poster, ax: ax, sys: world,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         world.core = core
-        target = CUTarget(id: "tsim", sessionId: "s", pid: SimPid.target, bundleId: "com.apple.finder", appName: "Finder",
+        target = CUTarget(id: "tsim", sessionId: "s", pid: SimPid.target, bundleId: plan.targetBundle, appName: "Finder",
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Docs")
         core.registerForTesting(target, windowElement: tWindow)
+        if plan.targetBundle != "com.apple.finder" {
+            // T is an ordinary app (round 14's queue item 1): its acts open T, the default browser (S) and the mail app
+            // only; X is Terminal — a third party's app, outside every act's reach.
+            world.bundles[SimPid.safari] = "com.apple.Safari"
+            // (Round 19 — sim fidelity: T is not Finder, so its process is not Finder's either; Finder runs on its own,
+            // with no window, and a click on the empty desktop brings IT forward — PROTOCOL §4.12: "A click on the empty
+            // desktop: Finder's". The world had brought T forward and named T's process Finder.)
+            world.bundles[SimPid.target] = plan.targetBundle
+            world.finderPid = SimPid.finder
+            world.running.insert(SimPid.finder)
+            world.bundles[SimPid.finder] = "com.apple.finder"
+            world.zOrder.append(SimPid.finder)
+            world.bundles[SimPid.third] = "com.apple.Terminal"
+            world.targetScope = [plan.targetBundle, "com.apple.Safari", "com.apple.mail"]
+            core.isWebBrowserOverride = { _ in false }
+            core.defaultHandlerOverride = { ["http": "com.apple.Safari", "https": "com.apple.Safari", "mailto": "com.apple.mail"][$0] }
+        }
         target.refs.beginGeneration()
         visited = CUTarget(id: "t2sim", sessionId: "s2", pid: SimPid.visited, bundleId: "sim.visited", appName: "Visited",
                            isChromium: false, mirror: false, windowID: 61, windowTitle: "Far", privatePath: true)
@@ -299,6 +382,7 @@ final class SimRun {
                               isChromium: false, mirror: false, windowID: 66, windowTitle: "Near", privatePath: true)
         core.registerForTesting(heldTarget, windowElement: hWindow)
         core.keyTapInstaller = installer
+        world.onMidAct = { [unowned self] in self.userClickMidAct() }
         core.switchInputObservableOverride = true
         core.secureInputOverride = false
         core.keyFocusPidOverride = { w.lock.withLock { w.keyFocus } }
@@ -325,6 +409,11 @@ final class SimRun {
         core.userViewSettleMs = 20
         core.restoreDeadlineMs = 2_000
         core.restoreRetryMs = 120
+        // (Round 19, M2: the focus and press-watch waits at their live values, in simulated time.)
+        core.focusWaitNativeMs = 150
+        core.focusWaitWebMs = 400
+        core.pressSettleMs = 500
+        core.webPressWatchMs = 800
         core.appleScriptOverride = { _, _ in
             var left = w.lock.withLock { w.scriptMs }
             while left > 0 { let d = min(left, 50); w.advance(by: d); left -= d }
@@ -342,7 +431,19 @@ final class SimRun {
         enforcer.onForce = { w.agentCause(SimPid.target); w.advance(by: 2) }
         enforcer.onDeactivate = { w.agentCause(SimPid.target); w.advance(by: 2) }
         core.focusEnforcerFactory = { _ in enforcer }
+        // Every input event that STARTS or CONTINUES something, to T or a process of T's (its content process): a key down,
+        // any button down, a drag's move, a scroll, a pointer move (round 18 — round 17's H1: only keys and left clicks were
+        // watched).
+        let watched: Set<CGEventType> = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged,
+                                         .rightMouseDragged, .otherMouseDragged, .scrollWheel, .mouseMoved]
         poster.onPost = { e in
+            if e.type == .leftMouseDown, e.pid == SimPid.target, CGRect(x: 520, y: 60, width: 200, height: 24).contains(e.location) {
+                focusLands()
+            }
+            if watched.contains(e.type), e.pid == SimPid.target || w.isContentProcess(e.pid, of: SimPid.target) {
+                inFlightCheck(e.type == .keyDown ? "key" : e.type == .leftMouseDown ? "click" : "event \(e.type.rawValue)")
+                midAct()
+            }
             guard e.type == .keyDown || e.type == .leftMouseDown else { return }
             w.lock.withLock {
                 w.lastPostAt = w.now
@@ -454,7 +555,22 @@ final class SimRun {
             guard let win = w.lock.withLock({ w.wins[id].flatMap { w.onScreen($0) ? $0 : nil } }) else { return }
             click(at: CGPoint(x: win.frame.midX, y: win.frame.midY + 20), drag: true, r: &r)
         case .clickDesktop: click(at: CGPoint(x: 300, y: 860), r: &r)
-        case .clickStatusItem: click(at: CGPoint(x: 1310, y: 10), r: &r)
+        case .clickStatusItem:
+            // (Round 18b, R18-a: now and then a click on the Dock's TRASH instead — a click in the Dock that launches
+            // nothing: an app switch of no known app, never an interactive launcher. Its own generator.)
+            var tr = SimRNG(step.seed ^ 0x7_2A5)
+            if tr.chance(0.4) {
+                w.hardware(observable: true)
+                w.launchCapable()
+                w.log("the user clicks the Trash in the Dock")
+                core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+                w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil))
+                w.lock.withLock { w.dockLaunches = false }
+                _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
+                w.lock.withLock { w.dockLaunches = nil }
+            } else {
+                click(at: CGPoint(x: 1310, y: 10), r: &r)
+            }
         case .clickBanner:
             guard w.lock.withLock({ w.wins[701]?.shown == true }) else { return }
             click(at: CGPoint(x: 1450, y: 60), r: &r)
@@ -467,15 +583,25 @@ final class SimRun {
             click(at: CGPoint(x: 780, y: 480), r: &r)
         case .dock(let a):
             w.hardware(observable: true)
+            w.launchCapable()  // a click (R17-d (i))
             w.log("the user clicks \(SimPid.name(a)) in the Dock")
             core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
             // A click on that app's Dock tile: input for THAT app, claimed (the contract).
             let i = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, target: a, claim: true, dest: a))
+            // R17-b (the controller's ruling): a click on the FRONT app's Dock tile makes that app their place AT THE CLICK,
+            // strictly — a replacement, never a union (as a click into its window does).
+            let strict = w.lock.withLock { () -> Bool in
+                guard a == w.front, !w.visiting else { return false }
+                let cur = SPlace(app: w.front, space: w.space)
+                w.cands = [SimCand(place: cur, expected: cur, held: nil)]
+                w.log("  (a click on the front app's Dock tile: \(cur) is their place now)")
+                return true
+            }
             w.lock.withLock { w.dockTileApp = a }
             _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
             w.lock.withLock { w.dockTileApp = nil }
             w.schedule(after: r.double(20, 200), "the Dock activates \(SimPid.name(a))") { [unowned self] in
-                self.landSwitch(i, a, why: "the user clicked \(SimPid.name(a)) in the Dock")
+                self.landSwitch(i, a, why: "the user clicked \(SimPid.name(a)) in the Dock", strictAtClick: strict)
             }
         case .commandTab(let a, let tabSeen, let holdMs, let landMs):
             w.press(.maskCommand)
@@ -487,7 +613,7 @@ final class SimRun {
                 w.schedule(after: 30, "Tab (⌘ held)") {
                     let stillVisible = w.lock.withLock { !w.secure }
                     w.key(.keyDown, flags: .maskCommand, keycode: 48); w.key(.keyUp, flags: .maskCommand, keycode: 48)
-                    if stillVisible { tabSwitch = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: a, keyboard: true, pending: true)) }
+                    if stillVisible { tabSwitch = w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: a, keyboard: true, pending: true, tabSeen: true)) }
                 }
             }
             let hold = holdMs ?? r.double(60, 350)
@@ -497,7 +623,16 @@ final class SimRun {
                 w.release(.maskCommand)
                 let seen: Bool? = secureNow ? w.flagsSeenUnderSecure : nil
                 // The switcher switches at the release: a Tab seen counts from there when the release is seen (the contract).
-                if let t = tabSwitch { w.lock.withLock { if seen != false { w.switches[t].at = w.now }; w.switches[t].pending = false } }
+                if let t = tabSwitch {
+                    w.lock.withLock {
+                        if seen != false { w.switches[t].at = w.now }
+                        w.switches[t].pending = false
+                        // (Released, the seen ⌘-Tab is switch input from now on — R17-d's targeted switch: an app that came
+                        // forward a moment before and is heard of after it may be taken as its landing, §4.12's "what can't
+                        // be attributed".)
+                        w.lateFact(.switchInput)
+                    }
+                }
                 let at = tabSeen && !secure ? tabAt : w.now
                 // A release with no Tab seen explains only a change heard within 0.7 s of it (the contract).
                 let i = tabSwitch ?? w.addSwitch(SimSwitch(at: at, app: true, desktop: false, dest: a, secureFlags: seen,
@@ -508,12 +643,19 @@ final class SimRun {
             }
         case .commandChord:
             w.press(.maskCommand)
-            w.schedule(after: 50, "⌘S") { w.userKey(flags: .maskCommand) }
+            let pressedSecure = w.lock.withLock { w.secure }
+            var keyUnseen = false
+            w.schedule(after: 50, "⌘S") { keyUnseen = w.lock.withLock { w.secure }; w.userKey(flags: .maskCommand) }
             w.schedule(after: 120, "⌘ released") {
                 let secure = w.lock.withLock { w.secure }
                 w.release(.maskCommand)
-                // Under Secure Event Input the tap saw the modifier but not the S: it looks like a ⌘-Tab's release.
-                if secure, w.flagsSeenUnderSecure {
+                // Under Secure Event Input the tap saw the modifier but not the S: it looks like a ⌘-Tab's release. (Round
+                // 18b, ordinary seed 52 — §4.12's switch input: "A ⌘ release with no key seen …: an app switch, explaining
+                // only a change heard within 0.7 s". What counts is whether the S was SEEN — Secure Event Input when it was
+                // typed — and whether the hold and its release were: the user's click into T between them had ended
+                // Secure Event Input by the release, and the oracle read the release's moment alone.)
+                let unseenChord = keyUnseen && (pressedSecure ? w.flagsSeenUnderSecure : true) && (secure ? w.flagsSeenUnderSecure : true)
+                if unseenChord {
                     w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil, secureFlags: true, lifeMs: 700, keyboard: true))
                 }
             }
@@ -554,6 +696,7 @@ final class SimRun {
             w.lock.withLock {
                 w.secureEntry = on
                 core.secureInputOverride = w.secure
+                w.noteSecureChange()
             }
             w.log("Terminal's Secure Keyboard Entry \(on ? "on" : "off")")
         case .userLaunch(let after):
@@ -561,9 +704,51 @@ final class SimRun {
             w.press(.maskCommand)
             w.key(.keyDown, flags: .maskCommand, keycode: 49)
             w.release(.maskCommand)
-            for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown); w.key(.keyUp) } }
-            w.schedule(after: 260, "Return") { [unowned self] in
-                w.key(.keyDown, keycode: 36)
+            // (The keys typed into Spotlight's panel go to ITS process — R17-d (ii): the interactive launcher is the world's own
+            // fact, recorded where it launches.)
+            for k in 0..<3 { w.schedule(after: 60 + Double(k) * 50, "a Spotlight key") { w.key(.keyDown, to: SimPid.spotlight); w.key(.keyUp, to: SimPid.spotlight) } }
+            // (Round 18b: from the Dock now and then — a click on the tile of an app not running, R18-a — instead of
+            // Spotlight's Return; and the process starts a moment AFTER the input that launched it, never at it (R18 L1).
+            // Its own generator, so the plans' draws stay.)
+            var lr = SimRNG(step.seed ^ 0x1A_0C4E)
+            let fromDock = lr.chance(0.35)
+            let startDelay = lr.double(20, 120)
+            // (Round 19, the Finder legs of R18-a: with Finder as T, now and then from a Finder window — a double-click on
+            // an application or a document, which launches, or on a folder, which launches nothing and must not count; the
+            // app still starts — something else of theirs launched it, a launch no launcher of theirs explains. Its own
+            // generator, so the plans' draws stay.)
+            var fr = SimRNG(step.seed ^ 0xF1_DE12)
+            let finderItem: Int? = !fromDock && plan.targetBundle == "com.apple.finder" && fr.chance(0.3) ? fr.int(3) : nil
+            var fclick = SimRNG(fr.next())
+            w.schedule(after: 260, fromDock ? "a click on a Dock tile of an app not running" : "Return") { [unowned self] in
+                let finderPoint = CGPoint(x: 700, y: 210)
+                if let item = finderItem, w.lock.withLock({ w.clickTarget(at: finderPoint)?.id }) == 77 {
+                    let launches = item < 2
+                    w.log("the user double-clicks \(["an application", "a document", "a folder"][item]) in Finder's window")
+                    w.lock.withLock { w.finderLaunches = launches }
+                    self.click(at: finderPoint, clickCount: 2, r: &fclick)
+                    w.lock.withLock { w.finderLaunches = nil }
+                    // (Only a launching item is an interactive launcher — R18-a; a folder is none.)
+                    if launches { w.lock.withLock { w.launcherInputs.append(w.now) } }
+                } else if fromDock {
+                    w.hardware(observable: true)
+                    w.launchCapable()
+                    w.log("the user clicks the Dock tile of an app that is not running")
+                    core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+                    // (§4.12's switch input: "A click elsewhere in the Dock … an app switch of no known app" — its tile names
+                    // no running app.)
+                    w.addSwitch(SimSwitch(at: w.now, app: true, desktop: false, dest: nil))
+                    w.lock.withLock { w.dockLaunches = true }
+                    _ = core.onPhysicalClick(at: CGPoint(x: 800, y: 975), userData: 0, now: clock.nowSeconds())
+                    w.lock.withLock { w.dockLaunches = nil }
+                    w.lock.withLock { w.launcherInputs.append(w.now) }
+                } else {
+                    w.key(.keyDown, keycode: 36, to: SimPid.spotlight)
+                    // (Only a Return the tap SAW — under Secure Event Input it sees no key, and nothing can tell the launch
+                    // was theirs: every right answer is kept, the contract's frozen-reference rule.)
+                    w.lock.withLock { if !w.secure { w.launcherInputs.append(w.now) } }
+                }
+                w.schedule(after: startDelay, "the launched app's process starts") { [unowned self] in
                 let pid = w.lock.withLock { () -> pid_t in
                     self.userLaunchSeq += 1
                     let pid = 950 + self.userLaunchSeq
@@ -575,11 +760,52 @@ final class SimRun {
                     w.mainWin[pid] = wid
                     w.zOrder.append(pid)
                     w.userLaunches[pid] = w.now
+                    w.noteLaunchStart(pid)
                     return pid
                 }
                 w.log("the user's app \(SimPid.name(pid)) starts")
                 w.schedule(after: 30, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) }
                 w.schedule(after: after, "\(SimPid.name(pid)) comes forward (the user's launch)") {
+                    w.lock.withLock {
+                        let n = w.landingPlace(pid)
+                        guard n.app != w.front || n.space != w.space else { return }
+                        w.change(to: n, cause: w.untouchedCause(pid, indirect: false, why: "the user's own launch", newPlace: n),
+                                 why: "\(SimPid.name(pid)) comes forward (the user launched it)")
+                    }
+                }
+                }
+            }
+        case .finderLaunch(let item, let startAfter, let forwardAfter):
+            var fclick = SimRNG(step.seed)
+            let finderPoint = CGPoint(x: 700, y: 210)
+            guard w.lock.withLock({ w.clickTarget(at: finderPoint)?.id }) == 77 else {
+                w.log("the user would double-click in Finder's window, but it is not under the pointer"); break
+            }
+            let launches = item < 2
+            w.log("the user double-clicks \(["an application", "a document", "a folder"][item]) in Finder's window")
+            w.lock.withLock { w.finderLaunches = launches }
+            click(at: finderPoint, clickCount: 2, r: &fclick)
+            w.lock.withLock { w.finderLaunches = nil }
+            // (Only a launching item is an interactive launcher — R18-a; a folder is none.)
+            if launches { w.lock.withLock { w.launcherInputs.append(w.now) } }
+            w.schedule(after: startAfter, "an app of the user's starts") { [unowned self] in
+                let pid = w.lock.withLock { () -> pid_t in
+                    self.userLaunchSeq += 1
+                    let pid = 950 + self.userLaunchSeq
+                    let wid = UInt32(9_500 + Int(pid))
+                    w.running.insert(pid)
+                    w.bundles[pid] = "sim.user.launched.\(pid)"
+                    w.startedAt[pid] = w.now
+                    w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 300, y: 600, width: 300, height: 200), space: w.space1)
+                    w.mainWin[pid] = wid
+                    w.zOrder.append(pid)
+                    w.userLaunches[pid] = w.now
+                    w.noteLaunchStart(pid)
+                    return pid
+                }
+                w.log("the user's app \(SimPid.name(pid)) starts")
+                w.schedule(after: 30, "NSWorkspace: \(SimPid.name(pid)) launched") { [unowned self] in self.core.onAppLaunched(pid: pid) }
+                w.schedule(after: forwardAfter, "\(SimPid.name(pid)) comes forward (the user launched it)") {
                     w.lock.withLock {
                         let n = w.landingPlace(pid)
                         guard n.app != w.front || n.space != w.space else { return }
@@ -594,6 +820,16 @@ final class SimRun {
                 w.onMainWindow?(a, id)
             }
             w.log("\(SimPid.name(a))'s main window becomes \(id)")
+        case .targetRaisedOnItsOtherDesktop:
+            // (The act's own raise, as the engine records it for an act's raising write — then the window server moves.)
+            core.noteGuardianCause(SimPid.target, raise: true)
+            w.lock.withLock {
+                guard let win = w.wins[78], let sp = win.space, sp != w.space || w.front != SimPid.target else { return }
+                w.mainWin[SimPid.target] = 78
+                w.agentCause(SimPid.target, raise: true)
+                w.change(to: SPlace(app: SimPid.target, space: sp), cause: .agentDirect(SimPid.target, "the agent's act raised its window on another desktop"),
+                         why: "the agent's act in flight raises T's window on desktop \(sp)")
+            }
         case .selfActivate(let a):
             w.lock.withLock {
                 // An app already in front does not activate itself again (nothing moves).
@@ -639,7 +875,7 @@ final class SimRun {
     /// A physical click at `p`: the tap sees it (and the guardian's click handler runs), then the window server delivers
     /// it — activating the app whose window takes it, or nothing (a status item, a banner — whose app activates the
     /// subject a moment later —, Picture in Picture, a non-activating panel, the helper's own panel, a ⌘-click, a drag).
-    func click(at p: CGPoint, flags: CGEventFlags = [], drag: Bool = false, r: inout SimRNG) {
+    func click(at p: CGPoint, flags: CGEventFlags = [], drag: Bool = false, clickCount: Int64 = 1, r: inout SimRNG) {
         let w = world
         let (hit, dest, sw, subject) = w.lock.withLock { () -> (SimWin?, SPlace?, SimSwitch?, pid_t?) in
             let hit = w.clickTarget(at: p)
@@ -647,8 +883,9 @@ final class SimRun {
             guard let h = hit else {
                 // The empty desktop: Finder comes forward on this desktop.
                 guard p.x < 1600 else { return (nil, nil, nil, nil) }
-                let d = SPlace(app: SimPid.target, space: w.space1)
-                return (nil, d, SimSwitch(at: t, app: true, desktop: false, target: SimPid.target, claim: true, dest: SimPid.target), nil)
+                // (Finder — T only when T is Finder: round 19, PROTOCOL §4.12 "A click on the empty desktop: Finder's".)
+                let d = SPlace(app: w.finderPid, space: w.space1)
+                return (nil, d, SimSwitch(at: t, app: true, desktop: false, target: w.finderPid, claim: true, dest: w.finderPid), nil)
             }
             if h.pid == SimPid.own { return (h, nil, nil, nil) }
             if h.id == 701 {
@@ -662,13 +899,25 @@ final class SimRun {
             return (h, d, SimSwitch(at: t, app: true, desktop: elsewhere, target: h.pid, claim: true, dest: h.pid), nil)
         }
         w.hardware(observable: true)
+        w.launchCapable()  // a click (R17-d (i))
         // A click into an agent target's ordinary window (not a ⌘-click): they are working in it (round 10).
         if let h = hit, h.layer == 0, h.pid != SimPid.own, !flags.contains(.maskCommand) { w.userInteracted(h.pid) }
         w.log("the user \(flags.contains(.maskCommand) ? "⌘-" : "")\(drag ? "drags from" : "clicks") (\(Int(p.x)), \(Int(p.y))) — \(hit.map { "\(SimPid.name($0.pid))'s window \($0.id)" } ?? "the desktop")")
         core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, flags: flags, now: clock.nowSeconds())
         let i = sw.map { w.addSwitch($0) }
         let here = w.lock.withLock { SPlace(app: hit?.pid ?? w.front, space: w.space) }
-        _ = w.within(.userClick(dest ?? here)) { core.onPhysicalClick(at: p, userData: 0, flags: flags, now: clock.nowSeconds()) }
+        if drag {
+            // A drag brings nothing forward (review of round 9, #8): its button comes up elsewhere, and nothing the engine
+            // does in it passes for the user's click (no `userClick` label — that masked the activation on the mouse-down).
+            _ = core.onPhysicalClick(at: p, userData: 0, flags: flags, now: clock.nowSeconds())
+            core.onPhysicalMouseUp(at: CGPoint(x: p.x + 40, y: p.y + 30), userData: 0, now: clock.nowSeconds())
+        } else {
+            _ = w.within(.userClick(dest ?? here)) {
+                let r = core.onPhysicalClick(at: p, userData: 0, flags: flags, clickCount: clickCount, now: clock.nowSeconds())
+                core.onPhysicalMouseUp(at: p, userData: 0, now: clock.nowSeconds())
+                return r
+            }
+        }
         if hit?.id == 701 {
             w.lock.withLock { w.wins[701]?.shown = false }
             if let subject, let i {
@@ -685,11 +934,18 @@ final class SimRun {
     }
 
     /// The user's switch `i` lands: `app` comes forward (on `onSpace`, or where its main window is).
-    func landSwitch(_ i: Int, _ app: pid_t, onSpace: UInt64? = nil, why: String) {
+    /// `strictAtClick`: a click on the FRONT app's Dock tile, their place already AT THE CLICK (R17-b) — the Dock's own
+    /// activation of it a moment later adds nothing (round 18: R17-b's loose union here removed, the controller's ruling
+    /// that it is a replacement, not a union).
+    func landSwitch(_ i: Int, _ app: pid_t, onSpace: UInt64? = nil, why: String, strictAtClick: Bool = false) {
         let w = world
         w.lock.withLock {
             let n = w.landingPlace(app, onSpace: onSpace)
             guard n.app != w.front || n.space != w.space else {
+                if strictAtClick {
+                    w.log("\(why) — already there, their place since the click (R17-b)")
+                    return
+                }
                 // Their switch to what is in front already: it is now their choice — if the engine sees it (it judges
                 // nothing new unless a path looks again).
                 let cur = SPlace(app: w.front, space: w.space)
@@ -752,7 +1008,9 @@ final class SimRun {
                 w.wins[wid] = SimWin(id: wid, pid: pid, frame: CGRect(x: 320, y: 620, width: 300, height: 200), space: w.space1)
                 w.mainWin[pid] = wid
                 w.zOrder.append(pid)
-                w.agentColdLaunches[pid] = (w.now, w.clearlyNow())
+                // (Undone only within the act's reach — the ruling, round 16.)
+                w.agentColdLaunches[pid] = (w.now, w.clearlyNow(for: pid))
+                w.noteLaunchStart(pid)
                 return pid
             }
             w.log("\(SimPid.name(pid)) starts (the agent's action opened it; clearly the agent's: \(w.lock.withLock { w.agentColdLaunches[pid].map { "\($0.clearly)" } ?? "?" }))")
@@ -919,9 +1177,12 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working { w.agentBegins(tpid) }
             defer { if !working { w.agentEnds(tpid) } }
+            w.lock.withLock { w.actOnT = !working; w.actWorkSeen = false }
+            midActArmed = !working && midActRng.chance(Self.midActChance)
+            defer { w.lock.withLock { w.actOnT = false } }
             let opener = CUCore.actCanOpenApps(action) && !working
-            if opener { w.lock.withLock { w.lastOpenerAt = w.now } }
-            defer { if opener { w.lock.withLock { w.lastOpenerAt = w.now } } }
+            if opener { w.lock.withLock { w.noteOpener(w.targetScope) } }
+            defer { if opener { w.lock.withLock { w.noteOpener(w.targetScope) } } }
             do {
                 _ = try await core.targetAct(TargetActParams(targetId: "tsim", sessionId: "s", callId: id, action: action, access: .full,
                                                              allowForeground: false, privatePath: true))
@@ -930,7 +1191,18 @@ final class SimRun {
                 let e = error as? CUError
                 w.log("the act: \(e?.message ?? "\(error)")")
                 let refusedForWork = e?.code == "refused" && e?.data?["reason"] == .string("user_working")
-                if refusedForWork, !working {
+                // (Refused mid-act is right when they started working in it DURING the act — round 16, P1: an act in flight checks
+                // the work mark before every focus placement and key. Never when they don't work in it at the refusal either.)
+                // (Sticky: right too when they worked in it at any moment of the act and have left since — the review of
+                // round 17, M1.)
+                // (Round 19: right too when their work in T ended only by T leaving the front for a moment the engine never
+                // saw — every notification heard since found T in front again, the departure no longer than a notification
+                // can be late (the review of round 19, LOW 3); refusing is the safe side of I6.)
+                let unseenLeave = w.lock.withLock { w.unseenWorkLeave(tpid) }
+                if refusedForWork, unseenLeave {
+                    w.log("  (refused: their work in T ended only by a departure from the front the engine never saw — kept as right)")
+                    w.lock.withLock { w.stats.handsOff += 1 }
+                } else if refusedForWork, !working, !w.userWorks(in: tpid), !w.lock.withLock({ w.actWorkSeen }) {
                     w.lock.withLock { w.fail("I6: the act was refused as \"the user is working in it\", but they are not (only switched there, or left it)") }
                 } else if refusedForWork {
                     w.lock.withLock { w.stats.handsOff += 1 }
@@ -939,7 +1211,13 @@ final class SimRun {
         }
         switch step.kind {
         case .agentType(let n):
-            await act(.type(CUTypeAction(text: String(repeating: "x", count: n))), "c\(step.seed)")
+            // (Round 19, M2: half the typing names T's field — the focus is placed first; from its own generator, so the
+            // plans' draws stay.)
+            var f = SimRNG(step.seed ^ 0xF0C5)
+            let into = f.chance(0.5) ? target.refs.ref(for: AXIdentity(element: field)) : nil
+            await act(.type(CUTypeAction(text: String(repeating: "x", count: n), into: into)), "c\(step.seed)")
+            // The app moves its focus off the field now and then (a later act names it again).
+            if f.chance(0.3) { ax.focus(pid: SimPid.target, on: nil); w.log("T's field loses the focus") }
         case .agentClick(let what, let ms):
             // (An act refused because the user works in T opens nothing.)
             if what == .opener, !w.userWorks(in: tpid) {
@@ -954,7 +1232,15 @@ final class SimRun {
             }
             let el = what == .link ? link : what == .opener ? opener : field
             let ref = target.refs.ref(for: AXIdentity(element: el))
-            await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
+            // (Round 18 — round 17's H1: a DRAG of the agent's, whose moves continue after its button went down; a variant of
+            // the field click, from its own generator so the plans' draws stay.)
+            var d = SimRNG(step.seed ^ 0xD2A6)
+            if what == .field, d.chance(0.25) {
+                let to = target.refs.ref(for: AXIdentity(element: link))
+                await act(.drag(CUDragAction(from: CUDragEnd(ref: ref), to: CUDragEnd(ref: to))), "d\(step.seed)")
+            } else {
+                await act(.click(CUClickAction(ref: ref)), "c\(step.seed)")
+            }
         case .agentAppleScript(let seconds, let opens, let ms, let dialog):
             w.lock.withLock { w.scriptMs = seconds * 1000 }
             if opens, !w.userWorks(in: tpid) {  // (a script refused because the user works in T opens nothing)
@@ -965,9 +1251,9 @@ final class SimRun {
             let working = w.userWorks(in: tpid)
             if !working {
                 w.agentBegins(tpid, raise: true)
-                w.lock.withLock { w.lastOpenerAt = w.now }
+                w.lock.withLock { w.noteOpener(nil) }  // an AppleScript reaches any app (review of round 14, MEDIUM #3)
             }
-            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.lastOpenerAt = w.now } } }
+            defer { if !working { w.agentEnds(tpid); w.lock.withLock { w.noteOpener(nil) } } }
             do {
                 _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: "tsim", source: "tell application \"Finder\" to get name"))
             } catch { w.log("the script: \((error as? CUError)?.message ?? "\(error)")") }
@@ -977,7 +1263,7 @@ final class SimRun {
             let wid = UInt32(8000 + pid)
             let bundle = "sim.launched.\(pid)"
             w.agentBegins(pid, raise: true)
-            w.lock.withLock { w.lastOpenerAt = w.now }  // a launch can open apps (the engine notes its start and end)
+            w.lock.withLock { w.noteOpener([bundle]) }  // a launch opens the app it launches (round 14: never any app)
             w.lock.withLock {
                 w.running.insert(pid)
                 w.bundles[pid] = bundle
@@ -1007,7 +1293,7 @@ final class SimRun {
             do {
                 _ = try await core.targetBind(TargetBindParams(sessionId: "s", app: bundle, mirror: false))
             } catch { w.log("the bind: \((error as? CUError)?.message ?? "\(error)")") }
-            w.agentEnds(pid); w.lock.withLock { w.lastOpenerAt = w.now }
+            w.agentEnds(pid); w.lock.withLock { w.noteOpener([bundle]) }
         case .agentBusy(let n, let gap):
             for k in 0..<n {
                 if w.violation != nil { break }
@@ -1035,7 +1321,7 @@ final class SimRun {
         let kind = (await execute(plan)).violation.map { String($0.prefix(3)) }
         let deadline = Date().addingTimeInterval(120)
         func fails(_ steps: [SimStep]) async -> Bool {
-            guard let v = (await execute(SimPlan(seed: plan.seed, flagsSeen: plan.flagsSeen, steps: steps))).violation else { return false }
+            guard let v = (await execute(SimPlan(seed: plan.seed, flagsSeen: plan.flagsSeen, steps: steps, targetBundle: plan.targetBundle))).violation else { return false }
             return String(v.prefix(3)) == kind
         }
         var cur = plan.steps

@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 89, "expected 89 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 93, "expected 93 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -20,6 +20,49 @@ final class RoundTripTests: XCTestCase {
             let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
             XCTAssertNotNil(obj?["type"] as? String, "re-encoded JSON lost the type discriminator for \(url.lastPathComponent)")
         }
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): the pair decodes field for field, the element label present and absent.
+    func testWakeTriggerPairDecodes() throws {
+        func load(_ name: String) throws -> SessionEvent {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
+            return try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url))
+        }
+        guard case .wakeArmed(let armed) = try load("wake_armed") else { return XCTFail("wake_armed did not decode as .wakeArmed") }
+        XCTAssertEqual(armed.wakeId, "wk_1a2b3c4d5e6f")
+        XCTAssertEqual(armed.condition, "clicked")
+        XCTAssertEqual(armed.targetLabel, "Chrome — Developer Dashboard")
+        XCTAssertEqual(armed.elementLabel, "“Submit for review”", "the producer's label: the quoted name, never the role")
+        XCTAssertEqual(armed.expiresAt, 1781273600000)
+        guard case .wakeArmed(let page) = try load("wake_armed_page") else { return XCTFail("wake_armed_page did not decode") }
+        XCTAssertNil(page.elementLabel)
+        XCTAssertEqual(page.condition, "navigated")
+        guard case .wakeEnded(let ended) = try load("wake_ended") else { return XCTFail("wake_ended did not decode as .wakeEnded") }
+        XCTAssertEqual(ended.reason, "fired")
+        XCTAssertEqual(ended.at, 1781270460000)
+        XCTAssertTrue(ended.woken)
+        XCTAssertFalse(SessionEvent.wakeEnded(ended).isTransient)
+    }
+
+    /// ComputerV2 wake triggers: a label the daemon cut at `WAKE_LABEL_MAX` with an emoji at the cut. The daemon backs
+    /// off a high surrogate before its "…" (`wakes/text.ts`), so the label stays WELL-FORMED and Foundation's strict
+    /// decoder takes it; a cut that split the pair would leave a lone `\ud83d` escape, which it refuses — the whole
+    /// event (and the pill) would be lost.
+    func testAWakeLabelCutAtAnEmojiDecodesAndALoneSurrogateWouldNot() throws {
+        func armed(_ elementLabelJSON: String) -> Data {
+            Data(#"{"type":"wake_armed","seq":1,"sessionId":"s","ts":0,"threadId":"main","wakeId":"wk_1a2b3c4d5e6f","condition":"clicked","targetLabel":"Chrome","elementLabel":\#(elementLabelJSON),"expiresAt":1}"#.utf8)
+        }
+        // What `wakeLabel` (max 200) makes of 198 × "x", an emoji, then more: the cut at 199 units would split the emoji,
+        // so it backs off before it, then "…" (the TS side's test pins the same string).
+        let kept = String(repeating: "x", count: 198) + "…"
+        guard case .wakeArmed(let ok) = try JSONDecoder().decode(SessionEvent.self, from: armed(#""\#(kept)""#)) else { return XCTFail("not wake_armed") }
+        XCTAssertEqual(ok.elementLabel, kept)
+        // 197 × "x" then the emoji: it fits whole before the cut and survives intact.
+        let whole = String(repeating: "x", count: 197) + "😀…"
+        guard case .wakeArmed(let ok2) = try JSONDecoder().decode(SessionEvent.self, from: armed(#""\#(whole)""#)) else { return XCTFail("not wake_armed") }
+        XCTAssertEqual(ok2.elementLabel, whole)
+        // What a split pair serializes to (`JSON.stringify` escapes a lone surrogate): refused.
+        XCTAssertThrowsError(try JSONDecoder().decode(SessionEvent.self, from: armed(#""\#(String(repeating: "x", count: 198))\ud83d…""#)))
     }
 
     func testUnknownDiscriminatorFailsLoudly() throws {
@@ -457,6 +500,35 @@ final class RoundTripTests: XCTestCase {
         XCTAssertNil(without.images)
         let withoutObj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.userMessage(without))) as? [String: Any]
         XCTAssertNil(withoutObj?["images"], "an absent images must stay absent on re-encode")
+    }
+
+    /// Code-mode file attachments (2026-10-13): `user_message.files` is additive/optional beside `images` —
+    /// `user_message_with_files.json` (two entries out of order, one a folder, a space in a name) vs. the
+    /// pre-existing fixtures (absent). Content, order, and absent-stays-absent.
+    func testUserMessageFilesOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "user_message_with_files", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing user_message_with_files.json fixture")
+        }
+        guard case .userMessage(let with) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: withURL)) else { return XCTFail() }
+        XCTAssertEqual(with.text, "[Image #1] [File #2] [File #1]\nread these", "the text keeps its placeholders")
+        XCTAssertEqual(with.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/Users/me/Desktop/shot.png")])
+        XCTAssertEqual(with.files, [
+            SessionEvent.UserMessageFileRef(n: 2, path: "/Users/me/Documents/My Report.pdf"),
+            SessionEvent.UserMessageFileRef(n: 1, path: "/Users/me/Projects/app"),
+        ])
+        let reencoded = try JSONEncoder().encode(SessionEvent.userMessage(with))
+        guard case .userMessage(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        for name in ["user_message", "user_message_with_images"] {
+            guard let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures") else {
+                return XCTFail("missing \(name).json fixture")
+            }
+            guard case .userMessage(let without) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url)) else { return XCTFail() }
+            XCTAssertNil(without.files, name)
+            let obj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.userMessage(without))) as? [String: Any]
+            XCTAssertNil(obj?["files"], "an absent files must stay absent on re-encode (\(name))")
+        }
     }
 
     /// diff-tabs T4: `PanelTabKind.diff` is a NEW ENUM CASE (not just a new field) on the wire's

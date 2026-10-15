@@ -125,8 +125,19 @@ public struct CUStateFormatter: Sendable {
     public func renderedValue(_ n: CUNode) -> String? {
         if n.isSecure { return "<redacted>" }
         guard let v = n.value, !v.isEmpty, v != n.name else { return nil }
-        return quote(cut(v))
+        guard v.count > valueCap else { return quote(v) }
+        // A long value is cut, and says how long it is and where it reads whole (round 13's dogfood item 14).
+        let whole = valueCap < Self.wholeValueCap ? " — " + Self.wholeHint(ref: n.ref, count: v.count) : ""
+        return quote(cut(v)) + " (\(v.count) characters\(whole))"
     }
+
+    /// Where a cut value reads at length: whole, or — past `wholeValueCap` — its first `wholeValueCap` characters.
+    static func wholeHint(ref: Int, count: Int) -> String {
+        count <= wholeValueCap ? "state({within:\(ref)}) shows it whole" : "state({within:\(ref)}) shows its first \(wholeValueCap)"
+    }
+
+    /// The value cap of a `state({ within })` read: one element's field, read back whole up to this many characters.
+    public static let wholeValueCap = 8000
 
     /// Where typed text goes in a focused text element: "caret 12/40" (the caret's UTF-16 offset and the text's
     /// length, as accessibility counts), or `selected 3–9 ("hello")` with the selected text cut to 40 characters.

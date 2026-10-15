@@ -44,6 +44,8 @@ enum Typography {
     static func tiny(_ weight: Font.Weight = .regular) -> Font { sans(tinySize, weight) }
     /// The small-meta workhorse: tool rows, chips, pills, section labels (91 sites at adoption).
     static func caption(_ weight: Font.Weight = .regular) -> Font { sans(captionSize, weight) }
+    /// `caption` with tabular digits, for a figure that changes in place (a countdown) without its width jumping.
+    static func captionDigits(_ weight: Font.Weight = .regular) -> Font { caption(weight).monospacedDigit() }
     /// The standard-label workhorse: dashboard body text, sidebar meta (107 sites at adoption).
     static func label(_ weight: Font.Weight = .regular) -> Font { sans(labelSize, weight) }
     /// Rows and controls: sidebar rows, palette rows, composer chrome.
@@ -100,6 +102,10 @@ enum Typography {
     static let landingBody: Font = .body
     /// Landing-page fine print.
     static let landingCaption: Font = .caption
+    /// Attachment chips (2026-10-13): the name, and the chip's glyphs, at a size DERIVED from the text an
+    /// inline chip sits in (`AttachmentChipSize.inline(for:)`) — the strip chip passes `captionSize`.
+    static func attachmentChip(ofSize size: CGFloat, _ weight: Font.Weight = .regular) -> Font { sans(size, weight) }
+
     /// Chip and status-capsule labels (`ActivityChip`, sidebar count chips).
     static let chipLabel: Font = .caption2
 
@@ -124,6 +130,8 @@ enum Typography {
     static let fieldCodeLabelNS: NSFont = sansNS(ofSize: captionSize, .medium)
     /// The orb field's code-block body.
     static let fieldCodeBlockNS: NSFont = monoNS(ofSize: controlSize)
+    /// The Dispatch pill's terminal window — the emulator's cell face (`CommandRun`).
+    static let terminalNS: NSFont = monoNS(ofSize: controlSize)
     /// The orb field's INLINE-code run — DERIVED through the shared transcript metrics since
     /// the second 2026-08-13 ruling ("make its sizes bound to the apps transcript sizes"),
     /// which reversed this token's brief verbatim posture. The wiring change has ZERO rendered

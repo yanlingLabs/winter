@@ -748,4 +748,31 @@ describe("leaving a page that may ask \"leave this page?\"", () => {
     expect(chrome.attachedDebuggers.has(replaced.id!)).toBe(false);
     expect(chrome.activatedForPrompt).toEqual([]);
   });
+
+  test("1.2.0: a wake trigger's watch on a tab the browser replaces moves with it — its new document gets the watcher, and its events speak for the new id", async () => {
+    chrome.discardMode = "new-id";
+    const injected: Array<Record<string, any>> = [];
+    chrome.scriptAnswer = (func, arg) => {
+      if (func !== "wakeWatcher") return undefined;
+      injected.push(arg as Record<string, any>);
+      return { ok: true, installed: "new", doc: 1 };
+    };
+    chrome.runtimeOnMessage.addListener((m, sender, sendResponse) => { c.watchMessage(m, sender, sendResponse); return undefined; });
+    const id = await drivenTab();
+    await c.handle("watch.arm", { tabKey: String(id), spec: { watchId: "wk_0000000000aa", kind: "submitted", anyForm: true, pill: "Winter continues when you submit a form on this page", expiresAt: Date.now() + 60_000 } });
+    await typeInto(id);
+    notes = [];
+    try { await send(id, "Page.navigate", { url: "https://example.com/next" }); } catch { /* tab_gone naming the new id */ }
+    const replaced = [...chrome.tabs_.values()].find((t) => t.url === "https://example.com/next")!;
+    expect(c.watchCount()).toBe(1);
+    injected.length = 0;
+    for (const l of chrome.tabsOnUpdated.listeners) l(replaced.id!, { status: "complete" });
+    await flush();
+    // Winter's own navigation brought the new document: the watch's new baseline there.
+    expect(injected.map((a) => [a.op, a.spec?.initial])).toEqual([["arm", "baseline"]]);
+    let answer: unknown;
+    for (const l of chrome.runtimeOnMessage.listeners) l({ type: "winter.wake.event", watchId: "wk_0000000000aa", outcome: "fired", at: Date.now() + 5_000, url: "https://example.com/next" }, { id: chrome.runtimeId, tab: { ...replaced }, frameId: 0 }, (r) => { answer = r; });
+    expect(answer).toEqual({});
+    expect(notes.filter((n) => n.method === "watch.event").map((n) => [n.params.tabKey, n.params.outcome])).toEqual([[String(replaced.id), "fired"]]);
+  });
 });

@@ -6,7 +6,7 @@ import { z } from "zod";
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
 import { NDJSON_MAX_LINE_BYTES } from "./ndjson";
-import { SessionEvent, UserMessageImageRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
+import { SessionEvent, UserMessageImageRef, UserMessageFileRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -44,6 +44,11 @@ export const HelloResult = z.object({
  *  client holding a FILE attachment sends it as a path only when the daemon says so; otherwise it
  *  substitutes the path into the message text, as it always did for an older daemon. */
 export const DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS = "image-original-paths";
+/** `hello`'s `features`: `session.send`/`steer` take `files` — `[File #n]` placeholders naming the user's own
+ *  files or folders (2026-10-13). A client sends `files` only when the daemon says so; otherwise it puts each
+ *  path in the text itself (an older daemon's send schema would STRIP `files`, and the model would see the
+ *  bare placeholder). */
+export const DAEMON_FEATURE_ATTACHMENT_FILES = "attachment-files";
 
 /** The phone transport's hard per-frame ceiling, mirroring Swift's `maxFrameBytes` default
  *  (`IrohListener.swift` / `IrohDialer.swift`). An oversized frame does NOT produce an error — the
@@ -326,6 +331,10 @@ export const SessionListResult = z.object({
     // NOT the same absence as `runtimeKind`'s (a daemon can know the leg from `legOf` while this
     // daemon build predates threading the record through to `session.list` at all).
     providerId: z.string().min(1).optional(),
+    // ComputerV2 wake triggers (2026-10-12): how many triggers the session's model has ARMED now (`wakeWhen` — Winter
+    // waits for the user to click, submit, …) — the session list's "waiting for you" mark. Absent when none (or on an
+    // older daemon); kept live by the `wake_armed`/`wake_ended` pair, which every harness receives.
+    wakesArmed: z.number().int().positive().optional(),
   })),
 });
 
@@ -371,10 +380,21 @@ export const SessionHistoryResult = z.object({
  *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
  *  images. The array length is checked by the handler (typed), not here. */
 export const SessionSendImagesParam = z.array(UserMessageImageRef).optional();
+/** Code-mode file attachments (2026-10-13, hello feature `DAEMON_FEATURE_ATTACHMENT_FILES`): `text` keeps its
+ *  `[File #n]` placeholders and `files` names each one's path — the user's own file or folder, any type. The
+ *  daemon hands the MODEL the text with every placeholder replaced by its path and stores the `user_message`
+ *  with the placeholders and `files`. Every entry is checked before anything is appended (typed refusals,
+ *  never echoing a path): a local caller only, a code session only (`file_session_not_code`), an absolute
+ *  path with no control or direction-changing character and no edge whitespace, that resolves (`realpath`)
+ *  to a regular file or a directory (`file_unreadable` with `data.n` when it cannot be resolved), outside the
+ *  runtime Read tool's read-deny set; `n` unique and `[File #n]` in `text`; at most `USER_MESSAGE_FILES_MAX`.
+ *  Nothing is read, copied or staged, and no model capability is required. Omitted (or empty) = no files. */
+export const SessionSendFilesParam = z.array(UserMessageFileRef).optional();
 export const SessionSendParams = z.object({
   sessionId: z.string(),
   text: z.string().min(1),
   images: SessionSendImagesParam,
+  files: SessionSendFilesParam,
 });
 export const SessionSendResult = z.object({ seq: z.number().int() });
 
@@ -460,6 +480,9 @@ export const ComputerUseStatusResult = z.object({
   headlessEnabled: z.boolean(),
   /** Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`, default true). */
   webmcp: z.boolean(),
+  /** Wake triggers (2026-10-12): a script may arm `wakeWhen` (`computerUse.wakes`, default true). Optional: an
+   *  older daemon does not say. */
+  wakes: z.boolean().optional(),
   helper: z.object({
     installed: z.boolean(),
     running: z.boolean(),
@@ -488,9 +511,31 @@ export const ComputerUseStatusResult = z.object({
  *  `browserLink.detached`), `browserLink.result` (one per command; an unknown or late `cmdId` is dropped and still
  *  answered `{}`), `browserLink.events` (≤ 256 per batch, only subscribed allowlisted events, Network params stripped),
  *  `browserLink.tabGone`, and (protocol 2) `browserLink.download`. Daemon → app (notifications, no id):
- *  `browserLink.command`, `browserLink.detached`. */
-export const BrowserLinkAttachParams = z.object({ protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int() });
-export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int() });
+ *  `browserLink.command`, `browserLink.detached`.
+ *
+ *  FEATURES (the protocol stays 2): what each side can do beyond it, named at attach — the app in its params, the daemon
+ *  in its answer; a side never uses a feature the other did not name.
+ *  - `headless` (ComputerV2 Phase 4, lane H3): the app can show a tab of Winter's HEADLESS browser in its panel — the
+ *    live page, drawn from Winter Headless's own GPU frames (the page never leaves the helper; nothing reloads) — and the
+ *    daemon can ask it to. Daemon → app ops on `browserLink.command`: `headless.show {sessionId, tabId, service, nonce,
+ *    producerRequirement, control, purpose, url, title, uploadDir}` (connect to that presentation and show it; `purpose`
+ *    "handoff" — the agent waits for the user, who has control —, "watch", or "popup" — a window the page opened while
+ *    the person held its opener, a sign-in window as a rule, theirs alone and closed when they let the opener go; files
+ *    the person picks for the page are copied into `uploadDir` first), `headless.hide {sessionId, tabId, reason}`,
+ *    `headless.tabs {sessionId, tabs}` (the session's headless tabs changed) and `headless.update {sessionId, tabId,
+ *    purpose}` (why a shown tab is shown changed: a watch the person took over became the agent's hand-off, or a
+ *    hand-off nobody waits on any more). App → daemon: `browserLink.headless` (below).
+ *  - `watchOnly` (ComputerV2 wake triggers): `tab.ensure` takes `watchOnly: true` — a WATCH-ONLY hold, under which the
+ *    app sets none of its native-UI holds (the page's dialogs, permission prompts, file choosers, downloads, context
+ *    menus, keys and focus stay the user's), while a wake trigger waits on the tab for the user; a `tab.ensure` without
+ *    it takes the tab's full hold back (a primitive), and one with it drops back. It still counts toward the app's
+ *    ceiling on held tabs. */
+export const BROWSER_LINK_FEATURES = ["headless", "watchOnly"] as const;
+export const BrowserLinkAttachParams = z.object({
+  protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int(),
+  features: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int(), features: z.array(z.string()).optional() });
 export const BrowserLinkResultParams = z.union([
   z.object({ linkId: z.string().min(1), cmdId: z.string().min(1), ok: z.literal(true), result: z.unknown() }),
   z.object({
@@ -525,8 +570,23 @@ export const BrowserLinkDownloadParams = z.object({
   }),
 });
 export const BrowserLinkAckResult = z.object({});
+/** Feature `headless` — the person, in Winter's panel, acting on one of a session's HEADLESS tabs:
+ *  `list` (the session's headless tabs, fresh; no `tabId`), `watch` (show it, watch-only: the agent keeps working and
+ *  the person sees it live), `takeOver` (the person takes control: the agent's work in flight on that tab finishes
+ *  first, then every agent command on it is `TargetBusy` until it is handed back), `handBack` (control back to the
+ *  agent; the view stays, watch-only), `done` / `stopWaiting` (the answers to a `waitForUser` hand-off shown in the
+ *  panel), `close` (stop showing it; control, if held, goes back to the agent). */
+export const BrowserLinkHeadlessAction = z.enum(["list", "watch", "takeOver", "handBack", "done", "stopWaiting", "close"]);
+export const BrowserLinkHeadlessParams = z.object({
+  linkId: z.string().min(1),
+  sessionId: z.string().min(1).max(128),
+  tabId: z.string().min(1).max(256).optional(),
+  action: BrowserLinkHeadlessAction,
+});
+export const BrowserLinkHeadlessTab = z.object({ tabId: z.string(), url: z.string(), title: z.string(), presented: z.boolean(), control: z.boolean() });
+export const BrowserLinkHeadlessResult = z.object({ tabs: z.array(BrowserLinkHeadlessTab).optional() });
 /** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay;
- *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. */
+ *  protocol 2: tab.present, tab.mute, tab.downloads, tab.download. (Feature `watchOnly`: `tab.ensure`'s `watchOnly`.) */
 export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
 export const BrowserLinkDetachedNotification = z.object({ linkId: z.string(), reason: z.literal("replaced") });
 
@@ -567,8 +627,18 @@ export const ComputerUseSetSettingsParams = z.object({
   privateEventPath: z.boolean().optional(),
   headlessEnabled: z.boolean().optional(),
   webmcp: z.boolean().optional(),
+  /** Wake triggers (2026-10-12): `computerUse.wakes`. Off ends every armed trigger (`disabled`). */
+  wakes: z.boolean().optional(),
 });
 export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
+/** ComputerV2 wake triggers (2026-10-12): the Mac's [Stop waiting] on a session's "Waiting for you" pill — ends one
+ *  trigger the session's model armed (`cancelled`, no wake). LOCAL ROLE ONLY, like every `computerUse.*` door.
+ *  `cancelled: false` when the trigger had already ended (or never belonged to that session). */
+export const ComputerUseWakesCancelParams = z.object({
+  sessionId: z.string().min(1),
+  wakeId: z.string().regex(/^wk_[0-9a-f]{12}$/),
+});
+export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), cancelled: z.boolean() });
 
 /** Code-mode image input (2026-09-29, raw paths 2026-10-10): a composer image that has NO file of its
  *  own (clipboard data, a screenshot in the clipboard), STAGED as it is into the session's own temp
@@ -653,6 +723,14 @@ export const IMAGE_REFERENCE_INVALID = "image_reference_invalid";
  *  the bytes, stages them, and retries; the terminal client reports the message, which names the folder
  *  access that may be missing. */
 export const IMAGE_FILE_UNREADABLE = "image_file_unreadable";
+/** `session.send`/`session.steer`'s `files` refusals (2026-10-13). `file_reference_invalid`: a caller other
+ *  than a local client, a relative or unsafe path, a path in the Read tool's read-deny set, something that is
+ *  neither a regular file nor a directory, a repeated `n`, an `n` with no `[File #n]` in the text, or too many
+ *  entries. `file_session_not_code`: the session is not a code session. `file_unreadable` (`data.n`): the path
+ *  does not resolve — it moved, or macOS keeps its folder from the daemon. */
+export const FILE_REFERENCE_INVALID = "file_reference_invalid";
+export const FILE_SESSION_NOT_CODE = "file_session_not_code";
+export const FILE_UNREADABLE = "file_unreadable";
 export const SessionStageImageParams = z.object({
   sessionId: z.string().min(1),
   mediaType: z.enum(STAGE_IMAGE_MEDIA_TYPES),
@@ -692,7 +770,7 @@ export const BgKillResult = z.object({ ok: z.literal(true) });
 export const BgKillAllParams = z.object({ sessionId: z.string() });
 export const BgKillAllResult = z.object({ ok: z.literal(true), killed: z.number().int().nonnegative() });
 
-export const SessionSteerParams = z.object({ sessionId: z.string(), text: z.string().min(1), images: SessionSendImagesParam });
+export const SessionSteerParams = z.object({ sessionId: z.string(), text: z.string().min(1), images: SessionSendImagesParam, files: SessionSendFilesParam });
 export const SessionSteerResult = z.object({ ok: z.literal(true), injected: z.boolean() });
 export const SessionInterruptParams = z.object({ sessionId: z.string() });
 export const SessionInterruptResult = z.object({ ok: z.literal(true), wasRunning: z.boolean() });
@@ -3242,12 +3320,14 @@ export const METHODS = {
   computerUseAppsList: "computerUse.apps.list",
   computerUseAppsSet: "computerUse.apps.set",
   computerUseSetSettings: "computerUse.setSettings",
+  computerUseWakesCancel: "computerUse.wakes.cancel",
   // ComputerV2 Phase 2: Winter.app's browser link. HARNESS role only.
   browserLinkAttach: "browserLink.attach",
   browserLinkResult: "browserLink.result",
   browserLinkEvents: "browserLink.events",
   browserLinkTabGone: "browserLink.tabGone",
   browserLinkDownload: "browserLink.download",
+  browserLinkHeadless: "browserLink.headless",
   browserLinkCommand: "browserLink.command",
   browserLinkDetached: "browserLink.detached",
   sessionStageImage: "session.stageImage",

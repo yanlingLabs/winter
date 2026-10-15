@@ -62,6 +62,9 @@ enum DispatchPillMetrics {
     /// Transparent margin around everything, for the shadow. The mouse gate passes clicks there
     /// through to whatever is underneath.
     static let shadowPad: CGFloat = 24
+    /// Under the pointer the pill and everything above it grow by this much, from the pill's bottom edge, so the
+    /// stack moves and scales together (well inside `shadowPad`).
+    static let hoverScale: CGFloat = 1.03
     /// Gap between the stacked layers: cards → child pills → main pill.
     static let stackGap: CGFloat = 8
     /// A child pill is the main pill's own height (the user's call: same height, same shape).

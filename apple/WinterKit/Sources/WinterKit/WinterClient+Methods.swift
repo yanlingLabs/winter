@@ -740,12 +740,14 @@ extension WinterClient {
     /// `runtimeKind` — read from the runtime-state record, absent independently of it (an older
     /// daemon, a record-less session, or a daemon with no runtime-state door wired at all). Neither
     /// field is ever fabricated from the other.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?, runtimeKind: String?, providerId: String?)] {
+    /// ComputerV2 wake triggers (2026-10-12): `wakesArmed` appended LAST, the same purely-additive precedent — how many
+    /// triggers the session has armed now (the list's "waiting for you" mark); `nil` for none or an older daemon.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?, runtimeKind: String?, providerId: String?, wakesArmed: Int?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue, s["runtimeKind"]?.stringValue, s["providerId"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue, s["runtimeKind"]?.stringValue, s["providerId"]?.stringValue, s["wakesArmed"]?.intValue)
         }
     }
 
@@ -777,20 +779,35 @@ extension WinterClient {
     /// (`stageImage`) or the user's own original image file. `text` keeps the placeholders — the user's
     /// message shows them — and the daemon gives the MODEL the paths. Only a daemon whose `stageImage`
     /// answered `imagesOnSend` takes them; an empty list omits the key.
-    public func send(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Int {
-        let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))
+    ///
+    /// `files` (code-mode file attachments, 2026-10-13): each `[File #n]` placeholder's file or folder — the user's
+    /// own path. Send them only to a daemon that announced `supportsAttachmentFiles`; an empty list omits the key.
+    public func send(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = [],
+                     files: [SessionEvent.UserMessageFileRef] = []) async throws -> Int {
+        let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text),
+                                                               "images": refsParam(images.map { ($0.n, $0.path) }),
+                                                               "files": refsParam(files.map { ($0.n, $0.path) })]))
         guard let seq = r["seq"]?.intValue else { throw RpcError(code: -3, message: "invalid result from server for session.send") }
         return seq
     }
 
-    /// `images`: as `send`'s.
-    public func steer(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Bool {
-        try await request("session.steer", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))["injected"]?.boolValue ?? false
+    /// `images` and `files`: as `send`'s.
+    public func steer(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = [],
+                      files: [SessionEvent.UserMessageFileRef] = []) async throws -> Bool {
+        try await request("session.steer", params: obj(["sessionId": .string(sessionId), "text": .string(text),
+                                                        "images": refsParam(images.map { ($0.n, $0.path) }),
+                                                        "files": refsParam(files.map { ($0.n, $0.path) })]))["injected"]?.boolValue ?? false
     }
 
-    /// `nil` (the key omitted) for no images — an older daemon never sees it.
-    private func imagesParam(_ images: [SessionEvent.UserMessageImageRef]) -> JSONValue? {
-        images.isEmpty ? nil : .array(images.map { .object(["n": .number(Double($0.n)), "path": .string($0.path)]) })
+    /// `nil` (the key omitted) for no refs — an older daemon never sees it.
+    private func refsParam(_ refs: [(n: Int, path: String)]) -> JSONValue? {
+        refs.isEmpty ? nil : .array(refs.map { .object(["n": .number(Double($0.n)), "path": .string($0.path)]) })
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): the session pill's [Stop waiting] — ends one trigger the session's model
+    /// armed (`computerUse.wakes.cancel`, local role only). `false` when it had already ended.
+    public func cancelWake(sessionId: String, wakeId: String) async throws -> Bool {
+        try await request("computerUse.wakes.cancel", params: obj(["sessionId": .string(sessionId), "wakeId": .string(wakeId)]))["cancelled"]?.boolValue ?? false
     }
 
     public func interrupt(sessionId: String) async throws -> Bool {

@@ -10,6 +10,12 @@ protocol CUPasteboardIO: AnyObject {
     /// Replaces the contents; returns the new change count.
     func write(_ items: [[String: Data]]) -> Int
     func readString() -> String?
+    /// The file URLs on it (a copied file in Finder), as strings.
+    func readFileURLs() -> [String]
+}
+
+extension CUPasteboardIO {
+    func readFileURLs() -> [String] { [] }
 }
 
 /// Markers clipboard managers honour (nspasteboard.org): Winter's own contents are short-lived and may be
@@ -89,6 +95,9 @@ final class CUSystemPasteboard: CUPasteboardIO {
     }
 
     func readString() -> String? { pb.string(forType: .string) }
+    func readFileURLs() -> [String] {
+        (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []).map(\.absoluteString)
+    }
 }
 
 /// The clipboard dance around one paste, with the key press and the evidence wait injected so the ordering
@@ -173,6 +182,18 @@ struct CUPasteSequence {
         format == .html ? plainFromHTML(text) : text
     }
 
+    /// The text a RICH target shows once it took the paste: Markdown rendered (its `**`, `[…](…)` gone), HTML's text.
+    /// A plain-text target shows `plain` instead — the proof looks for either (review of round 13, MEDIUM #5).
+    static func rendered(text: String, format: CUPasteFormat) -> String {
+        switch format {
+        case .markdown:
+            return (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                .map { String($0.characters) } ?? text
+        case .html: return plainFromHTML(text)
+        default: return text
+        }
+    }
+
     static func plainFromHTML(_ html: String) -> String {
         var s = html.replacingOccurrences(of: "<br\\s*/?>", with: "\n", options: [.regularExpression, .caseInsensitive])
         s = s.replacingOccurrences(of: "</(p|div|li|h[1-6]|tr)>", with: "\n", options: [.regularExpression, .caseInsensitive])
@@ -207,16 +228,17 @@ struct CUEditEvidence {
 
     /// Waits up to `capMs` for the proof. `expect`: the text put in (its first `probeLength` normalized characters
     /// must appear); nil when unknown (then only a real content change counts).
-    func wait(before: String?, expect: String?, capMs: Double, pollMs: Double = 25) -> Bool {
+    func wait(before: String?, expect: String?, also: String? = nil, capMs: Double, pollMs: Double = 25) -> Bool {
         let start = nowMs()
         let was = Self.normalized(before ?? "")
-        let probe = expect.map { String(Self.normalized($0).prefix(Self.probeLength)) }
-        if let probe, probe.isEmpty { return false }  // nothing to look for: no proof possible
+        // `also`: another form the same text may take in the field (a rich target shows Markdown rendered).
+        let probes = [expect, also].compactMap { $0 }.map { String(Self.normalized($0).prefix(Self.probeLength)) }
+        if expect != nil, probes.allSatisfy(\.isEmpty) { return false }  // nothing to look for: no proof possible
         while true {
             if let v = readValue() {
                 let now = Self.normalized(v)
                 // Changed, and (when known) the text put in appears once more than it did before.
-                if now != was, probe.map({ Self.occurrences(of: $0, in: now) > Self.occurrences(of: $0, in: was) }) ?? true {
+                if now != was, probes.isEmpty || probes.contains(where: { !$0.isEmpty && Self.occurrences(of: $0, in: now) > Self.occurrences(of: $0, in: was) }) {
                     return true
                 }
             }

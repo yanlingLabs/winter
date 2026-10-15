@@ -171,8 +171,8 @@ final class SpikeReparentHarness {
     }
 
     private func startCEF(pageURL: String) {
-        guard let helper = Self.helperExecutablePath() else {
-            fatal("no CEF helper bundle in this build")
+        guard let chromium = WinterChromium.location(appBundle: Bundle.main.bundleURL) else {
+            fatal("no Chromium (the nested Winter Headless helper) in this build")
             return
         }
         let cache = Self.cachePath()
@@ -188,7 +188,7 @@ final class SpikeReparentHarness {
         // browser panel is the thing that breaks. The hazard is bidirectional, so the spike takes a
         // scratch profile of its own. Everything downstream of this one call — creation, the three
         // observers, the chrome verbs, the close path — is the production API verbatim.
-        let ok = WinterCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper)
+        let ok = WinterCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, chromium.framework.path, chromium.subprocessExecutable.path)
         guard ok else {
             fatal("CefInitialize failed: \(String(cString: WinterCEFLastError()))")
             return
@@ -498,15 +498,6 @@ final class SpikeReparentHarness {
             return explicit
         }
         return NSTemporaryDirectory() + "winter-spike-cef"
-    }
-
-    /// A three-line copy of `WinterCEFRuntime.helperExecutablePath()` — private there, and copying it
-    /// is right for spike code that must not widen a production surface.
-    private static func helperExecutablePath() -> String? {
-        let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Frameworks/Winter Helper.app/Contents/MacOS", isDirectory: true)
-            .appendingPathComponent("Winter Helper", isDirectory: false)
-        return FileManager.default.isExecutableFile(atPath: url.path) ? url.path : nil
     }
 
     private static func describe(_ responder: NSResponder?) -> String {

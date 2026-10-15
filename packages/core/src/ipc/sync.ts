@@ -524,6 +524,10 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     if (event.type === "user_message" && event.images !== undefined) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a user_message with images — chat sessions carry none; nothing was appended`);
     }
+    // Code-mode file attachments: `user_message.files` names files on this Mac, for a code session — never a phone's.
+    if (event.type === "user_message" && event.files !== undefined) {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a user_message with files — chat sessions carry none; nothing was appended`);
+    }
     // `tool_result.siteIcons` is the daemon's own stamp (`runtime-sdk/site-icons.ts`) — urls a Mac
     // client FETCHES, so a list a remote caller supplies must never be stored. But the daemon's own chat
     // logs carry it (the runtime's WebFetch/WebSearch report icons in chat too), `sync.pull` copies them
@@ -537,6 +541,11 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     // The thinking pill (2026-10-05): a `thinking_delta` is TRANSIENT — it is never in a log, so a pushed
     // one is a protocol violation. A `thinking_block` IS in a daemon chat log (pulled to the phone and
     // re-pushed by a fork, like `siteIcons` above): schema-bounded, display-only, accepted as is.
+    // ComputerV2 wake triggers: a daemon CODE/DISPATCH session's own record (`computer-use/wakes/`) — a chat log never
+    // carries one, so a pushed one is refused rather than stored for the Mac to draw a pill from.
+    if (event.type === "wake_armed" || event.type === "wake_ended") {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a ${event.type} — chat sessions carry none; nothing was appended`);
+    }
     if (event.type === "thinking_delta") {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a thinking_delta, which is transient and never in a log; nothing was appended`);
     }

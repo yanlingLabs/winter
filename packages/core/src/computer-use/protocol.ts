@@ -265,7 +265,21 @@ export type ActAction =
  *  observed it (apple/ComputerUse/PROTOCOL.md). */
 export type TargetLostReason = "app_quit" | "window_closed" | "helper_restart" | "unknown";
 
-/** The three notifications the helper sends (spine §2.2). */
+/**
+ * helper 1.17.0: WATCHES — the wake triggers' app half (apple/ComputerUse/PROTOCOL.md §4.13). `watch.arm {targetId,
+ * watchId, condition, expiresAt?}` → `WatchArmResult`; `watch.cancel {watchId}` → `{}` (idempotent); one `watchEvent`
+ * notification ends each watch. The daemon arms only on a helper at least this new (its version at `hello`).
+ */
+export const HELPER_WATCH_VERSION = "1.17.0";
+/** `watch.arm`'s `condition`: `ref` is a state() ref (a number) — the helper's own ref space for the bound window. */
+export interface WatchConditionWire {
+  kind: "clicked" | "appeared" | "gone" | "changed" | "titled";
+  ref?: number; text?: string; title?: string; settleMs?: number;
+}
+/** `watch.arm`'s answer: screen-derived — the daemon fences both for the model. */
+export interface WatchArmResult { element?: { role: string; name: string }; targetLabel: string }
+
+/** The notifications the helper sends (spine §2.2). */
 export type HelperNotification =
   | { method: "escPressed"; params: { sessionIds: string[] } }
   | { method: "targetLost"; params: { targetId: string; reason: TargetLostReason } }
@@ -273,7 +287,10 @@ export type HelperNotification =
   /** helper 1.7.0: at EVERY desktop visit's close (however it ended — a cancelled request's included, whose answer
    *  the dispatcher sends before the visit's report exists): how many primitives ran in it, how long the user was
    *  away and whether they are back. */
-  | { method: "desktopVisited"; params: { visitId?: string; sessionId: string; callId?: string; targetId?: string; app?: string; why?: "act" | "live"; actions?: number; ms: number; returned: boolean; userMoved?: boolean } };
+  | { method: "desktopVisited"; params: { visitId?: string; sessionId: string; callId?: string; targetId?: string; app?: string; why?: "act" | "live"; actions?: number; ms: number; returned: boolean; userMoved?: boolean } }
+  /** helper 1.17.0: a watch FIRED (the user did what it waits for — `detail` in a few screen-derived words) or was LOST
+   *  (`reason`: the app quit, the window closed, the element went). One per watch; the watch is gone after it. */
+  | { method: "watchEvent"; params: { watchId: string; outcome: "fired" | "lost"; at: number; detail?: string; reason?: string } };
 
 /** One request line is at most 1 MiB; one response line at most 16 MiB (images). */
 export const HELPER_MAX_REQUEST_LINE = 1024 * 1024;

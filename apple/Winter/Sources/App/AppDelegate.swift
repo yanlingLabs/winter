@@ -483,6 +483,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pill.onSetPolicy = { [weak model] policy in
             await model?.setSessionPolicy(policy) ?? false
         }
+        // A command typed into the pill runs in the bound session's working directory when it has one (a
+        // dispatch session usually does not — then the pill falls back to the home folder).
+        // "Add to transcript" sends to the session the command was RUN from — that session's own send, never the
+        // focused one, never a new one; a session that is gone disables the button.
+        pill.commandRuns.onSendToTranscript = { [weak self] sessionId, text in
+            guard let client = self?.appModel?.client else { return false }
+            return (try? await client.send(sessionId: sessionId, text: text)) != nil
+        }
+        pill.commandRuns.sessionExists = { [weak model] sessionId in
+            model?.directory.rows.contains { $0.sessionId == sessionId } ?? false
+        }
+        pill.commandWorkingDirectory = { [weak model] in
+            guard let model, let sid = model.focusedSessionId,
+                  let row = model.directory.rows.first(where: { $0.sessionId == sid }) else { return nil }
+            return row.cwd ?? row.dirs?.first?.path
+        }
         pill.onSubmit = { [weak self] text in
             guard let model = self?.appModel else { return false }
             let ok = await model.sendOrSteer(text)
@@ -859,6 +875,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host.showWebTab(tabId, sessionId: sessionId)
         } else {
             DispatchQueue.main.async { [weak host] in host?.showWebTab(tabId, sessionId: sessionId) }
+        }
+    }
+
+    /// ComputerV2 Phase 4 (lane H3) — **a headless tab shown in the panel** (the browser link's `headless.show`): Winter's
+    /// own window comes to the session and its panel is revealed, where the presentation is drawn (`ShellPanel` shows
+    /// the store's newest presentation for the session it shows). Only Winter's window — nothing of another app's.
+    /// Like `presentBrowserTab`, the reveal hook is registered when the shell's root view first appears, so on the
+    /// app's first summon it runs one main-queue turn later.
+    func presentHeadlessTab(sessionId: String) {
+        summonAppWindow(navigatingTo: .session(sessionId))
+        guard let host = appWindow?.host else { return }
+        if let reveal = host.onRevealPanel {
+            reveal()
+        } else {
+            DispatchQueue.main.async { [weak host] in host?.onRevealPanel?() }
         }
     }
 
@@ -1439,7 +1470,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The dispatch pill: the 4-finger tap / hotkey / menu summon's surface (the `TriggerHub`
         // sink below). Construction has no side effects — no ordering, no monitors — so every
         // `boot()` under test builds one harmlessly.
-        let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings)
+        // Command mode reads the user's own login shell — never under unit tests (`.inert`: nothing is a
+        // command), so no test ever runs the developer's shell or its profile.
+        let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings,
+                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live())
         pillController = pill
         wireDispatchPill(pill, model: model)
 
@@ -1764,6 +1798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             browserLink = BrowserLink.start(home: AppProfile.winterHome, keychainService: AppProfile.keychainService)
             browserLink?.host.onPresent = { [weak self] sessionId, tabId in self?.presentBrowserTab(sessionId: sessionId, tabId: tabId) }
+            browserLink?.host.headless?.onShow = { [weak self] sessionId in self?.presentHeadlessTab(sessionId: sessionId) }
         }
         // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
         // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and

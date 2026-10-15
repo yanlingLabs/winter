@@ -1,0 +1,11 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "wake_armed",
+  "wakeId": "wk_0f9e8d7c6b5a",
+  "condition": "navigated",
+  "targetLabel": "Safari — Checkout",
+  "expiresAt": 1781273600000
+}

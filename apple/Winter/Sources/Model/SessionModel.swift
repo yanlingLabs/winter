@@ -380,16 +380,21 @@ struct ActivityItem: Equatable {
     /// shows in monospace beside the text result. The 100-character `detail` cannot hold a script, so
     /// it rides here, as `writtenLines` does, set when the call arrives. `nil` for every other tool.
     var scriptCode: String? = nil { didSet { stamp = ChangeStamp.next() } }
+    /// A `read` call's whole `file_path` (2026-10-13), uncut — the 100-character `detail` may clip it, and
+    /// the tool row draws the image a read looked at from this (`toolRunReadImages`). `nil` for every other
+    /// tool and for a path that is not absolute.
+    var readPath: String? = nil { didSet { stamp = ChangeStamp.next() } }
 
     /// Names this item's CONTENT as of its last change: fresh at creation, replaced by every mutation
     /// of a field above, copied with the value. Two items with the same stamp are therefore the same
     /// content, which is what lets `==` answer without walking up to 64 KiB of result text.
     private(set) var stamp: UInt64 = ChangeStamp.next()
 
-    init(kind: Kind, writtenLines: Int? = nil, scriptCode: String? = nil) {
+    init(kind: Kind, writtenLines: Int? = nil, scriptCode: String? = nil, readPath: String? = nil) {
         self.kind = kind
         self.writtenLines = writtenLines
         self.scriptCode = scriptCode
+        self.readPath = readPath
     }
 
     /// Content equality, with a shortcut: the same stamp is the same content (see `stamp`). SwiftUI
@@ -398,12 +403,12 @@ struct ActivityItem: Equatable {
     /// Debug build of Winter Dev hung at 99% CPU inside it). Items that differ in stamp fall back to the
     /// field-by-field comparison, so independently built equal items still compare equal.
     static func == (a: ActivityItem, b: ActivityItem) -> Bool {
-        a.stamp == b.stamp || (a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode)
+        a.stamp == b.stamp || contentEquals(a, b)
     }
 
     /// The field-by-field comparison alone (tests: the cost the stamp shortcut avoids).
     static func contentEquals(_ a: ActivityItem, _ b: ActivityItem) -> Bool {
-        a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode
+        a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode && a.readPath == b.readPath
     }
 }
 
@@ -455,6 +460,14 @@ struct Exchange: Equatable {
     /// the user bubble wears the sender's header (and the summary, when it carried one) instead of
     /// showing the wrapper's XML. `nil` for everything a person typed.
     var promptEnvelope: AgentMessageEnvelope? = nil { didSet { stamp = ChangeStamp.next() } }
+    /// Composer attachments (2026-10-13): the path behind each `[Image #n]` / `[File #n]` in `prompt`, from the
+    /// `user_message`'s `images`/`files` (a folded steer's renumbered past the prompt's own). The bubble draws
+    /// each as a chip (`promptDisplay`). Empty for a prompt without attachments.
+    var promptAttachments = PromptAttachments() { didSet { stamp = ChangeStamp.next() } }
+    /// ComputerV2 wake triggers (2026-10-12): a daemon note on this exchange — "Winter continued: you clicked
+    /// “Submit for review” in Chrome" — set when a `computer-wake` message opened it (or was folded into it). Built
+    /// from the `wake_armed`/`wake_ended` pair, never from the message, whose text is for the model. `nil` otherwise.
+    var notice: String? = nil { didSet { stamp = ChangeStamp.next() } }
     /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
     /// Task 1). The engine emits one PER ROUND, whenever the round produced text
     /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
@@ -521,7 +534,7 @@ struct Exchange: Equatable {
     static func == (a: Exchange, b: Exchange) -> Bool {
         if a.stamp == b.stamp { return true }
         guard a.aborted == b.aborted, a.replies.count == b.replies.count, a.activity.count == b.activity.count else { return false }
-        guard a.prompt == b.prompt, a.promptEnvelope == b.promptEnvelope, a.replies == b.replies else { return false }
+        guard a.prompt == b.prompt, a.promptEnvelope == b.promptEnvelope, a.notice == b.notice, a.replies == b.replies else { return false }
         return a.activity.withUnsafeBufferPointer { left in
             b.activity.withUnsafeBufferPointer { right in
                 var i = left.count - 1
@@ -623,6 +636,13 @@ struct OrbSessionState: Equatable {
     /// turn the queued text was riding on ends — absorbed (`turnCompleted`) or died
     /// (`agentError`) — since a queued steer never survives past the turn it was queued for.
     var queuedSteers: [String] = []
+    /// ComputerV2 wake triggers (2026-10-12): the triggers this session's model has armed and that have not ended
+    /// (`wake_armed` adds, `wake_ended` removes) — the "Waiting for you" pill. Persisted events, so a replay
+    /// rebuilds it exactly.
+    var armedWakes: [ArmedWake] = []
+    /// What the ended triggers that wake the session did ("you clicked “Submit for review” in Chrome") — said by the
+    /// next `computer-wake` message's notice, then cleared.
+    var pendingWakeNews: [String] = []
     /// The tool calls the bash safety reviewer is judging right now (`tool_review_progress`: `started`
     /// adds a `callId`, `ended` removes it). Transient state — never replayed — so it is also cleared
     /// when the call's result arrives, when the turn ends or errors, and when the connection drops: a
@@ -854,6 +874,32 @@ enum SessionReducer {
             if let i = s.attachedClients.firstIndex(of: v.clientName) {
                 s.attachedClients.remove(at: i) // remove-first-match, see `attachedClients`'s doc
             }
+        case .wakeArmed(let v) where v.threadId == mainThread:
+            s.armedWakes.removeAll { $0.wakeId == v.wakeId }
+            s.armedWakes.append(ArmedWake(wakeId: v.wakeId, condition: v.condition, targetLabel: v.targetLabel,
+                                          elementLabel: v.elementLabel, expiresAt: v.expiresAt))
+        case .wakeEnded(let v) where v.threadId == mainThread:
+            if let i = s.armedWakes.firstIndex(where: { $0.wakeId == v.wakeId }) {
+                let wake = s.armedWakes.remove(at: i)
+                // Held for the wake message's notice only when one will carry it (`woken` — never judged from the
+                // reason: a silent expiry is not news, and must never be glued onto a later wake's notice).
+                if v.woken { s.pendingWakeNews.append(WakeWords.endedWords(wake, reason: v.reason)) }
+            }
+        case .userMessage(let v) where v.threadId == mainThread && v.clientName == WakeWords.computerWakeClientName:
+            // ComputerV2 wake triggers: the daemon WAKES the session (`computer-wake`) — never a user bubble. Its text is
+            // the model's `<computer-wake>` block; what the user sees is a note built from the pair. Folded into a
+            // running turn (a steer) it notes the running exchange; otherwise it opens a prompt-less exchange, like
+            // Dispatch's own wake.
+            let note = s.pendingWakeNews.isEmpty ? "A wake trigger ended — Winter continues" : "Winter continued: " + s.pendingWakeNews.joined(separator: "; ")
+            s.pendingWakeNews = []
+            if s.turnRunning, let last = s.exchanges.indices.last {
+                s.exchanges[last].notice = s.exchanges[last].notice.map { "\($0)\n\(note)" } ?? note
+            } else {
+                var opened = Exchange(prompt: "", reply: "")
+                opened.notice = note
+                s.exchanges.append(opened)
+                s.lastTurnOriginClientName = v.clientName
+            }
         case .userMessage(let v) where v.threadId == mainThread && v.clientName == dispatchWakeClientName:
             // Dispatch's children (`packages/core/src/agent/dispatch-children.ts`): the daemon WAKES the
             // dispatch session with a `<child_update>` message the user never typed. It opens its own
@@ -871,7 +917,9 @@ enum SessionReducer {
             if s.turnRunning, let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 // Mid-turn steer: same turn, same exchange — the prompt grows (one turn = one exchange).
                 // A steer from another session folds in as a readable line carrying its sender.
-                let steer = envelope.map { "[\($0.senderLabel())] \($0.body)" } ?? v.text
+                // A steer's own attachments join the prompt's, renumbered past them (`PromptAttachments.fold`).
+                let steer = envelope.map { "[\($0.senderLabel())] \($0.body)" }
+                    ?? s.exchanges[last].promptAttachments.fold(steerText: v.text, PromptAttachments(v))
                 s.exchanges[last].prompt += "\n↳ \(steer)"
                 // Wave-5 gate item 2: surface the queued message separately from the fold above
                 // so the UI can show it as visibly "queued" rather than silently absorbed.
@@ -879,6 +927,7 @@ enum SessionReducer {
             } else {
                 var opened = Exchange(prompt: envelope?.body ?? v.text, reply: "")
                 opened.promptEnvelope = envelope
+                if envelope == nil { opened.promptAttachments = PromptAttachments(v) }
                 s.exchanges.append(opened)
                 // orb-scope Part 2 / Important-2 fix: a NEW exchange is exactly a new-turn start —
                 // stamp who initiated it, UNLESS `clientName` is one of the engine's OWN bookkeeping
@@ -931,6 +980,11 @@ enum SessionReducer {
                let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
                s.exchanges[e].activity[i].toolCallId == v.callId {
                 s.exchanges[e].activity[i].scriptCode = code
+            }
+            if v.name.lowercased() == "read", let path = readToolPath(argsJson: v.argsJson),
+               let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
+               s.exchanges[e].activity[i].toolCallId == v.callId {
+                s.exchanges[e].activity[i].readPath = path
             }
         case .toolReviewProgress(let v):
             // Any thread: a subagent's call is reviewed too, and the callId is unique to the call.
@@ -1626,6 +1680,15 @@ enum SessionReducer {
     }
 
     /// How many lines a `write` call's `content` holds (a trailing newline does not start another).
+    /// A `read` call's `file_path`, whole, when it is absolute (≤ 4096 characters, one line) — `nil` otherwise.
+    static func readToolPath(argsJson: String) -> String? {
+        guard let data = argsJson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = obj["file_path"] as? String, path.hasPrefix("/"), path.count <= 4096,
+              !path.contains(where: \.isNewline) else { return nil }
+        return path
+    }
+
     static func writtenLineCount(argsJson: String) -> Int? {
         guard let data = argsJson.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

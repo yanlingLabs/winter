@@ -136,10 +136,10 @@ export interface InternalRouter {
    */
   quotaFor(providerId: string): QuotaManager | undefined;
   /**
-   * What `daemon.status`/`sync.config` read — THE `codex-oauth` LEDGER, always.
+   * What the `quota.state` RPC reads (via `daemon.ts`'s `quota`) — THE `codex-oauth` LEDGER, always.
    *
    * `daemon.ts` reads this ONCE at boot into the value it hands `startIpcServer`, when the map is still
-   * empty, so the getter's own fallback creates the codex ledger and that is the one status reports for
+   * empty, so the getter's own fallback creates the codex ledger and that is the one `quota.state` reports for
    * the daemon's whole life. Deliberate, and it is the compatibility requirement: codex-oauth is the only
    * backend that ever reports a subscription quota (`quotaEvent`), so a codex user's status reads exactly
    * as it did before the per-provider split. A home that never calls codex-oauth therefore shows an inert

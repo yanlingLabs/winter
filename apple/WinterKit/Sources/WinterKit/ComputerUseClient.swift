@@ -125,6 +125,9 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     /// Phase 4: sites' own agent tools (WebMCP) are discovered and callable (`computerUse.webmcp`). `nil` from a
     /// daemon that predates it.
     public let webmcp: Bool?
+    /// Wake triggers (2026-10-12): a script may arm `wakeWhen` (`computerUse.wakes`). `nil` from a daemon that
+    /// predates them — the page then shows no switch for it.
+    public let wakes: Bool?
     public let helper: ComputerUseHelperStatus
     /// The browsers ComputerV2 can drive (see `ComputerUseBrowserStatus`). `nil` from a daemon that
     /// predates browsers — and from one whose list this build cannot read, which is never a reason to
@@ -132,7 +135,7 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     public let browsers: [ComputerUseBrowserStatus]?
 
     public init(enabled: Bool, legacyComputer: Bool, mirror: Bool, privateEventPath: Bool,
-                allowAllApps: Bool = true, headlessEnabled: Bool? = nil, webmcp: Bool? = nil,
+                allowAllApps: Bool = true, headlessEnabled: Bool? = nil, webmcp: Bool? = nil, wakes: Bool? = nil,
                 helper: ComputerUseHelperStatus, browsers: [ComputerUseBrowserStatus]? = nil) {
         self.enabled = enabled
         self.legacyComputer = legacyComputer
@@ -141,6 +144,7 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
         self.allowAllApps = allowAllApps
         self.headlessEnabled = headlessEnabled
         self.webmcp = webmcp
+        self.wakes = wakes
         self.helper = helper
         self.browsers = browsers
     }
@@ -154,6 +158,7 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
         allowAllApps = try c.decodeIfPresent(Bool.self, forKey: .allowAllApps) ?? true
         headlessEnabled = try c.decodeIfPresent(Bool.self, forKey: .headlessEnabled)
         webmcp = try c.decodeIfPresent(Bool.self, forKey: .webmcp)
+        wakes = try c.decodeIfPresent(Bool.self, forKey: .wakes)
         helper = try c.decode(ComputerUseHelperStatus.self, forKey: .helper)
         browsers = (try? c.decodeIfPresent([ComputerUseBrowserStatus].self, forKey: .browsers)) ?? nil
     }
@@ -164,7 +169,7 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
                           mirror: patch.mirror ?? mirror, privateEventPath: patch.privateEventPath ?? privateEventPath,
                           allowAllApps: patch.allowAllApps ?? allowAllApps,
                           headlessEnabled: patch.headlessEnabled ?? headlessEnabled, webmcp: patch.webmcp ?? webmcp,
-                          helper: helper, browsers: browsers)
+                          wakes: patch.wakes ?? wakes, helper: helper, browsers: browsers)
     }
 }
 
@@ -241,19 +246,22 @@ public struct ComputerUseSettingsPatch: Codable, Equatable, Sendable {
     public var allowAllApps: Bool?
     public var headlessEnabled: Bool?
     public var webmcp: Bool?
+    /// Wake triggers (2026-10-12): `computerUse.wakes`. Off ends every armed trigger.
+    public var wakes: Bool?
 
     public init(enabled: Bool? = nil, mirror: Bool? = nil, privateEventPath: Bool? = nil, allowAllApps: Bool? = nil,
-                headlessEnabled: Bool? = nil, webmcp: Bool? = nil) {
+                headlessEnabled: Bool? = nil, webmcp: Bool? = nil, wakes: Bool? = nil) {
         self.enabled = enabled
         self.mirror = mirror
         self.privateEventPath = privateEventPath
         self.allowAllApps = allowAllApps
         self.headlessEnabled = headlessEnabled
         self.webmcp = webmcp
+        self.wakes = wakes
     }
 
     public var isEmpty: Bool {
-        enabled == nil && mirror == nil && privateEventPath == nil && allowAllApps == nil && headlessEnabled == nil && webmcp == nil
+        enabled == nil && mirror == nil && privateEventPath == nil && allowAllApps == nil && headlessEnabled == nil && webmcp == nil && wakes == nil
     }
 }
 
@@ -268,6 +276,16 @@ public protocol ComputerUseClient: Sendable {
     func setApp(bundleId: String, name: String?, access: ComputerUseAccessWrite, grant: ComputerUseGrantWrite) async throws
     /// PROPOSED (`computerUse.setSettings`) — see the header.
     func setSettings(_ patch: ComputerUseSettingsPatch) async throws
+    /// Wake triggers (2026-10-12): the session pill's [Stop waiting] — `computerUse.wakes.cancel`. `false` when the
+    /// trigger had already ended.
+    func cancelWake(sessionId: String, wakeId: String) async throws -> Bool
+}
+
+extension ComputerUseClient {
+    /// A client that predates wake triggers (a test double) cannot stop one.
+    public func cancelWake(sessionId: String, wakeId: String) async throws -> Bool {
+        throw RpcError(code: -3, message: "computerUse.wakes.cancel is not available on this client")
+    }
 }
 
 /// The production implementation, over `WinterClient.request`.
@@ -329,10 +347,19 @@ public final class LiveComputerUseClient: ComputerUseClient, Sendable {
         if let allowAllApps = patch.allowAllApps { params["allowAllApps"] = .bool(allowAllApps) }
         if let headlessEnabled = patch.headlessEnabled { params["headlessEnabled"] = .bool(headlessEnabled) }
         if let webmcp = patch.webmcp { params["webmcp"] = .bool(webmcp) }
+        if let wakes = patch.wakes { params["wakes"] = .bool(wakes) }
         let r = try await client.request("computerUse.setSettings", params: .object(params))
         guard r["ok"]?.boolValue == true else {
             throw RpcError(code: -3, message: "computerUse.setSettings returned ok:false")
         }
+    }
+
+    public func cancelWake(sessionId: String, wakeId: String) async throws -> Bool {
+        let r = try await client.request("computerUse.wakes.cancel", params: .object(["sessionId": .string(sessionId), "wakeId": .string(wakeId)]))
+        guard r["ok"]?.boolValue == true else {
+            throw RpcError(code: -3, message: "computerUse.wakes.cancel returned ok:false")
+        }
+        return r["cancelled"]?.boolValue ?? false
     }
 
     /// PURE: one wire value as `T`, or `nil` when it does not have `T`'s shape. A JSON round trip because

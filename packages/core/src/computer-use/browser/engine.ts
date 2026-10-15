@@ -8,8 +8,9 @@
 // sites approved on the dangerous-domain card. Tab targets never enter the service's own target table: every
 // helper-facing loop stays app-only, and a tab-only script never launches the helper.
 //
-// POLICY. The built-in browser (`winter`) has no per-app card and no access setting ("Allow all apps" does not apply),
-// but `plan` is observe-only and chat has no computer use. A user's browser is the app with its bundle id: the
+// POLICY. Winter's own browsers — the built-in browser (`winter`) and the headless one (`headless`, Phase 4) — have no
+// per-app card and no access setting ("Allow all apps" does not apply), but `plan` is observe-only and chat has no
+// computer use; the headless browser also stays off the local network (`headless/private-network.ts`). A user's browser is the app with its bundle id: the
 // existing per-app policy (`authorize`) — `browsers.open` is checked as a full-class act first, then as a bind;
 // `browsers.tab` is a bind; reads are observes; acts are acts. One grant covers the browser as an app and its tabs.
 // The dangerous-domain floor and the secure-field floor apply to both backends.
@@ -23,15 +24,22 @@ import type { TabHandle } from "../worker/bridge";
 import { browserForBundleId, familyInfo, familyOfBackendId } from "./families";
 import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
-import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
+import { BLOCKED_TAB_PRIMITIVES, blockedTabMembers, ensureSiteAllowed, listedHost, ruleAllowsSite, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
 import { escapeInvisible } from "./page-runtime/webmcp";
-import { pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
+import { MOD_SHIFT } from "./input";
+import type { RtCheckFacts } from "./page-runtime/protocol";
+import { pressTookEffect, VALUE_CAP, valueWithLength } from "./page-runtime/widgets";
+import { quote } from "./state-format";
+import { HOLD_CEILING_SENTENCE, isWakeHolder, pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
 import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
+import { HEADLESS_ENGINES } from "./headless/engines";
+import { HEADLESS_USER_HAS_TAB, HELD_TAB_PRIMITIVES } from "./headless/lease";
+import { HEADLESS_LAN_REFUSAL, isPrivateNetworkUrl } from "./headless/private-network";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
 import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
 import { clearStagedDownloads, DOWNLOAD_MAX_BYTES, DOWNLOADS_PER_RUN, newStagingDir, placeDownload, planDownload, type DownloadPlan, type DownloadRoots } from "./download-paths";
@@ -49,6 +57,10 @@ const GROUP_COLORS: readonly string[] = ["grey", "blue", "red", "yellow", "green
 const WAIT_FOR_DEFAULT_MS = 10_000;
 const NO_VISION = "this model can't see images — use state()";
 const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed — click the field or pass { into }";
+/** How long a click waits for the page to open a file chooser from it (a button whose handler clicks a file input). */
+const FILE_CHOOSER_WAIT_MS = 150;
+/** How long setValue(ref, true | false) reads a check box for its press to take before calling it unconfirmed. */
+const CHECK_CONFIRM_MS = 2_500;
 
 /** What a tab primitive is, for the per-app policy (everything not here acts). */
 const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text",
@@ -98,10 +110,42 @@ export interface BrowserEngineDeps {
   stopScript?(sessionId: string, reason: string): void;
   /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
   turnRunning?(sessionId: string): boolean;
+  /** Phase 4: the session's runtime ended (idle, deleted) — its headless browser context (its cookies) goes. */
+  headlessSessionEnded?(sessionId: string): void;
+  /** Phase 4: why the headless browser is not offered, when it is not ("turned off in Settings", missing). */
+  headlessReason?(): string | undefined;
+  /** When Winter Headless last refused a request of this tab to the local network (the pool's `localNetworkRefusedAt`). */
+  headlessLocalNetworkRefusedAt?(tabKey: string): number | undefined;
+  /** Lane H3: why a headless tab can't be shown in Winter's panel now (undefined: it can) — `waitForUser` on one. */
+  headlessPresentMissing?(): string | undefined;
+  /** Lane H3: the person pressed Done on a shown headless tab — control returns to the agent and the panel's view goes. */
+  headlessHandBack?(tabKey: string): Promise<void>;
+  /** Lane H3: a `waitForUser` on a shown headless tab ended without Done — the tab stays with the person. */
+  headlessHandoffOver?(tabKey: string): void;
+  /** Lane H3: the view a headless tab's page is laid out in, once it differs from the agent's own (a tab shown in Winter's
+   *  panel follows the panel's size): how often it changed, its size, and whether a person is watching it now. */
+  headlessView?(tabKey: string): { epoch: number; width: number; height: number; watched: boolean } | undefined;
+  /** Lane H3: does the person hold this headless tab in Winter's panel now (what its page does is theirs)? */
+  headlessHeld?(tabKey: string): boolean;
+  /** Lane H3: how many times the person has held this headless tab, and when the latest hold began. */
+  headlessHolds?(tabKey: string): { count: number; since: number } | undefined;
   now?(): number;
   log?(line: string): void;
   /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
   httpReader?: HttpReader;
+  /** Wake triggers: did Winter's helper send input to this browser APP (bound as an app) at `at`, or within the grace
+   *  before it? Its clicks in a page are trusted DOM events too, so a tab watch never counts them as the user's. */
+  ownAppInputAt?(bundleId: string, at: number): boolean;
+}
+
+/** Wake triggers (`wake/backend.ts`): what a tab binding names — its tab's driver and the facts the floors read. */
+export interface WakeTabTarget {
+  backend: BackendId;
+  tabKey: string;
+  family: BrowserFamily;
+  bundleId?: string;
+  browserName: string;
+  driver: TabDriver;
 }
 
 interface Binding {
@@ -142,6 +186,29 @@ export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it
 /** How long a closed tab's teardown is kept for a `rekey` (a navigation's answer follows its "closed" at once). */
 const RECENTLY_CLOSED_MS = 30_000;
 export const HOLDS_GLOBAL = 16;
+
+/** The hold budget is full and wake triggers' waits are (part of) what fills it. */
+export function wakeHoldsFull(waiting: number, scope: "session" | "all"): string {
+  return `${scope === "session" ? `this session holds ${HOLDS_PER_SESSION} tabs` : `${HOLDS_GLOBAL} tabs are held in all`} and ${waiting} of them wait for the user — too many tabs are waiting; stop waiting on one with wakes.cancel(id), or close some with tab.close()`;
+}
+
+/** How long a failed headless navigation waits for the browser's local-network notice (it can trail the answer). */
+const HEADLESS_REFUSAL_GRACE_MS = 400;
+
+/** Phase 4 (the user's ruling on headless tabs): a headless tab is nobody's but the agent's — never handed over. It can
+ *  be SHOWN to the user (lane H3: `waitForUser`, the page drawn in Winter's panel) and stays the agent's. */
+export const HEADLESS_KEEP = "a headless tab can't be handed to the user to keep — it stays in Winter's private browser; to show it to them, call waitForUser() on it (Winter's panel shows the live page), or open the page with browsers.open(url) in Winter's browser";
+/** Lane H3: the hand-off card for a headless tab offers only to show it — nothing of it can be done anywhere else. */
+export const HANDOFF_ASK_OPTIONS_HEADLESS = [{ id: "handoff_show", label: "Show me the tab" }] as const;
+/** What a headless tab can't do, by primitive (the same ruling; the headless browser never downloads and has no sound). */
+function headlessRefusal(primitive: string, args: Record<string, unknown>): string | undefined {
+  switch (primitive) {
+    case "keep": return HEADLESS_KEEP;
+    case "download": return "Winter's headless browser doesn't download files — open the page with browsers.open(url) in Winter's browser to download it";
+    case "mute": return args.on === false ? "a headless tab never plays sound" : undefined;
+    default: return undefined;
+  }
+}
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
 const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
@@ -194,6 +261,9 @@ export class BrowserEngine {
   /** waitForUser(): the hand-off card waiting on a tab (backend|tabKey), answerable from the browser's own Done. */
   private readonly handoffAnswers = new Map<string, (approved: boolean, by: string, optionId?: string) => void>();
   private installedCache?: { at: number; ids: Set<string> };
+  /** Wake triggers: the tab each armed target named (session + target id → backend, tab key) — `hostOf` still answers
+   *  after a reset or a worker restart let go of the binding. */
+  private readonly wakeTabs = new Map<string, { backend: BackendId; tabKey: string }>();
   private unwatch?: () => void;
   private stopped = false;
 
@@ -219,6 +289,12 @@ export class BrowserEngine {
 
   owns(sessionId: string, targetId: string): boolean { return this.sessions.get(sessionId)?.bindings.has(targetId) === true; }
 
+  /** The dangerous-domain floor for a URL the daemon opens OUTSIDE a tab — a link the helper rerouted out of another
+   *  app into its default opener: the same card (or block) as `browsers.open`, the same per-session approvals. */
+  async ensureLinkAllowed(scope: TabRunScope, url: string, openerName: string): Promise<void> {
+    await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, openerName, this.cwdOf(scope.sessionId));
+  }
+
   label(sessionId: string, targetId: string): string | undefined {
     const b = this.sessions.get(sessionId)?.bindings.get(targetId);
     if (b === undefined) return undefined;
@@ -243,6 +319,8 @@ export class BrowserEngine {
         case "browsers.read": return await this.reader.read(scope, checkTabUrl(args.url, "browsers.read()"), args, { approvals: this.approvals, site: this.deps.site ?? {}, cwd: this.cwdOf(scope.sessionId) });
         default: throw bad(`unknown primitive ${primitive}`);
       }
+    } catch (err) {
+      throw this.holdsNameWakes(err);
     } finally {
       scope.metric.engineMs = this.now() - t0;
     }
@@ -257,7 +335,16 @@ export class BrowserEngine {
       scope.live();
       const facts = scope.sessionFacts();
       if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
-      if (NAVIGATE_PRIMITIVES.has(primitive) && this.familyOf(b.backend) !== "winter" && this.usersTab(scope.sessionId, b)) throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
+      if (NAVIGATE_PRIMITIVES.has(primitive) && !this.isWintersOwn(b.backend) && this.usersTab(scope.sessionId, b)) throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
+      if (this.isHeadless(b.backend)) {
+        scope.metric.headlessEngine = "winter";
+        const refusal = headlessRefusal(primitive, args);
+        if (refusal !== undefined) throw new AutomationFailure("NotAllowed", refusal);
+        // The person holds the tab in Winter's panel: nothing of it is the agent's — no read from what the driver already
+        // has (console, network, a state diff), no command — until they hand it back. Letting go, keeping it and waiting
+        // for the person still work.
+        if (this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) throw new AutomationFailure("TargetBusy", HEADLESS_USER_HAS_TAB);
+      }
       const act = !OBSERVE_PRIMITIVES.has(primitive);
       // A site's own tool (WebMCP) is called only while the setting allows it — said before any card.
       if (primitive === "callTool" && scope.webMcp?.() === false) throw new AutomationFailure("NotAllowed", SITE_TOOLS_OFF);
@@ -274,19 +361,52 @@ export class BrowserEngine {
       scope.live();
       this.makeRoomForHold(scope, driver);
       driver.busy++;
+      // An act is Winter's own input to the tab, whatever it sends (a wake trigger never takes what it causes for the
+      // user's).
+      if (act) driver.beginOwnInput();
       try {
-        await driver.ensureAttached(scope.sessionId);
-        scope.live();
-        if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        if (this.isHeadless(b.backend)) {
+          // Lane H3: the page was re-laid out in another size since the agent last looked (the panel's while the user
+          // watches, its own after) — a Point of an earlier screenshot is refused from here on; and the person held the
+          // tab in between — what its page logged and loaded meanwhile was theirs. Each said once, once the agent has the
+          // tab again.
+          driver.syncView(this.deps.headlessView?.(b.tabKey));
+          driver.noteHolds(this.deps.headlessHolds?.(b.tabKey));
+        }
+        // A primitive that works while the person holds the tab (letting it go, keeping it, waiting for them — Drill B,
+        // 2026-10-13: a waitForUser on a tab the person had taken over threw TargetBusy at this attach) runs without
+        // taking the tab: the pool refuses the agent's attach for the whole hold, and nothing of the page is the agent's
+        // to read or card meanwhile. waitForUser's own Done attaches again, once the tab is handed back.
+        const heldPass = this.isHeadless(b.backend) && this.deps.headlessHeld?.(b.tabKey) === true && HELD_TAB_PRIMITIVES.has(primitive);
+        if (!heldPass) {
+          await driver.ensureAttached(scope.sessionId);
+          scope.live();
+          for (const line of driver.takeNotes()) scope.builder.daemonLine(line);
+          if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        }
+        // Again, right before the work: the lock, the attach and a site card can each wait long enough for the person to
+        // take the tab over meanwhile.
+        if (this.isHeadless(b.backend) && this.deps.headlessHeld?.(b.tabKey) === true && !HELD_TAB_PRIMITIVES.has(primitive)) {
+          throw new AutomationFailure("TargetBusy", HEADLESS_USER_HAS_TAB);
+        }
         return await this.run(scope, b, driver, primitive, args);
       } finally {
         driver.busy--;
+        if (act) driver.endOwnInput();
       }
     } catch (err) {
-      throw this.lostIfGone(scope.sessionId, b, err);
+      throw this.holdsNameWakes(this.lostIfGone(scope.sessionId, b, err));
     } finally {
       scope.metric.engineMs = this.now() - t0;
     }
+  }
+
+  /** Winter.app's ceiling on held built-in tabs, reached while wake triggers hold some of them: the sentence names
+   *  `wakes.cancel` too (a waiting tab is held until its trigger ends). */
+  private holdsNameWakes(err: unknown): unknown {
+    if (!(err instanceof AutomationFailure) || err.kind !== "TargetBusy" || err.message !== HOLD_CEILING_SENTENCE) return err;
+    const waiting = [...this.drivers.values()].filter((d) => this.familyOf(d.backend) === "winter" && d.wakeHolders.size > 0).length;
+    return waiting === 0 ? err : new AutomationFailure("TargetBusy", `${HOLD_CEILING_SENTENCE}, or stop waiting on one with wakes.cancel(id) (${waiting} built-in tab${waiting === 1 ? " waits" : "s wait"} for the user)`);
   }
 
   /** A run ended: its "once" site approvals go, and a user browser bound on an "Allow once" answer is released. */
@@ -321,7 +441,8 @@ export class BrowserEngine {
       void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
     }
     for (const [key, a] of [...s.agentTabs]) {
-      if (shouldCloseAgentTab({ event: "turn-ended", family: this.familyOf(a.backend), kept: a.kept, handoff: a.handoff })) {
+      const waiting = (this.drivers.get(key)?.wakesArmed ?? 0) > 0;
+      if (shouldCloseAgentTab({ event: "turn-ended", family: this.familyOf(a.backend), kept: a.kept, handoff: a.handoff, waiting })) {
         this.closeAgentTab(sessionId, s, key, a, "closed_turn_end");
       } else {
         a.handoff = false;
@@ -347,7 +468,9 @@ export class BrowserEngine {
     const d = this.drivers.get(key);
     if (d !== undefined) { void d.release(sessionId); d.onGone("closed"); this.drivers.delete(key); }
     const transport = this.deps.registry.get(a.backend);
-    if (transport === undefined || !transport.connected) return;
+    // The headless pool is asked even while it is not offered (turned off, its app gone): it forgets the tab at once,
+    // so a tab it can no longer close never stays counted against the open-tab budget.
+    if (transport === undefined || (!transport.connected && this.familyOf(a.backend) !== "headless")) return;
     void transport.closeTab(a.tabKey).catch((err: unknown) => this.deps.log?.(`computer-use: closing ${a.backend}:${a.tabKey} failed (${err instanceof Error ? err.message : "error"})`));
   }
 
@@ -368,11 +491,17 @@ export class BrowserEngine {
     const s = this.sessions.get(sessionId);
     if (s !== undefined) {
       for (const b of s.bindings.values()) if (b.lost === undefined) void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
-      if (reason === "deleted") {
+      if (reason === "deleted" || reason === "idle") {
+        const event = reason === "deleted" ? "session-deleted" : "idle-ended";
         for (const [key, a] of [...s.agentTabs]) {
-          if (shouldCloseAgentTab({ event: "session-deleted", family: this.familyOf(a.backend), kept: a.kept })) this.closeAgentTab(sessionId, s, key, a, "closed_session_end");
+          if (shouldCloseAgentTab({ event, family: this.familyOf(a.backend), kept: a.kept })) this.closeAgentTab(sessionId, s, key, a, "closed_session_end");
         }
       }
+    }
+    // The session's private headless context (its cookies) goes with its runtime; at daemon stop the headless browser
+    // exits and takes every context along.
+    if (reason !== "stop") {
+      try { this.deps.headlessSessionEnded?.(sessionId); } catch { /* best effort */ }
     }
     // The runtime idling out keeps the session's memory of its agent tabs (the next turn's end still closes them);
     // the bindings themselves went with the worker.
@@ -381,6 +510,7 @@ export class BrowserEngine {
       s.byTab.clear();
     }
     if (reason === "deleted") {
+      for (const k of [...this.wakeTabs.keys()]) if (k.startsWith(`${sessionId}\u0000`)) this.wakeTabs.delete(k);
       this.sessions.delete(sessionId);
       this.approvals.sessionEnded(sessionId);
     }
@@ -417,11 +547,95 @@ export class BrowserEngine {
     this.hooked.clear();
   }
 
+  // ── wake triggers (`wake/backend.ts`) ───────────────────────────────────────────────────────────
+
+  /** What a session's tab binding names now: its tab's driver (taken by the backend for the trigger's life — the
+   *  binding itself may go with a reset, a worker restart or a turn end) and the facts its floors read. */
+  wakeTarget(sessionId: string, targetId: string): WakeTabTarget {
+    if (this.stopped) throw new AutomationFailure("BrowserUnavailable", "Winter is shutting down");
+    const b = this.binding(sessionId, targetId);
+    this.wakeTabs.set(`${sessionId}\u0000${targetId}`, { backend: b.backend, tabKey: b.tabKey });
+    return {
+      backend: b.backend, tabKey: b.tabKey, family: this.familyOf(b.backend), browserName: this.browserName(b.backend),
+      ...(b.bundleId === undefined ? {} : { bundleId: b.bundleId }), driver: this.driverFor(b.backend, b.tabKey),
+    };
+  }
+
+  /** The dangerous-domain floor with no run (a trigger is armed without a card): the listed host `url` is on when the
+   *  session has not approved it for the session (a one-run approval does not count) and no saved rule allows it. */
+  wakeSiteBlocked(sessionId: string, url: string): string | undefined {
+    if (!/^https?:/i.test(url)) return undefined;
+    const cwd = this.cwdOf(sessionId);
+    const match = listedHost(url, this.deps.site ?? {}, cwd);
+    if (match === null) return undefined;
+    if (this.approvals.approved(sessionId, "", match.host)) return undefined;
+    let rules: readonly string[] = [];
+    try { rules = this.deps.site?.savedAllowRules?.(cwd) ?? []; } catch { rules = []; }
+    return ruleAllowsSite(rules, url) ? undefined : match.host;
+  }
+
+  /** The bound tab's host now — the wake audit line's `site` (a host only, token-looking runs redacted; never a path or
+   *  query). Answers for a target a trigger was armed on even after its binding went. */
+  hostOf(sessionId: string, targetId: string): string | undefined {
+    const b = this.sessions.get(sessionId)?.bindings.get(targetId);
+    const tab = b === undefined ? this.wakeTabs.get(`${sessionId}\u0000${targetId}`) : { backend: b.backend, tabKey: b.tabKey };
+    if (tab === undefined) return undefined;
+    const d = this.drivers.get(tabKeyOf(tab.backend, tab.tabKey));
+    if (d === undefined) return undefined;
+    try {
+      const host = new URL(d.url).hostname;
+      return host.length > 0 ? redactText(host) : undefined;
+    } catch { return undefined; }
+  }
+
+  /** Did the user allow this browser app beyond one call (a trigger outlives the call)? */
+  wakeAllowed(sessionId: string, bundleId: string): boolean {
+    try { return this.deps.persistentlyAllowed?.(sessionId, bundleId) === true; } catch { return false; }
+  }
+
+  /** Winter's helper input to this browser app at `at` (see `BrowserEngineDeps.ownAppInputAt`). */
+  wakeOwnAppInput(bundleId: string, at: number): boolean {
+    try { return this.deps.ownAppInputAt?.(bundleId, at) === true; } catch { return false; }
+  }
+
+  /** A wake trigger that keeps `driver` held (the debugger path) counts against the hold budgets — the session's
+   *  `HOLDS_PER_SESSION` and `HOLDS_GLOBAL` in all, waiting tabs only (`arming`: the holder being armed, not counted):
+   *  the refusal's sentence, or undefined when there is room (or the tab is held for another wake of the session). */
+  wakeHoldRefusal(sessionId: string, driver: TabDriver, arming: string): string | undefined {
+    if (this.isHeadless(driver.backend)) return undefined;
+    const holds = (d: TabDriver): string[] => [...d.wakeHolders].filter(([h]) => h !== arming).map(([, sid]) => sid);
+    const waiting = [...this.drivers.values()].filter((d) => !this.isHeadless(d.backend) && holds(d).length > 0);
+    const mine = waiting.filter((d) => holds(d).includes(sessionId));
+    if (mine.includes(driver)) return undefined;
+    if (mine.length >= HOLDS_PER_SESSION) return `${mine.length} tabs already wait for the user in this session (at most ${HOLDS_PER_SESSION}) — too many tabs are waiting; cancel one with wakes.cancel(id)`;
+    if (!waiting.includes(driver) && waiting.length >= HOLDS_GLOBAL) return `${waiting.length} tabs already wait for the user (at most ${HOLDS_GLOBAL} in all) — too many tabs are waiting; cancel one with wakes.cancel(id)`;
+    return undefined;
+  }
+
+  /**
+   * A wake trigger on this tab ended (fired, lost, cancelled, expired): an AGENT tab gets the `handoff` mark — one more
+   * turn — when its session is running a turn now (or that can't be told), so the turn that is ending does not close
+   * it under the wake it is about to deliver; the ordinary rule then applies at the wake turn's end. (Ended between
+   * turns, the next turn end IS the wake turn's.)
+   */
+  wakeEnded(backend: BackendId, tabKey: string): void {
+    const key = tabKeyOf(backend, tabKey);
+    for (const [sid, s] of this.sessions) {
+      const a = s.agentTabs.get(key);
+      if (a === undefined) continue;
+      let running = true;
+      try { if (this.deps.turnRunning !== undefined) running = this.deps.turnRunning(sid) === true; } catch { running = true; }
+      if (running) a.handoff = true;
+    }
+  }
+
   /** The backends for `computerUse.status` and `browsers.list()`. */
   listRows(): BrowserListRow[] {
     const rows = new Map<string, BrowserListRow>();
     for (const r of this.deps.registry.list()) {
-      rows.set(r.id, { id: r.id, name: r.name, isDefault: r.id === "winter", connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) });
+      // The headless browser's reason is the pool's own ("turned off in Settings", missing), not a link's.
+      const reason = r.connected ? undefined : r.family === "headless" ? (this.deps.headlessReason?.() ?? "Winter's headless browser is not available") : r.reason;
+      rows.set(r.id, { id: r.id, name: r.name, isDefault: r.id === "winter", connected: r.connected, ...(reason === undefined ? {} : { reason }) });
     }
     if (!rows.has("winter")) rows.set("winter", { id: "winter", name: "Winter (built-in)", isDefault: true, connected: false, reason: "Winter isn't running" });
     const installed = this.installedBundleIds();
@@ -434,7 +648,7 @@ export class BrowserEngine {
       const name = browserForBundleId(channel)?.name ?? info.name;
       rows.set(fam, { id: fam, name, isDefault: false, connected: false, reason: `Winter for Chrome is not installed in ${name} — ask the user` });
     }
-    const order = ["winter", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
+    const order = ["winter", "headless", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
     return [...rows.values()].sort((a, b) => order.indexOf(familyOfBackendId(a.id) ?? "") - order.indexOf(familyOfBackendId(b.id) ?? "") || a.id.localeCompare(b.id));
   }
 
@@ -447,7 +661,8 @@ export class BrowserEngine {
       live.add(transport);
       if (this.hooked.has(transport)) continue;
       const off = [
-        transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e)),
+        // A headless tab the person holds in Winter's panel: its page is followed, but what it does is theirs.
+        transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e, { person: this.personHolds(id, e.tabKey) })),
         transport.onTabGone((tabKey, reason) => this.tabGone(id, tabKey, reason)),
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
         // The hand-off's Done / Stop waiting in the browser itself (Winter for Chrome's toolbar popup).
@@ -460,7 +675,7 @@ export class BrowserEngine {
         })]),
       ];
       this.hooked.set(transport, { backend: id, off });
-      if (this.familyOf(id) !== "winter" && transport.connected) void this.reconcileOrphans(id, transport);
+      if (!this.isWintersOwn(id) && transport.connected) void this.reconcileOrphans(id, transport);
     }
     for (const [t, h] of this.hooked) {
       if (live.has(t)) continue;
@@ -530,16 +745,28 @@ export class BrowserEngine {
   private makeRoomForHold(scope: TabRunScope, driver: TabDriver): void {
     driver.lastUsed = this.now();
     if (driver.isAttached && driver.holders.has(scope.sessionId)) return;
-    const held = [...this.drivers.values()].filter((d) => d !== driver && d.isAttached && d.holders.size > 0);
-    const mine = held.filter((d) => d.holders.has(scope.sessionId));
+    // A headless tab's attachment costs nothing in Winter.app: the pool's open-tab caps are its budget, and it neither
+    // counts toward these caps nor is let go for them.
+    if (this.isHeadless(driver.backend)) return;
+    const held = [...this.drivers.values()].filter((d) => d !== driver && d.isAttached && d.holders.size > 0 && !this.isHeadless(d.backend));
+    // A tab a wake trigger holds (its debugger path) counts for its session, and is never let go for another hold.
+    const mine = held.filter((d) => d.holders.has(scope.sessionId) || [...d.wakeHolders.values()].includes(scope.sessionId));
     const free = (list: TabDriver[]): TabDriver[] => list.filter((d) => {
-      if (d.busy > 0) return false;
+      if (d.busy > 0 || d.wakeHolders.size > 0) return false;
       const run = scope.lockRun(`tab:${d.backend}:${d.tabKey}`);
       return run === undefined || run === scope.runId;
     });
     const lru = (list: TabDriver[]): TabDriver | undefined => free(list).reduce<TabDriver | undefined>((a, d) => (a === undefined || d.lastUsed < a.lastUsed ? d : a), undefined);
-    const victim = mine.length >= HOLDS_PER_SESSION ? lru(mine) : held.length >= HOLDS_GLOBAL ? lru(held) : undefined;
-    if (victim === undefined) return;
+    const over = mine.length >= HOLDS_PER_SESSION ? mine : held.length >= HOLDS_GLOBAL ? held : undefined;
+    if (over === undefined) return;
+    const victim = lru(over);
+    if (victim === undefined) {
+      // Never past the cap for good: tabs wake triggers wait on stay held until their triggers end, so the hold is
+      // refused, naming the way out. (Tabs a primitive is using right now are past it only for that moment.)
+      const waiting = over.filter((d) => d.wakeHolders.size > 0).length;
+      if (waiting > 0) throw new AutomationFailure("TargetBusy", wakeHoldsFull(waiting, over === mine ? "session" : "all"));
+      return;
+    }
     const cap = mine.length >= HOLDS_PER_SESSION ? `${HOLDS_PER_SESSION} in this session` : `${HOLDS_GLOBAL} in all`;
     scope.builder.daemonLine(`let go of ${victim.backend}:${victim.tabKey} (the least recently used of more than ${cap} held tabs) — it stays open; using it again takes it back`);
     for (const sid of [...victim.holders]) void victim.release(sid);
@@ -547,7 +774,8 @@ export class BrowserEngine {
 
   private stopPressed(backend: BackendId, tabKey: string): void {
     const d = this.drivers.get(tabKeyOf(backend, tabKey));
-    for (const sid of d?.holders ?? []) this.deps.stopScript?.(sid, "the user pressed Stop in the browser");
+    // Sessions only: a wake trigger's hold (`wake:<id>`) runs no script.
+    for (const sid of d?.holders ?? []) if (!isWakeHolder(sid)) this.deps.stopScript?.(sid, "the user pressed Stop in the browser");
   }
 
   private driverFor(backend: BackendId, tabKey: string): TabDriver {
@@ -557,7 +785,7 @@ export class BrowserEngine {
     let d = this.drivers.get(key);
     if (d === undefined) {
       const driver = new TabDriver(backend, tabKey, transport, this.browserName(backend), () => this.now());
-      if (this.familyOf(backend) !== "winter") driver.onRekey = (newKey) => this.rekey(driver, newKey);
+      if (!this.isWintersOwn(backend)) driver.onRekey = (newKey) => this.rekey(driver, newKey);
       d = driver;
       this.drivers.set(key, d);
     } else d.replaceTransport(transport);
@@ -601,13 +829,16 @@ export class BrowserEngine {
         s.agentTabs.set(newK, a);
       }
     }
+    // A wake trigger's record of the tab (`hostOf`) follows it too.
+    for (const [k, v] of this.wakeTabs) if (v.backend === backend && v.tabKey === oldKey) this.wakeTabs.set(k, { backend, tabKey: newKey });
     this.deps.log?.(`computer-use: ${backend} tab ${oldKey} came back as ${newKey} after a navigation`);
     return true;
   }
 
   private unavailable(backend: BackendId): AutomationFailure {
     const row = this.listRows().find((r) => r.id === backend);
-    const reason = row?.reason ?? (familyOfBackendId(backend) === "winter" ? "Winter isn't running" : "it is not connected");
+    const fam = familyOfBackendId(backend);
+    const reason = row?.reason ?? (fam === "winter" ? "Winter isn't running" : fam === "headless" ? (this.deps.headlessReason?.() ?? "it is not available") : "it is not connected");
     return new AutomationFailure("BrowserUnavailable", `${row?.name ?? backend} can't be reached: ${reason}`, true);
   }
 
@@ -615,14 +846,26 @@ export class BrowserEngine {
     return this.deps.registry.info(backend)?.family ?? familyOfBackendId(backend) ?? "chromium";
   }
 
+  /** Winter's own browsers (`winter`, `headless`): no bundle id, no per-app card; `plan` is observe-only. */
+  private isWintersOwn(backend: BackendId): boolean {
+    const f = this.familyOf(backend);
+    return f === "winter" || f === "headless";
+  }
+
+  private isHeadless(backend: BackendId): boolean { return this.familyOf(backend) === "headless"; }
+  private personHolds(backend: BackendId, tabKey: string): boolean {
+    return this.deps.headlessHeld !== undefined && this.isHeadless(backend) && this.deps.headlessHeld(tabKey);
+  }
+
   private browserName(backend: BackendId): string {
     if (this.familyOf(backend) === "winter") return "Winter's browser";
+    if (this.familyOf(backend) === "headless") return "Winter's headless browser";
     return this.deps.registry.info(backend)?.name ?? familyInfo(this.familyOf(backend))?.name ?? backend;
   }
 
   private bundleIdOf(backend: BackendId): string | undefined {
     const fam = this.familyOf(backend);
-    if (fam === "winter") return undefined;
+    if (fam === "winter" || fam === "headless") return undefined;
     return this.deps.registry.info(backend)?.bundleId ?? familyInfo(fam)?.bundleIds[0];
   }
 
@@ -733,6 +976,15 @@ export class BrowserEngine {
   private async open(scope: TabRunScope, args: Record<string, unknown>): Promise<TabHandle> {
     const url = checkTabUrl(args.url, "browsers.open()");
     const backend = this.backendFor(args.browser);
+    const headless = this.isHeadless(backend);
+    // `engine` (Phase 4): which engine runs a headless tab — Winter Headless (`winter`) is the only one.
+    if (args.engine !== undefined) {
+      if (!headless) throw bad("{ engine } is for { browser: \"headless\" }");
+      if (typeof args.engine !== "string" || !(HEADLESS_ENGINES as readonly string[]).includes(args.engine.trim().toLowerCase())) {
+        throw bad(`no headless engine "${String(args.engine).slice(0, 40)}" — the engines are: ${HEADLESS_ENGINES.join(", ")}`);
+      }
+    }
+    if (headless && isPrivateNetworkUrl(url)) throw new AutomationFailure("NotAllowed", HEADLESS_LAN_REFUSAL);
     const facts = scope.sessionFacts();
     if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
     const transport = this.deps.registry.get(backend);
@@ -757,6 +1009,9 @@ export class BrowserEngine {
       if (this.familyOf(backend) === "winter") {
         const tabKey = this.deps.mintWinterTab(scope.sessionId, url === "about:blank" ? undefined : url);
         tab = await transport.createTab({ sessionId: scope.sessionId, url, tabKey, ...(title === undefined ? {} : { sessionTitle: title }) });
+      } else if (headless) {
+        const engine = typeof args.engine === "string" ? args.engine.trim().toLowerCase() : HEADLESS_ENGINES[0];
+        tab = await transport.createTab({ sessionId: scope.sessionId, url, engine });
       } else {
         tab = await transport.createTab({ sessionId: scope.sessionId, url, ...(title === undefined ? {} : { sessionTitle: title }) });
       }
@@ -767,7 +1022,8 @@ export class BrowserEngine {
     const driver = this.driverFor(backend, tab.tabKey);
     const loaded = await driver.waitOpened(url, scope.signal);
     scope.live();
-    scope.builder.daemonLine(this.familyOf(backend) === "winter" ? "opened a new tab in Winter's browser" : `opened a new tab in ${name} (in the background)`);
+    scope.builder.daemonLine(this.familyOf(backend) === "winter" ? "opened a new tab in Winter's browser"
+      : headless ? "opened a new tab in Winter's headless browser (nobody sees it)" : `opened a new tab in ${name} (in the background)`);
     if (!loaded) scope.builder.daemonLine("still loading after 10 s");
     // Where the tab LANDED (a redirect) meets the dangerous-domain floor before anything of it is printed.
     await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
@@ -789,6 +1045,15 @@ export class BrowserEngine {
     }
     const transport = this.deps.registry.get(backend);
     if (transport === undefined || !transport.connected) throw this.unavailable(backend);
+    if (this.isHeadless(backend)) {
+      // The session's own headless tabs only (another session's are in another context); nothing is started to list.
+      let mine: TransportTab[];
+      try { mine = await transport.listTabs({ sessionId: scope.sessionId }); } catch (err) { throw transportFailure(err, this.browserName(backend)); }
+      return mine.map((t) => ({
+        id: `${backend}:${t.tabKey}`, browser: backend, url: shownUrl(t.url.length > 0 ? t.url : "about:blank"), title: t.title, active: false,
+        yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false,
+      }));
+    }
     // Listing a user's browser reads every tab's title and URL: it needs that browser's per-app consent, the same as
     // binding it (the card under the asking policies; only "Always allow" under dont-ask).
     const bundleId = this.bundleIdOf(backend);
@@ -811,6 +1076,8 @@ export class BrowserEngine {
     for (const r of this.listRows()) {
       if (familyOfBackendId(r.id) === "winter") { ids.push(r.id); continue; }
       if (!r.connected) continue;
+      // The headless browser is Winter's own: its tabs are listed with no grant (only this session's).
+      if (familyOfBackendId(r.id) === "headless") { ids.push(r.id); continue; }
       const bundleId = this.bundleIdOf(r.id);
       if (bundleId !== undefined && !scope.granted(bundleId)) { leftOut.push(`${r.name} (${r.id}) — not allowed in this session yet`); continue; }
       ids.push(r.id);
@@ -853,18 +1120,19 @@ export class BrowserEngine {
       const rows = await this.tabRows(scope, backend);
       const hit = rows.find((r) => r.id === `${backend}:${tabKey}`);
       if (hit === undefined) {
-        throw new AutomationFailure("TargetLost", this.familyOf(backend) === "winter"
+        throw new AutomationFailure("TargetLost", this.isWintersOwn(backend)
           ? `no tab ${t.slice(0, 80)} in this session's tabs — browsers.tabs() lists them`
           : `no tab ${t.slice(0, 80)} is open — browsers.tabs() lists them`);
       }
       url = hit.url;
     } else if (t !== null && typeof t === "object" && (t as { active?: unknown }).active === true) {
       // The tab the user has in front in a user's browser (named, or the one allowed and connected).
-      const chosen = args.browser === undefined ? this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter") : [this.backendFor(args.browser)];
+      const chosen = args.browser === undefined ? this.defaultBackends(scope).ids.filter((id) => !this.isWintersOwn(id)) : [this.backendFor(args.browser)];
       if (chosen.length === 0) throw bad("browsers.tab({ active: true }) needs a user's browser: name it with { browser } (browsers.list() shows them)");
       if (chosen.length > 1) throw bad(`several browsers are connected — name one with { browser }: ${chosen.join(", ")}`);
       backend = chosen[0]!;
       if (this.familyOf(backend) === "winter") throw bad("browsers.tab({ active: true }) is for a user's browser — bind a built-in tab by its id from browsers.tabs()");
+      if (this.isHeadless(backend)) throw bad("browsers.tab({ active: true }) is for a user's browser — bind a headless tab by its id from browsers.tabs()");
       const rows = await this.tabRows(scope, backend);
       const front = rows.filter((r) => r.active).sort((a, b) => (b.lastUsed ?? "").localeCompare(a.lastUsed ?? ""))[0];
       if (front === undefined) throw new AutomationFailure("TargetLost", `no tab is in front in ${this.browserName(backend)}`);
@@ -936,6 +1204,11 @@ export class BrowserEngine {
     const cwd = this.cwdOf(scope.sessionId);
     const url = driver.url;
     if (url.length === 0) return;
+    // The user's ruling (the LAN is refused): a headless tab that landed on the local network (a redirect, the page's own script) is read and acted on no
+    // further — only the members a blocked tab keeps work until it navigates away.
+    if (this.isHeadless(b.backend) && isPrivateNetworkUrl(url)) {
+      throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL}. This tab is on one — only ${blockedTabMembers()} work on it until it navigates away`);
+    }
     const match = listedHost(url, this.deps.site ?? {}, cwd);
     if (match === null) return;
     const runKey = `${scope.sessionId}\u0000${scope.runId}`;
@@ -964,11 +1237,11 @@ export class BrowserEngine {
   /** Where a pointer act lands. `press`: the act presses a button there — refused on a native picker control (a
    *  <select>, a date/time/color or file input, a label for one), whose window would open on the user's screen.
    *  `menu`: a right-click — the browser's own context menu must not open either (the page's own may). */
-  private async pointOf(scope: TabRunScope, b: Binding, driver: TabDriver, v: unknown, what: string, press = false, menu = false): Promise<{ x: number; y: number }> {
+  private async pointOf(scope: TabRunScope, b: Binding, driver: TabDriver, v: unknown, what: string, press = false, menu = false): Promise<{ x: number; y: number; check?: RtCheckFacts; chooser?: true }> {
     if (isRef(v)) {
       const p = await driver.pointForRef(v, menu ? { guardMenu: true } : {});
       if (press && p.picker !== undefined) throw new AutomationFailure("Refused", pickerSentence(v, p.picker));
-      return { x: p.x, y: p.y };
+      return { x: p.x, y: p.y, ...(p.check === undefined ? {} : { check: p.check }), ...(p.chooser === true ? { chooser: true as const } : {}) };
     }
     if (isPoint(v)) {
       this.requireVision(scope);
@@ -980,6 +1253,62 @@ export class BrowserEngine {
       return at;
     }
     throw bad(`${what} takes an element ref${scope.vision ? " or a [x, y] point" : ""}`);
+  }
+
+  /** After a click: a check box, radio or switch that did not take the press is said (nothing when it did — a radio
+   *  already on stays on); a file chooser the page opened from the click (a button whose handler clicks a hidden file
+   *  input) is said, naming the input to upload() into — Winter intercepts the chooser, so nothing opened on screen. */
+  private async afterPress(scope: TabRunScope, driver: TabDriver, ref: number | undefined, check: RtCheckFacts | undefined, single: boolean, chooserBefore: boolean, mayChoose: boolean): Promise<void> {
+    if (ref !== undefined && check !== undefined && single) {
+      const now = await driver.checkAfterPress(ref, check.kind, check.checked, 600, scope.signal);
+      if (now !== undefined && !pressTookEffect(check.kind, check.checked, now)) {
+        scope.builder.daemonLine(`[${ref}] still reads ${now ? "checked" : "unchecked"} after the click — the page may not have taken the press there; state() shows what it did`);
+      }
+    }
+    // Waited for only after a press that may open one (`mayOpenChooser` in the page runtime: a button with a file input
+    // in its form or near it); a chooser already reported is said after any press.
+    if (!chooserBefore && (driver.fileChooser !== undefined || (mayChoose && await driver.waitFileChooser(FILE_CHOOSER_WAIT_MS, scope.signal)))) {
+      const input = await driver.fileChooserInput();
+      scope.builder.daemonLine(`the click opened the page's file chooser — Winter held it, so nothing opened on screen; ${input === undefined
+        ? "upload(ref, paths) on its file input puts the files in"
+        : `upload([${input}], paths) puts the files in (its file input)`}`);
+    }
+  }
+
+  /** What a key did, when the engine can tell: where the focus went (Tab), a check box's state (Space, Return), a field's
+   *  selection (⌘A). Undefined: nothing to say beyond the press itself. */
+  private async keyOutcome(scope: TabRunScope, driver: TabDriver, combo: string, target: { ref?: number; label?: string; editable: boolean },
+                           o: { isTab: boolean; selectAll: boolean; check?: { checked?: boolean; kind?: "checkbox" | "radio" }; repeat: number; textBefore?: string | null }): Promise<string | undefined> {
+    try {
+      if (o.isTab) {
+        const now = await driver.focusNow();
+        if (now.ref === undefined) return target.ref === undefined ? `pressed ${combo} — the focus did not move (nothing on the page has it)` : `pressed ${combo} — the focus left ${target.label} (nothing on the page has it now)`;
+        if (now.ref === target.ref) {
+          const after = o.textBefore === null || o.textBefore === undefined || target.ref === undefined ? null : await driver.readBack(target.ref);
+          if (after !== null && after !== o.textBefore) return `pressed ${combo} — ${target.label} took the key itself (its text changed; the focus stayed there)`;
+          if (o.repeat === 1) return `pressed ${combo} — the focus did not move (still ${target.label})`;
+        }
+        return `pressed ${combo} — the focus is now on ${now.label}`;
+      }
+      if (o.check !== undefined && target.ref !== undefined && o.check.checked !== undefined) {
+        const kind = o.check.kind ?? "checkbox";
+        const now = await driver.checkAfterPress(target.ref, kind, o.check.checked, 600, scope.signal);
+        if (now === undefined) return undefined;
+        return pressTookEffect(kind, o.check.checked, now)
+          ? `pressed ${combo} in ${target.label} — it is now ${now ? "checked" : "unchecked"}`
+          : `pressed ${combo} in ${target.label} — it did not change (still ${now ? "checked" : "unchecked"})`;
+      }
+      if (o.selectAll && target.editable && target.ref !== undefined) {
+        const now = await driver.focusNow();
+        if (now.ref !== target.ref || now.selection === undefined) return undefined;
+        const sel = now.selection;
+        if (sel.length === 0) return `pressed ${combo} in ${target.label} — the field is empty`;
+        return sel.start === 0 && sel.end === sel.length
+          ? `pressed ${combo} in ${target.label} — all ${sel.length} characters are selected`
+          : `pressed ${combo} in ${target.label} — the field's text was not all selected (selection ${sel.start}–${sel.end} of ${sel.length})`;
+      }
+    } catch { /* the page moved on (a navigation): nothing to say */ }
+    return undefined;
   }
 
   private settleFor(scope: TabRunScope, b: Binding, args: Record<string, unknown>): { maxMs: number } | undefined {
@@ -1024,12 +1353,15 @@ export class BrowserEngine {
           }
           if (o.exact === true) (query as Record<string, unknown>).exact = true;
         } else throw bad("find() takes text, or { role, name, text, label, placeholder, testId, css }");
-        const found = await driver.find(query);
+        const raw = await driver.find(query);
+        // A long value is cut at 200 characters and says its length and where it reads whole (the helper's wording).
+        const found = raw.map(({ valueLength, ...e }) => (e.value === undefined || e.value === "<redacted>" ? e
+          : { ...e, value: valueWithLength(e.ref, e.value, valueLength, VALUE_CAP, (v) => v) }));
         scope.builder.markScreenRead();
         if (args.emit !== false) {
-          scope.builder.text(found.length === 0 ? "(nothing in this tab matches)" : found.map((e) => {
+          scope.builder.text(found.length === 0 ? "(nothing in this tab matches)" : raw.map((e) => {
             const states = e.states !== undefined && e.states.length > 0 ? ` (${e.states.join(", ")})` : "";
-            return `[${e.ref}] ${e.role}${e.name === undefined ? "" : ` "${e.name}"`}${e.value === undefined ? "" : e.value === "<redacted>" ? " value=<redacted>" : ` value="${e.value.slice(0, 200)}"`}${states}`;
+            return `[${e.ref}] ${e.role}${e.name === undefined ? "" : ` "${e.name}"`}${e.value === undefined ? "" : e.value === "<redacted>" ? " value=<redacted>" : ` value=${valueWithLength(e.ref, e.value, e.valueLength, VALUE_CAP, quote)}`}${states}`;
           }).join("\n"), { screen: true });
         }
         return found;
@@ -1043,8 +1375,11 @@ export class BrowserEngine {
         }
         const at = await this.pointOf(scope, b, driver, args.target, "click()", true, args.button === "right");
         scope.live();
+        const chooserBefore = driver.fileChooser !== undefined;
         await driver.click(at, { button: args.button, count: args.count, modifiers: args.modifiers });
         scope.acted.add(b.targetId);
+        const single = (args.button === undefined || args.button === "left") && (args.count === undefined || args.count === 1) && (args.modifiers === undefined || (Array.isArray(args.modifiers) && args.modifiers.length === 0));
+        await this.afterPress(scope, driver, isRef(args.target) ? args.target : undefined, at.check, single, chooserBefore, at.chooser === true);
         return undefined;
       }
       case "setValue": {
@@ -1053,9 +1388,16 @@ export class BrowserEngine {
           const st = await driver.checkState(args.ref);
           if (!st.checkable) throw bad(`setValue(ref, true | false) is for a check box, radio or switch — [${args.ref}] is not one`);
           if (st.checked !== args.value) {
-            const at = await this.pointOf(scope, b, driver, args.ref, "setValue()", true);
+            // Pressed where the page takes it: the element, its label, or the native control a role-less wrapper holds.
+            const at = await this.pointOf(scope, b, driver, st.control ?? args.ref, "setValue()", true);
             scope.live();
             await driver.click(at, {});
+            scope.acted.add(b.targetId);
+            // A slow page may apply it late: read for a while, then say it is not confirmed (Uncertain), never "failed".
+            const now = await driver.checkAfterPress(args.ref, st.kind ?? "checkbox", st.checked === true, CHECK_CONFIRM_MS, scope.signal);
+            if (now !== undefined && now !== args.value) {
+              throw new AutomationFailure("Uncertain", `[${args.ref}] was pressed but still reads ${now ? "checked" : "unchecked"} after ${CHECK_CONFIRM_MS / 1000} s — the page may apply it late or not have taken the press; check state() before pressing it again`);
+            }
           }
           scope.acted.add(b.targetId);
           return undefined;
@@ -1065,7 +1407,7 @@ export class BrowserEngine {
           driver.dialog.promptText = args.value;
           return undefined;
         }
-        await driver.setValue(args.ref, args.value);
+        await driver.setValue(args.ref, args.value, { live: () => scope.live(), signal: scope.signal });
         scope.acted.add(b.targetId);
         return undefined;
       }
@@ -1103,10 +1445,22 @@ export class BrowserEngine {
         const press = driver.parseKey(args.combo);
         const repeat = typeof args.repeat === "number" && Number.isInteger(args.repeat) && args.repeat > 0 ? Math.min(args.repeat, 100) : 1;
         const target = await driver.keyboardTarget(isRef(args.into) ? args.into : undefined);
+        // What the key should do, read before and after, so the result says what it did (never a bare "ok" when the
+        // engine can tell nothing changed): Tab moves the focus, Space or Return presses a focused check box, ⌘A
+        // selects a field's text.
+        const k = press.def.key;
+        const mods = press.modifiers;
+        const isTab = k === "Tab" && (mods & ~MOD_SHIFT) === 0;
+        const pressKey = (k === " " || k === "Enter") && mods === 0;
+        const check = pressKey && target.ref !== undefined ? await driver.checkState(target.ref).catch(() => undefined) : undefined;
+        // A field that takes Tab itself (an editor inserting a tab): its text, to tell that from a page ignoring the key.
+        const textBefore = isTab && target.editable && target.ref !== undefined ? await driver.readBack(target.ref) : null;
         scope.live();
         await driver.press(press, repeat, scope.signal);
         scope.acted.add(b.targetId);
-        if (target.label !== undefined) scope.builder.text(`pressed ${args.combo} in ${target.label}`, { screen: true });
+        const outcome = await this.keyOutcome(scope, driver, args.combo, target, { isTab, selectAll: press.commands?.includes("selectAll") === true, check: check?.checkable === true ? check : undefined, repeat, textBefore });
+        if (outcome !== undefined) scope.builder.text(outcome, { screen: true });
+        else if (target.label !== undefined) scope.builder.text(`pressed ${args.combo} in ${target.label}`, { screen: true });
         return undefined;
       }
       case "scroll": {
@@ -1177,6 +1531,7 @@ export class BrowserEngine {
       }
       case "goto": {
         const url = checkTabUrl(args.url, "goto()");
+        if (this.isHeadless(b.backend) && isPrivateNetworkUrl(url)) throw new AutomationFailure("NotAllowed", HEADLESS_LAN_REFUSAL);
         if (url !== "about:blank") await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(b.backend), this.cwdOf(sid));
         scope.live();
         noteSiteOf(scope, url);
@@ -1298,6 +1653,8 @@ export class BrowserEngine {
         this.requireOwnTab(sid, b, "mute()");
         const on = args.on === undefined ? true : args.on;
         if (typeof on !== "boolean") throw bad("mute() takes true (the default) or false");
+        // A headless tab is silent already (its browser runs muted); unmuting was refused above.
+        if (this.isHeadless(b.backend)) return undefined;
         const t = driver.transport;
         if (t.setMuted === undefined) {
           throw this.familyOf(b.backend) === "winter"
@@ -1386,15 +1743,16 @@ export class BrowserEngine {
     if (named !== undefined) {
       const id = this.backendFor(named);
       if (this.familyOf(id) === "winter") throw new Error(`Winter's built-in browser has no ${what} — name a user's browser (browsers.list())`);
+      if (this.isHeadless(id)) throw new Error(`Winter's headless browser has no ${what} — name a user's browser (browsers.list())`);
       return id;
     }
-    const ids = this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    const ids = this.defaultBackends(scope).ids.filter((id) => !this.isWintersOwn(id));
     if (ids.length === 1) return ids[0]!;
     throw bad(ids.length === 0 ? `name the user's browser with { browser } (browsers.list() shows them) — none is allowed in this session yet` : `several browsers are connected — name one with { browser }: ${ids.join(", ")}`);
   }
 
   private async windowsCall(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
-    const ids = args.browser !== undefined ? [this.oneUserBrowser(scope, args.browser, "windows")] : this.defaultBackends(scope).ids.filter((id) => this.familyOf(id) !== "winter");
+    const ids = args.browser !== undefined ? [this.oneUserBrowser(scope, args.browser, "windows")] : this.defaultBackends(scope).ids.filter((id) => !this.isWintersOwn(id));
     const rows: Array<{ browser: string; id: number; focused: boolean; tabs: number }> = [];
     for (const id of ids) {
       const t = this.deps.registry.get(id);
@@ -1420,10 +1778,13 @@ export class BrowserEngine {
     if (args.browser !== undefined && this.familyOf(this.backendFor(args.browser)) === "winter") {
       throw new Error("Winter's built-in browser keeps no history or bookmarks Winter can read");
     }
+    if (args.browser !== undefined && this.isHeadless(this.backendFor(args.browser))) {
+      throw new Error("Winter's headless browser keeps no history or bookmarks");
+    }
     const facts = scope.sessionFacts();
     if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
     const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
-    const ids = chosen.ids.filter((id) => this.familyOf(id) !== "winter");
+    const ids = chosen.ids.filter((id) => !this.isWintersOwn(id));
     if (ids.length === 0) {
       throw bad(`browsers.${label} searches a user's browser — name it with { browser } (browsers.list() shows them)${chosen.leftOut.length > 0 ? `; not allowed in this session yet: ${chosen.leftOut.join("; ")}` : ""}`);
     }
@@ -1571,10 +1932,18 @@ export class BrowserEngine {
     if (driver.dialog !== undefined) {
       throw new AutomationFailure("TargetBusy", `a page dialog is open (${driver.dialog.type}) — read it with dialog() and answer it with answerDialog() first: handing the tab to the user would dismiss it`);
     }
+    // A wake trigger's debugger path holds the tab: handing it over would let go of it.
+    if (driver.wakeHolders.size > 0) {
+      throw new AutomationFailure("TargetBusy", "a wake trigger is armed on this tab — handing it over would end it; cancel the trigger first (wakes.cancel(id)), or let the trigger alone wait for the user");
+    }
     if (scope.userCard === undefined) throw new Error("this Winter can't hand a tab to the user");
     const winter = this.familyOf(b.backend) === "winter";
+    const headless = this.isHeadless(b.backend);
     const name = this.browserName(b.backend);
     const transport = driver.transport;
+    // A headless tab is shown in Winter's panel (lane H3): Winter.app must be there and able to.
+    const cannotShow = headless ? this.deps.headlessPresentMissing?.() ?? (this.deps.headlessHandBack === undefined ? "this Winter can't show a headless tab" : undefined) : undefined;
+    if (cannotShow !== undefined) throw new AutomationFailure("BrowserUnavailable", `waitForUser() shows a headless tab in Winter's panel, and ${cannotShow}`);
     if (transport.present === undefined) {
       throw winter
         ? new Error("Winter's built-in browser can't show a tab to the user until Winter is updated")
@@ -1584,7 +1953,7 @@ export class BrowserEngine {
     const t0 = this.now();
     // Let the tab go first, for every session: whatever the user does in it from here is theirs alone.
     await driver.handOff();
-    const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, HANDOFF_ASK_OPTIONS, total);
+    const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, headless ? HANDOFF_ASK_OPTIONS_HEADLESS : HANDOFF_ASK_OPTIONS, total);
     scope.live();
     if (!ask.approved) {
       scope.builder.daemonLine(`the user did not take over (${ask.by === "timeout" ? "no answer" : "declined"})`);
@@ -1592,29 +1961,53 @@ export class BrowserEngine {
     }
     if (ask.optionId !== "handoff_done") {
       const key = tabKeyOf(b.backend, b.tabKey);
-      try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
-      scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window` : `brought the tab forward in ${name} for the user`);
-      const left = Math.max(1_000, total - (this.now() - t0));
-      let wait: { approved: boolean; optionId?: string; by?: string };
       try {
-        wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
-          (answer) => { this.handoffAnswers.set(key, answer); });
-      } finally {
-        this.handoffAnswers.delete(key);
-        // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
-        if (!winter) transport.overlay(b.tabKey, { active: false });
-      }
-      scope.live();
-      if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
-      if (!wait.approved) {
-        scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
-        return { done: false };
+        try { await transport.present(b.tabKey, { sessionId: sid }); } catch (err) { throw transportFailure(err, name); }
+        scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window`
+          : headless ? "showed the headless tab to the user in Winter's panel (the same live page — they have it until they press Done)"
+            : `brought the tab forward in ${name} for the user`);
+        const left = Math.max(1_000, total - (this.now() - t0));
+        let wait: { approved: boolean; optionId?: string; by?: string };
+        try {
+          wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
+            (answer) => { this.handoffAnswers.set(key, answer); });
+        } finally {
+          this.handoffAnswers.delete(key);
+          // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
+          if (!winter) transport.overlay(b.tabKey, { active: false });
+        }
+        scope.live();
+        if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
+        if (!wait.approved) {
+          // A headless tab stays shown, the user's, until they hand it back in the panel (the agent's commands on it are
+          // TargetBusy meanwhile).
+          if (headless) this.deps.headlessHandoffOver?.(b.tabKey);
+          scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
+          return { done: false };
+        }
+        // Done: a headless tab's control comes back and the panel's view goes, before the agent takes the tab again.
+        if (headless) await this.deps.headlessHandBack?.(b.tabKey);
+      } catch (err) {
+        // The wait ended by any other road — the script cancelled (Esc, an interrupt, its timeout), the tab gone, the
+        // show failing: nobody waits on the tab any more. A headless tab the person holds stays theirs, its panel offering
+        // Hand back — never a Done that would answer nothing and leave the tab held for good.
+        if (headless) this.deps.headlessHandoffOver?.(b.tabKey);
+        throw err;
       }
     }
     // Done: the tab is taken again — a fresh look (every earlier ref is stale).
     await driver.ensureAttached(sid);
     scope.live();
     scope.builder.daemonLine(`the user finished on ${host}`);
+    // Whatever page the user left it on is the agent's to read only past the site floor, as for any bound tab: a listed
+    // host is carded (or blocked) now, never while the user had it.
+    try {
+      await this.siteFloor(scope, b, driver);
+    } catch (err) {
+      if (!(err instanceof AutomationFailure) || err.kind !== "NotAllowed") throw err;
+      scope.builder.daemonLine(err.message);
+      return { done: true };
+    }
     await this.printState(scope, b.targetId, driver, { full: true, settle: true });
     return { done: true };
   }
@@ -2031,8 +2424,23 @@ export class BrowserEngine {
 
   private async navigate(scope: TabRunScope, b: Binding, driver: TabDriver, go: () => Promise<boolean>): Promise<undefined> {
     driver.agentNavigating = b.kind === "agent";
+    const startedAt = Date.now();
     let loaded: boolean;
-    try { loaded = await go(); } finally { driver.agentNavigating = false; }
+    try {
+      loaded = await go();
+    } catch (err) {
+      // A headless navigation the browser itself cancelled because it led to the local network (a redirect there):
+      // the model reads why, not a bare net error. The browser's notice can trail the failed navigation's answer by a
+      // moment (they travel separately), so a failure waits a little for it.
+      if (this.isHeadless(b.backend) && this.deps.headlessLocalNetworkRefusedAt !== undefined) {
+        const refused = (): boolean => (this.deps.headlessLocalNetworkRefusedAt?.(b.tabKey) ?? -1) >= startedAt;
+        for (let waited = 0; !refused() && waited < HEADLESS_REFUSAL_GRACE_MS; waited += 25) await new Promise((r) => setTimeout(r, 25));
+        if (refused()) throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
+      }
+      throw err;
+    } finally {
+      driver.agentNavigating = false;
+    }
     scope.live();
     scope.acted.add(b.targetId);
     scope.diffBases.clearTarget(scope.sessionId, b.targetId);
@@ -2155,7 +2563,9 @@ function lostSentence(b: Binding): string {
     case "closed_by_you": return "you closed that tab — open another with browsers.open()";
     case "closed_turn_end": return "Winter closed that tab when your turn ended (it was not marked with keep() or handoff()) — open a new one with browsers.open()";
     case "closed_session_end": return "Winter closed that tab when the session ended — open a new one with browsers.open()";
-    case "crashed": return "the tab crashed — open it again with browsers.open()";
+    case "crashed": return familyOfBackendId(b.backend) === "headless"
+      ? "Winter's headless browser stopped (or this tab's page crashed) — open the page again with browsers.open()"
+      : "the tab crashed — open it again with browsers.open()";
     case "detached_by_user": return "the user stopped Winter from controlling this tab — ask them before binding it again";
     case "stopped": return "the tab's browser was stopped — open a new tab with browsers.open()";
     default: return "the tab was closed — open a new one with browsers.open() or bind another with browsers.tab()";

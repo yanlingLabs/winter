@@ -118,6 +118,7 @@ import {
   BROWSER_HOST, browserHostExecutable, checkSignedBrowserHost, checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER,
   readHelperVersion,
 } from "./computer-helper-lib";
+import { checkSignedHeadless, HEADLESS, HEADLESS_EMBED_RELATIVE, HEADLESS_NESTED_HELPERS, headlessRequirement, signedFacts as headlessSignedFacts } from "./headless-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -485,6 +486,9 @@ console.log(`Built: ${app}`);
 // Winter Computer Use (com.winter.computeruse, the shipped identity) would otherwise sit in LaunchServices
 // beside the user's installed one. Only the copy embedded in Winter.app is ever launched; drop this one.
 probe(`"${LSREGISTER}" -u "${join(dd, "Build", "Products", "Release", `${HELPER.dist.name}.app`)}"`);
+// ComputerV2 Phase 4: the same for the standalone Release build of Winter Headless (the daemon spawns only the copy
+// nested in Winter.app, by path — never through LaunchServices — but no stray registration is left either).
+probe(`"${LSREGISTER}" -u "${join(dd, "Build", "Products", "Release", `${HEADLESS.dist.name}.app`)}"`);
 
 // ---------------------------------------------------------------------------
 // 3b. Re-sign Sparkle.framework's nested helper binaries (T2 finding, see header comment) —
@@ -798,20 +802,25 @@ if (!officeSandboxProfileEmbedded.equals(officeSandboxProfileSource)) {
 console.log(`office-helper.sb present at ${officeSandboxProfile}, unmodified since signing ` +
   `(codesign --verify --deep --strict above), and byte-identical to the repository source.`);
 
-// --- CEF (panel-cef Task 5) -------------------------------------------------
+// --- CEF (panel-cef Task 5; moved into Winter Headless, the user's ruling) ---------------------
+// Winter's ONE Chromium lives inside the nested Winter Headless helper — Winter.app/Contents/Helpers/Winter Headless.app/
+// Contents/Frameworks — and Winter.app's own CEF runs from there too (every Chromium subprocess's sandbox reads only
+// inside its browser's main bundle: the helper holds them for its own browser, Winter.app holds the helper). Winter.app's
+// own Contents/Frameworks must hold NO second copy (checked below).
 // The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above
 // already proves the seals nest correctly; this roster proves the two things it does NOT check
 // and that notarization rejects outright — a Developer ID TEAM identity and a secure timestamp
 // on every one of them. Both matter beyond notarization here: the Team ID is exactly what lets
 // the hardened runtime's library validation permit the app and the helpers to dlopen this
-// framework at all (see project.yml's "Embed CEF framework"), and libcef_sandbox.dylib is
+// framework at all (see project.yml's "Embed Winter's Chromium"), and libcef_sandbox.dylib is
 // dlopen'd separately by every helper's CefScopedSandboxContext, so it needs its own identity
 // rather than inheriting the framework's seal.
 //
 // `existsSync`-tolerant loops are deliberately NOT used here, unlike the Sparkle nested helpers
 // above (whose set legitimately varies by Sparkle version): every path below is produced by this
 // repo's own build, so a missing one is a broken build, and assertSigned fails closed on it.
-const cefFramework = join(app, "Contents", "Frameworks", "Chromium Embedded Framework.framework");
+const chromiumFrameworks = join(app, HEADLESS_EMBED_RELATIVE, "Contents", "Frameworks");
+const cefFramework = join(chromiumFrameworks, "Chromium Embedded Framework.framework");
 assertSigned(cefFramework, "Chromium Embedded Framework.framework");
 for (const lib of ["libEGL.dylib", "libGLESv2.dylib", "libcef_sandbox.dylib", "libvk_swiftshader.dylib", "libvulkan.dylib"]) {
   assertSigned(join(cefFramework, "Libraries", lib), `CEF framework library (${lib})`);
@@ -824,7 +833,13 @@ const CEF_HELPERS = [
   "Winter Helper (Renderer)",
 ];
 for (const name of CEF_HELPERS) {
-  assertSigned(join(app, "Contents", "Frameworks", `${name}.app`), `CEF helper (${name})`);
+  assertSigned(join(chromiumFrameworks, `${name}.app`), `CEF helper (${name})`);
+}
+{
+  const second = ["Chromium Embedded Framework.framework", ...CEF_HELPERS.map((n) => `${n}.app`)]
+    .filter((name) => existsSync(join(app, "Contents", "Frameworks", name)));
+  if (second.length > 0) fail(`Winter.app's own Contents/Frameworks still holds a second Chromium (${second.join(", ")}) — the one copy lives in ${HEADLESS_EMBED_RELATIVE}`);
+  console.log(`Chromium: one copy, in ${HEADLESS_EMBED_RELATIVE}/Contents/Frameworks (Winter.app's own Frameworks hold none).`);
 }
 // --- Winter Computer Use (ComputerV2) ---------------------------------------
 // The helper app that holds its OWN Accessibility and Screen Recording grants, embedded at
@@ -875,6 +890,37 @@ assertSigned(browserHostPath, "winter-browser-host");
   if (!satisfied.ok) failures.push(`the host's signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
   if (failures.length > 0) fail(`winter-browser-host is not signed the way the daemon and Chrome need:\n  ${failures.join("\n  ")}`);
   console.log(`winter-browser-host verified: ${BROWSER_HOST.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, no test hooks.`);
+}
+// --- Winter Headless (ComputerV2 Phase 4) ----------------------------------------------------
+// Winter's private, invisible browser: a background-only app the daemon SPAWNS by path (never through LaunchServices)
+// and checks against EXACTLY its stated requirement before it sends anything. Embedded at
+// Contents/Helpers/Winter Headless.app by project.yml's "Embed Winter Headless" phase (scripts/embed-headless-helper.sh).
+// Beyond assertSigned's team + timestamp, a release proves: the identifier com.winter.headless; the stated designated
+// requirement (identifier + team OU); the hardened runtime; NO entitlements at all (it holds no grants, and the
+// hardened runtime's library validation is what lets it load only Winter's own CEF framework); LSBackgroundOnly (no
+// Dock tile, no menu bar); this release's version; and Winter's one Chromium in its own Contents/Frameworks — the CEF
+// framework and the five Winter Helper bundles, each keeping its own identifier. `checkSignedHeadless` is the same
+// check `dev:headless` and `verify:headless-helper` run.
+const headlessApp = join(app, HEADLESS_EMBED_RELATIVE);
+assertSigned(headlessApp, "Winter Headless");
+{
+  const plist = probe(`plutil -convert json -o - "${join(headlessApp, "Contents", "Info.plist")}"`);
+  const failures = checkSignedHeadless("dist", TEAM_ID, version, {
+    codesignDvv: probe(`codesign -dvv "${headlessApp}" 2>&1`).stdout,
+    codesignDr: probe(`codesign -d -r- "${headlessApp}" 2>&1`).stdout,
+    entitlementsXml: probe(`codesign -d --entitlements - --xml "${headlessApp}" 2>/dev/null`).stdout,
+    infoPlist: plist.ok ? (JSON.parse(plist.stdout) as Record<string, unknown>) : {},
+    hasFrameworks: existsSync(join(headlessApp, "Contents", "Frameworks")),
+    nestedIdentifiers: Object.fromEntries(HEADLESS_NESTED_HELPERS.map((name) => {
+      const nested = join(headlessApp, "Contents", "Frameworks", `${name}.app`);
+      return [name, existsSync(nested) ? headlessSignedFacts(probe(`codesign -dvv "${nested}" 2>&1`).stdout).identifier : undefined];
+    })),
+  });
+  const stated = headlessRequirement(HEADLESS.dist.identifier, TEAM_ID);
+  const satisfied = probe(`codesign --verify --strict -R='${stated}' "${headlessApp}" 2>&1`);
+  if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
+  if (failures.length > 0) fail(`Winter Headless is not signed the way the daemon needs:\n  ${failures.join("\n  ")}`);
+  console.log(`Winter Headless verified: ${HEADLESS.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, background-only, version ${version}, Winter's one Chromium inside.`);
 }
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong
@@ -934,6 +980,8 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // which is not in the cs.* family; checkSignedHelper above pins exactly that one.
   { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
   { path: browserHostPath, label: "winter-browser-host", expect: [] },
+  // ComputerV2 Phase 4 — Winter Headless: no entitlements at all (checkSignedHeadless above pins that whole).
+  { path: headlessApp, label: "Winter Headless", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
   // (embed-runtimes.sh), same posture as winter-core/WinterHelper above.
   // A2 (2026-09-22): `winter` is a bun binary too (measured `Bun v1.4.2` in the shipped runtime) —
@@ -953,7 +1001,7 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // `"termination": {"namespace":"CODESIGNING","indicator":"Invalid Page"}`. Chrome 151 ships
   // `allow-jit` on both of these helpers and on neither of the other three; so does Winter.
   ...CEF_HELPERS.map((name) => ({
-    path: join(app, "Contents", "Frameworks", `${name}.app`),
+    path: join(chromiumFrameworks, `${name}.app`),
     label: `CEF helper (${name})`,
     expect: CEF_JIT_HELPERS.includes(name) ? [JIT] : [],
   })),

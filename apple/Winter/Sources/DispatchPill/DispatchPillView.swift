@@ -14,18 +14,22 @@ struct DispatchPillView: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var canvas: DispatchPillCanvasModel
     @ObservedObject var adapter: FieldStateAdapter
+    /// Observed so the first command run mounts the floating stack (and the last one leaving unmounts it).
+    @ObservedObject var commandRuns: CommandRunStore
     let morph: DispatchPillMorphModel
 
     init(controller: DispatchPillController) {
         self.controller = controller
         self.canvas = controller.canvas
         self.adapter = controller.adapter
+        self.commandRuns = controller.commandRuns
         self.morph = controller.morph
     }
 
     private var hasAccessories: Bool {
         guard controller.presentation != .fullScreen else { return false }
         return !adapter.dispatchChildren.isEmpty
+            || !commandRuns.runs.isEmpty
             || commandMenu != nil
             || controller.commandNotice != nil
             || adapter.compactionStartedAt != nil
@@ -40,7 +44,8 @@ struct DispatchPillView: View {
         let accessories = hasAccessories
         VStack(spacing: DispatchPillMetrics.stackGap) {
             if accessories {
-                DispatchPillAccessories(controller: controller, adapter: adapter, morph: morph, commandMenu: commandMenu)
+                DispatchPillAccessories(controller: controller, adapter: adapter, commandRuns: commandRuns, morph: morph,
+                                        commandMenu: commandMenu)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGRect.self) { proxy in
                         proxy.frame(in: .named(Self.canvasSpace))
@@ -54,14 +59,23 @@ struct DispatchPillView: View {
                 if controller.presentation == .fullScreen {
                     FullScreenPillView(controller: controller, adapter: adapter)
                 } else {
-                    DispatchPillComposerBar(controller: controller, adapter: adapter)
+                    DispatchPillComposerBar(controller: controller, adapter: adapter, commandMode: controller.commandMode)
                 }
             }
+        }
+        // A slight grow under the pointer — the whole stack, anchored at the pill's bottom edge, so the floating
+        // layers above move up and scale with it and stay aligned. Not in full screen.
+        // The animation is scoped to the scale alone: a container-wide one would also ease the layout the morph
+        // spring drives frame by frame.
+        .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
+            view.scaleEffect(controller.pointerOver && controller.presentation != .fullScreen
+                             ? DispatchPillMetrics.hoverScale : 1, anchor: .bottom)
         }
         .padding(DispatchPillMetrics.shadowPad)
         .frame(width: canvas.size.width, height: canvas.size.height, alignment: .bottom)
         .coordinateSpace(.named(Self.canvasSpace))
         .environment(\.colorScheme, .dark)
+        .environment(\.dispatchPillPointer, controller.pointer)
         .onChange(of: accessories, initial: true) { _, present in
             if !present { controller.accessoryLayoutChanged(frame: .zero) }
         }
@@ -104,14 +118,15 @@ struct DispatchPillShell<Content: View>: View {
     }
 }
 
-/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, a
-/// running compaction's clock, a command's notice, and — right above the main pill — the `/` menu while a
+/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, the
+/// commands run from the pill (`CommandPillsView`), a running compaction's clock, a command's notice, and — right above the main pill — the `/` menu while a
 /// command is being typed. Each layer is present only while it has something to show, and the stack
 /// closes up around one that leaves, so the child sessions always stay on top. (`/permissions` floats
 /// nothing: it turns the main pill itself into the picker.)
 private struct DispatchPillAccessories: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
+    @ObservedObject var commandRuns: CommandRunStore
     /// Observed so the child row follows the main pill's ANIMATED width frame by frame — it resizes
     /// with the pill as it grows or compresses, instead of snapping to where the pill is heading.
     @ObservedObject var morph: DispatchPillMorphModel
@@ -134,6 +149,10 @@ private struct DispatchPillAccessories: View {
                     palette: { controller.childPalette(for: $0) }
                 )
                 .transition(.childPill)
+            }
+            if !commandRuns.runs.isEmpty {
+                CommandPillsView(store: commandRuns, rowWidth: rowWidth)
+                    .transition(.childPill)
             }
             if let startedAt = adapter.compactionStartedAt {
                 DispatchPillCompactionPill(startedAtMs: startedAt, width: rowWidth)
@@ -167,6 +186,8 @@ private struct DispatchPillAccessories: View {
 struct DispatchPillComposerBar: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
+    /// Command mode: the draft in purple, its ghost completion, Delete's opt-out, the send circle's run look.
+    @ObservedObject var commandMode: DispatchPillCommandMode
 
     var body: some View {
         let expanded = controller.presentation == .expanded
@@ -221,6 +242,7 @@ struct DispatchPillComposerBar: View {
                 PillSendStopButton(
                     isRunning: running,
                     canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    runsCommand: commandMode.displaysCommand(draft),
                     onSend: { controller.submit(adapter.composerDraft) },
                     onStop: { controller.interrupt() }
                 )
@@ -268,10 +290,18 @@ struct DispatchPillComposerBar: View {
                         tintOverride: .white,
                         onViewCreated: { controller.registerComposerView($0) },
                         viewAlpha: hidden ? 0 : 1,
-                        // A command typed in full reads in blue.
                         onFocusKey: { key, _, _ in controller.handleMenuKey(key) },
-                        highlightRanges: { dispatchPillCommandHighlightRange($0).map { [$0] } ?? [] },
+                        // A shell line the pill will RUN reads in purple, whole; a `/` command typed in full in blue.
+                        highlightRanges: { [commandMode] text in
+                            if commandMode.displaysCommand(text) { return [NSRange(location: 0, length: (text as NSString).length)] }
+                            return dispatchPillCommandHighlightRange(text).map { [$0] } ?? []
+                        },
                         highlightColor: dispatchPillCommandBlueNS,
+                        highlightColorForText: { [commandMode] text in
+                            commandMode.displaysCommand(text) ? dispatchPillCommandPurpleNS : dispatchPillCommandBlueNS
+                        },
+                        ghostSuffix: commandMode.ghost(for: draft),
+                        onDeleteBackwardAtEnd: { controller.handleDeleteBackwardAtEnd() },
                         onHorizontalKey: { controller.handleHorizontalKey(left: $0) }
                     )
                 }

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DISPATCH_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
+import { COMPUTER_WAKE_CLIENT_NAME, DISPATCH_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
@@ -199,7 +199,8 @@ export class Dreamer {
       // A `messaging` turn is ANOTHER SESSION's SendMessage (`agent/session-messaging.ts`), never the user:
       // labelled as such, so a peer's words are never learned as the user's preferences.
       if (e.type === "user_message") {
-        if (e.clientName === DISPATCH_WAKE_CLIENT_NAME) continue;
+        // A ComputerV2 wake trigger's message (`computer-use/wakes/`) is the daemon too — never the user's words.
+        if (e.clientName === DISPATCH_WAKE_CLIENT_NAME || e.clientName === COMPUTER_WAKE_CLIENT_NAME) continue;
         lines.push(e.clientName === "messaging" ? `[message from another session — not the user] ${e.text}` : `[user] ${e.text}`);
       }
       else if (e.type === "assistant_message") lines.push(`[winter] ${e.text}`);

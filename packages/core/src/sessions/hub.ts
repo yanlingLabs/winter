@@ -1,4 +1,4 @@
-import { SessionEvent, type SessionActivity, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
+import { SessionEvent, type SessionActivity, type UserMessageFileRef, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import type { SessionStore, EventInput } from "./store";
 
 /** Default bound on `SessionHub`'s last-emitted-activity memo (see `emitActivity`). Sessions are
@@ -136,13 +136,14 @@ export class SessionHub {
     catch (err) { console.error(`[hub] detach hook failed for ${sessionId}:`, err); }
   }
 
-  send(client: HubClient, sessionId: string, text: string, images?: readonly UserMessageImageRef[]): number {
+  send(client: HubClient, sessionId: string, text: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): number {
     if (this.byClient.get(client) !== sessionId) {
       throw new Error(`client ${client.clientName} not attached to ${sessionId}`);
     }
     return this.appendAndBroadcast(sessionId, {
       type: "user_message", sessionId, threadId: "main", text, clientName: client.clientName,
       ...(images !== undefined && images.length > 0 ? { images: images.map((i) => ({ n: i.n, path: i.path })) } : {}),
+      ...(files !== undefined && files.length > 0 ? { files: files.map((f) => ({ n: f.n, path: f.path })) } : {}),
     }).seq;
   }
 
@@ -194,7 +195,9 @@ export class SessionHub {
     this.fanOut(sessionId, event);
     // Narrow on purpose: session_created already has its own server-side broadcast, and every
     // other event type is scoped to a session's own attachments.
-    if (event.type === "session_titled") this.onGlobalEvent?.(event);
+    // ComputerV2 wake triggers (2026-10-12): the pair is global the same way — a session list shows a "waiting for you"
+    // mark on a row nobody has open. Persisted, so the attached double is absorbed by seq dedupe like `session_titled`'s.
+    if (event.type === "session_titled" || event.type === "wake_armed" || event.type === "wake_ended") this.onGlobalEvent?.(event);
     this.notifyObservers(event);
     return event;
   }
