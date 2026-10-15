@@ -164,7 +164,7 @@ test("the real CLI refuses a FIFO promptly instead of blocking on a writer", () 
   const started = Date.now(), run = cli(directory, [...metadata, "--content-file", fifo], "ignore");
   expect(run.exitedDueToTimeout).toBe(false); expect(run.exitCode).toBe(1); expect(Date.now() - started).toBeLessThan(15_000);
   expect(run.stderr.toString()).toContain(NOT_REGULAR); expect(run.stdout.byteLength).toBe(0);
-});
+}, 30_000);
 
 test("the real CLI refuses invalid, empty or conflicting stdin before connecting, writing or echoing input", () => {
   const directory = home(), marker = "PRIVATE-STDIN-MARKER";
@@ -182,7 +182,7 @@ test("the real CLI refuses invalid, empty or conflicting stdin before connecting
     expect(run.stdout.toString() + run.stderr.toString()).not.toContain(marker);
     expect(readdirSync(directory)).toEqual([]);
   }
-});
+}, 30_000); // five real CLI cold starts; the 5 s default is too tight on hosted runners
 
 test("bounded stdin captures reused chunk buffers instead of retaining producer-owned views", async () => {
   const shared = Buffer.from("first");
