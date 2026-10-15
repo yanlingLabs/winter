@@ -114,12 +114,16 @@ struct CoworkWorkspaceView: View {
         .disabled(model.busy)
         .task { await model.refresh() }
         // Status and error text appears and disappears without moving focus, so VoiceOver would never
-        // say it. Guidance text that arrives while an operation is running is announced once, when the
-        // operation ends, so a retry that fails with the same words as before is still heard.
+        // say it.
         .onChange(of: model.error) { _, text in coworkAnnounce(text) }
         .onChange(of: selectionError) { _, text in coworkAnnounce(text) }
-        .onChange(of: guidanceAnnouncement) { _, text in if !model.guidanceBusy { coworkAnnounce(text) } }
-        .onChange(of: model.guidanceBusy) { wasBusy, busy in if wasBusy && !busy { coworkAnnounce(guidanceAnnouncement) } }
+        .onChange(of: guidanceSignal) { old, new in
+            // Quiet while an operation runs. When it ends, say what it left, even if the words are the
+            // same as last time (a retry that fails the same way is news). Outside an operation, say a
+            // new message once. One handler, so a message that lands as the operation ends is not said twice.
+            guard !new.busy, old.busy || old.text != new.text else { return }
+            coworkAnnounce(new.text)
+        }
         .onChange(of: draftProblem) { _, text in coworkAnnounce(text) }
         .onChange(of: model.selected) { _, value in
             rename = value?.title ?? ""; invalidatePreparation()
@@ -144,6 +148,8 @@ struct CoworkWorkspaceView: View {
         guard let state = model.guidance, state.workspaceId == model.selected?.workspaceId else { return nil }
         return state.message ?? state.receipt.map { "Host save recorded at instruction revision \($0.value.instructionRevision)." }
     }
+    private struct GuidanceSignal: Equatable { let text: String?, busy: Bool }
+    private var guidanceSignal: GuidanceSignal { GuidanceSignal(text: guidanceAnnouncement, busy: model.guidanceBusy) }
     private var draftProblem: String? {
         guard let state = model.guidance, state.workspaceId == model.selected?.workspaceId, let draft = state.draft,
               !Self.draftIsValid(draft) else { return nil }
