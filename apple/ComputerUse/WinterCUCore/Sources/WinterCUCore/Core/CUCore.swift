@@ -635,10 +635,12 @@ public final class CUCore: @unchecked Sendable {
     var guardianNoted: ((String) -> Void)?
     /// Whether a bound app is a web browser, as a test says (live: its Info.plist declares http/https).
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
-    /// Per target: what was typed into a file panel since its last choice (`CUCore+FilePanel.swift`).
-    var panelTyped: [String: CUPanelTyped] = [:]
-    /// Per sheet: is it a file panel (`isFilePanel`), and when that was decided.
+    /// Per target: what was typed into a file panel since its last choice (`CUCore+FilePanel.swift`). Acts run on per-pid
+    /// queues, two apps' at once: read and written under `panelStateLock` only.
+    var panelTypedStore: [String: CUPanelTyped] = [:]
+    /// Per sheet: is it a file panel (`isFilePanel`), and when that was decided. Under `panelStateLock`.
     var filePanelVerdicts: [AXIdentity: (yes: Bool, atMs: Double)] = [:]
+    let panelStateLock = NSLock()
     /// Floor F's words for a browser's dialogs, as a test says (live: the browser's own locale packs — `remoteDebuggingWords`).
     var remoteDebuggingWordsOverride: ((CUTarget) -> CURemoteDebuggingWords)?
     /// Tests: told each time Floor F's words are read ahead for a target (`warmRemoteDebuggingWords`).

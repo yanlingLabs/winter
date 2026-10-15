@@ -1104,7 +1104,7 @@ final class LeftoversTests: XCTestCase {
         let r2 = await refusal(.click(CUClickAction(ref: ref(ok))))
         XCTAssertNil(r2)
         XCTAssertTrue(ax.performed.contains("\(token(ok)):AXPress"), "OK pressed")
-        XCTAssertNil(core.panelTyped[target.id], "nothing armed")
+        XCTAssertNil(core.panelTypedFor(target.id), "nothing armed")
     }
 
     func testAPrintSheetActsAsBefore() async throws {
@@ -1360,6 +1360,58 @@ final class LeftoversTests: XCTestCase {
         let said = await refusal(.key(CUKeyAction(combo: "return")))
         XCTAssertNil(said)
         XCTAssertTrue(poster.entries.dropFirst(n).contains { $0.type == .keyDown }, "Return was sent")
+    }
+
+    // MARK: the eighth pass
+
+    /// A Git client's settings sheet prefilled with the user's key path: OK and Return go ahead; typing into it, or next
+    /// to it, is judged by what the agent types only.
+    func testASheetsOwnPrefilledSecretPathIsNeverJudged() async throws {
+        world()
+        let sheet = fakeElement(98_500), key = fakeElement(98_501), name = fakeElement(98_502), ok = fakeElement(98_503)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, title: "Settings", frame: CGRect(x: 100, y: 40, width: 500, height: 300), extra: [kAXParentAttribute: window])
+        ax.add(key, role: kAXTextFieldRole, title: "SSH key", frame: CGRect(x: 120, y: 80, width: 400, height: 24),
+               extra: [kAXParentAttribute: sheet, kAXValueAttribute: "SSH key: ~/.ssh/id_ed25519"])
+        ax.add(name, role: kAXTextFieldRole, title: "Name", frame: CGRect(x: 120, y: 120, width: 400, height: 24),
+               extra: [kAXParentAttribute: sheet, kAXValueAttribute: "", kAXFocusedAttribute: true])
+        ax.add(ok, role: kAXButtonRole, title: "OK", frame: CGRect(x: 500, y: 300, width: 60, height: 24), extra: [kAXParentAttribute: sheet])
+        ax.setActions(ok, [kAXPressAction])
+        ax.put(sheet, [kAXChildrenAttribute: [key, name, ok], kAXDefaultButtonAttribute: ok])
+        ax.focus(pid: pid, on: name)
+        XCTAssertFalse(core.isFilePanel(sheet, name, target))
+        let typed = await refusal(.type(CUTypeAction(text: "Alex", into: ref(name))))
+        XCTAssertNil(typed)
+        let pressed = await refusal(.click(CUClickAction(ref: ref(ok))))
+        XCTAssertNil(pressed)
+        XCTAssertTrue(ax.performed.contains("\(token(ok)):AXPress"))
+        let ret = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNil(ret)
+        // Into the prefilled field itself: what is added is judged, not what was there.
+        ax.focus(pid: pid, on: key)
+        ax.put(key, [kAXFocusedAttribute: true])
+        let appended = await refusal(.type(CUTypeAction(text: " (main)", into: ref(key))))
+        XCTAssertNil(appended)
+        let still = await refusal(.type(CUTypeAction(text: "~/.aws/credentials", into: ref(name))))
+        XCTAssertNotNil(still, "what the agent types still counts")
+    }
+
+    /// The panel state is shared by acts on different apps' queues: many concurrent writes and reads never crash.
+    func testThePanelStateTakesConcurrentActsOnTwoQueues() {
+        world()
+        let (sheet, _) = openPanel()
+        let other = CUTarget(id: "t2", sessionId: "s2", pid: 7171, bundleId: "com.example.other", appName: "Other",
+                             isChromium: false, mirror: false, windowID: 99, windowTitle: "Other")
+        let targets = [target!, other]
+        DispatchQueue.concurrentPerform(iterations: 2_000) { i in
+            let t = targets[i % 2]
+            core.noteTyped("a", into: sheet, t)
+            _ = core.panelTypedFor(t.id)
+            core.notePanelAct(AXIdentity(element: sheet), t)
+            _ = core.isFilePanel(sheet, nil, t)
+        }
+        XCTAssertNotNil(core.panelTypedFor(target.id))
+        XCTAssertNotNil(core.panelTypedFor("t2"))
     }
 
     func testProtectedPanelPaths() {

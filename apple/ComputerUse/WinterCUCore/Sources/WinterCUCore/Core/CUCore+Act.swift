@@ -395,16 +395,22 @@ extension CUCore {
             return pickerHinted(try click(a, p, t, token), a, t)
         case .setValue(let a):
             if let o = try setValueOfWebSelect(a, p, t, token) { return o }
+            let named = try? element(a.ref, in: t)
+            let before = panelFieldValues(named, t)
             let o = try setValue(a, p, t, token)
-            try refuseProtectedPanelValue(try? element(a.ref, in: t), t)
+            try refuseProtectedPanelValue(named, t, before: before)
             return o
         case .type(let a):
+            let named = a.into.flatMap { try? element($0, in: t) }
+            let before = panelFieldValues(named, t)
             let o = try type(a, p, t, token)
-            try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
+            try refuseProtectedPanelValue(named, t, before: before)
             return o
         case .paste(let a):
+            let named = a.into.flatMap { try? element($0, in: t) }
+            let before = panelFieldValues(named, t)
             let o = try paste(a, p, t, token)
-            try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
+            try refuseProtectedPanelValue(named, t, before: before)
             return o
         case .key(let a):
             try refuseProtectedChoice(p.action, t)
@@ -417,10 +423,11 @@ extension CUCore {
                !chord.modifiers.contains(.command) {
                 try refuseProtectedPanelText(String(ch), into: a.into.flatMap { try? element($0, in: t) }, t)
             }
+            let named = a.into.flatMap { try? element($0, in: t) }
+            let typing = (try? CUKeyChord.parse(a.combo)).map(Self.producesText) ?? false
+            let before = typing ? panelFieldValues(named, t) : [:]
             let o = try keyChecked(a, t) { try key(a, p, t, token) }
-            if let chord = try? CUKeyChord.parse(a.combo), Self.producesText(chord) {
-                try refuseProtectedPanelValue(a.into.flatMap { try? element($0, in: t) }, t)
-            }
+            if typing { try refuseProtectedPanelValue(named, t, before: before) }
             return o
         case .scroll(let a): return try scroll(a, p, t, token)
         case .drag(let a):

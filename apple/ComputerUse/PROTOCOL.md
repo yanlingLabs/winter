@@ -1241,6 +1241,11 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   and anything under `Library/Keychains`. Residual: a panel that fails the scope test, reached by clicks alone, with no
   `AXURL` and a secret that matches none of these names (a project's `.env`, a token file under another name) is not
   refused — the scope test recognises every file panel measured so far.
+- The eighth pass: outside a recognised file panel the floors judge only what the agent itself types or pastes there
+  (and the choice also its selection, rows and folder pop-up) — never a value the sheet already held: a Git client's
+  settings sheet prefilled with "SSH key: ~/.ssh/id_ed25519" takes OK and Return, and text added to that field is judged
+  alone. The panel state (typed text per target, file-panel verdicts per sheet) is read and written under one lock: acts
+  on two apps' queues at once share it.
 - Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
   routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
   record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise

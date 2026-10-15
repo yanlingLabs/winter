@@ -223,10 +223,12 @@ extension CUCore {
         // Cached per sheet for its life: a yes for good, a no for a second (a panel fills in as it opens).
         let key = AXIdentity(element: root)
         let now = clock.nowMs()
-        if let v = filePanelVerdicts[key], ax.isAlive(root), v.yes || now - v.atMs < 1_000 { return v.yes }
+        if let v = panelStateLock.withLock({ filePanelVerdicts[key] }), ax.isAlive(root), v.yes || now - v.atMs < 1_000 { return v.yes }
         let yes = isFilePanelUncached(root, e, t)
-        if filePanelVerdicts.count > 64 { filePanelVerdicts = filePanelVerdicts.filter { now - $0.value.atMs < 60_000 } }
-        filePanelVerdicts[key] = (yes, now)
+        panelStateLock.withLock {
+            if filePanelVerdicts.count > 64 { filePanelVerdicts = filePanelVerdicts.filter { now - $0.value.atMs < 60_000 } }
+            filePanelVerdicts[key] = (yes, now)
+        }
         return yes
     }
 
@@ -284,18 +286,23 @@ extension CUCore {
         return nil
     }
 
+    /// The target's typed-into-a-panel record, read under the lock.
+    func panelTypedFor(_ targetId: String) -> CUPanelTyped? { panelStateLock.withLock { panelTypedStore[targetId] } }
+
     /// What was typed into the panel `root` since its last choice (a new panel starts empty).
     func typedInto(_ root: AXUIElement, _ t: CUTarget) -> String? {
-        guard let rec = panelTyped[t.id], rec.panel == AXIdentity(element: root) else { return nil }
+        guard let rec = panelTypedFor(t.id), rec.panel == AXIdentity(element: root) else { return nil }
         return rec.text
     }
 
     func noteTyped(_ text: String, into root: AXUIElement, _ t: CUTarget) {
         let id = AXIdentity(element: root)
-        let was = panelTyped[t.id].flatMap { $0.panel == id ? $0.text : nil } ?? ""
         // After a Return the panel chose (or tried): only what follows it is still pending.
         let segs = CUFloors.returnSegments(text)
-        panelTyped[t.id] = CUPanelTyped(panel: id, text: segs.count > 1 ? segs.last! : was + text)
+        panelStateLock.withLock {
+            let was = panelTypedStore[t.id].flatMap { $0.panel == id ? $0.text : nil } ?? ""
+            panelTypedStore[t.id] = CUPanelTyped(panel: id, text: segs.count > 1 ? segs.last! : was + text)
+        }
     }
 
     /// 1. Text about to go into a sheet or panel (typed, pasted, set, or one typing key): refused before it is sent when
@@ -308,12 +315,13 @@ extension CUCore {
         let current = replacing ? "" : (ax.string(target, kAXValueAttribute) ?? "")
         let typed = replacing ? "" : (typedInto(root, t) ?? "")
         let segs = CUFloors.returnSegments(text)
-        var candidates = segs
-        candidates.append(current + segs[0])
-        candidates.append(typed + segs[0])
-        // In a recognised file panel every path rule; in any other sheet or dialog only path-like tokens and exact secret
-        // names (the sixth pass).
+        // In a recognised file panel every path rule, with the field's current value; in any other sheet or dialog only
+        // path-like tokens and exact secret names (the sixth pass), and only of what the agent itself types — never a value
+        // the sheet already held (the eighth pass: a Git client's "SSH key: ~/.ssh/id_ed25519").
         let file = isFilePanel(root, target, t)
+        var candidates = segs
+        if file { candidates.append(current + segs[0]) }
+        candidates.append(typed + segs[0])
         if let hit = candidates.first(where: { file ? CUFloors.typedPanelPathIsProtected($0, base: base) : CUFloors.outsidePanelTextIsProtected($0, base: base) }) {
             CULog.act.notice("type in \(t.appName, privacy: .public): a protected path into a sheet or panel — refused before sending")
             _ = hit
@@ -321,9 +329,12 @@ extension CUCore {
         }
         if segs.count > 1 {
             // A Return in it CHOOSES: what the panel would choose, with the field holding what comes before the Return.
-            try refuseProtectedChoiceIn(root, item: nil, t, extra: [current + segs[0], typed + segs[0]], sending: true)
+            try refuseProtectedChoiceIn(root, item: nil, t, extra: file ? [current + segs[0], typed + segs[0]] : [typed + segs[0], segs[0]], sending: true)
         }
-        if replacing { panelTyped[t.id] = CUPanelTyped(panel: AXIdentity(element: root), text: text) } else { noteTyped(text, into: root, t) }
+        if replacing {
+            let rec = CUPanelTyped(panel: AXIdentity(element: root), text: text)
+            panelStateLock.withLock { panelTypedStore[t.id] = rec }
+        } else { noteTyped(text, into: root, t) }
     }
 
     /// ⌘V into a sheet or panel: what the clipboard holds (put there by anything — a shell's pbcopy) is judged like typed
@@ -341,7 +352,17 @@ extension CUCore {
 
     /// 2. After text went into a sheet or panel: the VALUE each field now holds (the one named and the focus) judged
     /// whole; a protected one is cleared (when the field takes a value) and refused.
-    func refuseProtectedPanelValue(_ named: AXUIElement?, _ t: CUTarget) throws {
+    /// The values of the field named and of the focus, before an act (`refuseProtectedPanelValue`'s `before`).
+    func panelFieldValues(_ named: AXUIElement?, _ t: CUTarget) -> [AXIdentity: String] {
+        guard t.accessible else { return [:] }
+        var out: [AXIdentity: String] = [:]
+        for e in [named, reportedFocus(t)].compactMap({ $0 }) where panelRoot(e, t) != nil {
+            if let v = ax.string(e, kAXValueAttribute) { out[AXIdentity(element: e)] = v }
+        }
+        return out
+    }
+
+    func refuseProtectedPanelValue(_ named: AXUIElement?, _ t: CUTarget, before: [AXIdentity: String] = [:]) throws {
         guard t.accessible else { return }
         var seen: [AXUIElement] = []
         for e in [named, reportedFocus(t)].compactMap({ $0 }) where !seen.contains(where: { CFEqual($0, e) }) {
@@ -349,6 +370,9 @@ extension CUCore {
             guard let root = panelRoot(e, t), let v = ax.string(e, kAXValueAttribute) else { continue }
             let file = isFilePanel(root, e, t)
             guard file ? CUFloors.typedPanelPathIsProtected(v, base: panelFolder(root)) : CUFloors.outsidePanelTextIsProtected(v, base: panelFolder(root)) else { continue }
+            // Outside a recognised file panel, a value the field already held before this act is the sheet's, not the
+            // agent's: left alone (the eighth pass).
+            if !file, let was = before[AXIdentity(element: e)], CUFloors.outsidePanelTextIsProtected(was, base: panelFolder(root)) { continue }
             // Cleared only in a recognised file panel; anywhere else the field is never touched — refused, said.
             var cleared = false
             if file, ax.isSettable(e, kAXValueAttribute), (try? ax.set(e, kAXValueAttribute, "" as CFString)) != nil {
@@ -457,7 +481,7 @@ extension CUCore {
 
     func notePanelAct(_ id: AXIdentity?, _ t: CUTarget) {
         guard let id else { return }
-        if panelTyped[t.id]?.panel != id { panelTyped[t.id] = CUPanelTyped(panel: id, text: "") }
+        panelStateLock.withLock { if panelTypedStore[t.id]?.panel != id { panelTypedStore[t.id] = CUPanelTyped(panel: id, text: "") } }
     }
 
     /// A sheet open on the bound window (its first `AXSheet` child), when there is one.
@@ -469,8 +493,9 @@ extension CUCore {
     /// What the panel would choose, as read: the URLs, file names and titles of its selected items (and of `item`, a
     /// double-clicked one), its text fields' values (a file name, the Go to folder field), its pop-ups' values (the folder
     /// shown). `determined`: the whole panel was read and something besides its pop-ups was there to judge.
-    func panelChoices(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget? = nil) -> (values: [String], determined: Bool) {
+    func panelChoices(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget? = nil) -> (values: [String], determined: Bool, fields: Set<String>) {
         var out: [String] = []
+        var fields: Set<String> = []
         var substantive = false
         var selectionRead = false, fieldRead = false
         func describe(_ e: AXUIElement, depth: Int) {
@@ -543,7 +568,7 @@ extension CUCore {
             if [kAXTextFieldRole, kAXComboBoxRole, kAXPopUpButtonRole].contains(role), ax.string(c, kAXSubroleAttribute) != "AXSearchField",
                let v = ax.string(c, kAXValueAttribute), !v.isEmpty {
                 out.append(v)
-                if role != kAXPopUpButtonRole { substantive = true; fieldRead = true }
+                if role != kAXPopUpButtonRole { substantive = true; fieldRead = true; fields.insert(v) }
             }
             for name in [kAXSelectedRowsAttribute, kAXSelectedChildrenAttribute] {
                 for sel in ax.elements(c, name).prefix(20) { describe(sel, depth: 3); rowPath(sel) }
@@ -551,7 +576,7 @@ extension CUCore {
             queue += ax.elements(c, kAXChildrenAttribute)
         }
         // Readable enough: the selection, or a field, or the whole panel walked with something in it.
-        return (out, selectionRead || fieldRead || (substantive && queue.isEmpty))
+        return (out, selectionRead || fieldRead || (substantive && queue.isEmpty), fields)
     }
 
     /// The choice check on a panel: anything it would choose protected → refused; nothing readable after text was sent
@@ -559,10 +584,13 @@ extension CUCore {
     /// starts the panel's typed text afresh.
     func refuseProtectedChoiceIn(_ root: AXUIElement, item: AXUIElement?, _ t: CUTarget, extra: [String] = [], sending: Bool = false,
                                  unresolved: Bool = false) throws {
-        let (values, determined) = panelChoices(root, item: item, t)
+        let (allValues, determined, fields) = panelChoices(root, item: item, t)
         let typed = typedInto(root, t)
         let base = panelFolder(root)
         let file = isFilePanel(root, nil, t)
+        // Outside a recognised file panel the sheet's own field values are never judged (only what the agent typed, the
+        // selection, its rows and the folder pop-up — the eighth pass).
+        let values = file ? allValues : allValues.filter { !fields.contains($0) }
         // In a sheet that is no recognised file panel, only what reads as a path is judged (an alert's or Print's own
         // labels and pop-ups are no file names) — and it never fails closed.
         // Outside a recognised file panel: path-like candidates by the path rules, and a selected item's or folder
@@ -592,7 +620,8 @@ extension CUCore {
             CULog.act.notice("act in \(t.appName, privacy: .public): what the panel would choose can't be read after text went into it — refused")
             throw CUError.refused(.savePath, "what \(t.appName)'s panel would choose can't be read after Winter typed or clicked in it — nothing was pressed (Winter can't check it isn't \(Self.panelPathWords)); the user can pick the file themselves")
         }
-        if let rec = panelTyped[t.id], rec.panel == AXIdentity(element: root) { panelTyped[t.id]?.text = "" }
+        let rootId = AXIdentity(element: root)
+        panelStateLock.withLock { if panelTypedStore[t.id]?.panel == rootId { panelTypedStore[t.id]?.text = "" } }
     }
 
     /// 3. Before an act that makes a sheet or panel choose.
