@@ -421,6 +421,25 @@ import WinterProtocol
         XCTAssertFalse(model.guidanceBusy)
         await model.select("one"); XCTAssertEqual(model.guidance?.draft, "My draft")
     }
+    func testAQueuedReadKeepsItsWorkspaceEntryWhenTheWorkspaceLeavesTheListWhileThatReadIsOutstanding() async {
+        let host = Host(); var parked: [CheckedContinuation<Void, Never>] = [], parkReads = 0
+        let model = CoworkWorkspaceModel { method, params in
+            if method == "workspace.instructions.get", parkReads > 0 { parkReads -= 1; await withCheckedContinuation { parked.append($0) } }
+            return try host.call(method, params)
+        }
+        await model.select("two"); model.editInstructions("Two draft"); await model.select("one")
+        parkReads = 2
+        let refreshing = Task { await model.refreshInstructions() }
+        while parked.count < 1 { await Task.yield() }
+        // Selecting "two" while "one"'s refresh holds the lane queues "two"'s read; it starts when that refresh ends.
+        await model.select("two"); parked[0].resume()
+        while parked.count < 2 { await Task.yield() }
+        // While the queued read is outstanding the person moves back, "two" leaves the list and a listing runs.
+        await model.select("one"); host.listed = ["one"]; await model.refresh()
+        parked[1].resume(); await refreshing.value
+        XCTAssertFalse(model.guidanceBusy)
+        await model.select("two"); XCTAssertEqual(model.guidance?.draft, "Two draft")
+    }
     func testInFlightSaveCapturesContentAndDoesNotDropSubsequentEditsOrDuplicateWrite() async {
         let host = Host(); var resume: CheckedContinuation<Void, Never>?
         let model = CoworkWorkspaceModel { method, params in
