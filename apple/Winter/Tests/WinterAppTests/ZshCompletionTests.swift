@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Winter
 
@@ -144,13 +145,21 @@ final class ZshCompletionTests: XCTestCase {
         XCTAssertFalse(passes("git $a $b $c"), "three of them are prose")
     }
 
-    func testNothingZshCouldEvaluateIsShownToIt() {
+    func testOnlyAllowlistedCharactersAreShownToZsh() {
         for line in ["ls $(id)/", "ls `id`/", "ls $HOME/", "echo $((1+1))", "ls !!", "diff =(ls) x", "cat <(ls)",
-                     "ls *(e:'id':)", "ls ${x::=1}"] {
+                     "ls *(e:'id':)", "ls ${x::=1}", "rsync ';touch A B;#':", "scp 'x;mkdir STRAY':",
+                     #"git commit -m "fix""#, #"ls a\ b"#, "ls a;b", "ls a&", "ls a|b", "ls >x", "ls {a,b}",
+                     "ls *.md", "ls ?", "ls [ab]", "ls #x", "ls\tx", "ls é", "ls 😛"] {
             XCTAssertFalse(zshBufferIsSafe(line), line)
         }
-        XCTAssertTrue(zshBufferIsSafe("git commit -m 'fix the bug'"))
-        XCTAssertTrue(zshBufferIsSafe("ls -la ~/proj/*.md"))
+        for line in ["git status", "ls -la ~/proj/x.md", "git checkout feature/x", "make build", "a=b c",
+                     "cp x@host:/tmp/y .", "printf 100%", "git log -n 1,2 +3"] {
+            XCTAssertTrue(zshBufferIsSafe(line), line)
+        }
+        XCTAssertFalse(zshLineMayBeShown("rsync -e touch host:"), "a remote-shell command never reaches zsh")
+        XCTAssertFalse(zshLineMayBeShown("ls && scp host:/x ."))
+        XCTAssertFalse(zshLineMayBeShown("/usr/bin/ssh host"))
+        XCTAssertTrue(zshLineMayBeShown("git status"))
     }
 
     private func isWholeCommand(_ line: String) -> Bool {
@@ -313,16 +322,25 @@ final class ZshCompletionIntegrationTests: XCTestCase {
     /// file may appear.
     func testTypedSubstitutionsNeverRunWhileBeingChecked() throws {
         let cases = ["ls $(touch pw1)/", "cd $(touch pw2)/", "ls ~$(touch pw3)/", "echo $(($(touch pw4)))/",
-                     "ls ${x::=$(touch pw5)}/", "cat $(touch pw6)/x"]
+                     "ls ${x::=$(touch pw5)}/", "cat $(touch pw6)/x",
+                     // The re-review's: `_rsync`/`_scp` build `ssh … <host>` and eval it.
+                     "rsync ';touch A B;#':", "scp 'x;mkdir STRAY':"]
         let home = root.appendingPathComponent("home").path
         let context = ShellCommandContext(pathDirectories: ["/usr/bin", "/bin", "/usr/sbin", "/sbin"], homeDirectory: home,
                                           workingDirectory: workDirectory, fileSystem: LiveShellFileSystem())
         let environment = CommandLineEnvironment.fixed(pathDirectories: context.pathDirectories, commandNames: ["ls", "cat"],
                                                        homeDirectory: home, fileSystem: LiveShellFileSystem(),
                                                        completion: engine)
+        // Anywhere: the working directory, HOME, and the engine's own (writable) private folder.
+        let planted: Set<String> = ["pw1", "pw2", "pw3", "pw4", "pw5", "pw6", "A", "B", "STRAY"]
         func created() -> [String] {
-            ((try? FileManager.default.contentsOfDirectory(atPath: workDirectory)) ?? []).filter { $0 != "Makefile" }
+            var found = ((try? FileManager.default.contentsOfDirectory(atPath: workDirectory)) ?? []).filter { $0 != "Makefile" }
                 + ((try? FileManager.default.contentsOfDirectory(atPath: home)) ?? [])
+            let enumerator = FileManager.default.enumerator(atPath: engine.privateDirectory)
+            while let path = enumerator?.nextObject() as? String {
+                if planted.contains((path as NSString).lastPathComponent) { found.append("private/" + path) }
+            }
+            return found
         }
         for line in cases {
             XCTAssertFalse(zshBufferIsSafe(line), line)
@@ -360,6 +378,40 @@ final class ZshCompletionIntegrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: outside))
         let inside = (engine.privateDirectory as NSString).appendingPathComponent("inside.txt")
         XCTAssertEqual(touch(inside), 0, "the private folder stays writable")
+    }
+
+    /// From INSIDE the engine's sandbox (a zsh under the same profile, as injected code would be): no signal to
+    /// another of the user's processes, no pasteboard, no Apple Events, no LaunchServices. Harmless probes —
+    /// and `pbcopy` is refused before it can write: neither pasteboard's change count may move.
+    func testTheSandboxDeniesSignalsPasteboardAppleEventsAndLaunchServices() throws {
+        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory)
+        let bystander = Process()
+        bystander.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        bystander.arguments = ["30"]
+        try bystander.run()
+        defer { bystander.terminate() }
+        func inside(_ command: String) -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+            process.arguments = ["-p", profile, "/bin/zsh", "-f", "-c", command]
+            process.environment = ["PATH": "/usr/bin:/bin", "HOME": root.appendingPathComponent("home").path,
+                                   "TMPDIR": engine.privateDirectory]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+        XCTAssertNotEqual(inside("kill -0 \(bystander.processIdentifier)"), 0, "signalling another process")
+        XCTAssertTrue(bystander.isRunning)
+        XCTAssertEqual(inside("kill -0 $$"), 0, "…while its own processes stay reachable (the probe works)")
+        let general = NSPasteboard.general.changeCount
+        let ruler = NSPasteboard(name: .ruler).changeCount
+        XCTAssertNotEqual(inside("print -n probe | pbcopy -pboard ruler"), 0, "pbcopy")
+        XCTAssertEqual(NSPasteboard.general.changeCount, general, "the clipboard was not touched")
+        XCTAssertEqual(NSPasteboard(name: .ruler).changeCount, ruler)
+        XCTAssertNotEqual(inside("osascript -e 1"), 0, "osascript")
+        XCTAssertNotEqual(inside("open -g /tmp"), 0, "open (LaunchServices)")
     }
 }
 

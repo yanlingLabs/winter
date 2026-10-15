@@ -370,11 +370,41 @@ let shellFreeTextCommands: [String: Int] = [
 /// message, unquoted) make the line prose.
 let shellFreeTextPositionLimit = 3
 
-/// PURE: may `text` be shown to zsh's completion system? Never when it holds anything zsh could EVALUATE while
-/// completing (`_path_files` expands the word under the cursor): `$` (parameters, `$(…)`, `$((…))`), a backtick,
-/// `!` (history), or `(` (`=(…)`, `<(…)`, `>(…)`, glob qualifiers such as `*(e:…:)`).
+/// The only characters a line may hold to be shown to zsh's completion system — an ALLOWLIST: letters, digits,
+/// space and `. _ / : @ % + , = - ~`. Completion functions EVALUATE parts of the line (`_path_files` expands the
+/// word under the cursor; `_rsync`/`_scp` build an `ssh … <host>` command and `eval` it, so a quoted host splices
+/// commands), so any quote, backslash, `; & | < > { } * ? [ ] # $`, backtick, `! ( )`, tab or non-ASCII
+/// character keeps the line away from zsh — the prose guard decides it instead.
+let zshEngineAllowedCharacters: Set<Character> = Set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._/:@%+,=-~")
+
+/// PURE: may `text` be shown to zsh's completion system (`zshEngineAllowedCharacters`)?
 func zshBufferIsSafe(_ text: String) -> Bool {
-    !text.contains { "$`!(".contains($0) }
+    text.allSatisfy { zshEngineAllowedCharacters.contains($0) }
+}
+
+/// Commands whose completion reaches a REMOTE shell (it builds and runs `ssh <host> …`, or the command named by
+/// `-e`): a line naming one is never shown to zsh, whatever its characters.
+let shellCommandsNeverShownToZsh: Set<String> = [
+    "rsync", "scp", "sftp", "ssh", "slogin", "rcp", "rsh", "sshfs", "mosh", "rclone",
+]
+
+/// PURE: may this line, as tokenized, be shown to zsh? Its characters (`zshBufferIsSafe`) and its commands.
+func zshLineMayBeShown(_ line: String) -> Bool {
+    guard zshBufferIsSafe(line), case .complete(let tokens) = shellTokenize(line) else { return false }
+    var commandPosition = true
+    for token in tokens {
+        switch token {
+        case .op(let op):
+            if shellCommandSeparators.contains(op) { commandPosition = true }
+        case .word(let word):
+            if commandPosition {
+                if shellCommandsNeverShownToZsh.contains((word.text as NSString).lastPathComponent) { return false }
+                if !shellIsAssignment(word.text), !shellReservedWords.contains(word.text) { commandPosition = false }
+            }
+        }
+    }
+    return true
 }
 
 // MARK: - The validator
@@ -511,7 +541,7 @@ private func shellValidateArguments(_ words: ArraySlice<ShellWord>, context: She
     return true
 }
 
-private func shellIsAssignment(_ text: String) -> Bool {
+func shellIsAssignment(_ text: String) -> Bool {
     guard let eq = text.firstIndex(of: "="), eq != text.startIndex else { return false }
     let name = text[..<eq]
     guard let first = name.first, first.isLetter || first == "_" else { return false }
@@ -619,7 +649,7 @@ func shellCompletion(for line: String, context: ShellCommandContext, commandName
     guard case .complete(let tokensBefore) = shellTokenize(before) else { return nil }
     let isFirstWord = !tokensBefore.contains { if case .word = $0 { return true } else { return false } }
 
-    if !isFirstWord, let source, zshBufferIsSafe(line), shellFirstWordResolves(before, context: context),
+    if !isFirstWord, let source, zshLineMayBeShown(line), shellFirstWordResolves(before, context: context),
        let capture = source.capture(buffer: line, directory: context.workingDirectory, deadline: deadline) {
         let candidates = capture.hits.filter { $0.hasPrefix(word) && $0 != word }
         guard !candidates.isEmpty, !capture.hits.contains(word) else { return nil }

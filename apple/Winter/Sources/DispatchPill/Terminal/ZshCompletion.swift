@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -139,7 +140,7 @@ func shellCompletionCheckPasses(_ line: String, context: ShellCommandContext, so
     guard case .complete(let tokens) = shellTokenize(line) else { return false }
     let chars = Array(line)
     // Nothing that zsh could evaluate while completing is ever shown to it.
-    let engine = zshBufferIsSafe(line) ? source : nil
+    let engine = zshLineMayBeShown(line) ? source : nil
 
     // Simple commands: words, with redirection targets set apart (they were judged structurally already).
     var commands: [[ShellWord]] = [[]]
@@ -230,6 +231,7 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
     /// The engine's own temp folder — the one place it may write.
     let privateDirectory: String
     private let backoffBase: TimeInterval
+    private var quitObserver: NSObjectProtocol?
 
     private let lock = NSLock()
     private var process: Process?
@@ -271,9 +273,22 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
         environment["TMPDIR"] = privateDirectory
         environment["TMPPREFIX"] = (privateDirectory as NSString).appendingPathComponent("zsh") // here-documents
         self.environment = environment
+        // The app quitting takes the engine with it (its inner shell gets the pty's hang-up).
+        quitObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                                              object: nil, queue: nil) { [weak self] _ in
+            self?.shutDown()
+        }
+    }
+
+    /// Stops the engine for good (app quit).
+    func shutDown() {
+        lock.lock(); defer { lock.unlock() }
+        unavailable = true
+        stopLocked()
     }
 
     deinit {
+        if let quitObserver { NotificationCenter.default.removeObserver(quitObserver) }
         stopLocked()
         try? FileManager.default.removeItem(atPath: privateDirectory)
     }
@@ -510,13 +525,26 @@ func shellSetCloseOnExec(_ descriptor: Int32) {
 
 /// PURE: the engine's sandbox — everything zsh's completion needs to READ and RUN, nothing it could WRITE
 /// except its private folder and the terminal devices zpty uses, and no network.
+///
+/// DENY by default. Allowed: forking and running programs (completion functions run `git`, `make`, `xcrun`…);
+/// READING files — all of them, because path completion lists whatever directory the user types (reads cannot
+/// leave the sandbox: no network, no writes, no pasteboard); ioctls and ptys (zpty); signals only within the
+/// sandbox (never another of the user's processes — not the Winter daemon, not the app); writes only to its
+/// private folder and the tty/pty devices; three Mach services libc needs (user lookup, notify, logging).
+/// Explicitly denied on top: Apple Events, the pasteboard, LaunchServices, the window server, and running
+/// `osascript`, `open`, `pbcopy`, `pbpaste`.
 func zshCompletionSandboxProfile(privateDirectory: String) -> String {
     let quoted = privateDirectory.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     return """
     (version 1)
-    (allow default)
-    (deny network*)
-    (deny file-write*)
+    (deny default)
+    (allow process-fork)
+    (allow process-exec)
+    (allow file-read*)
+    (allow file-ioctl)
+    (allow sysctl-read)
+    (allow pseudo-tty)
+    (allow signal (target same-sandbox))
     (allow file-write*
       (literal "/dev/null")
       (literal "/dev/ptmx")
@@ -524,6 +552,23 @@ func zshCompletionSandboxProfile(privateDirectory: String) -> String {
       (regex #"^/dev/tty")
       (regex #"^/dev/pty")
       (subpath "\(quoted)"))
+    (allow mach-lookup
+      (global-name "com.apple.system.opendirectoryd.libinfo")
+      (global-name "com.apple.system.notification_center")
+      (global-name "com.apple.system.logger"))
+    (allow ipc-posix-shm-read* (ipc-posix-name "apple.shm.notification_center"))
+    (deny network*)
+    (deny appleevent-send)
+    (deny mach-lookup
+      (global-name "com.apple.pasteboard.1")
+      (global-name "com.apple.coreservices.launchservicesd")
+      (global-name-regex #"^com\\.apple\\.lsd\\.")
+      (global-name "com.apple.windowserver.active"))
+    (deny process-exec
+      (literal "/usr/bin/osascript")
+      (literal "/usr/bin/open")
+      (literal "/usr/bin/pbcopy")
+      (literal "/usr/bin/pbpaste"))
     """
 }
 
