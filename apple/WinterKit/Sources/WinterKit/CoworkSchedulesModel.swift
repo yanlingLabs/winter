@@ -70,6 +70,12 @@ func coworkScheduleErrorText(_ error: Error) -> String {
     @Published public private(set) var isUnsupported = false
     @Published public private(set) var nextCursor: String?
     @Published public private(set) var canGoBack = false
+    /// Counts every UNBIND (`bind(workspaceId: nil)`, which the workspace model performs whenever its
+    /// selection is reassigned, and `release`). A view that binds this model keys its task on the
+    /// count, so a model-driven unbind re-binds it even when no render saw the selection change (a
+    /// refresh that sets the same workspace back). A bind to a workspace never counts: the view's own
+    /// bind would change the key it is keyed on and restart its task forever.
+    @Published public private(set) var unbindGeneration = 0
     private struct Scope: Equatable { let workspaceId: String, generation: UUID }
     private struct Intent: Hashable { let workspaceId: String, scheduleId: String }
     private var generation = UUID(), activeRequest: UUID?
@@ -83,6 +89,7 @@ func coworkScheduleErrorText(_ error: Error) -> String {
     /// Navigation/refresh generations invalidate late UI results, including returning to the same ID.
     @discardableResult public func bind(workspaceId: String?) -> UUID {
         generation = UUID(); activeRequest = nil; self.workspaceId = workspaceId
+        if workspaceId == nil { unbindGeneration += 1 }
         resetListing(); lastCancellation = nil; error = nil; busy = false; isUnsupported = false
         // An unconfirmed cancellation retains its exact revision when the user returns later.
         return generation

@@ -230,6 +230,15 @@ import WinterProtocol
         XCTAssertTrue(try host.params("workspace.schedule.cancel").isEmpty)
         gate.release(); await selection.value
     }
+    func testOnlyAnUnbindCountsSoABindingViewKeyedOnItCannotRetriggerItself() {
+        let model = CoworkSchedulesModel { _, _ in throw NSError(domain: "unused", code: 1) }
+        XCTAssertEqual(model.unbindGeneration, 0)
+        let first = model.bind(workspaceId: "workspace"), second = model.bind(workspaceId: "workspace")
+        XCTAssertEqual(model.unbindGeneration, 0, "binding is what the view does inside its task; counting it would loop")
+        model.release(first); XCTAssertEqual(model.unbindGeneration, 0); XCTAssertEqual(model.workspaceId, "workspace")
+        model.release(second); XCTAssertEqual(model.unbindGeneration, 1); XCTAssertNil(model.workspaceId)
+        model.bind(workspaceId: nil); XCTAssertEqual(model.unbindGeneration, 2)
+    }
     func testCancellationIsSerializedWhileAwaitingReceipt() async throws {
         let host = Host(), gate = Gate()
         let model = CoworkSchedulesModel { method, params in

@@ -9,8 +9,11 @@ import WinterProtocol
     let policyRevision: Int?
     @State private var bindingToken: UUID?
     @State private var cancellation: CoworkScheduleView?
+    /// Re-keyed by the workspace's own revisions AND by the model's unbind count: the workspace model
+    /// unbinds this model whenever it reassigns its selection, including a reassignment to an equal
+    /// workspace that no render observed, and only the count tells the task to bind again.
     private var workspaceGeneration: String {
-        "\(workspace.workspaceId):\(workspace.configRevision):\(workspace.grantRevision):\(workspace.instructionRevision):\(workspace.leaseEpoch):\(policyRevision ?? 0):\(workspace.state)"
+        "\(workspace.workspaceId):\(workspace.configRevision):\(workspace.grantRevision):\(workspace.instructionRevision):\(workspace.leaseEpoch):\(policyRevision ?? 0):\(workspace.state):\(model.unbindGeneration)"
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

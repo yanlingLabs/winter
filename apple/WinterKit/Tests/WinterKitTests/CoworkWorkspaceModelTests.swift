@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import WinterKit
 import WinterProtocol
 
@@ -180,6 +181,27 @@ import WinterProtocol
         await model.refresh()
         XCTAssertNil(model.error); XCTAssertEqual(model.workspaces.count, 1)
         XCTAssertFalse(model.capabilities.folderPreparation)
+    }
+    /// The schedules view binds in a task keyed on `unbindGeneration`. `refresh()` unbinds by setting the
+    /// selection to nil and then to the same workspace again; a key made only of the workspace's own
+    /// fields never changes across that, so without the count the view would stay unbound.
+    func testRefreshUnbindsTheSchedulesModelAndPublishesAGenerationSoABindingViewBindsAgain() async {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }
+        await model.select("workspace")
+        let schedules = model.schedules; schedules.bind(workspaceId: "workspace")
+        let before = schedules.unbindGeneration; XCTAssertEqual(schedules.workspaceId, "workspace")
+        var keys: [Int] = []
+        // What the view's task does: bind again whenever the key changes.
+        let view = schedules.$unbindGeneration.dropFirst().sink { key in keys.append(key); schedules.bind(workspaceId: "workspace") }
+        await model.refresh()
+        XCTAssertNil(model.error); XCTAssertEqual(model.selected?.workspaceId, "workspace")
+        XCTAssertGreaterThan(schedules.unbindGeneration, before); XCTAssertFalse(keys.isEmpty)
+        XCTAssertEqual(keys, Array((before + 1)...schedules.unbindGeneration), "the key must move on every reassignment")
+        XCTAssertEqual(schedules.workspaceId, "workspace", "the key moved and the keyed binder bound again")
+        // Without a binder the same refresh leaves the model unbound, which is why the key matters.
+        view.cancel(); let moved = schedules.unbindGeneration
+        await model.refresh()
+        XCTAssertNil(schedules.workspaceId); XCTAssertGreaterThan(schedules.unbindGeneration, moved)
     }
     func testInvalidCreationNeverCallsDaemon() async {
         let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }
