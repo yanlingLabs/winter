@@ -221,8 +221,9 @@ Winter installation or deliberately creates host memory pressure.
 
 ## Later status (2026-10-15)
 
-Winter PRs #29-#39 merged into `cowork/output-integration` after the 2026-10-12
-record above. Creation and guest execution remain unavailable after them.
+Winter PRs #29-#39 merged into `cowork/output-integration` between 2026-10-12 and
+2026-10-15, with the dates below. Creation and guest execution remain unavailable
+after them.
 
 | PR | Merged | Summary |
 | --- | --- | --- |
