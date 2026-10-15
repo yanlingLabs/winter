@@ -152,6 +152,10 @@ final class DispatchPillController: ObservableObject {
     let adapter: FieldStateAdapter
     let canvas = DispatchPillCanvasModel()
     let morph = DispatchPillMorphModel()
+    /// Command mode: whether the draft is a shell line to RUN (purple, Return runs it), and its ghost completion.
+    let commandMode: DispatchPillCommandMode
+    /// The commands run from the pill — their pills in the floating stack, their terminal windows.
+    let commandRuns = CommandRunStore()
 
     // MARK: Wiring (AppDelegate)
 
@@ -190,6 +194,10 @@ final class DispatchPillController: ObservableObject {
     var onSpawnCowork: (() -> Void)?
     /// The session the adapter's policy readout belongs to — a re-seed is due when the pill's session changes.
     private var policySessionId: String?
+
+    /// The bound session's working directory, where a command runs — nil falls back to the home folder
+    /// (a dispatch session usually has none).
+    var commandWorkingDirectory: (() -> String?)?
 
     /// The session this pill is bound to, read fresh (card drafts are keyed by it).
     var currentSessionId: (() -> String?)? {
@@ -270,10 +278,15 @@ final class DispatchPillController: ObservableObject {
     /// `settings` is required, never defaulted: the app hands in its ONE store
     /// (`AppDelegate.dispatchPillSettings`) and a test its own throwaway suite, so no construction
     /// can quietly read a different store than the settings page writes.
-    init(session: SessionModel, settings: DispatchPillSettings) {
+    ///
+    /// `commandEnvironment` is the user's shell as command mode sees it — `.inert` (nothing is a command)
+    /// unless the app hands in its live one, so no pill built by a test ever runs the user's shell.
+    init(session: SessionModel, settings: DispatchPillSettings, commandEnvironment: CommandLineEnvironment = .inert) {
         self.session = session
         self.settings = settings
         self.adapter = FieldStateAdapter(session: session)
+        self.commandMode = DispatchPillCommandMode(environment: commandEnvironment,
+                                                   workingDirectory: { commandEnvironment.homeDirectory })
         let initialMain = CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
         let initialCanvas = dispatchPillCanvasSize(mainSize: initialMain, accessorySize: .zero)
         panel = DispatchPillPanel(
@@ -311,6 +324,13 @@ final class DispatchPillController: ObservableObject {
         wireAdapter()
         observeSession()
         observeSettings()
+        commandMode.workingDirectory = { [weak self] in
+            self?.commandDirectory() ?? commandEnvironment.homeDirectory
+        }
+        // "Add to transcript" in a terminal window: the composer's own send path.
+        commandRuns.onSendToTranscript = { [weak self] text in
+            await self?.onSubmit?(text) ?? false
+        }
     }
 
     // MARK: - The SwiftUI tree (exists only while the pill is up)
@@ -525,6 +545,11 @@ final class DispatchPillController: ObservableObject {
             runMenuItem(selected)
             return
         }
+        // Command mode: the line runs in the user's shell instead of being sent.
+        if commandMode.isCommandNow(text) {
+            runCommand(text)
+            return
+        }
         if case .complete(let full) = dispatchPillEnterAction(draft: text, currentPolicy: knownPolicy) {
             adapter.composerDraft = full
             return
@@ -542,6 +567,7 @@ final class DispatchPillController: ObservableObject {
             self.adapter.endComposerSubmit()
             guard ok else { return } // failure: the draft stays — never lost
             self.adapter.composerSendSucceeded(sentDraft: text)
+            self.commandMode.reset()
             self.draftCache.clear()
             self.historyIndex = nil
             if !stayFullScreen, self.adapter.composerDraft.isEmpty {
@@ -554,6 +580,37 @@ final class DispatchPillController: ObservableObject {
 
     /// The stop button.
     func interrupt() { onInterrupt?() }
+
+    // MARK: - Command mode
+
+    /// Where a command runs: the bound session's working directory when it has one that exists, else home.
+    func commandDirectory() -> String {
+        if let dir = commandWorkingDirectory?(), !dir.isEmpty {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: dir, isDirectory: &isDirectory), isDirectory.boolValue { return dir }
+        }
+        return commandMode.environment.homeDirectory
+    }
+
+    /// Return in command mode: the line runs as the user — a pill joins the stack, the composer clears the
+    /// way a sent message's does.
+    private func runCommand(_ line: String) {
+        commandRuns.start(command: line, workingDirectory: commandDirectory(), environment: commandMode.environment)
+        adapter.composerDraft = ""
+        draftCache.clear()
+        historyIndex = nil
+        commandMode.reset()
+        if presentation == .expanded { setPresentation(.compact) } else { retargetMain() }
+    }
+
+    /// Delete/Backspace with the caret at the end and nothing selected (`ComposerTextView.onDeleteBackwardAtEnd`).
+    /// True when it was the command-mode opt-out — nothing is deleted then.
+    func handleDeleteBackwardAtEnd() -> Bool {
+        commandMode.deleteBackward(text: adapter.composerDraft, caretAtEnd: true, hasSelection: false)
+    }
+
+    /// A click on a command pill.
+    func openCommandRun(_ id: UUID) { commandRuns.openWindow(id) }
 
     // MARK: - Commands the pill handles itself
 
@@ -723,6 +780,7 @@ final class DispatchPillController: ObservableObject {
     func clearDraft() {
         adapter.composerDraft = ""
         draftCache.clear()
+        commandMode.reset()
     }
 
     /// `ComposerTextView.onContentHeightChange`.
@@ -927,6 +985,7 @@ final class DispatchPillController: ObservableObject {
         // restore as typing (the caller decides the presentation).
         lastDraft = restored
         adapter.composerDraft = restored
+        commandMode.draftChanged(restored)
     }
 
     // MARK: - Geometry
@@ -1390,6 +1449,10 @@ final class DispatchPillController: ObservableObject {
                 // By the hop the new draft is stored, so the same layout agrees with the text view.
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.adapter.composerDraft == new else { return }
+                    // Command mode re-judges every edit (debounced, off the main thread). Here, never in the
+                    // willSet above: it can publish at once, and a re-render then would hand the composer the
+                    // draft as it was before this keystroke (the same trap as the expansion below).
+                    self.commandMode.draftChanged(new)
                     // A changed draft hands the `/` menu's mark back to the closest match.
                     self.menuSelection = nil
                     // Typing while the picker is up means the user went back to writing.
