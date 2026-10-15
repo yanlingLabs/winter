@@ -156,6 +156,9 @@ final class DispatchPillController: ObservableObject {
     let morph = DispatchPillMorphModel()
     /// Command mode: whether the draft is a shell line to RUN (purple, Return runs it), and its ghost completion.
     let commandMode: DispatchPillCommandMode
+    /// The paths on screen in the app the user is in — command mode's argument ghost offers them. Read only while
+    /// the pill is up, dropped when it goes (`OnScreenTextReader.swift`).
+    let onScreenPaths: OnScreenPathStore
     /// The commands run from the pill — their pills in the floating stack, their terminal windows.
     let commandRuns = CommandRunStore()
 
@@ -283,8 +286,10 @@ final class DispatchPillController: ObservableObject {
     ///
     /// `commandEnvironment` is the user's shell as command mode sees it — `.inert` (nothing is a command)
     /// unless the app hands in its live one, so no pill built by a test ever runs the user's shell.
-    init(session: SessionModel, settings: DispatchPillSettings, commandEnvironment: CommandLineEnvironment = .inert) {
+    init(session: SessionModel, settings: DispatchPillSettings, commandEnvironment: CommandLineEnvironment = .inert,
+         onScreenPaths: OnScreenPathStore? = nil) {
         self.session = session
+        self.onScreenPaths = onScreenPaths ?? .inert
         self.settings = settings
         self.adapter = FieldStateAdapter(session: session)
         self.commandMode = DispatchPillCommandMode(environment: commandEnvironment,
@@ -328,6 +333,16 @@ final class DispatchPillController: ObservableObject {
         observeSettings()
         commandMode.workingDirectory = { [weak self] in
             self?.commandDirectory() ?? commandEnvironment.homeDirectory
+        }
+        // On-screen paths: read when command mode turns on (throttled), refreshed for an argument's ghost when
+        // stale, and a read that brings different paths re-judges the draft so its ghost can show them.
+        let onScreenPaths = self.onScreenPaths
+        commandMode.onScreenPaths = { [onScreenPaths] in onScreenPaths.paths }
+        commandMode.onScreenPathsWanted = { [onScreenPaths] in onScreenPaths.refreshIfStale() }
+        commandMode.onCommandModeTurnedOn = { [onScreenPaths] in onScreenPaths.refresh() }
+        onScreenPaths.onChange = { [weak self] in
+            guard let self, self.isVisible, !self.adapter.composerDraft.isEmpty else { return }
+            self.commandMode.draftChanged(self.adapter.composerDraft)
         }
     }
 
@@ -379,6 +394,7 @@ final class DispatchPillController: ObservableObject {
         presentation = adapter.composerDraft.isEmpty ? .compact : .expanded
         snapToTarget()
         isVisible = true
+        onScreenPaths.activate()
         reconcileChildFeeds()
         installContent()
         panel.orderFrontRegardless()
@@ -398,6 +414,7 @@ final class DispatchPillController: ObservableObject {
         presentation = .compact
         removeMonitors()
         isVisible = false
+        onScreenPaths.deactivate()
         pointerOver = false
         pointer.set(nil)
         reconcileChildFeeds()
@@ -586,6 +603,8 @@ final class DispatchPillController: ObservableObject {
     /// Where a command runs: the bound session's working directory when it has one that exists, else home.
     func commandDirectory() -> String {
         if let dir = commandWorkingDirectory?(), !dir.isEmpty {
+            // A session folder under a privacy-gated one is taken by name — checking it could prompt.
+            if shellPathIsTCCGated(dir, home: commandMode.environment.homeDirectory) { return dir }
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: dir, isDirectory: &isDirectory), isDirectory.boolValue { return dir }
         }

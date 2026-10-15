@@ -1473,7 +1473,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Command mode reads the user's own login shell — never under unit tests (`.inert`: nothing is a
         // command), so no test ever runs the developer's shell or its profile.
         let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings,
-                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live())
+                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live(),
+                                          onScreenPaths: Self.isRunningUnitTests ? .inert : .live())
         pillController = pill
         wireDispatchPill(pill, model: model)
 
