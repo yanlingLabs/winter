@@ -307,8 +307,16 @@ import WinterProtocol
         guard !busy, !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id,
               var state = guidanceByWorkspace[id],
               state.canSave, let content = state.draft, let revision = state.baseRevision, let digest = state.baseDigest else { return }
-        if let expectedDraft, Data(expectedDraft.utf8) != Data(content.utf8) { return }
-        guard expectedRevision == nil || expectedRevision == revision, expectedDigest == nil || expectedDigest == digest else { return }
+        // The view that asked drew a different draft or base than the model holds now (a late tap after an
+        // edit, a review or a refresh). Nothing is sent; the person is told, not left with a button that did nothing.
+        if let expectedDraft, Data(expectedDraft.utf8) != Data(content.utf8) {
+            state.note("The draft changed before it could be saved. Review it and save again.", aboutDraft: true)
+            publishGuidance(state); return
+        }
+        guard expectedRevision == nil || expectedRevision == revision, expectedDigest == nil || expectedDigest == digest else {
+            state.note("The shared instructions changed before this save. Review them and save again.", aboutDraft: false)
+            publishGuidance(state); return
+        }
         guard content.utf8.count <= Self.instructionMaxBytes, !content.contains("\0") else {
             state.note("Shared instructions must contain at most 65,536 UTF-8 bytes and no NUL characters.", aboutDraft: true)
             publishGuidance(state); return

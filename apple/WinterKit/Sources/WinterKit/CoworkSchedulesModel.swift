@@ -184,11 +184,19 @@ func coworkScheduleErrorText(_ error: Error) -> String {
         }
         catch { if current(captured, token) { fail(error) } }
     }
+    /// Shown when a confirmed cancellation no longer matches the row on screen. A fixed sentence, not daemon prose.
+    public static let staleScheduleMessage = "This schedule changed; review it again."
     public func cancel(scheduleId: String, expectedRevision: Int, binding: UUID) async {
         guard generation == binding else { return }
         let known = status?.schedule.scheduleId == scheduleId ? status?.schedule : schedules.first(where: { $0.scheduleId == scheduleId })
-        guard let row = known, row.canCancel, row.revision == expectedRevision,
-              let (captured, token) = begin() else { return }; defer { end(captured, token) }
+        guard let row = known, row.canCancel, row.revision == expectedRevision else {
+            // The list moved under the open confirmation (a refresh, a status read, another page), so the
+            // row the person confirmed is gone or at another revision. Nothing was sent; say so. While a
+            // request is in flight the refusal below stays silent: that request is about to move the list.
+            if !busy { error = Self.staleScheduleMessage }
+            return
+        }
+        guard let (captured, token) = begin() else { return }; defer { end(captured, token) }
         let intent = Intent(workspaceId: captured.workspaceId, scheduleId: scheduleId)
         // A pin is the lost-reply replay token. It may be sent again only while the row still sits at
         // that exact revision; at any other revision the earlier attempt cannot have applied, so the pin

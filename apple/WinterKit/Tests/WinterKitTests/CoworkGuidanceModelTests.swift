@@ -323,6 +323,25 @@ import WinterProtocol
         let count = host.updates.count; await model.retryInstructionSave(workspaceId: "two", requestId: "stale-pending")
         XCTAssertEqual(host.updates.count, count); XCTAssertTrue(model.guidance?.hasUnconfirmedSave ?? false)
     }
+    func testASaveFromAViewThatDrewAnOlderDraftRevisionOrDigestSaysSoInsteadOfDoingNothing() async throws {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        let digest = try XCTUnwrap(model.guidance?.current?.digest)
+        model.editInstructions("Current draft")
+        await model.saveInstructions(expectedDraft: "The draft the view drew")
+        XCTAssertEqual(model.guidance?.message, "The draft changed before it could be saved. Review it and save again.")
+        // That message is about the draft, so the next edit supersedes it.
+        model.editInstructions("Current draft, edited"); XCTAssertNil(model.guidance?.message)
+        await model.saveInstructions(expectedDraft: "Current draft, edited", expectedRevision: 99)
+        XCTAssertEqual(model.guidance?.message, "The shared instructions changed before this save. Review them and save again.")
+        model.editInstructions("Current draft, edited again")
+        await model.saveInstructions(expectedDraft: "Current draft, edited again", expectedRevision: 1, expectedDigest: String(repeating: "0", count: 64))
+        XCTAssertEqual(model.guidance?.message, "The shared instructions changed before this save. Review them and save again.")
+        XCTAssertTrue(host.updates.isEmpty); XCTAssertFalse(model.guidance?.hasUnconfirmedSave ?? true)
+        XCTAssertEqual(model.guidance?.draft, "Current draft, edited again"); XCTAssertTrue(model.guidance?.canSave ?? false)
+        // The matching request still saves, and its first act retires the message.
+        await model.saveInstructions(expectedDraft: "Current draft, edited again", expectedRevision: 1, expectedDigest: digest)
+        XCTAssertEqual(host.updates.count, 1); XCTAssertNil(model.guidance?.message)
+    }
     func testRecoveryRequiredForeverIsEscapedByAbandoningAndTheDraftSurvives() async throws {
         let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
         model.editInstructions("Doomed save"); host.saveMode = .journalFailed; await model.saveInstructions()

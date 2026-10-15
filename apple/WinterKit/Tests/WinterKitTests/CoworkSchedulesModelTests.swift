@@ -213,8 +213,40 @@ import WinterProtocol
         let old = model.bind(workspaceId: "workspace"); await model.refresh()
         let current = model.bind(workspaceId: "workspace"); await model.refresh()
         await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: old)
+        // An old binding belongs to a screen that is gone: nothing to tell the current one.
+        XCTAssertNil(model.error)
         await model.cancel(scheduleId: "schedule", expectedRevision: 9, binding: current)
         XCTAssertTrue(try host.params("workspace.schedule.cancel").isEmpty)
+        XCTAssertEqual(model.error, "This schedule changed; review it again.")
+    }
+    func testAConfirmationThatNoLongerMatchesTheListSaysSoAndSendsNothing() async throws {
+        let host = Host(), gate = Gate()
+        let model = CoworkSchedulesModel { method, params in
+            if method == "workspace.schedule.cancel" { await gate.wait() }
+            return try host.call(method, params)
+        }, binding = model.bind(workspaceId: "workspace")
+        await model.refresh()
+        // The row moved on (it is now at revision 2) while the confirmation for revision 1 stayed open.
+        host.revision = 2; await model.refresh(); XCTAssertEqual(model.schedules.first?.revision, 2)
+        await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertEqual(model.error, CoworkSchedulesModel.staleScheduleMessage); XCTAssertFalse(model.busy)
+        // The row is gone from the page.
+        await model.refresh(); XCTAssertNil(model.error)
+        await model.cancel(scheduleId: "vanished", expectedRevision: 2, binding: binding)
+        XCTAssertEqual(model.error, "This schedule changed; review it again.")
+        // The next request retires the message like any other.
+        await model.refresh(); XCTAssertNil(model.error)
+        // Already cancelled rows cannot be cancelled again.
+        host.cancelled = true; host.revision = 3; await model.refresh()
+        await model.cancel(scheduleId: "schedule", expectedRevision: 3, binding: binding)
+        XCTAssertEqual(model.error, CoworkSchedulesModel.staleScheduleMessage)
+        XCTAssertTrue(try host.params("workspace.schedule.cancel").isEmpty)
+        // While a request is in flight the refusal stays silent: that request is about to move the list.
+        host.cancelled = false; host.revision = 4; await model.refresh()
+        let first = Task { await model.cancel(scheduleId: "schedule", expectedRevision: 4, binding: binding) }
+        while gate.continuation == nil { await Task.yield() }
+        await model.cancel(scheduleId: "schedule", expectedRevision: 1, binding: binding)
+        XCTAssertNil(model.error); gate.release(); await first.value
     }
     func testWorkspaceSelectionImmediatelyInvalidatesScheduleConfirmation() async throws {
         let host = Host(), gate = Gate()
