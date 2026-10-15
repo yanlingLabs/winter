@@ -121,7 +121,7 @@ public struct CoworkSelection: Codable, Equatable, Sendable {
 /// host authority and feasibility gates. The paired transport token alone grants no workspace.
 public struct CoworkRequest<Result: Decodable & Sendable>: Sendable {
     public let method: String, params: SessionEvent.JSONValue
-    fileprivate init(_ method: String, _ values: [String: SessionEvent.JSONValue]) { self.method = method; self.params = .object(values) }
+    init(_ method: String, _ values: [String: SessionEvent.JSONValue]) { self.method = method; self.params = .object(values) }
     public func decode(_ value: SessionEvent.JSONValue) throws -> Result { try JSONDecoder().decode(Result.self, from: JSONEncoder().encode(value)) }
 }
 private func mutation(_ workspaceId: String, _ requestId: String, _ revision: Int) -> [String: SessionEvent.JSONValue] {
