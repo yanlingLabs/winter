@@ -127,6 +127,8 @@ final class DispatchPillController: ObservableObject {
     /// The pointer is over what the pill draws (the mouse gate's verdict): the pill and everything floating above it
     /// grow a little (`DispatchPillMetrics.hoverScale`).
     @Published private(set) var pointerOver = false
+    /// The pointer over the canvas, for the buttons' hover glow (`PillHoverGlow.swift`).
+    let pointer = DispatchPillPointer()
     /// Which past turn the 2-finger swipe has pinned (index into the transcript), or nil for the
     /// composer. Only meaningful while compact/expanded.
     @Published private(set) var historyIndex: Int?
@@ -397,6 +399,7 @@ final class DispatchPillController: ObservableObject {
         removeMonitors()
         isVisible = false
         pointerOver = false
+        pointer.set(nil)
         reconcileChildFeeds()
         snapToTarget()
         panel.orderOut(nil)
@@ -1187,6 +1190,7 @@ final class DispatchPillController: ObservableObject {
                                           accessoryFrame: presentation == .fullScreen ? .zero : accessoryFrame)
         if panel.ignoresMouseEvents == accepts { panel.ignoresMouseEvents = !accepts }
         if pointerOver != accepts { pointerOver = accepts }
+        pointer.set(accepts ? local : nil)
     }
 
     // MARK: - Event monitors (installed while visible, removed on hide)

@@ -75,6 +75,7 @@ struct DispatchPillView: View {
         .frame(width: canvas.size.width, height: canvas.size.height, alignment: .bottom)
         .coordinateSpace(.named(Self.canvasSpace))
         .environment(\.colorScheme, .dark)
+        .environment(\.dispatchPillPointer, controller.pointer)
         .onChange(of: accessories, initial: true) { _, present in
             if !present { controller.accessoryLayoutChanged(frame: .zero) }
         }

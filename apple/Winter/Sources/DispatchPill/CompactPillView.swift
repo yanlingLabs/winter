@@ -72,6 +72,7 @@ struct PillSendStopButton: View {
             }
             .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)
             .contentShape(Circle())
+            .pillHoverGlow(runsCommand && role == .send ? Theme.commandPurple : Color.white)
         }
         .buttonStyle(.plain)
         .disabled(phase == .stopping)
