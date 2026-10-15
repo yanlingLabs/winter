@@ -358,8 +358,9 @@ private struct GuidanceTextEditor: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
-        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        // A text view with its own undo history, not the window's: this window also holds the composer and
+        // settings fields, and a model-driven replacement of the draft must not touch their undo stack.
+        let (scrollView, textView) = ScopedUndoTextView.makeScrollable()
         let font = Typography.monoNS(ofSize: Typography.labelSize)
         let color = NSColor(named: "TextPrimary") ?? .labelColor
         textView.delegate = context.coordinator
@@ -395,13 +396,13 @@ private struct GuidanceTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? NSTextView else { return }
+        guard let textView = nsView.documentView as? ScopedUndoTextView else { return }
         context.coordinator.parent = self
         // An AppKit view ignores the SwiftUI `.disabled(model.busy)` above it unless told.
         textView.isEditable = context.environment.isEnabled
         // Only a model-driven replacement lands here (the person's own typing comes back byte-equal and
-        // changes nothing). It also drops the undo entries that point into the text that was replaced:
-        // left on the stack, Cmd-Z raises NSRangeException.
+        // changes nothing). It also drops this view's undo entries that point into the text that was
+        // replaced: left on the stack, Cmd-Z raises NSRangeException.
         textView.replaceTextFromModel(text)
     }
 
