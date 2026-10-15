@@ -25,7 +25,21 @@ function failed(): never {
  * nonvariadic binding. No O_CREAT/O_TRUNC; callers fstat before bounded
  * reads. NONBLOCK prevents a substituted FIFO from hanging before refusal. */
 export function openInstructionAt(directory: number): number {
-  const filename = Buffer.from("WINTER.md\0");
+  return openReadOnlyAt(directory, "WINTER.md");
+}
+
+/** Read-only open of the service's OWN recorded temporary entry in the held
+ * directory, for restart recovery to prove an orphan is exactly the file it
+ * recorded before removing it. Same binding and flags as openInstructionAt (no
+ * new symbol, no mode flag); the name must be a generated temporary name, so
+ * this can never open the user's WINTER.md or any other entry. */
+export function openTemporaryAt(directory: number, temporaryName: string): number {
+  if (!temporary(temporaryName)) throw new CoworkError("invalid_request");
+  return openReadOnlyAt(directory, temporaryName);
+}
+
+function openReadOnlyAt(directory: number, name: string): number {
+  const filename = Buffer.from(`${name}\0`);
   const fd = native().symbols.openat!(directory, filename,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW | O_CLOEXEC) as number;
   if (fd < 0) failed();
