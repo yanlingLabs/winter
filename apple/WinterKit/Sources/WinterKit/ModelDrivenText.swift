@@ -16,9 +16,9 @@ extension NSTextView {
     /// and would leave the view showing a different spelling from the one the model will save.
     ///
     /// `undoManager` is the window's, which every text control in that window shares, so the clear
-    /// also drops their history. AppKit offers no per-view removal: `removeAllActions(withTarget:)`
-    /// does not match the text system's private targets (checked), and a delegate-supplied manager
-    /// would change how Edit > Undo finds the stack.
+    /// also drops their history. `removeAllActions(withTarget:)` cannot narrow it: it does not match the
+    /// text system's private targets (checked). A per-view manager handed out through the delegate's
+    /// `undoManager(for:)` would scope the clear; that is a possible follow-up, not done here.
     @MainActor @discardableResult
     public func replaceTextFromModel(_ text: String) -> Bool {
         guard !string.utf8.elementsEqual(text.utf8) else { return false }
