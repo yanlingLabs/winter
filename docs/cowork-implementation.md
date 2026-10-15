@@ -4,6 +4,10 @@ The user authorized continuing until the accepted [Cowork specification](cowork-
 is fully implemented. This ledger tracks implementation and measured acceptance
 separately. Cowork remains unavailable until its required gates pass.
 
+As of 2026-10-15. The dated 2026-10-12 text below is kept as the record of that
+day; notes marked "Later status (2026-10-15)" and the
+[later-status section](#later-status-2026-10-15) record what changed since.
+
 ## Current decisions and verified groundwork
 
 - The later accepted architecture uses one sandboxed native worker per workspace,
@@ -152,6 +156,11 @@ See [architecture-specific Linux evidence](research/2026-10-12-cowork-linux-supe
 Full PR CI and designated re-review remain separate from these Linux job results.
 Full guest startup is still disabled, and Winter's SDK pin is unchanged.
 
+*Later status (2026-10-15):* agent SDK PR #5 is merged (2026-10-12, merge commit
+`41ac3df21`), as are PR #4 (the Linux ARM64 guest runtime artifact) and PR #7
+(guest provider turns through a private host proxy), both on 2026-10-12. Merged
+is not released: confined-guest query startup still refuses on the SDK's `main`.
+
 The two-disk fixture at `9a588735` is built and signed with 60 Python regressions
 and two strict-C handoff runs passing, but has no independent launch-admission
 receipt and has not run. The native review task was held after its agent turn
@@ -169,6 +178,13 @@ passed 86 tests/432 assertions. It remains fixture-only until the isolated parse
 helper, durable repository grants and guest source acknowledgments are connected.
 Provider proxy/broker and the Git parser helper are progressing independently.
 
+*Later status (2026-10-15):* the provider broker is merged. Winter PR #28
+(`feat(cowork): broker concurrent provider turns with host-held credentials`)
+merged into `main` on 2026-10-12 (merge commit `2cba23d2c`), and the broker source
+(`packages/core/src/cowork/provider-broker.ts`) is also in `cowork/output-integration`.
+Two native lanes, the Mac two-disk VM fixture admission and the native egress
+broker, are on hold pending owner decision; not implemented.
+
 | Area | Current work | Required before completion |
 | --- | --- | --- |
 | Canonical host state | Schema 10 repository, raw volumes and filesystem readiness journals, receipts/outbox, typed workspace metadata RPCs, remote allowlist mirrors and bounded cursor pages | Native controller acknowledgments, source provisioning, authority service wiring, lifecycle/recovery and paired-client scope adapter |
@@ -177,7 +193,7 @@ Provider proxy/broker and the Git parser helper are progressing independently.
 | Guest execution | Merged remote transport; confined text file and foreground-process helpers; protected-store bootstrap seam | Immutable runtime/supervisor, native ownership and termination adapters, complete process/extension routes, run-home/instructions and cold VM parent/child restoration |
 | Network and credentials | Native egress and bounded Git publication foundations, isolated package receipts | Guest parser outside credential daemon; brokered sockets and providers/MCP; GitHub auth/private clone/service wiring; native resource bounds and revocation draining |
 | Workspace behavior | Durable source/policy metadata transitions and replay-safe mutations | Real source admission and live add/remove/revoke, context refresh and trust, artifact/export/backup retention, same-Project messaging |
-| Product integration | CLI metadata commands and Swift RPC methods; production create remains refused | Mac/CLI/iOS creation and execution, host schedules, lifecycle events, kit/SDK version integration and end-to-end checks |
+| Product integration | CLI metadata and guidance commands, with guidance content from `--content`, `--stdin` or `--content-file` (#37); Swift RPC methods; shared-guidance get/update/provenance, host schedule records, a durable per-conversation outbox and local watch leases (#36); bounded local reads of workspace outputs (#38); Mac workspace list, shared-guidance editor and schedules view (#39). Production create remains refused | Mac/CLI/iOS creation and execution, schedule creation (needs trusted ceiling and target inputs), guest integration, kit/SDK version integration and end-to-end checks |
 
 Internal repositories and fake backends do not enable a session creation door.
 Source/policy changes require the trusted controller to refresh its epoch before
@@ -202,6 +218,41 @@ dead daemon PIDs alone are not substituted for VM termination.
 Tests use injected temporary homes, grants, credentials and coordination. Real-VM
 experiments remain opt-in, disposable and sequential; none touches the live
 Winter installation or deliberately creates host memory pressure.
+
+## Later status (2026-10-15)
+
+Winter PRs #29-#39 merged into `cowork/output-integration` after the 2026-10-12
+record above. Creation and guest execution remain unavailable after them.
+
+| PR | Merged | Summary |
+| --- | --- | --- |
+| [#29](https://github.com/yanlingLabs/winter/pull/29) | 2026-10-12 | Compose Cowork guest queries with host approvals and projection: a guest-only query builder on canonical conversation identity with a one-use launch snapshot, composed with the approval bridge, permission gate, projector and SQLite checkpoints. |
+| [#30](https://github.com/yanlingLabs/winter/pull/30) | 2026-10-13 | Record Cowork bypass parity and the required guest isolation checks. Documentation only; no code changed. |
+| [#31](https://github.com/yanlingLabs/winter/pull/31) | 2026-10-13 | Plan current workspace context from canonical records: a parent-only planner that returns bounded facts and the required instruction scopes, not instruction bytes. |
+| [#32](https://github.com/yanlingLabs/winter/pull/32) | 2026-10-13 | Resolve current parent guidance from canonical host records: a parent-only resolver over the planner and an injected protected guidance reader. |
+| [#33](https://github.com/yanlingLabs/winter/pull/33) | 2026-10-13 | Preserve consistent repeated guidance imports, while still refusing cycles, invalid lineage, out-of-scope paths and contradictory repeated text. |
+| [#34](https://github.com/yanlingLabs/winter/pull/34) | 2026-10-13 | Validate and map structured instruction snapshots onto the canonical workspace alias for the parent reader. |
+| [#35](https://github.com/yanlingLabs/winter/pull/35) | 2026-10-14 | Adapt the SDK parent current-context callback to the Core resolver, with no cached fallback. |
+| [#36](https://github.com/yanlingLabs/winter/pull/36) | 2026-10-15 | Persist guidance, schedules and workspace notifications: guidance get/update/provenance with revision and digest checks, durable host schedules, revision-only workspace events through a durable outbox, local watch leases; migrations 12, 13, 14. |
+| [#37](https://github.com/yanlingLabs/winter/pull/37) | 2026-10-15 | `winter workspace instructions update` can read the new guidance from `--stdin` or `--content-file`. |
+| [#38](https://github.com/yanlingLabs/winter/pull/38) | 2026-10-15 | Read workspace outputs through bounded local APIs (`workspace.output.list`, `workspace.file.stat`, `workspace.file.read`, `workspace.file.readRange`); schema 15. |
+| [#39](https://github.com/yanlingLabs/winter/pull/39) | 2026-10-15 | Mac shared-guidance editor and schedules view in the workspace screen. |
+
+Winter PRs #23, #24, #26 and #27 (messaging scope, format-once preparation, volume
+journal recovery, durable Mac folder grants) merged into the same branch on
+2026-10-12, before the numbered list above.
+
+**Reader-only hosted run.** One hosted ARM run of the reader-only native check
+succeeded on 2026-10-15: `yanlingLabs/winter-runtime-sdk` Actions run 38727104090,
+workflow `reader-native-reviewed`, branch `cowork/reader-hosted-dependency-probe`,
+head `2f7bd17c`, attempt 1. Its dependency probe returned the healthy record that
+was recorded as the expectation before the run, with no outside canary visible, and
+the reader case set passed (`readerCaseSetPassed: true`). This is one run on fixed
+public data. It does not explain the earlier failed run (C59): the reader binary
+was the same, but the compartment launcher, an added probe case and the runner
+instance all differed, and one run does not separate them. It does not verify any
+guided guest turn: `guidedGuestTurnVerified`, VM execution, production activation
+and cleanup proof all remain false.
 
 ## Completion evidence still required
 
