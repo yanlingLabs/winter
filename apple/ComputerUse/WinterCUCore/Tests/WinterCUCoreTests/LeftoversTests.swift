@@ -1221,6 +1221,107 @@ final class LeftoversTests: XCTestCase {
         XCTAssertFalse(core.isFilePanelUncached(sheet, files, target))
     }
 
+    // MARK: the sixth pass: outside recognised file panels
+
+    /// A commit sheet (no file panel): ordinary text with dots is typed, and the field is never touched.
+    private func commitSheet() -> (sheet: AXUIElement, field: AXUIElement) {
+        let sheet = fakeElement(98_400), field = fakeElement(98_401)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 500, height: 200), extra: [kAXParentAttribute: window, kAXChildrenAttribute: [field]])
+        ax.add(field, role: kAXTextFieldRole, frame: CGRect(x: 120, y: 80, width: 400, height: 24),
+               extra: [kAXParentAttribute: sheet, kAXValueAttribute: "", kAXFocusedAttribute: true])
+        ax.makeSettable(field, kAXValueAttribute)
+        ax.focus(pid: pid, on: field)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown, !e.unicode.isEmpty else { return }
+            ax.put(field, [kAXValueAttribute: (ax.string(field, kAXValueAttribute) ?? "") + e.unicode])
+        }
+        return (sheet, field)
+    }
+
+    func testOrdinaryTextWithDotsInADialogIsTypedAndNeverCleared() async throws {
+        world()
+        let (_, field) = commitSheet()
+        var want = ""
+        for text in ["Update .gitignore", " see .env.example", " wait...", " .NET 8"] {
+            let said = await refusal(.type(CUTypeAction(text: text, into: ref(field))))
+            XCTAssertNil(said, text)
+            want += text
+            XCTAssertEqual(ax.string(field, kAXValueAttribute), want, "untouched after \(text)")
+        }
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":AXValue") }, "never cleared")
+        // A real path or an exact secret name still counts — refused, and the field is still never cleared.
+        let path = await refusal(.type(CUTypeAction(text: " ~/.ssh/id_ed25519", into: ref(field))))
+        XCTAssertNotNil(path)
+        let exact = await refusal(.type(CUTypeAction(text: " id_ed25519", into: ref(field))))
+        XCTAssertNotNil(exact)
+        XCTAssertEqual(ax.string(field, kAXValueAttribute), want)
+    }
+
+    func testAProtectedValueInADialogIsRefusedButNeverCleared() async throws {
+        world()
+        let (_, field) = commitSheet()
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            ax.put(field, [kAXValueAttribute: "~/.aws/credentials"])  // the app completed it
+        }
+        let said = await refusal(.type(CUTypeAction(text: "x", into: ref(field))))
+        XCTAssertTrue(said?.contains("clear it before going on") ?? false, said ?? "typed")
+        XCTAssertEqual(ax.string(field, kAXValueAttribute), "~/.aws/credentials", "not cleared outside a file panel")
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":AXValue") })
+    }
+
+    func testOutsidePanelText() {
+        for ok in ["Update .gitignore", "see .env.example", "wait...", ".NET 8", "server.key", "notes credentials.txt"] {
+            XCTAssertFalse(CUFloors.outsidePanelTextIsProtected(ok), ok)
+        }
+        for bad in ["~/.ssh/id_rsa", "copy /tmp/x.pem", ".aws", "Credentials", "src/certs/server.key", "file:///Users/u/.netrc"] {
+            XCTAssertTrue(CUFloors.outsidePanelTextIsProtected(bad), bad)
+        }
+    }
+
+    /// A real panel that fails the scope test, navigated by clicks into ".ssh" (no URLs): its selected item's and its
+    /// folder pop-up's exact secret names refuse the choice; a Find panel's ".gitignore" goes ahead.
+    private func unmarkedChooser(selected: String, folder: String, parent: String? = nil) -> AXUIElement {
+        let sheet = fakeElement(98_420), list = fakeElement(98_421), row = fakeElement(98_422), popUp = fakeElement(98_423), parentRow = fakeElement(98_424)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400), extra: [kAXParentAttribute: window, kAXChildrenAttribute: [popUp, list]])
+        ax.add(popUp, role: kAXPopUpButtonRole, frame: CGRect(x: 300, y: 50, width: 120, height: 20), extra: [kAXParentAttribute: sheet, kAXValueAttribute: folder])
+        var rowExtra: [String: Any] = [kAXParentAttribute: list]
+        if let parent {
+            ax.add(parentRow, role: kAXRowRole, title: parent, frame: CGRect(x: 120, y: 80, width: 560, height: 20), extra: [kAXParentAttribute: list])
+            rowExtra[kAXDisclosedByRowAttribute] = parentRow
+        }
+        ax.add(row, role: kAXRowRole, title: selected, frame: CGRect(x: 120, y: 100, width: 560, height: 20), extra: rowExtra)
+        ax.setActions(row, [kAXPressAction])
+        ax.add(list, role: kAXListRole, frame: CGRect(x: 120, y: 80, width: 560, height: 300),
+               extra: [kAXParentAttribute: sheet, kAXChildrenAttribute: parent == nil ? [row] : [parentRow, row], kAXSelectedRowsAttribute: [row], kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: list)
+        XCTAssertFalse(core.isFilePanel(sheet, list, target))
+        return row
+    }
+
+    func testAClickOnlyNavigationIntoSSHInAnUnmarkedChooserIsRefused() async throws {
+        world()
+        let row = unmarkedChooser(selected: "id_ed25519", folder: ".ssh")
+        _ = await refusal(.click(CUClickAction(ref: ref(row))))
+        let said = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertTrue(said?.contains("panel would choose a protected location") ?? false, said ?? "pressed")
+        world()
+        _ = unmarkedChooser(selected: "server", folder: "Projects", parent: ".ssh")
+        let parent = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNotNil(parent, "its parent row named .ssh")
+    }
+
+    func testAFindPanelWithGitignoreSelectedGoesAhead() async throws {
+        world()
+        _ = unmarkedChooser(selected: ".gitignore", folder: "Find", parent: "proj")
+        let n = poster.entries.count
+        let said = await refusal(.key(CUKeyAction(combo: "return")))
+        XCTAssertNil(said)
+        XCTAssertTrue(poster.entries.dropFirst(n).contains { $0.type == .keyDown }, "Return was sent")
+    }
+
     func testProtectedPanelPaths() {
         let home = "/Users/u"
         XCTAssertTrue(CUFloors.isProtectedPanelPath("~/.aws/credentials", home: home))

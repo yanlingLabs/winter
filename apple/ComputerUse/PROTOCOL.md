@@ -1224,6 +1224,13 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   unreadable-choice refusal need a recognised file panel. The OUTERMOST sheet on the window is the panel (a nested Go to
   folder sheet is judged with the panel's typed text). The file-panel verdict is cached per sheet: a yes for its life, a
   no for a second.
+- The sixth pass: outside a recognised file panel, text and values are judged only by their path-like tokens (starting
+  with / or ~, or holding a /; a `.pem`, `.p12` or `.key` among them; any component exactly a secret name) and by bare
+  tokens EXACTLY one of `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.netrc`, `.npmrc`, `.pgpass`, `id_rsa`,
+  `id_ed25519`, `id_ecdsa`, `id_dsa`, `credentials`, `login.keychain-db` — never the names-only rule on a bare word
+  ("Update .gitignore", "see .env.example", "wait...", ".NET 8" are typed); a field there is NEVER cleared (refused, left
+  as it is). The choice outside a recognised panel also judges the selected item's name, its parent rows' names and the
+  folder pop-up against that exact list (a click-only way into `.ssh`); a Find panel's ".gitignore" goes ahead.
 - Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
   routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
   record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise

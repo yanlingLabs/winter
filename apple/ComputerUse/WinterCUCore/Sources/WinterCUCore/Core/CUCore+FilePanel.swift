@@ -119,6 +119,41 @@ extension CUFloors {
         pathsMentioned(in: text).contains { isProtectedPanelPath($0, home: home, base: base) }
     }
 
+    /// Secret files and folders named EXACTLY (any case) — what a bare word outside a recognised file panel must match to
+    /// count (the sixth pass: "Update .gitignore", ".NET 8" or "wait..." in a commit sheet are no paths).
+    public static let secretExactNames: Set<String> = [
+        ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc", ".npmrc", ".pgpass",
+        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials", "login.keychain-db",
+    ]
+
+    /// Text in a sheet or dialog that is NO recognised file panel: only its path-like tokens (starting with / or ~, or
+    /// holding a /) are judged as paths — a `.pem`, `.p12` or `.key` among them too — and a bare token only when it is
+    /// exactly one of `secretExactNames`. Never the names-only rule on a bare word.
+    public static func outsidePanelTextIsProtected(_ text: String, home: String = NSHomeDirectory(), base: String? = nil) -> Bool {
+        let tokens = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).map(String.init)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for tok in tokens + (trimmed.contains(" ") && (trimmed.hasPrefix("/") || trimmed.hasPrefix("~")) ? [trimmed] : []) {
+            var t = tok
+            if let u = URL(string: t), u.isFileURL { t = u.path }
+            if t.hasPrefix("/") || t.hasPrefix("~") || t.contains("/") {
+                if isProtectedPanelPath(t, home: home, base: base) { return true }
+                if t.split(separator: "/").contains(where: { secretExactNames.contains($0.lowercased()) }) { return true }
+                let low = t.lowercased()
+                if low.hasSuffix(".pem") || low.hasSuffix(".p12") || low.hasSuffix(".key") { return true }
+                continue
+            }
+            if secretExactNames.contains(t.lowercased()) { return true }
+        }
+        return false
+    }
+
+    /// A bare item name (a selected row's, a folder pop-up's) that is exactly a secret name — judged outside recognised
+    /// file panels too ("id_ed25519, 411 bytes" names "id_ed25519").
+    public static func exactSecretName(_ raw: String) -> Bool {
+        let name = (raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: ", ").first ?? raw).lowercased()
+        return secretExactNames.contains(name)
+    }
+
     /// One thing a panel would choose — a file URL, a path, or an item's bare name — is protected.
     public static func panelChoiceIsProtected(_ raw: String, home: String = NSHomeDirectory()) -> Bool {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -255,7 +290,10 @@ extension CUCore {
         var candidates = segs
         candidates.append(current + segs[0])
         candidates.append(typed + segs[0])
-        if let hit = candidates.first(where: { CUFloors.typedPanelPathIsProtected($0, base: base) }) {
+        // In a recognised file panel every path rule; in any other sheet or dialog only path-like tokens and exact secret
+        // names (the sixth pass).
+        let file = isFilePanel(root, target, t)
+        if let hit = candidates.first(where: { file ? CUFloors.typedPanelPathIsProtected($0, base: base) : CUFloors.outsidePanelTextIsProtected($0, base: base) }) {
             CULog.act.notice("type in \(t.appName, privacy: .public): a protected path into a sheet or panel — refused before sending")
             _ = hit
             throw CUError.refused(.savePath, "the text names \(Self.panelPathWords) and would go into \(t.appName)'s panel — nothing was sent; ask the user to choose it")
@@ -287,10 +325,12 @@ extension CUCore {
         var seen: [AXUIElement] = []
         for e in [named, reportedFocus(t)].compactMap({ $0 }) where !seen.contains(where: { CFEqual($0, e) }) {
             seen.append(e)
-            guard let root = panelRoot(e, t), let v = ax.string(e, kAXValueAttribute),
-                  CUFloors.typedPanelPathIsProtected(v, base: panelFolder(root)) else { continue }
+            guard let root = panelRoot(e, t), let v = ax.string(e, kAXValueAttribute) else { continue }
+            let file = isFilePanel(root, e, t)
+            guard file ? CUFloors.typedPanelPathIsProtected(v, base: panelFolder(root)) : CUFloors.outsidePanelTextIsProtected(v, base: panelFolder(root)) else { continue }
+            // Cleared only in a recognised file panel; anywhere else the field is never touched — refused, said.
             var cleared = false
-            if ax.isSettable(e, kAXValueAttribute), (try? ax.set(e, kAXValueAttribute, "" as CFString)) != nil {
+            if file, ax.isSettable(e, kAXValueAttribute), (try? ax.set(e, kAXValueAttribute, "" as CFString)) != nil {
                 cleared = ax.string(e, kAXValueAttribute)?.isEmpty ?? false
             }
             CULog.act.notice("type in \(t.appName, privacy: .public): a panel field now names a protected path — \(cleared ? "cleared" : "not cleared", privacy: .public), refused")
@@ -364,6 +404,9 @@ extension CUCore {
     }
 
     static let panelReadCap = 600
+    /// Marks a path built from rows' names (no file URL): a recognised panel judges it as a path, any other sheet by its
+    /// names' exact secret names only (a Find panel's "proj/.gitignore" is fine).
+    static let rowPathMark = "\u{1}row:"
 
     /// A row's or item's name: its own title, description or value, else its first named descendant's (two levels).
     func panelItemName(_ e: AXUIElement) -> String? {
@@ -442,7 +485,7 @@ extension CUCore {
                 if let n = panelItemName(c) { names.insert(n, at: 0) }
                 cur = ax.element(c, kAXDisclosedByRowAttribute)
             }
-            if !names.isEmpty { out.append(names.joined(separator: "/")); substantive = true }
+            if !names.isEmpty { out.append(Self.rowPathMark + names.joined(separator: "/")); substantive = true }
         }
         if let item { let n = out.count; describe(item, depth: 3); rowPath(item); if out.count > n { selectionRead = true } }
         // The selection FIRST, from the browsers themselves — the focus and its parents, and the panel's own first levels —
@@ -501,9 +544,18 @@ extension CUCore {
         let file = isFilePanel(root, nil, t)
         // In a sheet that is no recognised file panel, only what reads as a path is judged (an alert's or Print's own
         // labels and pop-ups are no file names) — and it never fails closed.
-        let pathLike: (String) -> Bool = { s in s.contains("/") || s.hasPrefix("~") || (URL(string: s)?.isFileURL ?? false) }
-        let candidates = (values + extra + (typed.map { [$0] } ?? [])).filter { file || pathLike($0) }
-        if let hit = candidates.first(where: { CUFloors.panelChoiceIsProtected($0) || CUFloors.typedPanelPathIsProtected($0, base: base) }) {
+        // Outside a recognised file panel: path-like candidates by the path rules, and a selected item's or folder
+        // pop-up's EXACT secret name (`.ssh`, `id_ed25519` — a click-only navigation; a Find panel's ".gitignore" is fine).
+        let candidates = values + extra + (typed.map { [$0] } ?? [])
+        let judge: (String) -> Bool = { raw in
+            if raw.hasPrefix(Self.rowPathMark) {
+                let path = String(raw.dropFirst(Self.rowPathMark.count))
+                return file ? CUFloors.isProtectedPanelPath(path, base: base) : path.split(separator: "/").contains { CUFloors.exactSecretName(String($0)) }
+            }
+            return file ? (CUFloors.panelChoiceIsProtected(raw) || CUFloors.typedPanelPathIsProtected(raw, base: base))
+                        : (CUFloors.outsidePanelTextIsProtected(raw, base: base) || CUFloors.exactSecretName(raw))
+        }
+        if let hit = candidates.first(where: judge).map({ $0.hasPrefix(Self.rowPathMark) ? String($0.dropFirst(Self.rowPathMark.count)) : $0 }) {
             CULog.act.notice("act in \(t.appName, privacy: .public): the panel would choose a protected item — refused before the press")
             throw CUError.refused(.savePath, "\(t.appName)'s panel would choose \(Self.panelPathWords) (\u{201C}\(hit.prefix(80))\u{201D}) — nothing was pressed; ask the user to choose it")
         }
