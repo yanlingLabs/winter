@@ -406,6 +406,21 @@ import WinterProtocol
         await model.select("one")
         XCTAssertEqual(model.guidance?.draft, "My draft"); XCTAssertEqual(model.guidance?.conflict, true)
     }
+    func testADirtyDraftWhoseWorkspaceLeavesTheListDuringARefreshOfItsGuidanceIsRetained() async {
+        let host = Host(); var resume: CheckedContinuation<Void, Never>?, parkNextRead = false
+        let model = CoworkWorkspaceModel { method, params in
+            if method == "workspace.instructions.get", parkNextRead { parkNextRead = false; await withCheckedContinuation { resume = $0 } }
+            return try host.call(method, params)
+        }
+        await model.select("one"); model.editInstructions("My draft"); parkNextRead = true
+        let refreshing = Task { await model.refreshInstructions() }
+        while resume == nil { await Task.yield() }
+        // While the refresh's read is outstanding the person moves on, "one" leaves the list and a listing runs.
+        await model.select("two"); host.listed = ["two"]; await model.refresh()
+        resume?.resume(); await refreshing.value
+        XCTAssertFalse(model.guidanceBusy)
+        await model.select("one"); XCTAssertEqual(model.guidance?.draft, "My draft")
+    }
     func testInFlightSaveCapturesContentAndDoesNotDropSubsequentEditsOrDuplicateWrite() async {
         let host = Host(); var resume: CheckedContinuation<Void, Never>?
         let model = CoworkWorkspaceModel { method, params in
