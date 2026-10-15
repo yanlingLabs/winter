@@ -64,6 +64,10 @@ import WinterProtocol
             if let status = model.status { detail(status) }
         }
         .disabled(model.busy)
+        .onChange(of: model.error) { _, text in coworkAnnounce(text) }
+        .onChange(of: model.lastCancellation?.scheduleId) { _, id in
+            if let id { coworkAnnounce("Cancellation recorded for schedule \(id).") }
+        }
         .task(id: workspaceGeneration) {
             cancellation = nil; bindingToken = model.bind(workspaceId: workspace.workspaceId)
             await model.refresh()

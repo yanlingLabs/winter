@@ -112,6 +112,14 @@ struct CoworkWorkspaceView: View {
         .navigationTitle("Cowork")
         .disabled(model.busy)
         .task { await model.refresh() }
+        // Status and error text appears and disappears without moving focus, so VoiceOver would never
+        // say it. Guidance text that arrives while an operation is running is announced once, when the
+        // operation ends, so a retry that fails with the same words as before is still heard.
+        .onChange(of: model.error) { _, text in coworkAnnounce(text) }
+        .onChange(of: selectionError) { _, text in coworkAnnounce(text) }
+        .onChange(of: guidanceAnnouncement) { _, text in if !model.guidanceBusy { coworkAnnounce(text) } }
+        .onChange(of: model.guidanceBusy) { wasBusy, busy in if wasBusy && !busy { coworkAnnounce(guidanceAnnouncement) } }
+        .onChange(of: draftProblem) { _, text in coworkAnnounce(text) }
         .onChange(of: model.selected) { _, value in
             rename = value?.title ?? ""; invalidatePreparation()
         }
@@ -128,6 +136,21 @@ struct CoworkWorkspaceView: View {
             Text(revoke ? "Access will be revoked even if this is the last source. The workspace will retain an unavailable source and dependent work will be blocked." : "Dependent work is blocked immediately. The backend still needs to acknowledge detachment; workspace data is retained.")
         }
         .sheet(isPresented: $showingCreate) { creation }
+    }
+
+    /// What the guidance panel is currently saying about the last operation: its message, else its receipt.
+    private var guidanceAnnouncement: String? {
+        guard let state = model.guidance, state.workspaceId == model.selected?.workspaceId else { return nil }
+        return state.message ?? state.receipt.map { "Host save recorded at instruction revision \($0.value.instructionRevision)." }
+    }
+    private var draftProblem: String? {
+        guard let state = model.guidance, state.workspaceId == model.selected?.workspaceId, let draft = state.draft,
+              !Self.draftIsValid(draft) else { return nil }
+        return Self.draftProblemText
+    }
+    private static let draftProblemText = "The draft exceeds the file limit or contains a NUL character."
+    private static func draftIsValid(_ draft: String) -> Bool {
+        draft.utf8.count <= CoworkWorkspaceModel.instructionMaxBytes && !draft.contains("\0")
     }
 
     private func guidanceEditor(_ state: CoworkWorkspaceModel.Guidance) -> some View {
@@ -159,11 +182,11 @@ struct CoworkWorkspaceView: View {
                     .frame(maxWidth: .infinity, minHeight: 180, idealHeight: 240, maxHeight: 360)
                     .background(Theme.controlSurface, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.hairlineElevated, lineWidth: 1))
-                    .accessibilityLabel("Shared workspace instructions draft")
-                let valid = draft.utf8.count <= CoworkWorkspaceModel.instructionMaxBytes && !draft.contains("\0")
+                    .accessibilityLabel(GuidanceTextEditor.accessibilityName)
+                let valid = Self.draftIsValid(draft)
                 Text("\(draft.utf8.count) / \(CoworkWorkspaceModel.instructionMaxBytes) UTF-8 bytes\(state.hasUnsavedChanges ? " · unsaved draft" : "")")
                     .font(Typography.caption()).foregroundStyle(valid ? Theme.textMuted : Color.red)
-                if !valid { Text("The draft exceeds the file limit or contains a NUL character.").font(Typography.caption()).foregroundStyle(Color.red) }
+                if !valid { Text(Self.draftProblemText).font(Typography.caption()).foregroundStyle(Color.red) }
                 HStack {
                     Button("Save instructions") {
                         Task { await model.saveInstructions(workspaceId: state.workspaceId, expectedDraft: draft,
@@ -306,6 +329,7 @@ struct CoworkWorkspaceView: View {
 /// binding) and its `isAutomaticQuoteSubstitutionEnabled = false` precedent. That component itself
 /// cannot be reused here: Return submits in it and it claims first responder on every update.
 private struct GuidanceTextEditor: NSViewRepresentable {
+    static let accessibilityName = "Shared workspace instructions draft"
     @Binding var text: String
 
     func makeCoordinator() -> Coordinator {
@@ -318,6 +342,9 @@ private struct GuidanceTextEditor: NSViewRepresentable {
         let font = Typography.monoNS(ofSize: Typography.labelSize)
         let color = NSColor(named: "TextPrimary") ?? .labelColor
         textView.delegate = context.coordinator
+        // On the text view itself: the SwiftUI label below reaches the scroll view that wraps it, and
+        // VoiceOver would otherwise land in an unnamed edit field.
+        textView.setAccessibilityLabel(GuidanceTextEditor.accessibilityName)
         textView.isRichText = false
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -369,4 +396,10 @@ private struct GuidanceTextEditor: NSViewRepresentable {
             parent.text = textView.string
         }
     }
+}
+
+/// Speaks `text` through VoiceOver (and any other assistive technology listening). Nothing for nil or empty.
+@MainActor func coworkAnnounce(_ text: String?) {
+    guard let text, !text.isEmpty else { return }
+    AccessibilityNotification.Announcement(text).post()
 }
