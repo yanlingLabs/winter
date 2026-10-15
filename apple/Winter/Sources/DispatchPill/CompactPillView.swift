@@ -40,6 +40,9 @@ struct PillSendStopButton: View {
     let canSend: Bool
     /// Stop was pressed and the turn has not ended yet: the circle shows a spinner and the button waits.
     var isStopping: Bool = false
+    /// The draft is a shell line the pill will RUN (command mode): the send circle turns purple and shows a
+    /// terminal — Return (or a click) runs it.
+    var runsCommand: Bool = false
     let onSend: () -> Void
     let onStop: () -> Void
 
@@ -55,13 +58,13 @@ struct PillSendStopButton: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(Color.white)
+                    .fill(runsCommand && role == .send ? Theme.commandPurple : Color.white)
                 if phase == .stopping {
                     ProgressView()
                         .controlSize(.small)
                         .colorScheme(.light)
                 } else {
-                    Image(systemName: pillSendButtonSymbol(role))
+                    Image(systemName: runsCommand && role == .send ? "terminal.fill" : pillSendButtonSymbol(role))
                         .font(Typography.label(.bold))
                         .foregroundStyle(Color.black)
                         .contentTransition(.symbolEffect(.replace))
@@ -72,7 +75,8 @@ struct PillSendStopButton: View {
         }
         .buttonStyle(.plain)
         .disabled(phase == .stopping)
-        .help(phase == .stopping ? pillStoppingLabel : pillSendButtonLabel(role))
+        .animation(.easeOut(duration: 0.18), value: runsCommand)
+        .help(phase == .stopping ? pillStoppingLabel : runsCommand && role == .send ? "Run in your shell (Return)" : pillSendButtonLabel(role))
         .accessibilityLabel(phase == .stopping ? pillStoppingLabel : pillSendButtonLabel(role))
     }
 }

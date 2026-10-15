@@ -108,6 +108,17 @@ struct ComposerTextView: NSViewRepresentable {
     /// undo stack and the binding never change. `nil` (the default) leaves every other surface as it was.
     var highlightRanges: ((String) -> [NSRange])? = nil
     var highlightColor: NSColor = .systemBlue
+    /// The highlight's colour for a given text, when it depends on the text (the dispatch pill draws a `/`
+    /// command in blue and a shell command in purple). Overrides `highlightColor` when set.
+    var highlightColorForText: ((String) -> NSColor)? = nil
+    /// Dimmed completion text drawn right after the caret while it sits at the END of the text with nothing
+    /// selected; Tab inserts it (the dispatch pill's command mode). `nil` (the default) draws nothing and
+    /// leaves Tab as AppKit's.
+    var ghostSuffix: String? = nil
+    /// Delete/Backspace with the caret at the END and nothing selected, consulted before anything is deleted
+    /// (`true` = consumed, nothing deleted — the dispatch pill's command-mode opt-out). `nil` (the default)
+    /// leaves Delete as AppKit's.
+    var onDeleteBackwardAtEnd: (() -> Bool)? = nil
     /// ←/→, consulted before the caret moves (`true` = consumed) — the dispatch pill's picker walks its
     /// chips with them while the composer is hidden under it. `nil` (the default) leaves the caret's own.
     var onHorizontalKey: ((_ left: Bool) -> Bool)? = nil
@@ -182,6 +193,8 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onTypingRefocus = onTypingRefocus
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
+        textView.ghostSuffix = ghostSuffix
+        textView.onDeleteBackwardAtEnd = onDeleteBackwardAtEnd
         attachPicker?.textView = textView
 
         let scrollView = NSScrollView()
@@ -220,6 +233,7 @@ struct ComposerTextView: NSViewRepresentable {
         // against a new attachment would keep interrupting the previous session.
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
+        textView.onDeleteBackwardAtEnd = onDeleteBackwardAtEnd
         if let attachPicker, attachPicker.textView !== textView { attachPicker.textView = textView }
         // Keep the live view in step if the size changes across an update — otherwise the font
         // would be whatever `makeNSView` happened to set the first time this view was built.
@@ -232,6 +246,8 @@ struct ComposerTextView: NSViewRepresentable {
             textView.setComposerText(text)
         }
         context.coordinator.applyHighlights(textView)
+        // After the text is in step, so the ghost is judged against the text it was computed for.
+        textView.ghostSuffix = ghostSuffix
         textView.textContainer?.containerSize = NSSize(
             width: max(1, nsView.contentSize.width),
             height: .greatestFiniteMagnitude
@@ -286,9 +302,10 @@ struct ComposerTextView: NSViewRepresentable {
         func applyHighlights(_ textView: NSTextView) {
             guard let highlight = parent.highlightRanges, let layoutManager = textView.layoutManager else { return }
             let length = (textView.string as NSString).length
+            let color = parent.highlightColorForText?(textView.string) ?? parent.highlightColor
             layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: NSRange(location: 0, length: length))
             for range in highlight(textView.string) where range.location >= 0 && NSMaxRange(range) <= length && range.length > 0 {
-                layoutManager.addTemporaryAttribute(.foregroundColor, value: parent.highlightColor, forCharacterRange: range)
+                layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: range)
             }
         }
 
@@ -376,6 +393,15 @@ final class CommandTextView: NSTextView {
         let first = caretAtFirstLine(of: string, caretLocation: selectedRange().location)
         let last = caretAtLastLine(of: string, caretLocation: NSMaxRange(selectedRange()))
         switch selector {
+        case #selector(NSResponder.deleteBackward(_:)):
+            if caretAtEndWithNoSelection, onDeleteBackwardAtEnd?() == true { return }
+            super.doCommand(by: selector)
+        case #selector(NSResponder.insertTab(_:)):
+            if let ghost = ghostSuffix, !ghost.isEmpty, caretAtEndWithNoSelection {
+                insertText(ghost, replacementRange: selectedRange())
+                return
+            }
+            super.doCommand(by: selector)
         case #selector(NSResponder.moveUp(_:)):
             if onFocusKey?(.up, first, last) == true { return }
             super.doCommand(by: selector)
@@ -403,6 +429,53 @@ final class CommandTextView: NSTextView {
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         onTypingRefocus?()
         super.insertText(insertString, replacementRange: replacementRange)
+    }
+
+    // MARK: Ghost completion and the Delete opt-out (the dispatch pill's command mode)
+
+    /// See `ComposerTextView.onDeleteBackwardAtEnd`.
+    var onDeleteBackwardAtEnd: (() -> Bool)?
+
+    /// See `ComposerTextView.ghostSuffix`.
+    var ghostSuffix: String? {
+        didSet { if oldValue != ghostSuffix { needsDisplay = true } }
+    }
+
+    /// The caret sits after the last character and nothing is selected.
+    var caretAtEndWithNoSelection: Bool {
+        let selection = selectedRange()
+        return selectedRanges.count == 1 && selection.length == 0 && selection.location == (string as NSString).length
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        // The ghost shows only with the caret at the end — a caret that moves away takes it along.
+        if ghostSuffix?.isEmpty == false { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawGhostSuffix()
+    }
+
+    /// The ghost, dimmed, starting where the next typed character would land.
+    private func drawGhostSuffix() {
+        guard let ghost = ghostSuffix, !ghost.isEmpty, caretAtEndWithNoSelection,
+              let layoutManager, let container = textContainer else { return }
+        let text = string as NSString
+        guard text.length > 0, text.character(at: text.length - 1) != 0x0A else { return }
+        let glyph = layoutManager.glyphIndexForCharacter(at: text.length - 1)
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let origin = textContainerOrigin
+        let face = font ?? Typography.sansNS(ofSize: Typography.composerFieldSize)
+        (ghost as NSString).draw(at: NSPoint(x: origin.x + glyphRect.maxX, y: origin.y + line.minY),
+                                 withAttributes: [.font: face, .foregroundColor: ghostColor])
+    }
+
+    /// The ghost's ink: the text's own colour, faded.
+    private var ghostColor: NSColor {
+        (textColor ?? .white).withAlphaComponent(0.38)
     }
 
     // MARK: Composer attachments

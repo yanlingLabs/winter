@@ -60,7 +60,7 @@ Plain links, not `@` imports — read the file whose area you are about to touch
 | [settings-and-migrations.md](docs/claude/settings-and-migrations.md) | Before adding a setting (live reload, the one-reader rule) or touching the legacy `~/.norma` home or project migration. |
 | [runtime-home.md](docs/claude/runtime-home.md) | Before touching `<home>/sdk`, run folders, MCP/settings scopes and trust, Migration C, saved answers or the plugin format. |
 | [tool-surface.md](docs/claude/tool-surface.md) | Before changing what a model can call: capability servers and plain names, deferral, chat/dispatch allowed lists, web tools, hooks, read/write fences, sandbox escapes, saved allow rules, skills. |
-| [dispatch-and-messaging.md](docs/claude/dispatch-and-messaging.md) | Before touching mid-turn pushes (the fold), turn pairing, `SpawnSession`/children, `SendMessage`/`ListAgents`/`TaskStop`, or `ListSessions`. |
+| [dispatch-and-messaging.md](docs/claude/dispatch-and-messaging.md) | Before touching mid-turn pushes (the fold), turn pairing, `SpawnSession`/children, `SendMessage`/`ListAgents`/`TaskStop`, `ListSessions`, or the Dispatch pill's command mode and terminal. |
 | [mcp.md](docs/claude/mcp.md) | Before touching connector permissions, MCP OAuth sign-ins, URL-mode elicitation, an `mcp.*` RPC or `winter mcp`. |
 | [images.md](docs/claude/images.md) | Before touching image attachments, `session.stageImage` or `images` on `session.send`/`steer`. |
 | [computer-use.md](docs/claude/computer-use.md) | Before touching `packages/core/src/computer-use/**` (not `browser/`), `apple/ComputerUse/**`, the `computer_v2` tool, its policy/cards, the helper client, app adapters, the focus guardian. |

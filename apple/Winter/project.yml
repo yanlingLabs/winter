@@ -34,6 +34,13 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  # The Dispatch pill's terminal (Sources/DispatchPill/Terminal): a real VT emulator + PTY runner, MIT.
+  # EXACT, not `from:` — the project (and so its Package.resolved) is regenerated, never committed, so a
+  # range would float to whatever is newest on every generate. 1.18.0 is the last release on tools 5.9
+  # with no build-tool plugin (1.19+ add one, which an xcodegen project does not trust by default).
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: "1.18.0"
 targets:
   Winter:
     type: application
@@ -89,6 +96,8 @@ targets:
       - package: WinterProtocol
       - package: WinterCUPresentation
       - package: Sparkle
+      - package: SwiftTerm
+        product: SwiftTerm
       - target: WinterHelper
         embed: false
       # office-plumbing Task 2: same build-order-only relationship as WinterHelper immediately
@@ -243,6 +252,16 @@ targets:
             fi
             ditto "${SRC_DIR}/${SRC_NAME}" "${DEST}/${DEST_NAME}"
           done
+      - name: Embed SwiftTerm licence notice
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # The Dispatch pill's terminal links SwiftTerm (MIT, pinned in `packages:` above), whose licence asks
+          # that its notice ship with every copy — so the app carries it beside CEF's and Monaco's. The text is a
+          # committed copy of the pinned tag's LICENSE: refresh it whenever the pin moves.
+          DEST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/Licenses"
+          mkdir -p "${DEST}"
+          ditto "${SRCROOT}/Support/Licenses/SWIFTTERM-LICENSE.txt" "${DEST}/SWIFTTERM-LICENSE.txt"
       - name: Embed Monaco editor assets
         basedOnDependencyAnalysis: false
         script: |
