@@ -148,9 +148,14 @@ struct CUPanelTyped {
 extension CUCore {
     static let panelPathWords = "a protected location (a shell startup file, ~/.ssh or another hidden folder of the home, LaunchAgents, a keychain, or Winter's or Claude's settings)"
 
-    /// The FILE panel `e` lies in — an Open or Save panel, never another sheet or dialog (an alert, Print: those act
-    /// exactly as before; the fourth pass). Every floor here and the fail-closed arming go through it.
-    func panelRoot(_ e: AXUIElement, _ t: CUTarget) -> AXUIElement? {
+    /// The sheet or dialog `e` lies in — ANY one (the outermost sheet on the window). The text, value and protected-path
+    /// floors judge in every one: they refuse only protected paths, so an alert or Print is never held up by them (the
+    /// fifth pass: a real in-process Open panel can show none of a file panel's marks).
+    func panelRoot(_ e: AXUIElement, _ t: CUTarget) -> AXUIElement? { anyPanelRoot(e, t) }
+
+    /// The FILE panel `e` lies in — a recognised Open or Save panel. Only the fail-closed arming and the unreadable-choice
+    /// refusal go through it (the fourth pass: an alert, Print, other sheets never fail closed).
+    func filePanelRoot(_ e: AXUIElement, _ t: CUTarget) -> AXUIElement? {
         guard let root = anyPanelRoot(e, t), isFilePanel(root, e, t) else { return nil }
         return root
     }
@@ -159,6 +164,17 @@ extension CUCore {
     /// panel service draws it, it has a Save panel's name field, or it hosts a file browser — an item with a file URL, or
     /// the shape every file panel has (a search field, a pop-up for the folder, an outline or browser). Bounded.
     func isFilePanel(_ root: AXUIElement, _ e: AXUIElement?, _ t: CUTarget) -> Bool {
+        // Cached per sheet for its life: a yes for good, a no for a second (a panel fills in as it opens).
+        let key = AXIdentity(element: root)
+        let now = clock.nowMs()
+        if let v = filePanelVerdicts[key], ax.isAlive(root), v.yes || now - v.atMs < 1_000 { return v.yes }
+        let yes = isFilePanelUncached(root, e, t)
+        if filePanelVerdicts.count > 64 { filePanelVerdicts = filePanelVerdicts.filter { now - $0.value.atMs < 60_000 } }
+        filePanelVerdicts[key] = (yes, now)
+        return yes
+    }
+
+    func isFilePanelUncached(_ root: AXUIElement, _ e: AXUIElement?, _ t: CUTarget) -> Bool {
         func named(_ c: AXUIElement) -> Bool {
             guard let id = ax.string(c, kAXIdentifierAttribute)?.lowercased() else { return false }
             return id.contains("openpanel") || id.contains("savepanel")
@@ -188,15 +204,17 @@ extension CUCore {
     /// The sheet or panel `e` lies in, whatever it holds: its `AXSheet`, or a window of another kind than a standard one
     /// (a dialog, a floating panel) or another than the bound one. Nil in the bound window's own content.
     func anyPanelRoot(_ e: AXUIElement, _ t: CUTarget) -> AXUIElement? {
+        // The OUTERMOST sheet: a Go to folder sheet on an Open panel is judged with the panel's context (the fifth pass).
         var cur: AXUIElement? = e
+        var sheet: AXUIElement? = nil
         for _ in 0..<60 {
-            guard let c = cur else { return nil }
+            guard let c = cur else { return sheet }
             let role = ax.string(c, kAXRoleAttribute)
-            if role == kAXSheetRole { return c }
-            if role == kAXWindowRole { return inSheetOrPanel(c, t) ? c : nil }
+            if role == kAXSheetRole { sheet = c }
+            if role == kAXWindowRole { return sheet ?? (inSheetOrPanel(c, t) ? c : nil) }
             cur = ax.element(c, kAXParentAttribute)
         }
-        return nil
+        return sheet
     }
 
     /// The folder the panel shows, as a path, when it says (its `AXDocument` or `AXURL`); nil otherwise.
@@ -370,7 +388,7 @@ extension CUCore {
         case .key(let k): e = k.into.flatMap { try? element($0, in: t) } ?? reportedFocus(t)
         default: e = Self.primaryRef(a).flatMap { try? element($0, in: t) } ?? reportedFocus(t)
         }
-        return e.flatMap { panelRoot($0, t) }.map { AXIdentity(element: $0) }
+        return e.flatMap { filePanelRoot($0, t) }.map { AXIdentity(element: $0) }
     }
 
     func notePanelAct(_ id: AXIdentity?, _ t: CUTarget) {
@@ -480,7 +498,11 @@ extension CUCore {
         let (values, determined) = panelChoices(root, item: item, t)
         let typed = typedInto(root, t)
         let base = panelFolder(root)
-        let candidates = values + extra + (typed.map { [$0] } ?? [])
+        let file = isFilePanel(root, nil, t)
+        // In a sheet that is no recognised file panel, only what reads as a path is judged (an alert's or Print's own
+        // labels and pop-ups are no file names) — and it never fails closed.
+        let pathLike: (String) -> Bool = { s in s.contains("/") || s.hasPrefix("~") || (URL(string: s)?.isFileURL ?? false) }
+        let candidates = (values + extra + (typed.map { [$0] } ?? [])).filter { file || pathLike($0) }
         if let hit = candidates.first(where: { CUFloors.panelChoiceIsProtected($0) || CUFloors.typedPanelPathIsProtected($0, base: base) }) {
             CULog.act.notice("act in \(t.appName, privacy: .public): the panel would choose a protected item — refused before the press")
             throw CUError.refused(.savePath, "\(t.appName)'s panel would choose \(Self.panelPathWords) (\u{201C}\(hit.prefix(80))\u{201D}) — nothing was pressed; ask the user to choose it")
@@ -493,7 +515,7 @@ extension CUCore {
             let s = p.trimmingCharacters(in: .whitespacesAndNewlines)
             return !(s.hasPrefix("/") || s.hasPrefix("~"))
         }
-        if !determined && sent && unjudgeable && base == nil {
+        if file && !determined && sent && unjudgeable && base == nil {
             CULog.act.notice("act in \(t.appName, privacy: .public): what the panel would choose can't be read after text went into it — refused")
             throw CUError.refused(.savePath, "what \(t.appName)'s panel would choose can't be read after Winter typed or clicked in it — nothing was pressed (Winter can't check it isn't \(Self.panelPathWords)); the user can pick the file themselves")
         }
@@ -543,7 +565,7 @@ extension CUCore {
             CULog.act.notice("drag in \(t.appName, privacy: .public): its source is a protected file — refused")
             throw CUError.refused(.savePath, "the drag's source is \(Self.panelPathWords) (\u{201C}\(hit.prefix(80))\u{201D}) — nothing was dragged; ask the user to move it themselves")
         }
-        let fileLike = (panelRoot(source, t) != nil || t.bundleId == "com.apple.finder")
+        let fileLike = (filePanelRoot(source, t) != nil || t.bundleId == "com.apple.finder")
             && [kAXRowRole, kAXCellRole, kAXImageRole, kAXStaticTextRole, kAXGroupRole].contains(ax.string(source, kAXRoleAttribute) ?? "")
         if fileLike, !urls.contains(where: { URL(string: $0)?.isFileURL == true }) {
             CULog.act.notice("drag in \(t.appName, privacy: .public): a file item whose path can't be read — refused")

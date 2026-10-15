@@ -334,7 +334,7 @@ extension CUCore {
         // move, ⌘C, Space (Quick Look), ⌘⇧. (hidden files) — the review of the open panel, LOW-1.
         let inPanel: AXUIElement? = Self.panelWatchExempt(chord) ? nil : (a.into != nil
             ? a.into.flatMap { try? element($0, in: t) }
-            : reportedFocus(t)).flatMap { el in panelRoot(el, t).map { looksLikeFilePanel($0, el, t) } == true ? el : nil }
+            : reportedFocus(t)).flatMap { el in filePanelRoot(el, t) != nil ? el : nil }
         if let el = inPanel {
             let focusId = reportedFocus(t).map { AXIdentity(element: $0) }
             let app = ax.application(t.pid)

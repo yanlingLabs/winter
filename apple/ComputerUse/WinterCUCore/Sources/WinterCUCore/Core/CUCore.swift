@@ -637,6 +637,8 @@ public final class CUCore: @unchecked Sendable {
     var isWebBrowserOverride: ((CUTarget) -> Bool)?
     /// Per target: what was typed into a file panel since its last choice (`CUCore+FilePanel.swift`).
     var panelTyped: [String: CUPanelTyped] = [:]
+    /// Per sheet: is it a file panel (`isFilePanel`), and when that was decided.
+    var filePanelVerdicts: [AXIdentity: (yes: Bool, atMs: Double)] = [:]
     /// Floor F's words for a browser's dialogs, as a test says (live: the browser's own locale packs — `remoteDebuggingWords`).
     var remoteDebuggingWordsOverride: ((CUTarget) -> CURemoteDebuggingWords)?
     /// Tests: told each time Floor F's words are read ahead for a target (`warmRemoteDebuggingWords`).

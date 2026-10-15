@@ -1177,6 +1177,50 @@ final class LeftoversTests: XCTestCase {
         XCTAssertNotNil(style)
     }
 
+    // MARK: the fifth pass
+
+    /// A real in-process Open panel can show none of a file panel's marks: the text floor still refuses a protected path.
+    func testAPanelWithNoMarksStillRefusesATypedProtectedPath() async throws {
+        world()
+        let sheet = fakeElement(98_300), list = fakeElement(98_301)
+        ax.put(window, [kAXChildrenAttribute: [web, sheet]])
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 100, y: 40, width: 600, height: 400), extra: [kAXParentAttribute: window, kAXChildrenAttribute: [list]])
+        ax.add(list, role: kAXListRole, frame: CGRect(x: 120, y: 80, width: 560, height: 300), extra: [kAXParentAttribute: sheet, kAXFocusedAttribute: true])
+        ax.focus(pid: pid, on: list)
+        XCTAssertFalse(core.isFilePanel(sheet, list, target), "no marks")
+        let said = await refusal(.type(CUTypeAction(text: "~/.ssh/id_ed25519\n", into: ref(list))))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "typed")
+        XCTAssertTrue(poster.entries.filter { $0.type == .keyDown }.isEmpty, "nothing sent")
+    }
+
+    /// A Return typed into a Go to folder sheet NESTED on the panel is judged with the panel's context (what was typed
+    /// into the panel before).
+    func testANestedGoToSheetIsJudgedWithTheOuterPanel() async throws {
+        world()
+        let (sheet, files) = openPanel()
+        let goTo = fakeElement(98_310), field = fakeElement(98_311)
+        ax.add(goTo, role: kAXSheetRole, frame: CGRect(x: 150, y: 60, width: 400, height: 120), extra: [kAXParentAttribute: sheet, kAXChildrenAttribute: [field]])
+        ax.add(field, role: kAXTextFieldRole, frame: CGRect(x: 160, y: 80, width: 300, height: 24), extra: [kAXParentAttribute: goTo, kAXValueAttribute: ""])
+        ax.put(sheet, [kAXChildrenAttribute: ax.elements(sheet, kAXChildrenAttribute) + [goTo]])
+        XCTAssertTrue(CFEqual(core.panelRoot(field, target)!, sheet), "the outermost sheet")
+        _ = await refusal(.type(CUTypeAction(text: "~/Library/Key", into: ref(files))))
+        ax.focus(pid: pid, on: field)
+        ax.put(field, [kAXFocusedAttribute: true])
+        let n = poster.entries.count
+        let said = await refusal(.type(CUTypeAction(text: "chains/login.keychain-db\n", into: ref(field))))
+        XCTAssertTrue(said?.contains("the text names a protected location") ?? false, said ?? "typed")
+        XCTAssertEqual(poster.entries.count, n, "nothing sent")
+    }
+
+    func testTheFilePanelVerdictIsCachedForTheSheet() {
+        world()
+        let (sheet, files) = openPanel()
+        XCTAssertTrue(core.isFilePanel(sheet, files, target))
+        ax.put(sheet, [kAXChildrenAttribute: [files]])  // its marks gone from the tree: the verdict holds for the sheet's life
+        XCTAssertTrue(core.isFilePanel(sheet, files, target))
+        XCTAssertFalse(core.isFilePanelUncached(sheet, files, target))
+    }
+
     func testProtectedPanelPaths() {
         let home = "/Users/u"
         XCTAssertTrue(CUFloors.isProtectedPanelPath("~/.aws/credentials", home: home))

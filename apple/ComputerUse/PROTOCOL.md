@@ -1217,6 +1217,13 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
   600-element walk reached; it fails closed only when neither can be read. A bare "Cookies" or "Keychains" is no
   protected name (the Library rule is for paths under `~/Library` only). Edit ▸ Paste (or Paste and Match Style) through
   `menu` into a file panel judges the clipboard as ⌘V does.
+- The fifth pass: the text, value and protected-path floors (and the Return-in-text choice check on the typed path)
+  judge in ANY sheet or dialog again — a real in-process Open panel can show none of a file panel's marks; they refuse
+  only protected paths, and in a sheet that is no recognised file panel the choice judges only what reads as a path (an
+  alert's or Print's labels and pop-ups are no file names). Only the fail-closed arming, the open-sheet choice and the
+  unreadable-choice refusal need a recognised file panel. The OUTERMOST sheet on the window is the panel (a nested Go to
+  folder sheet is judged with the panel's typed text). The file-panel verdict is cached per sheet: a yes for its life, a
+  no for a second.
 - Still UNMEASURED on the remote view: which pid accessibility reports for the service-drawn panel's elements (the
   routing needs the service's), whether a Go to folder field it opens is in the app's tree at all (the floors' typed-text
   record covers one that isn't), whether the panel says its folder (`AXDocument`/`AXURL` — relative text is otherwise
