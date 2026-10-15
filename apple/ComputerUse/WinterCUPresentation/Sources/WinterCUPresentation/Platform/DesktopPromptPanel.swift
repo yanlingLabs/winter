@@ -51,6 +51,9 @@ final class DesktopPromptPanel: NSPanel {
     private let panel: DesktopPromptPanel
     private var shown = false
     private var slot = -1
+    /// The app the user was in when the pill appeared, and the watch that gives it the front back.
+    private var userApp: NSRunningApplication?
+    private var activationWatch: NSObjectProtocol?
 
     init(_ model: CUDesktopPromptModel) {
         self.model = model
@@ -71,6 +74,7 @@ final class DesktopPromptPanel: NSPanel {
         if !shown {
             shown = true
             if NSApp.isHidden { NSApp.unhideWithoutActivation() }
+            guardFocus()
             panel.orderFrontRegardless()
             // Born now; the frame driver stops once the liquid has settled.
             state.bornAt = Date()
@@ -85,6 +89,8 @@ final class DesktopPromptPanel: NSPanel {
     /// card or cancelled, it goes at once.
     func close() {
         shown = false
+        if let activationWatch { NotificationCenter.default.removeObserver(activationWatch) }
+        activationWatch = nil
         let panel = panel
         guard state.answeredHere, state.bornAt != nil, !reduceMotion else {
             panel.orderOut(nil)
@@ -117,6 +123,24 @@ final class DesktopPromptPanel: NSPanel {
         let top = frame.maxY - DesktopIslandGeometry.panelTop(slot: slot, housing: housing, menuBarHeight: menuBar)
         panel.setFrame(CGRect(x: frame.midX - size.width / 2, y: top - size.height, width: size.width, height: size.height),
                        display: true)
+    }
+
+    /// The pill never takes the user's focus: the panel never becomes key and never activates this app, and should
+    /// this app become active anyway while it shows (an app started from a terminal is made active by macOS at its
+    /// launch), the front goes straight back to the app the user was in.
+    private func guardFocus() {
+        let me = NSRunningApplication.current
+        if let front = NSWorkspace.shared.frontmostApplication, front != me { userApp = front }
+        let hand = { [weak self] in
+            guard let self, self.shown, let app = self.userApp, !app.isTerminated else { return }
+            NSApp.yieldActivation(to: app)
+            app.activate(from: me, options: [])
+        }
+        activationWatch = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                                                 object: NSApp, queue: .main) { _ in
+            MainActor.assumeIsolated { hand() }
+        }
+        if NSApp.isActive { hand() }
     }
 
     /// The camera housing's size on `screen`, nil when it has none.

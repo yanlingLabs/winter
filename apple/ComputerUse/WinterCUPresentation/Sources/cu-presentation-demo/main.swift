@@ -109,18 +109,24 @@ if let dir = options.islandDir {
     }
 }
 
+/// The demo's prompt controller, kept for the life of the process (it answers the island's buttons and runs its
+/// countdown).
+@MainActor var islandPrompts: CUDesktopPromptController?
+
 if options.showIsland {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     let seconds = options.seconds
     MainActor.assumeIsolated {
         let prompts = CUDesktopPromptController.live()
+        islandPrompts = prompts
         let request = CUDesktopPromptRequest(
             promptId: "demo", sessionId: "demo", app: "Google Chrome", bundleId: "com.google.Chrome",
             reason: "To see what the page shows now.", timeoutMs: Int(seconds * 1000))
         prompts.show(request) { answer in
             print("answered: \(answer.rawValue)")
-            exit(0)
+            // Let the way back up play before quitting.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { exit(0) }
         }
     }
     app.run()

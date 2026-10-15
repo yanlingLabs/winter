@@ -4,7 +4,7 @@ import SwiftUI
 // The desktop-switch prompt as a pill born from the camera housing like a drop of water (user ruling 2026-10-14; the
 // liquid is `DesktopIslandFluid`): it falls out of the housing (or the top edge of a screen without one), its tail
 // snaps, and it spreads into a pill floating just below — one line ("Winter needs your view for a sec on Safari"), a
-// red ✕ and a blue ✓. The words come from `CUDesktopPromptModel`; nothing here decides anything.
+// white ✕ and a blue ✓. The words come from `CUDesktopPromptModel`; nothing here decides anything.
 
 /// Where everything is inside the island's panel, in points, top-left origin (the panel's top is the screen's top).
 struct DesktopIslandGeometry: Equatable {
@@ -24,10 +24,19 @@ struct DesktopIslandGeometry: Equatable {
     static let margin: CGFloat = 24
     static let stack: CGFloat = 10
     static let widthRange: ClosedRange<CGFloat> = 300...560
-    static let font = NSFont.systemFont(ofSize: 13.5, weight: .semibold)
+    /// The line's face: the Dispatch pill's typed text (Winter's composer field) — 14 pt, light in a dark appearance,
+    /// regular in a light one.
+    static let fontSize: CGFloat = 14
+    @MainActor static var fontWeight: NSFont.Weight {
+        NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .light : .regular
+    }
+    @MainActor static var font: NSFont { .systemFont(ofSize: fontSize, weight: fontWeight) }
+    /// While the shape still moves, the content blurs by how far it has to go (the Dispatch pill's morph blur).
+    static let maxMorphBlur: CGFloat = 8
+    static let morphBlurFalloff: CGFloat = 12
 
     /// The pill's width for its line: the text, then the two buttons, within `widthRange`.
-    static func pillWidth(for headline: String) -> CGFloat {
+    @MainActor static func pillWidth(for headline: String) -> CGFloat {
         let text = ceil((headline as NSString).size(withAttributes: [.font: font]).width)
         // The row: leading, the text, three spacings (text–spacer–✕–✓), the spacer's minimum, the buttons, trailing,
         // and a little slack so the line never truncates by a rounding hair.
@@ -39,6 +48,13 @@ struct DesktopIslandGeometry: Equatable {
     /// - Parameters:
     ///   - housing: the camera housing's size, nil on a screen without one.
     ///   - menuBarHeight: the top inset with no housing (the pill rests below it).
+    /// The content's blur for a pill of `size` heading to `target` (none within `morphBlurFalloff` of it).
+    static func morphBlur(size: CGSize, target: CGSize) -> CGFloat {
+        let remaining = max(abs(target.width - size.width), abs(target.height - size.height))
+        let radius = min(maxMorphBlur, remaining / morphBlurFalloff)
+        return radius < 0.25 ? 0 : radius
+    }
+
     static func make(housing: CGSize?, menuBarHeight: CGFloat, pillWidth: CGFloat, slot: Int) -> Self {
         let m = margin
         if slot > 0 {
@@ -151,28 +167,34 @@ struct IslandFrameView: View {
                 }
                 .frame(width: geometry.panelSize.width, height: geometry.panelSize.height)
             }
-            Capsule(style: .continuous)
-                .fill(Color.black)
-                .shadow(color: .black.opacity(0.3 * frame.crisp), radius: 12, y: 5)
-                .frame(width: max(pill.width, 0), height: max(pill.height, 0))
-                .offset(x: pill.minX, y: pill.minY)
-                .opacity(frame.crisp)
+            // The Dispatch pill's shell: content laid out at the pill's resting height, as wide as the shape is now
+            // (the buttons ride its edge), blurred by how far the spring still has to travel, clipped to the shape,
+            // a hairline edge and its shadow.
+            let shape = Capsule(style: .continuous)
             DesktopIslandRow(model: model, state: state)
-                .frame(width: geometry.pill.width, height: geometry.pill.height)
-                .offset(x: geometry.pill.minX, y: geometry.pill.minY)
+                .frame(width: max(pill.width, 0), height: geometry.pill.height)
+                .frame(width: max(pill.width, 0), height: max(pill.height, 0))
+                .blur(radius: DesktopIslandGeometry.morphBlur(size: pill.size, target: geometry.pill.size)
+                      + DesktopIslandGeometry.maxMorphBlur * CGFloat(1 - frame.content))
                 .opacity(frame.content)
+                .clipShape(shape)
+                .background(shape.fill(Color.black))
+                .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+                .compositingGroup()
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
+                .opacity(frame.crisp)
+                .offset(x: pill.minX, y: pill.minY)
                 .allowsHitTesting(frame.content > 0.9 && state.returningAt == nil)
         }
         .frame(width: geometry.panelSize.width, height: geometry.panelSize.height, alignment: .topLeading)
     }
 }
 
-/// The pill's one row: the line, then ✕ (don't switch) and ✓ (switch now).
+/// The pill's one row: the line, then a white ✕ (don't switch) and a blue ✓ (switch now).
 struct DesktopIslandRow: View {
     let model: CUDesktopPromptModel
     @ObservedObject var state: DesktopIslandState
 
-    static let red = Color(red: 1.0, green: 0.27, blue: 0.23)
     static let blue = Color(red: 0.04, green: 0.52, blue: 1.0)
     static let leading: CGFloat = 20
     static let trailing: CGFloat = 7
@@ -183,16 +205,17 @@ struct DesktopIslandRow: View {
     var body: some View {
         HStack(spacing: Self.spacing) {
             Text(model.headline)
-                .font(Font(DesktopIslandGeometry.font))
+                .font(.system(size: DesktopIslandGeometry.fontSize, weight: Font.Weight(DesktopIslandGeometry.fontWeight)))
+                .fixedSize()
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: Self.spacerMin)
             Button { answer(state.onRefuse) } label: { Image(systemName: "xmark") }
-                .buttonStyle(IslandCircleButtonStyle(fill: Self.red))
+                .buttonStyle(IslandCircleButtonStyle(fill: .white, glyph: .black))
                 .accessibilityLabel("Don't switch")
             Button { answer(state.onSwitch) } label: { Image(systemName: "checkmark") }
-                .buttonStyle(IslandCircleButtonStyle(fill: Self.blue))
+                .buttonStyle(IslandCircleButtonStyle(fill: Self.blue, glyph: .white))
                 .accessibilityLabel("Switch now")
         }
         .padding(.leading, Self.leading)
@@ -207,11 +230,12 @@ struct DesktopIslandRow: View {
 
 struct IslandCircleButtonStyle: ButtonStyle {
     let fill: Color
+    let glyph: Color
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .bold))
-            .foregroundStyle(.white)
+            .foregroundStyle(glyph)
             .frame(width: DesktopIslandRow.button, height: DesktopIslandRow.button)
             .background(Circle().fill(fill))
             .scaleEffect(configuration.isPressed ? 0.9 : 1)
@@ -295,5 +319,22 @@ public enum CUDesktopIslandGallery {
     static func write(_ image: CGImage, _ url: URL) throws -> URL {
         try CUCursorGallery.writePNG(image, to: url)
         return url
+    }
+}
+
+extension Font.Weight {
+    /// The SwiftUI weight for an AppKit one (the island's face is chosen as an `NSFont.Weight`).
+    init(_ weight: NSFont.Weight) {
+        switch weight {
+        case .ultraLight: self = .ultraLight
+        case .thin: self = .thin
+        case .light: self = .light
+        case .medium: self = .medium
+        case .semibold: self = .semibold
+        case .bold: self = .bold
+        case .heavy: self = .heavy
+        case .black: self = .black
+        default: self = .regular
+        }
     }
 }
