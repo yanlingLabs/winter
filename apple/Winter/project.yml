@@ -34,6 +34,13 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  # The Dispatch pill's terminal (Sources/DispatchPill/Terminal): a real VT emulator + PTY runner, MIT.
+  # EXACT, not `from:` — the project (and so its Package.resolved) is regenerated, never committed, so a
+  # range would float to whatever is newest on every generate. 1.18.0 is the last release on tools 5.9
+  # with no build-tool plugin (1.19+ add one, which an xcodegen project does not trust by default).
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: "1.18.0"
 targets:
   Winter:
     type: application
@@ -89,6 +96,8 @@ targets:
       - package: WinterProtocol
       - package: WinterCUPresentation
       - package: Sparkle
+      - package: SwiftTerm
+        product: SwiftTerm
       - target: WinterHelper
         embed: false
       # office-plumbing Task 2: same build-order-only relationship as WinterHelper immediately

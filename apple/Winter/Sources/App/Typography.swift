@@ -130,6 +130,8 @@ enum Typography {
     static let fieldCodeLabelNS: NSFont = sansNS(ofSize: captionSize, .medium)
     /// The orb field's code-block body.
     static let fieldCodeBlockNS: NSFont = monoNS(ofSize: controlSize)
+    /// The Dispatch pill's terminal window — the emulator's cell face (`CommandRun`).
+    static let terminalNS: NSFont = monoNS(ofSize: controlSize)
     /// The orb field's INLINE-code run — DERIVED through the shared transcript metrics since
     /// the second 2026-08-13 ruling ("make its sizes bound to the apps transcript sizes"),
     /// which reversed this token's brief verbatim posture. The wiring change has ZERO rendered

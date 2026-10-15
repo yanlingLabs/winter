@@ -62,6 +62,25 @@ final class TranscriptBrandTests: XCTestCase {
         "DiffAdded": ("1F7A3D", "4CC38A", 1, 1),
         "DiffAddedWash": ("22C55E", "22C55E", 0.10, 0.16),
         "DiffRemovedWash": ("EF4444", "EF4444", 0.10, 0.16),
+        // The Dispatch pill's command mode and its terminal (§ 3.9). The terminal's ANSI colours carry ONE
+        // value for both appearances: the terminal window is dark whatever the system says.
+        "CommandPurple": ("7C3AED", "BF8CFF", 1, 1),
+        "TerminalBlack": ("2E2E2E", "2E2E2E", 1, 1),
+        "TerminalRed": ("FF6B70", "FF6B70", 1, 1),
+        "TerminalGreen": ("4CC38A", "4CC38A", 1, 1),
+        "TerminalYellow": ("F2C66D", "F2C66D", 1, 1),
+        "TerminalBlue": ("6BA3FF", "6BA3FF", 1, 1),
+        "TerminalMagenta": ("BF8CFF", "BF8CFF", 1, 1),
+        "TerminalCyan": ("8CCBF0", "8CCBF0", 1, 1),
+        "TerminalWhite": ("D4D4D4", "D4D4D4", 1, 1),
+        "TerminalBrightBlack": ("767676", "767676", 1, 1),
+        "TerminalBrightRed": ("FF8E92", "FF8E92", 1, 1),
+        "TerminalBrightGreen": ("74D9A6", "74D9A6", 1, 1),
+        "TerminalBrightYellow": ("FFDB8F", "FFDB8F", 1, 1),
+        "TerminalBrightBlue": ("92BCFF", "92BCFF", 1, 1),
+        "TerminalBrightMagenta": ("D4B3FF", "D4B3FF", 1, 1),
+        "TerminalBrightCyan": ("B3DDF5", "B3DDF5", 1, 1),
+        "TerminalBrightWhite": ("FFFFFF", "FFFFFF", 1, 1),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
