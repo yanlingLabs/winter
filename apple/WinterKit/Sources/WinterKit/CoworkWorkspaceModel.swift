@@ -62,6 +62,9 @@ import WinterProtocol
     /// A workspace selected while another guidance operation held `guidanceBusy`: its read could not
     /// start then, and `finishGuidanceOperation` runs it (the last selection wins).
     private var queuedGuidanceRead: String?
+    /// The workspace whose guidance operation holds `guidanceBusy`. A listing never prunes its entry
+    /// while the operation runs: the operation settles against that entry when it resumes.
+    private var guidanceOperationWorkspace: String?
     private var selectedId: String?
     /// Separate bounded metadata consumer; workspace policy/source discovery remains independent.
     public private(set) lazy var schedules = CoworkSchedulesModel(call: call)
@@ -93,10 +96,12 @@ import WinterProtocol
         let listed = Set(values.map(\.workspaceId))
         guard listed.count == values.count else { throw ModelError.invalidPagination }
         workspaces = values
-        // A draft is kept only for a workspace the person can still open. Two are exempt: the selected one (its
-        // editor is on screen, and dropping its entry under it would silently discard edits typed next) and one
-        // with a save still pending (that request, in flight or unconfirmed, settles against this entry).
-        guidanceByWorkspace = guidanceByWorkspace.filter { listed.contains($0.key) || $0.key == selectedId || $0.value.pending != nil }
+        // A draft is kept only for a workspace the person can still open. Exempt: the selected one (its editor is
+        // on screen, and dropping its entry under it would silently discard edits typed next), the one a guidance
+        // operation is running for, and one with a save still pending (that request may yet have applied).
+        guidanceByWorkspace = guidanceByWorkspace.filter {
+            listed.contains($0.key) || $0.key == selectedId || $0.key == guidanceOperationWorkspace || $0.value.pending != nil
+        }
     }
     private func detail(_ id: String) async throws {
         let value = try await send(CoworkRequest<CoworkWorkspace>.get(workspaceId: id))
@@ -279,18 +284,21 @@ import WinterProtocol
     /// Ends the guidance operation that holds `guidanceBusy`. A workspace selected while it ran could
     /// not start its own read (`detail` queued it), so that read runs now instead of never.
     private func finishGuidanceOperation() async {
-        guidanceBusy = false
+        guidanceBusy = false; guidanceOperationWorkspace = nil
         while let id = queuedGuidanceRead {
             queuedGuidanceRead = nil
             guard selected?.workspaceId == id else { continue }
-            guidanceBusy = true
+            beginGuidanceOperation(id)
             await readGuidance(id)
-            guidanceBusy = false
+            guidanceBusy = false; guidanceOperationWorkspace = nil
         }
+    }
+    private func beginGuidanceOperation(_ id: String) {
+        guidanceBusy = true; guidanceOperationWorkspace = id
     }
     public func refreshInstructions(workspaceId: String? = nil) async {
         guard !busy, !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id else { return }
-        guidanceBusy = true
+        beginGuidanceOperation(id)
         await readGuidance(id)
         await finishGuidanceOperation()
     }
@@ -359,7 +367,7 @@ import WinterProtocol
     public func abandonInstructionSave(workspaceId: String? = nil, requestId: String? = nil) async {
         guard !busy, !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id,
               let save = guidanceByWorkspace[id]?.pending, requestId == nil || requestId == save.requestId else { return }
-        guidanceBusy = true
+        beginGuidanceOperation(id)
         await readGuidance(id)
         if var state = guidanceByWorkspace[id], state.pending?.requestId == save.requestId {
             if state.available {
@@ -375,7 +383,7 @@ import WinterProtocol
         await finishGuidanceOperation()
     }
     private func performInstructionSave(_ save: InstructionSave) async {
-        guidanceBusy = true
+        beginGuidanceOperation(save.workspaceId)
         do {
             let receipt = try await send(CoworkRequest<CoworkReceipt<CoworkInstructionMetadata>>.updateInstructions(workspaceId: save.workspaceId, requestId: save.requestId,
                 expectedInstructionRevision: save.expectedRevision, expectedDigest: save.expectedDigest, content: save.content))

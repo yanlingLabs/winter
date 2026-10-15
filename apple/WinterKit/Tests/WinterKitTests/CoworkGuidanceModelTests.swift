@@ -388,6 +388,24 @@ import WinterProtocol
             await model.select("one"); XCTAssertEqual(model.guidance?.draft, "Saved while leaving")
         }
     }
+    func testAConflictedSaveWhoseWorkspaceLeavesTheListDuringItsSettlingReadStillRetainsTheDraft() async {
+        let host = Host(); var resume: CheckedContinuation<Void, Never>?, parkNextRead = false
+        let model = CoworkWorkspaceModel { method, params in
+            if method == "workspace.instructions.update" { parkNextRead = true }
+            if method == "workspace.instructions.get", parkNextRead { parkNextRead = false; await withCheckedContinuation { resume = $0 } }
+            return try host.call(method, params)
+        }
+        await model.select("one"); model.editInstructions("My draft"); host.externalEdit("Someone else's version")
+        let saving = Task { await model.saveInstructions() }
+        while resume == nil { await Task.yield() }
+        // The save was refused as a conflict; while its read of the winning version is outstanding the
+        // person moves on, "one" leaves the list and a listing runs.
+        await model.select("two"); host.listed = ["two"]; await model.refresh()
+        resume?.resume(); await saving.value
+        XCTAssertFalse(model.guidanceBusy)
+        await model.select("one")
+        XCTAssertEqual(model.guidance?.draft, "My draft"); XCTAssertEqual(model.guidance?.conflict, true)
+    }
     func testInFlightSaveCapturesContentAndDoesNotDropSubsequentEditsOrDuplicateWrite() async {
         let host = Host(); var resume: CheckedContinuation<Void, Never>?
         let model = CoworkWorkspaceModel { method, params in
