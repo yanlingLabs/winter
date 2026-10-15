@@ -3,6 +3,19 @@ import WinterProtocol
 @testable import WinterKit
 
 final class CoworkClientTests: XCTestCase {
+    // Source regression only during the GUI/Swift execution hold.
+    func testOutputReaderIsTypedAndExcludedFromPairedAllowlist() throws {
+        for method in ["workspace.output.list", "workspace.file.stat", "workspace.file.read", "workspace.file.readRange"] { XCTAssertFalse(Gateway.remoteAllowedMethods.contains(method)) }
+        let request = CoworkRequest<CoworkOutputFileChunk>.outputFileReadRange(workspaceId: "workspace", locationId: "output-location", relativePath: "binary.bin", expectedLocationRevision: 1, expectedGeneration: String(repeating: "a", count: 64), offset: 3)
+        XCTAssertEqual(request.method, "workspace.file.readRange")
+        let params = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request.params)) as! [String: Any]
+        XCTAssertEqual(params["locationId"] as? String, "output-location"); XCTAssertEqual(params["offset"] as? Int, 3); XCTAssertNil(params["path"])
+        let json = #"{"workspaceId":"workspace","locationId":"output-location","relativePath":"binary.bin","locationRevision":1,"generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":6,"kind":"file","offset":3,"nextOffset":6,"eof":true,"contentBase64":"/wAB","encoding":"base64"}"#
+        let decoded = try JSONDecoder().decode(CoworkOutputFileChunk.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.nextOffset, 6); XCTAssertTrue(decoded.eof); XCTAssertEqual(Data(base64Encoded: decoded.contentBase64), Data([255, 0, 1]))
+        XCTAssertEqual(try JSONDecoder().decode(CoworkOutputFileChunk.self, from: JSONEncoder().encode(decoded)), decoded)
+    }
+
     func testFolderPreparationInventoryRemainsMacLocal() throws {
         for method in ["workspace.capabilities.get", "workspace.selection.prepareFolder", "workspace.selection.revoke"] {
             XCTAssertFalse(Gateway.remoteAllowedMethods.contains(method))

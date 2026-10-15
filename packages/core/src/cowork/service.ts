@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { COWORK_RPC, CoworkSource as SourceDto, CoworkCompleteWorkspace as WorkspaceDto, CoworkSummaryWorkspace as SummaryDto, CoworkWorkspacePolicy as PolicyDto, CoworkPolicySummary as PolicySummaryDto, CoworkWorkspaceRecord as WorkspaceRecordDto, type CoworkMethod, type CoworkResult } from "@yanlinglabs/winter-protocol";
 import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
 import { CoworkInstructions, type InstructionAgentApproval } from "./instructions";
+import { CoworkOutputs } from "./outputs";
 import { CoworkSchedules } from "./schedules";
 import { CoworkRepository } from "./repository";
 import { CoworkError, type CapabilityCeiling, type MutationContext, type MutationReceipt, type SourceSelection, type WorkspaceSource, type WorkspacePolicy, type Workspace } from "./types";
@@ -61,6 +62,7 @@ export class CoworkWorkspaceService {
   readonly watches: CoworkWorkspaceWatches;
   readonly schedules: CoworkSchedules;
   readonly instructions?: CoworkInstructions;
+  readonly outputs?: CoworkOutputs;
   constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number, instructionHome?: string, instructionApproval?: InstructionAgentApproval, watchOptions: CoworkWatchOptions = {}) {
     this.authority = new CoworkAuthority(records, host.grants);
     this.schedules = new CoworkSchedules(records, host.grants, scheduleNow);
@@ -69,6 +71,8 @@ export class CoworkWorkspaceService {
       // fail. Unsupported platform/canonical DB topology leaves its RPC gated.
       try { this.instructions = new CoworkInstructions(records, instructionHome, host.grants, instructionApproval); }
       catch { this.instructions = undefined; }
+      try { this.outputs = new CoworkOutputs(records, instructionHome, host.grants); }
+      catch { this.outputs = undefined; }
     }
     this.watches = new CoworkWorkspaceWatches(records.rs, (connection, ids) => records.rs.transaction(() => {
       const principal = this.localWatchPrincipal(connection);
@@ -221,7 +225,7 @@ export class CoworkWorkspaceService {
   private checkedResponse(method: CoworkMethod, result: unknown): void {
     COWORK_RPC[method].result.parse(result);
     // Conservative inner budget leaves room for paired JSON escaping/base64 and outer envelope.
-    if (Buffer.byteLength(JSON.stringify(result), "utf8") > RESPONSE_BUDGET) throw new CoworkError("response_too_large");
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > (method.startsWith("workspace.file.") ? 384 * 1024 : RESPONSE_BUDGET)) throw new CoworkError("response_too_large");
   }
   /** Revalidated at every remote read/replay/live delivery; pairing alone is not workspace scope. */
   requireSessionRead(connection: CoworkConnection, sessionId: string, eventWorkspaceId?: string): void {
@@ -236,6 +240,16 @@ export class CoworkWorkspaceService {
   close(): void { this.beginShutdown(); this.watches.close(); this.host.selections?.close(); }
   private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown, connection: CoworkConnection): unknown {
     switch (method) {
+      case "workspace.output.list": case "workspace.file.stat": case "workspace.file.read": case "workspace.file.readRange": {
+        // Local user reads only. All paired mirrors deliberately exclude this slice.
+        if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        COWORK_RPC[method].params.parse(raw);
+        if (!this.outputs) throw new CoworkError("unsupported_topology");
+        if (method === "workspace.output.list") return this.outputs.list(principal, COWORK_RPC[method].params.parse(raw));
+        if (method === "workspace.file.stat") return this.outputs.stat(principal, COWORK_RPC[method].params.parse(raw));
+        const request = method === "workspace.file.readRange" ? COWORK_RPC[method].params.parse(raw) : { ...COWORK_RPC["workspace.file.read"].params.parse(raw), offset: 0 };
+        return this.outputs.read(principal, request);
+      }
       case "workspace.watch": case "workspace.watch.renew": case "workspace.watch.detach":
         throw new CoworkError("unsupported_topology"); // stream/control connection doors are handled above
       case "workspace.instructions.get": case "workspace.instructions.provenance": case "workspace.instructions.update": {

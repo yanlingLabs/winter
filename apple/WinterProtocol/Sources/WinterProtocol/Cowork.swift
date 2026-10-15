@@ -254,3 +254,47 @@ extension CoworkRequest where Result == CoworkReceipt<CoworkInstructionMetadata>
         Self("workspace.instructions.update", ["workspaceId": .string(workspaceId), "requestId": .string(requestId), "expectedInstructionRevision": .number(Double(expectedInstructionRevision)), "expectedDigest": .string(expectedDigest), "content": .string(content)])
     }
 }
+
+/// Local recorded output locations, not a directory listing or VM availability claim.
+public struct CoworkOutputLocation: Codable, Equatable, Sendable {
+    public let workspaceId: String, sessionId: String, locationId: String, kind: String
+    public let revision: Int
+}
+public struct CoworkOutputPage: Codable, Equatable, Sendable {
+    public let locations: [CoworkOutputLocation]
+    public let nextCursor: String?
+}
+/// Generation is an optimistic file version token, not a content SHA-256 digest.
+public struct CoworkOutputFileStat: Codable, Equatable, Sendable {
+    public let workspaceId: String, locationId: String, relativePath: String, generation: String, kind: String
+    public let locationRevision: Int, bytes: Int
+}
+public struct CoworkOutputFileChunk: Codable, Equatable, Sendable {
+    public let workspaceId: String, locationId: String, relativePath: String, generation: String, kind: String, contentBase64: String, encoding: String
+    public let locationRevision: Int, bytes: Int, offset: Int, nextOffset: Int
+    public let eof: Bool
+}
+private func outputFileParams(_ workspaceId: String, _ locationId: String, _ relativePath: String, _ revision: Int) -> [String: SessionEvent.JSONValue] {
+    ["workspaceId": .string(workspaceId), "locationId": .string(locationId), "relativePath": .string(relativePath), "expectedLocationRevision": .number(Double(revision))]
+}
+extension CoworkRequest where Result == CoworkOutputPage {
+    public static func outputs(workspaceId: String, cursor: String? = nil, limit: Int = 100) -> Self {
+        var p: [String: SessionEvent.JSONValue] = ["workspaceId": .string(workspaceId), "limit": .number(Double(limit))]
+        if let cursor { p["cursor"] = .string(cursor) }; return Self("workspace.output.list", p)
+    }
+}
+extension CoworkRequest where Result == CoworkOutputFileStat {
+    public static func outputFileStat(workspaceId: String, locationId: String, relativePath: String, expectedLocationRevision: Int) -> Self {
+        Self("workspace.file.stat", outputFileParams(workspaceId, locationId, relativePath, expectedLocationRevision))
+    }
+}
+extension CoworkRequest where Result == CoworkOutputFileChunk {
+    public static func outputFileRead(workspaceId: String, locationId: String, relativePath: String, expectedLocationRevision: Int, expectedGeneration: String, maxBytes: Int = 65536) -> Self {
+        var p = outputFileParams(workspaceId, locationId, relativePath, expectedLocationRevision)
+        p["expectedGeneration"] = .string(expectedGeneration); p["maxBytes"] = .number(Double(maxBytes)); return Self("workspace.file.read", p)
+    }
+    public static func outputFileReadRange(workspaceId: String, locationId: String, relativePath: String, expectedLocationRevision: Int, expectedGeneration: String, offset: Int, maxBytes: Int = 65536) -> Self {
+        var p = outputFileParams(workspaceId, locationId, relativePath, expectedLocationRevision)
+        p["expectedGeneration"] = .string(expectedGeneration); p["maxBytes"] = .number(Double(maxBytes)); p["offset"] = .number(Double(offset)); return Self("workspace.file.readRange", p)
+    }
+}

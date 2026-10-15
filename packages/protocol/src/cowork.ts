@@ -89,6 +89,24 @@ export const CoworkInstructionMetadata = z.object({ workspaceId: Id, instruction
 export const CoworkInstructionRead = CoworkInstructionMetadata.extend({ contentBase64: z.string().max(87384), encoding: z.literal("utf-8") }).strict();
 export const CoworkInstructionProvenance = CoworkInstructionMetadata.extend({ entries: z.array(z.object({ kind: z.literal("workspace"), guestPath: z.literal("/workspace/.winter/WINTER.md"), digest: Digest }).strict()).length(1), sourceDiscovery: z.literal("unavailable") }).strict();
 export const CoworkInstructionReceipt = receipt(CoworkInstructionMetadata);
+/** Local recorded-output inventory only; this never enumerates filesystem entries. */
+export const COWORK_FILE_CHUNK_MAX_BYTES = 256 * 1024;
+// Conservative local response budget also stays below the existing 128 KiB service guard.
+export const COWORK_FILE_CHUNK_DEFAULT_BYTES = 64 * 1024;
+export const CoworkOutputLocation = z.object({ workspaceId: Id, sessionId: Id, locationId: Id,
+  kind: z.literal("conversation-outputs"), revision: Revision }).strict();
+export const CoworkOutputPage = z.object({ locations: z.array(CoworkOutputLocation).max(100), nextCursor: z.string().max(200).nullable() }).strict();
+export const CoworkOutputPath = z.string().min(1).max(4096).refine(value => {
+  if (value.includes("\0") || Buffer.byteLength(value, "utf8") > 4096 || Buffer.from(value, "utf8").toString("utf8") !== value) return false;
+  const parts = value.split("/");
+  return parts.length <= 32 && parts.every(part => part !== "" && part !== "." && part !== ".." && Buffer.byteLength(part, "utf8") <= 255);
+});
+const FileRequest = WorkspaceId.extend({ locationId: Id, relativePath: CoworkOutputPath, expectedLocationRevision: Revision }).strict();
+export const CoworkOutputFileStat = z.object({ workspaceId: Id, locationId: Id, relativePath: CoworkOutputPath,
+  locationRevision: Revision, generation: Digest, bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), kind: z.literal("file") }).strict();
+export const CoworkOutputFileChunk = CoworkOutputFileStat.extend({ offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  nextOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), eof: z.boolean(), contentBase64: z.string().max(349528).refine(value => Buffer.from(value, "base64").toString("base64") === value && Buffer.from(value, "base64").length <= COWORK_FILE_CHUNK_MAX_BYTES), encoding: z.literal("base64") }).strict().refine(value => value.nextOffset >= value.offset && value.nextOffset <= value.bytes && value.nextOffset - value.offset === Buffer.from(value.contentBase64, "base64").length && value.eof === (value.nextOffset === value.bytes));
+const FileReadRequest = FileRequest.extend({ expectedGeneration: Digest, maxBytes: z.number().int().min(1).max(COWORK_FILE_CHUNK_MAX_BYTES).default(COWORK_FILE_CHUNK_DEFAULT_BYTES) }).strict();
 /** Local Unix subscription contract. Paired Gateway negotiation is not implemented. */
 export const WORKSPACE_WATCH_LEASE_MS = 60_000;
 export const WORKSPACE_WATCH_RENEW_MS = 20_000;
@@ -103,6 +121,10 @@ export const CoworkWatchFrame = z.discriminatedUnion("phase", [
 export type CoworkWatchFrame = z.infer<typeof CoworkWatchFrame>;
 export const COWORK_WATCH_METHODS = ["workspace.watch", "workspace.watch.renew", "workspace.watch.detach"] as const;
 export const COWORK_RPC = {
+  "workspace.output.list": { params: WorkspaceId.extend({ cursor: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), result: CoworkOutputPage },
+  "workspace.file.stat": { params: FileRequest, result: CoworkOutputFileStat },
+  "workspace.file.read": { params: FileReadRequest, result: CoworkOutputFileChunk },
+  "workspace.file.readRange": { params: FileReadRequest.extend({ offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }).strict(), result: CoworkOutputFileChunk },
   "workspace.watch": { params: z.object({ workspaceIds: z.array(Id).min(1).max(32).refine(ids => new Set(ids).size === ids.length) }).strict(), result: CoworkWatchLease },
   "workspace.watch.renew": { params: z.object({ subscriptionId: Id }).strict(), result: CoworkWatchLease },
   "workspace.watch.detach": { params: z.object({ subscriptionId: Id }).strict(), result: z.object({ detached: z.literal(true) }).strict() },
@@ -145,6 +167,7 @@ export type CoworkWorkspace = z.infer<typeof CoworkWorkspace>;
 export type CoworkSource = z.infer<typeof CoworkSource>;
 export type CoworkWorkspacePolicy = z.infer<typeof CoworkWorkspacePolicy>;
 export const COWORK_METHODS = {
+  workspaceOutputList: "workspace.output.list", workspaceFileStat: "workspace.file.stat", workspaceFileRead: "workspace.file.read", workspaceFileReadRange: "workspace.file.readRange",
   workspaceInstructionsGet: "workspace.instructions.get", workspaceInstructionsProvenance: "workspace.instructions.provenance", workspaceInstructionsUpdate: "workspace.instructions.update",
   workspaceScheduleCreate: "workspace.schedule.create", workspaceScheduleList: "workspace.schedule.list", workspaceScheduleCancel: "workspace.schedule.cancel", workspaceScheduleStatus: "workspace.schedule.status",
   workspaceCapabilitiesGet: "workspace.capabilities.get", workspaceSelectionPrepareFolder: "workspace.selection.prepareFolder", workspaceSelectionRevoke: "workspace.selection.revoke",

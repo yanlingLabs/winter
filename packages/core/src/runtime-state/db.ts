@@ -1,9 +1,9 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { COWORK_TABLES, migrateCoworkSchema, migrateCoworkVolumeSchema, migrateCoworkFilesystemSchema, migrateCoworkFolderGrantSchema, migrateCoworkScheduleSchema, migrateCoworkInstructionSchema, migrateCoworkScheduleQuarantineSchema } from "../cowork/schema";
+import { COWORK_TABLES, migrateCoworkSchema, migrateCoworkVolumeSchema, migrateCoworkFilesystemSchema, migrateCoworkFolderGrantSchema, migrateCoworkScheduleSchema, migrateCoworkInstructionSchema, migrateCoworkScheduleQuarantineSchema, migrateCoworkOutputSchema } from "../cowork/schema";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 14;
+export const RUNTIME_STATE_SCHEMA_VERSION = 15;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -237,6 +237,7 @@ const MIGRATIONS: ReadonlyArray<{
   { version: 12, up: migrateCoworkScheduleSchema },
   { version: 13, up: migrateCoworkInstructionSchema },
   { version: 14, up: migrateCoworkScheduleQuarantineSchema },
+  { version: 15, up: migrateCoworkOutputSchema },
 ];
 
 /** `PRAGMA foreign_key_check`'s row count — how many child rows point at no parent. */
@@ -252,7 +253,7 @@ function dropEmptyCoworkSchema(db: Database): void {
 
 /** Explicit compatibility rollback only; caller must hold the stopped-daemon migration boundary.
  * Keeps all WS-21/v7 state and filesystem layout intact. Populated Cowork authority never drops. */
-export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 10 | 11 | 12 | 13 | 14; to: 7 } | "not-needed" {
+export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15; to: 7 } | "not-needed" {
   const path = join(home, "runtimes", "runtime-state.db");
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
@@ -261,10 +262,10 @@ export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 1
     return db.transaction(() => {
       const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
       if (version <= 7) return "not-needed" as const;
-      if (version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13 && version !== 14) throw new RuntimeStateUnavailableError(path, "newer-schema");
+      if (version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13 && version !== 14 && version !== 15) throw new RuntimeStateUnavailableError(path, "newer-schema");
       dropEmptyCoworkSchema(db);
       db.run("PRAGMA user_version=7");
-      return { from: version as 8 | 9 | 10 | 11 | 12 | 13 | 14, to: 7 as const };
+      return { from: version as 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15, to: 7 as const };
     }).immediate();
   } finally { db.close(); }
 }
@@ -283,14 +284,14 @@ export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 1
  * still unprovable quarantines again: a second evidence copy under `cache/quarantine/`, its sessions
  * re-marked `repair-required` — idempotent, never a loss. Rollback runs this step FIRST (round 3, minor 1).
  */
-export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14; to: 6 } | "not-needed" {
+export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15; to: 6 } | "not-needed" {
   const path = join(home, "runtimes", "runtime-state.db");
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
   try {
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
     if (version <= 6) return "not-needed";
-    if (version > 14) throw new RuntimeStateUnavailableError(path, "newer-schema");
+    if (version > 15) throw new RuntimeStateUnavailableError(path, "newer-schema");
     const row = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").get();
     const v7Check = "IN ('official-spool','sdk-resume-staging','run-folder')";
     db.run("PRAGMA foreign_keys = OFF");
@@ -324,7 +325,7 @@ export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 
     } finally {
       db.run("PRAGMA foreign_keys = ON");
     }
-    return { from: version as 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14, to: 6 };
+    return { from: version as 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15, to: 6 };
   } finally {
     db.close();
   }

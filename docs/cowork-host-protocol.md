@@ -88,6 +88,7 @@ Introduce one daemon-side `assertRemoteMayUseWorkspace` gate, analogous to the e
 | `session.retarget` | Session, source/location ID, relative path and expected source revision | Allow inside an already authorized ready workspace; guest validates cwd, no grant creation |
 | `workspace.delegation.list`, `workspace.delegation.revoke` | Safe scope summaries or narrowing by ID/revision | Allow |
 | `workspace.delegation.create` | Sender/target scope, operations, expiry and explicit user authorization | Local-only initially |
+| `workspace.output.list` | Canonical opaque conversation-output location inventory, paginated; never directory file listing or discovery | Local-only source slice initially; all four paired mirrors exclude |
 | `workspace.file.list`, `workspace.file.stat`, `workspace.file.read`, `workspace.file.readRange` | Location ID/relative path, size/range bounds, explicit wake permission when needed | Allow within admitted workspace; no raw Mac paths, no hidden reads of SDK/control stores |
 | `workspace.export.create`, `workspace.export.status`, `workspace.export.read` | Generation-bound export job and bounded artifact/chunk handles | Allow user-facing export without raw authority DB/bookmarks or selected external-folder contents; host destination path/export-import authority stays local |
 | `workspace.watch`, `workspace.watch.renew`, `workspace.watch.detach` | Authorized workspace IDs/revisions; peer-bound subscription ID, lease and bounded snapshot/change frames | Allow; explicit Gateway subscription handling, snapshot/refetch on reconnect, no reliance on `$system` replay |
@@ -99,6 +100,15 @@ source handling. Current paired mirrors still exclude these methods; guest owner
 and reader refresh remain unwired. The provenance result reports workspace alias
 only and source discovery unavailable. Initialization is trusted host provisioning,
 never a missing-file RPC seed. See [guidance source evidence](research/2026-10-14-cowork-workspace-instructions-source.md).
+
+2026-10-14 output-read source slice: local `workspace.output.list` returns canonical
+opaque location records only. Local `workspace.file.stat/read/readRange` read
+recorded host-backed conversation outputs while stopped, with expected location
+revision and file generation plus decoded chunks at most256 KiB. Reads never
+initialize, recreate, enroll, wake or provision. Filesystem directory listing,
+guest-only files, memory and exports remain unimplemented here. All four paired
+mirrors still exclude these methods; Swift request/DTO source is not consumer or
+native validation. See [output-read source boundaries](cowork-output-reads.md).
 
 Folder preparations are ephemeral and do not count as workspace sources. They bind the authenticated local principal and issuing connection, expire on a monotonic deadline, and release held descriptors/scope on revocation, disconnect or stop. A bookmark is location evidence, not proof of a UI gesture or signed-client identity. Re-resolve and revalidate the current protected roots, access and held directory identity before consumption. Exact request replay preserves identity/expiry; an expired or revoked preparation is not minted again. Schema11 implements atomic consumption into protected, source-bound durable folder grants. Source creation/addition commits the bookmark, exact root identity, home/workspace/source/issuing principal and opaque selection together with the desired source and operation/outbox. Only then is ephemeral scope released; disconnect/restart does not revoke an accepted source. Current bookmark/root/access/protected-policy validation is mandatory on every durable lookup, and removal/revocation tombstones the grant in the source transaction. Retrying old successful create/add requests rechecks current authority and never recreates revoked grants. New client-input digests have an explicit version. Schema10 receipts are replayable only when the supplied original selection can still be freshly resolved/current-authorized and the exact old normalized host payload matches; lost legacy selection inputs are refused rather than inferred from a receipt. Actual native provisioning remains required and refused by the default host; preparation or durable acceptance alone never marks a source ready. See [durable grant implementation evidence](research/2026-10-12-cowork-durable-folder-grants.md). The implemented preparation scope is recorded in [Mac selection acceptance](research/2026-10-12-cowork-macos-selection-independent-review.md).
 

@@ -96,3 +96,9 @@ export function unlinkAt(dirFd: number, name: string): void {
 export function closeFd(fd: number): void {
   if (fd >= 0) load().close(fd);
 }
+
+/** Capture the existing errno reader BEFORE another module makes its syscall.
+ * No ABI addition; avoiding lazy dlopen after a failed call preserves its errno. */
+export function fdErrnoReader(): () => number {
+  return load().errno;
+}
