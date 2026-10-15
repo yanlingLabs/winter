@@ -162,6 +162,26 @@ final class ZshCompletionTests: XCTestCase {
         XCTAssertTrue(zshLineMayBeShown("git status"))
     }
 
+    func testOnlyAllowlistedCommandsAndNeverWrappersReachZsh() {
+        for line in ["nice rsync host:", "command scp host:", "env ssh host", "sudo ls", "xargs ls", "exec ls",
+                     "nohup ls", "time ls", "watch ls", "nice git status", "FOO=1 env git status",
+                     "/usr/bin/git status", "git status && rsync host:", "unknowncmd x"] {
+            XCTAssertFalse(zshLineMayBeShown(line), line)
+        }
+        for line in ["git status", "FOO=1 make build", "ls -la /tmp", "cd ~/proj", "brew info x"] {
+            XCTAssertTrue(zshLineMayBeShown(line), line)
+        }
+        XCTAssertFalse(zshLineMayBeShown("ls | grep x"), "a pipe is not an allowed character either")
+        for wrapper in ["nice", "command", "env", "sudo", "xargs", "exec", "nohup", "time", "watch", "rsync", "scp", "ssh"] {
+            XCTAssertFalse(shellCommandsShownToZsh.contains(wrapper), wrapper)
+        }
+        // A wrapped line meets the prose guard; zsh is never asked.
+        let watcher = FakeCompletionSource(captures: [:], functions: ["make": true, "nice": true])
+        XCTAssertFalse(passes("nice make sure the tests pass", watcher))
+        XCTAssertTrue(passes("nice make build", watcher), "two plain words: the guard lets it through")
+        XCTAssertEqual(watcher.asked, [], "the engine was never shown a wrapped line")
+    }
+
     private func isWholeCommand(_ line: String) -> Bool {
         shellLineIsCommand(line, context: context()) && passes(line)
     }
@@ -363,7 +383,7 @@ final class ZshCompletionIntegrationTests: XCTestCase {
 
     /// The engine's sandbox, on its own: no write outside its private folder.
     func testTheSandboxProfileDeniesWritesOutsideThePrivateFolder() throws {
-        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory)
+        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory, terminal: "/dev/ttys999")
         func touch(_ path: String) -> Int32 {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
@@ -380,11 +400,40 @@ final class ZshCompletionIntegrationTests: XCTestCase {
         XCTAssertEqual(touch(inside), 0, "the private folder stays writable")
     }
 
+    /// The completing shell may write only its OWN terminal: from inside a sandbox naming one fresh pty, a write to
+    /// another fresh pty is denied (and nothing arrives there) — no real terminal is touched.
+    func testTheSandboxWritesOnlyItsOwnTerminal() throws {
+        func freshPty() throws -> (master: Int32, slave: Int32, name: String) {
+            var master: Int32 = -1, slave: Int32 = -1
+            var name = [CChar](repeating: 0, count: 128)
+            guard openpty(&master, &slave, &name, nil, nil) == 0 else { throw XCTSkip("no pty available") }
+            return (master, slave, String(cString: name))
+        }
+        let own = try freshPty(), other = try freshPty()
+        defer { [own.master, own.slave, other.master, other.slave].forEach { close($0) } }
+        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory, terminal: own.name)
+        func inside(_ command: String) -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+            process.arguments = ["-p", profile, "/bin/zsh", "-f", "-c", command]
+            process.environment = ["PATH": "/usr/bin:/bin"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+        XCTAssertNotEqual(inside("print -n probe > \(other.name)"), 0, "another terminal is not writable")
+        var poller = pollfd(fd: other.master, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&poller, 1, 200), 0, "nothing reached the other terminal")
+        XCTAssertEqual(inside("print -n probe > \(own.name)"), 0, "its own terminal is")
+    }
+
     /// From INSIDE the engine's sandbox (a zsh under the same profile, as injected code would be): no signal to
     /// another of the user's processes, no pasteboard, no Apple Events, no LaunchServices. Harmless probes —
     /// and `pbcopy` is refused before it can write: neither pasteboard's change count may move.
     func testTheSandboxDeniesSignalsPasteboardAppleEventsAndLaunchServices() throws {
-        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory)
+        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory, terminal: "/dev/ttys999")
         let bystander = Process()
         bystander.executableURL = URL(fileURLWithPath: "/bin/sleep")
         bystander.arguments = ["30"]

@@ -383,13 +383,22 @@ func zshBufferIsSafe(_ text: String) -> Bool {
     text.allSatisfy { zshEngineAllowedCharacters.contains($0) }
 }
 
-/// Commands whose completion reaches a REMOTE shell (it builds and runs `ssh <host> …`, or the command named by
-/// `-e`): a line naming one is never shown to zsh, whatever its characters.
-let shellCommandsNeverShownToZsh: Set<String> = [
-    "rsync", "scp", "sftp", "ssh", "slogin", "rcp", "rsh", "sshfs", "mosh", "rclone",
+/// The ONLY commands whose completion may reach the engine — local tools whose completion functions list
+/// subcommands, targets, branches, files, processes. A line is shown to zsh only when the FIRST word (after
+/// assignments) of every simple command in it is one of these, exactly as typed: never a path to one, and never
+/// a wrapper (`nice`, `command`, `env`, `sudo`, `xargs`, `exec`, `nohup`, `time`, `watch` — each would hand its
+/// own arguments to another command's completion, `nice rsync …` to `_rsync`'s remote shell). Everything else
+/// meets the prose guard.
+let shellCommandsShownToZsh: Set<String> = [
+    "git", "make", "ls", "cd", "open", "cat", "less", "more", "head", "tail", "cp", "mv", "rm", "mkdir", "rmdir",
+    "touch", "ln", "code", "vim", "vi", "nvim", "nano", "grep", "rg", "find", "fd", "npm", "npx", "bun", "yarn",
+    "pnpm", "brew", "swift", "xcodebuild", "xcrun", "python3", "pip3", "node", "deno", "cargo", "go", "kill",
+    "killall", "ps", "du", "df", "tar", "zip", "unzip", "gzip", "gunzip", "chmod", "chown", "diff", "wc", "sort",
+    "uniq", "file", "stat", "which", "man", "say", "echo", "printf", "pwd", "tree", "bat", "jq", "docker", "gh",
 ]
 
-/// PURE: may this line, as tokenized, be shown to zsh? Its characters (`zshBufferIsSafe`) and its commands.
+/// PURE: may this line, as tokenized, be shown to zsh? Its characters (`zshBufferIsSafe`) and its commands
+/// (`shellCommandsShownToZsh`).
 func zshLineMayBeShown(_ line: String) -> Bool {
     guard zshBufferIsSafe(line), case .complete(let tokens) = shellTokenize(line) else { return false }
     var commandPosition = true
@@ -398,10 +407,10 @@ func zshLineMayBeShown(_ line: String) -> Bool {
         case .op(let op):
             if shellCommandSeparators.contains(op) { commandPosition = true }
         case .word(let word):
-            if commandPosition {
-                if shellCommandsNeverShownToZsh.contains((word.text as NSString).lastPathComponent) { return false }
-                if !shellIsAssignment(word.text), !shellReservedWords.contains(word.text) { commandPosition = false }
-            }
+            guard commandPosition else { continue }
+            if shellIsAssignment(word.text) { continue }
+            guard shellCommandsShownToZsh.contains(word.text) else { return false }
+            commandPosition = false
         }
     }
     return true

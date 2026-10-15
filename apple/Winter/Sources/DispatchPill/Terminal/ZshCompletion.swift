@@ -222,9 +222,11 @@ func shellCompletionCheckPasses(_ line: String, context: ShellCommandContext, so
 /// `breakerThreshold` consecutive timeouts the breaker opens for `breakerCooldown`: no zsh at all, prose guard
 /// only. Every reply is memoized per (directory, buffer), so typing a line asks zsh about each new prefix once.
 ///
-/// It runs under `sandbox-exec` (`zshCompletionSandboxProfile`): no file writes outside its private temp folder
-/// and the terminal devices, no network — defense in depth behind `zshBufferIsSafe`. Completion functions
-/// still read, and still run the tools they need (`git`, `make`…).
+/// The shell that COMPLETES — the inner `zsh -f -i`, where every completion function runs — is under
+/// `sandbox-exec` (`zshCompletionSandboxProfile`): defense in depth behind `zshLineMayBeShown`. Its profile is
+/// made per start, INSIDE the new pty, before the sandbox applies: it names that pty's own slave as the one
+/// terminal it may write, so injected code could not write to any of the user's other terminals. The outer
+/// `zsh -f` runs only this file's fixed protocol script (it never evaluates typed text) and owns the pty.
 final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
     let zshPath: String
     private let environment: [String: String]
@@ -372,9 +374,12 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
             return
         }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
-        process.arguments = ["-p", zshCompletionSandboxProfile(privateDirectory: privateDirectory),
-                             zshPath, "-f", "-c", zshCompletionEngineScript]
+        process.executableURL = URL(fileURLWithPath: zshPath)
+        process.arguments = ["-f", "-c", zshCompletionEngineScript]
+        var environment = environment
+        // The inner shell's profile, its terminal filled in inside the pty (`zshCompletionEngineScript`).
+        environment["WINTER_ENGINE_PROFILE"] = zshCompletionSandboxProfile(privateDirectory: privateDirectory,
+                                                                           terminal: zshProfileTerminalPlaceholder)
         process.environment = environment
         process.currentDirectoryURL = URL(fileURLWithPath: environment["HOME"] ?? NSHomeDirectory())
         let stdin = Pipe(), stdout = Pipe()
@@ -523,18 +528,26 @@ func shellSetCloseOnExec(_ descriptor: Int32) {
     if flags >= 0 { _ = fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) }
 }
 
-/// PURE: the engine's sandbox — everything zsh's completion needs to READ and RUN, nothing it could WRITE
-/// except its private folder and the terminal devices zpty uses, and no network.
+/// Where the completing shell's own terminal goes in its profile — replaced, inside the new pty, by `$(tty)`.
+let zshProfileTerminalPlaceholder = "@WINTER_TTY@"
+
+/// PURE: the completing shell's sandbox — everything zsh's completion needs to READ and RUN, nothing it could
+/// WRITE except its private folder and its OWN terminal (`terminal`, the pty slave it was started on; never
+/// another of the user's terminals), and no network.
 ///
 /// DENY by default. Allowed: forking and running programs (completion functions run `git`, `make`, `xcrun`…);
 /// READING files — all of them, because path completion lists whatever directory the user types (reads cannot
 /// leave the sandbox: no network, no writes, no pasteboard); ioctls and ptys (zpty); signals only within the
 /// sandbox (never another of the user's processes — not the Winter daemon, not the app); writes only to its
-/// private folder and the tty/pty devices; three Mach services libc needs (user lookup, notify, logging).
+/// private folder, its own terminal, `/dev/tty` (the controlling terminal — its own), `/dev/ptmx` and
+/// `/dev/null`; three Mach services libc needs (user lookup, notify, logging).
 /// Explicitly denied on top: Apple Events, the pasteboard, LaunchServices, the window server, and running
 /// `osascript`, `open`, `pbcopy`, `pbpaste`.
-func zshCompletionSandboxProfile(privateDirectory: String) -> String {
-    let quoted = privateDirectory.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+func zshCompletionSandboxProfile(privateDirectory: String, terminal: String) -> String {
+    func sbplQuoted(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
+    let quoted = sbplQuoted(privateDirectory)
     return """
     (version 1)
     (deny default)
@@ -549,8 +562,8 @@ func zshCompletionSandboxProfile(privateDirectory: String) -> String {
       (literal "/dev/null")
       (literal "/dev/ptmx")
       (literal "/dev/dtracehelper")
-      (regex #"^/dev/tty")
-      (regex #"^/dev/pty")
+      (literal "/dev/tty")
+      (literal "\(sbplQuoted(terminal))")
       (subpath "\(quoted)"))
     (allow mach-lookup
       (global-name "com.apple.system.opendirectoryd.libinfo")
@@ -600,7 +613,7 @@ let zshCompletionEngineScript = #"""
 { for __fd in /dev/fd/<3->(N:t); do exec {__fd}>&-; done } 2>/dev/null
 zmodload zsh/zpty 2>/dev/null || { print -r -- X; exit 1 }
 autoload -Uz compinit && compinit -C -D 2>/dev/null
-zpty __w /bin/zsh -f -i || { print -r -- X; exit 1 }
+zpty __w 'exec /usr/bin/sandbox-exec -p "${WINTER_ENGINE_PROFILE//@WINTER_TTY@/$(tty)}" /bin/zsh -f -i' || { print -r -- X; exit 1 }
 __winit=$(mktemp "${TMPDIR:-/tmp}/winter-compcap.XXXXXX") || exit 1
 cat > $__winit <<'INIT'
 PROMPT= RPROMPT= PS2=
