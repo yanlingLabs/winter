@@ -38,7 +38,7 @@ struct CoworkWorkspaceView: View {
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }.buttonStyle(.plain)
                         .accessibilityLabel("\(workspace.ownership == .project ? "Project" : "Workspace") \(workspace.title), \(workspace.state), \(workspace.power)")
-                        .listRowBackground(model.selected?.workspaceId == workspace.workspaceId ? Color.accentColor.opacity(0.12) : Color.clear)
+                        .listRowBackground(model.selected?.workspaceId == workspace.workspaceId ? Theme.selectionPill : Color.clear)
                     }
                     if model.workspaces.isEmpty && !model.busy { Text("No workspaces").foregroundStyle(.secondary) }
                 }
@@ -102,7 +102,7 @@ struct CoworkWorkspaceView: View {
                                         .disabled(source.trust == "revoked")
                                 }
                             }.padding().frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                                .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
                     } else if !model.busy { Text("Select a workspace to see its sources and policy.").foregroundStyle(.secondary) }
                     if let selectionError { Text(selectionError).foregroundStyle(.red) }
@@ -207,7 +207,7 @@ struct CoworkWorkspaceView: View {
             }
         }.padding().frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.hairlineElevated, lineWidth: 1))
             .confirmationDialog("Abandon the unconfirmed save?", isPresented: $confirmingAbandon) {
                 Button("Abandon unconfirmed save", role: .destructive) {
                     Task { await model.abandonInstructionSave(workspaceId: state.workspaceId, requestId: state.pendingRequestId) }
