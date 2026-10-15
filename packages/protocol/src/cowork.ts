@@ -107,11 +107,27 @@ export const CoworkOutputFileStat = z.object({ workspaceId: Id, locationId: Id, 
 export const CoworkOutputFileChunk = CoworkOutputFileStat.extend({ offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   nextOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), eof: z.boolean(), contentBase64: z.string().max(349528).refine(value => Buffer.from(value, "base64").toString("base64") === value && Buffer.from(value, "base64").length <= COWORK_FILE_CHUNK_MAX_BYTES), encoding: z.literal("base64") }).strict().refine(value => value.nextOffset >= value.offset && value.nextOffset <= value.bytes && value.nextOffset - value.offset === Buffer.from(value.contentBase64, "base64").length && value.eof === (value.nextOffset === value.bytes));
 const FileReadRequest = FileRequest.extend({ expectedGeneration: Digest, maxBytes: z.number().int().min(1).max(COWORK_FILE_CHUNK_MAX_BYTES).default(COWORK_FILE_CHUNK_DEFAULT_BYTES) }).strict();
+/** Local Unix subscription contract. Paired Gateway negotiation is not implemented. */
+export const WORKSPACE_WATCH_LEASE_MS = 60_000;
+export const WORKSPACE_WATCH_RENEW_MS = 20_000;
+export const CoworkWatchLease = z.object({ subscriptionId: Id, leaseExpiresAt: z.string(), renewAfterMs: z.literal(WORKSPACE_WATCH_RENEW_MS) }).strict();
+const WatchBase = { subscriptionId: Id, seq: Revision, leaseExpiresAt: z.string() };
+export const CoworkWatchRevision = z.object({ workspaceId: Id, configRevision: Revision, grantRevision: Revision, instructionRevision: Revision, leaseEpoch: z.number().int().nonnegative() }).strict();
+export const CoworkWatchFrame = z.discriminatedUnion("phase", [
+  z.object({ ...WatchBase, phase: z.literal("snapshot"), workspace: CoworkWorkspace }).strict(),
+  z.object({ ...WatchBase, phase: z.literal("change"), revisions: z.array(CoworkWatchRevision).max(32), refetchRequired: z.boolean() }).strict(),
+  z.object({ ...WatchBase, phase: z.literal("ended"), reason: z.enum(["detached", "disconnected", "expired", "authority_revoked", "shutdown", "unavailable"]) }).strict(),
+]);
+export type CoworkWatchFrame = z.infer<typeof CoworkWatchFrame>;
+export const COWORK_WATCH_METHODS = ["workspace.watch", "workspace.watch.renew", "workspace.watch.detach"] as const;
 export const COWORK_RPC = {
   "workspace.output.list": { params: WorkspaceId.extend({ cursor: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), result: CoworkOutputPage },
   "workspace.file.stat": { params: FileRequest, result: CoworkOutputFileStat },
   "workspace.file.read": { params: FileReadRequest, result: CoworkOutputFileChunk },
   "workspace.file.readRange": { params: FileReadRequest.extend({ offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }).strict(), result: CoworkOutputFileChunk },
+  "workspace.watch": { params: z.object({ workspaceIds: z.array(Id).min(1).max(32).refine(ids => new Set(ids).size === ids.length) }).strict(), result: CoworkWatchLease },
+  "workspace.watch.renew": { params: z.object({ subscriptionId: Id }).strict(), result: CoworkWatchLease },
+  "workspace.watch.detach": { params: z.object({ subscriptionId: Id }).strict(), result: z.object({ detached: z.literal(true) }).strict() },
   "workspace.instructions.get": { params: WorkspaceId, result: CoworkInstructionRead },
   "workspace.instructions.provenance": { params: WorkspaceId, result: CoworkInstructionProvenance },
   "workspace.instructions.update": { params: CoworkInstructionUpdate, result: CoworkInstructionReceipt },
@@ -162,6 +178,7 @@ export const COWORK_METHODS = {
   workspaceSetDefaultPolicy: "workspace.setDefaultPolicy", projectSetDefaultPolicy: "project.setDefaultPolicy", workspaceSetCapabilityCeiling: "workspace.setCapabilityCeiling",
   workspaceSetPublicationPolicy: "workspace.setPublicationPolicy", workspaceOperationGet: "workspace.operation.get",
   workspacePolicyGet: "workspace.policy.get",
+  workspaceWatch: "workspace.watch", workspaceWatchRenew: "workspace.watch.renew", workspaceWatchDetach: "workspace.watch.detach",
 } as const;
 /** Table membership permits routing only; current-record host authority remains mandatory. */
 export const COWORK_REMOTE_METHODS = ["workspace.list", "workspace.get", "workspace.create", "workspace.update", "project.list", "project.get", "project.create", "project.update", "workspace.source.list", "workspace.source.get", "workspace.policy.get", "workspace.source.addRepository", "workspace.source.remove", "workspace.source.revoke", "workspace.operation.get"] as const;

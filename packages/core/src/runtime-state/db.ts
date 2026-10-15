@@ -24,7 +24,7 @@ export interface IntegrityReport { ok: boolean; checks: string[]; schemaVersion:
  *  blocks on the busy handler, then re-reads and sees the committed truth instead of an error. */
 export type TransactionMode = "deferred" | "immediate" | "exclusive";
 
-export interface RuntimeStateDb { readonly path: string; readonly db: Database; schemaVersion(): number; integrity(): IntegrityReport; backup(destDir?: string): string; transaction<T>(fn: () => T, opts?: { mode?: TransactionMode }): T; close(): void }
+export interface RuntimeStateDb { readonly path: string; readonly db: Database; schemaVersion(): number; integrity(): IntegrityReport; backup(destDir?: string): string; transaction<T>(fn: () => T, opts?: { mode?: TransactionMode }): T; onCommittedWrite(listener: () => void): () => void; close(): void }
 
 // Schema v1. Every column that holds a router-owned or product-owned JSON blob is named *_json;
 // opaque provider state never lands here (WS-16 §7).
@@ -406,6 +406,8 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
       }
     }
   }
+  const committedWriteListeners = new Set<() => void>();
+  const changes = () => opened.query<{ n: number }, []>("SELECT total_changes() AS n").get()!.n;
   return {
     path, db: opened,
     schemaVersion: version,
@@ -427,10 +429,20 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
       return dest;
     },
     transaction: (fn, txOpts) => {
+      const outer = !opened.inTransaction, before = committedWriteListeners.size && outer ? changes() : 0;
       const tx = opened.transaction(fn);
       const mode = txOpts?.mode ?? "deferred";
-      return mode === "immediate" ? tx.immediate() : mode === "exclusive" ? tx.exclusive() : tx();
+      const result = mode === "immediate" ? tx.immediate() : mode === "exclusive" ? tx.exclusive() : tx();
+      // Successful outer transaction() commits only; raw db/autocommit is not observed.
+      // total_changes includes rolled-back savepoint writes, so a caught inner rollback may
+      // signal the successful outer commit. Consumers must filter current canonical state.
+      // Observers cannot make an already committed mutation appear to have failed.
+      if (outer && committedWriteListeners.size && changes() !== before) {
+        for (const listener of committedWriteListeners) { try { listener(); } catch { /* advisory hint; refetch remains authoritative */ } }
+      }
+      return result;
     },
-    close: () => opened.close(),
+    onCommittedWrite(listener) { committedWriteListeners.add(listener); return () => committedWriteListeners.delete(listener); },
+    close: () => { committedWriteListeners.clear(); opened.close(); },
   };
 }
