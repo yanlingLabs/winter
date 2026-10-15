@@ -82,6 +82,7 @@ struct CoworkWorkspaceView: View {
                         if let guidance = model.guidance, guidance.workspaceId == workspace.workspaceId {
                             guidanceEditor(guidance)
                         }
+                        CoworkSchedulesView(model: model.schedules, workspace: workspace, policyRevision: model.policy?.revision)
                         HStack {
                             Text("Sources").font(Typography.paneTitle)
                             Spacer()
