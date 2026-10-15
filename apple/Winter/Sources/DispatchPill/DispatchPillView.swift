@@ -58,6 +58,14 @@ struct DispatchPillView: View {
                 }
             }
         }
+        // A slight grow under the pointer — the whole stack, anchored at the pill's bottom edge, so the floating
+        // layers above move up and scale with it and stay aligned. Not in full screen.
+        // The animation is scoped to the scale alone: a container-wide one would also ease the layout the morph
+        // spring drives frame by frame.
+        .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
+            view.scaleEffect(controller.pointerOver && controller.presentation != .fullScreen
+                             ? DispatchPillMetrics.hoverScale : 1, anchor: .bottom)
+        }
         .padding(DispatchPillMetrics.shadowPad)
         .frame(width: canvas.size.width, height: canvas.size.height, alignment: .bottom)
         .coordinateSpace(.named(Self.canvasSpace))

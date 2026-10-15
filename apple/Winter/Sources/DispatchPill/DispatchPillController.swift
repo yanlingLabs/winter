@@ -124,6 +124,9 @@ struct DispatchPillChildFeed {
 final class DispatchPillController: ObservableObject {
     @Published private(set) var presentation: DispatchPillPresentation = .compact
     @Published private(set) var isVisible = false
+    /// The pointer is over what the pill draws (the mouse gate's verdict): the pill and everything floating above it
+    /// grow a little (`DispatchPillMetrics.hoverScale`).
+    @Published private(set) var pointerOver = false
     /// Which past turn the 2-finger swipe has pinned (index into the transcript), or nil for the
     /// composer. Only meaningful while compact/expanded.
     @Published private(set) var historyIndex: Int?
@@ -377,6 +380,7 @@ final class DispatchPillController: ObservableObject {
         presentation = .compact
         removeMonitors()
         isVisible = false
+        pointerOver = false
         reconcileChildFeeds()
         snapToTarget()
         panel.orderOut(nil)
@@ -1124,6 +1128,7 @@ final class DispatchPillController: ObservableObject {
         let accepts = dispatchPillHitTest(point: local, canvasSize: canvas.size, mainSize: morph.size,
                                           accessoryFrame: presentation == .fullScreen ? .zero : accessoryFrame)
         if panel.ignoresMouseEvents == accepts { panel.ignoresMouseEvents = !accepts }
+        if pointerOver != accepts { pointerOver = accepts }
     }
 
     // MARK: - Event monitors (installed while visible, removed on hide)
