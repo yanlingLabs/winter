@@ -44,6 +44,13 @@ import WinterProtocol
         public var pendingRequestId: String? { pending?.requestId }
         public var hasUnsavedChanges: Bool { draft != nil && draft.map { Data($0.utf8) } != baseContent.map { Data($0.utf8) } }
         public var canSave: Bool { available && !conflict && pending == nil && hasUnsavedChanges }
+        /// True when `reviewInstructionConflict(keepDraft: false)` would throw away text that exists nowhere
+        /// else: the draft differs from the shared content that replaces it AND from the version it was
+        /// written against. After an abandon there is no such version, so any differing draft counts.
+        public var useCurrentDiscardsDraft: Bool {
+            guard hasUnsavedChanges, let draft, let currentContent else { return false }
+            return Data(draft.utf8) != Data(currentContent.utf8)
+        }
     }
     fileprivate struct InstructionSave: Equatable, Sendable {
         let workspaceId: String, requestId: String, expectedDigest: String, content: String
@@ -300,9 +307,14 @@ import WinterProtocol
     public func reviewInstructionConflict(keepDraft: Bool, workspaceId: String? = nil, expectedRevision: Int? = nil, expectedDigest: String? = nil) {
         guard !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id,
               var state = guidanceByWorkspace[id], state.available, state.pending == nil,
-              let read = state.current, let content = state.currentContent,
-              expectedRevision == nil || expectedRevision == read.instructionRevision,
-              expectedDigest == nil || expectedDigest == read.digest else { return }
+              let read = state.current, let content = state.currentContent else { return }
+        // The choice was made against a version that a refresh has since replaced (a confirmation can
+        // stay open while one lands). Nothing changes; the person is told to look again.
+        guard expectedRevision == nil || expectedRevision == read.instructionRevision,
+              expectedDigest == nil || expectedDigest == read.digest else {
+            state.note("The shared instructions changed while you were deciding. Review the current version and choose again.", aboutDraft: false)
+            publishGuidance(state); return
+        }
         if !keepDraft { state.draft = content }
         state.baseContent = content; state.baseRevision = read.instructionRevision; state.baseDigest = read.digest
         state.conflict = false; state.message = nil; publishGuidance(state)

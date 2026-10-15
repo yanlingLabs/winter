@@ -270,6 +270,38 @@ import WinterProtocol
         model.reviewInstructionConflict(keepDraft: false)
         XCTAssertEqual(model.guidance?.draft, "New canonical"); XCTAssertFalse(model.guidance?.hasUnsavedChanges ?? true)
     }
+    func testUseCurrentContentDiscardsADraftOnlyWhenTheDraftExistsNowhereElse() async {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        XCTAssertFalse(model.guidance?.useCurrentDiscardsDraft ?? true, "an untouched draft is the host's content")
+        model.editInstructions("My draft"); host.externalEdit("Another user's edit"); await model.refreshInstructions()
+        XCTAssertTrue(model.guidance?.conflict ?? false); XCTAssertTrue(model.guidance?.useCurrentDiscardsDraft ?? false)
+        // Typed back to exactly the content that would replace it: nothing is lost.
+        model.editInstructions("Another user's edit"); XCTAssertFalse(model.guidance?.useCurrentDiscardsDraft ?? true)
+        model.editInstructions("My draft"); XCTAssertTrue(model.guidance?.useCurrentDiscardsDraft ?? false)
+        // Reviewing against the new version does not make the draft any less the person's own.
+        model.reviewInstructionConflict(keepDraft: true); XCTAssertTrue(model.guidance?.useCurrentDiscardsDraft ?? false)
+        model.reviewInstructionConflict(keepDraft: false)
+        XCTAssertEqual(model.guidance?.draft, "Another user's edit"); XCTAssertFalse(model.guidance?.useCurrentDiscardsDraft ?? true)
+    }
+    func testAfterAnAbandonThereIsNoBaseSoAnyDifferingDraftCountsAsUnsaved() async throws {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        model.editInstructions("Doomed save"); host.saveMode = .journalFailed; await model.saveInstructions()
+        await model.abandonInstructionSave()
+        XCTAssertTrue(model.guidance?.conflict ?? false); XCTAssertTrue(model.guidance?.useCurrentDiscardsDraft ?? false)
+        model.editInstructions("Canonical guidance"); XCTAssertFalse(model.guidance?.useCurrentDiscardsDraft ?? true)
+    }
+    func testAChoiceMadeAgainstAVersionAHostChangeHasSinceReplacedSaysSoAndChangesNothing() async throws {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        model.editInstructions("My draft"); host.externalEdit("Another user's edit"); await model.refreshInstructions()
+        let seen = try XCTUnwrap(model.guidance?.current)
+        host.externalEdit("A third version"); await model.refreshInstructions()
+        XCTAssertEqual(model.guidance?.current?.instructionRevision, 3)
+        model.reviewInstructionConflict(keepDraft: false, expectedRevision: seen.instructionRevision, expectedDigest: seen.digest)
+        XCTAssertEqual(model.guidance?.draft, "My draft"); XCTAssertTrue(model.guidance?.conflict ?? false)
+        XCTAssertEqual(model.guidance?.message, "The shared instructions changed while you were deciding. Review the current version and choose again.")
+        model.reviewInstructionConflict(keepDraft: false, expectedRevision: 3, expectedDigest: model.guidance?.current?.digest)
+        XCTAssertEqual(model.guidance?.draft, "A third version"); XCTAssertNil(model.guidance?.message)
+    }
     func testWriteConflictWhoseFollowUpReadFailsStaysAConflictThatNeedsARefresh() async {
         let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
         model.editInstructions("My draft"); host.externalEdit("New canonical"); host.unreadable = true; await model.saveInstructions()
