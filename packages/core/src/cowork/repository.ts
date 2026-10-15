@@ -299,6 +299,11 @@ export class CoworkRepository {
     const current = this.sources(workspaceId).filter(value => value.state !== "detached");
     return current.some(value => value.kind === "githubRepository" && value.desired === "present") && !current.some(value => value.kind === "folder");
   }
+  /** Internal change position only: never project raw outbox payloads or global sequence onto the wire. */
+  watchPosition(workspaceId: string): number {
+    this.get(workspaceId);
+    return this.one("SELECT coalesce(max(sequence),0) AS n FROM cowork_outbox WHERE workspace_id=?", workspaceId)!.n;
+  }
   /** Host logical-session deletion/missing-session retirement only. Keep workspace, sources,
    * operation receipts and guest data; tombstone prevents future notification fanout. */
   abandonConversation(sessionId: string): void {

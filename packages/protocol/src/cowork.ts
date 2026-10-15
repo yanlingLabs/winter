@@ -89,7 +89,23 @@ export const CoworkInstructionMetadata = z.object({ workspaceId: Id, instruction
 export const CoworkInstructionRead = CoworkInstructionMetadata.extend({ contentBase64: z.string().max(87384), encoding: z.literal("utf-8") }).strict();
 export const CoworkInstructionProvenance = CoworkInstructionMetadata.extend({ entries: z.array(z.object({ kind: z.literal("workspace"), guestPath: z.literal("/workspace/.winter/WINTER.md"), digest: Digest }).strict()).length(1), sourceDiscovery: z.literal("unavailable") }).strict();
 export const CoworkInstructionReceipt = receipt(CoworkInstructionMetadata);
+/** Local Unix subscription contract. Paired Gateway negotiation is not implemented. */
+export const WORKSPACE_WATCH_LEASE_MS = 60_000;
+export const WORKSPACE_WATCH_RENEW_MS = 20_000;
+export const CoworkWatchLease = z.object({ subscriptionId: Id, leaseExpiresAt: z.string(), renewAfterMs: z.literal(WORKSPACE_WATCH_RENEW_MS) }).strict();
+const WatchBase = { subscriptionId: Id, seq: Revision, leaseExpiresAt: z.string() };
+export const CoworkWatchRevision = z.object({ workspaceId: Id, configRevision: Revision, grantRevision: Revision, instructionRevision: Revision, leaseEpoch: z.number().int().nonnegative() }).strict();
+export const CoworkWatchFrame = z.discriminatedUnion("phase", [
+  z.object({ ...WatchBase, phase: z.literal("snapshot"), workspace: CoworkWorkspace }).strict(),
+  z.object({ ...WatchBase, phase: z.literal("change"), revisions: z.array(CoworkWatchRevision).max(32), refetchRequired: z.boolean() }).strict(),
+  z.object({ ...WatchBase, phase: z.literal("ended"), reason: z.enum(["detached", "disconnected", "expired", "authority_revoked", "shutdown", "unavailable"]) }).strict(),
+]);
+export type CoworkWatchFrame = z.infer<typeof CoworkWatchFrame>;
+export const COWORK_WATCH_METHODS = ["workspace.watch", "workspace.watch.renew", "workspace.watch.detach"] as const;
 export const COWORK_RPC = {
+  "workspace.watch": { params: z.object({ workspaceIds: z.array(Id).min(1).max(32).refine(ids => new Set(ids).size === ids.length) }).strict(), result: CoworkWatchLease },
+  "workspace.watch.renew": { params: z.object({ subscriptionId: Id }).strict(), result: CoworkWatchLease },
+  "workspace.watch.detach": { params: z.object({ subscriptionId: Id }).strict(), result: z.object({ detached: z.literal(true) }).strict() },
   "workspace.instructions.get": { params: WorkspaceId, result: CoworkInstructionRead },
   "workspace.instructions.provenance": { params: WorkspaceId, result: CoworkInstructionProvenance },
   "workspace.instructions.update": { params: CoworkInstructionUpdate, result: CoworkInstructionReceipt },
@@ -139,6 +155,7 @@ export const COWORK_METHODS = {
   workspaceSetDefaultPolicy: "workspace.setDefaultPolicy", projectSetDefaultPolicy: "project.setDefaultPolicy", workspaceSetCapabilityCeiling: "workspace.setCapabilityCeiling",
   workspaceSetPublicationPolicy: "workspace.setPublicationPolicy", workspaceOperationGet: "workspace.operation.get",
   workspacePolicyGet: "workspace.policy.get",
+  workspaceWatch: "workspace.watch", workspaceWatchRenew: "workspace.watch.renew", workspaceWatchDetach: "workspace.watch.detach",
 } as const;
 /** Table membership permits routing only; current-record host authority remains mandatory. */
 export const COWORK_REMOTE_METHODS = ["workspace.list", "workspace.get", "workspace.create", "workspace.update", "project.list", "project.get", "project.create", "project.update", "workspace.source.list", "workspace.source.get", "workspace.policy.get", "workspace.source.addRepository", "workspace.source.remove", "workspace.source.revoke", "workspace.operation.get"] as const;
