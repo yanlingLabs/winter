@@ -233,12 +233,15 @@ import XCTest
         XCTAssertEqual(g.panelSize.height, g.pill.maxY + DesktopIslandGeometry.margin)
     }
 
-    func testTheBirthIsADripThatSnapsThenSpreadsIntoThePillAndSettles() {
+    func testTheBirthIsAHousingWideMassThatPinchesOffThenSpreadsIntoThePillAndSettles() {
         let g = DesktopIslandGeometry.make(housing: CGSize(width: 185, height: 32), menuBarHeight: 32, pillWidth: 340, slot: 0)
         let fluid = DesktopIslandFluid(geometry: g)
-        XCTAssertEqual(fluid.frame(at: 0).blobs.count, 1, "at first only the housing itself")
+        let start = fluid.frame(at: 0)
+        XCTAssertTrue(start.blobs.dropFirst().allSatisfy { $0.rect.maxY <= g.source.maxY + 0.5 },
+                      "at first the mass is all inside the housing, hidden")
+        XCTAssertGreaterThan(start.pill.width, g.source.width * 0.8, "a mass as wide as the housing, not a small drip")
         let drip = fluid.frame(at: 0.25)
-        XCTAssertGreaterThan(drip.blobs.filter { $0.kind == .ellipse }.count, 1, "a tail of drops hangs from the housing")
+        XCTAssertGreaterThan(drip.blobs.filter { $0.kind == .ellipse }.count, 1, "a neck of liquid joins it to the housing")
         XCTAssertGreaterThan(drip.blur, 5, "the drops melt into one surface")
         let free = fluid.frame(at: 0.5)
         XCTAssertEqual(free.blobs.count, 2, "the tail is gone: the housing and the free drop")

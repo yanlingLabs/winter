@@ -1,10 +1,10 @@
 import CoreGraphics
 import Foundation
 
-/// The pill's birth as a liquid, frame by frame (user ruling 2026-10-14: "the morphing feeling of water"). A drop
-/// swells out of the source and falls on a spring, stretching with its speed; a tapering tail of smaller drops trails
-/// it, so the neck stretches, thins and snaps like a drip; once free, the drop spreads into the pill on an
-/// underdamped spring — overshooting and squashing, then settling like jelly. Drawn through a blur and an alpha
+/// The pill's birth as a liquid, frame by frame (user rulings 2026-10-14/15: "the morphing feeling of water", and a
+/// mass in proportion to the housing, not a small drip off it). The housing's whole lower edge sags into a wide body
+/// of liquid that falls on a heavy spring; the neck between them pinches in like an hourglass and parts; once free,
+/// the body spreads into the pill on an underdamped spring — overshooting and squashing, then settling like jelly. Drawn through a blur and an alpha
 /// threshold, the shapes melt into one surface. Pure: a function of the seconds since the birth began.
 struct DesktopIslandFluid {
     let geometry: DesktopIslandGeometry
@@ -34,8 +34,8 @@ struct DesktopIslandFluid {
     // Timings, in seconds.
     // The drip snaps first (the tail gone, the melt's blur thinned so the free drop and the housing can't join
     // again); only then does the drop spread into the pill, already crisp, wobbling.
-    static let fallStart = 0.08
-    static let tailFade = (from: 0.18, to: 0.42)
+    static let fallStart = 0.04
+    static let tailFade = (from: 0.16, to: 0.42)
     static let spreadStart = 0.42
     static let meltEnd = (from: 0.32, to: 0.5)
     static let crispIn = (from: 0.44, to: 0.52)
@@ -45,28 +45,33 @@ struct DesktopIslandFluid {
         let t = max(0, seconds)
         let g = geometry
         let pillHeight = g.pill.height
-        let drop = max(min(g.floating ? 26 : g.source.height * 1.15, 40), 26)
+        // The mass is born as wide as the housing it comes from (not a small drip off a big notch): a flat body of
+        // liquid that sags out of the housing's whole lower edge.
+        let massWidth = g.floating ? 120 : (g.sourceIsHousing ? g.source.width * 0.86 : 130)
+        let massHeight: CGFloat = 26
 
-        // The drop's fall: from just inside the source to the pill's middle, on a gently bouncy spring.
-        let startY = g.floating ? g.pill.midY : g.source.maxY - drop * 0.3
-        let fall = Self.spring(t - Self.fallStart, response: 0.42, damping: 0.68)
+        // The fall: from inside the source (its top hidden in the housing) to the pill's middle, on a heavy spring.
+        let startY = g.floating ? g.pill.midY : g.source.maxY - massHeight * 0.5
+        let fall = Self.spring(t - Self.fallStart, response: 0.5, damping: 0.7)
         let y = Self.lerp(startY, g.pill.midY, fall)
         // Its speed (points per second), for the stretch while it falls.
-        let speed = abs(Self.lerp(startY, g.pill.midY, Self.spring(t + 0.008 - Self.fallStart, response: 0.42, damping: 0.68)) - y) / 0.008
-        // It swells out of the source first.
-        let swell = Self.easeOut(Self.phase(t, 0, 0.22))
+        let ahead = Self.lerp(startY, g.pill.midY, Self.spring(t + 0.008 - Self.fallStart, response: 0.5, damping: 0.7))
+        let speed = abs(ahead - y) / 0.008
+        // A floating pill grows in place; one from the top is there from the start, hidden in the housing.
+        let swell = g.floating ? Self.easeOut(Self.phase(t, 0, 0.22)) : 1
 
         // The spread into the pill: an underdamped spring, so it overshoots and wobbles; the height answers the width
         // (wider than its rest → thinner), the way a liquid keeps its volume.
-        let spread = Self.spring(t - Self.spreadStart, response: 0.5, damping: 0.52)
+        let spread = Self.spring(t - Self.spreadStart, response: 0.5, damping: 0.55)
         let lift = Self.spring(t - Self.spreadStart, response: 0.34, damping: 0.8)
-        var w = Self.lerp(drop, g.pill.width, spread)
-        var h = Self.lerp(drop, pillHeight, min(lift, 1))
-        // Squash past the rest width, a little stretch before it — eased in so the drop's own shape never jumps.
+        var w = Self.lerp(massWidth, g.pill.width, spread)
+        var h = Self.lerp(massHeight, pillHeight, min(lift, 1))
+        // Squash past the rest width, a little stretch before it — eased in so the mass's own shape never jumps.
         h *= 1 - 0.55 * CGFloat(spread - 1) * CGFloat(Self.phase(t, Self.spreadStart, Self.spreadStart + 0.3))
-        let stretch = CGFloat(min(speed / 900, 0.35)) * CGFloat(1 - min(spread, 1))
+        // Heavy liquid pulled down: a little taller and narrower while it falls fast.
+        let stretch = CGFloat(min(speed / 1000, 0.25)) * CGFloat(1 - min(spread, 1))
         h *= 1 + stretch
-        w /= 1 + stretch * 0.5
+        w /= 1 + stretch * 0.4
         w *= CGFloat(swell)
         h *= CGFloat(swell)
         h = max(h, 0)
@@ -75,31 +80,35 @@ struct DesktopIslandFluid {
         var blobs: [Blob] = []
         if !g.floating {
             // The source: the housing itself (run up past the top so the blur never thins its edge), or, without
-            // one, a bead of liquid hanging from the top edge that swells and is drawn back.
+            // one, a band of liquid hanging from the top edge that the mass leaves and that is drawn back.
             let above: CGFloat = 40
             if g.sourceIsHousing {
                 blobs.append(Blob(rect: CGRect(x: g.source.minX, y: -above, width: g.source.width,
                                                height: g.source.maxY + above), kind: .roundedRect(9)))
             } else {
-                let bead = 18 * CGFloat(Self.bump(t, up: 0.16, down: 0.62))
-                if bead > 0.5 {
-                    blobs.append(Blob(rect: CGRect(x: g.source.midX - 60, y: -above, width: 120, height: bead + above),
-                                      kind: .roundedRect(14)))
+                let band = 16 * CGFloat(1 - Self.easeInOut(Self.phase(t, 0.3, 0.62)))
+                if band > 0.5 {
+                    blobs.append(Blob(rect: CGRect(x: g.source.midX - massWidth / 2, y: -above, width: massWidth,
+                                                   height: band + above), kind: .roundedRect(14)))
                 }
             }
-            // The tail: drops strung between the source and the falling drop, each later along the fall and smaller,
-            // all shrinking away — the neck thins until it parts.
-            let fade = 1 - Self.easeIn(Self.phase(t, Self.tailFade.from, Self.tailFade.to))
-            if fade > 0 {
-                for i in 1...5 {
-                    let lag = 0.045 * Double(i)
-                    let k = Self.spring(t - Self.fallStart - lag, response: 0.42, damping: 0.68)
-                    let along = CGFloat(Double(5 - i + 1) / 6.5)
-                    let ty = Self.lerp(g.source.maxY - 4, Self.lerp(startY, g.pill.midY, k), along)
-                    let r = drop * 0.5 * (0.92 - 0.1 * CGFloat(i)) * CGFloat(fade * swell)
-                    if r > 0.5 {
-                        blobs.append(Blob(rect: CGRect(x: g.pill.midX - r, y: ty - r, width: 2 * r, height: 2 * r),
-                                          kind: .ellipse))
+            // The neck: slices of liquid between the source and the falling mass, as wide as the mass at first —
+            // a sagging meniscus — then pinching in at the middle like an hourglass until it parts.
+            let pinch = Self.easeIn(Self.phase(t, Self.tailFade.from, Self.tailFade.to))
+            let top = g.source.maxY - 6
+            let bottom = y - h / 2 + 6
+            if pinch < 1, bottom > top {
+                let slices = 5
+                let step = (bottom - top) / CGFloat(slices)
+                for i in 0..<slices {
+                    let f = (CGFloat(i) + 0.5) / CGFloat(slices)
+                    // Narrowest in the middle; the whole neck thins as it pinches.
+                    let waist = 1 - 0.85 * sin(.pi * f) * CGFloat(min(1, pinch * 1.6))
+                    let width = massWidth * 0.92 * waist * CGFloat(1 - pinch)
+                    let height = step + 10
+                    if width > 1 {
+                        blobs.append(Blob(rect: CGRect(x: g.pill.midX - width / 2, y: top + step * CGFloat(i) - 5,
+                                                       width: width, height: height), kind: .ellipse))
                     }
                 }
             }
