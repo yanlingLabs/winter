@@ -83,8 +83,12 @@ import WinterProtocol
             let page = try await send(CoworkRequest<CoworkWorkspacePage>.list(cursor: cursor))
             values += page.workspaces; cursor = try next(page.nextCursor, seen: &seen)
         } while cursor != nil
-        guard Set(values.map(\.workspaceId)).count == values.count else { throw ModelError.invalidPagination }
+        let listed = Set(values.map(\.workspaceId))
+        guard listed.count == values.count else { throw ModelError.invalidPagination }
         workspaces = values
+        // A draft is kept only for a workspace the person can still open. The selected one is exempt: its
+        // editor is on screen, and dropping its entry under it would silently discard edits typed next.
+        guidanceByWorkspace = guidanceByWorkspace.filter { listed.contains($0.key) || $0.key == selectedId }
     }
     private func detail(_ id: String) async throws {
         let value = try await send(CoworkRequest<CoworkWorkspace>.get(workspaceId: id))

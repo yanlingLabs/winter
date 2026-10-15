@@ -17,6 +17,8 @@ import WinterProtocol
         /// A one-shot `error.data.code` the next update is refused with, before any write.
         var refuseNextUpdate: String?
         var updateUnsupported = false
+        /// The workspaces `workspace.list` answers with.
+        var listed = ["one", "two"]
         private var failedRequests = Set<String>()
         var readOverride: [String: Any] = [:], provenanceOverride: [String: Any] = [:]
         private var receipts: [String: [String: Any]] = [:]
@@ -46,16 +48,11 @@ import WinterProtocol
             let fields = try JSONSerialization.jsonObject(with: JSONEncoder().encode(params)) as! [String: Any]
             let id = fields["workspaceId"] as? String ?? "one"
             switch method {
-            case "workspace.get":
-                return try json(["workspaceId": id, "ownership": "project", "ownerId": "project-" + id, "title": id,
-                    "state": "retained", "configRevision": revisions[id]!, "grantRevision": 1, "instructionRevision": revisions[id]!,
-                    "leaseEpoch": 0, "power": "stopped", "createdAt": "fixture", "updatedAt": "fixture", "automaticPublication": false,
-                    "detailState": "summary", "detailReason": "response_limit", "sourceCount": 0, "policySummary": policy(id),
-                    "detailMethods": ["sources": "workspace.source.list", "policy": "workspace.policy.get"]])
+            case "workspace.get": return try json(workspace(id))
             case "workspace.source.list": return try json(["sources": [], "nextCursor": NSNull()])
             case "workspace.policy.get": return try json(["policy": policy(id), "entries": [], "nextCursor": NSNull()])
             case "workspace.capabilities.get": return try json(["folderPreparation": false, "repositoryPreparation": false, "provisioning": false, "execution": false])
-            case "workspace.list": return try json(["workspaces": [], "nextCursor": NSNull()])
+            case "workspace.list": return try json(["workspaces": listed.map(workspace), "nextCursor": NSNull()])
             case "workspace.instructions.get":
                 if unreadable { throw RpcError(code: -32602, message: "Cowork request refused", data: .object(["code": .string("instruction_unavailable")])) }
                 var read = metadata(id); read["contentBase64"] = Data(contents[id]!.utf8).base64EncodedString(); read["encoding"] = "utf-8"
@@ -91,6 +88,13 @@ import WinterProtocol
                 return try json(receipt)
             default: throw RpcError(code: -32601, message: "Unexpected fixture method")
             }
+        }
+        func workspace(_ id: String) -> [String: Any] {
+            ["workspaceId": id, "ownership": "project", "ownerId": "project-" + id, "title": id,
+             "state": "retained", "configRevision": revisions[id]!, "grantRevision": 1, "instructionRevision": revisions[id]!,
+             "leaseEpoch": 0, "power": "stopped", "createdAt": "fixture", "updatedAt": "fixture", "automaticPublication": false,
+             "detailState": "summary", "detailReason": "response_limit", "sourceCount": 0, "policySummary": policy(id),
+             "detailMethods": ["sources": "workspace.source.list", "policy": "workspace.policy.get"]]
         }
         func policy(_ id: String) -> [String: Any] {
             ["policyId": "policy-" + id, "workspaceId": id, "defaultPolicy": "auto", "publication": "manual", "revision": 1,
@@ -310,6 +314,26 @@ import WinterProtocol
         XCTAssertEqual(model.guidance?.draft, "Later draft"); XCTAssertEqual(model.guidance?.pendingContent, "Saved later")
         host.saveMode = .normal; await model.retryInstructionSave()
         XCTAssertEqual(try host.encoded(host.updates[0]), try host.encoded(host.updates[1])); XCTAssertEqual(model.guidance?.draft, "Later draft")
+    }
+    func testRetainedDraftsOfWorkspacesThatLeaveTheListArePrunedButTheSelectedOneIsNeverDroppedUnderTheUser() async {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }
+        await model.select("one"); model.editInstructions("Draft one")
+        await model.select("two"); model.editInstructions("Draft two")
+        // A refresh that still lists both keeps both.
+        await model.refresh(); XCTAssertEqual(model.guidance?.draft, "Draft two")
+        await model.select("one"); XCTAssertEqual(model.guidance?.draft, "Draft one")
+        await model.select("two")
+        // "one" leaves the list: its retained draft goes with it and a later visit starts from the host's content.
+        host.listed = ["two"]; await model.refresh()
+        XCTAssertEqual(model.guidance?.draft, "Draft two")
+        await model.select("one"); XCTAssertEqual(model.guidance?.draft, "Canonical guidance")
+        // The selected workspace is exempt even when the list no longer names it: edits typed next must land.
+        model.editInstructions("Draft one again"); await model.refresh()
+        XCTAssertEqual(model.guidance?.draft, "Draft one again")
+        model.editInstructions("Draft one, edited after the refresh"); XCTAssertEqual(model.guidance?.draft, "Draft one, edited after the refresh")
+        // Once something else is selected the next listing prunes it.
+        await model.select("two"); await model.refresh()
+        await model.select("one"); XCTAssertEqual(model.guidance?.draft, "Canonical guidance")
     }
     func testInFlightSaveCapturesContentAndDoesNotDropSubsequentEditsOrDuplicateWrite() async {
         let host = Host(); var resume: CheckedContinuation<Void, Never>?
