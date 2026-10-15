@@ -1,7 +1,7 @@
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionStore } from "./store";
 
-/** The 13 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+/** Persisted content and safe host control event types history is allowed to return. Allowlist, never a
  *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
  *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
  *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
@@ -36,6 +36,7 @@ import type { SessionStore } from "./store";
  *  this file's 200-event default page size (some cacheable content is the overwhelming case) and
  *  harmless even so -- a stalled re-fetch of the same page, never a crash or data loss. */
 export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
+  "workspace_sources_changed", "workspace_policy_changed", "workspace_operation_changed", "workspace_metadata_changed", "workspace_instructions_changed",
   "user_message",
   "assistant_message",
   "turn_completed",

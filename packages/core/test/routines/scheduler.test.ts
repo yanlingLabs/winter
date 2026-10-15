@@ -293,3 +293,15 @@ describe("makeRoutineScheduler — audit line shapes", () => {
     expect(lines[1]).toEqual({ op: "defer", id: routine.id, reason: "quota" });
   });
 });
+
+test("Cowork metadata timer failure leaves ordinary Code routine firing intact", async () => {
+  const { store } = makeStore();
+  try {
+    const routine = store.create({ spec: "every 1s", prompt: "ordinary Code fixture", policy: "auto", cwd: "/tmp/ordinary-code-fixture" });
+    const { runner, calls } = makeControllableRunner(), { audit } = makeAudit();
+    const scheduler = makeRoutineScheduler({ store, runner, audit, now: () => routine.nextRunAt + 1, hostTick: () => { throw new Error("fixture metadata unavailable"); } });
+    const pending = scheduler.tick(); expect(calls).toHaveLength(1);
+    expect(calls[0]!.opts.cwd).toBe("/tmp/ordinary-code-fixture"); calls[0]!.resolve({ ok: true, resultText: "fixture done" }); await pending;
+    expect(store.get(routine.id)!.lastResult).toBe("fixture done");
+  } finally { store.close(); }
+});

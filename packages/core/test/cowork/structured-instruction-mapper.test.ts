@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { CoworkCurrentContextResolver, CoworkContextResolverError, COWORK_SHARED_INSTRUCTION_VIEW, type CoworkInstructionReadRequest, type CoworkInstructionTier } from "../../src/cowork/current-context-resolver";
@@ -26,7 +27,7 @@ function fixture(kind: "folder" | "githubRepository" = "githubRepository") {
   const created = records.create({ principalId: "fixture", requestId: "create" }, { ownership: "project", title: "credential-value injected title", ceiling: caps, sources: [selection(kind)] });
   const workspaceId = created.workspaceId, initial = records.sources(workspaceId)[0]!;
   const epoch = records.beginIncarnation(workspaceId, "incarnation", 1); records.acknowledgeSource(epoch, initial.sourceId, initial.revision, "ready");
-  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, workspaceId, { sessionId: "logical-parent", sourceId: initial.sourceId, relativeCwd: "starting/directory" });
+  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, workspaceId, { sessionId: "logical-parent", sourceId: initial.sourceId, relativeCwd: "starting/directory" }, authorityFixtureSessions("logical-parent"));
   const sessions = new RuntimeSessionRecords(db, () => "2026-10-13T00:00:00.000Z");
   sessions.create({ winterSessionId: "logical-parent", runtimeKind: "winter-agent", backendSessionId: "backend-current", providerId: "fixture", modelRef: "fixture-model",
     backendRoot: "/private/protected/backend", transcriptProjectKey: "private-key", memoryProjectKey: "private-key", tempProjectKey: "private-key",

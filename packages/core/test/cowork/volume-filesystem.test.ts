@@ -6,7 +6,7 @@ import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkVolumes, RAW_VOLUME_MIN_BYTES, type CoworkVolumeRequest } from "../../src/cowork/volumes";
 import type { CoworkVolumeFilesystemAuthority, VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../../src/cowork/volume-filesystem";
 import { migrateCoworkVolumeSchema } from "../../src/cowork/schema";
-import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
 
 const homes: string[] = [], dbs: RuntimeStateDb[] = [];
 afterEach(() => { dbs.splice(0).forEach(db => db.close()); homes.splice(0).forEach(home => rmSync(home, { recursive: true, force: true })); });
@@ -86,7 +86,7 @@ test("schema9 migration preserves identity and owner but never invents virgin or
   for (const row of raw) f.db.db.run(`INSERT INTO cowork_volumes(${keys.join(",")}) VALUES(${keys.map(() => "?").join(",")})`, keys.map(k => row[k]));
   f.db.db.run("PRAGMA user_version=9"); f.db.close(); dbs.splice(dbs.indexOf(f.db), 1);
   const upgraded = openRuntimeStateDb(f.home); dbs.push(upgraded); const reopened = f.reopen(upgraded), after = reopened.records(f.request.workspaceId);
-  expect(upgraded.schemaVersion()).toBe(11); expect(after.map(v => [v.volumeId, v.creationId, v.identity, v.owner])).toEqual(before.map(v => [v.volumeId, v.creationId, v.identity, v.owner]));
+  expect(upgraded.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(after.map(v => [v.volumeId, v.creationId, v.identity, v.owner])).toEqual(before.map(v => [v.volumeId, v.creationId, v.identity, v.owner]));
   expect(after.every(v => v.filesystemState === "recovery-required" && v.filesystemUUID === null && !v.formatEligible)).toBe(true);
   expect(() => reopened.prepareFilesystems(f.request)).toThrow("recovery_required"); expect(upgraded.integrity().ok).toBe(true);
 });

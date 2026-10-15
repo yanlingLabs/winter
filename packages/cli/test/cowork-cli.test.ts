@@ -167,3 +167,23 @@ describe("typed Cowork CLI against a private daemon with disabled production pro
     await expect(fake.cowork("workspace.get", { workspaceId })).rejects.toThrow("invalid result from server");
   });
 });
+
+test("workspace schedule metadata CLI is strict, bounded and never accepts a guest cwd", () => {
+  expect(parseCoworkArgs("workspace", ["schedule", "list", "workspace-one", "--limit", "10"])).toMatchObject({ method: "workspace.schedule.list", params: { workspaceId: "workspace-one", limit: 10 } });
+  expect(parseCoworkArgs("workspace", ["schedule", "status", "workspace-one", "schedule-one"])).toMatchObject({ method: "workspace.schedule.status", params: { workspaceId: "workspace-one", scheduleId: "schedule-one" } });
+  expect(parseCoworkArgs("workspace", ["schedule", "cancel", "workspace-one", "schedule-one", "--revision", "1"])).toMatchObject({ method: "workspace.schedule.cancel", params: { expectedRevision: 1 } });
+  const definition = { target: { kind: "project", projectId: "project-one" }, sourceId: "source-one", prompt: "fixture", timing: { kind: "once", at: 1000 }, timezone: "UTC", savedCeiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" }, policy: "ask", overlap: "one-active-one-pending" };
+  expect(parseCoworkArgs("workspace", ["schedule", "create", "workspace-one", "--definition-json", JSON.stringify(definition), "--request-id", "create-one"])).toMatchObject({ method: "workspace.schedule.create", params: { definition } });
+  expect(() => parseCoworkArgs("workspace", ["schedule", "create", "workspace-one", "--definition-json", JSON.stringify({ ...definition, cwd: "/workspace/source" }), "--request-id", "create-one"])).toThrow("Invalid arguments");
+  expect(() => parseCoworkArgs("workspace", ["schedule", "list", "workspace-one", "--cwd", "/workspace/source"])).toThrow("Unsupported option");
+  expect(() => parseCoworkArgs("project", ["schedule", "list", "project-one"])).toThrow("Unknown workspace/Project command");
+});
+
+test("shared guidance parser carries only content/revision/digest and renders terminal controls safely", () => {
+  const args = ["instructions", "update", "workspace", "--instruction-revision", "2", "--digest", "a".repeat(64), "--content", "shared", "--request-id", "request"];
+  expect(route("workspace", args)).toEqual({ method: "workspace.instructions.update", params: { workspaceId: "workspace", requestId: "request", expectedInstructionRevision: 2, expectedDigest: "a".repeat(64), content: "shared" }, json: false });
+  expect(() => route("workspace", [...args, "--path", "/untrusted"])).toThrow("Unsupported option");
+  const get = route("workspace", ["instructions", "get", "workspace"]);
+  const lines = formatCoworkResult(get, { workspaceId: "workspace", instructionRevision: 2, digest: "a".repeat(64), bytes: 3, refreshState: "refresh-required", contentBase64: Buffer.from("\u001b[2J").toString("base64"), encoding: "utf-8" });
+  expect(lines.join("\n")).not.toContain("\u001b"); expect(lines.join("\n")).toContain("\\u001b");
+});

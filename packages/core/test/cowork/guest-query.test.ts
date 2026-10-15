@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,7 +52,7 @@ function fixture(toolClasses = ["read", "write", "execute"], defaultPolicy: Appr
     sources: [{ kind: "folder", access: "read-write", label: "fixture", detail: { grantRef: "grant", rootIdentity: "root" } }] });
   const source = records.sources(created.workspaceId)[0]!, epoch = records.beginIncarnation(created.workspaceId, "incarnation", 1);
   records.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
-  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, created.workspaceId, { sessionId: "conversation", sourceId: source.sourceId, relativeCwd: "repo/subdir" });
+  records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, created.workspaceId, { sessionId: "conversation", sourceId: source.sourceId, relativeCwd: "repo/subdir" }, authorityFixtureSessions("conversation"));
   let revoked = false, model = "winter-test/echo", resume = false;
   const authority = new CoworkAuthority(records, { folder: () => ({ rootIdentity: "root", writable: true, revoked }), repository: () => undefined });
   const deps = { records, authority, identity: () => ({ backendSessionId: "backend-stable", model, resume }), bootId: () => "12345678-1234-1234-1234-123456789abc" };

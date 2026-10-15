@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,7 +35,7 @@ function fixture(legacyHome = false) {
     return { workspaceId: created.workspaceId, sourceId: source.sourceId };
   };
   const bind = (workspace: ReturnType<typeof project>, id = session()) => {
-    records.bindConversation({ ...context(), expectedRevision: records.get(workspace.workspaceId).configRevision }, workspace.workspaceId, { sessionId: id, sourceId: workspace.sourceId }); return id;
+    records.bindConversation({ ...context(), expectedRevision: records.get(workspace.workspaceId).configRevision }, workspace.workspaceId, { sessionId: id, sourceId: workspace.sourceId }, authorityFixtureSessions(id)); return id;
   };
   const driver = (id: string): MessagingDriverHandle => ({ turnRunning: true,
     send: async text => { sent.push({ id, text }); return { seq: 1, queued: false }; },

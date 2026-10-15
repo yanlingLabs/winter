@@ -1,3 +1,4 @@
+import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents } from "./cowork/workspace-events";
 import { createMacCoworkHost } from "./cowork/mac-host";
 import { CoworkRepository } from "./cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
@@ -359,6 +360,8 @@ export function pluginToolNameParts(fullName: string): { pluginId: string; name:
 export async function startDaemon(opts: {
   /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
   coworkHost?: CoworkHostPorts;
+  /** Isolated clock for host schedule metadata tests. */
+  coworkScheduleNow?: () => number;
   home?: string;
   secrets?: SecretStore;
   server?: Partial<Pick<IpcServerOptions, "helloTimeoutMs" | "maxConnections" | "preAuthMaxLine">>;
@@ -762,6 +765,8 @@ export async function startDaemon(opts: {
     ...(linkedRouterSupportsRunHome() ? { recovery: { deferClaudeResumeSweep: true } } : {}),
   });
   const runtime = runtimeStateOnline(runtimeState);
+  const coworkRecords = runtime ? new CoworkRepository(runtime.db) : undefined;
+  const onStoredSessionDeleted = createCoworkSessionDeletionHook(coworkRecords, runtime?.onSessionDeleted);
 
   // session-activity-hygiene T6 (spec §2): the empty-session reaper's boot sweep — once, here,
   // right after store/hub exist and before anything can attach to anything. Catches sessions left
@@ -771,10 +776,10 @@ export async function startDaemon(opts: {
   // its own try/catch anyway (the same caution this file already gives other best-effort boot steps,
   // e.g. the settings load above) even though `reapEmptySessions` is designed to never throw.
   //
-  // P8a Task 12: `onDelete` takes the reaped session's runtime state with it (WS-16 §16). Undefined
-  // when the spine could not be opened — there are no runtime rows to remove in that case.
+  // The shared deletion hook removes runtime state and canonical Cowork fanout before
+  // drivers exist. With an unavailable spine both hook legs are absent/no-op.
   try {
-    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home, onDelete: runtime?.onSessionDeleted });
+    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home, onDelete: onStoredSessionDeleted });
   } catch (err) {
     console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
   }
@@ -2173,7 +2178,7 @@ export async function startDaemon(opts: {
    *  could exist, so it keeps the bare records hook. */
   const onSessionDeleted = (sessionId: string): void => {
     void winterDrivers.evict(sessionId);
-    runtime?.onSessionDeleted(sessionId);
+    onStoredSessionDeleted(sessionId);
     // ComputerV2: the session's automation worker ends with it, and the helper releases its targets.
     computerUseRuntime.service.endSession(sessionId);
   };
@@ -2804,8 +2809,10 @@ export async function startDaemon(opts: {
   // P8b Task 17: a routine fires as a NEW code session through the driver table (fix wave F9: the
   // runner's engine branch is gone with the engine).
   const routineRunner = makeDaemonRoutineRunner({ store, hub, winter: winterDrivers });
+  let coworkService: CoworkWorkspaceService | undefined;
   const routineScheduler = makeRoutineScheduler({
     store: routineStore,
+    hostTick: () => coworkService?.schedules.tick(),
     runner: routineRunner,
     audit: (line) => routinesAudit.append(line),
     maxConcurrent: () => settings?.routines?.maxConcurrent,
@@ -2910,11 +2917,16 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
-  const coworkService = runtime ? new CoworkWorkspaceService(new CoworkRepository(runtime.db), opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db)) : undefined;
+  coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
+  coworkService?.schedules.recover();
+  coworkService?.schedules.tick();
+  const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;
+  coworkEvents?.start();
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
     cowork: coworkService,
+    coworkEvents,
     tokens: authority,
     store,
     hub,
@@ -3128,11 +3140,13 @@ export async function startDaemon(opts: {
       // after the children drained and before the store closes).
       // Before anything else: no session is created, resumed or (re)opened from here on, and an open
       // already under way refuses just before its spawn — no runtime child can outlive this daemon.
+      coworkService?.beginShutdown(); // close durable schedule claims before draining anything
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
+      coworkEvents?.stop();
       server.stop(); coworkService?.close(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();

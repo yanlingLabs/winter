@@ -1,8 +1,15 @@
+import { durableCoworkTransaction } from "./durable-transaction";
 import { createHash, randomUUID } from "node:crypto";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { CoworkError, isTerminalOperationStatus, type OperationStatus, type CapabilityCeiling, type ConversationBinding, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
 
+/** Host-owned index dependency. Never RPC/guest data; caller must commit the actual
+ * session creation first and bind synchronously while that SessionStore remains open. */
+export interface CoworkCommittedSessions { hasCommittedSession(sessionId: string): boolean }
+export interface WorkspaceChange {
+  changeId: string; workspaceId: string; operationId: string; revision: number; kind: string; payload: unknown;
+}
 type Row = Record<string, any>;
 const POLICIES = new Set(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]);
 const id = (value: string) => { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) throw new CoworkError("invalid_request"); return value; };
@@ -51,12 +58,23 @@ export class CoworkRepository {
   private one(sql: string, ...args: any[]): Row | null { return this.rs.db.query<Row, any[]>(sql).get(...args); }
   private all(sql: string, ...args: any[]): Row[] { return this.rs.db.query<Row, any[]>(sql).all(...args); }
   private run(sql: string, ...args: any[]) { return this.rs.db.run(sql, args); }
+  private homeIdentityWithinTransaction(): string {
+    // Only our scoped durable entry points call this; never reuse a caller's
+    // transaction or start a nested durability wrapper from a source binding.
+    if (!this.rs.db.inTransaction) throw new CoworkError("authority_denied");
+    const existing = this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1");
+    if (existing) return existing.home_id;
+    const homeId = this.mint("home"); this.run("INSERT INTO cowork_home_identity VALUES (1,?,?)", homeId, this.now()); return homeId;
+  }
+  /** Pure canonical lookup usable within a planner or mutation transaction.
+   * Missing authority is refused; this method never provisions an identity. */
+  recordedHomeIdentity(): string {
+    const existing = this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1");
+    if (!existing) throw new CoworkError("recovery_required");
+    return existing.home_id;
+  }
   homeIdentity(): string {
-    return this.rs.transaction(() => {
-      const existing = this.one("SELECT home_id FROM cowork_home_identity WHERE singleton=1");
-      if (existing) return existing.home_id;
-      const homeId = this.mint("home"); this.run("INSERT INTO cowork_home_identity VALUES (1,?,?)", homeId, this.now()); return homeId;
-    }, { mode: "immediate" });
+    return durableCoworkTransaction(this.rs, () => this.homeIdentityWithinTransaction());
   }
   get(workspaceId: string): Workspace {
     const row = this.one("SELECT * FROM cowork_workspaces WHERE workspace_id=?", id(workspaceId));
@@ -100,6 +118,20 @@ export class CoworkRepository {
   }
   private publish(workspaceId: string, operationId: string, kind: string, payload: unknown): void {
     const changeId = this.mint("change"), current = this.get(workspaceId);
+    // Capture safe metadata at COMMIT, never re-project a later source/policy state into an older change.
+    const data = payload as Record<string, unknown>;
+    if (kind === "workspace_sources_changed") {
+      const selected = typeof data.sourceId === "string" ? [this.source(workspaceId, data.sourceId)] : this.sources(workspaceId);
+      payload = { phase: data.incarnationId ? "acknowledged" : "requested", sources: selected.map(value => ({
+        sourceId: value.sourceId, sourceRevision: value.revision, desired: value.desired, state: value.state,
+        ackRevision: value.ackRevision, restartRequired: value.restartRequired,
+        reason: value.reason === null ? null : value.reason === "access_revoked" ? "access_revoked" : "source_unavailable",
+      })) };
+    } else if (kind === "workspace_policy_changed") {
+      const policy = this.policy(workspaceId);
+      payload = { policyRevision: policy.revision, defaultRevision: policy.defaultRevision, publicationRevision: policy.publicationRevision,
+        defaultPolicy: policy.defaultPolicy, publication: policy.publication, phase: "metadata" };
+    }
     this.run("INSERT INTO cowork_outbox(change_id,workspace_id,operation_id,revision,kind,payload_json,created_at) VALUES(?,?,?,?,?,?,?)", changeId, workspaceId, operationId, current.configRevision, kind, canonical(payload), this.now());
     this.run("INSERT INTO cowork_outbox_deliveries(change_id,session_id,state) SELECT ?,session_id,'pending' FROM cowork_conversations WHERE workspace_id=? AND state!='deleted'", changeId, workspaceId);
   }
@@ -137,7 +169,7 @@ export class CoworkRepository {
   private mutate<T>(context: MutationContext, method: string, scope: string, input: unknown, body: () => { workspaceId: string; value: T; kind: string; payload?: unknown; changedSources?: string[]; applied?: boolean }): MutationReceipt<T> {
     id(context.principalId); id(context.requestId); method = id(context.method ?? method);
     const currentDigest = requestDigest(context, input);
-    return this.rs.transaction(() => {
+    return durableCoworkTransaction(this.rs, () => {
       const previous = this.one("SELECT request_digest,result_json FROM cowork_operations WHERE principal_id=? AND method=? AND scope=? AND request_id=?", context.principalId, method, scope, context.requestId);
       if (previous) {
         if (previous.request_digest !== currentDigest) throw new CoworkError("request_conflict");
@@ -150,6 +182,7 @@ export class CoworkRepository {
         if (current.state !== "retained" && !(narrowing && current.state !== "deleted")) throw new CoworkError("authority_denied");
       }
       context.admitMutation?.();
+      this.homeIdentityWithinTransaction();
       const result = body(), current = this.get(result.workspaceId), operationId = this.mint("operation"), at = this.now();
       const receipt: MutationReceipt<T> = { operationId, workspaceId: current.workspaceId, revision: current.configRevision, value: result.value };
       context.validateReceipt?.(receipt);
@@ -161,7 +194,7 @@ export class CoworkRepository {
       }
       this.publish(current.workspaceId, operationId, result.kind, result.payload ?? {});
       return receipt;
-    }, { mode: "immediate" });
+    });
   }
   private advance(workspaceId: string, authority = false): void {
     this.run("UPDATE cowork_workspaces SET config_revision=config_revision+1,grant_revision=grant_revision+?,updated_at=? WHERE workspace_id=?", authority ? 1 : 0, this.now(), workspaceId);
@@ -214,9 +247,13 @@ export class CoworkRepository {
       return { workspaceId, value: this.policy(workspaceId), kind: "workspace_policy_changed" };
     });
   }
-  bindConversation(context: MutationContext, workspaceId: string, input: { sessionId: string; sourceId: string; relativeCwd?: string }): MutationReceipt<ConversationBinding> {
+  bindConversation(context: MutationContext, workspaceId: string, input: { sessionId: string; sourceId: string; relativeCwd?: string }, sessions: CoworkCommittedSessions): MutationReceipt<ConversationBinding> {
     const normalized = { sessionId: id(input.sessionId), sourceId: id(input.sourceId), relativeCwd: relativeCoworkPath(input.relativeCwd ?? ".") };
+    // The two stores cannot share an atomic transaction. Require committed index creation
+    // before entering canonical binding, with no await/reentrancy or permissive fallback.
+    if (!sessions || typeof sessions.hasCommittedSession !== "function" || sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
     return this.mutate(context, "conversation.bind", id(workspaceId), normalized, () => {
+      if (sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
       const current = this.get(workspaceId), selected = this.source(workspaceId, normalized.sourceId), policy = this.policy(workspaceId);
       if (current.ownership === "standalone" && current.ownerId !== normalized.sessionId) throw new CoworkError("authority_denied");
       if (selected.state !== "ready" || selected.desired !== "present") throw new CoworkError("source_unavailable");
@@ -228,14 +265,14 @@ export class CoworkRepository {
   }
   /** Controller/coordination service alone calls this after acquiring disk ownership. */
   beginIncarnation(workspaceId: string, incarnationId: string, expectedRevision: number): GuestEpoch {
-    return this.rs.transaction(() => {
+    return durableCoworkTransaction(this.rs, () => {
       const current = this.get(workspaceId); id(incarnationId);
       if (current.configRevision !== expectedRevision) throw new CoworkError("revision_conflict", current.configRevision);
       if (current.state !== "retained" || current.power !== "stopped") throw new CoworkError("recovery_required");
       this.run("UPDATE cowork_workspaces SET incarnation_id=?,lease_epoch=lease_epoch+1,power='starting',updated_at=? WHERE workspace_id=?", incarnationId, this.now(), workspaceId);
       this.run("UPDATE cowork_sources SET state='preparing',ack_revision=NULL,ack_incarnation_id=NULL WHERE workspace_id=? AND desired='present' AND state='ready'", workspaceId);
       return { workspaceId, incarnationId, leaseEpoch: current.leaseEpoch + 1, configRevision: current.configRevision, grantRevision: current.grantRevision };
-    }, { mode: "immediate" });
+    });
   }
   /** Host controller refreshes authority before issuing a NEW effect; never rewrite an old
    * callback's captured epoch. Guest messages cannot call this internal ownership port. */
@@ -245,7 +282,7 @@ export class CoworkRepository {
     return { workspaceId, incarnationId, leaseEpoch, configRevision: current.configRevision, grantRevision: current.grantRevision };
   }
   acknowledgeSource(epoch: GuestEpoch, sourceId: string, revision: number, state: "ready" | "detached"): void {
-    this.rs.transaction(() => {
+    durableCoworkTransaction(this.rs, () => {
       const current = this.get(epoch.workspaceId), selected = this.source(epoch.workspaceId, sourceId);
       if (!["starting", "running"].includes(current.power) || current.incarnationId !== epoch.incarnationId || current.leaseEpoch !== epoch.leaseEpoch || current.configRevision !== epoch.configRevision || current.grantRevision !== epoch.grantRevision || selected.revision !== revision) throw new CoworkError("stale_acknowledgment");
       if (selected.state === state && selected.ackRevision === revision && selected.ackIncarnationId === epoch.incarnationId) return;
@@ -255,19 +292,57 @@ export class CoworkRepository {
       this.run("UPDATE cowork_sources SET state=?,ack_revision=revision,ack_incarnation_id=?,restart_required=0,reason=NULL,updated_at=? WHERE source_id=?", state, epoch.incarnationId, this.now(), sourceId);
       this.publish(epoch.workspaceId, operationId, "workspace_sources_changed", { sourceId, sourceRevision: revision, state, incarnationId: epoch.incarnationId });
       if (!this.one("SELECT 1 FROM cowork_sources WHERE operation_id=? AND state NOT IN ('ready','detached') LIMIT 1", operationId)) this.concludeOperation(epoch.workspaceId, operationId, "applied");
-    }, { mode: "immediate" });
+    });
   }
   /** Membership predicate only; publication still requires current ready source/write authority. */
   githubOnly(workspaceId: string): boolean {
     const current = this.sources(workspaceId).filter(value => value.state !== "detached");
     return current.some(value => value.kind === "githubRepository" && value.desired === "present") && !current.some(value => value.kind === "folder");
   }
-  pendingChanges(sessionId: string): Array<{ changeId: string; workspaceId: string; revision: number; kind: string; payload: unknown }> {
-    return this.all("SELECT o.* FROM cowork_outbox o JOIN cowork_outbox_deliveries d USING(change_id) WHERE d.session_id=? AND d.state='pending' ORDER BY o.sequence", id(sessionId)).map(row => ({ changeId: row.change_id, workspaceId: row.workspace_id, revision: row.revision, kind: row.kind, payload: JSON.parse(row.payload_json) }));
+  /** Internal change position only: never project raw outbox payloads or global sequence onto the wire. */
+  watchPosition(workspaceId: string): number {
+    this.get(workspaceId);
+    return this.one("SELECT coalesce(max(sequence),0) AS n FROM cowork_outbox WHERE workspace_id=?", workspaceId)!.n;
+  }
+  /** Host logical-session deletion/missing-session retirement only. Keep workspace, sources,
+   * operation receipts and guest data; tombstone prevents future notification fanout. */
+  abandonConversation(sessionId: string): void {
+    id(sessionId);
+    if (!this.one("SELECT 1 FROM cowork_conversations WHERE session_id=?", sessionId)) return;
+    durableCoworkTransaction(this.rs, () => {
+      this.run("UPDATE cowork_conversations SET state='deleted' WHERE session_id=?", sessionId);
+      const changes = this.all("SELECT change_id FROM cowork_outbox_deliveries WHERE session_id=?", sessionId);
+      this.run("DELETE FROM cowork_outbox_deliveries WHERE session_id=?", sessionId);
+      for (const change of changes) this.run("DELETE FROM cowork_outbox WHERE change_id=? AND NOT EXISTS (SELECT 1 FROM cowork_outbox_deliveries WHERE change_id=?)", change.change_id, change.change_id);
+    });
+  }
+  /** Bounded delivery receipt retention; pending deliveries and other conversations' rows remain.
+   * Unbound workspace journal entries are not pruned by this per-conversation operation. */
+  pruneDeliveredChanges(sessionId: string, retain = 100): void {
+    id(sessionId);
+    durableCoworkTransaction(this.rs, () => {
+      const stale = this.all("SELECT d.change_id FROM cowork_outbox_deliveries d JOIN cowork_outbox o USING(change_id) WHERE d.session_id=? AND d.state='delivered' ORDER BY o.sequence DESC LIMIT -1 OFFSET ?", sessionId, retain);
+      for (const change of stale) {
+        this.run("DELETE FROM cowork_outbox_deliveries WHERE session_id=? AND change_id=? AND state='delivered'", sessionId, change.change_id);
+        this.run("DELETE FROM cowork_outbox WHERE change_id=? AND NOT EXISTS (SELECT 1 FROM cowork_outbox_deliveries WHERE change_id=?)", change.change_id, change.change_id);
+      }
+    });
+  }
+  /** Canonical bound logical conversations with outstanding work; no synthetic system session. */
+  pendingChangeSessions(): string[] {
+    return this.all("SELECT DISTINCT d.session_id FROM cowork_outbox_deliveries d JOIN cowork_conversations c USING(session_id) WHERE d.state='pending' AND c.state!='deleted' ORDER BY d.session_id").map(row => row.session_id);
+  }
+  conversationWorkspace(sessionId: string): string | undefined {
+    return this.one("SELECT workspace_id FROM cowork_conversations WHERE session_id=?", id(sessionId))?.workspace_id;
+  }
+  pendingChanges(sessionId: string, limit = Number.MAX_SAFE_INTEGER): WorkspaceChange[] {
+    return this.all("SELECT o.* FROM cowork_outbox o JOIN cowork_outbox_deliveries d USING(change_id) WHERE d.session_id=? AND d.state='pending' ORDER BY o.sequence LIMIT ?", id(sessionId), Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(limit)))).map(row => ({ changeId: row.change_id, workspaceId: row.workspace_id, operationId: row.operation_id, revision: row.revision, kind: row.kind, payload: JSON.parse(row.payload_json) }));
   }
   acknowledgeChange(sessionId: string, changeId: string, eventSeq: number): void {
     if (!Number.isSafeInteger(eventSeq) || eventSeq < 1) throw new CoworkError("invalid_request");
-    const changed = this.run("UPDATE cowork_outbox_deliveries SET state='delivered',event_seq=? WHERE session_id=? AND change_id=? AND state='pending'", eventSeq, id(sessionId), id(changeId));
-    if (!changed.changes && !this.one("SELECT 1 FROM cowork_outbox_deliveries WHERE session_id=? AND change_id=? AND state='delivered' AND event_seq=?", sessionId, changeId, eventSeq)) throw new CoworkError("request_conflict");
+    durableCoworkTransaction(this.rs, () => {
+      const changed = this.run("UPDATE cowork_outbox_deliveries SET state='delivered',event_seq=? WHERE session_id=? AND change_id=? AND state='pending'", eventSeq, id(sessionId), id(changeId));
+      if (!changed.changes && !this.one("SELECT 1 FROM cowork_outbox_deliveries WHERE session_id=? AND change_id=? AND state='delivered' AND event_seq=?", sessionId, changeId, eventSeq)) throw new CoworkError("request_conflict");
+    });
   }
 }

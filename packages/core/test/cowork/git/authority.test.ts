@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "../committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,7 +20,7 @@ function fixture() {
     ceiling: { toolClasses: ["read", "write"], hostServices: ["git.publish"], connectors: [], network: "internet" } });
   const source = made.value.sources[0]!, epoch = records.beginIncarnation(made.workspaceId, "incarnation-one", made.value.workspace.configRevision);
   records.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
-  records.bindConversation(context("bind"), made.workspaceId, { sessionId: "session-one", sourceId: source.sourceId });
+  records.bindConversation(context("bind"), made.workspaceId, { sessionId: "session-one", sourceId: source.sourceId }, authorityFixtureSessions("session-one"));
   let writable = true, taskAllowed = true, beforeTask: (() => void) | undefined;
   let scope: PublicationGrant["sourceScope"] = { revision: 1, sourceIds: null };
   const authority = new CoworkAuthority(records, { folder: () => undefined, repository: () => ({ readable: true, writable, revoked: false }) });

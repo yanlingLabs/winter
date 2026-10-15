@@ -1047,7 +1047,60 @@ export const PanelCommandEvent = Base.extend({
   deadlineMs: z.number().int().positive(),
 });
 
+/** Host-owned durable metadata. These are notifications, never execution grants or model guidance. */
+const WorkspaceChangeBase = Base.extend({
+  workspaceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
+  workspaceChangeId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
+  operationId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
+  workspaceRevision: z.number().int().positive(),
+});
+export const WorkspaceSourceChange = z.object({
+  sourceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
+  sourceRevision: z.number().int().positive(),
+  desired: z.enum(["present", "removed"]),
+  state: z.enum(["preparing", "ready", "unavailable", "removing", "detached"]),
+  ackRevision: z.number().int().positive().nullable(),
+  restartRequired: z.boolean(),
+  reason: z.enum(["access_revoked", "source_unavailable"]).nullable(),
+});
+export const WorkspaceSourcesChangedEvent = WorkspaceChangeBase.extend({
+  type: z.literal("workspace_sources_changed"),
+  sources: z.array(WorkspaceSourceChange).max(100),
+  // Only the controller's exact source ACK records an effect. Revocation metadata cannot claim it.
+  phase: z.enum(["requested", "acknowledged", "refetch"]),
+});
+export const WorkspacePolicyChangedEvent = WorkspaceChangeBase.extend({
+  type: z.literal("workspace_policy_changed"),
+  policyRevision: z.number().int().positive().optional(),
+  defaultRevision: z.number().int().positive().optional(),
+  publicationRevision: z.number().int().positive().optional(),
+  defaultPolicy: z.enum(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]).optional(),
+  publication: z.enum(["github-only-feature-branches", "manual"]).optional(),
+  // Stored defaults/policy metadata do not announce installation of a narrower tool view.
+  phase: z.literal("metadata"),
+});
+export const WorkspaceOperationChangedEvent = WorkspaceChangeBase.extend({
+  type: z.literal("workspace_operation_changed"),
+  status: z.enum(["pending", "applied", "blocked", "failed", "superseded"]),
+  terminal: z.boolean(),
+  supersededBy: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/).optional(),
+});
+export const WorkspaceInstructionsChangedEvent = WorkspaceChangeBase.extend({
+  type: z.literal("workspace_instructions_changed"),
+  instructionRevision: z.number().int().positive(),
+  digest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  refreshState: z.enum(["current", "refresh-required", "unavailable"]),
+});
+export const WorkspaceMetadataChangedEvent = WorkspaceChangeBase.extend({
+  type: z.literal("workspace_metadata_changed"),
+  change: z.enum(["created", "display", "lifecycle", "conversation-bound"]),
+});
+export const HOST_WORKSPACE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "workspace_sources_changed", "workspace_policy_changed", "workspace_operation_changed", "workspace_metadata_changed", "workspace_instructions_changed",
+]);
+
 export const SessionEvent = z.discriminatedUnion("type", [
+  WorkspaceSourcesChangedEvent, WorkspacePolicyChangedEvent, WorkspaceOperationChangedEvent, WorkspaceMetadataChangedEvent, WorkspaceInstructionsChangedEvent,
   SessionCreatedEvent,
   HarnessAttachedEvent,
   HarnessDetachedEvent,

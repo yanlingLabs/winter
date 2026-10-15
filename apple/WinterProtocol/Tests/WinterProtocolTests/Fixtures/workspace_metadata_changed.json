@@ -1,0 +1,11 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "workspace_metadata_changed",
+  "workspaceId": "w_one",
+  "workspaceChangeId": "change_four",
+  "operationId": "op_four",
+  "workspaceRevision": 6,
+  "change": "display"
+}

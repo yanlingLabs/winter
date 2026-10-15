@@ -73,10 +73,10 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
   // on disk, so it moves in this task's own commit; the Swift LITERAL in RoundTripTests.swift is a
   // separate, later edit — the same two-commit split diff-tabs Task 4 established, and `swift test`
   // is expected red between the two commits by design.
-  test("did not leak into the Swift-synced fixture bundle, which now has exactly 84 files", () => {
+  test("did not leak into the Swift-synced fixture bundle, which now has exactly 89 files", () => {
     const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "WinterProtocol", "Tests", "WinterProtocolTests", "Fixtures");
     const swiftFiles = readdirSync(swiftFixDir).filter((f) => f.endsWith(".json"));
-    expect(swiftFiles.length).toBe(84);
+    expect(swiftFiles.length).toBe(89);
     expect(swiftFiles).not.toContain("dangerous-domains.json");
     expect(swiftFiles).not.toContain("cleaner-vectors.json");
   });

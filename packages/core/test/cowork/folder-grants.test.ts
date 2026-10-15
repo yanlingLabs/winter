@@ -9,7 +9,7 @@ import { createMacCoworkHost } from "../../src/cowork/mac-host";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "../../src/cowork/service";
 import { CoworkError } from "../../src/cowork/types";
-import { downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
 const principal={kind:"local-user" as const,id:"local-fixture"};
 const connection={role:"harness",connectionId:1};
 const roots:string[]=[],dbs:RuntimeStateDb[]=[],hosts:CoworkFolderSelections[]=[];
@@ -43,7 +43,7 @@ test("source acceptance atomically binds private grant and releases ephemeral de
   const fd=(f.selections as any).entries.get(p.selectionId).fd as number, pinned=fstatSync(fd,{bigint:true});
   const made=f.service.call(connection,"workspace.create",f.request(p.selectionId)),source=f.records.sources(made.workspaceId)[0]!;
   const stillPinned=()=>{try{const current=fstatSync(fd,{bigint:true});return current.dev===pinned.dev&&current.ino===pinned.ino;}catch{return false;}};
-  expect(f.db.schemaVersion()).toBe(11);expect(source.state).toBe("preparing");expect(source.trust).toBe("untrusted");
+  expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);expect(source.state).toBe("preparing");expect(source.trust).toBe("untrusted");
   expect(f.scopes()).toBe(0);expect(stillPinned()).toBe(false);
   if(source.kind!=="folder")throw new Error("folder");
   const grant=f.grants.get(source.detail.grantRef)!;
@@ -75,8 +75,8 @@ test("revocation scrubs bookmark/path, preserves tombstone and blocks old succes
 });
 test("receipt rollback leaves pending selection usable and no authority/source half-commit",()=>{
   const f=fixture(),p=f.prepare(),selected=f.selections.selection(principal,1,p.selectionId)!,pending=f.selections.prepareConsumption(principal,1,p.selectionId);
-  expect(()=>f.records.create({principalId:principal.id,requestId:"rollback",bindSources:s=>pending.bind(s[0]!),validateReceipt:()=>{throw new Error("refuse receipt");}},{ownership:"project",title:"Project",sources:[selected],ceiling:{toolClasses:[],hostServices:[],connectors:[],network:"none"}})).toThrow("refuse receipt");
-  expect(f.records.list()).toEqual([]);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});expect(f.scopes()).toBe(1);
+  expect(()=>f.records.create({principalId:principal.id,requestId:"rollback",bindSources:s=>{expect(f.db.db.inTransaction).toBe(true);expect(["synchronous","fullfsync","checkpoint_fullfsync"].map(name=>f.db.db.query<Record<string,number>,[]>(`PRAGMA main.${name}`).get()![name])).toEqual([2,1,1]);pending.bind(s[0]!);},validateReceipt:()=>{throw new Error("refuse receipt");}},{ownership:"project",title:"Project",sources:[selected],ceiling:{toolClasses:[],hostServices:[],connectors:[],network:"none"}})).toThrow("refuse receipt");
+  expect(f.records.list()).toEqual([]);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});expect(f.db.db.query("SELECT count(*) AS n FROM cowork_home_identity").get()).toEqual({n:0});expect(f.scopes()).toBe(1);
   expect(f.service.call(connection,"workspace.create",f.request(p.selectionId)).value.sources[0]!.state).toBe("preparing");expect(f.scopes()).toBe(0);
 });
 test("caller transaction refused before consumption cleanup; principal, disconnect and expiry deny pending grants",()=>{
@@ -112,13 +112,13 @@ test("policy change between preflight and transaction denies binding and preserv
 });
 test("schema10 upgrade creates only empty authority table; populated schema11 rollback refused",()=>{
   const f=fixture();f.db.db.run("DROP TABLE cowork_folder_grants");f.db.db.run("PRAGMA user_version=10");f.restart();
-  expect(f.db.schemaVersion()).toBe(11);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});
-  create(f);expect(()=>downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority");expect(f.db.schemaVersion()).toBe(11);
+  expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});
+  create(f);expect(()=>downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority");expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
 });
 test("empty schema11 safely rolls back and future schema writer refused",()=>{
   const f=fixture();f.service.close();f.db.close();dbs.splice(dbs.indexOf(f.db),1);
-  expect(downgradeCoworkRuntimeStateToV7(f.home)).toEqual({from:11,to:7});
-  const raw=new Database(join(f.home,"runtimes/runtime-state.db"));expect(raw.query("SELECT name FROM sqlite_master WHERE name='cowork_folder_grants'").get()).toBeNull();raw.run("PRAGMA user_version=12");raw.close();expect(()=>openRuntimeStateDb(f.home)).toThrow("newer-schema");
+  expect(downgradeCoworkRuntimeStateToV7(f.home)).toEqual({from:RUNTIME_STATE_SCHEMA_VERSION,to:7});
+  const raw=new Database(join(f.home,"runtimes/runtime-state.db"));expect(raw.query("SELECT name FROM sqlite_master WHERE name='cowork_folder_grants'").get()).toBeNull();raw.run(`PRAGMA user_version=${RUNTIME_STATE_SCHEMA_VERSION+1}`);raw.close();expect(()=>openRuntimeStateDb(f.home)).toThrow("newer-schema");
 });
 test("default Mac adapter cannot provision or consume despite durable storage",()=>{
   const f=fixture(),ports=createMacCoworkHost(f.home,f.options,f.db),service=new CoworkWorkspaceService(f.records,ports);hosts.push(ports.selections!);

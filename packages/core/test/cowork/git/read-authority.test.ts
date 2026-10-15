@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "../committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,7 +45,7 @@ test("runtime reads require actual ready ACK, active binding, explicit source sc
   const f = setup(), runtime = { ...f.caller, sessionId: "session" };
   await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, f.request))).rejects.toMatchObject({ code: "authority_denied" });
   f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
-  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: runtime.sessionId, sourceId: f.source.sourceId });
+  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: runtime.sessionId, sourceId: f.source.sourceId }, authorityFixtureSessions(runtime.sessionId));
   expect((await f.readAuthority.authorize(runtime, f.request)).scopeDigest).not.toBe((await f.readAuthority.authorize(f.caller, f.request)).scopeDigest);
   f.resolver.sourceScope = () => undefined; await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, f.request))).rejects.toMatchObject({ code: "authority_denied" });
   f.resolver.sourceScope = () => ({ revision: 1, sourceIds: ["foreign"] }); await expect(Promise.resolve().then(() => f.readAuthority.authorize(runtime, f.request))).rejects.toMatchObject({ code: "authority_denied" });
@@ -54,7 +55,7 @@ test("runtime reads require actual ready ACK, active binding, explicit source sc
 });
 test("restoring scope contents at a later revision does not restore prior read authority", async () => {
   const f = setup(); f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
-  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId });
+  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId }, authorityFixtureSessions("session"));
   const caller = { ...f.caller, sessionId: "session" }; const before = await f.readAuthority.authorize(caller, f.request);
   f.resolver.sourceScope = () => ({ revision: 3, sourceIds: [f.source.sourceId] }); expect((await f.readAuthority.authorize(caller, f.request)).scopeDigest).not.toBe(before.scopeDigest);
 });
@@ -71,7 +72,7 @@ test("final synchronous scope cannot return stale workspace or mutable account a
   for (const mutation of ["workspace", "account"] as const) {
     const f = setup(); let calls = 0; const current = { ...account };
     f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
-    f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId });
+    f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId }, authorityFixtureSessions("session"));
     f.resolver.repository = () => current;
     f.resolver.sourceScope = () => {
       if (++calls === 2) {
@@ -87,7 +88,7 @@ test("final synchronous scope cannot return stale workspace or mutable account a
 test("final scope resolution cannot return a stopped worker even with unchanged source revisions", async () => {
   const f = setup(); let calls = 0;
   f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
-  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId });
+  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId }, authorityFixtureSessions("session"));
   f.resolver.sourceScope = () => {
     if (++calls === 2) f.db.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [f.caller.workspaceId]);
     return { revision: 1, sourceIds: [f.source.sourceId] };
@@ -97,7 +98,7 @@ test("final scope resolution cannot return a stopped worker even with unchanged 
 test("task source scope changes at final snapshot cannot reuse its earlier grant", async () => {
   const f = setup(); let calls = 0;
   f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
-  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId });
+  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId }, authorityFixtureSessions("session"));
   f.resolver.sourceScope = () => ++calls === 1 ? { revision: 1, sourceIds: [f.source.sourceId] } : { revision: 2, sourceIds: [] };
   await expect(Promise.resolve().then(() => f.readAuthority.authorize({ ...f.caller, sessionId: "session" }, f.request))).rejects.toMatchObject({ code: "authority_denied" });
 });
@@ -105,7 +106,7 @@ test("task source scope changes at final snapshot cannot reuse its earlier grant
 test("final transport authority cut never releases bytes after the worker stops in final scope resolution", async () => {
   const f = setup(); let calls = 0;
   f.records.acknowledgeSource(f.epoch, f.source.sourceId, f.source.revision, "ready");
-  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId });
+  f.records.bindConversation({ principalId: "host", requestId: "bind", expectedRevision: 1 }, f.caller.workspaceId, { sessionId: "session", sourceId: f.source.sourceId }, authorityFixtureSessions("session"));
   f.resolver.sourceScope = () => {
     if (++calls === 8) f.db.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [f.caller.workspaceId]);
     return { revision: 1, sourceIds: [f.source.sourceId] };

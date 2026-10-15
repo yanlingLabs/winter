@@ -1,0 +1,16 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "workspace_policy_changed",
+  "workspaceId": "w_one",
+  "workspaceChangeId": "change_two",
+  "operationId": "op_two",
+  "workspaceRevision": 5,
+  "policyRevision": 2,
+  "defaultRevision": 2,
+  "publicationRevision": 1,
+  "defaultPolicy": "plan",
+  "publication": "manual",
+  "phase": "metadata"
+}

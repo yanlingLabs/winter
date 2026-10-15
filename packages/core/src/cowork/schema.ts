@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -145,4 +145,52 @@ export function migrateCoworkFolderGrantSchema(db: Database): void {
   );
   CREATE UNIQUE INDEX IF NOT EXISTS cowork_folder_grants_root ON cowork_folder_grants(workspace_id,root_device,root_inode) WHERE state='active';
   CREATE INDEX IF NOT EXISTS cowork_folder_grants_scope ON cowork_folder_grants(workspace_id,source_id);`);
+}
+
+/** Host-owned timer authority. Independent of VM power and guest SDK snapshots. */
+export function migrateCoworkScheduleSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_schedules (
+    schedule_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+    principal_id TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL,
+    definition_json TEXT NOT NULL, next_due INTEGER, state TEXT NOT NULL CHECK(state IN ('enabled','cancelled','handled')),
+    revision INTEGER NOT NULL CHECK(revision>0), created_at INTEGER NOT NULL,
+    UNIQUE(workspace_id,principal_id,request_id)
+  );
+  CREATE TABLE IF NOT EXISTS cowork_schedule_occurrences (
+    occurrence_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES cowork_schedules(schedule_id),
+    due_at INTEGER NOT NULL, latest_due_at INTEGER NOT NULL, missed_count INTEGER NOT NULL DEFAULT 0 CHECK(missed_count>=0),
+    state TEXT NOT NULL CHECK(state IN ('pending','claimed','dispatching','uncertain','handled','cancelled')),
+    claim_token TEXT, reason TEXT, UNIQUE(schedule_id,due_at)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS cowork_schedule_pending ON cowork_schedule_occurrences(schedule_id) WHERE state='pending';
+  CREATE UNIQUE INDEX IF NOT EXISTS cowork_schedule_active ON cowork_schedule_occurrences(schedule_id) WHERE state IN ('claimed','dispatching','uncertain');`);
+}
+
+/** Canonical host shared guidance and crash-visible file replacement debt. */
+export function migrateCoworkInstructionSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_instruction_directories (
+    relative_path TEXT PRIMARY KEY, identity_json TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS cowork_instructions (
+    workspace_id TEXT PRIMARY KEY REFERENCES cowork_workspaces(workspace_id),
+    home_id TEXT NOT NULL REFERENCES cowork_home_identity(home_id),
+    file_identity_json TEXT NOT NULL, digest TEXT NOT NULL CHECK(length(digest)=64),
+    bytes INTEGER NOT NULL CHECK(bytes>=0 AND bytes<=65536), pending_operation TEXT,
+    refresh_state TEXT NOT NULL CHECK(refresh_state IN ('refresh-required','unavailable'))
+  );
+  CREATE TABLE IF NOT EXISTS cowork_instruction_mutations (
+    operation_id TEXT PRIMARY KEY REFERENCES cowork_operations(operation_id),
+    workspace_id TEXT NOT NULL REFERENCES cowork_instructions(workspace_id),
+    expected_revision INTEGER NOT NULL CHECK(expected_revision>0),
+    before_digest TEXT NOT NULL CHECK(length(before_digest)=64), after_digest TEXT NOT NULL CHECK(length(after_digest)=64),
+    temporary_name TEXT NOT NULL, file_identity_json TEXT NOT NULL, after_bytes INTEGER NOT NULL CHECK(after_bytes>=0 AND after_bytes<=65536)
+  );`);
+}
+
+/** Schedule poison records are retained, never interpreted as runnable authority. */
+export function migrateCoworkScheduleQuarantineSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_schedule_quarantines (
+    schedule_id TEXT PRIMARY KEY REFERENCES cowork_schedules(schedule_id),
+    reason TEXT NOT NULL CHECK(reason='invalid_schedule'), quarantined_at INTEGER NOT NULL
+  );`);
 }

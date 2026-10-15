@@ -1,8 +1,10 @@
+import { CoworkError } from "../cowork/types";
+import { fullSyncInstructionFd } from "../cowork/instruction-fullsync";
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { openSync, closeSync, fstatSync, constants, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
+import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
@@ -663,6 +665,29 @@ export class SessionStore {
     return row.last_seq;
   }
 
+  /** Cowork-only ACK prerequisite. Reuses the reviewed Darwin owned-FD primitive;
+   * ordinary session append behavior is unchanged. Completed OS flush requests are
+   * not proof of storage hardware behavior after power loss. */
+  flushLog(sessionId: string): void {
+    if (process.platform !== "darwin" || process.arch !== "arm64") throw new CoworkError("unsupported_topology");
+    const row = this.db.query("SELECT scope FROM sessions WHERE session_id=?").get(sessionId) as { scope: string } | null;
+    if (!row) throw new Error("unknown session");
+    const path = this.logPath(row.scope, sessionId);
+    const directory = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    let file: number | undefined;
+    try {
+      file = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const directoryStat = fstatSync(directory), fileStat = fstatSync(file);
+      const uid = process.getuid?.();
+      if (!directoryStat.isDirectory() || !fileStat.isFile() || fileStat.nlink !== 1 ||
+          (uid !== undefined && (directoryStat.uid !== uid || fileStat.uid !== uid)) || directoryStat.dev !== fileStat.dev) {
+        throw new Error("workspace log flush refused");
+      }
+      fullSyncInstructionFd(file);
+      fullSyncInstructionFd(directory);
+    } finally { if (file !== undefined) closeSync(file); closeSync(directory); }
+  }
+
   read(sessionId: string, fromSeq = 0): SessionEvent[] {
     const row = this.db.query("SELECT scope FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string } | null;
@@ -890,6 +915,19 @@ export class SessionStore {
       | { scope: string } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     return this.logPath(row.scope, sessionId);
+  }
+
+  /** Trusted binding adapter: autocommitted session creation plus its initial event
+   * must precede a canonical Cowork bind. A caller transaction/empty sync row is not ready. */
+  hasCommittedSession(sessionId: string): boolean {
+    if (this.db.inTransaction) return false;
+    const row = this.db.query<{ last_seq: number }, [string]>("SELECT last_seq FROM sessions WHERE session_id=?").get(sessionId);
+    return row !== null && row.last_seq >= 1;
+  }
+
+  /** Index existence after constructor recovery; never inferred from a missing/unreadable log. */
+  hasSession(sessionId: string): boolean {
+    return this.db.query("SELECT 1 FROM sessions WHERE session_id=?").get(sessionId) !== null;
   }
 
   meta(sessionId: string): {
@@ -1185,6 +1223,7 @@ export class SessionStore {
     const expectedFirst = row.last_seq + 1;
     for (let i = 0; i < entries.length; i++) {
       const { raw, event } = entries[i]!;
+      if (HOST_WORKSPACE_EVENT_TYPES.has(event.type) || HOST_WORKSPACE_EVENT_TYPES.has(JSON.parse(raw).type)) throw new Error("appendSynced: host workspace events are not importable");
       if (event.sessionId !== sessionId) throw new Error(`event ${i} belongs to session ${event.sessionId}, not ${sessionId}`);
       if (event.seq !== expectedFirst + i) throw new Error(`event ${i} has seq ${event.seq}, expected ${expectedFirst + i}`);
       if (raw.includes("\n")) throw new Error(`event ${i} raw line contains a newline`); // would forge extra log lines

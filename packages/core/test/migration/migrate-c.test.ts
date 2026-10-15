@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "../cowork/committed-sessions";
 // WS-21 L3.7 (spec §8): Migration C on a fixture home in the old layout — a Winter-leg session, an
 // official-leg session whose `claude-config` working copy holds one extra trailing entry, a subagent,
 // memory, provider-state, the moved settings keys, and a DeepSeek tag in provider.model, pins and
@@ -835,7 +836,7 @@ describe("round 3: the bulk canonical-cwd re-key", () => {
     const workspace = created.value.workspace, source = created.value.sources[0]!;
     const epoch = repo.beginIncarnation(workspace.workspaceId, "fixture_incarnation", created.revision);
     repo.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
-    repo.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: created.revision }, workspace.workspaceId, { sessionId: moving, sourceId: source.sourceId });
+    repo.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: created.revision }, workspace.workspaceId, { sessionId: moving, sourceId: source.sourceId }, authorityFixtureSessions(moving));
     rs.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [workspace.workspaceId]);
     const beforeBinding = repo.binding(moving);
     const beforeRoot = join(home, "projects", rawKey);
