@@ -91,6 +91,8 @@ struct DesktopIslandGeometry: Equatable {
     /// The birth (or the way back) is over: the frame driver stops, nothing redraws.
     @Published var still = false
     @Published var secondsLeft: Int
+    /// Where the pointer is over the panel (top-left origin), nil when it is outside: the buttons grow under it.
+    @Published var pointer: CGPoint?
     /// The answer came from the pill's own buttons (it then goes back into the housing before it closes).
     var answeredHere = false
     var onSwitch: (() -> Void)?
@@ -144,6 +146,17 @@ struct IslandFrameView: View {
     @ObservedObject var state: DesktopIslandState
     var reduceMotion = false
 
+    /// The button under the pointer, judged against the resting row (the buttons sit at its trailing end).
+    private var hoveredButton: DesktopIslandRow.Answer? {
+        guard let p = state.pointer, frame.content > 0.9 else { return nil }
+        let pill = geometry.pill
+        let half = DesktopIslandRow.button / 2 + 2
+        let check = CGPoint(x: pill.maxX - DesktopIslandRow.trailing - DesktopIslandRow.button / 2, y: pill.midY)
+        let cross = CGPoint(x: check.x - DesktopIslandRow.button - DesktopIslandRow.spacing, y: pill.midY)
+        func over(_ c: CGPoint) -> Bool { abs(p.x - c.x) <= half && abs(p.y - c.y) <= half }
+        return over(check) ? .switchNow : over(cross) ? .refuse : nil
+    }
+
     var body: some View {
         let pill = frame.pill
         ZStack(alignment: .topLeading) {
@@ -171,7 +184,7 @@ struct IslandFrameView: View {
             // (the buttons ride its edge), blurred by how far the spring still has to travel, clipped to the shape,
             // a hairline edge and its shadow.
             let shape = Capsule(style: .continuous)
-            DesktopIslandRow(model: model, state: state)
+            DesktopIslandRow(model: model, state: state, hovered: hoveredButton)
                 .frame(width: max(pill.width, 0), height: geometry.pill.height)
                 .frame(width: max(pill.width, 0), height: max(pill.height, 0))
                 .blur(radius: DesktopIslandGeometry.morphBlur(size: pill.size, target: geometry.pill.size)
@@ -194,6 +207,9 @@ struct IslandFrameView: View {
 struct DesktopIslandRow: View {
     let model: CUDesktopPromptModel
     @ObservedObject var state: DesktopIslandState
+    var hovered: Answer?
+
+    enum Answer { case refuse, switchNow }
 
     static let blue = Color(red: 0.04, green: 0.52, blue: 1.0)
     static let leading: CGFloat = 20
@@ -212,10 +228,10 @@ struct DesktopIslandRow: View {
                 .truncationMode(.middle)
             Spacer(minLength: Self.spacerMin)
             Button { answer(state.onRefuse) } label: { Image(systemName: "xmark") }
-                .buttonStyle(IslandCircleButtonStyle(fill: .white, glyph: .black))
+                .buttonStyle(IslandCircleButtonStyle(fill: .white, glyph: .black, hovered: hovered == .refuse))
                 .accessibilityLabel("Don't switch")
             Button { answer(state.onSwitch) } label: { Image(systemName: "checkmark") }
-                .buttonStyle(IslandCircleButtonStyle(fill: Self.blue, glyph: .white))
+                .buttonStyle(IslandCircleButtonStyle(fill: Self.blue, glyph: .white, hovered: hovered == .switchNow))
                 .accessibilityLabel("Switch now")
         }
         .padding(.leading, Self.leading)
@@ -231,6 +247,10 @@ struct DesktopIslandRow: View {
 struct IslandCircleButtonStyle: ButtonStyle {
     let fill: Color
     let glyph: Color
+    var hovered = false
+
+    /// A little larger under the pointer.
+    static let hoverScale: CGFloat = 1.12
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -238,15 +258,50 @@ struct IslandCircleButtonStyle: ButtonStyle {
             .foregroundStyle(glyph)
             .frame(width: DesktopIslandRow.button, height: DesktopIslandRow.button)
             .background(Circle().fill(fill))
-            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .scaleEffect(configuration.isPressed ? 0.9 : hovered ? Self.hoverScale : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: hovered)
             .opacity(configuration.isPressed ? 0.8 : 1)
             .contentShape(Circle())
     }
 }
 
 /// A hosting view that takes the first click on a panel that is never key, without activating the helper.
+/// It also reports the pointer (top-left origin; nil when it leaves) through an always-active tracking area: SwiftUI's
+/// own hover does not fire in a panel that is never key, of an app that is not active.
 final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    var onPointer: ((CGPoint?) -> Void)?
+    private var pointerArea: NSTrackingArea?
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerArea { removeTrackingArea(pointerArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        pointerArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        report(event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        report(event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onPointer?(nil)
+    }
+
+    private func report(_ event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        onPointer?(CGPoint(x: p.x, y: isFlipped ? p.y : bounds.height - p.y))
+    }
 }
 
 /// The island rendered OFFSCREEN (no window, nothing on screen), for looking at it without a prompt: a still of the

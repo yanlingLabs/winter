@@ -117,6 +117,9 @@ final class DesktopPromptPanel: NSPanel {
                                                   pillWidth: DesktopIslandGeometry.pillWidth(for: model.headline), slot: slot)
         let view = DesktopIslandView(model: model, geometry: geometry, state: state, reduceMotion: reduceMotion)
         let host = FirstClickHostingView(rootView: view)
+        host.onPointer = { [state] point in
+            if state.pointer != point { state.pointer = point }
+        }
         host.sizingOptions = []
         panel.contentView = host
         let size = geometry.panelSize
