@@ -223,7 +223,10 @@ final class CommandLineEnvironment: @unchecked Sendable {
         let path = (inherited + ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"])
             .filter { seen.insert($0).inserted }
         let snapshot = Snapshot(enabled: true, pathDirectories: path, aliases: [], commandNames: [],
-                                homeDirectory: home, fileSystem: LiveShellFileSystem(), wholeCommandCheck: true)
+                                homeDirectory: home,
+                                // Never a stat, a listing or a privacy prompt under a gated folder: judged by name there.
+                                fileSystem: TCCGatedFileSystem(inner: LiveShellFileSystem(), home: home),
+                                wholeCommandCheck: true)
         return CommandLineEnvironment(snapshot: snapshot, isLive: true, shell: shell,
                                       runEnvironment: loginShellEnvironment(from: processEnvironment, home: home,
                                                                             user: user, shell: shell))
