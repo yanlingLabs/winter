@@ -19,6 +19,7 @@ struct CoworkWorkspaceView: View {
     @State private var sourceToRemove: CoworkSource?
     @State private var revoke = false
     @State private var confirmingAbandon = false
+    @State private var confirmingUseCurrent = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -209,8 +210,17 @@ struct CoworkWorkspaceView: View {
                     }
                     HStack {
                         Button("Keep my draft against this version") { model.reviewInstructionConflict(keepDraft: true, workspaceId: state.workspaceId, expectedRevision: state.current?.instructionRevision, expectedDigest: state.current?.digest) }
-                        Button("Use current content") { model.reviewInstructionConflict(keepDraft: false, workspaceId: state.workspaceId, expectedRevision: state.current?.instructionRevision, expectedDigest: state.current?.digest) }
+                        // Replacing the draft is the one choice here that cannot be taken back: ask first
+                        // unless the draft holds nothing that is not already in the shared content.
+                        Button("Use current content") {
+                            if state.useCurrentDiscardsDraft { confirmingUseCurrent = true } else { useCurrentContent(state) }
+                        }
                     }.disabled(model.guidanceBusy || state.hasUnconfirmedSave)
+                    .confirmationDialog("Replace your draft with the current shared content?", isPresented: $confirmingUseCurrent) {
+                        Button("Replace my draft", role: .destructive) { useCurrentContent(state) }
+                    } message: {
+                        Text("Your unsaved changes to this draft are discarded and cannot be recovered. The shared content stays as it is.")
+                    }
                 }
             }
             if let pending = state.pendingContent {
@@ -238,6 +248,11 @@ struct CoworkWorkspaceView: View {
             } message: {
                 Text("Winter stops trying to confirm that save and keeps your current draft. If the host already applied it, the refresh shows it as the current shared content; either way you review it against your draft before saving again.")
             }
+    }
+
+    private func useCurrentContent(_ state: CoworkWorkspaceModel.Guidance) {
+        model.reviewInstructionConflict(keepDraft: false, workspaceId: state.workspaceId,
+                                        expectedRevision: state.current?.instructionRevision, expectedDigest: state.current?.digest)
     }
 
     /// The one status line under the revision. Only a real problem is drawn as one: a conflict (a
