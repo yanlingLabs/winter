@@ -346,12 +346,49 @@ private let shellCompoundPairs: [(openers: Set<String>, closer: String)] = [
     (["[["], "]]"),
 ]
 
+// MARK: - Words that are commands only sometimes (one place — `ShellCommandLineTests`)
+
+/// A LONE word — no arguments — is a command only when it is one people run bare. Everything else typed alone
+/// (`yes`, `true`, `wait`, `continue`, `say`, `sure`, `ok` …) is a reply, never a run.
+let shellBareCommandAllowlist: Set<String> = [
+    "ls", "l", "la", "ll", "pwd", "top", "htop", "btop", "clear", "reset", "date", "cal", "uptime", "whoami", "who",
+    "w", "id", "groups", "df", "du", "ps", "history", "jobs", "env", "printenv", "hostname", "uname", "ifconfig",
+    "vim", "vi", "nvim", "nano", "emacs", "micro", "hx", "python", "python3", "ipython", "node", "bun", "deno", "irb",
+    "ghci", "lua", "sqlite3", "psql", "make", "ninja", "tmux", "screen", "zsh", "bash", "fish", "lazygit", "tig",
+    "ranger", "nnn", "k9s", "caffeinate",
+]
+
+/// Commands whose arguments are FREE TEXT, and how many unquoted plain words there make the line prose rather
+/// than a command. `say thanks` and `yes please` are replies (one is enough); `echo hi` runs, `echo this is it`
+/// is prose. Quoted text never counts: `say "thanks"` runs.
+let shellFreeTextCommands: [String: Int] = [
+    "say": 1, "yes": 1, "true": 1, "false": 1, "wait": 1, "continue": 1, "break": 1,
+    "echo": 3, "printf": 3, "print": 3,
+]
+
+/// How many unquoted words at a free-text position of a command WITH a completion function (`git commit -m`'s
+/// message, unquoted) make the line prose.
+let shellFreeTextPositionLimit = 3
+
+/// PURE: may `text` be shown to zsh's completion system? Never when it holds anything zsh could EVALUATE while
+/// completing (`_path_files` expands the word under the cursor): `$` (parameters, `$(…)`, `$((…))`), a backtick,
+/// `!` (history), or `(` (`=(…)`, `<(…)`, `>(…)`, glob qualifiers such as `*(e:…:)`).
+func zshBufferIsSafe(_ text: String) -> Bool {
+    !text.contains { "$`!(".contains($0) }
+}
+
 // MARK: - The validator
 
 /// PURE: is `line` a shell line the user means to run? See this file's header for the three rules.
 func shellLineIsCommand(_ line: String, context: ShellCommandContext) -> Bool {
     guard line.count <= 4000, !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
     guard case .complete(let tokens) = shellTokenize(line), !tokens.isEmpty else { return false }
+
+    // A lone word is a command only if people run it bare (or it is a path to one).
+    if tokens.count == 1, case .word(let only) = tokens[0], !only.text.contains("/"),
+       !shellBareCommandAllowlist.contains(only.text) {
+        return false
+    }
 
     // No trailing continuation or dangling redirection — the shell would wait for more.
     if let last = tokens.last(where: { $0 != .op("\n") }), case .op(let op) = last,
@@ -582,7 +619,7 @@ func shellCompletion(for line: String, context: ShellCommandContext, commandName
     guard case .complete(let tokensBefore) = shellTokenize(before) else { return nil }
     let isFirstWord = !tokensBefore.contains { if case .word = $0 { return true } else { return false } }
 
-    if !isFirstWord, let source, shellFirstWordResolves(before, context: context),
+    if !isFirstWord, let source, zshBufferIsSafe(line), shellFirstWordResolves(before, context: context),
        let capture = source.capture(buffer: line, directory: context.workingDirectory, deadline: deadline) {
         let candidates = capture.hits.filter { $0.hasPrefix(word) && $0 != word }
         guard !candidates.isEmpty, !capture.hits.contains(word) else { return nil }

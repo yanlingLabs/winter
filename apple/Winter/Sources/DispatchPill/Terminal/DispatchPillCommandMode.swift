@@ -35,10 +35,10 @@ struct CommandModeSuppression: Equatable {
 /// completion after the caret. Validation never blocks typing: each edit schedules one evaluation, debounced,
 /// on a background queue (the stat calls run there), and the verdict is memoized by text. Until a new verdict
 /// lands the last one stands (`displaysCommand`), so the purple does not flicker off on every keystroke.
-/// Return re-judges the text synchronously (`isCommandNow`): the world can change under an unchanged draft —
-/// the file a path names may appear after the last keystroke. Delete, a repeating typing key, acts on what is
-/// shown and never blocks. The memo is keyed by text alone (the working directory rarely changes under a
-/// draft; a Return always looks again).
+/// Return and Delete act only on a FRESH verdict for the exact text (`isActive(for:)`) — what the user saw
+/// purple — and never ask zsh: Return never upgrades white text to a run (a quick structural recheck may only
+/// downgrade it, say a path that vanished), and Delete opts out only of a purple that belongs to this text.
+/// The memo is keyed by text alone (the working directory rarely changes under a draft).
 @MainActor
 final class DispatchPillCommandMode: ObservableObject {
     /// The draft the published state belongs to.
@@ -86,11 +86,14 @@ final class DispatchPillCommandMode: ObservableObject {
         text == evaluatedText ? ghost : nil
     }
 
-    /// Command mode NOW, judged afresh — Return's question. A synchronous evaluation (a few stat calls): Return
-    /// is one action, not typing, and the answer must be about the filesystem as it is at the press.
-    func isCommandNow(_ text: String) -> Bool {
-        guard !text.isEmpty else { return false }
-        return suppression.isCommandMode(text: text, isValid: evaluate(text, ghost: false).valid)
+    /// Return's question: RUN this text? Only when a verdict for this exact text was already shown purple — Return
+    /// never turns white text into a run. A quick structural recheck (stat calls; never zsh, never the engine
+    /// lock) may still DOWNGRADE it to a message, e.g. when a path it names has vanished since.
+    func shouldRunOnReturn(_ text: String) -> Bool {
+        guard !text.isEmpty, isActive(for: text) else { return false }
+        let snapshot = environment.snapshot()
+        guard snapshot.enabled else { return false }
+        return shellLineIsCommand(text, context: snapshot.context(workingDirectory: workingDirectory()))
     }
 
     /// Every edit of the draft.
@@ -123,8 +126,9 @@ final class DispatchPillCommandMode: ObservableObject {
     /// Delete/Backspace from the composer (caret at the end, nothing selected — the text view checks).
     /// True when consumed: command mode was on, and the opt-out is recorded instead of a character deleted.
     func deleteBackward(text: String, caretAtEnd: Bool, hasSelection: Bool) -> Bool {
-        // What the composer shows as purple decides — never a fresh evaluation: Delete repeats as it is held.
-        guard !text.isEmpty, displaysCommand(text) else { return false }
+        // Only a purple that is a fresh verdict for THIS text — a stale one (still showing from the last keystroke)
+        // lets Delete delete. Never an evaluation: Delete repeats as it is held.
+        guard !text.isEmpty, isActive(for: text) else { return false }
         let consumed = suppression.deleteBackward(text: text, isValid: true, caretAtEnd: caretAtEnd,
                                                   hasSelection: hasSelection)
         if consumed {

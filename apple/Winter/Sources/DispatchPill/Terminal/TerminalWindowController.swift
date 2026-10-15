@@ -14,7 +14,10 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
     static let defaultSize = NSSize(width: 780, height: 480)
 
-    init(run: CommandRun, onAddToTranscript: @escaping (String) async -> Bool) {
+    /// - Parameters:
+    ///   - canAddToTranscript: whether the run's own session still exists (read live — the button disables).
+    ///   - onAddToTranscript: sends the run's message to that session; true when it went.
+    init(run: CommandRun, canAddToTranscript: @escaping () -> Bool, onAddToTranscript: @escaping () async -> Bool) {
         self.run = run
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -36,12 +39,12 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             onMinimize: { [weak window] in window?.performMiniaturize(nil) },
             onZoom: { [weak window] in window?.performZoom(nil) },
             onStop: { [weak run] in run?.stop() },
-            onAddToTranscript: { [weak run] in
-                guard let run, chrome.sendState != .sending else { return }
-                let message = run.transcriptMessage()
+            canAddToTranscript: canAddToTranscript,
+            onAddToTranscript: {
+                guard chrome.sendState != .sending, canAddToTranscript() else { return }
                 chrome.sendState = .sending
                 Task { @MainActor in
-                    let ok = await onAddToTranscript(message)
+                    let ok = await onAddToTranscript()
                     chrome.sendState = ok ? .sent : .failed
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
                     if chrome.sendState != .sending { chrome.sendState = .idle }
@@ -106,6 +109,7 @@ struct TerminalWindowRootView: View {
     let onMinimize: () -> Void
     let onZoom: () -> Void
     let onStop: () -> Void
+    let canAddToTranscript: () -> Bool
     let onAddToTranscript: () -> Void
 
     static let headerBand: CGFloat = 56
@@ -176,8 +180,30 @@ struct TerminalWindowRootView: View {
         }
     }
 
-    @ViewBuilder
+    /// Re-asked every couple of seconds: the run's session can go away while the window is open.
     private var addToTranscriptButton: some View {
+        TimelineView(.periodic(from: .now, by: 2)) { _ in
+            addToTranscriptControl(available: canAddToTranscript())
+        }
+    }
+
+    @ViewBuilder
+    private func addToTranscriptControl(available: Bool) -> some View {
+        if !available, chrome.sendState != .sent {
+            TerminalChromeButton(symbol: "text.bubble", label: "Add to transcript",
+                                 help: run.sessionId == nil
+                                    ? "This command was not run from a Dispatch session"
+                                    : "The Dispatch session this command was run from is gone",
+                                 action: {})
+                .opacity(0.4)
+                .disabled(true)
+        } else {
+            addToTranscriptState
+        }
+    }
+
+    @ViewBuilder
+    private var addToTranscriptState: some View {
         switch chrome.sendState {
         case .sent:
             Label("Added", systemImage: "checkmark")
@@ -188,11 +214,11 @@ struct TerminalWindowRootView: View {
                 .transition(.opacity)
         case .failed:
             TerminalChromeButton(symbol: "exclamationmark.triangle", label: "Couldn’t send — retry",
-                                 help: "Send the command and its output to Dispatch again", tint: .orange,
+                                 help: "Send the command and its output to its Dispatch session again", tint: .orange,
                                  action: onAddToTranscript)
         case .idle, .sending:
             TerminalChromeButton(symbol: "text.bubble", label: "Add to transcript",
-                                 help: "Send the command and its output to Dispatch as your message",
+                                 help: "Send the command and its output to the Dispatch session it was run from, as your message",
                                  action: onAddToTranscript)
                 .opacity(chrome.sendState == .sending ? 0.5 : 1)
                 .disabled(chrome.sendState == .sending)

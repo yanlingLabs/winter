@@ -61,34 +61,53 @@ struct ZshCompletionCapture: Equatable {
     var offersOptions: Bool { hits.contains { $0.hasPrefix("-") } }
 }
 
+/// How a position took a word (or did not).
+enum ZshPositionVerdict: Equatable {
+    /// One of the completion candidates there.
+    case candidate
+    /// A free-text (`_message`) position — it takes anything; unquoted words there still count as prose.
+    case freeText
+    /// A file position and an existing path.
+    case existingPath
+    /// A `-word` where options are offered.
+    case flag
+    case rejected
+}
+
 /// PURE: does the position whose completion is `capture` take `word`? `optionsHere` answers whether options
-/// are offered at the position (asked only for a `-word` that is not itself a candidate).
-func zshPositionAccepts(_ word: ShellWord, capture: ZshCompletionCapture, pathExists: Bool,
-                        optionsHere: () -> Bool) -> Bool {
-    if word.hasExpansion { return true } // its value is unknown until run time — not judged
-    if capture.contains(word.text) { return true }
-    if capture.kinds.contains(.message) { return true }
-    if capture.kinds.contains(.files), pathExists { return true }
-    if word.text.hasPrefix("-"), !word.wasQuoted, optionsHere() { return true }
-    return false
+/// are offered at the position (asked only for a `-word` that is not itself a candidate). A word holding an
+/// expansion never gets here — such lines are never shown to zsh (`zshBufferIsSafe`).
+func zshPositionVerdict(_ word: ShellWord, capture: ZshCompletionCapture, pathExists: Bool,
+                        optionsHere: () -> Bool) -> ZshPositionVerdict {
+    if word.hasExpansion { return .rejected }
+    if capture.contains(word.text) { return .candidate }
+    if capture.kinds.contains(.message) { return .freeText }
+    if capture.kinds.contains(.files), pathExists { return .existingPath }
+    if word.text.hasPrefix("-"), !word.wasQuoted, optionsHere() { return .flag }
+    return .rejected
 }
 
 // MARK: - The prose guard (pure)
 
-/// PURE: a command with no completion function is NOT one when its line ends like a sentence (`?`, `.`, `!`,
-/// `,`) or it has three or more PLAIN words after the command — words that are not flags, paths, existing
-/// files, URLs, quoted strings or `=` assignments (pipes and redirections are not words at all).
+/// PURE: the PLAIN words among `arguments` — not flags, paths, existing files, URLs, quoted strings or `=`
+/// assignments. A word holding an expansion is never an existing path: it counts as plain.
+func shellPlainWords(_ arguments: [ShellWord], pathExists: (ShellWord) -> Bool) -> [ShellWord] {
+    arguments.filter { word in
+        if word.hasExpansion { return true }
+        return !(word.wasQuoted || word.text.hasPrefix("-") || shellLooksLikePath(word)
+                 || word.text.contains("://") || word.text.contains("=") || pathExists(word))
+    }
+}
+
+/// PURE: a command zsh cannot vouch for (no completion function, a line zsh may not see, no answer in time) is
+/// NOT one when its line ends like a sentence (`?`, `.`, `!`, `,`) or it has three or more plain words.
 func shellProseGuardRejects(lineEndsSimpleCommand: Bool, line: String, arguments: [ShellWord],
                             pathExists: (ShellWord) -> Bool) -> Bool {
     if lineEndsSimpleCommand,
        let last = line.trimmingCharacters(in: .whitespacesAndNewlines).last, "?.!,".contains(last) {
         return true
     }
-    let plain = arguments.filter { word in
-        !(word.wasQuoted || word.hasExpansion || word.text.hasPrefix("-") || shellLooksLikePath(word)
-          || word.text.contains("://") || word.text.contains("=") || pathExists(word))
-    }
-    return plain.count >= 3
+    return shellPlainWords(arguments, pathExists: pathExists).count >= 3
 }
 
 // MARK: - The source the validator asks
@@ -96,7 +115,7 @@ func shellProseGuardRejects(lineEndsSimpleCommand: Bool, line: String, arguments
 /// What the whole-command check asks zsh. The live one is `ZshCompletionEngine`; tests hand in a dictionary.
 protocol ShellCompletionSource: AnyObject {
     /// The completion for the line `buffer` with the cursor at its end, run in `directory`. Nil when it could
-    /// not be had before `deadline` (or the engine is unavailable).
+    /// not be had before `deadline`, the engine is unavailable, or the buffer may not be shown to zsh.
     func capture(buffer: String, directory: String, deadline: Date) -> ZshCompletionCapture?
     /// Whether `command` has a completion function. Nil when unknown before `deadline`.
     func hasCompletionFunction(_ command: String, deadline: Date) -> Bool?
@@ -106,13 +125,21 @@ protocol ShellCompletionSource: AnyObject {
 let shellCompletionCheckBudget: TimeInterval = 0.3
 
 /// PURE (given its source): the whole-command check, run AFTER `shellLineIsCommand` said yes. For every simple
-/// command: with a completion function, every word after the command must be taken by its position
-/// (`zshPositionAccepts`); without one — or when zsh cannot answer in time — the prose guard decides.
+/// command:
+/// - a FREE-TEXT command (`say`, `yes`, `echo`… — `shellFreeTextCommands`) is prose once enough unquoted plain
+///   words follow it;
+/// - with a completion function, every word after the command must be taken by its position
+///   (`zshPositionVerdict`), and unquoted words at free-text positions count as prose
+///   (`shellFreeTextPositionLimit`);
+/// - without one, for a line zsh may not see (`zshBufferIsSafe`), or when zsh cannot answer in time — the
+///   prose guard decides.
 /// Lines with compound structure (`if`/`for`/`{`/`(`, several lines) are left to the structural rules.
 func shellCompletionCheckPasses(_ line: String, context: ShellCommandContext, source: ShellCompletionSource?,
                                 deadline: Date) -> Bool {
     guard case .complete(let tokens) = shellTokenize(line) else { return false }
     let chars = Array(line)
+    // Nothing that zsh could evaluate while completing is ever shown to it.
+    let engine = zshBufferIsSafe(line) ? source : nil
 
     // Simple commands: words, with redirection targets set apart (they were judged structurally already).
     var commands: [[ShellWord]] = [[]]
@@ -152,41 +179,57 @@ func shellCompletionCheckPasses(_ line: String, context: ShellCommandContext, so
         let guardRejects = {
             shellProseGuardRejects(lineEndsSimpleCommand: isLast, line: line, arguments: arguments, pathExists: exists)
         }
+        if !head.wasQuoted, let limit = shellFreeTextCommands[head.text] {
+            if shellPlainWords(arguments, pathExists: exists).count >= limit || guardRejects() { return false }
+            continue
+        }
         guard !arguments.isEmpty else { continue }
-        guard let source, !head.hasExpansion,
-              let hasFunction = source.hasCompletionFunction(head.text, deadline: deadline) else {
+        guard let engine, !head.hasExpansion,
+              let hasFunction = engine.hasCompletionFunction(head.text, deadline: deadline), hasFunction else {
             if guardRejects() { return false }
             continue
         }
-        guard hasFunction else {
-            if guardRejects() { return false }
-            continue
-        }
+        var freeTextWords = 0
         for word in arguments {
             let buffer = String(chars[0..<min(word.end, chars.count)])
-            guard let capture = source.capture(buffer: buffer, directory: context.workingDirectory, deadline: deadline) else {
+            guard let capture = engine.capture(buffer: buffer, directory: context.workingDirectory, deadline: deadline) else {
                 // zsh could not answer in time: the prose guard decides this command.
                 if guardRejects() { return false }
                 break
             }
-            let accepted = zshPositionAccepts(word, capture: capture, pathExists: exists(word)) {
+            let verdict = zshPositionVerdict(word, capture: capture, pathExists: exists(word)) {
                 let optionBuffer = String(chars[0..<min(word.start, chars.count)]) + "-"
-                return source.capture(buffer: optionBuffer, directory: context.workingDirectory,
+                return engine.capture(buffer: optionBuffer, directory: context.workingDirectory,
                                       deadline: deadline)?.offersOptions ?? true
             }
-            if !accepted { return false }
+            switch verdict {
+            case .rejected: return false
+            case .freeText: if !word.wasQuoted { freeTextWords += 1 }
+            case .candidate, .existingPath, .flag: break
+            }
         }
+        if freeTextWords >= shellFreeTextPositionLimit { return false }
     }
     return true
 }
 
 // MARK: - The engine
 
-/// The zsh that answers: see this file's header. Thread-safe — one query at a time, under a lock; every reply
-/// is memoized per (directory, buffer), so typing a line asks zsh about each new prefix once.
+/// The zsh that answers: see this file's header. Thread-safe and never blocking for long: a query waits for
+/// the lock only until its deadline, a stopped engine is restarted IN THE BACKGROUND (the query that found it
+/// stopped answers nil — the prose guard decides meanwhile), restarts back off exponentially, and after
+/// `breakerThreshold` consecutive timeouts the breaker opens for `breakerCooldown`: no zsh at all, prose guard
+/// only. Every reply is memoized per (directory, buffer), so typing a line asks zsh about each new prefix once.
+///
+/// It runs under `sandbox-exec` (`zshCompletionSandboxProfile`): no file writes outside its private temp folder
+/// and the terminal devices, no network — defense in depth behind `zshBufferIsSafe`. Completion functions
+/// still read, and still run the tools they need (`git`, `make`…).
 final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
     let zshPath: String
     private let environment: [String: String]
+    /// The engine's own temp folder — the one place it may write.
+    let privateDirectory: String
+    private let backoffBase: TimeInterval
 
     private let lock = NSLock()
     private var process: Process?
@@ -194,44 +237,77 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
     private var outputDescriptor: Int32 = -1
     private var pending = Data()
     private var directory: String?
-    /// After a failed start, when to try again (a missing zsh/zpty is not retried on every keystroke).
-    private var retryAfter = Date.distantPast
+    private var starting = false
+    private var unavailable = false
+    private var nextStartAllowed = Date.distantPast
+    private var consecutiveFailures = 0
+    private var breakerOpenUntil = Date.distantPast
     private var captures: [String: ZshCompletionCapture] = [:]
     private var functions: [String: Bool] = [:]
+    private let startQueue = DispatchQueue(label: "winter.dispatch-pill.zsh-engine-start", qos: .utility)
+
     static let memoLimit = 2048
     /// How long a cold start (zsh, compinit, the inner shell) may take.
     static let startTimeout: TimeInterval = 3
+    static let breakerThreshold = 3
+    static let breakerCooldown: TimeInterval = 60
+    static let maxBackoff: TimeInterval = 30
 
     /// - Parameter environment: what the background zsh sees — the PATH completion functions run tools from
-    ///   (`git`, `make`…), HOME. Never the app's own variables.
-    init(zshPath: String = "/bin/zsh", environment: [String: String]) {
+    ///   (`git`, `make`…), HOME. Never the app's own variables. Its TMPDIR is replaced by the private folder.
+    /// - Parameter backoffBase: the first restart delay (doubling per consecutive failure, up to `maxBackoff`).
+    init(zshPath: String = "/bin/zsh", environment: [String: String], backoffBase: TimeInterval = 0.5) {
         self.zshPath = zshPath
+        self.backoffBase = backoffBase
+        let base = (NSTemporaryDirectory() as NSString).appendingPathComponent("winter-zsh-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+        // realpath, not `resolvingSymlinksInPath` (which strips `/private`): the sandbox matches the kernel's path.
+        privateDirectory = base.withCString { pointer in
+            guard let resolved = realpath(pointer, nil) else { return base }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        var environment = environment
+        environment["TMPDIR"] = privateDirectory
+        environment["TMPPREFIX"] = (privateDirectory as NSString).appendingPathComponent("zsh") // here-documents
         self.environment = environment
     }
 
-    deinit { stopLocked() }
-
-    /// Starts the engine in the background now (it is otherwise started by the first query).
-    func warmUp() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); defer { self.lock.unlock() }
-            _ = self.ensureRunningLocked()
-        }
+    deinit {
+        stopLocked()
+        try? FileManager.default.removeItem(atPath: privateDirectory)
     }
 
-    /// True once the engine has started and answered (tests skip on false).
-    func isAvailable() -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return ensureRunningLocked()
+    /// Starts the engine in the background now (it is otherwise started by the first query that finds it stopped).
+    func warmUp() {
+        lock.lock()
+        startInBackgroundLocked()
+        lock.unlock()
+    }
+
+    /// Starts the engine and waits up to `timeout` for it to answer — tests only (it blocks).
+    func waitUntilAvailable(timeout: TimeInterval = startTimeout + 1) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            lock.lock()
+            let running = process?.isRunning == true
+            let gaveUp = unavailable
+            if !running { startInBackgroundLocked() }
+            lock.unlock()
+            if running { return true }
+            if gaveUp { return false }
+            usleep(20_000)
+        }
+        return false
     }
 
     func capture(buffer: String, directory: String, deadline: Date) -> ZshCompletionCapture? {
-        guard let escaped = zshEngineQuoted(buffer) else { return nil }
-        lock.lock(); defer { lock.unlock() }
+        guard zshBufferIsSafe(buffer), let escaped = zshEngineQuoted(buffer) else { return nil }
+        guard lock.lock(before: deadline) else { return nil }
+        defer { lock.unlock() }
         let key = directory + "\u{0}" + buffer
         if let cached = captures[key] { return cached }
-        guard ensureRunningLocked() else { return nil }
+        guard runningLocked() else { return nil }
         if self.directory != directory {
             guard let quotedDirectory = zshEngineQuoted(directory),
                   requestLocked("D" + quotedDirectory, deadline: deadline) != nil else { return nil }
@@ -245,10 +321,11 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
     }
 
     func hasCompletionFunction(_ command: String, deadline: Date) -> Bool? {
-        guard let escaped = zshEngineQuoted(command) else { return nil }
-        lock.lock(); defer { lock.unlock() }
+        guard zshBufferIsSafe(command), let escaped = zshEngineQuoted(command) else { return nil }
+        guard lock.lock(before: deadline) else { return nil }
+        defer { lock.unlock() }
         if let cached = functions[command] { return cached }
-        guard ensureRunningLocked(), let lines = requestLocked("C" + escaped, deadline: deadline) else { return nil }
+        guard runningLocked(), let lines = requestLocked("C" + escaped, deadline: deadline) else { return nil }
         let has = lines.contains { $0.hasPrefix("C1") }
         functions[command] = has
         return has
@@ -256,39 +333,88 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
 
     // MARK: Process
 
-    private func ensureRunningLocked() -> Bool {
+    /// Running and answering — or, if not, a background start is asked for (never waited on here).
+    private func runningLocked() -> Bool {
         if let process, process.isRunning { return true }
-        stopLocked()
-        guard Date() >= retryAfter, FileManager.default.isExecutableFile(atPath: zshPath) else { return false }
+        if process != nil { noteFailureLocked() }
+        startInBackgroundLocked()
+        return false
+    }
+
+    private func startInBackgroundLocked() {
+        guard !starting, !unavailable, process?.isRunning != true else { return }
+        let now = Date()
+        guard now >= nextStartAllowed, now >= breakerOpenUntil else { return }
+        starting = true
+        startQueue.async { [weak self] in self?.start() }
+    }
+
+    /// Off every caller's thread: launch, wait for the ready line, then install under the lock.
+    private func start() {
+        guard FileManager.default.isExecutableFile(atPath: zshPath),
+              FileManager.default.isExecutableFile(atPath: "/usr/bin/sandbox-exec") else {
+            finishStart(nil, error: "zsh or sandbox-exec missing", permanent: true)
+            return
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: zshPath)
-        process.arguments = ["-f", "-c", zshCompletionEngineScript]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+        process.arguments = ["-p", zshCompletionSandboxProfile(privateDirectory: privateDirectory),
+                             zshPath, "-f", "-c", zshCompletionEngineScript]
         process.environment = environment
         process.currentDirectoryURL = URL(fileURLWithPath: environment["HOME"] ?? NSHomeDirectory())
         let stdin = Pipe(), stdout = Pipe()
+        for descriptor in [stdin.fileHandleForReading.fileDescriptor, stdin.fileHandleForWriting.fileDescriptor,
+                           stdout.fileHandleForReading.fileDescriptor, stdout.fileHandleForWriting.fileDescriptor] {
+            shellSetCloseOnExec(descriptor)
+        }
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch {
-            retryAfter = Date().addingTimeInterval(60)
-            NSLog("[DispatchPill] completion engine: could not start zsh")
-            return false
+            finishStart(nil, error: "could not launch", permanent: false)
+            return
         }
         // A write to an engine that died must fail, never SIGPIPE the app.
         _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
-        self.process = process
-        input = stdin.fileHandleForWriting
-        outputDescriptor = stdout.fileHandleForReading.fileDescriptor
-        pending = Data()
-        directory = nil
-        guard let ready = readLineLocked(deadline: Date().addingTimeInterval(Self.startTimeout)), ready == "R" else {
-            stopLocked()
-            retryAfter = Date().addingTimeInterval(60)
-            NSLog("[DispatchPill] completion engine: unavailable (no zsh/zpty, or it did not start in time)")
-            return false
+        let output = stdout.fileHandleForReading.fileDescriptor
+        var buffer = Data()
+        let ready = zshReadLine(output, pending: &buffer, deadline: Date().addingTimeInterval(Self.startTimeout))
+        guard ready == "R" else {
+            process.terminate()
+            finishStart(nil, error: ready == "X" ? "zsh/zpty unavailable" : "no answer in time", permanent: ready == "X")
+            return
         }
-        NSLog("[DispatchPill] completion engine: started")
-        return true
+        finishStart((process, stdin.fileHandleForWriting, output, buffer), error: nil, permanent: false)
+    }
+
+    private func finishStart(_ started: (Process, FileHandle, Int32, Data)?, error: String?, permanent: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        starting = false
+        if let (process, input, output, buffer) = started {
+            self.process = process
+            self.input = input
+            outputDescriptor = output
+            pending = buffer
+            directory = nil
+            NSLog("[DispatchPill] completion engine: started")
+        } else {
+            if permanent { unavailable = true }
+            noteFailureLocked()
+            NSLog("[DispatchPill] completion engine: %@", error ?? "failed")
+        }
+    }
+
+    /// A timeout or a death: stop, back off, and open the breaker after too many in a row.
+    private func noteFailureLocked() {
+        stopLocked()
+        consecutiveFailures += 1
+        let backoff = min(Self.maxBackoff, backoffBase * pow(2, Double(consecutiveFailures - 1)))
+        nextStartAllowed = Date().addingTimeInterval(backoff)
+        if consecutiveFailures >= Self.breakerThreshold {
+            breakerOpenUntil = Date().addingTimeInterval(Self.breakerCooldown)
+            consecutiveFailures = 0
+            NSLog("[DispatchPill] completion engine: breaker open — prose guard only for %.0f s", Self.breakerCooldown)
+        }
     }
 
     private func stopLocked() {
@@ -301,8 +427,7 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
         directory = nil
     }
 
-    /// One request → its reply lines up to `E`. A timeout or a dead engine stops it (the next query starts a
-    /// fresh one) and answers nil.
+    /// One request → its reply lines up to `E`. A timeout or a dead engine counts as a failure and answers nil.
     private func requestLocked(_ request: String, deadline: Date) -> [String]? {
         guard let input, let data = (request + "\n").data(using: .utf8) else { return nil }
         let wrote: Bool = data.withUnsafeBytes { raw in
@@ -314,35 +439,18 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
             }
             return true
         }
-        guard wrote else { stopLocked(); return nil }
+        guard wrote else { noteFailureLocked(); return nil }
         var lines: [String] = []
         while true {
-            guard let line = readLineLocked(deadline: deadline) else {
-                stopLocked()
+            guard let line = zshReadLine(outputDescriptor, pending: &pending, deadline: deadline) else {
+                noteFailureLocked()
                 return nil
             }
-            if line == "E" { return lines }
-            lines.append(line)
-        }
-    }
-
-    private func readLineLocked(deadline: Date) -> String? {
-        while true {
-            if let newline = pending.firstIndex(of: 0x0A) {
-                let line = pending[pending.startIndex..<newline]
-                pending.removeSubrange(pending.startIndex...newline)
-                return String(decoding: line, as: UTF8.self)
+            if line == "E" {
+                consecutiveFailures = 0
+                return lines
             }
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0, outputDescriptor >= 0 else { return nil }
-            var descriptor = pollfd(fd: outputDescriptor, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&descriptor, 1, Int32(max(1, remaining * 1000)))
-            if ready < 0, errno == EINTR { continue }
-            guard ready > 0 else { return nil }
-            var buffer = [UInt8](repeating: 0, count: 16_384)
-            let count = read(outputDescriptor, &buffer, buffer.count)
-            guard count > 0 else { return nil }
-            pending.append(buffer, count: count)
+            lines.append(line)
         }
     }
 
@@ -352,6 +460,71 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return captures.count
     }
+
+    var breakerIsOpenForTesting: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return Date() < breakerOpenUntil
+    }
+
+    /// Sends `buffer` to the engine WITHOUT the `zshBufferIsSafe` refusal — only to prove the sandbox holds.
+    func captureBypassingSafetyForTesting(buffer: String, directory: String, deadline: Date) -> ZshCompletionCapture? {
+        guard let escaped = zshEngineQuoted(buffer), lock.lock(before: deadline) else { return nil }
+        defer { lock.unlock() }
+        guard runningLocked() else { return nil }
+        if self.directory != directory {
+            guard let quotedDirectory = zshEngineQuoted(directory),
+                  requestLocked("D" + quotedDirectory, deadline: deadline) != nil else { return nil }
+            self.directory = directory
+        }
+        return requestLocked("Q" + escaped, deadline: deadline).map(ZshCompletionCapture.parse)
+    }
+}
+
+/// Reads one line from `descriptor` (buffering in `pending`), or nil at the deadline or EOF.
+private func zshReadLine(_ descriptor: Int32, pending: inout Data, deadline: Date) -> String? {
+    while true {
+        if let newline = pending.firstIndex(of: 0x0A) {
+            let line = pending[pending.startIndex..<newline]
+            pending.removeSubrange(pending.startIndex...newline)
+            return String(decoding: line, as: UTF8.self)
+        }
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0, descriptor >= 0 else { return nil }
+        var poller = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&poller, 1, Int32(max(1, remaining * 1000)))
+        if ready < 0, errno == EINTR { continue }
+        guard ready > 0 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        let count = read(descriptor, &buffer, buffer.count)
+        guard count > 0 else { return nil }
+        pending.append(buffer, count: count)
+    }
+}
+
+/// Marks a descriptor close-on-exec, so no child the app starts (a terminal run, a helper) inherits it.
+func shellSetCloseOnExec(_ descriptor: Int32) {
+    guard descriptor >= 0 else { return }
+    let flags = fcntl(descriptor, F_GETFD)
+    if flags >= 0 { _ = fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) }
+}
+
+/// PURE: the engine's sandbox — everything zsh's completion needs to READ and RUN, nothing it could WRITE
+/// except its private folder and the terminal devices zpty uses, and no network.
+func zshCompletionSandboxProfile(privateDirectory: String) -> String {
+    let quoted = privateDirectory.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    return """
+    (version 1)
+    (allow default)
+    (deny network*)
+    (deny file-write*)
+    (allow file-write*
+      (literal "/dev/null")
+      (literal "/dev/ptmx")
+      (literal "/dev/dtracehelper")
+      (regex #"^/dev/tty")
+      (regex #"^/dev/pty")
+      (subpath "\(quoted)"))
+    """
 }
 
 /// PURE: `text` as a zsh `$'…'` literal the engine `eval`s — or nil when it holds a control character, which must
@@ -379,10 +552,11 @@ func zshEngineQuoted(_ text: String) -> String? {
 /// loop on stdin: `Q<$'buffer'>` completes, `C<$'command'>` asks for a completion function, `D<$'dir'>` moves
 /// both shells. Replies end with a line `E`.
 let zshCompletionEngineScript = #"""
+{ for __fd in /dev/fd/<3->(N:t); do exec {__fd}>&-; done } 2>/dev/null
 zmodload zsh/zpty 2>/dev/null || { print -r -- X; exit 1 }
 autoload -Uz compinit && compinit -C -D 2>/dev/null
 zpty __w /bin/zsh -f -i || { print -r -- X; exit 1 }
-__winit=$(mktemp -t winter-compcap) || exit 1
+__winit=$(mktemp "${TMPDIR:-/tmp}/winter-compcap.XXXXXX") || exit 1
 cat > $__winit <<'INIT'
 PROMPT= RPROMPT= PS2=
 unsetopt beep

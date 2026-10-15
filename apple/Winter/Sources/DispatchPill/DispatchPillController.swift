@@ -327,10 +327,6 @@ final class DispatchPillController: ObservableObject {
         commandMode.workingDirectory = { [weak self] in
             self?.commandDirectory() ?? commandEnvironment.homeDirectory
         }
-        // "Add to transcript" in a terminal window: the composer's own send path.
-        commandRuns.onSendToTranscript = { [weak self] text in
-            await self?.onSubmit?(text) ?? false
-        }
     }
 
     // MARK: - The SwiftUI tree (exists only while the pill is up)
@@ -545,8 +541,9 @@ final class DispatchPillController: ObservableObject {
             runMenuItem(selected)
             return
         }
-        // Command mode: the line runs in the user's shell instead of being sent.
-        if commandMode.isCommandNow(text) {
+        // Command mode: the line runs in the user's shell instead of being sent — only when it was SHOWN purple
+        // (a verdict for this exact text); Return never turns white text into a run.
+        if commandMode.shouldRunOnReturn(text) {
             runCommand(text)
             return
         }
@@ -595,7 +592,9 @@ final class DispatchPillController: ObservableObject {
     /// Return in command mode: the line runs as the user — a pill joins the stack, the composer clears the
     /// way a sent message's does.
     private func runCommand(_ line: String) {
-        commandRuns.start(command: line, workingDirectory: commandDirectory(), environment: commandMode.environment)
+        // The run remembers the dispatch session it was typed into: "Add to transcript" goes there and nowhere else.
+        commandRuns.start(command: line, workingDirectory: commandDirectory(), environment: commandMode.environment,
+                          sessionId: currentSessionId?())
         adapter.composerDraft = ""
         draftCache.clear()
         historyIndex = nil

@@ -33,17 +33,24 @@ final class CommandRun: ObservableObject, Identifiable {
     let command: String
     let workingDirectory: String
     let homeDirectory: String
+    /// The dispatch session the command was typed into — "Add to transcript" goes there and nowhere else.
+    let sessionId: String?
     @Published private(set) var outcome: CommandRunOutcome = .running
     let terminalView: WinterTerminalView
+    /// The process group the run started (forkpty made the shell a session leader, so its pid is the group's) —
+    /// kept after it finishes: background jobs it left behind are still that group.
+    private(set) var processGroup: pid_t?
 
-    /// The tail of what the PTY produced, raw (`TerminalTranscriptLimits.maxCapturedBytes`).
-    private var captured: [UInt8] = []
+    /// The tail of what the PTY produced, raw.
+    private var captured = CapturedOutput(limit: TerminalTranscriptLimits.maxCapturedBytes)
 
     /// `launch: false` builds the run without starting a process (tests — no test runs the user's shell).
-    init(command: String, workingDirectory: String, environment: CommandLineEnvironment, launch: Bool = true) {
+    init(command: String, workingDirectory: String, environment: CommandLineEnvironment, sessionId: String? = nil,
+         launch: Bool = true) {
         self.command = command
         self.workingDirectory = workingDirectory
         self.homeDirectory = environment.homeDirectory
+        self.sessionId = sessionId
         let view = WinterTerminalView(frame: NSRect(x: 0, y: 0, width: 760, height: 420),
                                       font: Typography.terminalNS,
                                       options: TerminalOptions(scrollback: 10_000))
@@ -60,21 +67,19 @@ final class CommandRun: ObservableObject, Identifiable {
         let invocation = loginShellRunInvocation(shell: environment.shell, line: command)
         let env = environment.runEnvironment.map { "\($0.key)=\($0.value)" }
         view.startProcess(executable: invocation.executable, args: invocation.arguments, environment: env,
-                          execName: "-" + (invocation.executable as NSString).lastPathComponent,
-                          currentDirectory: workingDirectory)
-        if !view.process.running { outcome = .failedToStart }
-    }
-
-    /// The whole process group — the shell and everything it started (forkpty made the shell a session
-    /// leader, so its pid is the group's).
-    private var processGroup: pid_t? {
-        let pid = terminalView.process.shellPid
-        return pid > 0 && outcome == .running ? pid : nil
+                          execName: nil, currentDirectory: workingDirectory)
+        guard view.process.running else {
+            outcome = .failedToStart
+            return
+        }
+        processGroup = view.process.shellPid > 0 ? view.process.shellPid : nil
+        // This run's pty master must not leak into the NEXT run's (or any other) child.
+        shellSetCloseOnExec(view.process.childfd)
     }
 
     /// The explicit Stop: hang up the group, and kill it if it is still there a moment later.
     func stop() {
-        guard let group = processGroup else { return }
+        guard outcome == .running, let group = processGroup else { return }
         kill(-group, SIGHUP)
         kill(-group, SIGTERM)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
@@ -83,30 +88,13 @@ final class CommandRun: ObservableObject, Identifiable {
         }
     }
 
-    /// The app is quitting: nothing it started may outlive it.
-    func stopForQuit() {
-        guard let group = processGroup else { return }
-        kill(-group, SIGHUP)
-        kill(-group, SIGTERM)
-        // A short grace for a clean exit, then the hard stop — the app is going either way.
-        for _ in 0..<10 {
-            if kill(group, 0) != 0 { return }
-            usleep(20_000)
-        }
-        kill(-group, SIGKILL)
-    }
-
     /// The message "Add to transcript" sends.
     func transcriptMessage() -> String {
         terminalTranscriptMessage(command: command, workingDirectory: workingDirectory, home: homeDirectory,
-                                  outcome: outcome, output: terminalCappedOutput(terminalPlainText(captured)))
+                                  outcome: outcome, output: terminalCappedOutput(terminalPlainText(captured.bytes())))
     }
 
-    private func capture(_ slice: ArraySlice<UInt8>) {
-        captured.append(contentsOf: slice)
-        let overflow = captured.count - TerminalTranscriptLimits.maxCapturedBytes
-        if overflow > 0 { captured.removeFirst(overflow) }
-    }
+    private func capture(_ slice: ArraySlice<UInt8>) { captured.append(slice) }
 
     private func finish(_ status: Int32?) {
         guard outcome == .running else { return }
@@ -119,6 +107,42 @@ final class CommandRun: ObservableObject, Identifiable {
     func finishForTesting(waitStatus: Int32?) { finish(waitStatus) }
 }
 
+/// The tail of a byte stream within `limit`, kept as chunks: appending never copies what is already held,
+/// and the oldest whole chunks are dropped once the total passes the limit (the kept tail may start a little
+/// before it — never less than `limit` bytes are kept while that many arrived).
+struct CapturedOutput {
+    let limit: Int
+    private var chunks: [[UInt8]] = []
+    private var head = 0
+    private(set) var count = 0
+
+    init(limit: Int) { self.limit = limit }
+
+    mutating func append(_ slice: ArraySlice<UInt8>) {
+        guard !slice.isEmpty else { return }
+        chunks.append(Array(slice))
+        count += slice.count
+        while head < chunks.count - 1, count - chunks[head].count >= limit {
+            count -= chunks[head].count
+            chunks[head] = []
+            head += 1
+        }
+        // Compact the dropped slots now and then, so the array does not grow without bound.
+        if head > 64 {
+            chunks.removeFirst(head)
+            head = 0
+        }
+    }
+
+    /// The kept bytes, oldest first, trimmed to at most `limit`.
+    func bytes() -> [UInt8] {
+        var out: [UInt8] = []
+        out.reserveCapacity(count)
+        for chunk in chunks[head...] { out.append(contentsOf: chunk) }
+        return out.count > limit ? Array(out.suffix(limit)) : out
+    }
+}
+
 /// Every command run from the pill, in the order they started. Owns their terminal windows too.
 @MainActor
 final class CommandRunStore: ObservableObject {
@@ -129,11 +153,17 @@ final class CommandRunStore: ObservableObject {
     /// Test seam: false builds runs without starting their process.
     var launchesProcesses = true
 
-    /// The send path the composer uses (`session.send`): "Add to transcript" hands its message here.
-    var onSendToTranscript: ((String) async -> Bool)?
+    /// Sends a run's transcript message to ONE session — its own send path (`session.send`), never the focused
+    /// session's, never creating one. Wired by the app.
+    var onSendToTranscript: ((_ sessionId: String, _ text: String) async -> Bool)?
+    /// Whether a session still exists (the app's directory). "Add to transcript" is disabled when it does not.
+    var sessionExists: ((String) -> Bool)?
 
     private var windows: [UUID: TerminalWindowController] = [:]
     private var outcomeWatch: [UUID: AnyCancellable] = [:]
+    /// Every process group any run started — dismissed and pruned runs included: their background jobs are
+    /// stopped on quit too.
+    private var launchedGroups: Set<pid_t> = []
     private var quitObserver: NSObjectProtocol?
 
     init() {
@@ -147,11 +177,13 @@ final class CommandRunStore: ObservableObject {
         if let quitObserver { NotificationCenter.default.removeObserver(quitObserver) }
     }
 
-    /// Start `command` in `workingDirectory` as the user. Returns the run (its pill appears at once).
+    /// Start `command` in `workingDirectory` as the user, remembering the dispatch session it came from.
     @discardableResult
-    func start(command: String, workingDirectory: String, environment: CommandLineEnvironment) -> CommandRun {
+    func start(command: String, workingDirectory: String, environment: CommandLineEnvironment,
+               sessionId: String? = nil) -> CommandRun {
         let run = CommandRun(command: command, workingDirectory: workingDirectory, environment: environment,
-                             launch: launchesProcesses)
+                             sessionId: sessionId, launch: launchesProcesses)
+        if let group = run.processGroup { launchedGroups.insert(group) }
         withAnimationIfVisible { runs.append(run) }
         // The pill's state follows the run; the store republishes only so the row re-lays out.
         outcomeWatch[run.id] = run.$outcome.dropFirst().sink { [weak self] _ in
@@ -163,6 +195,18 @@ final class CommandRunStore: ObservableObject {
 
     func run(_ id: UUID) -> CommandRun? { runs.first { $0.id == id } }
 
+    /// "Add to transcript" is possible: the run knows its session, and that session still exists.
+    func canAddToTranscript(_ run: CommandRun) -> Bool {
+        guard let sessionId = run.sessionId, onSendToTranscript != nil else { return false }
+        return sessionExists?(sessionId) ?? false
+    }
+
+    /// Sends the run's command and output to ITS session. False when it cannot (no session, gone, refused).
+    func addToTranscript(_ run: CommandRun) async -> Bool {
+        guard canAddToTranscript(run), let sessionId = run.sessionId, let send = onSendToTranscript else { return false }
+        return await send(sessionId, run.transcriptMessage())
+    }
+
     /// A click on a command pill: its terminal window — brought forward when already open.
     func openWindow(_ id: UUID) {
         guard let run = run(id) else { return }
@@ -170,9 +214,16 @@ final class CommandRunStore: ObservableObject {
             open.bringToFront()
             return
         }
-        let controller = TerminalWindowController(run: run, onAddToTranscript: { [weak self] text in
-            await self?.onSendToTranscript?(text) ?? false
-        })
+        let controller = TerminalWindowController(
+            run: run,
+            canAddToTranscript: { [weak self, weak run] in
+                guard let self, let run else { return false }
+                return self.canAddToTranscript(run)
+            },
+            onAddToTranscript: { [weak self, weak run] in
+                guard let self, let run else { return false }
+                return await self.addToTranscript(run)
+            })
         controller.onClosed = { [weak self] in self?.windows[id] = nil }
         windows[id] = controller
         controller.show()
@@ -201,13 +252,29 @@ final class CommandRunStore: ObservableObject {
         }
     }
 
+    /// The app is quitting: nothing any run started may outlive it — running or finished, its whole process
+    /// group (background jobs included) is hung up, then killed after a short grace.
     private func stopAllForQuit() {
-        runs.forEach { $0.stopForQuit() }
+        let groups = launchedGroups.filter { kill(-$0, 0) == 0 }
+        guard !groups.isEmpty else { return }
+        for group in groups {
+            kill(-group, SIGHUP)
+            kill(-group, SIGTERM)
+        }
+        for _ in 0..<10 {
+            if groups.allSatisfy({ kill(-$0, 0) != 0 }) { return }
+            usleep(20_000)
+        }
+        for group in groups { kill(-group, SIGKILL) }
     }
 
     private func withAnimationIfVisible(_ change: () -> Void) {
         commandPillRowAnimated(change)
     }
+
+    // MARK: Test seams
+
+    var launchedGroupsForTesting: Set<pid_t> { launchedGroups }
 }
 
 /// The terminal's look: Winter's brand tokens, resolved in the dark appearance (the window is dark whatever

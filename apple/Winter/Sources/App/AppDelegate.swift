@@ -485,6 +485,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // A command typed into the pill runs in the bound session's working directory when it has one (a
         // dispatch session usually does not — then the pill falls back to the home folder).
+        // "Add to transcript" sends to the session the command was RUN from — that session's own send, never the
+        // focused one, never a new one; a session that is gone disables the button.
+        pill.commandRuns.onSendToTranscript = { [weak self] sessionId, text in
+            guard let client = self?.appModel?.client else { return false }
+            return (try? await client.send(sessionId: sessionId, text: text)) != nil
+        }
+        pill.commandRuns.sessionExists = { [weak model] sessionId in
+            model?.directory.rows.contains { $0.sessionId == sessionId } ?? false
+        }
         pill.commandWorkingDirectory = { [weak model] in
             guard let model, let sid = model.focusedSessionId,
                   let row = model.directory.rows.first(where: { $0.sessionId == sid }) else { return nil }

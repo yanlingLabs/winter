@@ -14,57 +14,52 @@ enum TerminalTranscriptLimits {
     static let maxCapturedBytes = 1_048_576
 }
 
-/// PURE: terminal output bytes → plain text. Strips CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ST`), DCS/SOS/PM/APC
-/// strings, and the other two- and three-byte escapes; resolves `\r\n` to a line break, a lone `\r` to "back to
-/// the start of the line" (what follows overwrites it), backspace to deleting the previous character; drops the
-/// remaining C0 controls except tab and newline. Invalid UTF-8 decodes to U+FFFD.
+/// PURE: terminal output bytes → plain text. Decodes UTF-8 FIRST (invalid bytes become U+FFFD) — a UTF-8
+/// continuation byte such as 0x9B is part of "ś" or "😛", never an 8-bit CSI, so there is no C1 handling at all —
+/// then strips, on the decoded text, CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ST`), DCS/SOS/PM/APC strings and the
+/// other two- and three-character escapes; resolves `\r\n` to a line break, a lone `\r` to "back to the start of
+/// the line" (what follows overwrites it), backspace to deleting the previous character; drops the remaining C0
+/// controls except tab and newline.
 func terminalPlainText(_ bytes: [UInt8]) -> String {
-    var cleaned: [UInt8] = []
-    cleaned.reserveCapacity(bytes.count)
+    let scalars = Array(String(decoding: bytes, as: UTF8.self).unicodeScalars)
+    var cleaned = String.UnicodeScalarView()
     var i = 0
-    let n = bytes.count
+    let n = scalars.count
+    func value(_ k: Int) -> UInt32 { scalars[k].value }
     while i < n {
-        let b = bytes[i]
-        if b == 0x1B { // ESC
-            guard i + 1 < n else { break }
-            let next = bytes[i + 1]
-            switch next {
-            case 0x5B: // CSI: parameters/intermediates 0x20–0x3F, final 0x40–0x7E
-                var j = i + 2
-                while j < n, !(0x40...0x7E).contains(bytes[j]) { j += 1 }
-                i = j + 1
-            case 0x5D, 0x50, 0x58, 0x5E, 0x5F: // OSC, DCS, SOS, PM, APC: to BEL or ST (ESC \)
-                var j = i + 2
-                while j < n {
-                    if bytes[j] == 0x07 { j += 1; break }
-                    if bytes[j] == 0x1B, j + 1 < n, bytes[j + 1] == 0x5C { j += 2; break }
-                    j += 1
-                }
-                i = j
-            case 0x20...0x2F: // ESC + intermediate(s) + final (`ESC ( B`)
-                var j = i + 1
-                while j < n, (0x20...0x2F).contains(bytes[j]) { j += 1 }
-                i = j + 1
-            default: // ESC + one final (`ESC =`, `ESC 7`, `ESC M` …)
-                i += 2
-            }
+        guard value(i) == 0x1B else {
+            cleaned.append(scalars[i])
+            i += 1
             continue
         }
-        if b == 0x9B { // 8-bit CSI
-            var j = i + 1
-            while j < n, !(0x40...0x7E).contains(bytes[j]) { j += 1 }
+        guard i + 1 < n else { break }
+        switch value(i + 1) {
+        case 0x5B: // CSI: parameters/intermediates 0x20–0x3F, final 0x40–0x7E
+            var j = i + 2
+            while j < n, !(0x40...0x7E).contains(value(j)) { j += 1 }
             i = j + 1
-            continue
+        case 0x5D, 0x50, 0x58, 0x5E, 0x5F: // OSC, DCS, SOS, PM, APC: to BEL or ST (ESC \)
+            var j = i + 2
+            while j < n {
+                if value(j) == 0x07 { j += 1; break }
+                if value(j) == 0x1B, j + 1 < n, value(j + 1) == 0x5C { j += 2; break }
+                j += 1
+            }
+            i = j
+        case 0x20...0x2F: // ESC + intermediate(s) + final (`ESC ( B`)
+            var j = i + 1
+            while j < n, (0x20...0x2F).contains(value(j)) { j += 1 }
+            i = j + 1
+        default: // ESC + one final (`ESC =`, `ESC 7`, `ESC M` …)
+            i += 2
         }
-        cleaned.append(b)
-        i += 1
     }
 
     // Lines: \r\n → \n; a lone \r returns to the line's start; \b deletes back.
     var lines: [String] = []
     var line: [Character] = []
     var column = 0
-    let text = String(decoding: cleaned, as: UTF8.self)
+    let text = String(cleaned)
     var characters = Array(text)
     // `\r\n` arrives as ONE grapheme in Swift; split it back so the rules below see both.
     characters = characters.flatMap { $0 == "\r\n" ? ["\n"] : [$0] }

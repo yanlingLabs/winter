@@ -139,7 +139,66 @@ final class ZshCompletionTests: XCTestCase {
     func testCompoundLinesAndExpansionsAreLeftToTheStructuralRules() {
         XCTAssertTrue(passes("(git is confusing)"))
         XCTAssertTrue(passes("if true; then echo this is a test; fi"))
-        XCTAssertTrue(passes("git $SUBCOMMAND"), "an expansion's value is unknown — not judged")
+        XCTAssertTrue(passes("git $SUBCOMMAND"),
+                      "a line zsh may not see meets the prose guard; the expansion counts as one plain word")
+        XCTAssertFalse(passes("git $a $b $c"), "three of them are prose")
+    }
+
+    func testNothingZshCouldEvaluateIsShownToIt() {
+        for line in ["ls $(id)/", "ls `id`/", "ls $HOME/", "echo $((1+1))", "ls !!", "diff =(ls) x", "cat <(ls)",
+                     "ls *(e:'id':)", "ls ${x::=1}"] {
+            XCTAssertFalse(zshBufferIsSafe(line), line)
+        }
+        XCTAssertTrue(zshBufferIsSafe("git commit -m 'fix the bug'"))
+        XCTAssertTrue(zshBufferIsSafe("ls -la ~/proj/*.md"))
+    }
+
+    private func isWholeCommand(_ line: String) -> Bool {
+        shellLineIsCommand(line, context: context()) && passes(line)
+    }
+
+    func testRepliesAreNeverCommands() {
+        for reply in ["yes", "true", "wait", "continue", "say", "sure", "ok"] {
+            XCTAssertFalse(isWholeCommand(reply), "\(reply) alone is a reply")
+        }
+        XCTAssertFalse(isWholeCommand("say thanks"))
+        XCTAssertFalse(isWholeCommand("yes please"))
+        XCTAssertTrue(isWholeCommand(#"say "thanks""#), "quoted text is meant for the command")
+        XCTAssertTrue(isWholeCommand("echo hi"), "one plain word is fine")
+        XCTAssertFalse(isWholeCommand("echo this is prose"), "three or more is prose")
+        XCTAssertFalse(isWholeCommand("echo hi."), "and it ends like a sentence")
+        for bare in ["ls", "pwd", "top", "make"] {
+            XCTAssertTrue(isWholeCommand(bare), "\(bare) is run bare")
+            XCTAssertTrue(shellBareCommandAllowlist.contains(bare))
+        }
+        XCTAssertTrue(isWholeCommand("./build.sh"), "a path to a program is a command alone")
+    }
+
+    func testUnquotedWordsAtAFreeTextPositionCountAsProse() {
+        let source = FakeCompletionSource(captures: [
+            "git commit": Self.hits(["commit"]),
+            "git commit -m": Self.hits(["-m"]),
+            "git commit -m fix": Self.hits([], [.message]),
+            "git commit -m fix the": Self.hits([], [.message]),
+            "git commit -m fix the bug": Self.hits([], [.message]),
+        ], functions: ["git": true])
+        XCTAssertTrue(passes("git commit -m fix", source))
+        XCTAssertFalse(passes("git commit -m fix the bug", source), "three unquoted free-text words")
+    }
+
+    func testCapturedOutputKeepsTheTailWithoutCopyingIt() {
+        var output = CapturedOutput(limit: 10)
+        for chunk in ["abc", "defg", "hij", "klmno"] { output.append(Array(chunk.utf8)[...]) }
+        XCTAssertEqual(String(decoding: output.bytes(), as: UTF8.self), "fghijklmno", "the last 10 bytes, in order")
+        var small = CapturedOutput(limit: 100)
+        small.append(Array("short".utf8)[...])
+        XCTAssertEqual(String(decoding: small.bytes(), as: UTF8.self), "short")
+    }
+
+    func testMultibyteTextSurvivesStripping() {
+        let text = "\u{1B}[1mś ě 😛\u{1B}[0m — ąę ok\u{1B}]0;title\u{07}"
+        XCTAssertEqual(terminalPlainText(Array(text.utf8)), "ś ě 😛 — ąę ok",
+                       "0x9B inside UTF-8 is a continuation byte, never a CSI")
     }
 
     func testTheProseGuardItself() {
@@ -194,7 +253,7 @@ final class ZshCompletionIntegrationTests: XCTestCase {
             "HOME": home.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TERM": "xterm-256color",
             "LANG": "en_US.UTF-8", "GIT_OPTIONAL_LOCKS": "0",
         ])
-        guard engine.isAvailable() else { throw XCTSkip("zsh/zpty unavailable — the engine did not start") }
+        guard engine.waitUntilAvailable() else { throw XCTSkip("zsh/zpty/sandbox-exec unavailable — the engine did not start") }
     }
 
     override func tearDownWithError() throws {
@@ -237,10 +296,83 @@ final class ZshCompletionIntegrationTests: XCTestCase {
         print("[ZshCompletionIntegrationTests] per-check latency (uncached): " + timings.joined(separator: "; "))
     }
 
-    func testAnEngineThatDiesIsRestarted() {
+    func testAnEngineThatTimesOutIsRestartedInTheBackground() {
         XCTAssertNotNil(engine.capture(buffer: "git sta", directory: workDirectory, deadline: Date().addingTimeInterval(3)))
-        // A query that cannot answer in time stops the engine; the next query starts a fresh one.
+        // A query that cannot answer in time stops the engine.
         XCTAssertNil(engine.capture(buffer: "git stas", directory: workDirectory, deadline: Date()))
+        // The next query never waits for a restart: it answers nil at once, and the restart happens off its thread.
+        let started = Date()
+        XCTAssertNil(engine.capture(buffer: "git stat", directory: workDirectory, deadline: Date().addingTimeInterval(3)))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.1, "no restart on the caller's thread")
+        XCTAssertTrue(engine.waitUntilAvailable(timeout: 6), "…and it comes back after its backoff")
         XCTAssertNotNil(engine.capture(buffer: "git stat", directory: workDirectory, deadline: Date().addingTimeInterval(3)))
+    }
+
+    /// The reviewer's cases: typing them must never run their `$(…)`. Each is put through the engine (refused),
+    /// the full validator and the ghost — and then, bypassing the refusal, through the SANDBOXED engine — and no
+    /// file may appear.
+    func testTypedSubstitutionsNeverRunWhileBeingChecked() throws {
+        let cases = ["ls $(touch pw1)/", "cd $(touch pw2)/", "ls ~$(touch pw3)/", "echo $(($(touch pw4)))/",
+                     "ls ${x::=$(touch pw5)}/", "cat $(touch pw6)/x"]
+        let home = root.appendingPathComponent("home").path
+        let context = ShellCommandContext(pathDirectories: ["/usr/bin", "/bin", "/usr/sbin", "/sbin"], homeDirectory: home,
+                                          workingDirectory: workDirectory, fileSystem: LiveShellFileSystem())
+        let environment = CommandLineEnvironment.fixed(pathDirectories: context.pathDirectories, commandNames: ["ls", "cat"],
+                                                       homeDirectory: home, fileSystem: LiveShellFileSystem(),
+                                                       completion: engine)
+        func created() -> [String] {
+            ((try? FileManager.default.contentsOfDirectory(atPath: workDirectory)) ?? []).filter { $0 != "Makefile" }
+                + ((try? FileManager.default.contentsOfDirectory(atPath: home)) ?? [])
+        }
+        for line in cases {
+            XCTAssertFalse(zshBufferIsSafe(line), line)
+            XCTAssertNil(engine.capture(buffer: line, directory: workDirectory, deadline: Date().addingTimeInterval(2)),
+                         "the engine refuses \(line)")
+            _ = shellLineIsCommand(line, context: context)
+            _ = shellCompletionCheckPasses(line, context: context, source: engine, deadline: Date().addingTimeInterval(2))
+            _ = shellCompletion(for: line, context: context, commandNames: ["ls"], source: engine,
+                                deadline: Date().addingTimeInterval(2))
+            _ = DispatchPillCommandMode.evaluate(line, environment: environment, workingDirectory: workDirectory)
+            XCTAssertEqual(created(), [], "checking \(line) created a file")
+        }
+        // Defense in depth: even shown to zsh, the sandbox denies the write.
+        for line in cases {
+            _ = engine.captureBypassingSafetyForTesting(buffer: line, directory: workDirectory,
+                                                        deadline: Date().addingTimeInterval(3))
+            XCTAssertEqual(created(), [], "the sandboxed engine let \(line) write a file")
+        }
+    }
+
+    /// The engine's sandbox, on its own: no write outside its private folder.
+    func testTheSandboxProfileDeniesWritesOutsideThePrivateFolder() throws {
+        let profile = zshCompletionSandboxProfile(privateDirectory: engine.privateDirectory)
+        func touch(_ path: String) -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+            process.arguments = ["-p", profile, "/usr/bin/touch", path]
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+        let outside = (workDirectory as NSString).appendingPathComponent("outside.txt")
+        XCTAssertNotEqual(touch(outside), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside))
+        let inside = (engine.privateDirectory as NSString).appendingPathComponent("inside.txt")
+        XCTAssertEqual(touch(inside), 0, "the private folder stays writable")
+    }
+}
+
+/// The engine's breaker, on a "zsh" that never answers: after a few failures it stops trying for a while, and a
+/// query never waits.
+final class ZshCompletionEngineBreakerTests: XCTestCase {
+    func testRepeatedFailuresOpenTheBreaker() {
+        let engine = ZshCompletionEngine(zshPath: "/usr/bin/false", environment: ["HOME": NSTemporaryDirectory()],
+                                         backoffBase: 0.01)
+        XCTAssertFalse(engine.waitUntilAvailable(timeout: 1.5))
+        XCTAssertTrue(engine.breakerIsOpenForTesting, "three failures in a row: prose guard only for a while")
+        let started = Date()
+        XCTAssertNil(engine.capture(buffer: "git sta", directory: "/tmp", deadline: Date().addingTimeInterval(2)))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.05, "an open breaker answers at once")
     }
 }

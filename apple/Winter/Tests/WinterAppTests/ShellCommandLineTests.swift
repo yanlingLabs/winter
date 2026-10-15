@@ -45,6 +45,7 @@ final class ShellCommandLineTests: XCTestCase {
         "/usr/bin/grep": .executable, "/usr/bin/git": .executable, "/usr/bin/gitk": .executable,
         "/usr/bin/README": .file,
         "/bin/cat": .executable, "/bin/sleep": .executable,
+        "/usr/bin/yes": .executable, "/usr/bin/say": .executable, "/usr/bin/top": .executable, "/usr/bin/true": .executable,
         "/tmp": .directory, "/tmp/x": .directory, "/tmp/x/notes.md": .file, "/tmp/x/My Files": .directory,
         "/tmp/x/a.log": .file, "/tmp/x/b.log": .file,
         "/Users": .directory, "/Users/u": .directory, "/Users/u/proj": .directory,
@@ -334,15 +335,19 @@ final class ShellCommandLineTests: XCTestCase {
 
     func testARunHandsTheLineOverAsAnArgumentNeverInTheScript() {
         let line = #"echo "it's"; rm -rf "$HOME/x" `whoami`"#
-        let zsh = loginShellRunInvocation(shell: "/bin/zsh", line: line)
+        let zsh = loginShellRunInvocation(shell: "/opt/homebrew/bin/zsh", line: line)
+        // The fd-closing trampoline first, then the user's own shell.
         XCTAssertEqual(zsh.executable, "/bin/zsh")
-        XCTAssertEqual(Array(zsh.arguments.prefix(2)), ["-l", "-c"])
-        XCTAssertEqual(zsh.arguments.last, line, "the line is the last argument, verbatim")
-        XCTAssertFalse(zsh.arguments[2].contains("whoami"), "and never spliced into the script")
-        XCTAssertTrue(zsh.arguments[2].contains(".zshrc"), "the rc file is sourced, as the probe does")
-        XCTAssertTrue(zsh.arguments[2].hasSuffix(#"eval "$__winter_line""#))
+        XCTAssertEqual(Array(zsh.arguments.prefix(5)), ["-f", "-c", loginShellRunTrampoline, "winter-run", "/opt/homebrew/bin/zsh"])
+        XCTAssertTrue(loginShellRunTrampoline.contains("<3->"), "every descriptor above 2 is closed")
+        let shell = Array(zsh.arguments.dropFirst(5))
+        XCTAssertEqual(Array(shell.prefix(2)), ["-l", "-c"])
+        XCTAssertEqual(shell.last, line, "the line is the last argument, verbatim")
+        XCTAssertFalse(shell[2].contains("whoami"), "and never spliced into the script")
+        XCTAssertTrue(shell[2].contains(".zshrc"), "the rc file is sourced, as the probe does")
+        XCTAssertTrue(shell[2].hasSuffix(#"eval "$__winter_line""#))
         let fish = loginShellRunInvocation(shell: "/opt/homebrew/bin/fish", line: "ls")
-        XCTAssertEqual(fish.arguments, ["-l", "-c", "ls"])
+        XCTAssertEqual(Array(fish.arguments.dropFirst(4)), ["/opt/homebrew/bin/fish", "-l", "-c", "ls"])
     }
 
     func testTheRunEnvironmentIsTheLoginShellsNotTheApps() {
@@ -375,7 +380,7 @@ final class DispatchPillCommandModeTests: XCTestCase {
         let mode = DispatchPillCommandMode(environment: .inert, workingDirectory: { "/tmp" })
         mode.evaluateNowForTesting("ls /tmp")
         XCTAssertFalse(mode.isActive(for: "ls /tmp"))
-        XCTAssertFalse(mode.isCommandNow("ls"))
+        XCTAssertFalse(mode.shouldRunOnReturn("ls"))
         XCTAssertNil(mode.ghost(for: "ls /tmp"))
     }
 
@@ -398,17 +403,35 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertFalse(mode.displaysCommand("hello there"), "…both ways")
     }
 
-    func testReturnJudgesTheFilesystemAsItIsNotAsItWas() {
+    func testReturnNeverUpgradesButMayDowngrade() {
         var nodes = ShellCommandLineTests.fileSystem.nodes
         let fileSystem = MutableFileSystem(nodes: nodes)
         let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: ["open"],
                                                        homeDirectory: "/Users/u", fileSystem: fileSystem)
         let mode = DispatchPillCommandMode(environment: environment, workingDirectory: { "/tmp" })
+        // White (no file yet), then the file appears: Return still sends — it never upgrades to a run.
         mode.evaluateNowForTesting("open /tmp/later.md")
-        XCTAssertFalse(mode.isActive(for: "open /tmp/later.md"))
         nodes["/tmp/later.md"] = .file
         fileSystem.nodes = nodes
-        XCTAssertTrue(mode.isCommandNow("open /tmp/later.md"), "the file appeared; the draft did not change")
+        XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "white text never runs")
+        // Purple, then the file vanishes: Return downgrades to a message.
+        mode.evaluateNowForTesting("open /tmp/later.md")
+        XCTAssertTrue(mode.shouldRunOnReturn("open /tmp/later.md"))
+        nodes["/tmp/later.md"] = nil
+        fileSystem.nodes = nodes
+        XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "the path vanished: a message")
+    }
+
+    func testReturnAndDeleteActOnlyOnAFreshVerdictForTheExactText() {
+        let mode = makeMode()
+        XCTAssertFalse(mode.shouldRunOnReturn("ls /tmp"), "no verdict shown yet (typed within the debounce)")
+        XCTAssertFalse(mode.deleteBackward(text: "ls /tmp", caretAtEnd: true, hasSelection: false))
+        mode.evaluateNowForTesting("ls /tmp")
+        XCTAssertTrue(mode.displaysCommand("ls /tmp/"), "the purple is still showing from the last keystroke…")
+        XCTAssertFalse(mode.shouldRunOnReturn("ls /tmp/"), "…but it is stale: Return sends")
+        XCTAssertFalse(mode.deleteBackward(text: "ls /tmp/", caretAtEnd: true, hasSelection: false),
+                       "…and Delete deletes")
+        XCTAssertTrue(mode.shouldRunOnReturn("ls /tmp"))
     }
 
     /// A filesystem a test can change between two questions.
@@ -438,7 +461,7 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertTrue(mode.deleteBackward(text: "make", caretAtEnd: true, hasSelection: false), "consumed")
         XCTAssertFalse(mode.isActive(for: "make"))
         XCTAssertFalse(mode.displaysCommand("make"))
-        XCTAssertFalse(mode.isCommandNow("make"), "Return sends it as a message now")
+        XCTAssertFalse(mode.shouldRunOnReturn("make"), "Return sends it as a message now")
         XCTAssertFalse(mode.deleteBackward(text: "make", caretAtEnd: true, hasSelection: false), "the next Delete deletes")
         mode.evaluateNowForTesting("make ")
         XCTAssertTrue(mode.isActive(for: "make "), "different and valid: command mode is back")
@@ -481,6 +504,7 @@ final class DispatchPillCommandRunTests: XCTestCase {
         let (pill, sent) = makePill()
         pill.commandWorkingDirectory = { "/tmp" }
         pill.adapter.composerDraft = "ls /tmp"
+        pill.commandMode.evaluateNowForTesting("ls /tmp") // shown purple
         pill.submit("ls /tmp")
         XCTAssertEqual(pill.commandRuns.runs.count, 1)
         XCTAssertEqual(pill.commandRuns.runs.first?.command, "ls /tmp")
@@ -488,6 +512,45 @@ final class DispatchPillCommandRunTests: XCTestCase {
         XCTAssertEqual(pill.adapter.composerDraft, "", "the composer clears")
         await Task.yield()
         XCTAssertEqual(sent(), [], "a command is never sent to Dispatch")
+    }
+
+    func testReturnBeforeAnyVerdictSendsAMessage() async {
+        let (pill, sent) = makePill()
+        pill.adapter.composerDraft = "ls /tmp"
+        pill.submit("ls /tmp") // within the debounce: it was never shown purple
+        for _ in 0..<20 where sent().isEmpty { await Task.yield() }
+        XCTAssertEqual(sent(), ["ls /tmp"])
+        XCTAssertTrue(pill.commandRuns.runs.isEmpty, "Return never turns white text into a run")
+    }
+
+    func testAddToTranscriptGoesToTheRunsOwnSessionOnly() async {
+        let (pill, sent) = makePill()
+        var focused = "session-a"
+        pill.currentSessionId = { focused }
+        var delivered: [(String, String)] = []
+        var alive: Set<String> = ["session-a", "session-b"]
+        pill.commandRuns.onSendToTranscript = { sessionId, text in delivered.append((sessionId, text)); return true }
+        pill.commandRuns.sessionExists = { alive.contains($0) }
+        pill.adapter.composerDraft = "ls /tmp"
+        pill.commandMode.evaluateNowForTesting("ls /tmp")
+        pill.submit("ls /tmp")
+        guard let run = pill.commandRuns.runs.first else { return XCTFail("no run") }
+        XCTAssertEqual(run.sessionId, "session-a", "recorded at RUN time")
+        focused = "session-b"
+        XCTAssertTrue(pill.commandRuns.canAddToTranscript(run))
+        let ok = await pill.commandRuns.addToTranscript(run)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(delivered.map(\.0), ["session-a"], "never the focused session")
+        XCTAssertEqual(sent(), [], "and never the composer's send-or-create path")
+        alive.remove("session-a")
+        XCTAssertFalse(pill.commandRuns.canAddToTranscript(run), "its session is gone: the button disables")
+        let refused = await pill.commandRuns.addToTranscript(run)
+        XCTAssertFalse(refused)
+        XCTAssertEqual(delivered.count, 1)
+
+        let orphan = pill.commandRuns.start(command: "ls", workingDirectory: "/tmp",
+                                            environment: pill.commandMode.environment, sessionId: nil)
+        XCTAssertFalse(pill.commandRuns.canAddToTranscript(orphan), "no session at run time: nothing to add to")
     }
 
     func testAMessageStillSends() async {
@@ -523,6 +586,7 @@ final class DispatchPillCommandRunTests: XCTestCase {
         let (pill, _) = makePill()
         pill.commandWorkingDirectory = { "/tmp" }
         pill.adapter.composerDraft = "ls /tmp"
+        pill.commandMode.evaluateNowForTesting("ls /tmp")
         pill.submit("ls /tmp")
         guard let run = pill.commandRuns.runs.first else { return XCTFail("no run") }
         XCTAssertEqual(run.outcome, .running)

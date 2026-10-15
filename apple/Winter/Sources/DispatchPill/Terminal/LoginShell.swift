@@ -97,16 +97,26 @@ private func loginShellBetween(_ text: String, _ start: String, _ end: String) -
     return String(text[a.upperBound..<b.lowerBound])
 }
 
-/// PURE: how a line runs — the executable and its arguments. A POSIX dialect sources the rc file the way the
-/// probe does and then `eval`s the line, handed over as `$1` (never spliced into the script, so no quoting can
-/// break out of it) and cleared from the positional parameters before it runs. fish takes the line as its
-/// `-c` script.
+/// The run's trampoline: SwiftTerm's `forkpty` + `execve` hands the child every descriptor the app holds that is
+/// not close-on-exec, and it offers no pre-exec hook. So a run starts in `/bin/zsh -f`, which closes every
+/// descriptor above 2 and then `exec`s the user's shell — nothing of the app's reaches the user's command.
+let loginShellRunTrampoline = #"{ for __fd in /dev/fd/<3->(N:t); do exec {__fd}>&-; done } 2>/dev/null; exec "$@""#
+
+/// PURE: how a line runs — the executable and its arguments. Through the trampoline above, the user's shell: a
+/// POSIX dialect sources the rc file the way the probe does and then `eval`s the line, handed over as `$1`
+/// (never spliced into the script, so no quoting can break out of it) and cleared from the positional
+/// parameters before it runs. fish takes the line as its `-c` script.
 func loginShellRunInvocation(shell: String, line: String) -> (executable: String, arguments: [String]) {
     let dialect = loginShellDialect(shell) ?? .zsh
-    let executable = loginShellDialect(shell) == nil ? "/bin/zsh" : shell
-    if dialect == .fish { return (executable, ["-l", "-c", line]) }
-    let script = loginShellRcPrelude(dialect) + #"__winter_line=$1; set --; eval "$__winter_line""#
-    return (executable, ["-l", "-c", script, (executable as NSString).lastPathComponent, line])
+    let target = loginShellDialect(shell) == nil ? "/bin/zsh" : shell
+    let shellArguments: [String]
+    if dialect == .fish {
+        shellArguments = ["-l", "-c", line]
+    } else {
+        let script = loginShellRcPrelude(dialect) + #"__winter_line=$1; set --; eval "$__winter_line""#
+        shellArguments = ["-l", "-c", script, (target as NSString).lastPathComponent, line]
+    }
+    return ("/bin/zsh", ["-f", "-c", loginShellRunTrampoline, "winter-run", target] + shellArguments)
 }
 
 /// PURE: the environment a run (and the probe) starts from. A Mac app's own environment is LaunchServices'
@@ -291,6 +301,8 @@ private func runLoginShellProbe(shell: String, arguments: [String], environment:
     var pipe: [Int32] = [0, 0]
     guard Darwin.pipe(&pipe) == 0 else { return nil }
     let readEnd = pipe[0], writeEnd = pipe[1]
+    shellSetCloseOnExec(readEnd)
+    shellSetCloseOnExec(writeEnd)
 
     var actions: posix_spawn_file_actions_t?
     posix_spawn_file_actions_init(&actions)
