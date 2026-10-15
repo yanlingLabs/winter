@@ -3,12 +3,12 @@ import CryptoKit
 @testable import WinterKit
 import WinterProtocol
 
-/// Async fake transport only. Not run under the current Swift/native/test-host hold.
+/// Async fake transport only: no daemon, guest, native worker or home.
 @MainActor final class CoworkGuidanceModelTests: XCTestCase {
     private final class Host {
         /// `journalFailed`: the NEXT update fails like a journaled operation that could not finish; the
         /// host then answers `recovery_required` forever to that request ID, while a new one proceeds.
-        enum SaveMode: Equatable { case normal, lostBeforeCommit, lostAfterCommit, conflict, malformedReceipt, journalFailed }
+        enum SaveMode: Equatable { case normal, lostBeforeCommit, lostAfterCommit, malformedReceipt, journalFailed }
         var calls: [(String, SessionEvent.JSONValue)] = []
         var contents = ["one": "Canonical guidance", "two": "Other workspace guidance"]
         var revisions = ["one": 1, "two": 1]
@@ -75,7 +75,7 @@ import WinterProtocol
                 if let code = refuseNextUpdate { refuseNextUpdate = nil; throw refusal(code) }
                 if saveMode == .lostBeforeCommit { throw NSError(domain: "disconnected", code: 1) }
                 if saveMode == .journalFailed { saveMode = .normal; failedRequests.insert(requestId); throw refusal("recovery_required") }
-                if saveMode == .conflict || fields["expectedInstructionRevision"] as? Int != revisions[id]
+                if fields["expectedInstructionRevision"] as? Int != revisions[id]
                     || fields["expectedDigest"] as? String != metadata(id)["digest"] as? String {
                     throw RpcError(code: -32602, message: "Cowork request refused", data: .object(["code": .string("revision_conflict")]))
                 }
@@ -122,23 +122,116 @@ import WinterProtocol
         host.unreadable = true; await model.refreshInstructions()
         XCTAssertEqual(model.guidance?.draft, "Unsaved"); XCTAssertFalse(model.guidance?.canSave ?? true)
     }
-    func testStrictReadRefusesMalformedEncodingBoundsBytesDigestAndForeignMetadata() async {
-        let invalid = Data([0xc3, 0x28])
-        let host = Host(); let validBytes = Data(host.contents["one"]!.utf8)
-        let cases: [[String: Any]] = [
-            ["contentBase64": invalid.base64EncodedString(), "bytes": invalid.count, "digest": host.digest(invalid)],
-            ["contentBase64": " \n" + validBytes.base64EncodedString()], ["contentBase64": String(repeating: "A", count: 87_388)],
-            ["bytes": validBytes.count + 1], ["bytes": 65_537], ["digest": String(repeating: "0", count: 64)],
-            ["encoding": "utf-16"], ["workspaceId": "two"], ["instructionRevision": 0], ["refreshState": "ready"],
-            ["contentBase64": Data([0]).base64EncodedString(), "bytes": 1, "digest": host.digest(Data([0]))],
+    /// A provenance report that agrees with `read` field for field, so that a case which corrupts one read
+    /// field trips ONLY the validator named for it and not also the read-versus-provenance cross-check.
+    /// `workspaceId` is deliberately not mirrored: the provenance check compares it with the SELECTED id.
+    private func mirroring(_ read: [String: Any]) -> [String: Any] {
+        var provenance: [String: Any] = [:]
+        for key in ["instructionRevision", "digest", "bytes", "refreshState"] { if let value = read[key] { provenance[key] = value } }
+        if let digest = read["digest"] { provenance["entries"] = [["kind": "workspace", "guestPath": "/workspace/.winter/WINTER.md", "digest": digest]] }
+        return provenance
+    }
+    /// Selects a workspace the host answers with `host`'s overrides and asserts nothing was published or sendable.
+    private func assertRefused(_ host: Host, _ label: String, file: StaticString = #filePath, line: UInt = #line) async {
+        let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        XCTAssertNotNil(model.guidance, label, file: file, line: line)
+        XCTAssertNil(model.guidance?.draft, label, file: file, line: line); XCTAssertNil(model.guidance?.current, label, file: file, line: line)
+        XCTAssertNil(model.guidance?.provenance, label, file: file, line: line)
+        XCTAssertFalse(model.guidance?.available ?? true, label, file: file, line: line)
+        XCTAssertNotNil(model.guidance?.message, label, file: file, line: line)
+        await model.saveInstructions(); XCTAssertTrue(host.updates.isEmpty, label, file: file, line: line)
+    }
+    /// One read field is wrong per case, everything else is valid, and the provenance report mirrors the
+    /// read, so dropping the single validator named in the label turns that case red and no other.
+    /// Checked by removing each validator from `decodeInstructions`/`validMetadata` in turn: every one
+    /// named below is killed by exactly its own case.
+    ///
+    /// Six checks have no case of their own, in three groups, because within a group none can be
+    /// tripped alone (removing any one of them leaves the test green; removing the whole group turns
+    /// `...OverlappingValidators` red):
+    /// - the byte-count bounds: `bytes >= 0` and `bytes <= max` in the metadata check, and the decoded
+    ///   `count <= max`, are implied by each other once `bytes == decoded count` holds;
+    /// - the digest's length and lowercase-hex shape are implied by `digest == sha256(bytes)`, since a
+    ///   SHA-256 hex digest is always 64 lowercase hex characters;
+    /// - the base64 length cap is implied by the decoded-size and canonical-encoding checks, since a
+    ///   canonical encoding of at most 65,536 bytes is at most 87,384 characters.
+    func testStrictReadRefusesAFieldThatViolatesExactlyOneValidator() async {
+        let valid = Data(Host().contents["one"]!.utf8).base64EncodedString()
+        let host0 = Host(); let validCount = host0.contents["one"]!.utf8.count
+        let a = Data("A".utf8), invalid = Data([0xc3, 0x28]), nul = Data([0])
+        let cases: [(String, [String: Any])] = [
+            ("workspaceId is the selected workspace", ["workspaceId": "two"]),
+            ("instructionRevision is positive", ["instructionRevision": 0]),
+            ("instructionRevision is a safe integer", ["instructionRevision": 9_007_199_254_740_992]),
+            ("refreshState is a known state", ["refreshState": "ready"]),
+            ("encoding is utf-8", ["encoding": "utf-16"]),
+            ("base64 decodes (leading whitespace)", ["contentBase64": " \n" + valid]),
+            ("base64 decodes (not base64)", ["contentBase64": "not base64!"]),
+            ("base64 is canonical", ["contentBase64": "QR==", "bytes": 1, "digest": host0.digest(a)]),
+            ("bytes equals the decoded length", ["bytes": validCount + 1]),
+            ("content is valid UTF-8", ["contentBase64": invalid.base64EncodedString(), "bytes": invalid.count, "digest": host0.digest(invalid)]),
+            ("content has no NUL", ["contentBase64": nul.base64EncodedString(), "bytes": 1, "digest": host0.digest(nul)]),
+            ("digest matches the bytes", ["digest": String(repeating: "0", count: 64)]),
         ]
-        for fields in cases {
-            host.readOverride = fields
-            let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
-            XCTAssertNil(model.guidance?.draft); XCTAssertFalse(model.guidance?.available ?? true)
-            XCTAssertNotNil(model.guidance?.message); await model.saveInstructions()
+        for (label, read) in cases {
+            let host = Host(); host.readOverride = read; host.provenanceOverride = mirroring(read)
+            await assertRefused(host, label)
         }
-        XCTAssertTrue(host.updates.isEmpty)
+        // Controls: the same mirroring with VALID values loads, so a case is red because of its one
+        // violation and not because the mirroring itself breaks the cross-check.
+        for (label, read) in [("another revision", ["instructionRevision": 7] as [String: Any]),
+                              ("other content", ["contentBase64": "QQ==", "bytes": 1, "digest": host0.digest(a)])] {
+            let host = Host(); host.readOverride = read; host.provenanceOverride = mirroring(read)
+            let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+            XCTAssertTrue(model.guidance?.available ?? false, label); XCTAssertNotNil(model.guidance?.draft, label)
+        }
+    }
+    /// Inputs that more than one validator refuses. Each is rejected, but no single validator is
+    /// load-bearing for it, so this is breadth, not per-validator strength (see the groups above).
+    func testStrictReadAlsoRefusesInputsThatOverlappingValidatorsEachCatch() async {
+        let host0 = Host(); let validBytes = Data(host0.contents["one"]!.utf8)
+        let big = Data(repeating: 65, count: 65_537)
+        let cases: [(String, [String: Any])] = [
+            ("bytes above the limit", ["bytes": 65_537]),
+            ("negative bytes", ["bytes": -1]),
+            ("content above the limit", ["contentBase64": big.base64EncodedString(), "bytes": big.count, "digest": host0.digest(big)]),
+            ("base64 above its length cap", ["contentBase64": String(repeating: "A", count: 87_388)]),
+            ("short digest", ["digest": String(repeating: "0", count: 63)]),
+            ("uppercase digest", ["digest": host0.digest(validBytes).uppercased()]),
+            ("non-hex digest", ["digest": String(repeating: "g", count: 64)]),
+        ]
+        for (label, read) in cases {
+            let host = Host(); host.readOverride = read; host.provenanceOverride = mirroring(read)
+            await assertRefused(host, label)
+        }
+    }
+    /// The read is valid in every case; one provenance field disagrees with it, or is not the single
+    /// workspace entry this build understands.
+    func testStrictProvenanceRefusesAFieldThatViolatesExactlyOneCheck() async {
+        let zeros = String(repeating: "0", count: 64)
+        let host0 = Host(); let digest = host0.digest(Data(host0.contents["one"]!.utf8))
+        let good: [String: Any] = ["kind": "workspace", "guestPath": "/workspace/.winter/WINTER.md", "digest": digest]
+        func entry(_ field: String, _ value: Any) -> [[String: Any]] { var copy = good; copy[field] = value; return [copy] }
+        let cases: [(String, [String: Any])] = [
+            ("provenance workspaceId", ["workspaceId": "two"]),
+            ("provenance instructionRevision", ["instructionRevision": 99]),
+            ("provenance digest", ["digest": zeros]),
+            ("provenance bytes", ["bytes": 1]),
+            ("provenance refreshState", ["refreshState": "unavailable"]),
+            ("provenance sourceDiscovery", ["sourceDiscovery": "available"]),
+            ("no entries", ["entries": [] as [[String: Any]]]),
+            ("two entries", ["entries": [good, good]]),
+            ("entry kind", ["entries": entry("kind", "repository")]),
+            ("entry guestPath", ["entries": entry("guestPath", "/workspace/WINTER.md")]),
+            ("entry digest", ["entries": entry("digest", zeros)]),
+        ]
+        for (label, provenance) in cases {
+            let host = Host(); host.provenanceOverride = provenance
+            await assertRefused(host, label)
+        }
+        // Control: the untouched report loads.
+        let model = CoworkWorkspaceModel { try host0.call($0, $1) }; await model.select("one")
+        XCTAssertTrue(model.guidance?.available ?? false); XCTAssertNotNil(model.guidance?.provenance)
     }
     func testProvenanceRaceDoesNotPublishMixedGenerationOrReplaceExistingDraft() async {
         let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
