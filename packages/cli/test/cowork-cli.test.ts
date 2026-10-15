@@ -136,7 +136,7 @@ describe("typed Cowork CLI against a private daemon with disabled production pro
       const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect(code).toBe(expected); expect(stdout + stderr).toContain(output); expect(readdirSync(home)).toEqual([]);
     }
-  });
+  }, 30_000); // three real CLI cold starts; the 5 s default is too tight on hosted runners
   test("source/detail pages, metadata mutation and exact retry use the canonical RPCs", async () => {
     const { records, client } = await boot();
     const made = records.create({ principalId: "fixture-seed", requestId: "fixture" }, { ownership: "project", title: "Fixture", sources: [{ kind: "githubRepository", label: "Fixture repository", access: "read-write", detail: { repositoryId: "private-repository-id", authorityRef: "private-authority-ref", initialRef: "main" } }], ceiling }), workspaceId = made.workspaceId;
