@@ -267,34 +267,23 @@ struct DesktopIslandRow: View {
     }
 }
 
-/// How a button answers the pointer: TRIAL (user 2026-10-15, choosing between the two) — `CUDesktopIslandButtonHover`.
-public enum CUDesktopIslandButtonHover: String, Sendable, CaseIterable {
-    /// The fill brightens (a light fill takes a soft grey wash instead).
-    case lift
-    /// A soft glow of the button's own colour.
-    case glow
-    /// The style the pills use (the demo's `--hover` sets it).
-    @MainActor public static var current: CUDesktopIslandButtonHover = .lift
-}
-
 struct IslandCircleButtonStyle: ButtonStyle {
     let fill: Color
     let glyph: Color
     var hovered = false
-    var lightFill: Bool { fill == .white }
+
+    static let glowNear = 0.45
+    static let glowFar = 0.22
 
     func makeBody(configuration: Configuration) -> some View {
-        let style = MainActor.assumeIsolated { CUDesktopIslandButtonHover.current }
-        let lift = hovered && style == .lift
-        let glow = hovered && style == .glow
         return configuration.label
             .font(.system(size: 12, weight: .bold))
             .foregroundStyle(glyph)
             .frame(width: DesktopIslandRow.button, height: DesktopIslandRow.button)
             .background(Circle().fill(fill))
-            .overlay(Circle().fill(lightFill ? Color.black.opacity(0.1) : Color.white.opacity(0.18)).opacity(lift ? 1 : 0))
-            .shadow(color: fill.opacity(glow ? 0.75 : 0), radius: 6)
-            .shadow(color: fill.opacity(glow ? 0.45 : 0), radius: 14)
+            // Under the pointer: a soft glow of the button's own colour (user 2026-10-15: glow, gentle).
+            .shadow(color: fill.opacity(hovered ? Self.glowNear : 0), radius: 4)
+            .shadow(color: fill.opacity(hovered ? Self.glowFar : 0), radius: 10)
             .animation(.easeOut(duration: 0.15), value: hovered)
             .scaleEffect(configuration.isPressed ? 0.9 : 1)
             .opacity(configuration.isPressed ? 0.8 : 1)
@@ -321,14 +310,9 @@ public enum CUDesktopIslandGallery {
         }
         let hovered = try frame(t: DesktopIslandFluid.settle, housing: housing, slot: 0, hover: true)
         out.append(try write(hovered, directory.appendingPathComponent("island-hover@2x.png")))
-        let was = CUDesktopIslandButtonHover.current
-        defer { CUDesktopIslandButtonHover.current = was }
-        for style in CUDesktopIslandButtonHover.allCases {
-            CUDesktopIslandButtonHover.current = style
-            for (name, button) in [("check", DesktopIslandRow.Answer.switchNow), ("cross", .refuse)] {
-                let image = try frame(t: DesktopIslandFluid.settle, housing: housing, slot: 0, button: button)
-                out.append(try write(image, directory.appendingPathComponent("island-hover-\(style.rawValue)-\(name)@2x.png")))
-            }
+        for (name, button) in [("check", DesktopIslandRow.Answer.switchNow), ("cross", .refuse)] {
+            let image = try frame(t: DesktopIslandFluid.settle, housing: housing, slot: 0, button: button)
+            out.append(try write(image, directory.appendingPathComponent("island-hover-\(name)@2x.png")))
         }
         let times = stride(from: 0.0, through: 1.2, by: 0.1).map { $0 }
         let frames = try times.map { try frame(t: $0, housing: housing, slot: 0) }
