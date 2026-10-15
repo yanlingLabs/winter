@@ -7,6 +7,10 @@ remains unchanged. No push, PR, pin, availability or production activation occur
 from this local freeze. Outputs schema15 and CLI stdin/file work remain separate,
 uncomposed lanes.
 
+Later status (2026-10-15): this composition merged as PR #36. The output reads lane
+then merged its tip, so outputs schema 15 now follows this branch's schema 14. The
+statements below describe this branch as it was frozen.
+
 ## Accepted leaves and actual local DAG
 
 | Accepted source leaf | Local composition commit | Scope |
