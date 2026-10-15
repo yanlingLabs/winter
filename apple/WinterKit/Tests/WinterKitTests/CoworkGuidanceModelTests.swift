@@ -362,6 +362,33 @@ import WinterProtocol
         XCTAssertEqual(model.guidance?.current?.instructionRevision, 2); XCTAssertEqual(model.guidance?.draft, "Applied after all")
         XCTAssertFalse(model.guidance?.hasUnsavedChanges ?? true); XCTAssertEqual(host.updates.count, 1)
     }
+    func testAbandonIsRefusedWhileTheSettlingReadFailsAndTheSavePendingSurvivesIt() async throws {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        model.editInstructions("Maybe applied"); host.saveMode = .lostAfterCommit; await model.saveInstructions()
+        let pendingId = try XCTUnwrap(model.guidance?.pendingRequestId)
+        host.unreadable = true; await model.abandonInstructionSave()
+        // Nothing is known about the save: it stays pending, byte for byte, and no review is forced on a stale base.
+        XCTAssertTrue(model.guidance?.hasUnconfirmedSave ?? false); XCTAssertEqual(model.guidance?.pendingRequestId, pendingId)
+        XCTAssertEqual(model.guidance?.pendingContent, "Maybe applied"); XCTAssertEqual(model.guidance?.draft, "Maybe applied")
+        XCTAssertFalse(model.guidance?.conflict ?? true); XCTAssertFalse(model.guidance?.available ?? true)
+        XCTAssertTrue(model.guidance?.message?.contains("not abandoned") ?? false); XCTAssertFalse(model.guidanceBusy)
+        // The same refusal on every attempt.
+        await model.abandonInstructionSave(); XCTAssertEqual(model.guidance?.pendingRequestId, pendingId)
+        XCTAssertEqual(host.updates.count, 1)
+        // Once the host can be read the abandon works: here the read finds the save applied and settles it.
+        host.unreadable = false; await model.abandonInstructionSave()
+        XCTAssertFalse(model.guidance?.hasUnconfirmedSave ?? true); XCTAssertFalse(model.guidance?.conflict ?? true)
+        XCTAssertEqual(model.guidance?.current?.instructionRevision, 2); XCTAssertEqual(model.guidance?.draft, "Maybe applied")
+    }
+    func testAbandonAfterASuccessfulReadStillForgetsAnUnappliedSaveAndForcesAReview() async throws {
+        let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
+        model.editInstructions("Never applied"); host.saveMode = .lostBeforeCommit; await model.saveInstructions()
+        host.unreadable = true; await model.abandonInstructionSave()
+        XCTAssertTrue(model.guidance?.hasUnconfirmedSave ?? false)
+        host.unreadable = false; await model.abandonInstructionSave()
+        XCTAssertFalse(model.guidance?.hasUnconfirmedSave ?? true); XCTAssertTrue(model.guidance?.conflict ?? false)
+        XCTAssertEqual(model.guidance?.draft, "Never applied"); XCTAssertFalse(model.guidance?.canSave ?? true)
+    }
     func testAbandonWithNoPendingSaveDoesNothing() async {
         let host = Host(); let model = CoworkWorkspaceModel { try host.call($0, $1) }; await model.select("one")
         model.editInstructions("Plain draft"); let reads = host.calls.count

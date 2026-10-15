@@ -326,18 +326,25 @@ import WinterProtocol
     /// Gives up on an unconfirmed save that cannot resolve, for example when the host answers
     /// `recovery_required` forever to a failed journaled operation's request ID. The draft is kept.
     /// The refresh comes first, so a save the host did apply is settled as applied rather than
-    /// dropped. A save still unresolved afterwards is forgotten and the draft's base is cleared:
-    /// the user must review the host's current content (`reviewInstructionConflict`) before any
-    /// new save, which then carries a fresh request ID.
+    /// dropped. If that refresh cannot read the host's content, nothing is known about the save, and
+    /// forgetting it would let the user review a stale version and overwrite a save that did land:
+    /// the abandon is refused and the save stays pending. A save still unresolved after a successful
+    /// read is forgotten and the draft's base is cleared: the user must review the host's current
+    /// content (`reviewInstructionConflict`) before any new save, which then carries a fresh request ID.
     public func abandonInstructionSave(workspaceId: String? = nil, requestId: String? = nil) async {
         guard !busy, !guidanceBusy, let id = selected?.workspaceId, workspaceId == nil || workspaceId == id,
               let save = guidanceByWorkspace[id]?.pending, requestId == nil || requestId == save.requestId else { return }
         guidanceBusy = true
         await readGuidance(id)
         if var state = guidanceByWorkspace[id], state.pending?.requestId == save.requestId {
-            state.pending = nil; state.baseRevision = nil; state.baseDigest = nil; state.baseContent = nil
-            state.conflict = true
-            state.note("The unconfirmed save was abandoned. Compare the current shared content with your retained draft before saving.", aboutDraft: false)
+            if state.available {
+                state.pending = nil; state.baseRevision = nil; state.baseDigest = nil; state.baseContent = nil
+                state.conflict = true
+                state.note("The unconfirmed save was abandoned. Compare the current shared content with your retained draft before saving.", aboutDraft: false)
+            } else {
+                // The read's own message ("unavailable, refresh") does not say what happened to the abandon.
+                state.note("The unconfirmed save was not abandoned: the shared instructions could not be read to check whether the host already applied it. It is still pending. Refresh, then abandon it or retry it.", aboutDraft: false)
+            }
             publishGuidance(state)
         }
         await finishGuidanceOperation()
