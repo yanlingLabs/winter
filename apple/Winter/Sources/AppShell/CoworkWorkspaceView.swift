@@ -338,7 +338,7 @@ private struct GuidanceTextEditor: NSViewRepresentable {
         textView.insertionPointColor = NSColor(named: "AccentColor") ?? .labelColor
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 6, height: 6)
-        textView.string = text
+        textView.replaceTextFromModel(text)
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
@@ -351,11 +351,10 @@ private struct GuidanceTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         // An AppKit view ignores the SwiftUI `.disabled(model.busy)` above it unless told.
         textView.isEditable = context.environment.isEnabled
-        // Compare UTF-8 bytes, not Swift `==`: that treats canonically equivalent spellings as equal and
-        // would leave the view showing a different spelling from the one the model will save.
-        if !textView.string.utf8.elementsEqual(text.utf8) {
-            textView.string = text
-        }
+        // Only a model-driven replacement lands here (the person's own typing comes back byte-equal and
+        // changes nothing). It also drops the undo entries that point into the text that was replaced:
+        // left on the stack, Cmd-Z raises NSRangeException.
+        textView.replaceTextFromModel(text)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
