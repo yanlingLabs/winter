@@ -6,6 +6,7 @@ import { CoworkSchedules } from "./schedules";
 import { CoworkRepository } from "./repository";
 import { CoworkError, type CapabilityCeiling, type MutationContext, type MutationReceipt, type SourceSelection, type WorkspaceSource, type WorkspacePolicy, type Workspace } from "./types";
 
+import { CoworkWorkspaceWatches, type CoworkWatchOptions, type CoworkWatchSink } from "./watch";
 import type { CoworkFolderSelections } from "./folder-selections";
 
 export interface CoworkConnection { role: string; connectionId: number }
@@ -57,9 +58,10 @@ export function assertRemoteMayUseWorkspace(records: CoworkRepository, authority
 }
 export class CoworkWorkspaceService {
   private readonly authority: CoworkAuthority;
+  readonly watches: CoworkWorkspaceWatches;
   readonly schedules: CoworkSchedules;
   readonly instructions?: CoworkInstructions;
-  constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number, instructionHome?: string, instructionApproval?: InstructionAgentApproval) {
+  constructor(readonly records: CoworkRepository, private readonly host: CoworkHostPorts = disabledCoworkHost, scheduleNow?: () => number, instructionHome?: string, instructionApproval?: InstructionAgentApproval, watchOptions: CoworkWatchOptions = {}) {
     this.authority = new CoworkAuthority(records, host.grants);
     this.schedules = new CoworkSchedules(records, host.grants, scheduleNow);
     if (instructionHome) {
@@ -68,8 +70,26 @@ export class CoworkWorkspaceService {
       try { this.instructions = new CoworkInstructions(records, instructionHome, host.grants, instructionApproval); }
       catch { this.instructions = undefined; }
     }
+    this.watches = new CoworkWorkspaceWatches(records.rs, (connection, ids) => records.rs.transaction(() => {
+      const principal = this.localWatchPrincipal(connection);
+      return { principalId: principal.id, workspaces: ids.map(workspaceId => ({ snapshot: this.readSnapshot(principal, workspaceId), position: records.watchPosition(workspaceId) })) };
+    }), (connection, ids) => records.rs.transaction(() => {
+      const principal = this.localWatchPrincipal(connection);
+      for (const workspaceId of ids) assertRemoteMayUseWorkspace(records, this.authority, principal, workspaceId);
+      return principal.id;
+    }), watchOptions);
   }
   beginShutdown(): void { this.schedules.beginShutdown(); }
+  private localWatchPrincipal(connection: CoworkConnection) {
+    const principal = this.host.principal(connection);
+    if (!principal || principal.kind !== "local-user" || !["harness", "admin"].includes(connection.role)) throw new CoworkError("authority_denied");
+    return principal;
+  }
+  watch(connection: CoworkConnection, raw: unknown, sink: CoworkWatchSink) {
+    this.localWatchPrincipal(connection);
+    const params = COWORK_RPC["workspace.watch"].params.parse(raw);
+    return COWORK_RPC["workspace.watch"].result.parse(this.watches.start(connection, params.workspaceIds, sink));
+  }
   private snapshot(principal: CoworkPrincipal, workspaceId: string) {
     const value = assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId);
     // Explicit projection: never rely on a schema stripping a future sensitive field.
@@ -177,6 +197,13 @@ export class CoworkWorkspaceService {
     return response(nextCursor);
   }
   call<M extends CoworkMethod>(connection: CoworkConnection, method: M, raw: unknown): CoworkResult<M> {
+    if (method === "workspace.watch.renew" || method === "workspace.watch.detach") {
+      if (!["harness", "admin"].includes(connection.role)) throw new CoworkError("authority_denied");
+      const p = COWORK_RPC["workspace.watch.renew"].params.parse(raw);
+      const result = method === "workspace.watch.renew" ? this.watches.renew(connection, p.subscriptionId) : this.watches.detach(connection, p.subscriptionId);
+      this.checkedResponse(method, result);
+      return result as CoworkResult<M>;
+    }
     const principal = this.host.principal(connection);
     if (!principal || principal.kind === "runtime" || !["harness", "admin", "remote"].includes(connection.role) || (connection.role === "remote" ? principal.kind !== "paired-user" : principal.kind !== "local-user")) throw new CoworkError("authority_denied");
     if (this.records.rs.db.inTransaction && ["workspace.create", "project.create", "workspace.source.addFolder", "workspace.source.addRepository"].includes(method)) throw new CoworkError("authority_denied");
@@ -205,10 +232,12 @@ export class CoworkWorkspaceService {
     if (connection.role !== "remote" || principal?.kind !== "paired-user") throw new CoworkError("authority_denied");
     assertRemoteMayUseWorkspace(this.records, this.authority, principal, workspaceId);
   }
-  closeConnection(connectionId: number): void { this.host.selections?.closeConnection(connectionId); }
-  close(): void { this.beginShutdown(); this.host.selections?.close(); }
+  closeConnection(connectionId: number): void { this.watches.closeConnection(connectionId); this.host.selections?.closeConnection(connectionId); }
+  close(): void { this.beginShutdown(); this.watches.close(); this.host.selections?.close(); }
   private execute(principal: CoworkPrincipal, method: CoworkMethod, raw: unknown, connection: CoworkConnection): unknown {
     switch (method) {
+      case "workspace.watch": case "workspace.watch.renew": case "workspace.watch.detach":
+        throw new CoworkError("unsupported_topology"); // stream/control connection doors are handled above
       case "workspace.instructions.get": case "workspace.instructions.provenance": case "workspace.instructions.update": {
         // Initially Mac-local. Paired reads require explicit four-mirror admission;
         // guest edits have a distinct authenticated content-bound approval port.
