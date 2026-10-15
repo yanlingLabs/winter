@@ -54,6 +54,9 @@ final class DesktopPromptPanel: NSPanel {
     /// The app the user was in when the pill appeared, and the watch that gives it the front back.
     private var userApp: NSRunningApplication?
     private var activationWatch: NSObjectProtocol?
+    /// Mouse-move monitors while it shows: the pill grows under the pointer. (A panel that is never key, of an app
+    /// that is not active, gets no hover of its own — the Dispatch pill reads the pointer the same way.)
+    private var pointerMonitors: [Any] = []
 
     init(_ model: CUDesktopPromptModel) {
         self.model = model
@@ -75,6 +78,7 @@ final class DesktopPromptPanel: NSPanel {
             shown = true
             if NSApp.isHidden { NSApp.unhideWithoutActivation() }
             guardFocus()
+            watchPointer()
             panel.orderFrontRegardless()
             // Born now; the frame driver stops once the liquid has settled.
             state.bornAt = Date()
@@ -91,6 +95,9 @@ final class DesktopPromptPanel: NSPanel {
         shown = false
         if let activationWatch { NotificationCenter.default.removeObserver(activationWatch) }
         activationWatch = nil
+        for monitor in pointerMonitors { NSEvent.removeMonitor(monitor) }
+        pointerMonitors = []
+        state.pointer = nil
         let panel = panel
         guard state.answeredHere, state.bornAt != nil, !reduceMotion else {
             panel.orderOut(nil)
@@ -117,9 +124,6 @@ final class DesktopPromptPanel: NSPanel {
                                                   pillWidth: DesktopIslandGeometry.pillWidth(for: model.headline), slot: slot)
         let view = DesktopIslandView(model: model, geometry: geometry, state: state, reduceMotion: reduceMotion)
         let host = FirstClickHostingView(rootView: view)
-        host.onPointer = { [state] point in
-            if state.pointer != point { state.pointer = point }
-        }
         host.sizingOptions = []
         panel.contentView = host
         let size = geometry.panelSize
@@ -144,6 +148,27 @@ final class DesktopPromptPanel: NSPanel {
             MainActor.assumeIsolated { hand() }
         }
         if NSApp.isActive { hand() }
+    }
+
+    private func watchPointer() {
+        let moved = { [weak self] in self?.pointerMoved() }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { _ in
+            MainActor.assumeIsolated { moved() }
+        }) { pointerMonitors.append(m) }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { event in
+            MainActor.assumeIsolated { moved() }
+            return event
+        }) { pointerMonitors.append(m) }
+        pointerMoved()
+    }
+
+    /// Where the pointer is over the panel (top-left origin), nil outside it.
+    private func pointerMoved() {
+        let mouse = NSEvent.mouseLocation
+        let frame = panel.frame
+        let local = CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y)
+        let point: CGPoint? = frame.contains(mouse) ? local : nil
+        if state.pointer != point { state.pointer = point }
     }
 
     /// The camera housing's size on `screen`, nil when it has none.
