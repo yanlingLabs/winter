@@ -367,6 +367,27 @@ import WinterProtocol
         await model.select("two"); await model.refresh()
         await model.select("one"); XCTAssertEqual(model.guidance?.draft, "Canonical guidance")
     }
+    func testAWorkspaceThatLeavesTheListWhileItsSaveIsInFlightKeepsItsEntryUntilTheSaveSettles() async {
+        for fails in [false, true] {
+            let host = Host(); var resume: CheckedContinuation<Void, Never>?
+            if fails { host.refuseNextUpdate = "authority_denied" }
+            let model = CoworkWorkspaceModel { method, params in
+                if method == "workspace.instructions.update" { await withCheckedContinuation { resume = $0 } }
+                return try host.call(method, params)
+            }
+            await model.select("one"); model.editInstructions("Saved while leaving")
+            let saving = Task { await model.saveInstructions() }
+            while resume == nil { await Task.yield() }
+            // The person moves on, "one" is removed elsewhere, and a listing runs before the save answers.
+            await model.select("two"); host.listed = ["two"]; await model.refresh()
+            resume?.resume(); await saving.value
+            XCTAssertFalse(model.guidanceBusy)
+            XCTAssertEqual(model.guidance?.workspaceId, "two")
+            XCTAssertEqual(host.contents["one"], fails ? "Canonical guidance" : "Saved while leaving")
+            // The settled entry is the retained one: a refused save keeps the draft it refused.
+            await model.select("one"); XCTAssertEqual(model.guidance?.draft, "Saved while leaving")
+        }
+    }
     func testInFlightSaveCapturesContentAndDoesNotDropSubsequentEditsOrDuplicateWrite() async {
         let host = Host(); var resume: CheckedContinuation<Void, Never>?
         let model = CoworkWorkspaceModel { method, params in

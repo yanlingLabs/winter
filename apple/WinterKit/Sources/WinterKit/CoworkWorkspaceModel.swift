@@ -93,9 +93,10 @@ import WinterProtocol
         let listed = Set(values.map(\.workspaceId))
         guard listed.count == values.count else { throw ModelError.invalidPagination }
         workspaces = values
-        // A draft is kept only for a workspace the person can still open. The selected one is exempt: its
-        // editor is on screen, and dropping its entry under it would silently discard edits typed next.
-        guidanceByWorkspace = guidanceByWorkspace.filter { listed.contains($0.key) || $0.key == selectedId }
+        // A draft is kept only for a workspace the person can still open. Two are exempt: the selected one (its
+        // editor is on screen, and dropping its entry under it would silently discard edits typed next) and one
+        // with a save still pending (that request, in flight or unconfirmed, settles against this entry).
+        guidanceByWorkspace = guidanceByWorkspace.filter { listed.contains($0.key) || $0.key == selectedId || $0.value.pending != nil }
     }
     private func detail(_ id: String) async throws {
         let value = try await send(CoworkRequest<CoworkWorkspace>.get(workspaceId: id))
@@ -386,7 +387,7 @@ import WinterProtocol
                   Self.validMetadata(workspaceId: metadata.workspaceId, revision: metadata.instructionRevision, digest: metadata.digest, bytes: metadata.bytes, refreshState: metadata.refreshState, expectedWorkspace: save.workspaceId),
                   metadata.instructionRevision == save.expectedRevision + 1, metadata.bytes == save.content.utf8.count,
                   metadata.digest == Self.digest(Data(save.content.utf8)) else { throw ModelError.invalidInstructions }
-            var state = guidanceByWorkspace[save.workspaceId]!
+            var state = guidanceByWorkspace[save.workspaceId] ?? Guidance(workspaceId: save.workspaceId)
             state.pending = nil; state.receipt = receipt; state.available = false; state.conflict = false
             state.baseRevision = metadata.instructionRevision; state.baseDigest = metadata.digest; state.baseContent = save.content
             // Keep the latest draft, including edits typed while this exact save was in flight.
@@ -408,7 +409,7 @@ import WinterProtocol
         "request_conflict": "The host refused this save because its request identity was already used for different content. Nothing was saved; your draft is retained. Save again to send it as a new request.",
     ]
     private func settleFailedSave(_ error: Error, _ save: InstructionSave) async {
-        var state = guidanceByWorkspace[save.workspaceId]!
+        var state = guidanceByWorkspace[save.workspaceId] ?? Guidance(workspaceId: save.workspaceId)
         let rpc = error as? RpcError
         let code = rpc?.data?["code"]?.stringValue
         if code == "revision_conflict" {
