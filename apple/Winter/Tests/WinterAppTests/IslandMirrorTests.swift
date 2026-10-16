@@ -113,6 +113,12 @@ final class IslandMirrorTests: XCTestCase {
         coordinator.stopCapture(sessionId: "s1")
         let off = await eventually { client.frameFlags(for: "s1") == [false, true, false] }
         XCTAssertTrue(off, "\(client.frameFlags(for: "s1"))")
+        // The helper's connection is lost: the island hears of it (rung 4 cannot end through a dead stream).
+        var lost = 0
+        coordinator.onIslandConnectionLost = { lost += 1 }
+        client.push(.connectionLost)
+        let told = await eventually { lost == 1 }
+        XCTAssertTrue(told)
         // The pill goes: unsubscribed, and the connection closes with nothing wanted.
         coordinator.setIslandCursorSessions([])
         let gone = await eventually { client.calls.contains("unsubscribe:s1") && client.calls.last == "disconnect" }

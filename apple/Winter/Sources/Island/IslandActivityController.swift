@@ -98,6 +98,18 @@ final class IslandActivityController {
             window.alphaValue = away ? 0 : 1
             window.ignoresMouseEvents = away
         }
+        // …and the slot goes AT ONCE — no way back up into the housing: a retreating panel is still a Winter window at
+        // the top centre, which the helper's hit test would refuse to click through.
+        if store.usingRealMouse {
+            shown = nil
+            leaving = nil
+            panel.orderOut(nil)
+            contentRect = .zero
+            wasExpanded = false
+            collapseHold = nil
+            updatePointerMonitors(active: false)
+            return
+        }
 
         let key: String? = switch decision.slot {
         case .none: nil

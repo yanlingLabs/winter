@@ -209,6 +209,15 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertFalse(hiding.mirrorOpen)
     }
 
+    func testTheHelpersLossEndsTheRealMouseStepAside() {
+        let store = makeStore()
+        store.apply(IslandActivitySnapshot(computerUse: [cu("s1")]))
+        store.cursor(sessionId: "s1", kind: "foreground", text: "on", appName: "Notes")
+        XCTAssertTrue(store.usingRealMouse)
+        store.helperConnectionLost()
+        XCTAssertFalse(store.usingRealMouse)
+    }
+
     func testThePillHidesWhileItsSessionsHostIsInFrontButNotBehindTheDispatchPill() {
         let store = makeStore(focus: IslandFocus(dispatchPillVisible: true, dispatchSessionIds: ["s_disp"], winterFrontmost: true,
                                                  keyOrMainWindowSessionIds: ["s_front"]))

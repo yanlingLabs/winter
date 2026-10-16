@@ -373,6 +373,8 @@ final class MirrorCoordinator: ObservableObject {
     private var islandFrameHolders: [String: Int] = [:]
     /// The agent cursor in a session the pill follows: (session, cursor kind, its text, the app it acts in).
     var onIslandCursor: ((_ sessionId: String, _ kind: String, _ text: String?, _ appName: String?) -> Void)?
+    /// The helper's connection was lost (the island clears what only its cursor stream could end — rung 4).
+    var onIslandConnectionLost: (() -> Void)?
 
     /// The sessions the computer-use pill follows now.
     func setIslandCursorSessions(_ sessions: Set<String>) {
@@ -589,6 +591,7 @@ final class MirrorCoordinator: ObservableObject {
             isConnected = false
             appliedSubscriptions = [:]
             states.values.forEach { $0.reset() }
+            onIslandConnectionLost?()
             if !desiredSessions.isEmpty { log("computer-use helper connection lost; will reconnect") }
             scheduleSync()
         }

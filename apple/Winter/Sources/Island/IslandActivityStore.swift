@@ -149,6 +149,13 @@ final class IslandActivityStore: ObservableObject {
         if cu != before { changed() }
     }
 
+    /// The helper's connection was lost (`MirrorCoordinator`): the cursor stream is gone, and rung 4 with it.
+    func helperConnectionLost() {
+        let before = cu
+        cu.helperConnectionLost()
+        if cu != before { changed() }
+    }
+
     /// The phase-1 queue's top changed: a card needing an answer is (or no longer is) on top.
     func setCardOnTop(_ busy: Bool) {
         guard busy != cardOnTop else { return }

@@ -100,7 +100,9 @@ struct IslandCUState: Equatable {
         let byId = Dictionary(items.map { ($0.sessionId, $0) }, uniquingKeysWith: { _, b in b })
         // Gone: the session's turn ended.
         let leaving = sessions.keys.filter { byId[$0] == nil }
-        let mostRecentLeaving = leaving.compactMap { sessions[$0] }.max { $0.recency < $1.recency }
+        // A session that leaves holds the real mouse no more (its turn ended, and with it rung 4).
+        var mostRecentLeaving = leaving.compactMap { sessions[$0] }.max { $0.recency < $1.recency }
+        mostRecentLeaving?.usingMouse = false
         for id in leaving { sessions[id] = nil }
         for item in items {
             if var s = sessions[item.sessionId] {
@@ -159,6 +161,12 @@ struct IslandCUState: Equatable {
         s.lineFromCaptionAt = kind == "caption" ? now : nil
         s.recency = bump()
         sessions[sessionId] = s
+    }
+
+    /// The helper's connection was lost: no rung 4 is running through it any more.
+    mutating func helperConnectionLost() {
+        for id in sessions.keys { sessions[id]?.usingMouse = false }
+        lingering?.usingMouse = false
     }
 
     /// The clock: the linger ends.

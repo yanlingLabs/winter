@@ -102,6 +102,24 @@ final class IslandCUPillTests: XCTestCase {
         XCTAssertFalse(s.usingRealMouse, "the session's turn ended: its pointer is the user's again")
     }
 
+    func testTheRealMouseIsClearedWhenTheSessionLeavesAndWhenTheHelperIsLost() {
+        var s = IslandCUState()
+        s.apply([item("s1")], now: 0)
+        s.cursor(sessionId: "s1", kind: "foreground", text: "on", appName: "Notes", now: 1)
+        s.apply([], now: 2)
+        XCTAssertFalse(s.usingRealMouse)
+        XCTAssertEqual(s.lingering?.usingMouse, false)
+        // Back within the linger: no rung 4 comes back with it.
+        s.apply([item("s1", lastAt: 3)], now: 3)
+        XCTAssertFalse(s.usingRealMouse)
+        // The helper's connection lost mid-rung-4: its `foreground off` will never come.
+        s.cursor(sessionId: "s1", kind: "foreground", text: "on", appName: "Notes", now: 4)
+        XCTAssertTrue(s.usingRealMouse)
+        s.helperConnectionLost()
+        XCTAssertFalse(s.usingRealMouse)
+        XCTAssertNotNil(s.presentation(), "the pill stays: only the step-aside ends")
+    }
+
     func testTheCursorsWordsAndTheScriptsWords() {
         XCTAssertEqual(islandCUActionLine(kind: "caption", text: "Choosing File › Save", appName: "Notes"), "Choosing File › Save in Notes")
         XCTAssertEqual(islandCUActionLine(kind: "caption", text: "Clicking “Save” in Notes", appName: "Notes"), "Clicking “Save” in Notes")

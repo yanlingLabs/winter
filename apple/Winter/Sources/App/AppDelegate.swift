@@ -1227,6 +1227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator?.onIslandCursor = { [weak activity] sid, kind, text, app in
             activity?.cursor(sessionId: sid, kind: kind, text: text, appName: app)
         }
+        coordinator?.onIslandConnectionLost = { [weak activity] in activity?.helperConnectionLost() }
         let controller = IslandActivityController(store: activity, island: island,
                                                   mirrors: coordinator.map { IslandMirrorLifecycle(capture: $0) })
         controller.mirrorModel = { [weak coordinator] sid in coordinator?.islandMirrorModel(for: sid) }
