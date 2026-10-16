@@ -49,7 +49,8 @@
 //     and `scratch`. DECISION: the policy table has no cell for either (its "ordinary workspace edits" are the
 //     admitted source and Project memory; the plan paragraph only says plan's tool execution "receives ...
 //     separately scoped disposable/planning scratch", a mount fact, not a verdict), so every tool class on them is
-//     denied as `path_unclassified` under every policy until the spec gives the cells. They exist as classes so a
+//     denied as `path_unclassified` under every policy until the table gets explicit cells (the spec already describes both
+//     locations; what is missing is their approval cells). They exist as classes so a
 //     caller cannot satisfy the matrix by calling them `admitted`;
 //   - the Ask in the instruction column does not depend on `alreadyAuthorized`: no reusable approval token
 //     exists for it (`CoworkInstructions.updateAgent` binds each card to the exact copied content);

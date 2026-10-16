@@ -74,13 +74,18 @@ export const COWORK_CLASSIFIER_CONNECTOR_CELLS: ReadonlyArray<readonly ["allow" 
 /** The ceiling the cells are read under, so the ceiling never masks a policy difference. */
 const FULL_CEILING: CapabilityCeiling = { toolClasses: ["read", "write", "execute"], hostServices: ["workspace.instructions.update"], connectors: [], network: "none" };
 
-/** How much a tool cell lets through, weakest first: deny < allow-inside-the-read-only-plan-view < ask < allow-with-review < allow. */
+/**
+ * How much a tool cell lets through, weakest first: deny < allow-in-plan-view < ask < allow.
+ * `bashReview` is deliberately NOT a rung: a per-call review of future launches revokes nothing a running process
+ * already holds, and the spec says "`auto` does not promise every action received model review". Ranking it would
+ * make the ordinary loosening switch to `auto` lateral and drain in-flight work for no reason.
+ */
 function reach(decision: CoworkHostDecision): number {
   switch (decision.verdict) {
     case "deny": return 0;
     case "allow-in-plan-view": return 1;
     case "ask": return 2;
-    case "allow": return decision.bashReview ? 3 : 4;
+    case "allow": return 4;
   }
 }
 const connectorReach = (verdict: CoworkVerdict): number => verdict === "deny" ? 0 : verdict === "ask" ? 1 : 2;

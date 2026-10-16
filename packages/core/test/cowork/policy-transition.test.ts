@@ -26,15 +26,14 @@ const kind = (from: CoworkPolicyState, to: CoworkPolicyState): CoworkPolicyChang
 test("classifier: the policy change matrix is cell-wise, not a rank (plan <-> dont-ask is lateral)", () => {
   // Rows: from. Columns: to, in the order plan, dont-ask, ask, accept-edits, auto, bypass. Worked out cell by cell from the spec table:
   // e.g. dont-ask -> plan shrinks an explicitly allowed edit (allow -> deny) but grows unauthorized Bash (deny -> read-only-view allow).
-  // auto is lateral to dont-ask, ask and accept-edits because its Bash is ALWAYS reviewed: against an explicit allow (an unreviewed
-  // Bash there) auto shrinks, against an unauthorized call it grows. Lateral takes the narrowing protocol, the safe direction.
+  // auto's per-call Bash review is not a cell rung (it revokes nothing a running process holds), so the switch to auto is an ordinary widening.
   const U = "unchanged", W = "widening", N = "narrowing", L = "lateral";
   const EXPECTED: Readonly<Record<ApprovalPolicy, readonly CoworkPolicyChangeKind[]>> = {
     "plan":         [U, L, W, W, W, W],
-    "dont-ask":     [L, U, W, W, L, W],
-    "ask":          [N, N, U, W, L, W],
-    "accept-edits": [N, N, N, U, L, W],
-    "auto":         [N, L, L, L, U, W],
+    "dont-ask":     [L, U, W, W, W, W],
+    "ask":          [N, N, U, W, W, W],
+    "accept-edits": [N, N, N, U, W, W],
+    "auto":         [N, N, N, N, U, W],
     "bypass":       [N, N, N, N, N, U],
   };
   for (const from of POLICIES) POLICIES.forEach((to, index) => expect({ from, to, kind: kind(state(from), state(to)) }).toEqual({ from, to, kind: EXPECTED[from][index]! }));
@@ -43,6 +42,23 @@ test("classifier: the policy change matrix is cell-wise, not a rank (plan <-> do
     const forward = kind(state(from), state(to)), back = kind(state(to), state(from));
     if (forward === "widening") expect(back).toBe("narrowing"); else if (forward === "narrowing") expect(back).toBe("widening"); else expect(back).toBe(forward);
   }
+});
+
+test("classifier: X -> auto with Bash authorized is a widening, not a shrinking (the per-call review is not a rung)", async () => {
+  const full = ceiling(["read", "write", "execute"], "none", ["workspace.instructions.update"]);
+  for (const from of ["dont-ask", "ask", "accept-edits"] as const) {
+    // The authorized Bash cell is allow in both; auto only adds the reviewer flag on the decision.
+    const before = coworkHostDecision({ policy: from, tool: "Bash", path: "none", ceiling: full, alreadyAuthorized: true });
+    const after = coworkHostDecision({ policy: "auto", tool: "Bash", path: "none", ceiling: full, alreadyAuthorized: true });
+    expect([before.verdict, after.verdict]).toEqual(["allow", "allow"]); expect([before.bashReview, after.bashReview]).toEqual([false, true]);
+    expect(kind(state(from), state("auto"))).toBe("widening");
+    // So the machine installs the view and drains nothing on the ordinary loosening switch to the default policy.
+    const h = harness(state(from));
+    expect((await h.machine.request(state("auto"))).status).toBe("applied");
+    expect(h.calls).toEqual(["installView"]);
+  }
+  // Leaving auto for a stricter policy still shrinks: that is a narrowing and drains.
+  for (const to of ["dont-ask", "ask", "accept-edits"] as const) expect(kind(state("auto"), state(to))).toBe("narrowing");
 });
 
 test("classifier: switching into plan is never a widening, and the cells cover every tool class of the matrix", () => {
