@@ -439,3 +439,113 @@ final class TerminalSessionIntegrationTests: XCTestCase {
         XCTAssertLessThan(micros ?? .infinity, 3000, "per keystroke, with 3,000 history entries and 30 paths")
     }
 }
+
+/// Idle shells end themselves: the countdown, on a fake process table, a fake foreground group and an injected
+/// clock (no process, no window, no timer waited on).
+@MainActor
+final class IdleShellTests: XCTestCase {
+    private var clock = Date(timeIntervalSince1970: 10_000)
+    private var foreground: pid_t? = 500
+    private var processes: TerminalSessionIntegrationTests.FakeProcesses!
+    private var store: CommandRunStore!
+
+    private func makeRun(command: String = "") -> CommandRun {
+        processes = .init([500: .init(sid: 500, start: 1_000)])
+        store = CommandRunStore()
+        store.launchesProcesses = false
+        store.presentsWindows = false
+        store.now = { [unowned self] in self.clock }
+        store.processTable = processes.processTable
+        store.foregroundGroupOf = { [unowned self] _ in self.foreground }
+        let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: [], homeDirectory: "/Users/u",
+                                                       fileSystem: ShellCommandLineTests.fileSystem)
+        let run = store.start(command: command, workingDirectory: "/tmp", environment: environment)
+        run.adoptSessionForTesting(leader: 500, leaderStart: 1_000, runStart: 990)
+        store.updateIdleTimer()
+        return run
+    }
+
+    private func check(at seconds: TimeInterval) {
+        clock = Date(timeIntervalSince1970: 10_000 + seconds)
+        store.checkIdleShells()
+    }
+
+    private func hungUp() -> Bool { processes.signals.contains { $0 == (500, SIGHUP) } }
+
+    func testAnIdleShellWithItsWindowClosedEndsAfterAMinuteNotBefore() {
+        let run = makeRun()
+        XCTAssertEqual(CommandRunStore.idleShellLifetime, 60)
+        check(at: 0)
+        check(at: 59)
+        XCTAssertFalse(run.endedForIdle)
+        XCTAssertFalse(hungUp(), "not before the minute")
+        check(at: 60)
+        XCTAssertTrue(run.endedForIdle)
+        XCTAssertTrue(hungUp(), "ended as End ends it: the session hung up")
+    }
+
+    func testAnOpenWindowKeepsItAlive() {
+        let run = makeRun()
+        store.openWindow(run.id)
+        for t in stride(from: 0.0, through: 600, by: 5) { check(at: t) }
+        XCTAssertFalse(run.endedForIdle)
+        XCTAssertFalse(store.idleTimerRunningForTesting, "nothing qualifies: no timer")
+        store.windowClosed(run.id)
+        XCTAssertTrue(store.idleTimerRunningForTesting)
+        check(at: 700)
+        check(at: 760)
+        XCTAssertTrue(run.endedForIdle, "closed, the countdown runs")
+    }
+
+    func testAForegroundJobKeepsItAlive() {
+        let run = makeRun(command: "vim notes.md")
+        foreground = 777
+        check(at: 0)
+        check(at: 61)
+        XCTAssertFalse(run.endedForIdle)
+        foreground = 500
+        check(at: 62)
+        check(at: 121)
+        XCTAssertFalse(run.endedForIdle, "the countdown restarted when the job ended")
+        check(at: 122)
+        XCTAssertTrue(run.endedForIdle)
+    }
+
+    func testABackgroundJobKeepsItAlive() {
+        let run = makeRun()
+        processes.table[501] = .init(sid: 500, start: 1_200) // `sleep 600 &`, or a nohup'd child
+        check(at: 0)
+        check(at: 300)
+        XCTAssertFalse(run.endedForIdle)
+    }
+
+    func testOutputOrTypingRestartsTheCountdown() {
+        let run = makeRun()
+        check(at: 0)
+        run.feedForTesting(Array("ding\r\n".utf8))
+        check(at: 30)
+        check(at: 60)
+        XCTAssertFalse(run.endedForIdle, "output at 30 s: a minute from there")
+        run.typeForTesting("l")
+        check(at: 85)
+        check(at: 140)
+        XCTAssertFalse(run.endedForIdle, "a keystroke at 85 s")
+        check(at: 145)
+        XCTAssertTrue(run.endedForIdle)
+    }
+
+    func testNoTimerRunsWhenNothingQualifies() {
+        let empty = CommandRunStore()
+        empty.updateIdleTimer()
+        XCTAssertFalse(empty.idleTimerRunningForTesting, "no shells")
+        let run = makeRun()
+        XCTAssertTrue(store.idleTimerRunningForTesting, "an open shell with its window closed")
+        run.finishForTesting(waitStatus: 0)
+        store.updateIdleTimer()
+        XCTAssertFalse(store.idleTimerRunningForTesting, "its shell ended")
+        // After an auto-end the run is still there to read, add to the transcript and dismiss.
+        XCTAssertEqual(store.runs.count, 1)
+        store.dismiss(run.id)
+        XCTAssertTrue(store.runs.isEmpty)
+    }
+}

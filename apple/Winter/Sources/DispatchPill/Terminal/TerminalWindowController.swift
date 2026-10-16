@@ -43,7 +43,6 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             onMinimize: { [weak window] in window?.performMiniaturize(nil) },
             onZoom: { [weak window] in window?.performZoom(nil) },
             onStop: { [weak run] in run?.interrupt() },
-            onEnd: { [weak run] in run?.endShell() },
             onTypeLine: { [weak run] in run?.typeLineByHand() },
             transcriptUnavailableReason: transcriptUnavailableReason,
             onAddToTranscript: {
@@ -127,7 +126,6 @@ struct TerminalWindowRootView: View {
     let onMinimize: () -> Void
     let onZoom: () -> Void
     let onStop: () -> Void
-    let onEnd: () -> Void
     let onTypeLine: () -> Void
     let transcriptUnavailableReason: () -> String?
     let onAddToTranscript: () -> Void
@@ -217,9 +215,6 @@ struct TerminalWindowRootView: View {
             if run.commandOutcome == .running {
                 TerminalChromeButton(symbol: "stop.fill", label: "Stop", help: "Stop this command (Ctrl-C) — the shell stays open",
                                      action: onStop)
-            }
-            if run.outcome == .running {
-                TerminalChromeButton(symbol: "power", label: "End", help: "End this shell", action: onEnd)
             }
             addToTranscriptButton
         }

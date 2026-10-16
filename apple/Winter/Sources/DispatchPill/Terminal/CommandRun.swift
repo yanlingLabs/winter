@@ -222,12 +222,19 @@ final class CommandRun: ObservableObject, Identifiable {
     /// job, background jobs in process groups of their own, ones that ignore SIGHUP — is hung up now and killed a
     /// moment later, whether or not the shell has gone by then. (An interactive shell ignores SIGTERM; it ends on
     /// SIGHUP.)
-    func endShell() {
+    func endShell(table: CommandRunProcessTable = .live) {
         guard let session else { return }
-        session.signal(SIGHUP)
+        session.signal(SIGHUP, table: table)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) {
-            session.signal(SIGKILL)
+            session.signal(SIGKILL, table: table)
         }
+    }
+
+    /// The idle countdown ran out (`CommandRunStore.checkIdleShells`): the shell ends as End would end it.
+    func endForIdle(table: CommandRunProcessTable = .live) {
+        guard outcome == .running else { return }
+        endedForIdle = true
+        endShell(table: table)
     }
 
     /// The process group in the terminal's foreground (a job the shell started), when there is one.
@@ -266,7 +273,14 @@ final class CommandRun: ObservableObject, Identifiable {
                                          scope: transcriptScope)
     }
 
+    /// Bumped by every output and every keystroke — the idle countdown restarts when it moves
+    /// (`CommandRunStore.checkIdleShells`).
+    private(set) var activityCount = 0
+    /// The shell was ended by the idle countdown, not by the user.
+    @Published private(set) var endedForIdle = false
+
     private func capture(_ slice: ArraySlice<UInt8>) {
+        activityCount &+= 1
         var start = slice.startIndex
         for (end, mark) in scanner.feed(slice) {
             route(slice[start..<end])
@@ -298,6 +312,7 @@ final class CommandRun: ObservableObject, Identifiable {
     }
 
     private func noteInput(_ data: ArraySlice<UInt8>) {
+        activityCount &+= 1
         guard phase == .shell, !typedAfterCommand, data.contains(0x0D) || data.contains(0x0A) else { return }
         typedAfterCommand = true
     }
@@ -323,6 +338,11 @@ final class CommandRun: ObservableObject, Identifiable {
     // MARK: Test seams (a run built with `launch: false`)
 
     func feedForTesting(_ bytes: [UInt8]) { capture(bytes[...]) }
+    /// A run built without a process, given a terminal session as if its shell were `leader`.
+    func adoptSessionForTesting(leader: pid_t, leaderStart: UInt64, runStart: UInt64) {
+        processGroup = leader
+        session = CommandRunSession(leader: leader, leaderStart: leaderStart, runStart: runStart)
+    }
     /// The session's tail as plain text.
     var sessionTextForTesting: String { terminalPlainText(sessionCapture.bytes()) }
     /// The screen's rows around the cursor's — `rows` up to it and `after` past it (a suggestion may wrap on) —
@@ -488,6 +508,25 @@ final class CommandRunStore: ObservableObject {
     var launchesProcesses = true
     /// Test seam: false records the windows it would open instead (no test puts a window on screen).
     var presentsWindows = true
+
+    // MARK: Idle shells end themselves
+
+    /// How long a shell may sit idle — at its prompt, nothing else running in its session, its window closed —
+    /// before it ends itself.
+    static let idleShellLifetime: TimeInterval = 60
+    /// How often the idle countdown is looked at — only while some shell is open with its window closed.
+    static let idleCheckInterval: TimeInterval = 5
+
+    /// The clock, the process table and the terminal's foreground group, as the idle countdown reads them
+    /// (injected by the tests).
+    var now: () -> Date = Date.init
+    var processTable = CommandRunProcessTable.live
+    var foregroundGroupOf: (CommandRun) -> pid_t? = { $0.foregroundGroup() }
+    /// When each qualifying shell went idle, and its activity count then.
+    private var idleSince: [UUID: (since: Date, activity: Int)] = [:]
+    private var idleTimer: Timer?
+    /// Windows open now (a window open — even unfocused or minimized — keeps its shell alive).
+    private var openWindowIds: Set<UUID> = []
     private(set) var openedWindowsForTesting: [UUID] = []
 
     /// The on-screen paths the pill holds now (a new run's shell starts with them). Wired by the pill.
@@ -549,9 +588,13 @@ final class CommandRunStore: ObservableObject {
         withAnimationIfVisible { runs.append(run) }
         // The pill's state follows the run; the store republishes only so the row re-lays out.
         outcomeWatch[run.id] = run.$outcome.dropFirst().sink { [weak self] _ in
-            DispatchQueue.main.async { self?.prune() }
+            DispatchQueue.main.async {
+                self?.prune()
+                self?.updateIdleTimer()
+            }
         }
         prune()
+        updateIdleTimer()
         return run
     }
 
@@ -603,6 +646,9 @@ final class CommandRunStore: ObservableObject {
     /// A click on a command pill: its terminal window — brought forward when already open.
     func openWindow(_ id: UUID) {
         guard let run = run(id) else { return }
+        openWindowIds.insert(id)
+        idleSince[id] = nil
+        updateIdleTimer()
         guard presentsWindows else {
             openedWindowsForTesting.append(id)
             return
@@ -621,7 +667,7 @@ final class CommandRunStore: ObservableObject {
                 guard let self, let run else { return false }
                 return await self.addToTranscript(run)
             })
-        controller.onClosed = { [weak self] in self?.windows[id] = nil }
+        controller.onClosed = { [weak self] in self?.windowClosed(id) }
         // Back to the terminal: its shell's autosuggestions get the paths on screen in the app the user came from.
         controller.onBecameKey = { [weak self, weak run] in
             guard let self, let run, let read = self.readOnScreenPaths else { return }
@@ -631,12 +677,65 @@ final class CommandRunStore: ObservableObject {
         controller.show()
     }
 
-    func isWindowOpen(_ id: UUID) -> Bool { windows[id] != nil }
+    func isWindowOpen(_ id: UUID) -> Bool { openWindowIds.contains(id) }
+
+    /// A terminal window closed: its shell's idle countdown may start.
+    func windowClosed(_ id: UUID) {
+        windows[id] = nil
+        openWindowIds.remove(id)
+        idleSince[id] = nil
+        updateIdleTimer()
+    }
+
+    /// A shell the countdown may end: running, with a session, its window closed.
+    private func idleCandidate(_ run: CommandRun) -> Bool {
+        run.outcome == .running && run.session != nil && !openWindowIds.contains(run.id)
+    }
+
+    /// The timer runs only while some shell is a candidate — none at all otherwise (the idle-wakeups budget).
+    func updateIdleTimer() {
+        let needed = runs.contains(where: idleCandidate)
+        if needed, idleTimer == nil {
+            let timer = Timer(timeInterval: Self.idleCheckInterval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.checkIdleShells() }
+            }
+            timer.tolerance = 1
+            RunLoop.main.add(timer, forMode: .common)
+            idleTimer = timer
+        } else if !needed, let timer = idleTimer {
+            timer.invalidate()
+            idleTimer = nil
+        }
+    }
+
+    var idleTimerRunningForTesting: Bool { idleTimer != nil }
+
+    /// One look: a shell idle at its prompt — the terminal's foreground group is the shell's own, and nothing else
+    /// runs in its session (background jobs and `nohup`'d children count) — with its window closed, and no output
+    /// or keystroke since, ends once that has held `idleShellLifetime`. Anything else restarts its countdown.
+    func checkIdleShells() {
+        let now = now()
+        for run in runs {
+            guard idleCandidate(run), let session = run.session else { idleSince[run.id] = nil; continue }
+            let idle = foregroundGroupOf(run) == session.leader && session.targets(in: processTable) == [session.leader]
+            guard idle else { idleSince[run.id] = nil; continue }
+            if let since = idleSince[run.id], since.activity == run.activityCount {
+                if now.timeIntervalSince(since.since) >= Self.idleShellLifetime {
+                    idleSince[run.id] = nil
+                    run.endForIdle(table: processTable)
+                }
+            } else {
+                idleSince[run.id] = (now, run.activityCount)
+            }
+        }
+        idleSince = idleSince.filter { id, _ in runs.contains { $0.id == id } }
+        updateIdleTimer()
+    }
 
     /// The pill's stop control and the window's: Ctrl-C to the running line; the shell stays.
     func stop(_ id: UUID) { run(id)?.interrupt() }
 
-    /// The pill's end control and the window's: the shell goes.
+    /// The pill's end control: the shell goes.
     func endShell(_ id: UUID) { run(id)?.endShell() }
 
     /// The pill's × on a run whose shell has ended: it leaves the row (and its window closes).
@@ -644,8 +743,10 @@ final class CommandRunStore: ObservableObject {
         guard let run = run(id), run.outcome.isFinished else { return }
         windows[id]?.close()
         windows[id] = nil
+        openWindowIds.remove(id)
         outcomeWatch[id] = nil
         withAnimationIfVisible { runs.removeAll { $0.id == id } }
+        updateIdleTimer()
     }
 
     /// Too many runs: the oldest finished ones with no window open go.
