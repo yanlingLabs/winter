@@ -2,7 +2,7 @@
 // allowlist and the world rules, and play the page watcher's ops): the debugger path (Winter's built-in browser, a
 // Winter for Chrome older than 1.2.0, an element in a child frame) and Winter for Chrome 1.2.0's debugger-free path.
 // The real watcher in a real browser: `scripts/browser-e2e/` (opt-in).
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { shouldCloseAgentTab } from "../../src/computer-use/browser/lifecycle";
 import { HOLD_CEILING_SENTENCE, SECURE_FIELD_SENTENCE, TabDriver } from "../../src/computer-use/browser/tab-driver";
 import { HOLDS_PER_SESSION } from "../../src/computer-use/browser/engine";
@@ -33,9 +33,15 @@ function page(url: string, extra: Partial<FakePage> = {}): FakePage {
   };
 }
 
+// Every backend a test builds is stopped when the test ends: a watch still armed at that point keeps its poller
+// (`runPoller`, a long poll every pollMs against the fake page) running for the rest of the process.
+const backends: BrowserWakeBackend[] = [];
+afterEach(() => { for (const b of backends.splice(0)) b.stop(); });
+
 function setup(o: HarnessOpts & { skew?: { ms: number } } = {}) {
   const h = harness(o);
   const backend = new BrowserWakeBackend(h.engine, { pollMs: 40, recoverMs: 1_500, closedGraceMs: 150, ...(o.skew === undefined ? {} : { now: () => Date.now() + o.skew!.ms }) });
+  backends.push(backend);
   const events: WakeBackendEvent[] = [];
   const r = h.run();
   const arm = (targetId: string, condition: WakeCondition, id = wakeId(), sessionId = "s1") =>
