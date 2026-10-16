@@ -171,14 +171,27 @@ describe("manifest-driven paths: a resumed or rolled-back run never moves Cowork
       { moved: [{ from: "cowork/workspaces/w/data.ext4", to: "sdk/x" }] }, { moved: [{ from: "projects", to: "cowork/workspaces/w" }] },
       { displaced: [{ from: "cowork/x", to: "migration/y" }] }, { moving: { from: "skills", to: "./cowork/x" } },
       { links: ["cowork"] }, { copied: ["a/../cowork/x"] }, { archived: [{ from: "/h/cowork/workspaces/w/env.ext4", to: "migration/x" }] },
+      // rollback renames INTO `<archiveDir>/rolled-back/...`, and the re-key step joins keys and names under sdk/projects
+      { archiveDir: "cowork/x" }, { archiveDir: "/h/cowork/workspaces/w/archive" },
+      { backups: { ...base.backups, settings: "/h/cowork/workspaces/w/settings.json.bak" } },
+      { reconciled: [{ root: "/h/cowork/workspaces/w", outcome: "clean" as const }] },
+      { rekeyed: [{ sessionId: "s", backendId: "b", from: "-raw", to: "../../cowork/workspaces/w", entries: ["b.jsonl"], outcome: "moved" as const }] },
+      { rekeyed: [{ sessionId: "s", backendId: "b", from: "-raw", to: "-canon", entries: ["../../../cowork/workspaces/w/data.ext4"], outcome: "pending" as const }] },
     ]) expect(coworkManifestProblem({ ...base, ...bad } as MigrationCManifest)).toContain("Cowork storage");
+    // a path that leaves the home is refused too, Cowork or not
+    for (const bad of [{ moved: [{ from: "projects", to: "../elsewhere" }] }, { archiveDir: "/elsewhere/c-t" }, { rekeyed: [{ sessionId: "s", backendId: "b", from: "-raw", to: "../../..", entries: [], outcome: "moved" as const }] }]) {
+      expect(coworkManifestProblem({ ...base, ...bad } as MigrationCManifest)).toContain("outside the home");
+    }
+    // ordinary recorded manifests stay accepted: transcript keys, names, backups inside the archive
+    expect(coworkManifestProblem({ ...base, backups: { ...base.backups, runtimeState: "/h/migration/c-t/runtime-state.db" }, reconciled: [{ root: "/h/runtimes/claude-config", outcome: "clean" as const }],
+      rekeyed: [{ sessionId: "s", backendId: "b", from: "-Users-x-app", to: "-private-tmp-app", entries: ["b", "b.jsonl"], outcome: "moved" as const }] })).toBeUndefined();
     expect(coworkManifestProblem({ ...base, moved: [{ from: "coworker", to: "sdk/coworker" }] })).toBeUndefined();
   });
-  const tamper = async (patch: Partial<MigrationCManifest>, status: MigrationCManifest["status"]) => {
+  const tamper = async (patch: Partial<MigrationCManifest> | ((home: string) => Partial<MigrationCManifest>), status: MigrationCManifest["status"]) => {
     const home = oldLayoutHome({ official: true }); coworkTree(home);
     await runMigrationC(home, deps()); // phase 1 complete; phase 2 pending
     const state = migrationCState(home) as { kind: "parsed"; manifest: MigrationCManifest };
-    writeFileSync(migrationCManifestPath(home), `${JSON.stringify({ ...state.manifest, ...patch, status }, null, 2)}\n`);
+    writeFileSync(migrationCManifestPath(home), `${JSON.stringify({ ...state.manifest, ...(typeof patch === "function" ? patch(home) : patch), status }, null, 2)}\n`);
     return { home, tree: snapshot(join(home, "cowork")), whole: snapshot(home) };
   };
   const named = { moved: [{ from: "skills", to: "sdk/skills" }, { from: "cowork/workspaces/ws_fixture", to: "sdk/stolen" }] };
@@ -192,6 +205,12 @@ describe("manifest-driven paths: a resumed or rolled-back run never moves Cowork
     const { home, whole } = await tamper(named, "phase1-complete");
     const refused = await refusal(() => finishMigrationC(home, { log: () => {}, reconcile: async () => "clean" }));
     expect(refused.code).toBe("sdk_home_half_migrated");
+    expect(snapshot(home)).toEqual(whole);
+  });
+  test("a tampered archive directory — the target of rollback's renames — is refused before anything is restored", async () => {
+    const { home, whole } = await tamper(h => ({ archiveDir: join(h, "cowork", "workspaces", WORKSPACE_DIR, "archive") }), "complete");
+    const refused = await refusal(() => rollbackMigrationC(home, { log: () => {} }));
+    expect(refused.code).toBe("sdk_home_migration_refused"); expect(refused.message).toContain("nothing was restored");
     expect(snapshot(home)).toEqual(whole);
   });
   test("rollback refuses it before restoring anything", async () => {

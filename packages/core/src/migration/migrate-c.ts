@@ -331,12 +331,19 @@ export function coworkManifestProblem(m: MigrationCManifest): string | undefined
     const clean = normalize(isAbsolute(p) ? relative(m.home, p) : p);
     return clean.split(sep).join("/");
   };
+  // Every field a later step turns into a rename/removal target: the move lists, the archive and backup
+  // locations, the reconciled roots, and the transcript keys and names the re-key step joins under sdk/projects.
   const named = [
     ...m.moved.flatMap((e) => [e.from, e.to]), ...(m.displaced ?? []).flatMap((e) => [e.from, e.to]),
     ...(m.moving === undefined ? [] : [m.moving.from, m.moving.to]), ...m.links, ...m.copied, ...m.archived.flatMap((e) => [e.from, e.to]),
+    m.archiveDir, ...Object.values(m.backups ?? {}).filter((p): p is string => typeof p === "string"), ...m.reconciled.map((r) => r.root),
+    ...(m.rekeyed ?? []).flatMap((e) => [e.from, e.to].flatMap((key) => [join("sdk", "projects", key), ...e.entries.map((name) => join("sdk", "projects", key, name))])),
   ];
-  const hit = named.find((p) => typeof p === "string" && isCoworkStorageRel(rel(p)));
-  return hit === undefined ? undefined : `its manifest names Cowork storage (${hit}); a migration never moves, copies or removes it`;
+  const outside = (p: string): boolean => { const r = rel(p); return r === ".." || r.startsWith("../"); };
+  const cowork = named.find((p) => typeof p === "string" && isCoworkStorageRel(rel(p)));
+  if (cowork !== undefined) return `its manifest names Cowork storage (${cowork}); a migration never moves, copies or removes it`;
+  const escaped = named.find((p) => typeof p === "string" && outside(p));
+  return escaped === undefined ? undefined : `its manifest names a path outside the home (${escaped})`;
 }
 
 /** Why phase 1 cannot run on this home, or `undefined`. Every check that can refuse runs BEFORE the

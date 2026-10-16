@@ -22,21 +22,21 @@ afterEach(() => { cleanup.splice(0).reverse().forEach(fn => { try { fn(); } catc
 const proof = {}, stopProof = {};
 const authority: CoworkVolumeAuthority = { authorize: (_action, input) => input.proof === proof, verifyStopped: (_input, stop) => stop.proof === stopProof };
 
-/** A standalone workspace bound to a real indexed session, with two sparse images that hold bytes and
- * shared instructions, memory and an output file for that session. */
-function fixture() {
+/** A workspace bound to a real indexed session, with two sparse images that hold bytes and shared
+ * instructions, memory and an output file for that session. Standalone by default; `project` for a shared one. */
+function fixture(ownership: "standalone" | "project" = "standalone") {
   const home = mkdtempSync(join(tmpdir(), "winter-cowork-retention-"));
   const db: RuntimeStateDb = openRuntimeStateDb(home), store = new SessionStore(home), repo = new CoworkRepository(db);
   cleanup.push(() => { store.close(); db.close(); rmSync(home, { recursive: true, force: true }); });
   repo.homeIdentity();
   const sessionId = store.createSession("global", { mode: "code" });
   const made = repo.create({ principalId: "fixture-user", requestId: "create" }, {
-    ownership: "standalone", title: "Retention fixture", sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "grant", rootIdentity: "root" } }],
+    ownership, title: "Retention fixture", sources: [{ kind: "folder", label: "Fixture", access: "read-write", detail: { grantRef: "grant", rootIdentity: "root" } }],
     ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" },
   });
   const workspaceId = made.workspaceId;
   // The standalone owner is the reserved conversation; the fixture points the reservation at the real session.
-  db.db.run("UPDATE cowork_workspaces SET owner_id=? WHERE workspace_id=?", [sessionId, workspaceId]);
+  if (ownership === "standalone") db.db.run("UPDATE cowork_workspaces SET owner_id=? WHERE workspace_id=?", [sessionId, workspaceId]);
   const epoch = repo.beginIncarnation(workspaceId, "fixture-incarnation", repo.get(workspaceId).configRevision);
   repo.acknowledgeSource(epoch, made.value.sources[0]!.sourceId, 1, "ready");
   repo.bindConversation({ principalId: "fixture-user", requestId: "bind", expectedRevision: repo.get(workspaceId).configRevision }, workspaceId, { sessionId, sourceId: made.value.sources[0]!.sourceId }, authorityFixtureSessions(sessionId));
@@ -51,11 +51,11 @@ function fixture() {
   for (const name of ["data.ext4", "env.ext4"]) { const fd = openSync(join(dir, name), "r+"), bytes = Buffer.from(`durable guest bytes in ${name}`); writeSync(fd, bytes, 0, bytes.length, 8192); closeSync(fd); }
   const shared = [["instructions/WINTER.md", "# workspace guidance"], ["memory/notes.md", "- remembered"], [`outputs/${sessionId}/report.pdf`, "deliverable"], [`outputs/${sessionId}/index.db`, "an artifact that happens to be named like an index"]] as const;
   for (const [rel, body] of shared) { mkdirSync(join(dir, "shared", rel, ".."), { recursive: true }); writeFileSync(join(dir, "shared", rel), body); }
-  return { home, db, store, repo, volumes, request, workspaceId, sessionId, dir };
+  return { home, db, store, repo, volumes, request, workspaceId, sessionId, dir, sourceId: made.value.sources[0]!.sourceId };
 }
 type Fixture = ReturnType<typeof fixture>;
 
-/** Everything a retention rule may not disturb: workspace and binding rows, volume records, and every byte beneath the workspace directory. */
+/** Everything a retention rule may not disturb: volume records, source rows, and every byte beneath the workspace directory. */
 function retained(f: Fixture) {
   const files: Record<string, string> = {};
   const walk = (dir: string): void => {
@@ -66,32 +66,62 @@ function retained(f: Fixture) {
     }
   };
   walk(f.dir);
-  const workspace = f.repo.get(f.workspaceId);
-  return { files, state: workspace.state, power: workspace.power, volumes: f.volumes.records(f.workspaceId), sources: f.repo.sources(f.workspaceId).map(s => [s.sourceId, s.state, s.desired]) };
+  return { files, power: f.repo.get(f.workspaceId).power, volumes: f.volumes.records(f.workspaceId), sources: f.repo.sources(f.workspaceId).map(s => [s.sourceId, s.state, s.desired]) };
 }
-// docs/cowork-spec.md ("Archive preserves data; deletion is separate. Deleting one conversation does not delete
-// shared Project files/memory or granted host folders. Deleting a standalone conversation also does not
-// silently destroy its workspace: retain it for explicit export/deletion. Empty-session reapers, runtime
-// retention and model-driven cleanup cannot remove Cowork volumes.")
-for (const door of ["the empty-session reaper", "the shared SessionStore.deleteSession door (user delete and the cleaner)"] as const) {
-  test(`deleting a standalone workspace's only conversation through ${door} retains the workspace, both volumes and every shared file`, () => {
-    const f = fixture(), before = retained(f);
+const lifecycle = (f: Fixture) => { const w = f.repo.get(f.workspaceId); return { state: w.state, configRevision: w.configRevision }; };
+const remove = (f: Fixture, door: "reaper" | "store") => {
+  const hook = createCoworkSessionDeletionHook(f.repo);
+  if (door === "reaper") expect(reapEmptySessions({ store: f.store, attachedCount: () => 0, home: f.home, now: () => Date.now() + 3 * 24 * 3600_000, onDelete: hook })).toEqual([f.sessionId]);
+  else { f.store.deleteSession(f.sessionId); hook(f.sessionId); }
+  expect(() => f.store.getTitle(f.sessionId)).toThrow("unknown session"); // the session really is gone
+};
+// docs/cowork-execution-contracts.md: "Deleting a standalone conversation does not silently destroy its
+// workspace. Detach/archive its workspace for explicit later deletion/export; ... Empty-session reapers, runtime
+// retention and model-driven session cleanup may not delete Cowork volumes or shared Project data." and
+// docs/cowork-spec.md: "Archive preserves data; deletion is separate."
+for (const door of ["reaper", "store"] as const) {
+  test(`deleting a standalone workspace's only conversation through ${door === "reaper" ? "the empty-session reaper" : "the shared SessionStore.deleteSession door (user delete and the cleaner)"} archives the workspace and retains both volumes and every shared file`, () => {
+    const f = fixture(), before = retained(f), revision = lifecycle(f).configRevision;
+    expect(lifecycle(f).state).toBe("retained");
     expect(Object.keys(before.files).sort()).toEqual(["data.ext4", "env.ext4", "shared/instructions/WINTER.md", "shared/memory/notes.md", `shared/outputs/${f.sessionId}/index.db`, `shared/outputs/${f.sessionId}/report.pdf`].sort());
-    const hook = createCoworkSessionDeletionHook(f.repo);
-    if (door === "the empty-session reaper") {
-      const reaped = reapEmptySessions({ store: f.store, attachedCount: () => 0, home: f.home, now: () => Date.now() + 3 * 24 * 3600_000, onDelete: hook });
-      expect(reaped).toEqual([f.sessionId]);
-    } else {
-      f.store.deleteSession(f.sessionId); hook(f.sessionId);
-    }
-    expect(() => f.store.getTitle(f.sessionId)).toThrow("unknown session"); // the session really is gone
+    remove(f, door);
     expect(f.repo.binding(f.sessionId).state).toBe("deleted"); // its binding is tombstoned, never reused
-    const after = retained(f);
-    expect(after).toEqual(before); // workspace still `retained`/`stopped`, volume records, and every byte unchanged
-    expect(after.state).toBe("retained");
+    expect(lifecycle(f)).toEqual({ state: "archived", configRevision: revision + 1 }); // detached, and visible to a revision-keyed client
+    expect(retained(f)).toEqual(before); // volume records, sources, power and every byte unchanged
+    // detached: no wake, no disk admission until it is explicitly restored (there is no restore operation yet)
+    for (const attempt of [() => f.volumes.claim(f.request), () => f.volumes.open(f.request, "data")]) {
+      try { attempt(); throw new Error("expected refusal"); } catch (error) { expect(error).toBeInstanceOf(CoworkVolumeError); expect((error as CoworkVolumeError).code).toBe("authority_denied"); }
+    }
     expect(f.db.integrity().ok).toBe(true);
+    createCoworkSessionDeletionHook(f.repo)(f.sessionId); // a repeated retirement is harmless
+    expect(lifecycle(f)).toEqual({ state: "archived", configRevision: revision + 1 });
   });
 }
+
+test("deleting one Project conversation never archives the shared workspace, and changes no revision", () => {
+  const f = fixture("project"), before = retained(f), life = lifecycle(f);
+  remove(f, "store");
+  expect(f.repo.binding(f.sessionId).state).toBe("deleted");
+  expect(lifecycle(f)).toEqual(life); expect(life.state).toBe("retained");
+  expect(retained(f)).toEqual(before);
+});
+
+test("a standalone workspace that is not stopped, or is already past retained, keeps its state when its conversation goes", () => {
+  for (const [power, state] of [["running", "retained"], ["starting", "retained"], ["draining", "retained"], ["uncertain", "retained"], ["stopped", "deleting"], ["stopped", "archived"]] as const) {
+    const f = fixture();
+    f.db.db.run("UPDATE cowork_workspaces SET power=?, state=? WHERE workspace_id=?", [power, state, f.workspaceId]);
+    const life = lifecycle(f); remove(f, "store");
+    expect(lifecycle(f)).toEqual(life);
+  }
+});
+
+test("only the standalone owner's retirement archives: another binding row on that workspace leaves it retained", () => {
+  const f = fixture(), life = lifecycle(f);
+  f.db.db.run("INSERT INTO cowork_conversations VALUES('s_other',?,NULL,?,'.','auto','{}',1,'active','t')", [f.workspaceId, f.sourceId]);
+  f.repo.abandonConversation("s_other");
+  expect(f.repo.binding("s_other").state).toBe("deleted");
+  expect(lifecycle(f)).toEqual(life);
+});
 
 // docs/cowork-spec.md, "Archived | Refuse automatic wake until explicitly restored"; restore returns
 // the same data (host-protocol: "restore never restores revoked grants or deleted backing").
