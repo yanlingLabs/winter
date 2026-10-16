@@ -1187,6 +1187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for window in self.detachedWindows where window.isKeyOrMain { ids.insert(window.sessionId) }
                 return ids
             })
+        wireIslandTabs(island, model: model, pill: pill)
         islandController = island
         island.start()
         // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
@@ -1206,6 +1207,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak island] _ in island?.focusChanged() }
             .store(in: &cancellables)
+    }
+
+    /// The island's phase-2 tabs (`docs/claude/island.md`): Sessions, Usage and limits, Devices read the app's own
+    /// client, directory, windows and remote stack; the Shelf keeps its own list. Nothing here polls while the island is
+    /// closed — the controller refreshes the selected tab only while it is open.
+    private func wireIslandTabs(_ island: IslandController, model: AppModel, pill: DispatchPillController) {
+        let client = model.client
+        let tabs = island.tabModels
+        let windowFacts: () -> IslandWindowFacts = { [weak self] in
+            guard let self else { return IslandWindowFacts() }
+            let app = self.appWindow.flatMap { $0.isVisible ? $0.host?.attachedSessionId : nil }
+            return IslandWindowFacts(appWindowSessionId: app, detachedSessionIds: Set(self.detachedWindows.map(\.sessionId)))
+        }
+        let title: (String) -> String? = { [weak model] sid in
+            model?.directory.rows.first { $0.sessionId == sid }?.title.flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        let sessions = tabs.sessions
+        sessions.directory = { [weak model] in model?.directory.rows ?? [] }
+        sessions.refreshDirectory = { [weak model] in await model?.directory.refresh() }
+        sessions.fetchHosts = { try await client.islandHosts() }
+        sessions.waiting = { [weak island] in Set(island?.store.cards.map(\.answerSessionId) ?? []) }
+        sessions.childStatuses = { [weak model] in
+            Dictionary((model?.session.state.children ?? []).map { ($0.sessionId, $0.status) }, uniquingKeysWith: { a, _ in a })
+        }
+        sessions.windows = windowFacts
+        sessions.perform = { [weak self, weak island] target in
+            island?.close()
+            self?.showIslandSessionTarget(target, title: title)
+        }
+
+        let usage = tabs.usage
+        usage.fetch = { sid in try await client.islandUsage(sessionId: sid) }
+        usage.fetchRoles = { try await client.settingsModelRoles() }
+        usage.currentSession = { [weak self, weak model] in
+            guard let self, let model else { return nil }
+            let front = self.detachedWindows.first(where: \.isKeyOrMain)?.sessionId
+                ?? windowFacts().appWindowSessionId
+                ?? model.focusedSessionId
+            return front.map { ($0, title($0)) }
+        }
+
+        let devices = tabs.devices
+        devices.fetchStatus = { try await LiveComputerUseClient(client: client).status() }
+        devices.fetchPhones = { [weak self] in await self?.remoteAccessCoordinator?.pairedDevices() ?? [] }
+        devices.connectedPhones = { [weak self] in await self?.remoteAccessCoordinator?.connectedPhoneIDs() ?? [] }
+        devices.mirrored = { [weak self] in self?.remoteMirrorHub?.watchedSessionIds ?? [] }
+        devices.titleFor = title
+
+        // The strip's working count and the Sessions rows follow the directory (its own pushes: created, titled,
+        // activity, child updates; re-listed while a window or the open island shows it).
+        model.directory.$rows
+            .receive(on: DispatchQueue.main)
+            .sink { [weak island] rows in
+                island?.setWorkingSessions(IslandSessionsBuilder.workingCount(rows))
+                island?.tabModels.sessions.recompute()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Moves the user's view to where an island Sessions row's session is.
+    private func showIslandSessionTarget(_ target: IslandSessionTarget, title: (String) -> String?) {
+        switch target {
+        case .appWindow(let sid):
+            summonAppWindow(navigatingTo: .session(sid))
+        case .detachedWindow(let sid):
+            if let window = detachedWindows.first(where: { $0.sessionId == sid }) { window.bringToFront() }
+            else { openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter") }
+        case .terminal(let tty, let sid):
+            if TerminalRaiser.raise(tty: tty) == .notFound {
+                openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
+            }
+        case .openDetached(let sid):
+            openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
+        }
     }
 
     /// Everything after activation policy. Split out so tests can drive it without

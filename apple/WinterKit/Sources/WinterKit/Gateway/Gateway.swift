@@ -527,6 +527,16 @@ public actor Gateway {
         sessions[clientInstanceID]?.pumpTask
     }
 
+    /// The paired phones (`RemoteConn.peerID`s) with at least one connection open now — the Winter island's Devices
+    /// tab ("connected"). Read-only.
+    public func connectedPeerIDs() -> Set<String> {
+        var out = Set<String>()
+        for (peer, clients) in peerToClients where clients.contains(where: { sessions[$0]?.openConns.isEmpty == false }) {
+            out.insert(peer)
+        }
+        return out
+    }
+
     /// Test-only inspection hook (`@testable`, T4 review fix 2): the `clientInstanceID`s currently
     /// mapped for a peer — the eviction test asserts this stays bounded (pruned in lockstep with
     /// `sessions`) for a churning device instead of growing with every ever-seen id.

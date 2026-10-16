@@ -2,9 +2,8 @@ import Foundation
 
 // The Winter island's tabs (`docs/claude/island.md`). The open island shows one tab at a time; a TWO-FINGER horizontal
 // swipe while the pointer is over it moves between them (`TrackpadHorizontalSwipeRecognizer`, the Dispatch pill's), with
-// small dots for where you are. Phase 1 registers ONE tab, Needs you; the registry is open for the rest (phase 2:
-// Sessions, Usage and limits, Devices, Shelf, Watches) — a tab is added by naming it here and giving the island view
-// a body for its id.
+// small dots for where you are. Needs you is always first; phase 2 adds Sessions, Shelf, Usage and Devices (and
+// Watches, from its own lane) — a tab is added by naming it here and giving the island view a body for its id.
 
 struct IslandTab: Identifiable, Equatable {
     let id: String
@@ -15,9 +14,13 @@ struct IslandTab: Identifiable, Equatable {
 
 enum IslandTabRegistry {
     static let needsYou = IslandTab(id: "needs-you", title: "Needs you", symbol: "hand.raised.fill")
+    static let sessions = IslandTab(id: "sessions", title: "Sessions", symbol: "rectangle.stack")
+    static let shelf = IslandTab(id: "shelf", title: "Shelf", symbol: "tray.full")
+    static let usage = IslandTab(id: "usage", title: "Usage and limits", symbol: "gauge.with.dots.needle.50percent")
+    static let devices = IslandTab(id: "devices", title: "Devices", symbol: "laptopcomputer.and.iphone")
 
-    /// The tabs this build shows, in swipe order. Phase 2 adds `sessions`, `usage`, `devices`, `shelf`, `watches`.
-    static let tabs: [IslandTab] = [needsYou]
+    /// The tabs this build shows, in swipe order: Needs you first, then Sessions, Shelf, Usage and limits, Devices.
+    static let tabs: [IslandTab] = [needsYou, sessions, shelf, usage, devices]
 }
 
 /// Which tab is showing. Pure.

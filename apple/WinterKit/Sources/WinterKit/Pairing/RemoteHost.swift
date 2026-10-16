@@ -462,4 +462,9 @@ public final class RemoteHost {
     public func pairedDevices() async -> [PairRecord] {
         await store.all()
     }
+
+    /// The paired phones connected now (none while the stack is not running) — the Winter island's Devices tab.
+    public func connectedPhoneIDs() async -> Set<String> {
+        await gateway?.connectedPeerIDs() ?? []
+    }
 }

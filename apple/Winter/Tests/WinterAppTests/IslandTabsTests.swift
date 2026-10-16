@@ -9,14 +9,22 @@ final class IslandTabsTests: XCTestCase {
         IslandTab(id: "usage", title: "Usage and limits", symbol: "gauge"),
     ]
 
-    func testPhaseOneRegistersOneTabNeedsYouAndShowsNoDots() {
+    func testTheTabsAreNeedsYouFirstThenSessionsShelfUsageDevices() {
         let state = IslandTabState()
-        XCTAssertEqual(state.tabs.map(\.id), ["needs-you"])
-        XCTAssertEqual(state.selected?.title, "Needs you")
-        XCTAssertFalse(state.showsDots)
+        XCTAssertEqual(state.tabs.map(\.id), ["needs-you", "sessions", "shelf", "usage", "devices"])
+        XCTAssertEqual(state.selected?.title, "Needs you", "Needs you is where the island opens")
+        XCTAssertTrue(state.showsDots)
         var s = state
-        XCTAssertFalse(s.swipe(.left), "nowhere to go with one tab")
-        XCTAssertFalse(s.swipe(.right))
+        XCTAssertFalse(s.swipe(.right), "nothing before Needs you")
+        XCTAssertTrue(s.swipe(.left))
+        XCTAssertEqual(s.selected?.id, "sessions")
+    }
+
+    func testOneTabShowsNoDots() {
+        var state = IslandTabState(tabs: [IslandTabRegistry.needsYou])
+        XCTAssertFalse(state.showsDots)
+        XCTAssertFalse(state.swipe(.left), "nowhere to go with one tab")
+        XCTAssertFalse(state.swipe(.right))
     }
 
     func testASwipeLeftShowsTheNextTabAndRightThePreviousWithoutWrapping() {
