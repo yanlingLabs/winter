@@ -75,6 +75,9 @@ export class CoworkExports {
    * are pinned. The manifest is derived from canonical rows inside this one transaction, so it describes one
    * state. Only one generation may be in flight per workspace. */
   prepare(workspaceId: string, proof: unknown): PreparedExport {
+    // Records only. The manifest is derived from canonical rows; nothing here opens an image. The future byte copy
+    // must re-verify, per image and on a pinned descriptor, identity (device/inode/owner), exact 0600 mode and
+    // the sticky backup exclusion (the `CoworkVolumes` door) before reading a byte, and `complete()` must follow it.
     const id = lifecycleId(workspaceId);
     return durableCoworkTransaction(this.rs, () => {
       const facts = this.admit("export.prepare", id, proof);
@@ -127,6 +130,8 @@ export class CoworkExports {
    * state still matches it. A foreign home, an unknown workspace (imports never reconstruct records), an
    * unrecorded generation, an owner already attached, or any identity/digest mismatch is a refusal. */
   validateImport(input: string | Uint8Array, proof: unknown): ValidatedImport {
+    // Bound the input before decoding it: a string's length never exceeds its UTF-8 byte length, and a Uint8Array's is it.
+    if (input.length > EXPORT_MANIFEST_MAX_BYTES) lifecycleFail("manifest_invalid");
     const text = typeof input === "string" ? input : Buffer.from(input).toString("utf8");
     if (Buffer.byteLength(text) > EXPORT_MANIFEST_MAX_BYTES) lifecycleFail("manifest_invalid");
     let raw: any;
@@ -139,7 +144,8 @@ export class CoworkExports {
     const manifest = parsed.data;
     const home = this.rs.db.query<Row, []>("SELECT home_id FROM cowork_home_identity WHERE singleton=1").get();
     if (!home) return lifecycleFail("authority_denied");
-    // Authority before any existence check, so an unauthorized caller learns nothing about workspaces.
+    // Authority before any existence check, so an unauthorized caller learns nothing about workspaces. The id is the
+    // manifest's own, so UNTRUSTED: a real authority port must never use it in a path join or any filesystem lookup.
     if (this.authority.authorize("export.validateImport", manifest.workspace.workspaceId, home.home_id, proof) !== true) lifecycleFail("authority_denied");
     if (manifest.homeId !== home.home_id) lifecycleFail("foreign_home");
     let facts: WorkspaceFacts;

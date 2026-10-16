@@ -278,7 +278,7 @@ export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 1
  * cleared (the older CHECK has no such kind), `runtime_sessions` rebuilt under the v6 CHECK by SQLite's
  * 12-step procedure (keys off OUTSIDE the transaction, `foreign_key_check` no worse), the quarantine
  * record dropped, `user_version` 6. `"not-needed"` for no store or a store already at v6 or below; a store
- * NEWER than v12 is refused. A v8/v9/v10/v11/v12 store may roll back only while every Cowork table is empty; populated authority must be retained. The daemon must be stopped.
+ * NEWER than v16 is refused. A v8..v16 store may roll back only while every Cowork table (`COWORK_TABLES`) is empty; populated authority must be retained. The daemon must be stopped.
  *
  * Dropping `run_root_quarantine` forgets which kept roots were quarantined: after a re-upgrade the boot
  * sweep reconciles those roots AGAIN (they are still on disk — nothing here deletes one). A root that is
@@ -298,7 +298,7 @@ export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 
     db.run("PRAGMA foreign_keys = OFF");
     try {
       db.transaction(() => {
-        // Existing homes may roll back an unused additive v8/v9/v10/v11/v12 schema. Never discard
+        // Existing homes may roll back an unused additive v8..v16 schema. Never discard
         // a home identity, source grant, binding, receipt or retained workspace.
         if (version >= 8) {
           dropEmptyCoworkSchema(db);

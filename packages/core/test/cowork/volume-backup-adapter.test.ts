@@ -51,7 +51,10 @@ test.skipIf(!supported)("verifyItemExcluded needs tmutil's answer for THAT path 
   expect(timeMachineVolumeBackup.verifyItemExcluded(`${t.dir}/../${basename(t.dir)}/data.ext4`, t.markedFd)).toBe(false);
   mkdirSync(join(t.dir, "nested")); // a path in a directory that is not the pinned image's
   expect(timeMachineVolumeBackup.verifyItemExcluded(`${dirname(t.marked)}/nested/../data.ext4`, t.markedFd)).toBe(false);
-  // tmutil's own verdict is required: a path it reports as included (a read-only query on a system folder) never passes,
-  // even with a descriptor that carries the marker.
-  expect(timeMachineVolumeBackup.verifyItemExcluded("/Applications", t.markedFd)).toBe(false);
+  // tmutil's own verdict is required: a path it reports as included never passes, even with a descriptor that carries
+  // the marker. /Applications is a read-only query on a system folder; whether it is backed up is the machine's own
+  // setting, so the assertion only runs where tmutil reports it as included (nothing here changes that setting).
+  const applications = Bun.spawnSync(["/usr/bin/tmutil", "isexcluded", "/Applications"]).stdout.toString();
+  if (applications.startsWith("[Included]")) expect(timeMachineVolumeBackup.verifyItemExcluded("/Applications", t.markedFd)).toBe(false);
+  else console.warn(`volume-backup-adapter: /Applications is not reported as included by tmutil on this machine (${applications.trim().split(/\s+/)[0] ?? "no answer"}); that assertion was skipped`);
 });

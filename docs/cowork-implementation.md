@@ -186,6 +186,10 @@ explicit v7 rollback that preserves SDK layout (`winter migrate --cowork-schema
 --rollback`); populated Cowork authority refuses rollback without data loss.
 The release that first ships schema 8 must name this rollback command and its
 populated-data refusal in its release notes; no release is being prepared yet.
+Schema 16 (image pins and export generations) follows the same rule: an empty
+store rolls back to v7 and upgrades again cleanly, while a recorded pin or export
+generation refuses the downgrade and keeps its rows. The release that first ships
+schema 16 must name that refusal as well.
 Draft native and Git components remain isolated from production creation. Open
 review work includes embedded and daemon-owned tool coverage, native
 descendant termination evidence, and VM/admission

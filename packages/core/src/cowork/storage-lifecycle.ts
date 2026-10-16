@@ -52,7 +52,9 @@ export function readWorkspaceFacts(rs: RuntimeStateDb, workspaceId: string): Wor
 }
 
 /** "Image/runtime updates occur while stopped": the guest is stopped, no volume records a writable owner
- * (an uncertain termination keeps ownership), and no format/probe operation is in flight or uncertain. */
+ * (an uncertain termination keeps ownership), and no format/probe operation is in flight or uncertain.
+ * This reads canonical rows only. It does not open an image, so it proves nothing about the file's current
+ * identity, mode or backup exclusion: any future byte copy or attach must re-verify those on a pinned descriptor. */
 export function assertAtRest(facts: WorkspaceFacts): void {
   if (facts.workspace.power !== "stopped" || facts.volumes.some(volume => volume.owner_json !== null)) lifecycleFail("volume_busy");
   if (facts.volumes.some(volume => ["formatting", "probing", "recovery-required"].includes(volume.filesystem_state))) lifecycleFail("recovery_required");

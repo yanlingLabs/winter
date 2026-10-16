@@ -153,12 +153,31 @@ test("an archived, deleting or deleted workspace refuses any disk admission and 
 // docs/cowork-execution-contracts.md: deletion/retention "must not silently remove uncommitted work,
 // transcripts, memory or outputs". A ratchet, not a proof: adding a removal/truncation primitive anywhere
 // under src/cowork fails here until the retention rules above are reviewed for it.
+const DESTRUCTIVE = new RegExp([
+  String.raw`\b(?:rmSync|unlinkSync|rmdirSync|truncateSync|ftruncateSync|renameSync|unlink|rmdir|truncate|rename|ftruncate)\s*\(`, // fs calls, sync or promise
+  String.raw`\brm\s*\(`, String.raw`\bunlinkat\b`, String.raw`\brenameat\b`,
+  String.raw`\bO_TRUNC\b`, // an open that truncates
+  String.raw`\bBun\.write\s*\(`, // Bun's overwrite-by-default writer
+  String.raw`["'\x60](?:/(?:usr/)?bin/)?rm(?:["'\x60\s])`, // spawning rm: ["rm", ...], "/bin/rm", "rm -rf ..."
+  String.raw`\$\x60\s*rm\b`, // Bun shell: $\`rm ...\`
+].join("|"));
+test("the ratchet pattern recognizes each removal, rename-over and truncation form, and not lookalikes", () => {
+  for (const code of [
+    "rmSync(p, { recursive: true })", "await rm(p, { force: true })", "unlinkSync(p)", "await unlink(p)", "rmdirSync(d)", "await rmdir(d)", "truncateSync(p, 0)", "await truncate(p)",
+    "ftruncateSync(fd, 0)", "await ftruncate(fd, 0)", "renameSync(a, b)", "await rename(a, b)", "native().symbols.renameat!(d, a, d, b)", "unlinkat(fd, name, 0)",
+    "openSync(p, O_WRONLY | O_TRUNC)", "constants.O_TRUNC", "await Bun.write(path, bytes)", 'spawnSync("rm", ["-rf", p])', 'Bun.spawn(["/bin/rm", "-rf", p])', 'execFileSync("/usr/bin/rm", [p])',
+    'execSync("rm -rf " + p)', "await $`rm -rf ${p}`",
+  ]) expect([code, DESTRUCTIVE.test(code)]).toEqual([code, true]);
+  for (const code of ["const norm = normalize(p)", "perform(task)", "alarm(1)", "const form = 1", "program(x)", "readFileSync(p)", "writeSync(fd, bytes)", 'const label = "rmdirectory"', "format(x)", "mkdirSync(d)", "const truncated = x"]) {
+    expect([code, DESTRUCTIVE.test(code)]).toEqual([code, false]);
+  }
+});
 test("no Cowork source file removes, renames-over or truncates anything beyond the audited sites", () => {
   const root = join(import.meta.dir, "..", "..", "src", "cowork");
   const files: string[] = [];
   const walk = (dir: string): void => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const p = join(dir, entry.name); if (entry.isDirectory()) walk(p); else if (p.endsWith(".ts")) files.push(p); } };
   walk(root);
-  const destructive = /\b(rmSync|unlinkSync|rmdirSync|truncateSync|ftruncateSync|renameSync|unlink|rmdir|truncate)\s*\(|\brm\s*\(|\bunlinkat\b|\brenameat\b/;
+  const destructive = DESTRUCTIVE;
   const found: string[] = [];
   for (const file of files) {
     readFileSync(file, "utf8").split("\n").forEach((line, index) => {
