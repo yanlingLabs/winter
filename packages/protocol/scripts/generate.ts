@@ -31,6 +31,10 @@ const fixtures: Record<string, unknown> = {
   // shape — a dedicated fixture (distinct from session_created.json above) so Swift round-trips
   // one carrying it, mirroring approval_requested_with_reviewer_reason's with/without pattern.
   "session_created_with_mode": { ...base, type: "session_created", scope: "global", mode: "dispatch" },
+  // Cowork (session door): `cowork` is a RECOGNISED mode on the same additive field. Nothing creates a
+  // Cowork session (`session.create` refuses it), but a stored log, a replayed stream or a newer daemon can
+  // carry one, so Swift must decode and re-encode the value rather than drop or reject it.
+  "session_created_with_cowork_mode": { ...base, type: "session_created", scope: "global", mode: "cowork" },
   "harness_attached": { ...base, type: "harness_attached", clientName: "orb" },
   "harness_detached": { ...base, type: "harness_detached", clientName: "orb" },
   "user_message": { ...base, type: "user_message", threadId: "main", text: "héllo \"world\" — done ✓", clientName: "cli-1" },

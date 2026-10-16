@@ -6,7 +6,7 @@ import { z } from "zod";
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
 import { NDJSON_MAX_LINE_BYTES } from "./ndjson";
-import { SessionEvent, UserMessageImageRef, UserMessageFileRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
+import { SessionEvent, SessionModeSchema, UserMessageImageRef, UserMessageFileRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -162,7 +162,12 @@ export const SessionCreateParams = z.object({
   // axis; passing "code" is a no-op.
   // Chat Mode Slice A: "chat" added — additive, NOT a singleton (many chat sessions may exist).
   // The handler rejects it for remote callers only (Mac-local for this slice).
-  mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Cowork (session door): "cowork" is wire-expressible so the daemon can answer it with a TYPED refusal
+  // instead of a generic schema error, and the handler refuses it for EVERY role (local, harness, remote,
+  // plugin) before any model resolution, row, run folder or child: `{code: "unsupported_topology"}`, the
+  // same error the Cowork workspace doors give while the host integration gates are closed. Nothing can
+  // create or run a Cowork session yet; docs/cowork-host-protocol.md adds the workspace binding later.
+  mode: SessionModeSchema.optional(),
   // Chat Slice D Task 1: an optional per-session model override, stamped at creation time —
   // additive/optional so every existing caller (CLI, WinterKit, the phone) that never sends it is
   // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
@@ -1290,8 +1295,6 @@ export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuer: 
  */
 export const CapabilitiesListParams = z.object({});
 
-export const SessionModeSchema = z.enum(["code", "dispatch", "chat"]);
-
 /** One capability tool's static facts (`capabilities/names.ts`'s `WINTER_CAPABILITY_TOOLS`,
  *  mirrored exactly) plus its LIVE per-mode exposure — whether the child actually gets this tool in
  *  each mode TODAY, derived by calling `runtime-sdk/mode-options.ts`'s `disallowedToolsFor` (never
@@ -1311,7 +1314,10 @@ export const CapabilityToolInfoSchema = z.object({
    *  to). `true` is the older "every mode" spelling, still valid. Absent means loaded up front. */
   deferred: z.union([z.literal(true), z.array(SessionModeSchema)]).optional(),
   /** Per-mode: whether the child is actually handed this tool today (`!disallowedToolsFor(mode).includes(name)`). */
-  exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean() }),
+  exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean(),
+    /** Cowork is recognised but never runnable (`SESSION_MODES`): the child is handed NO tool in it, so this is
+     *  a literal `false` on every row, not a table lookup. */
+    cowork: z.boolean() }),
 });
 
 export const CapabilityServerInfoSchema = z.object({
