@@ -65,8 +65,11 @@ before any filesystem is read. Only an exact `true` from the guard admits.
 
 **Where it is called.** One check serves both moments:
 
-- At claim (before images are open, even before they exist), the host calls `assessFreeSpace` with path targets for the
-  workspace directory and the planned `capacityBytes` values.
+- At plan or allocate (`CoworkVolumes.plan` / `materialize`, before any image exists), the host calls `assessFreeSpace`
+  with a path target that does exist, the home root, and the planned `capacityBytes` values. A path that does not exist yet
+  would read as `free_space_unavailable`, which is the wrong refusal at that moment.
+- At claim (the images exist; no descriptor has been handed out), the host calls the same function with path targets for the
+  existing workspace directory.
 - At launch, after `open` has produced the pinned image descriptors and before any descriptor is transferred to a worker, the
   host calls `preflightImageAdmission`. It reads free space with `fstatfs` on each pinned fd (never re-resolving a path),
   then re-verifies the sticky exclusion (below). A refusal happens before any guest could write; what the host does with the
