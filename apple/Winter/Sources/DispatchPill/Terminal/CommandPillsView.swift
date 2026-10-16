@@ -138,8 +138,9 @@ private struct CommandPill: View {
         .animation(.easeInOut(duration: 0.3), value: run.shellIsLive)
         .onTapGesture(perform: onOpen)
         .onHover { hovering = $0 }
-        .help(run.shellIsLive ? "$ \(run.command) — its shell is still open; click to type in it"
-                              : "$ \(run.command) — open its terminal")
+        .help(run.shellIsLive ? "\(run.displayTitle) — its shell is still open; click to type in it"
+              : run.endedForIdle ? "\(run.displayTitle) — its shell ended after a minute idle; click to read it"
+              : "\(run.displayTitle) — open its terminal")
         .task { await typeOn() }
     }
 
