@@ -310,18 +310,14 @@ export class CoworkSchedules {
     let result: unknown;
     try { result = await port.start(input, token); }
     catch {
-      // A throw asserts nothing launched (see the port contract). Guarded on state AND token: a cancel() or
-      // recover() that already recorded recovery_required is never clobbered back to pending.
-      return this.tx((): CoworkScheduleDispatchOutcome => {
-        const row = this.dispatching(occurrenceId, token);
-        if (!row) return { status: "uncertain" };
-        this.release(row, "execution_unavailable");
-        return { status: "not_started" };
-      });
+      // A throw is NEVER "nothing launched": the effect may exist. Only a returned `not-started` goes back to pending.
+      return this.tx((): CoworkScheduleDispatchOutcome => { if (this.dispatching(occurrenceId, token)) this.markUncertain(occurrenceId); return { status: "uncertain" }; });
     }
     return this.tx((): CoworkScheduleDispatchOutcome => {
+      // Guarded on state AND token: a cancel() or recover() that already recorded recovery_required is never clobbered back to pending.
       const row = this.dispatching(occurrenceId, token);
       if (!row) return { status: "uncertain" }; // cancel()/recover() got there first and recorded it durably
+      if (result && typeof result === "object" && (result as { kind?: unknown }).kind === "not-started") { this.release(row, "execution_unavailable"); return { status: "not-started" }; }
       const runRef = ackedRunRef(result, occurrenceId, token);
       if (runRef === undefined) { this.markUncertain(occurrenceId); return { status: "uncertain" }; } // an ack that cannot be trusted may still have launched
       const receipt: CoworkScheduleDispatchReceipt = Object.freeze({ occurrenceId, runRef });

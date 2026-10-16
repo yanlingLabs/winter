@@ -30,18 +30,25 @@ export interface CoworkScheduleDispatchInput {
 export interface CoworkScheduleStartReceipt { readonly occurrenceId: string; readonly token: string; readonly runRef: string }
 
 /**
- * `started`: the work was launched and is acknowledged. `uncertain`: the port cannot say whether anything
- * launched (a timeout after the request left, a lost transport). Those are the ONLY two ways to report that
- * an effect may exist.
+ * `started`: the work was launched and is acknowledged. `not-started`: the port KNOWS nothing launched
+ * (it refused before any effect); this is the ONLY answer that returns the occurrence to `pending`.
+ * `uncertain`: the port cannot say whether anything launched (a timeout after the request left, a lost
+ * transport). Anything else, including a throw, a rejection or a malformed or mismatched answer, is treated
+ * as uncertain by the host, because an effect may exist.
  */
-export type CoworkScheduleStartResult = { readonly kind: "started"; readonly receipt: CoworkScheduleStartReceipt } | { readonly kind: "uncertain" };
+export type CoworkScheduleStartResult =
+  | { readonly kind: "started"; readonly receipt: CoworkScheduleStartReceipt }
+  | { readonly kind: "not-started" }
+  | { readonly kind: "uncertain" };
 
 export interface CoworkScheduleDispatchPort {
   /**
-   * Launch the occurrence exactly once for this claim token. THROWING OR REJECTING ASSERTS THAT NOTHING WAS
-   * LAUNCHED: the host then returns the occurrence to `pending` (`execution_unavailable`) and a later claim may
-   * call `start` again with a fresh token. A port that cannot prove that must resolve `{ kind: "uncertain" }`
-   * instead, never throw. Called outside every database transaction, after `dispatching` is durable.
+   * Launch the occurrence exactly once for this claim token. THE SAFE DIRECTION IS STRUCTURAL: only a
+   * returned `{ kind: "not-started" }` lets the host return the occurrence to `pending`
+   * (`execution_unavailable`, a later claim may call `start` again with a fresh token). A throw or rejection
+   * is NEVER read as "nothing launched": the host records `uncertain`/`recovery_required` and never replays.
+   * A port that knows nothing launched must say so by returning `not-started`, not by throwing. Called outside
+   * every database transaction, after `dispatching` is durable.
    */
   start(occurrence: CoworkScheduleDispatchInput, token: string): CoworkScheduleStartResult | Promise<CoworkScheduleStartResult>;
 }
@@ -56,11 +63,11 @@ export interface CoworkScheduleDispatchReceipt { readonly occurrenceId: string; 
 /**
  * - `started`: durable `dispatching`, port acknowledged; the host awaits `handled` or `uncertain`.
  * - `blocked`: the begin-time recheck refused; the claim went back to `pending` carrying `reason`; the port was not called.
- * - `not_started`: the port threw, asserting nothing launched; back to `pending` with `execution_unavailable`.
- * - `uncertain`: an effect may exist; durable `uncertain`/`recovery_required` (also when cancel or recovery got there first). Never replayed.
+ * - `not-started`: the port returned `not-started`; back to `pending` with `execution_unavailable`.
+ * - `uncertain`: an effect may exist (a throw, `uncertain`, a malformed or mismatched ack); durable `uncertain`/`recovery_required`, also when cancel or recovery got there first. Never replayed.
  */
 export type CoworkScheduleDispatchOutcome =
   | { readonly status: "started"; readonly receipt: CoworkScheduleDispatchReceipt }
   | { readonly status: "blocked"; readonly reason: NonNullable<CoworkScheduleOccurrence["reason"]> }
-  | { readonly status: "not_started" }
+  | { readonly status: "not-started" }
   | { readonly status: "uncertain" };

@@ -21,7 +21,7 @@ that work ran. Production still constructs `CoworkSchedules` without a port, so
   identical behavior. No schema change, no new enum value, no new error code, no
   change to `tick()`, `claim()`, `cancel()`, `status()` or any RPC handler.
 - `packages/core/test/cowork/schedules.test.ts`: the two raw-SQL boundary fakes are
-  replaced by a counting fake port; 17 new tests (41 in the file, up from 24).
+  replaced by a counting fake port; 18 new tests (42 in the file, up from 24).
 
 ## State machine (existing columns and states only)
 
@@ -30,7 +30,7 @@ pending --claim--> claimed --beginDispatch--> dispatching --handled(receipt)--> 
    ^                  |                          |  \--uncertain(token)-----------> uncertain
    |  (recover, or    |  (begin-time recheck     |  \--recover()/cancel()---------> uncertain
    |   blocked begin) |   refused)               |
-   +------------------+--------------------------+ (port threw: nothing launched)
+   +------------------+--------------------------+ (port RETURNED not-started)
 ```
 
 `beginDispatch(occurrenceId, token)`:
@@ -51,10 +51,12 @@ pending --claim--> claimed --beginDispatch--> dispatching --handled(receipt)--> 
    `state='dispatching' AND claim_token=?`:
    - a well-formed ack echoing the occurrence and token: the row stays
      `dispatching`, the host mints a frozen receipt and returns `started`;
-   - the port threw or rejected: back to `pending`/`execution_unavailable`
-     (token cleared, any coalesced pending folded in), `not_started`;
-   - the port answered `{ kind: "uncertain" }`, or the answer is malformed or
-     echoes the wrong occurrence or token: `uncertain`/`recovery_required`;
+   - the port RETURNED `{ kind: "not-started" }`: back to
+     `pending`/`execution_unavailable` (token cleared, any coalesced pending folded
+     in), `not-started`. This is the only answer that reaches `pending`;
+   - the port threw or rejected, answered `{ kind: "uncertain" }`, or the answer is
+     malformed or echoes the wrong occurrence or token:
+     `uncertain`/`recovery_required`;
    - the row is no longer `dispatching` (cancel or recovery got there first):
      nothing is touched, `uncertain` is returned.
 
@@ -73,19 +75,21 @@ uncertain`; it never replays.
 | after claim, before begin | `claimed`; recovery returns it to `pending` | old token dead, a fresh claim may dispatch, port called once |
 | after begin, port in flight | `dispatching`; recovery makes it `uncertain` | a late ack changes nothing, port never called again |
 | after the port ack, before `handled` | `dispatching`; recovery makes it `uncertain` | the receipt is refused, a one-shot stays `enabled` |
-| port throws | `pending`, `execution_unavailable`, token cleared | retry needs a new claim and token |
-| port throws after cancel | stays `uncertain` | never clobbered back to `pending` |
+| port returns `not-started` | `pending`, `execution_unavailable`, token cleared | retry needs a new claim and token |
+| port throws or rejects | `uncertain`, `recovery_required`, token spent | never replayed; the error text is not kept |
+| any answer after a cancel | stays `uncertain` | never clobbered back to `pending` |
 
 ## REVIEW NEEDED
 
-1. **A port throw means "nothing launched".** The brief says a start failure returns
-   the occurrence to `pending`. That is only safe if the port promises it, so the
-   promise is written into the port's doc comment, and a port that cannot prove it
-   must resolve `{ kind: "uncertain" }` instead of throwing. An untrustworthy ack
-   (wrong echo, malformed shape, bad run reference) is treated as uncertain, not
-   pending. If you would rather have every throw be uncertain, it is a one-line
-   change in `launch`, at the price that a transient start failure then needs
-   manual recovery.
+1. **The safe direction is structural.** Coordinator ruling: only a returned
+   `{ kind: "not-started" }` returns the occurrence to `pending`. A throw or
+   rejection, `{ kind: "uncertain" }`, and any malformed or mismatched ack are
+   `uncertain`/`recovery_required` and never replayed, because an effect may exist.
+   A port that knows nothing launched must say so by returning `not-started`, never
+   by throwing. (An earlier revision of this slice read a throw as "nothing
+   launched", which depended on a doc-comment promise; that was reversed.) Costs: a
+   transient start failure that surfaces as an exception needs recovery, and the
+   host cannot tell a port bug from a real launch.
 2. **What "handled" means.** The receipt is the port's start acknowledgement.
    `handled` is a separate call so the crash window between them is real. Until it
    is called the occurrence stays `dispatching` and holds the job's single active
@@ -117,17 +121,21 @@ uncertain`; it never replays.
    `src/` calls them, and without a port no receipt can be minted, so `handled`
    always refuses. That is a delta from before, when the two-argument `handled` was
    callable on any `dispatching` row (reachable only through raw SQL in tests).
-8. **The `service.ts` pin is deliberately exact.** The anti-wiring test pins the text
-   `new CoworkSchedules(records, host.grants, scheduleNow)`. Another open lane that
-   adds a constructor argument there will fail this test without any behavioral
-   regression; update the pinned text in that merge.
+8. **The `service.ts` check is structural, not text.** The anti-wiring test reads the
+   port's parameter position from the `CoworkSchedules` constructor declaration and
+   requires that every `new CoworkSchedules(...)` in `src/` passes fewer arguments
+   than that position (a small balanced-paren scan), plus that no other `src/` file
+   mentions the port types or `beginDispatch` and that `schedules.ts` has a single
+   `import type` from `schedule-dispatch.ts`. Another lane adding or reordering
+   constructor parameters moves the position and cannot trip it; a `src/` caller
+   that reaches the port position does.
 9. **Anti-wiring pin location.** The pin is a new test in `schedules.test.ts`
    rather than an edit to the two existing pin tests, to avoid cross-lane conflicts.
 
 ## Tests and mutation checks
 
-`bun test test/cowork` from `packages/core`: 614 pass, 54 skip (pre-existing), 0
-fail across 34 files. `bun run typecheck` exits 0. `schedules.test.ts`: 41 pass.
+`bun test test/cowork` from `packages/core`: see the PR for the final count;
+`schedules.test.ts` has 42 tests. `bun run typecheck` exits 0.
 
 Mutations were applied one at a time to `schedules.ts`, the file run, and the file
 restored (script kept in the lane scratch folder, not committed):
@@ -138,9 +146,14 @@ restored (script kept in the lane scratch folder, not committed):
 | skip the claim-token compare | killed | "crash window after claim ...", "a wrong, unknown or reused token ..." |
 | `handled` skips the `dispatching` state check | killed | "crash window after the port ack ...", "the execution owner can report ..." |
 | `handled` skips the receipt | killed | "a one-shot is never marked handled without the receipt ..." |
-| throw path skips the `dispatching` guard | killed | "a failed start folds a pending interval ... never clobbers a recorded cancellation" |
+| a port THROW goes back to `pending` | killed | "a port throw (sync or async) is never read as nothing launched ..." |
+| same, and without the `dispatching` guard | killed | the throw test and the cancellation test |
+| a malformed answer is treated as `not-started` | killed | "an uncertain or untrustworthy port answer is uncertain ..." |
 | an untrustworthy ack is accepted | killed | "an uncertain or untrustworthy port answer is uncertain ..." |
+| the `not-started` path skips the `dispatching` guard | killed | "crash window after begin ...", "a not-started answer folds ..." |
 | `release` does not fold the pending interval | killed | four tests, including the restart-merge tests |
+| a `src/` construction passes a sixth argument | killed | the anti-wiring pin |
+| another lane adds a fourth argument in `service.ts` | not tripped (expected) | none |
 
 ## Still deferred
 

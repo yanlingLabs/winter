@@ -299,23 +299,35 @@ test("crash window after the port ack: the receipt cannot complete a recovered o
   expect(durable(f, row.occurrenceId).state).toBe("uncertain"); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled"); expect(p.calls).toHaveLength(1);
   expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined(); expect(() => s.uncertain(row.occurrenceId, token)).toThrow("request_conflict");
 });
-test("a port throw (sync or async) asserts nothing launched: the occurrence returns to pending/execution_unavailable and a fresh claim may retry", async () => {
+test("only a returned not-started answer returns the occurrence to pending/execution_unavailable, and a fresh claim may retry", async () => {
+  const f = fixture(); let attempts = 0;
+  const p = fakePort(f.db, (input, token) => (++attempts === 1 ? { kind: "not-started" } : ack(input, token))), s = f.open(p.port), { a, row } = due(f), first = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  expect(await s.beginDispatch(row.occurrenceId, first)).toEqual({ status: "not-started" });
+  expect(durable(f, row.occurrenceId)).toEqual({ state: "pending", reason: "execution_unavailable", claim_token: null }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
+  expect(() => s.beginDispatch(row.occurrenceId, first)).toThrow("request_conflict"); expect(p.calls).toHaveLength(1);
+  const second = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(second).not.toBe(first); expect((await s.beginDispatch(row.occurrenceId, second)).status).toBe("started"); expect(p.calls).toHaveLength(2);
+});
+test("a port throw (sync or async) is never read as nothing launched: it is uncertain, recorded durably, leaks nothing and is never replayed", async () => {
   for (const failure of [() => { throw new Error("secret-bearing detail"); }, () => Promise.reject(new Error("secret-bearing detail"))] as Start[]) {
-    const f = fixture(); let attempts = 0;
-    const p = fakePort(f.db, (input, token) => (++attempts === 1 ? failure(input, token) : ack(input, token))), s = f.open(p.port), { a, row } = due(f), first = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
-    const out = await s.beginDispatch(row.occurrenceId, first); expect(out).toEqual({ status: "not_started" }); expect(JSON.stringify(out)).not.toContain("secret");
-    expect(durable(f, row.occurrenceId)).toEqual({ state: "pending", reason: "execution_unavailable", claim_token: null }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
-    expect(() => s.beginDispatch(row.occurrenceId, first)).toThrow("request_conflict"); expect(p.calls).toHaveLength(1);
-    const second = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(second).not.toBe(first); expect((await s.beginDispatch(row.occurrenceId, second)).status).toBe("started"); expect(p.calls).toHaveLength(2);
+    const f = fixture(), p = fakePort(f.db, failure), s = f.open(p.port), { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+    const out = await s.beginDispatch(row.occurrenceId, token); expect(out).toEqual({ status: "uncertain" }); expect(JSON.stringify(out)).not.toContain("secret");
+    expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
+    // No replay by any route: the token is spent, the slot is held, recovery and ticks keep it uncertain.
+    expect(() => s.beginDispatch(row.occurrenceId, token)).toThrow("request_conflict"); expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined();
+    f.time(20000); s.tick(); f.peer(fakePort(f.db).port).schedules.recover(); s.recover(); expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+    expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined(); expect(p.calls).toHaveLength(1);
+    expect(() => s.handled(row.occurrenceId, token, forgedReceipt(row.occurrenceId))).toThrow("request_conflict");
   }
 });
-test("a failed start folds a pending interval materialized meanwhile instead of colliding, and never clobbers a recorded cancellation", async () => {
+test("a not-started answer folds a pending interval materialized meanwhile instead of colliding, and no answer clobbers a recorded cancellation", async () => {
   const f = fixture(), gate = deferred<CoworkScheduleStartResult>(), p = fakePort(f.db, () => gate.promise), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
   const inFlight = s.beginDispatch(row.occurrenceId, token); f.time(5000); s.tick(); expect(s.status(a.workspaceId, a.scheduleId).occurrences).toHaveLength(2);
-  gate.reject(new Error("refused")); expect(await inFlight).toEqual({ status: "not_started" });
+  gate.resolve({ kind: "not-started" }); expect(await inFlight).toEqual({ status: "not-started" });
   const rows = s.status(a.workspaceId, a.scheduleId).occurrences; expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ occurrenceId: row.occurrenceId, state: "pending", reason: "execution_unavailable", latestDueAt: 5000, missedCount: 4 });
-  // Second schedule: cancellation lands while the launch is in flight; neither a throw nor an ack may undo recovery_required.
-  for (const settle of [(g: ReturnType<typeof deferred<CoworkScheduleStartResult>>, occurrenceId: string, claim: string) => g.reject(new Error("late")), (g: ReturnType<typeof deferred<CoworkScheduleStartResult>>, occurrenceId: string, claim: string) => g.resolve({ kind: "started", receipt: { occurrenceId, token: claim, runRef: "late" } })]) {
+  // Cancellation lands while the launch is in flight; neither not-started, nor a throw, nor an ack may undo recovery_required.
+  type Gate = ReturnType<typeof deferred<CoworkScheduleStartResult>>;
+  const settles: ((g: Gate, occurrenceId: string, claim: string) => void)[] = [g => g.resolve({ kind: "not-started" }), g => g.reject(new Error("late")), (g, occurrenceId, claim) => g.resolve({ kind: "started", receipt: { occurrenceId, token: claim, runRef: "late" } })];
+  for (const settle of settles) {
     const g = fixture(), gated = deferred<CoworkScheduleStartResult>(), q = fakePort(g.db, () => gated.promise), t = g.open(q.port), one = due(g), claim = t.claim(one.a.workspaceId, one.a.scheduleId, one.row.occurrenceId)!;
     const pendingOutcome = t.beginDispatch(one.row.occurrenceId, claim); t.cancel(one.a.workspaceId, one.a.scheduleId, 1); expect(durable(g, one.row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
     settle(gated, one.row.occurrenceId, claim); expect(await pendingOutcome).toEqual({ status: "uncertain" }); expect(durable(g, one.row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
@@ -324,7 +336,7 @@ test("a failed start folds a pending interval materialized meanwhile instead of 
 test("an uncertain or untrustworthy port answer is uncertain, never pending, and never handles a one-shot", async () => {
   const wrong: Start[] = [() => ({ kind: "uncertain" }), (input, token) => ({ kind: "started", receipt: { occurrenceId: "another", token, runRef: "r" } }), (input) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token: "other-token", runRef: "r" } }),
     (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token, runRef: "../escape" } }), (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token } as any }),
-    () => ({}) as any, () => undefined as any, () => ({ kind: "started" }) as any];
+    () => ({}) as any, () => undefined as any, () => ({ kind: "started" }) as any, () => ({ kind: "not_started" }) as any, () => ({ kind: "Not-Started" }) as any, () => ({ kind: "notstarted" }) as any, () => "not-started" as any, () => ({ status: "not-started" }) as any];
   for (const answer of wrong) {
     const f = fixture(), p = fakePort(f.db, answer), s = f.open(p.port), { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
     expect(await s.beginDispatch(row.occurrenceId, token)).toEqual({ status: "uncertain" });
@@ -418,7 +430,33 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has no implementation and the service still builds schedules without one", () => {
+/** Text between the parenthesis opening at `open` and its match, skipping string literals. */
+function parenthesized(text: string, open: number): string {
+  let depth = 0, quote = "";
+  for (let i = open; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return text.slice(open + 1, i);
+  }
+  throw new Error("unbalanced parentheses");
+}
+/** Top-level comma-separated pieces of an argument or parameter list; `types` also nests on generic angle brackets (`=>` excepted). */
+function topLevel(list: string, types = false): string[] {
+  const parts: string[] = []; let depth = 0, quote = "", start = 0;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i]!;
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if ("([{".includes(c) || (types && c === "<")) depth++;
+    else if (")]}".includes(c) || (types && c === ">" && list[i - 1] !== "=")) depth--;
+    else if (c === "," && depth === 0) { parts.push(list.slice(start, i)); start = i + 1; }
+  }
+  if (list.slice(start).trim()) parts.push(list.slice(start));
+  return parts.filter(part => part.trim());
+}
+test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has no implementation and no src construction passes one", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "schedule-dispatch.ts"), owner = join(packages, "core", "src", "cowork", "schedules.ts"), service = join(packages, "core", "src", "cowork", "service.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
@@ -435,6 +473,19 @@ test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has 
   expect([...types.matchAll(/^import .* from "([^"]+)"/gm)].map(match => match[1]).sort()).toEqual(["./types", "@yanlinglabs/winter-protocol"]);
   // No implementation of the port anywhere in src, and the service constructs CoworkSchedules with no dispatch argument.
   for (const file of sources) expect(`${basename(file)}:${/implements\s+CoworkScheduleDispatchPort|:\s*CoworkScheduleDispatchPort\s*=/.test(readFileSync(file, "utf8"))}`).toBe(`${basename(file)}:false`);
-  expect(readFileSync(service, "utf8")).toContain("new CoworkSchedules(records, host.grants, scheduleNow)");
+  // Robust to other lanes changing the constructor: find the port's parameter position from the declaration itself,
+  // then require that no src construction reaches it. (Test files may pass a port; src may not.)
+  const declaration = own.slice(own.indexOf("constructor(", own.indexOf("export class CoworkSchedules")));
+  const parameters = topLevel(parenthesized(declaration, declaration.indexOf("(")), true), portIndex = parameters.findIndex(parameter => parameter.includes("CoworkScheduleDispatchPort"));
+  expect(portIndex).toBeGreaterThan(2); expect(parameters.length).toBe(portIndex + 1);
+  let constructions = 0;
+  for (const file of sources) {
+    const text = readFileSync(file, "utf8");
+    for (const match of text.matchAll(/new\s+CoworkSchedules\s*\(/g)) {
+      constructions++; const args = topLevel(parenthesized(text, match.index! + match[0].length - 1));
+      expect(`${file.slice(packages.length)}:${args.length <= portIndex}`).toBe(`${file.slice(packages.length)}:true`);
+    }
+  }
+  expect(constructions).toBeGreaterThan(0); expect(readFileSync(service, "utf8")).toMatch(/new\s+CoworkSchedules\s*\(/);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false); expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/schedule-dispatch|from "\.\/cowork/);
 });
