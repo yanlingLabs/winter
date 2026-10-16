@@ -81,6 +81,7 @@ test("hysteresis: a flapping reading blocks once, clears only at reserve + margi
   expect(writers.calls.map(c => c.episode)).toEqual([1]);
   const cleared = await step(R + M);                       // the resume line itself clears
   expect(cleared.blocked).toEqual([]); expect(guard.admitsNewWork()).toBe(true);
+  expect(guard.snapshot().entries[0]).toMatchObject({ state: "clear", reason: null, haltConfirmed: false, episode: 1 }); // a clear key carries no halt evidence
   await step(R); await step(R + M - 1); expect(guard.admitsNewWork()).toBe(true); // clear stays clear until the reserve is crossed
   await step(R - 1);                                       // a new crossing: episode 2, halt #2
   expect(writers.calls.map(c => c.episode)).toEqual([1, 2]);
@@ -162,6 +163,11 @@ test("unwatch reports whether the key was blocked; a retarget keeps the key's st
   const report = await fresh.guard.evaluate();
   expect(fresh.guard.snapshot().entries).toEqual([]); expect(report.blocked).toEqual([]);
   expect(fresh.guard.admitsNewWork()).toBe(false); // nothing watched fails closed
+  // A key unwatched while an EARLIER key is halting is skipped: its writers are not halted for a filesystem the host dropped.
+  const two = guardFor(["a", "b"]); two.reader.set("a", R - 1); two.reader.set("b", R - 1);
+  two.writers.script = request => { if (request.key === "a") two.guard.unwatch("b"); return { halted: true }; };
+  await two.guard.evaluate();
+  expect(two.writers.calls.map(c => c.key)).toEqual(["a"]); expect(two.guard.snapshot().entries.map(e => e.key)).toEqual(["a"]);
 });
 test("evaluations are serialized: a slow halt finishes before the next sample is taken", async () => {
   const { guard, reader, writers } = guardFor(["a"]);

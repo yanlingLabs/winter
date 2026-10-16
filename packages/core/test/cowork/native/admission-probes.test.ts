@@ -226,13 +226,13 @@ test("relocation and home identity are delegated; only an exact `true` authorize
 // ---------------------------------------------------------------- the Coordination ledger path
 test("the ledger path is pure spelling: the default under the home directory, or an absolute override", () => {
   expect(COORDINATION_LEDGER_FILE).toBe("cowork-admission.sqlite"); expect(COORDINATION_DIR_ENV).toBe("WINTER_COWORK_COORDINATION_DIR");
-  expect(coordinationLedgerPath({ env: {}, homeDirectory: "/Users/someone" })).toBe("/Users/someone/Library/Application Support/Winter/Coordination/cowork-admission.sqlite");
-  expect(coordinationLedgerPath({ env: { [COORDINATION_DIR_ENV]: "/tmp/n2-coordination" }, homeDirectory: "/Users/someone" })).toBe("/tmp/n2-coordination/cowork-admission.sqlite");
+  expect(coordinationLedgerPath({ env: {}, homeDirectory: "/fixture-home" })).toBe("/fixture-home/Library/Application Support/Winter/Coordination/cowork-admission.sqlite");
+  expect(coordinationLedgerPath({ env: { [COORDINATION_DIR_ENV]: "/tmp/n2-coordination" }, homeDirectory: "/fixture-home" })).toBe("/tmp/n2-coordination/cowork-admission.sqlite");
 });
 test("a malformed path or override throws and never falls back to the real per-user path", () => {
   for (const override of ["", "relative/dir", "/tmp/dir/", "/tmp/../tmp/dir", "/tmp/a\0b", "/tmp/a\nb", `/${"x".repeat(4096)}`, "/"])
-    expect(() => coordinationLedgerPath({ env: { [COORDINATION_DIR_ENV]: override }, homeDirectory: "/Users/someone" })).toThrow("coordination_path_invalid");
-  for (const home of ["", "relative", "/Users/x/", "/a\0b", undefined as never]) expect(() => coordinationLedgerPath({ env: {}, homeDirectory: home })).toThrow("coordination_path_invalid");
+    expect(() => coordinationLedgerPath({ env: { [COORDINATION_DIR_ENV]: override }, homeDirectory: "/fixture-home" })).toThrow("coordination_path_invalid");
+  for (const home of ["", "relative", "/fixture-home/", "/a\0b", undefined as never]) expect(() => coordinationLedgerPath({ env: {}, homeDirectory: home })).toThrow("coordination_path_invalid");
   expect(() => coordinationLedgerPath(undefined as never)).toThrow("coordination_path_invalid");
 });
 test("the ledger path and the host-storage fence spell the Coordination directory identically, and spelling touches no filesystem", () => {
@@ -316,7 +316,7 @@ real("the real sysctl adapter answers the facts the resource observer reads", ()
   const sysctl = createProductionHostAdapters().sysctl;
   expect(sysctl.uint64("hw.memsize")! >= 1n << 30n).toBe(true);
   expect(sysctl.int32("hw.ncpu")!).toBeGreaterThanOrEqual(1);
-  expect([1, 2, 4]).toContain(sysctl.int32("kern.memorystatus_vm_pressure_level"));
+  expect([1, 2, 4]).toContain(sysctl.int32("kern.memorystatus_vm_pressure_level")!);
   expect(sysctl.string("kern.bootsessionuuid")).toMatch(/^[0-9A-F-]{36}$/i);
   expect(sysctl.string("kern.no_such_sysctl_name")).toBeNull(); expect(sysctl.int32("hw.memsize")).toBeNull(); // wrong width for an 8-byte value
 });

@@ -44,6 +44,7 @@ test("disk pressure: unknown unless a recent evaluation observed every watched f
   expect(diskPressureFromSnapshot(snap(NOW - max - 1, [{ state: "clear" }]), NOW, max)).toBe("unknown");     // one millisecond older is stale
   expect(diskPressureFromSnapshot(snap(NOW + 1, [{ state: "clear" }]), NOW, max)).toBe("unknown");           // an evaluation from the future
   expect(diskPressureFromSnapshot(snap(null, [{ state: "clear" }]), NOW, max)).toBe("unknown");              // never evaluated
+  expect(diskPressureFromSnapshot(snap(null, [{ state: "clear" }]), 5000, max)).toBe("unknown");              // even on a clock too young for staleness to catch it
   expect(diskPressureFromSnapshot(snap(NOW, []), NOW, max)).toBe("unknown");                                 // nothing watched
   expect(diskPressureFromSnapshot(snap(NOW, [{ state: "clear" }, { state: "clear", observed: false }]), NOW, max)).toBe("unknown");
   expect(diskPressureFromSnapshot(undefined as never, NOW, max)).toBe("unknown");
@@ -79,6 +80,9 @@ test("unreadable host facts or an unusable budget give null, which the ledger re
   for (const bad of [null, { memoryBytes: -1, cpuUnits: 1, guestLimit: 1 }, { memoryBytes: 1.5, cpuUnits: 1, guestLimit: 1 }, { memoryBytes: 1, cpuUnits: -1, guestLimit: 1 }, { memoryBytes: 1, cpuUnits: 1, guestLimit: 4097 }, { memoryBytes: 1, cpuUnits: 1, guestLimit: -1 }, { memoryBytes: Number.NaN, cpuUnits: 1, guestLimit: 1 }, {} as never])
     expect(withBudget(() => bad)).toBeNull();
   expect(withBudget(() => { throw new Error("policy"); })).toBeNull();
+  // The physical memory size is bounded before the policy ever sees it, whatever the policy then returns.
+  const huge = createCoworkResourceObserver({ sysctl: sysctlWith({ memsize: 1n << 60n }), disk: healthy, budget: () => ({ memoryBytes: 1, cpuUnits: 1, guestLimit: 1 }), now: () => NOW })();
+  expect(huge).toBeNull();
   expect(withBudget(() => ({ memoryBytes: 0, cpuUnits: 0, guestLimit: 0 }))).toMatchObject({ budget: { memoryBytes: 0, cpuUnits: 0, guestLimit: 0 } }); // a zero budget is valid and admits nothing
   expect(createCoworkResourceObserver({ sysctl: { ...sysctlWith({}), uint64: () => { throw new Error("x"); } }, disk: healthy, budget, now: () => NOW })()).toBeNull();
   expect(createCoworkResourceObserver({ sysctl: sysctlWith({}), disk: { snapshot: () => { throw new Error("x"); } }, budget, now: () => NOW })()).toBeNull();
