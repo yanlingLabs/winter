@@ -39,12 +39,25 @@ export interface IslandPendingItem {
   hosts: IslandHost[];
 }
 
-/** One connected island client: told (with no payload) that the pending set may have changed. */
+/** What changed, in one `island.changed` (its params): the pending set (`{}`, the phase-1 payload), and/or a turn
+ *  started or ended somewhere (`working: true` — the island's working count re-lists the sessions). */
+export interface IslandChange {
+  working?: true;
+  pending?: true;
+}
+
+/** One connected island client: told that the pending set, or some session's working state, may have changed. */
 export interface IslandClient {
-  notify(): void;
+  notify(change?: IslandChange): void;
   /** Told (no payload) that the island's activity — computer use, turn results, watches — may have changed
    *  (`island.activityChanged`, `island/activity.ts`). */
   notifyActivity?(): void;
+}
+
+/** PURE: the notification's params for a burst — `{}` for the pending set alone (as phase 1 sent it). */
+export function islandChangeParams(pending: boolean, working: boolean): IslandChange {
+  if (!working) return {};
+  return pending ? { working: true, pending: true } : { working: true };
 }
 
 export interface IslandRegistryDeps {
@@ -88,6 +101,8 @@ export class IslandRegistry implements IslandPresence {
   private readonly entries = new Map<string, Entry>();
   private readonly clients = new Set<IslandClient>();
   private notifyScheduled = false;
+  private pendingDirty = false;
+  private workingDirty = false;
   private readonly goneListeners = new Set<() => void>();
   /** Card ids an island client said it shows, newest last (bounded), and the prompts waiting to hear it. */
   private readonly shown = new Set<string>();
@@ -175,6 +190,11 @@ export class IslandRegistry implements IslandPresence {
       case "elicitation_resolved":
         this.remove("elicitation", event.sessionId, event.elicitationId);
         return;
+      case "turn_started":
+      case "turn_completed":
+        // A turn began or ended: the island's working count (`signals.working`, which nothing else pushes).
+        this.changed("working");
+        return;
       case "harness_attached":
       case "harness_detached":
         // A session's hosts decide where its card shows (in front of its terminal or window, or not).
@@ -243,13 +263,18 @@ export class IslandRegistry implements IslandPresence {
 
   /** Tells every island client, once per burst (one microtask): a mirror and its child's copy, or a resolve and the
    *  next card, arrive together. */
-  private changed(): void {
-    if (this.clients.size === 0 || this.notifyScheduled) return;
+  private changed(what: "pending" | "working" = "pending"): void {
+    if (this.clients.size === 0) return;
+    if (what === "pending") this.pendingDirty = true; else this.workingDirty = true;
+    if (this.notifyScheduled) return;
     this.notifyScheduled = true;
     queueMicrotask(() => {
       this.notifyScheduled = false;
+      const change = islandChangeParams(this.pendingDirty, this.workingDirty);
+      this.pendingDirty = false;
+      this.workingDirty = false;
       for (const c of [...this.clients]) {
-        try { c.notify(); } catch { /* a dead connection's close() removes it */ }
+        try { c.notify(change); } catch { /* a dead connection's close() removes it */ }
       }
     });
   }

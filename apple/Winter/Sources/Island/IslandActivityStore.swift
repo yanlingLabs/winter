@@ -39,8 +39,9 @@ final class IslandActivityStore: ObservableObject {
     var wallClock: () -> TimeInterval = { Date().timeIntervalSince1970 }
     /// Arms the one wake-up (nil cancels).
     var scheduleWake: (TimeInterval?) -> Void = { _ in }
-    /// Moves the app's view to a session (a result's Open).
-    var openSession: (String) -> Void = { _ in }
+    /// Moves the app's view to a session (a result's Open) — the Sessions tab's own resolution: its window, its exact
+    /// terminal, Dispatch's view, else a new detached window. (session, its hosts, is it the Dispatch session)
+    var openSession: (_ sessionId: String, _ hosts: [IslandHost], _ isDispatch: Bool) -> Void = { _, _, _ in }
     /// `computerUse.wakes.cancel`.
     var disarm: (_ sessionId: String, _ wakeId: String) async -> Bool = { _, _ in false }
     /// Told after every change of what the activity panel may draw.
@@ -188,7 +189,7 @@ final class IslandActivityStore: ObservableObject {
 
     /// Open on a result: the app shows the session; the card goes.
     func openResult(_ id: String) {
-        if let item = resultItems[id] { openSession(item.sessionId) }
+        if let item = resultItems[id] { openSession(item.sessionId, item.hosts, item.session.mode == "dispatch") }
         dismissResult(id)
     }
 

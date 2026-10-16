@@ -108,7 +108,8 @@ final class IslandResultsTests: XCTestCase {
     func testOpenMovesTheViewToTheSessionAndDismissJustGoes() {
         let store = makeStore()
         var opened: [String] = []
-        store.openSession = { opened.append($0) }
+        var asked: [(hosts: [IslandHost], isDispatch: Bool)] = []
+        store.openSession = { sid, hosts, isDispatch in opened.append(sid); asked.append((hosts, isDispatch)) }
         store.apply(IslandActivitySnapshot(results: [result("r1")]))
         store.openResult("r1")
         XCTAssertEqual(opened, ["s_code"])
@@ -118,6 +119,30 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertNil(store.currentResult)
         XCTAssertEqual(opened, ["s_code"])
         XCTAssertTrue(store.resultItems.isEmpty)
+        XCTAssertEqual(asked.first?.isDispatch, false)
+    }
+
+    func testOpenGoesExactlyWhereASessionsRowsClickGoes() {
+        let sessions = IslandSessionsModel()
+        var targets: [IslandSessionTarget] = []
+        sessions.reveal = { targets.append($0) }
+        sessions.windows = { IslandWindowFacts(appWindowSessionId: "s_app", detachedSessionIds: ["s_det"]) }
+        let tty = [IslandHost(clientName: "tui", role: "harness", tty: "/dev/ttys004")]
+        sessions.setHostsForTesting(["s_cli": tty])
+        sessions.openFromIsland("s_app", hosts: [], isDispatch: false)
+        sessions.openFromIsland("s_det", hosts: [], isDispatch: false)
+        sessions.openFromIsland("s_cli", hosts: [], isDispatch: false)       // the tab's own hosts
+        sessions.openFromIsland("s_new", hosts: tty, isDispatch: false)      // the result's hosts
+        sessions.openFromIsland("s_disp", hosts: [], isDispatch: true)
+        let w = sessions.windows()
+        XCTAssertEqual(targets, [
+            IslandSessionsBuilder.target(of: "s_app", hosts: [], windows: w, isDispatch: false),
+            IslandSessionsBuilder.target(of: "s_det", hosts: [], windows: w, isDispatch: false),
+            IslandSessionsBuilder.target(of: "s_cli", hosts: tty, windows: w, isDispatch: false),
+            IslandSessionsBuilder.target(of: "s_new", hosts: tty, windows: w, isDispatch: false),
+            IslandSessionsBuilder.target(of: "s_disp", hosts: [], windows: w, isDispatch: true),
+        ])
+        XCTAssertEqual(targets.first, .appWindow(sessionId: "s_app"))
     }
 
     // MARK: Precedence

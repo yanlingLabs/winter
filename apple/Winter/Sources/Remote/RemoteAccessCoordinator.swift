@@ -161,6 +161,11 @@ final class RemoteAccessCoordinator {
         await host.pairedDevices()
     }
 
+    /// The paired phones connected now (the Winter island's Devices tab).
+    func connectedPhoneIDs() async -> Set<String> {
+        await host.connectedPhoneIDs()
+    }
+
     /// Propagates `RemoteHost.revoke`'s own failure rather than swallowing it — the caller (the
     /// Paired Devices window) surfaces the error instead of silently pretending the revoke
     /// succeeded.

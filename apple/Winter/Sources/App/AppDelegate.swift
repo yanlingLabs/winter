@@ -1189,13 +1189,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for window in self.detachedWindows where window.isKeyOrMain { ids.insert(window.sessionId) }
                 return ids
             })
+        wireIslandTabs(island, model: model, pill: pill)
         islandController = island
         island.start()
         startIslandActivity(store: store, island: island, client: client)
         // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
         let changes = client.notifications(method: WinterClient.islandChangedNotification)
+        // `{working: true}`: a turn started or ended somewhere — the strip's working count re-lists the sessions
+        // (coalesced: one `session.list` in flight, at most one more after it). Anything else: the pending set.
+        let relist = IslandCoalescedRun { [weak model] in await model?.directory.refresh() }
         Task { @MainActor [weak store] in
-            for await _ in changes { await store?.refresh() }
+            for await params in changes {
+                let change = IslandChangeKind(params)
+                if change.working { relist.request() }
+                if change.pending { await store?.refresh() }
+            }
         }
         // Every (re)connect re-reads the whole set (cards raised while the app was away included).
         let previous = model.onClientConnected
@@ -1220,7 +1228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activity.fetch = { try await client.islandActivity() }
         activity.focus = { [weak store] in store?.focus() ?? IslandFocus() }
         activity.readTerminals = { [weak store] ttys in await store?.readTerminals(ttys) ?? [:] }
-        activity.openSession = { [weak self] sid in self?.summonAppWindow(navigatingTo: .session(sid)) }
+        // A result's Open goes where a Sessions row's click goes (`IslandSessionsModel.openFromIsland`).
+        activity.openSession = { [weak island] sid, hosts, isDispatch in
+            island?.tabModels.sessions.openFromIsland(sid, hosts: hosts, isDispatch: isDispatch)
+        }
         activity.disarm = { sid, wakeId in (try? await client.cancelWake(sessionId: sid, wakeId: wakeId)) ?? false }
         let coordinator = mirrorCoordinator
         activity.onCursorSessionsChange = { [weak coordinator] ids in coordinator?.setIslandCursorSessions(ids) }
@@ -1239,6 +1250,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let changes = client.notifications(method: WinterClient.islandActivityChangedNotification)
         Task { @MainActor [weak activity] in
             for await _ in changes { await activity?.refresh() }
+        }
+    }
+
+    /// The island's phase-2 tabs (`docs/claude/island.md`): Sessions, Usage and limits, Devices read the app's own
+    /// client, directory, windows and remote stack; the Shelf keeps its own list. Nothing here polls while the island is
+    /// closed — the controller refreshes the selected tab only while it is open.
+    private func wireIslandTabs(_ island: IslandController, model: AppModel, pill: DispatchPillController) {
+        let client = model.client
+        let tabs = island.tabModels
+        let windowFacts: () -> IslandWindowFacts = { [weak self] in
+            guard let self else { return IslandWindowFacts() }
+            // A minimised app window still holds its session (a click brings it back, never a second window).
+            let app = self.appWindow.flatMap { $0.isVisible || $0.isMiniaturized ? $0.host?.attachedSessionId : nil }
+            return IslandWindowFacts(appWindowSessionId: app, detachedSessionIds: Set(self.detachedWindows.map(\.sessionId)))
+        }
+        let title: (String) -> String? = { [weak model] sid in
+            model?.directory.rows.first { $0.sessionId == sid }?.title.flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        let sessions = tabs.sessions
+        sessions.directory = { [weak model] in model?.directory.rows ?? [] }
+        sessions.refreshDirectory = { [weak model] in await model?.directory.refresh() }
+        sessions.fetchHosts = { try await client.islandHosts() }
+        sessions.waiting = { [weak island] in Set(island?.store.cards.map(\.answerSessionId) ?? []) }
+        sessions.childStatuses = { [weak model] in
+            Dictionary((model?.session.state.children ?? []).map { ($0.sessionId, $0.status) }, uniquingKeysWith: { a, _ in a })
+        }
+        sessions.windows = windowFacts
+        sessions.reveal = { [weak self] target in self?.showIslandSessionTarget(target, title: title) }
+        sessions.perform = { [weak self, weak island] target in
+            // A click on a row while the island is already closing (a double click) does nothing.
+            guard let island, island.isOpen else { return }
+            island.close()
+            self?.showIslandSessionTarget(target, title: title)
+        }
+
+        let usage = tabs.usage
+        usage.fetch = { sid in try await client.islandUsage(sessionId: sid) }
+        usage.fetchRoles = { try await client.settingsModelRoles() }
+        usage.currentSession = { [weak self, weak model] in
+            guard let self, let model else { return nil }
+            let front = self.detachedWindows.first(where: \.isKeyOrMain)?.sessionId
+                ?? windowFacts().appWindowSessionId
+                ?? model.focusedSessionId
+            return front.map { ($0, title($0)) }
+        }
+
+        let devices = tabs.devices
+        devices.fetchStatus = { try await LiveComputerUseClient(client: client).status() }
+        devices.fetchPhones = { [weak self] in await self?.remoteAccessCoordinator?.pairedDevices() ?? [] }
+        devices.connectedPhones = { [weak self] in await self?.remoteAccessCoordinator?.connectedPhoneIDs() ?? [] }
+        devices.mirrored = { [weak self] in self?.remoteMirrorHub?.watchedSessionIds ?? [] }
+        devices.titleFor = title
+
+        // The strip's working count and the Sessions rows follow the directory (its own pushes: created, titled,
+        // activity, child updates; re-listed while a window or the open island shows it).
+        model.directory.$rows
+            .receive(on: DispatchQueue.main)
+            .sink { [weak island] rows in
+                island?.setWorkingSessions(IslandSessionsBuilder.workingCount(rows))
+                island?.tabModels.sessions.recompute()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Moves the user's view to where an island Sessions row's session is.
+    private func showIslandSessionTarget(_ target: IslandSessionTarget, title: @escaping (String) -> String?) {
+        switch target {
+        case .appWindow(let sid):
+            appWindow?.deminiaturize()
+            summonAppWindow(navigatingTo: .session(sid))
+        case .detachedWindow(let sid):
+            showIslandSessionWindow(sid, title: title)
+        case .dispatch:
+            summonAppWindow(navigatingTo: .mode(.dispatch))
+        case .terminal(let tty, let sid):
+            Task { @MainActor [weak self] in
+                if await TerminalRaiser.raise(tty: tty) == .notFound {
+                    self?.showIslandSessionWindow(sid, title: title)
+                }
+            }
+        case .openDetached(let sid):
+            showIslandSessionWindow(sid, title: title)
+        }
+    }
+
+    /// The session's window: a detached window already showing it (re-checked NOW — one may have opened since the row
+    /// was judged), the app window holding it (even minimised), else a new detached window.
+    private func showIslandSessionWindow(_ sid: String, title: (String) -> String?) {
+        if let window = detachedWindows.first(where: { $0.sessionId == sid }) {
+            window.bringToFront()
+        } else if let app = appWindow, app.host?.attachedSessionId == sid, app.isVisible || app.isMiniaturized {
+            app.deminiaturize()
+            summonAppWindow(navigatingTo: .session(sid))
+        } else {
+            openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
         }
     }
 

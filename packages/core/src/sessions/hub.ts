@@ -185,6 +185,13 @@ export class SessionHub {
     }));
   }
 
+  /** The island's Sessions tab (`island.hosts`): every session with at least one attachment now. Read-only. */
+  attachedSessionIds(): string[] {
+    const out: string[] = [];
+    for (const [sid, set] of this.attachments) if (set.size > 0) out.push(sid);
+    return out;
+  }
+
   /** Which session `client` is currently attached to, or `undefined` if none — read-only, no side
    *  effects. session-activity-hygiene T9: the global sink asks this to answer "did `fanOut`
    *  already deliver this event to that connection?" (see `GlobalDeliveryOptions`). Deliberately

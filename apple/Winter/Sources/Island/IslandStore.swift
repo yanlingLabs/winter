@@ -86,7 +86,10 @@ final class IslandStore: ObservableObject {
 
     // MARK: Reading
 
-    var strip: IslandStripModel { IslandStripModel(waitingCount: cards.count) }
+    /// Sessions the daemon last said are working (the session directory's `signals.working`) — the strip's second count.
+    @Published var workingSessions = 0
+
+    var strip: IslandStripModel { IslandStripModel(waitingCount: cards.count, workingCount: workingSessions) }
 
     func card(_ id: String) -> IslandCard? { cards.first { $0.id == id } }
 
@@ -316,17 +319,28 @@ final class IslandStore: ObservableObject {
     }
 }
 
-/// The slim strip's state: the "waiting for you" count.
+/// The slim strip's state: the "waiting for you" count, and the working-sessions count beside it.
 struct IslandStripModel: Equatable {
     let waitingCount: Int
+    var workingCount: Int = 0
 
+    /// The wings show (and take clicks) only while they have something to say; idle, the strip is the housing alone.
+    var showsWings: Bool { waitingCount > 0 || workingCount > 0 }
     /// "2" — nothing when nothing waits.
     var countLabel: String? { waitingCount > 0 ? "\(waitingCount)" : nil }
+    /// "3" — nothing when nothing works.
+    var workingLabel: String? { workingCount > 0 ? "\(workingCount)" : nil }
     var accessibilityLabel: String {
+        let waiting: String
         switch waitingCount {
-        case 0: return "Winter island. Nothing needs you."
-        case 1: return "Winter island. 1 thing needs you."
-        default: return "Winter island. \(waitingCount) things need you."
+        case 0: waiting = "Winter island. Nothing needs you."
+        case 1: waiting = "Winter island. 1 thing needs you."
+        default: waiting = "Winter island. \(waitingCount) things need you."
+        }
+        switch workingCount {
+        case 0: return waiting
+        case 1: return waiting + " 1 session working."
+        default: return waiting + " \(workingCount) sessions working."
         }
     }
 }

@@ -13,8 +13,9 @@ enum IslandSpace {
 
 // MARK: - The slim strip
 
-/// The permanent strip extending the housing: the "waiting for you" icon on its left wing, the count on its right.
-/// Static: no animation, no timeline — it redraws only when the count changes.
+/// The permanent strip extending the housing: "waiting for you" (the amber icon and its count) on its left wing, the
+/// working sessions (a bolt and their count) on its right. Static: no animation, no timeline — it redraws only when a
+/// count changes. Idle (nothing waits, nothing works) it is the housing alone.
 struct IslandStripView: View {
     let model: IslandStripModel
     let size: CGSize
@@ -27,19 +28,19 @@ struct IslandStripView: View {
                                            style: .continuous)
         ZStack {
             shape.fill(Color.black)
-            if model.waitingCount == 0 {
+            if !model.showsWings {
                 // Idle: exactly the housing, black on black — nothing drawn beside it.
                 EmptyView()
             } else if let housingWidth {
                 HStack(spacing: 0) {
-                    icon.frame(width: IslandLayout.stripWing)
+                    waitingGroup.frame(width: IslandLayout.stripWing)
                     Spacer(minLength: housingWidth)
-                    count.frame(width: IslandLayout.stripWing)
+                    workingGroup.frame(width: IslandLayout.stripWing)
                 }
             } else {
-                HStack(spacing: 6) {
-                    icon
-                    count
+                HStack(spacing: 8) {
+                    waitingGroup
+                    workingGroup
                 }
             }
         }
@@ -50,17 +51,33 @@ struct IslandStripView: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    private var icon: some View {
-        Image(systemName: IslandTabRegistry.needsYou.symbol)
-            .font(Typography.label(.semibold))
-            .foregroundStyle(model.waitingCount > 0 ? pillReviewAmber : Theme.textMuted)
+    /// The amber "waiting for you" icon and its count (nothing while nothing waits).
+    @ViewBuilder private var waitingGroup: some View {
+        if let label = model.countLabel {
+            HStack(spacing: 4) {
+                Image(systemName: IslandTabRegistry.needsYou.symbol)
+                    .font(Typography.label(.semibold))
+                    .foregroundStyle(pillReviewAmber)
+                Text(label)
+                    .font(Typography.label(.semibold))
+                    .foregroundStyle(Color.white)
+            }
+        } else {
+            Color.clear.frame(width: 1, height: 1)
+        }
     }
 
-    @ViewBuilder private var count: some View {
-        if let label = model.countLabel {
-            Text(label)
-                .font(Typography.label(.semibold))
-                .foregroundStyle(Color.white)
+    /// The working sessions: a bolt and their count (nothing while nothing works).
+    @ViewBuilder private var workingGroup: some View {
+        if let label = model.workingLabel {
+            HStack(spacing: 4) {
+                Image(systemName: "bolt.fill")
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(Theme.accent)
+                Text(label)
+                    .font(Typography.label(.semibold))
+                    .foregroundStyle(Color.white)
+            }
         } else {
             Color.clear.frame(width: 1, height: 1)
         }
@@ -435,6 +452,8 @@ struct IslandExpandedView: View {
     let size: CGSize
     /// The list scrolls (always, live); the offscreen gallery lays it out flat (`ImageRenderer` cannot draw a scroll view).
     var scrolls = true
+    /// The phase-2 tabs' models (nil: only Needs you has a body).
+    var tabModels: IslandTabModels?
 
     var body: some View {
         let outline = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: IslandLayout.islandCorner,
@@ -473,6 +492,8 @@ struct IslandExpandedView: View {
         switch store.tabs.selected?.id {
         case IslandTabRegistry.needsYou.id?: IslandNeedsYouList(store: store, scrolls: scrolls)
         case IslandTabRegistry.watches.id?: IslandWatchesList(activity: store.activity, scrolls: scrolls)
+        case let id?:
+            if let tabModels { IslandTabBody(id: id, models: tabModels, scrolls: scrolls) } else { Spacer() }
         default: Spacer()
         }
     }

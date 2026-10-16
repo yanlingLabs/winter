@@ -122,6 +122,8 @@ import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord,
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
 import { IslandRegistry, type IslandHost, type IslandSessionFacts } from "./island/registry";
 import { IslandActivity } from "./island/activity";
+import { IslandUsageRegistry } from "./island/usage";
+import { rowForTag } from "./runtime-sdk/provider-selection";
 import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
 import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
@@ -1285,6 +1287,19 @@ export async function startDaemon(opts: {
     hosts: islandHosts,
   });
   hub.addObserver((event) => islandRegistry.observe(event));
+  // The island's Usage tab (`island.usage`): plan windows the runtime reported, per-session token counts since start,
+  // and Winter's background jobs' quota — all read from what the daemon already sees.
+  const islandUsage = new IslandUsageRegistry({
+    background: () => ({ ...quota.state(), ...quota.usage() }),
+    subscription: () => quota.subscriptionQuota(),
+    modelOf: (sid) => {
+      const model = store.meta(sid).model;
+      if (model === undefined) return undefined;
+      const window = rowForTag(model)?.contextWindow?.value;
+      return { model, ...(typeof window === "number" && window > 0 ? { contextWindow: window } : {}) };
+    },
+  });
+  hub.addObserver((event) => islandUsage.observe(event));
 
   const computerUseRuntime = createComputerUseRuntime({
     island: islandRegistry,
@@ -2110,6 +2125,7 @@ export async function startDaemon(opts: {
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); dispatchChildren?.onTurnSettled(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
+    onRateLimit: (sid, info) => islandUsage.noteRateLimit(sid, info),
     ...(titler === undefined ? {} : { titler }),
     // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
     // `.winter/mcp.json`; the repo-root `.mcp.json` is no longer read) reach the child under the
@@ -3046,6 +3062,7 @@ export async function startDaemon(opts: {
     questions: questions ?? undefined,
     island: islandRegistry,
     islandActivity,
+    islandUsage,
     tasks: undefined,
     // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
     // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`
