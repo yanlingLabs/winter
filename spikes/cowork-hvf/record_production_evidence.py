@@ -72,7 +72,7 @@ def main(extra_prefixes=()):
         'productionExports': [name[1:] for name in PRODUCTION_EXPORTS],
         'fixtureOracleOnlyExports': [name[1:] for name in FIXTURE_EXPORTS],
         'fixtureSymbolsExportedByProduction': production['fixtureSymbolsExported'],
-        'fixtureOracleSymbolsExported': build['fixtureOracle']['fixtureSymbolsExported'],
+        'fixtureOracleSymbolsExported': [name[1:] for name in build['fixtureOracle']['fixtureSymbolsExported']],
         'blockTraceRowStringsInProduction': production['blockTraceRowStrings'],
         'headerGuard': 'KRUN_COWORK_FIXTURE_ORACLE',
         'cargoFeature': 'cowork-fixture-oracle',

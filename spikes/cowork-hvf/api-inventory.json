@@ -88,13 +88,13 @@
     ],
     "fixtureSymbolsExportedByProduction": [],
     "fixtureOracleSymbolsExported": [
-      "_krun_create_cowork_bootstrap_stream",
-      "_krun_create_cowork_runtime_stream",
-      "_krun_enable_cowork_block_fixture_reclaim",
-      "_krun_enable_cowork_fixture_reclaim",
-      "_krun_enable_cowork_runtime_port_fixture_trace",
-      "_krun_set_cowork_bootstrap_stream",
-      "_krun_set_cowork_workspace_disks"
+      "krun_create_cowork_bootstrap_stream",
+      "krun_create_cowork_runtime_stream",
+      "krun_enable_cowork_block_fixture_reclaim",
+      "krun_enable_cowork_fixture_reclaim",
+      "krun_enable_cowork_runtime_port_fixture_trace",
+      "krun_set_cowork_bootstrap_stream",
+      "krun_set_cowork_workspace_disks"
     ],
     "blockTraceRowStringsInProduction": [],
     "headerGuard": "KRUN_COWORK_FIXTURE_ORACLE",
