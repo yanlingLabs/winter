@@ -115,6 +115,10 @@ struct ComposerTextView: NSViewRepresentable {
     /// selected; Tab inserts it (the dispatch pill's command mode). `nil` (the default) draws nothing and
     /// leaves Tab as AppKit's.
     var ghostSuffix: String? = nil
+    /// Tab with the caret at the END and nothing selected, consulted before the ghost is inserted: the edit to make
+    /// (`ComposerTabEdit` — the dispatch pill accepts its ghost, or cycles on-screen paths on Tab again), or nil to
+    /// fall back to inserting `ghostSuffix` / AppKit's Tab. `nil` (the default) leaves Tab as before.
+    var onTab: ((String) -> ComposerTabEdit?)? = nil
     /// Delete/Backspace with the caret at the END and nothing selected, consulted before anything is deleted
     /// (`true` = consumed, nothing deleted — the dispatch pill's command-mode opt-out). `nil` (the default)
     /// leaves Delete as AppKit's.
@@ -194,6 +198,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
         textView.ghostSuffix = ghostSuffix
+        textView.onTab = onTab
         textView.onDeleteBackwardAtEnd = onDeleteBackwardAtEnd
         attachPicker?.textView = textView
 
@@ -234,6 +239,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
         textView.onDeleteBackwardAtEnd = onDeleteBackwardAtEnd
+        textView.onTab = onTab
         if let attachPicker, attachPicker.textView !== textView { attachPicker.textView = textView }
         // Keep the live view in step if the size changes across an update — otherwise the font
         // would be whatever `makeNSView` happened to set the first time this view was built.
@@ -397,6 +403,10 @@ final class CommandTextView: NSTextView {
             if caretAtEndWithNoSelection, onDeleteBackwardAtEnd?() == true { return }
             super.doCommand(by: selector)
         case #selector(NSResponder.insertTab(_:)):
+            if caretAtEndWithNoSelection, let edit = onTab?(composerText) {
+                applyTabEdit(edit)
+                return
+            }
             if let ghost = ghostSuffix, !ghost.isEmpty, caretAtEndWithNoSelection {
                 insertText(ghost, replacementRange: selectedRange())
                 return
@@ -435,6 +445,20 @@ final class CommandTextView: NSTextView {
 
     /// See `ComposerTextView.onDeleteBackwardAtEnd`.
     var onDeleteBackwardAtEnd: (() -> Bool)?
+
+    /// See `ComposerTextView.onTab`.
+    var onTab: ((String) -> ComposerTabEdit?)?
+
+    /// Replaces the text's last `edit.replacingSuffix` with `edit.insert` as one typed change (undoable, and the
+    /// binding hears it). An edit whose suffix is not there changes nothing.
+    func applyTabEdit(_ edit: ComposerTabEdit) {
+        let text = string as NSString
+        let suffixLength = (edit.replacingSuffix as NSString).length
+        guard suffixLength <= text.length,
+              text.substring(from: text.length - suffixLength) == edit.replacingSuffix else { return }
+        guard suffixLength > 0 || !edit.insert.isEmpty else { return } // Tab consumed, nothing to change
+        insertText(edit.insert, replacementRange: NSRange(location: text.length - suffixLength, length: suffixLength))
+    }
 
     /// See `ComposerTextView.ghostSuffix`.
     var ghostSuffix: String? {

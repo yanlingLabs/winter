@@ -304,6 +304,8 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertEqual(CommandPillStatus(.exited(0)), .succeeded)
         XCTAssertEqual(CommandPillStatus(.exited(1)), .failed)
         XCTAssertEqual(CommandPillStatus(.signaled(9)), .failed)
+        XCTAssertEqual(CommandPillStatus(.running, waiting: true), .waiting, "a line not started yet is never 'failed'")
+        XCTAssertEqual(CommandPillStatus(.typedByHand), .handedOver)
     }
 
     func testDisplayPathsAbbreviateHome() {
@@ -333,21 +335,48 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertNil(loginShellParseProbe("\(loginShellPathStart)\(loginShellPathEnd)"), "an empty PATH is no PATH")
     }
 
-    func testARunHandsTheLineOverAsAnArgumentNeverInTheScript() {
+    func testARunIsAnInteractiveLoginShellThatReadsTheLineFromAPrivateFileNeverTheEnvironment() {
         let line = #"echo "it's"; rm -rf "$HOME/x" `whoami`"#
-        let zsh = loginShellRunInvocation(shell: "/opt/homebrew/bin/zsh", line: line)
-        // The fd-closing trampoline first, then the user's own shell.
+        let zsh = loginShellSessionInvocation(shell: "/opt/homebrew/bin/zsh", line: line, shimDirectory: "/tmp/shim",
+                                              nonce: "abc123")
+        // The fd-closing trampoline first, then the user's own shell — interactive, login.
         XCTAssertEqual(zsh.executable, "/bin/zsh")
         XCTAssertEqual(Array(zsh.arguments.prefix(5)), ["-f", "-c", loginShellRunTrampoline, "winter-run", "/opt/homebrew/bin/zsh"])
         XCTAssertTrue(loginShellRunTrampoline.contains("<3->"), "every descriptor above 2 is closed")
-        let shell = Array(zsh.arguments.dropFirst(5))
-        XCTAssertEqual(Array(shell.prefix(2)), ["-l", "-c"])
-        XCTAssertEqual(shell.last, line, "the line is the last argument, verbatim")
-        XCTAssertFalse(shell[2].contains("whoami"), "and never spliced into the script")
-        XCTAssertTrue(shell[2].contains(".zshrc"), "the rc file is sourced, as the probe does")
-        XCTAssertTrue(shell[2].hasSuffix(#"eval "$__winter_line""#))
-        let fish = loginShellRunInvocation(shell: "/opt/homebrew/bin/fish", line: "ls")
-        XCTAssertEqual(Array(fish.arguments.dropFirst(4)), ["/opt/homebrew/bin/fish", "-l", "-c", "ls"])
+        XCTAssertEqual(Array(zsh.arguments.dropFirst(5)), ["-l", "-i"])
+        XCTAssertEqual(zsh.environment, ["ZDOTDIR": "/tmp/shim"], "the startup shim — and no variable carries the line")
+        XCTAssertEqual(zsh.files[loginShellLineFile], line, "the line travels in its own file, verbatim")
+        XCTAssertEqual(Set(zsh.files.keys), [".zshenv", ".zprofile", ".zshrc", ".zlogin", "run", loginShellLineFile])
+        for (name, contents) in zsh.files where name != loginShellLineFile {
+            XCTAssertFalse(contents.contains("whoami"), "\(name): the line is never spliced into a script")
+        }
+        for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            XCTAssertTrue(zsh.files[name]!.contains("builtin source ${ZDOTDIR:-$HOME}/\(name)"), "\(name) sources the user's own")
+        }
+        XCTAssertFalse(zsh.arguments.contains { $0.contains("whoami") })
+        XCTAssertTrue(zsh.files[".zshenv"]!.contains("command rm -f -- $__winter_shim/\(loginShellLineFile)"),
+                      "read and deleted as the shell starts")
+        let zlogin = zsh.files[".zlogin"]!
+        XCTAssertTrue(zlogin.contains("add-zle-hook-widget line-init __winter_run_line"), "typed in at the first prompt")
+        XCTAssertTrue(zlogin.contains("histchars=''"), "with history expansion off for it")
+        XCTAssertTrue(zlogin.contains("133;C;winter-abc123") && zlogin.contains("133;D;%d;winter-abc123"), "marks carry the tag")
+        XCTAssertTrue(zsh.files["run"]!.contains(#"eval "$__winter_line""#), "the fallback evals: no history expansion")
+
+        let bash = loginShellSessionInvocation(shell: "/bin/bash", line: line, shimDirectory: "/tmp/shim", nonce: "n")
+        XCTAssertEqual(Array(bash.arguments.dropFirst(5)), ["--rcfile", "/tmp/shim/bashrc", "-i"])
+        XCTAssertEqual(bash.environment, [:])
+        XCTAssertTrue(bash.files["bashrc"]!.contains(".bash_profile"), "what a login shell reads")
+        XCTAssertTrue(bash.files["bashrc"]!.hasSuffix("builtin source '/tmp/shim/run'\n"))
+
+        let sh = loginShellSessionInvocation(shell: "/bin/sh", line: "ls", shimDirectory: "/tmp/shim", nonce: "n")
+        XCTAssertEqual(sh.environment, ["ENV": "/tmp/shim/env.sh"])
+
+        let fish = loginShellSessionInvocation(shell: "/opt/homebrew/bin/fish", line: "ls", shimDirectory: "/tmp/shim", nonce: "n")
+        XCTAssertEqual(Array(fish.arguments.dropFirst(4)),
+                       ["/opt/homebrew/bin/fish", "-l", "-i", "--init-command", "source '/tmp/shim/run.fish'"])
+        XCTAssertEqual(fish.environment, [:])
+        XCTAssertEqual(loginShellSingleQuoted("a'b"), #"'a'\''b'"#)
+        XCTAssertNotEqual(loginShellRunNonce(), loginShellRunNonce())
     }
 
     func testTheRunEnvironmentIsTheLoginShellsNotTheApps() {
@@ -403,7 +432,7 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertFalse(mode.displaysCommand("hello there"), "…both ways")
     }
 
-    func testReturnNeverUpgradesButMayDowngrade() {
+    func testReturnNeverUpgradesAndNeverTouchesTheFilesystem() {
         var nodes = ShellCommandLineTests.fileSystem.nodes
         let fileSystem = MutableFileSystem(nodes: nodes)
         let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: ["open"],
@@ -414,12 +443,11 @@ final class DispatchPillCommandModeTests: XCTestCase {
         nodes["/tmp/later.md"] = .file
         fileSystem.nodes = nodes
         XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "white text never runs")
-        // Purple, then the file vanishes: Return downgrades to a message.
+        // Purple: Return runs on the shown verdict alone — no stat on the main thread.
         mode.evaluateNowForTesting("open /tmp/later.md")
+        let asked = fileSystem.questions
         XCTAssertTrue(mode.shouldRunOnReturn("open /tmp/later.md"))
-        nodes["/tmp/later.md"] = nil
-        fileSystem.nodes = nodes
-        XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "the path vanished: a message")
+        XCTAssertEqual(fileSystem.questions, asked, "Return asked the filesystem nothing")
     }
 
     func testReturnAndDeleteActOnlyOnAFreshVerdictForTheExactText() {
@@ -437,8 +465,9 @@ final class DispatchPillCommandModeTests: XCTestCase {
     /// A filesystem a test can change between two questions.
     private final class MutableFileSystem: ShellFileSystem {
         var nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]
+        private(set) var questions = 0
         init(nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]) { self.nodes = nodes }
-        private var fake: ShellCommandLineTests.FakeShellFileSystem { .init(nodes: nodes) }
+        private var fake: ShellCommandLineTests.FakeShellFileSystem { questions += 1; return .init(nodes: nodes) }
         func exists(_ path: String) -> Bool { fake.exists(path) }
         func isDirectory(_ path: String) -> Bool { fake.isDirectory(path) }
         func isExecutableFile(_ path: String) -> Bool { fake.isExecutableFile(path) }
@@ -550,7 +579,29 @@ final class DispatchPillCommandRunTests: XCTestCase {
 
         let orphan = pill.commandRuns.start(command: "ls", workingDirectory: "/tmp",
                                             environment: pill.commandMode.environment, sessionId: nil)
-        XCTAssertFalse(pill.commandRuns.canAddToTranscript(orphan), "no session at run time: nothing to add to")
+        XCTAssertEqual(pill.commandRuns.transcriptTarget(orphan), .currentConversation)
+        XCTAssertTrue(pill.commandRuns.canAddToTranscript(orphan), "no session at run time: the current conversation")
+        let viaComposer = await pill.commandRuns.addToTranscript(orphan)
+        XCTAssertTrue(viaComposer)
+        XCTAssertEqual(sent().count, 1, "through the pill's own send — which creates the conversation if need be")
+        XCTAssertTrue(sent().first?.hasPrefix("I ran this in my terminal in /tmp") == true)
+        XCTAssertEqual(delivered.count, 1, "never a session's own send")
+        // The first click's conversation is pinned: a later click goes there, whatever is focused then.
+        XCTAssertEqual(orphan.pinnedSessionId, "session-b")
+        focused = "session-c"
+        let again = await pill.commandRuns.addToTranscript(orphan)
+        XCTAssertTrue(again)
+        XCTAssertEqual(delivered.map(\.0), ["session-a", "session-b"])
+        XCTAssertEqual(sent().count, 1)
+    }
+
+    func testTheTranscriptTargetRule() {
+        XCTAssertEqual(commandTranscriptTarget(recordedSessionId: "s1", recordedSessionExists: { _ in true }),
+                       .recordedSession("s1"))
+        XCTAssertEqual(commandTranscriptTarget(recordedSessionId: "s1", recordedSessionExists: { _ in false }),
+                       .unavailable, "only a recorded session that is gone disables the button")
+        XCTAssertEqual(commandTranscriptTarget(recordedSessionId: nil, recordedSessionExists: { _ in false }),
+                       .currentConversation)
     }
 
     func testAMessageStillSends() async {

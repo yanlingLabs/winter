@@ -15,8 +15,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     static let defaultSize = NSSize(width: 780, height: 480)
 
     /// - Parameters:
-    ///   - canAddToTranscript: whether the run's own session still exists (read live — the button disables).
-    ///   - onAddToTranscript: sends the run's message to that session; true when it went.
+    ///   - canAddToTranscript: whether "Add to transcript" has somewhere to go (read live — the button disables
+    ///     only when the session the run recorded has been deleted; `commandTranscriptTarget`).
+    ///   - onAddToTranscript: sends the run's message there; true when it went.
     init(run: CommandRun, canAddToTranscript: @escaping () -> Bool, onAddToTranscript: @escaping () async -> Bool) {
         self.run = run
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
@@ -38,7 +39,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             onClose: { [weak window] in window?.performClose(nil) },
             onMinimize: { [weak window] in window?.performMiniaturize(nil) },
             onZoom: { [weak window] in window?.performZoom(nil) },
-            onStop: { [weak run] in run?.stop() },
+            onStop: { [weak run] in run?.interrupt() },
+            onEnd: { [weak run] in run?.endShell() },
+            onTypeLine: { [weak run] in run?.typeLineByHand() },
             canAddToTranscript: canAddToTranscript,
             onAddToTranscript: {
                 guard chrome.sendState != .sending, canAddToTranscript() else { return }
@@ -120,6 +123,8 @@ struct TerminalWindowRootView: View {
     let onMinimize: () -> Void
     let onZoom: () -> Void
     let onStop: () -> Void
+    let onEnd: () -> Void
+    let onTypeLine: () -> Void
     let canAddToTranscript: () -> Bool
     let onAddToTranscript: () -> Void
 
@@ -128,6 +133,7 @@ struct TerminalWindowRootView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if run.needsManualStart { manualStartNotice }
             TerminalHost(view: run.terminalView)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -135,6 +141,25 @@ struct TerminalWindowRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
+    }
+
+    /// The shell did not run the line on its own: say so, and let the USER put it in — nothing is typed for them.
+    private var manualStartNotice: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Theme.commandPurple)
+            Text("Your shell didn’t run the line automatically (its startup overrides Winter’s).")
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Color.white.opacity(0.75))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TerminalChromeButton(symbol: "keyboard", label: "Type it",
+                                 help: "Type the line into this terminal and press Return", action: onTypeLine)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 40)
+        .background(Color.white.opacity(0.05))
     }
 
     private var header: some View {
@@ -183,9 +208,14 @@ struct TerminalWindowRootView: View {
 
     private var controls: some View {
         HStack(spacing: 8) {
-            TerminalRunStateBadge(outcome: run.outcome)
+            TerminalRunStateBadge(outcome: run.commandOutcome, shellIsLive: run.shellIsLive,
+                                  waiting: run.needsManualStart)
+            if run.commandOutcome == .running {
+                TerminalChromeButton(symbol: "stop.fill", label: "Stop", help: "Stop this command (Ctrl-C) — the shell stays open",
+                                     action: onStop)
+            }
             if run.outcome == .running {
-                TerminalChromeButton(symbol: "stop.fill", label: "Stop", help: "Stop this command", action: onStop)
+                TerminalChromeButton(symbol: "power", label: "End", help: "End this shell", action: onEnd)
             }
             addToTranscriptButton
         }
@@ -202,9 +232,7 @@ struct TerminalWindowRootView: View {
     private func addToTranscriptControl(available: Bool) -> some View {
         if !available, chrome.sendState != .sent {
             TerminalChromeButton(symbol: "text.bubble", label: "Add to transcript",
-                                 help: run.sessionId == nil
-                                    ? "This command was not run from a Dispatch session"
-                                    : "The Dispatch session this command was run from is gone",
+                                 help: "The Dispatch session this command was run from is gone",
                                  action: {})
                 .opacity(0.4)
                 .disabled(true)
@@ -225,11 +253,13 @@ struct TerminalWindowRootView: View {
                 .transition(.opacity)
         case .failed:
             TerminalChromeButton(symbol: "exclamationmark.triangle", label: "Couldn’t send — retry",
-                                 help: "Send the command and its output to its Dispatch session again", tint: .orange,
+                                 help: "Send the command and its output to Dispatch again", tint: .orange,
                                  action: onAddToTranscript)
         case .idle, .sending:
             TerminalChromeButton(symbol: "text.bubble", label: "Add to transcript",
-                                 help: "Send the command and its output to the Dispatch session it was run from, as your message",
+                                 help: run.sessionId == nil
+                                    ? "Send the command and its output to your Dispatch conversation, as your message"
+                                    : "Send the command and its output to the Dispatch session it was run from, as your message",
                                  action: onAddToTranscript)
                 .opacity(chrome.sendState == .sending ? 0.5 : 1)
                 .disabled(chrome.sendState == .sending)
@@ -269,9 +299,12 @@ private struct TerminalChromeButton: View {
     }
 }
 
-/// The run's state in the header: a breathing purple dot while it runs, then how it ended.
+/// The line's state in the header: a breathing purple dot while it runs, then how it ended — and "shell open"
+/// while the shell lives on after it.
 private struct TerminalRunStateBadge: View {
     let outcome: CommandRunOutcome
+    let shellIsLive: Bool
+    var waiting = false
 
     var body: some View {
         HStack(spacing: 5) {
@@ -282,7 +315,7 @@ private struct TerminalRunStateBadge: View {
                     Circle().fill(Theme.commandPurple).frame(width: 7, height: 7).opacity(0.45 + 0.55 * phase)
                 }
                 .frame(width: 7, height: 7)
-                Text("Running")
+                Text(waiting ? "Waiting" : "Running")
             case .exited(0):
                 Image(systemName: "checkmark").font(Typography.caption(.semibold))
                 Text("Done")
@@ -295,6 +328,12 @@ private struct TerminalRunStateBadge: View {
             case .failedToStart:
                 Circle().fill(Color.red).frame(width: 7, height: 7)
                 Text("Couldn’t start")
+            case .typedByHand:
+                Image(systemName: "keyboard").font(Typography.caption(.semibold))
+                Text("Typed in")
+            }
+            if shellIsLive {
+                Text("· shell open").foregroundStyle(Theme.commandPurple)
             }
         }
         .font(Typography.caption(.medium))

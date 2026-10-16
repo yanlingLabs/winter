@@ -128,6 +128,8 @@ enum CommandRunOutcome: Equatable {
     case signaled(Int32)
     /// The process could not be started.
     case failedToStart
+    /// The user typed the line in by hand ("Type it"): the shell runs it, its status is not known.
+    case typedByHand
 
     var isFinished: Bool { self != .running }
     var succeeded: Bool { self == .exited(0) }
@@ -149,18 +151,31 @@ func terminalDisplayPath(_ path: String, home: String) -> String {
     return path.hasPrefix(prefix) ? "~/" + path.dropFirst(prefix.count) : path
 }
 
+/// What "Add to transcript" carries: the first command alone, or the whole shell session after it.
+enum TerminalTranscriptScope: Equatable {
+    /// The line the user ran from the pill and its output — from the OSC 133 `C` mark to its `D` mark.
+    case command
+    /// The user went on typing in the shell: everything from the line's start to now (its tail).
+    case session
+}
+
 /// PURE: the user's message "Add to transcript" sends: a short header line, then a fenced block holding
 /// `$ <command>` and the output, stripped and capped. The fence is longer than any backtick run inside it.
 func terminalTranscriptMessage(command: String, workingDirectory: String, home: String,
-                               outcome: CommandRunOutcome, output: String) -> String {
+                               outcome: CommandRunOutcome, output: String,
+                               scope: TerminalTranscriptScope = .command) -> String {
     let state: String
     switch outcome {
     case .running: state = "still running"
     case .exited(let code): state = "exit \(code)"
     case .signaled(let signal): state = "stopped by signal \(signal)"
     case .failedToStart: state = "could not start"
+    case .typedByHand: state = "typed into the shell"
     }
-    let header = "I ran this in my terminal in \(terminalDisplayPath(workingDirectory, home: home)) (\(state)):"
+    let place = terminalDisplayPath(workingDirectory, home: home)
+    let header = scope == .command
+        ? "I ran this in my terminal in \(place) (\(state)):"
+        : "I ran this in my terminal in \(place) (\(state)), then kept working in that shell:"
     let body = output.isEmpty ? "$ \(command)" : "$ \(command)\n\(output)"
     var longest = 0, run = 0
     for c in body {
@@ -168,4 +183,74 @@ func terminalTranscriptMessage(command: String, workingDirectory: String, home: 
     }
     let fence = String(repeating: "`", count: max(3, longest + 1))
     return "\(header)\n\(fence)\n\(body)\n\(fence)"
+}
+
+// MARK: - OSC 133 semantic-prompt marks
+
+/// A mark a run's shell writes (`loginShellSessionInvocation`): `ESC ] 133 ; <body> BEL` (or ST, `ESC` + backslash, as the end).
+enum TerminalSemanticMark: Equatable {
+    /// `C` — the command's output starts.
+    case commandStart
+    /// `D[;<status>]` — the command ended, with its exit status when the shell gave one.
+    case commandEnd(Int32?)
+}
+
+/// PURE (stateful across chunks): finds a run's OSC 133 `C`/`D` marks in a byte stream as it arrives — a mark split
+/// across two reads is still found. Only marks carrying the run's tag (`winter-<nonce>`, `loginShellMarkTag`)
+/// count: the same mark printed by the command, or by a shell nested in it, is ignored. Every other OSC is
+/// skipped; a runaway OSC (no end within `maxBody` bytes) is dropped. The bytes themselves are not changed: the
+/// emulator still gets them (it ignores the marks).
+struct TerminalSemanticMarkScanner {
+    static let maxBody = 256
+    private enum State { case ground, escape, osc, oscEscape }
+    private var state = State.ground
+    private var body: [UInt8] = []
+    /// The field a mark must carry to count.
+    let tag: String
+
+    init(tag: String) { self.tag = tag }
+
+    /// The marks in `bytes`, each with the index just past its terminator (an index of `bytes`).
+    mutating func feed(_ bytes: ArraySlice<UInt8>) -> [(end: Int, mark: TerminalSemanticMark)] {
+        var found: [(Int, TerminalSemanticMark)] = []
+        var i = bytes.startIndex
+        while i < bytes.endIndex {
+            let b = bytes[i]
+            switch state {
+            case .ground:
+                if b == 0x1B { state = .escape }
+            case .escape:
+                if b == 0x5D { state = .osc; body.removeAll(keepingCapacity: true) } else { state = b == 0x1B ? .escape : .ground }
+            case .osc:
+                if b == 0x07 {
+                    if let mark = Self.mark(body, tag: tag) { found.append((i + 1, mark)) }
+                    state = .ground
+                } else if b == 0x1B {
+                    state = .oscEscape
+                } else if body.count < Self.maxBody {
+                    body.append(b)
+                } else {
+                    state = .ground
+                }
+            case .oscEscape:
+                if b == 0x5C, let mark = Self.mark(body, tag: tag) { found.append((i + 1, mark)) }
+                state = b == 0x5D ? .osc : .ground
+                if state == .osc { body.removeAll(keepingCapacity: true) }
+            }
+            i += 1
+        }
+        return found
+    }
+
+    /// PURE: an OSC body → a mark, when it is `133;C;<tag>` or `133;D;<status>;<tag>` (the tag may be any later
+    /// field).
+    static func mark(_ body: [UInt8], tag: String) -> TerminalSemanticMark? {
+        let fields = String(decoding: body, as: UTF8.self).split(separator: ";", omittingEmptySubsequences: false)
+        guard fields.count >= 3, fields[0] == "133", fields.dropFirst(2).contains(Substring(tag)) else { return nil }
+        switch fields[1] {
+        case "C": return .commandStart
+        case "D": return .commandEnd(Int32(fields[2]))
+        default: return nil
+        }
+    }
 }

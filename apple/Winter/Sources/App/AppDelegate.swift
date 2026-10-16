@@ -486,7 +486,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A command typed into the pill runs in the bound session's working directory when it has one (a
         // dispatch session usually does not — then the pill falls back to the home folder).
         // "Add to transcript" sends to the session the command was RUN from — that session's own send, never the
-        // focused one, never a new one; a session that is gone disables the button.
+        // focused one; a run that recorded none goes through the pill's own send (`onSubmit`, below), and only a
+        // recorded session that is gone disables the button.
         pill.commandRuns.onSendToTranscript = { [weak self] sessionId, text in
             guard let client = self?.appModel?.client else { return false }
             return (try? await client.send(sessionId: sessionId, text: text)) != nil
@@ -1473,7 +1474,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Command mode reads the user's own login shell — never under unit tests (`.inert`: nothing is a
         // command), so no test ever runs the developer's shell or its profile.
         let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings,
-                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live())
+                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live(),
+                                          onScreenPaths: Self.isRunningUnitTests ? .inert : .live())
         pillController = pill
         wireDispatchPill(pill, model: model)
 

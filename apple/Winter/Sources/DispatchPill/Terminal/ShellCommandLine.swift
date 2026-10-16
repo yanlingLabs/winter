@@ -48,6 +48,173 @@ struct LiveShellFileSystem: ShellFileSystem {
     }
 }
 
+// MARK: - Paths by name
+
+/// PURE: `path` with `.`, `..` and repeated or trailing slashes resolved by name (no symlinks followed).
+func shellNormalizedPath(_ path: String) -> String {
+    var parts: [Substring] = []
+    for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+        if component == "." { continue }
+        if component == ".." { if !parts.isEmpty { parts.removeLast() }; continue }
+        parts.append(component)
+    }
+    return "/" + parts.joined(separator: "/")
+}
+
+// MARK: - Slow mounts: never block on one
+
+/// A mounted filesystem: where, and of what type (`statfs`'s `f_fstypename`).
+struct ShellMount: Equatable, Sendable {
+    var mountPoint: String
+    var type: String
+}
+
+/// Filesystem types that can take seconds to answer (or hang) — network and FUSE mounts.
+let shellSlowFilesystemTypes: Set<String> = ["nfs", "smbfs", "afpfs", "webdav", "autofs", "osxfuse", "macfuse", "sshfs",
+                                             "fusefs", "cifs", "ftp"]
+
+/// PURE: is a filesystem of `type` one that may be slow?
+func shellFilesystemTypeIsSlow(_ type: String) -> Bool {
+    shellSlowFilesystemTypes.contains(type) || type.lowercased().contains("fuse")
+}
+
+/// The mount table, from the kernel's cached copy (`getfsstat` with `MNT_NOWAIT`: it never waits on a mount).
+func shellLiveMounts() -> [ShellMount] {
+    let count = getfsstat(nil, 0, MNT_NOWAIT)
+    guard count > 0 else { return [] }
+    let capacity = Int(count) + 8
+    let buffer = UnsafeMutablePointer<statfs>.allocate(capacity: capacity)
+    defer { buffer.deallocate() }
+    let got = getfsstat(buffer, Int32(capacity * MemoryLayout<statfs>.stride), MNT_NOWAIT)
+    guard got > 0 else { return [] }
+    return (0..<Int(min(got, Int32(capacity)))).map { index in
+        var entry = buffer[index]
+        let point = withUnsafeBytes(of: &entry.f_mntonname) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        let type = withUnsafeBytes(of: &entry.f_fstypename) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return ShellMount(mountPoint: point, type: type)
+    }
+}
+
+/// PURE: the slow mount `path` lives on (the longest mount point that holds it, when its type is slow), or nil.
+/// The Data volume's firmlinked spelling (`/System/Volumes/Data/…`) is read as the path it names.
+func shellSlowMount(for path: String, in mounts: [ShellMount]) -> String? {
+    var normalized = shellNormalizedPath(path)
+    let data = "/System/Volumes/Data"
+    if normalized.hasPrefix(data + "/") { normalized = String(normalized.dropFirst(data.count)) }
+    var best: ShellMount?
+    for mount in mounts {
+        let point = mount.mountPoint == "/" ? "/" : shellNormalizedPath(mount.mountPoint)
+        let holds = point == "/" || normalized == point || normalized.hasPrefix(point + "/")
+        if holds, point.count > (best.map { shellNormalizedPath($0.mountPoint).count } ?? -1) { best = mount }
+    }
+    guard let best, shellFilesystemTypeIsSlow(best.type) else { return nil }
+    return best.mountPoint
+}
+
+/// The filesystem with a guard for SLOW MOUNTS, told apart by filesystem type (`shellFilesystemTypeIsSlow` — NFS,
+/// SMB, AFP, WebDAV, autofs such as `/net`, FUSE such as sshfs — wherever they are mounted, home included), never
+/// by path name. On one: answers are memoized for `memoLifetime`; questions go to ONE serial queue with at most
+/// ONE in flight — while it is outstanding every other question gets "no" at once (no new thread); a question not
+/// answered within `timeout` gets "no", and that mount is left alone for `slowLifetime`. Everywhere else `inner`
+/// answers directly. (Folders macOS guards with a privacy prompt are checked normally: macOS may ask once.)
+final class SlowMountGuardedFileSystem: ShellFileSystem, @unchecked Sendable {
+    let inner: ShellFileSystem
+    let timeout: TimeInterval
+    static let memoLifetime: TimeInterval = 10
+    static let slowLifetime: TimeInterval = 30
+    static let mountTableLifetime: TimeInterval = 10
+
+    fileprivate enum Answer {
+        case bool(Bool), entries([String]?)
+        var bool: Bool { if case .bool(let b) = self { return b } else { return false } }
+        var entries: [String]? { if case .entries(let e) = self { return e } else { return nil } }
+    }
+    private let lock = NSLock()
+    private var memo: [String: (answer: Answer, at: Date)] = [:]
+    private var slowUntil: [String: Date] = [:]
+    private var inFlight = false
+    private var mounts: [ShellMount] = []
+    private var mountsReadAt = Date.distantPast
+    private let readMounts: () -> [ShellMount]
+    private let now: () -> Date
+    private let queue = DispatchQueue(label: "winter.dispatch-pill.slow-mount-stat", qos: .userInitiated)
+
+    init(inner: ShellFileSystem, timeout: TimeInterval = 0.25, mounts: @escaping () -> [ShellMount] = shellLiveMounts,
+         now: @escaping () -> Date = Date.init) {
+        self.inner = inner
+        self.timeout = timeout
+        self.readMounts = mounts
+        self.now = now
+    }
+
+    func exists(_ path: String) -> Bool {
+        guarded("e", path, .bool(false)) { .bool($0.exists(path)) }.bool
+    }
+
+    func isDirectory(_ path: String) -> Bool {
+        guarded("d", path, .bool(false)) { .bool($0.isDirectory(path)) }.bool
+    }
+
+    func isExecutableFile(_ path: String) -> Bool {
+        guarded("x", path, .bool(false)) { .bool($0.isExecutableFile(path)) }.bool
+    }
+
+    func entries(ofDirectory path: String) -> [String]? {
+        guarded("l", path, .entries(nil)) { .entries($0.entries(ofDirectory: path)) }.entries
+    }
+
+    private func slowMount(for path: String) -> String? {
+        lock.lock()
+        if now().timeIntervalSince(mountsReadAt) > Self.mountTableLifetime {
+            mounts = readMounts()
+            mountsReadAt = now()
+        }
+        let table = mounts
+        lock.unlock()
+        return shellSlowMount(for: path, in: table)
+    }
+
+    private func guarded(_ kind: String, _ path: String, _ fallback: Answer,
+                         _ ask: @escaping (ShellFileSystem) -> Answer) -> Answer {
+        guard let mount = slowMount(for: path) else { return ask(inner) }
+        let key = kind + "\u{0}" + path
+        let started = now()
+        lock.lock()
+        if let until = slowUntil[mount], until > started { lock.unlock(); return fallback }
+        if let hit = memo[key], started.timeIntervalSince(hit.at) < Self.memoLifetime { lock.unlock(); return hit.answer }
+        // One stat in flight at most: until it is back, "unknown" — not a command — and no new thread.
+        guard !inFlight else { lock.unlock(); return fallback }
+        inFlight = true
+        lock.unlock()
+
+        let box = AnswerBox()
+        let done = DispatchSemaphore(value: 0)
+        let inner = inner
+        queue.async { [weak self] in
+            let answer = ask(inner)
+            box.set(answer)
+            if let self { self.lock.lock(); self.inFlight = false; self.lock.unlock() }
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + timeout) == .success, let answer = box.get() else {
+            lock.lock(); slowUntil[mount] = started.addingTimeInterval(Self.slowLifetime); lock.unlock()
+            return fallback
+        }
+        lock.lock()
+        if memo.count > 512 { memo.removeAll(keepingCapacity: true) }
+        memo[key] = (answer, now())
+        lock.unlock()
+        return answer
+    }
+
+    private final class AnswerBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var answer: Answer?
+        func set(_ value: Answer) { lock.lock(); answer = value; lock.unlock() }
+        func get() -> Answer? { lock.lock(); defer { lock.unlock() }; return answer }
+    }
+}
+
 // MARK: - The context
 
 /// Everything outside the text that decides whether it is a command.
