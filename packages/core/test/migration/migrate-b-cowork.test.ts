@@ -327,15 +327,14 @@ describe("the executor refuses plans that reach Cowork storage through a symlink
 
 describe("inspection cleanup", () => {
   test("a temp-copy cleanup failure never turns the finding into a throw (the boot hook calls this)", () => {
-    const source = tempDir(); seedSource(source); seedRuntimeState(source, true, true);
-    const scratch: string[] = [];
-    const finding = inspectCoworkSource(source, { removeScratch: path => { scratch.push(path); throw new Error("EBUSY"); } });
-    expect(finding).toMatchObject({ present: true, kind: "authority-records" });
-    expect(scratch).toHaveLength(1);
-    rmSync(scratch[0]!, { recursive: true, force: true });
-    const clean = tempDir(); seedSource(clean); seedRuntimeState(clean, false, true);
-    expect(inspectCoworkSource(clean, { removeScratch: () => { throw new Error("EBUSY"); } })).toEqual({ present: false });
-    rmSync(scratch[0] ?? clean, { recursive: true, force: true });
+    const left: string[] = [], failing = { removeScratch: (path: string) => { left.push(path); throw new Error("EBUSY"); } };
+    try {
+      const populated = tempDir(); seedSource(populated); seedRuntimeState(populated, true, true);
+      expect(inspectCoworkSource(populated, failing)).toMatchObject({ present: true, kind: "authority-records" });
+      const clean = tempDir(); seedSource(clean); seedRuntimeState(clean, false, true);
+      expect(inspectCoworkSource(clean, failing)).toEqual({ present: false });
+      expect(left).toHaveLength(2); // each inspection really did try to clean up
+    } finally { for (const path of left) rmSync(path, { recursive: true, force: true }); }
   });
   test("by default the private copy is removed (a private TMPDIR is left empty)", () => {
     const source = tempDir(), scratchRoot = realpathSync(tempDir()); seedSource(source); seedRuntimeState(source, true, true);
@@ -344,6 +343,7 @@ describe("inspection cleanup", () => {
     finally { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; }
     expect(readdirSync(scratchRoot)).toEqual([]);
   });
+});
 
 describe("an unreadable legacy entry is not reported as Cowork storage", () => {
   test("the refusal says it could not be checked, and still refuses", async () => {
