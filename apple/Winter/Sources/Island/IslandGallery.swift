@@ -68,7 +68,127 @@ enum IslandGallery {
         out.append(try write(scene(notched, width: island0.width + 120, height: island0.height + 50) {
             IslandExpandedView(store: empty, shape: notched, size: island0.size)
         }, directory, "island-open-empty@2x.png"))
+        out.append(contentsOf: try renderTabs(to: directory, shape: notched))
         return out
+    }
+
+    // MARK: - Phase 2: the tabs
+
+    /// Every phase-2 tab with sample data (and the empty Shelf, and the strip with working sessions). The Shelf's
+    /// sample files live in a temporary folder removed afterwards; nothing else is written but the pictures.
+    static func renderTabs(to directory: URL, shape: IslandScreenShape) throws -> [URL] {
+        var out: [URL] = []
+        let now = Date()
+        let files = FileManager.default.temporaryDirectory.appendingPathComponent("winter-island-gallery-shelf-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: files) }
+        let models = sampleTabModels(now: now, files: files)
+        let store = sampleStore()
+
+        for (tab, name) in [(IslandTabRegistry.sessions, "sessions"), (IslandTabRegistry.shelf, "shelf"),
+                            (IslandTabRegistry.usage, "usage"), (IslandTabRegistry.devices, "devices")] {
+            store.tabs.select(tab.id)
+            out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id), directory,
+                                 "island-tab-\(name)@2x.png"))
+        }
+        // The empty Shelf, and the Shelf while a drag hovers it.
+        let emptyModels = IslandTabModels(shelf: IslandShelfStore(persistence: IslandShelfPersistence(
+            fileURL: files.appendingPathComponent("empty-shelf.json"))))
+        store.tabs.select(IslandTabRegistry.shelf.id)
+        out.append(try write(openScene(store: store, models: emptyModels, shape: shape, tab: IslandTabRegistry.shelf.id),
+                             directory, "island-tab-shelf-empty@2x.png"))
+        emptyModels.shelf.dropTargeted = true
+        out.append(try write(openScene(store: store, models: emptyModels, shape: shape, tab: IslandTabRegistry.shelf.id),
+                             directory, "island-tab-shelf-drop@2x.png"))
+
+        // The strip with waiting AND working counts, and with working only.
+        for (name, waiting, working) in [("strip-housing-waiting-working", 2, 3), ("strip-housing-working", 0, 1)] {
+            let model = IslandStripModel(waitingCount: waiting, workingCount: working)
+            guard let strip = IslandLayout.strip(shape, waiting: model.showsWings) else { continue }
+            out.append(try write(scene(shape, width: 520, height: 90) {
+                IslandStripView(model: model, size: strip.size, housingWidth: shape.housing?.width)
+            }, directory, "island-\(name)@2x.png"))
+        }
+        return out
+    }
+
+    private static func openScene(store: IslandStore, models: IslandTabModels, shape: IslandScreenShape, tab: String) -> some View {
+        let host = NSHostingView(rootView: VStack(spacing: 0) { IslandTabBody(id: tab, models: models, scrolls: false) }
+            .frame(width: IslandLayout.islandWidth).environment(\.colorScheme, .dark))
+        let content = 46 + min(ceil(host.fittingSize.height), IslandLayout.islandMaxHeight) + 6
+        let island = IslandLayout.island(shape, contentHeight: content)
+        return scene(shape, width: island.width + 120, height: island.height + 50) {
+            IslandExpandedView(store: store, shape: shape, size: island.size, scrolls: false, tabModels: models)
+        }
+    }
+
+    /// Sample data for every tab.
+    static func sampleTabModels(now: Date, files: URL) -> IslandTabModels {
+        let ms = { (d: TimeInterval) in (now.addingTimeInterval(d).timeIntervalSince1970 * 1000) }
+        // Sessions.
+        let rows = [
+            SessionSummary(sessionId: "s1", title: "Ship the island", createdAt: 5, scope: "global",
+                           signals: SessionSignals(attachedElsewhere: false, working: false)),
+            SessionSummary(sessionId: "s2", title: "Refactor the shelf store", createdAt: 4, scope: "global",
+                           signals: SessionSignals(attachedElsewhere: true, working: true)),
+            SessionSummary(sessionId: "s3", title: "Weekly planning", createdAt: 3, scope: "global", mode: "chat",
+                           signals: SessionSignals(attachedElsewhere: false, working: false)),
+            SessionSummary(sessionId: "s4", title: "Compare flight prices", createdAt: 2, scope: "global", mode: "code",
+                           parentSessionId: "d1", signals: SessionSignals(attachedElsewhere: false, working: false)),
+            SessionSummary(sessionId: "s5", title: "Inbox triage", createdAt: 1, scope: "global", activity: "background",
+                           signals: SessionSignals(attachedElsewhere: true, working: true)),
+        ]
+        let sessions = IslandSessionsModel()
+        sessions.directory = { rows }
+        sessions.waiting = { ["s1"] }
+        sessions.childStatuses = { ["s4": "completed"] }
+        sessions.windows = { IslandWindowFacts(appWindowSessionId: "s1", detachedSessionIds: ["s3"]) }
+        sessions.setHostsForTesting(["s2": [IslandHost(clientName: "cli-chat", role: "harness", tty: "/dev/ttys004")],
+                                     "s5": [IslandHost(clientName: "iphone-gateway", role: "remote")]])
+        sessions.recompute()
+
+        // Usage.
+        let usage = IslandUsageModel()
+        usage.setForTesting(IslandUsageSnapshot(
+            windows: [IslandUsageWindow(rateLimitType: "five_hour", status: "allowed_warning", utilization: 0.82,
+                                        resetsAt: ms(2 * 3600 + 14 * 60), at: ms(-180), sessionId: "s2"),
+                      IslandUsageWindow(rateLimitType: "seven_day", status: "allowed", utilization: 0.31,
+                                        resetsAt: ms(3 * 86400 + 4 * 3600), at: ms(-180), sessionId: "s2")],
+            background: .init(limited: false, inputTokens: 18_400, outputTokens: 2_150),
+            session: .init(sessionId: "s1", turns: 7, inputTokens: 412_000, outputTokens: 18_300, contextTokens: 64_000,
+                           contextWindow: 200_000, model: "example/model-large")),
+            roles: ["titles.model": ModelRoleValue(model: "example/model-small", explicit: false, constraint: "any", permitted: [],
+                                                   problem: ModelRoleProblem(reason: "rate-limited", model: "example/model-small"))],
+            sessionTitle: "Ship the island")
+
+        // Devices.
+        let devices = IslandDevicesModel()
+        let phone = PairRecord(phoneEndpointID: "p1", label: "Phone", createdAt: Int(now.timeIntervalSince1970) - 9 * 86400,
+                               caps: [], pairingEpoch: 1, lastSeenAt: 0)
+        let status = ComputerUseStatus(enabled: true, legacyComputer: false, mirror: true, privateEventPath: false,
+                                       helper: ComputerUseHelperStatus(installed: true, running: true, version: "1.4.0",
+                                                                       permissions: ComputerUsePermissions(accessibility: true, screenRecording: false)),
+                                       browsers: [ComputerUseBrowserStatus(id: "winter", name: "Winter", connected: true),
+                                                  ComputerUseBrowserStatus(id: "chrome", name: "Google Chrome", connected: false,
+                                                                           reason: "Winter for Chrome is not connected in Google Chrome"),
+                                                  ComputerUseBrowserStatus(id: "headless", name: "Winter (headless)", connected: true)])
+        devices.setForTesting(phones: IslandDevicesPresentation.phones([phone], connected: ["p1"], mirrored: ["s2"],
+                                                                       titleFor: { _ in "Refactor the shelf store" }, now: now),
+                              helpers: IslandDevicesPresentation.helpers(status))
+
+        // Shelf: three sample files (two present, one deleted after shelving — missing).
+        let shelf = IslandShelfStore(persistence: IslandShelfPersistence(fileURL: files.appendingPathComponent("shelf.json")))
+        var urls: [URL] = []
+        for name in ["Screenshot at 09.41.12.png", "Quarterly plan.pdf", "notes.md", "draft.txt"] {
+            let url = files.appendingPathComponent(name)
+            FileManager.default.createFile(atPath: url.path, contents: Data("sample".utf8))
+            urls.append(url)
+        }
+        shelf.add(urls.reversed())
+        try? FileManager.default.removeItem(at: urls[3])
+        shelf.resolveAllNow()
+        shelf.selectedId = shelf.items.first?.id
+        return IslandTabModels(sessions: sessions, shelf: shelf, usage: usage, devices: devices)
     }
 
     /// Three sample cards: an approval, a question and a view request (plus a link request).

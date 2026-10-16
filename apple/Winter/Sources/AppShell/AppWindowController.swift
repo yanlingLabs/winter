@@ -149,6 +149,10 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     var windowForTesting: NSWindow? { window }
 
     var isVisible: Bool { window.isVisible }
+    /// Minimised to the Dock (it still holds its session — the Winter island's Sessions tab brings it back).
+    var isMiniaturized: Bool { window.isMiniaturized }
+    /// Brings a minimised window back (the island's Sessions tab, before summoning it).
+    func deminiaturize() { if window.isMiniaturized { window.deminiaturize(nil) } }
     /// The Winter island's routing: this window is key or main (a card of the session it shows is then in front).
     var isKeyOrMain: Bool { window.isKeyWindow || window.isMainWindow }
 

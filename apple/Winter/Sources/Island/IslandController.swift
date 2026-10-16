@@ -29,6 +29,8 @@ struct IslandFocusSources {
 final class IslandController {
     let store: IslandStore
     var focusSources = IslandFocusSources()
+    /// The phase-2 tabs' models (Sessions, Shelf, Usage and limits, Devices).
+    let tabModels: IslandTabModels
 
     private let stripPanel = IslandPanel(level: .statusBar)
     private let topPanel = IslandPanel(level: .statusBar)
@@ -61,9 +63,19 @@ final class IslandController {
     private let terminalWatcher = TerminalFocusWatcher()
     /// The user dismissed the current card themselves (a click on the waiting pill).
     private var explicitDismiss = false
+    /// The pointer over the OPEN island (its rows' hover and its buttons' glow), fed only while it is open.
+    private let openPointer = DispatchPillPointer()
+    /// The open island's refresh of the selected tab's data (on open, on a tab change, then every
+    /// `openRefreshInterval` while open — nothing pushes `signals.working`, the helper's permissions or a phone's
+    /// connection). Cancelled on close: nothing runs while the island is closed.
+    private var openRefresh: Task<Void, Never>?
+    static let openRefreshInterval: Duration = .seconds(5)
+    private var relayoutPending = false
+    private var cancellables = Set<AnyCancellable>()
 
-    init(store: IslandStore) {
+    init(store: IslandStore, tabs: IslandTabModels? = nil) {
         self.store = store
+        self.tabModels = tabs ?? IslandTabModels()
         store.focus = { [weak self] in self?.currentFocus() ?? IslandFocus() }
         store.scheduleWake = { [weak self] deadline in self?.armWake(deadline) }
         store.onChange = { [weak self] in self?.layoutTop() }
@@ -91,10 +103,104 @@ final class IslandController {
             return true
         }
         islandPanel.onKeyDown = { [weak self] event in
-            guard event.keyCode == 53, let self, self.isOpen else { return false }
-            self.close()
-            return true
+            guard let self, self.isOpen else { return false }
+            if event.keyCode == 53 {
+                self.close()
+                return true
+            }
+            // ⌘C on the Shelf: the selected item's file URL (the user's own copy).
+            if event.charactersIgnoringModifiers?.lowercased() == "c", event.modifierFlags.contains(.command),
+               self.store.tabs.selected?.id == IslandTabRegistry.shelf.id {
+                return self.tabModels.shelf.copySelected()
+            }
+            return false
         }
+        // A click on a shelf item lets the island take the keyboard (so ⌘C reaches it); closing gives it back.
+        tabModels.shelf.onSelect = { [weak self] in self?.islandPanel.takeKeyboard() }
+        observeTabs()
+    }
+
+    // MARK: - The tabs
+
+    private func observeTabs() {
+        // A tab change: relayout (each tab has its own height) and refresh what it shows.
+        store.$tabs.map { $0.selected?.id }.removeDuplicates().dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.isOpen else { return }
+                self.layoutIsland()
+                self.restartOpenRefresh()
+            }
+            .store(in: &cancellables)
+        // The selected tab's content changed size: relayout once (coalesced).
+        let changes: [AnyPublisher<Void, Never>] = [
+            store.$cards.map { _ in () }.eraseToAnyPublisher(),
+            tabModels.sessions.$rows.map { _ in () }.eraseToAnyPublisher(),
+            tabModels.shelf.$items.map { _ in () }.eraseToAnyPublisher(),
+            tabModels.usage.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            tabModels.devices.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+        ]
+        Publishers.MergeMany(changes)
+            .sink { [weak self] in self?.relayoutSoon() }
+            .store(in: &cancellables)
+        // A card arriving or leaving changes a session's "waiting for you".
+        store.$cards.receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.tabModels.sessions.recompute() }
+            .store(in: &cancellables)
+    }
+
+    private func relayoutSoon() {
+        guard isOpen, !relayoutPending else { return }
+        relayoutPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.relayoutPending = false
+            if self.isOpen { self.layoutIsland() }
+        }
+    }
+
+    private func restartOpenRefresh() {
+        openRefresh?.cancel()
+        let tabs = tabModels
+        openRefresh = Task { @MainActor [weak self] in
+            var first = true
+            while !Task.isCancelled {
+                guard let id = self?.store.tabs.selected?.id else { return }
+                await tabs.refresh(tab: id, periodic: !first)
+                first = false
+                try? await Task.sleep(for: Self.openRefreshInterval)
+            }
+        }
+    }
+
+    /// The working-sessions count on the strip (the session directory's `signals.working`, on its own pushes).
+    func setWorkingSessions(_ count: Int) {
+        guard store.workingSessions != count else { return }
+        store.workingSessions = count
+        layoutStrip()
+    }
+
+    /// A drag with files came over the strip or the island: open it on the Shelf.
+    private func dragEntered() {
+        if !isOpen { open() }
+        store.tabs.select(IslandTabRegistry.shelf.id)
+        tabModels.shelf.dropTargeted = true
+    }
+
+    private var fileDrop: IslandFileDrop {
+        IslandFileDrop(
+            entered: { [weak self] in self?.dragEntered() },
+            exited: { [weak self] in self?.tabModels.shelf.dropTargeted = false },
+            drop: { [weak self] urls in
+                guard let self else { return false }
+                if !self.isOpen { self.open() }
+                self.store.tabs.select(IslandTabRegistry.shelf.id)
+                let taken = self.tabModels.shelf.add(urls) > 0 || !urls.isEmpty
+                self.relayoutSoon()
+                let shelf = self.tabModels.shelf
+                Task { await shelf.resolveAll() }
+                return taken
+            })
     }
 
     // MARK: - Lifecycle
@@ -111,6 +217,8 @@ final class IslandController {
         removePointerMonitors()
         removeOpenMonitors()
         wake?.cancel()
+        openRefresh?.cancel()
+        openRefresh = nil
         pendingReroute?.cancel()
         pendingReroute = nil
         terminalWatcher.stop()
@@ -208,7 +316,7 @@ final class IslandController {
     /// The strip's panel for the current count: the housing alone while nothing waits (nothing at all without a
     /// housing), the wings or the tab while something does. Re-laid out only when that flips.
     private func layoutStrip() {
-        let waiting = store.strip.waitingCount > 0
+        let waiting = store.strip.showsWings
         guard started, stripWaiting != waiting else { return }
         stripWaiting = waiting
         guard let strip = IslandLayout.strip(shape, waiting: waiting) else {
@@ -223,6 +331,7 @@ final class IslandController {
         } else {
             let host = IslandHostingView(rootView: view)
             host.sizingOptions = []
+            host.fileDrop = fileDrop
             stripPanel.contentView = host
         }
         stripPanel.setFrame(panelFrame(for: strip), display: true)
@@ -463,13 +572,20 @@ final class IslandController {
         }
         drawTop()
         installOpenMonitors()
+        restartOpenRefresh()
     }
 
-    func close() {
+    /// Closes the island. `outsideClick`: the user clicked another app or window — the keyboard is dropped WITHOUT
+    /// giving it back to the app it came from, so the app the user clicked keeps it.
+    func close(outsideClick: Bool = false) {
         guard isOpen else { return }
         isOpen = false
         removeOpenMonitors()
-        islandPanel.rest()
+        openRefresh?.cancel()
+        openRefresh = nil
+        openPointer.set(nil)
+        tabModels.shelf.dropTargeted = false
+        if outsideClick { islandPanel.letGo() } else { islandPanel.rest() }
         if reduceMotion {
             islandPanel.orderOut(nil)
         } else {
@@ -486,12 +602,14 @@ final class IslandController {
         let contentHeight = islandContentHeight()
         let r = IslandLayout.island(shape, contentHeight: contentHeight)
         let root = IslandOpenRoot(store: store, model: openModel, shape: shape, size: r.size,
-                                  stripSize: IslandLayout.strip(shape).size) { [weak self] in self?.close() }
+                                  stripSize: IslandLayout.strip(shape).size, tabModels: tabModels,
+                                  pointer: openPointer) { [weak self] in self?.close() }
         if let host = islandPanel.contentView as? IslandHostingView<IslandOpenRoot> {
             host.rootView = root
         } else {
             let host = IslandHostingView(rootView: root)
             host.sizingOptions = []
+            host.fileDrop = fileDrop
             islandPanel.contentView = host
         }
         // Room for the shadow below and at the sides.
@@ -503,6 +621,12 @@ final class IslandController {
     /// scrolls past the island's maximum).
     private func islandContentHeight() -> CGFloat {
         let header: CGFloat = 46
+        if let id = store.tabs.selected?.id, id != IslandTabRegistry.needsYou.id {
+            // A phase-2 tab: its flat body measured at the island's width.
+            let host = NSHostingView(rootView: VStack(spacing: 0) { IslandTabBody(id: id, models: tabModels, scrolls: false) }
+                .frame(width: IslandLayout.islandWidth).environment(\.colorScheme, .dark))
+            return header + min(ceil(host.fittingSize.height), IslandLayout.islandMaxHeight) + 6
+        }
         guard !store.cards.isEmpty else { return header + 90 }
         var rows: CGFloat = 0
         for card in store.cards.reversed() {
@@ -519,7 +643,7 @@ final class IslandController {
         swipeRecognizer.reset()
         // A click in another app closes it (mouse-downs need no permission)…
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
-            MainActor.assumeIsolated { self?.close() }
+            MainActor.assumeIsolated { self?.close(outsideClick: true) }
         }) { openMonitors.append(m) }
         // …or in another of Winter's windows. A click on the strip toggles it itself.
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
@@ -527,7 +651,7 @@ final class IslandController {
                 guard let self, self.isOpen, let window = event.window else { return }
                 if window === self.islandPanel || window === self.stripPanel { return }
                 if String(describing: type(of: window)).contains("Menu") { return }
-                self.close()
+                self.close(outsideClick: true)
             }
             return event
         }) { openMonitors.append(m) }
@@ -536,6 +660,21 @@ final class IslandController {
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
             MainActor.assumeIsolated { if event.keyCode == 53 { self?.close() } }
         }) { openMonitors.append(m) }
+        // The pointer over the open island: its rows grow and its buttons glow under it.
+        let movedOpen: (NSEvent?) -> Void = { [weak self] _ in
+            guard let self, self.isOpen else { return }
+            let mouse = NSEvent.mouseLocation
+            let frame = self.islandPanel.frame
+            self.openPointer.set(frame.contains(mouse) ? CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y) : nil)
+        }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: { event in
+            MainActor.assumeIsolated { movedOpen(event) }
+        }) { openMonitors.append(m) }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved], handler: { event in
+            MainActor.assumeIsolated { movedOpen(event) }
+            return event
+        }) { openMonitors.append(m) }
+        islandPanel.acceptsMouseMovedEvents = true
         // The two-finger swipe over the island changes tabs.
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel], handler: { [weak self] event in
             guard let self, self.isOpen, event.window === self.islandPanel else { return event }
@@ -641,6 +780,8 @@ struct IslandOpenRoot: View {
     let shape: IslandScreenShape
     let size: CGSize
     let stripSize: CGSize
+    var tabModels: IslandTabModels?
+    var pointer: DispatchPillPointer?
     let onClose: () -> Void
 
     var body: some View {
@@ -648,7 +789,7 @@ struct IslandOpenRoot: View {
         let sy = model.open ? 1 : stripSize.height / max(size.height, 1)
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                IslandExpandedView(store: store, shape: shape, size: size)
+                IslandExpandedView(store: store, shape: shape, size: size, tabModels: tabModels)
                     .opacity(model.open ? 1 : 0.0)
                 Color.clear
                     .frame(width: size.width, height: shape.topInset)
@@ -659,6 +800,8 @@ struct IslandOpenRoot: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .coordinateSpace(name: DispatchPillView.canvasSpace)
+        .environment(\.dispatchPillPointer, pointer)
         .environment(\.colorScheme, .dark)
     }
 }

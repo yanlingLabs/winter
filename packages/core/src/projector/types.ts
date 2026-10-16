@@ -144,6 +144,12 @@ export interface ProjectorDeps {
    * Called on a replayed prefix too (harmless: nothing is pending then). A throw is swallowed.
    */
   onToolResults?: (callIds: readonly string[]) => void;
+  /**
+   * The island's Usage tab (`docs/claude/island.md`): a `rate_limit_event` frame's `rate_limit_info` (a plan window's
+   * status, kind, utilization and reset), handed over as it arrives — the frame itself stays observed, never persisted.
+   * A throw is swallowed.
+   */
+  onRateLimit?: (info: Record<string, unknown>) => void;
 }
 
 /**

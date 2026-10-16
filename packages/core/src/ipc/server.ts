@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -82,6 +82,7 @@ import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { IslandClient, IslandRegistry } from "../island/registry";
+import type { IslandUsageRegistry } from "../island/usage";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
@@ -519,6 +520,8 @@ export interface IpcServerOptions {
   /** The Winter island (`island/registry.ts`): every pending card across sessions (`island.pending`), and the island
    *  clients — a harness hello advertising `CLIENT_CAPABILITY_ISLAND` — it tells when that set changes. */
   island?: IslandRegistry;
+  /** The island's Usage tab (`island/usage.ts`, `island.usage`). */
+  islandUsage?: IslandUsageRegistry;
   tasks?: TaskStore;         // session task lists; task.list
   plans?: PlanBridge;        // in-flight exit_plan_mode plans; plan.respond
   peripheral?: PeripheralBroker; // lease machinery; peripheral.* verbs (Phase 2f)
@@ -2099,7 +2102,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       socket.data.tty = p.tty ?? null;
       if (p.role === "harness" && p.capabilities?.includes(CLIENT_CAPABILITY_ISLAND) === true && opts.island) {
         const writer = socket.data.writer;
-        const client: IslandClient = { notify: () => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: {} })); } };
+        const client: IslandClient = { notify: (change = {}) => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: change })); } };
         socket.data.islandClient = client;
         opts.island.addClient(client);
       }
@@ -3467,6 +3470,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(IslandShownParams, params);
         opts.island?.markShown(p.ids);
         return { ok: true };
+      }
+      case METHODS.islandHosts: {
+        // The island's Sessions tab: who is attached where (a terminal's tty included). LOCAL harness clients only.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.hosts is available to local clients only");
+        parseParams(IslandHostsParams, params);
+        return {
+          sessions: hub.attachedSessionIds().map((sessionId) => ({
+            sessionId,
+            hosts: hub.attachedHarnesses(sessionId).map((h) => ({
+              clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
+            })),
+          })),
+        };
+      }
+      case METHODS.islandUsage: {
+        // The island's Usage tab: what the daemon already knows about usage and limits. LOCAL harness clients only.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.usage is available to local clients only");
+        const p = parseParams(IslandUsageParams, params);
+        if (opts.islandUsage !== undefined) return opts.islandUsage.snapshot(p.sessionId);
+        const state = opts.quota?.state() ?? { kind: "ok" as const };
+        return { windows: [], background: { ...state, ...(opts.quota?.usage() ?? { inputTokens: 0, outputTokens: 0 }) } };
       }
       case METHODS.elicitationUrl: {
         // WS-27: the full url of a PENDING card, for the local client about to open it — the url is

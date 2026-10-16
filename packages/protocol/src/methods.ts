@@ -510,13 +510,67 @@ export const IslandPendingItemSchema = z.object({
   hosts: z.array(IslandHostSchema),
 });
 export const IslandPendingResult = z.object({ items: z.array(IslandPendingItemSchema) });
-/** The daemon → island-client notification: the pending set (or a pending session's hosts) may have changed. */
+/** The daemon → island-client notification: the pending set (or a pending session's hosts) may have changed — params
+ *  `{}` — and/or a turn started or ended in some session — params `{working: true}` (with `pending: true` when both
+ *  happened in one burst): the island's working count then re-lists `session.list`. */
 export const ISLAND_CHANGED_NOTIFICATION = "island.changed";
 /** The island client says it SHOWS these cards (their `callId` / `elicitationId`) — sent after each `island.pending`
  *  it applies. The desktop-switch prompt waits ~2 s for it before asking the Computer Use helper as well (a Winter.app
  *  that is connected but hung shows nothing). HARNESS role only. */
 export const IslandShownParams = z.object({ ids: z.array(z.string().min(1).max(256)).max(256) });
 export const IslandShownResult = z.object({ ok: z.literal(true) });
+
+/** The island's Sessions tab (`docs/claude/island.md`): who is attached to each session right now, for every session
+ *  with at least one attachment — where a click on a row moves the user's view (a Winter window, or the EXACT terminal
+ *  through its `tty`). `session.list` carries no hosts. HARNESS role only (never remote, never a plugin). */
+export const IslandHostsParams = z.object({});
+export const IslandHostsResult = z.object({
+  sessions: z.array(z.object({ sessionId: z.string().min(1), hosts: z.array(IslandHostSchema) })),
+});
+
+/** One provider usage window the runtime reported (the agent SDK's `rate_limit_event`, subscription-shaped: a plan's
+ *  five-hour or seven-day window). `utilization` is the runtime's own number, passed through (a fraction or a percent —
+ *  the client normalises); `resetsAt` is epoch ms; `at` is when it was reported. */
+export const IslandUsageWindowSchema = z.object({
+  rateLimitType: z.string().optional(),
+  status: z.string(),
+  utilization: z.number().optional(),
+  resetsAt: z.number().optional(),
+  at: z.number(),
+  sessionId: z.string(),
+});
+/** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the
+ *  latest report per window kind since the daemon started; `subscription` — Winter's background jobs' subscription
+ *  quota snapshot (the codex-oauth ledger); `background` — those jobs' backoff and token counts since start (the same
+ *  numbers as `quota.state`); `session` — one session's token counts summed from its `turn_completed` events since
+ *  the daemon started, its last measured context size, and its model's context window when the catalog knows it.
+ *  HARNESS role only. */
+export const IslandUsageParams = z.object({ sessionId: z.string().min(1).optional() });
+export const IslandUsageResult = z.object({
+  windows: z.array(IslandUsageWindowSchema),
+  subscription: z.object({
+    status: z.string().optional(),
+    rateLimitType: z.string().optional(),
+    utilization: z.number().optional(),
+    resetsAt: z.number().optional(),
+    at: z.number(),
+  }).optional(),
+  background: z.object({
+    kind: z.enum(["ok", "limited"]),
+    resumeAt: z.number().optional(),
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+  }),
+  session: z.object({
+    sessionId: z.string(),
+    turns: z.number(),
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+    contextTokens: z.number().optional(),
+    contextWindow: z.number().optional(),
+    model: z.string().optional(),
+  }).optional(),
+});
 
 /** ComputerV2 (2026-10-08) — Settings → Computer Use's daemon doors. LOCAL ROLE ONLY: never in
  *  `REMOTE_ALLOWED_METHODS` (the phone does not configure the Mac's computer use) and refused for any other role.
@@ -3372,6 +3426,9 @@ export const METHODS = {
   // The Winter island (Mac app): every pending card across sessions. HARNESS role only.
   islandPending: "island.pending",
   islandShown: "island.shown",
+  // The island's Sessions and Usage tabs. HARNESS role only.
+  islandHosts: "island.hosts",
+  islandUsage: "island.usage",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",
