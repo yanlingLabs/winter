@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
     /// follows (`AppModel.session`), through its own adapter.
     private(set) var pillController: DispatchPillController?
+    /// The Winter island at the camera housing (`docs/claude/island.md`); nil under unit tests and without a token.
+    private(set) var islandController: IslandController?
     /// The background watchdog for a stalled main thread (never constructed under unit tests).
     private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
@@ -1165,6 +1167,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a real app launch. Returns true when boot completed (even degraded: a missing
     /// daemon token must not prevent the orb from appearing).
     @discardableResult
+    /// The Winter island (`docs/claude/island.md`): every pending approval, question and view request across sessions,
+    /// at the camera housing. It rides the main feed's connection — that hello advertises the island, so the daemon
+    /// shows the desktop-switch prompt here rather than in the Computer Use helper — and never attaches to a session.
+    private func startIsland(model: AppModel, pill: DispatchPillController) {
+        model.clientCapabilities = [WinterClient.capabilityIsland]
+        let client = model.client
+        let store = IslandStore()
+        store.fetch = { try await client.islandPending() }
+        store.responder = .live(client)
+        let island = IslandController(store: store)
+        island.focusSources = IslandFocusSources(
+            dispatchPillVisible: { [weak pill] in pill?.isVisible ?? false },
+            dispatchSessionIds: { [weak model] in
+                Set(model?.directory.rows.filter { $0.mode == "dispatch" }.map(\.sessionId) ?? [])
+                    .union(model?.focusedSessionId.map { [$0] } ?? [])
+            },
+            keyOrMainWindowSessionIds: { [weak self] in
+                guard let self else { return [] }
+                var ids = Set<String>()
+                if let app = self.appWindow, app.isKeyOrMain, let sid = app.host?.attachedSessionId { ids.insert(sid) }
+                for window in self.detachedWindows where window.isKeyOrMain { ids.insert(window.sessionId) }
+                return ids
+            })
+        islandController = island
+        island.start()
+        // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
+        let changes = client.notifications(method: WinterClient.islandChangedNotification)
+        Task { @MainActor [weak store] in
+            for await _ in changes { await store?.refresh() }
+        }
+        // Every (re)connect re-reads the whole set (cards raised while the app was away included).
+        let previous = model.onClientConnected
+        model.onClientConnected = { [weak store] in
+            previous?()
+            Task { await store?.refresh() }
+        }
+        // The Dispatch pill showing or hiding moves Dispatch's cards between it and the island.
+        pill.$isVisible
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak island] _ in island?.focusChanged() }
+            .store(in: &cancellables)
+    }
+
     func boot() -> Bool {
         // Lifecycle T6 (T4 review finding 5f): migration MUST run before the supervisor's
         // socket-exists probe just below — a leftover `com.winter.core` KeepAlive launchd agent
@@ -1480,6 +1526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                           onScreenPaths: Self.isRunningUnitTests ? .inert : .live())
         pillController = pill
         wireDispatchPill(pill, model: model)
+        if !Self.isRunningUnitTests && !tokenMissing { startIsland(model: model, pill: pill) }
 
         // Task 6 (2e-iii): the morph window's width-responsive sidebars. `onSelect` refocuses the
         // orb's own follow-focus feed in place (`focusSession`); `onNewSession` creates+focuses a
