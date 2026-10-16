@@ -163,4 +163,47 @@ final class IslandSessionsTests: XCTestCase {
         XCTAssertEqual(TerminalRaiser.pick(tty: "/dev/ttys004", appPid: 100, bundleId: "com.example.editor",
                                            processes: processes, windows: named)?.window, 1)
     }
+
+    func testOnlyStandardWindowsAndSeveralWindowsNeedTitleEvidence() {
+        // Never the Preferences (a non-standard window), even titled after the program.
+        let prefs = TerminalWindowCandidate(title: "project — winter — 80×24", tabTitles: [], isStandard: false)
+        XCTAssertNil(TerminalRaiser.pick(tty: "/dev/ttys004", appPid: 100, bundleId: "com.apple.Terminal", processes: processes,
+                                         windows: [prefs]))
+        let real = TerminalWindowCandidate(title: "project — winter — 80×24", tabTitles: [])
+        XCTAssertEqual(TerminalRaiser.pick(tty: "/dev/ttys004", appPid: 100, bundleId: "com.apple.Terminal", processes: processes,
+                                           windows: [prefs, real])?.window, 1)
+        // An app running ONE terminal: with one window it is that one; with two, a title must say which.
+        let one = processes.filter { $0.tty != "ttys005" }
+        let plain = TerminalWindowCandidate(title: "project — zsh — 80×24", tabTitles: [])
+        XCTAssertEqual(TerminalRaiser.pick(tty: "/dev/ttys004", appPid: 100, bundleId: "com.apple.Terminal", processes: one,
+                                           windows: [plain])?.window, 0)
+        XCTAssertNil(TerminalRaiser.pick(tty: "/dev/ttys004", appPid: 100, bundleId: "com.apple.Terminal", processes: one,
+                                         windows: [plain, plain]))
+        // Several tabs: a tab is picked only on its own title.
+        XCTAssertNil(TerminalRaiser.pick(tty: "/dev/ttys004", appPid: 100, bundleId: "com.apple.Terminal", processes: one,
+                                         windows: [TerminalWindowCandidate(title: nil, tabTitles: ["zsh", "zsh"])]))
+    }
+
+    func testIslandChangedSaysWhetherThePendingSetOrAWorkingStateChanged() {
+        XCTAssertEqual(IslandChangeKind(.object([:])), IslandChangeKind(pending: true, working: false), "phase 1's payload")
+        XCTAssertEqual(IslandChangeKind(.object(["working": .bool(true)])), IslandChangeKind(pending: false, working: true))
+        XCTAssertEqual(IslandChangeKind(.object(["working": .bool(true), "pending": .bool(true)])),
+                       IslandChangeKind(pending: true, working: true))
+    }
+
+    func testACoalescedRunNeverOverlapsAndCollapsesABurstIntoOneMoreRun() async {
+        var runs = 0
+        var gate: CheckedContinuation<Void, Never>?
+        let run = IslandCoalescedRun {
+            runs += 1
+            if runs == 1 { await withCheckedContinuation { gate = $0 } }
+        }
+        run.request()
+        await Task.yield()
+        for _ in 0..<5 { run.request() }
+        while gate == nil { await Task.yield() }
+        gate?.resume()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(runs, 2, "the first run, then ONE more for the whole burst")
+    }
 }

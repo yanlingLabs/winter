@@ -1192,8 +1192,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         island.start()
         // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
         let changes = client.notifications(method: WinterClient.islandChangedNotification)
+        // `{working: true}`: a turn started or ended somewhere — the strip's working count re-lists the sessions
+        // (coalesced: one `session.list` in flight, at most one more after it). Anything else: the pending set.
+        let relist = IslandCoalescedRun { [weak model] in await model?.directory.refresh() }
         Task { @MainActor [weak store] in
-            for await _ in changes { await store?.refresh() }
+            for await params in changes {
+                let change = IslandChangeKind(params)
+                if change.working { relist.request() }
+                if change.pending { await store?.refresh() }
+            }
         }
         // Every (re)connect re-reads the whole set (cards raised while the app was away included).
         let previous = model.onClientConnected
@@ -1217,7 +1224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tabs = island.tabModels
         let windowFacts: () -> IslandWindowFacts = { [weak self] in
             guard let self else { return IslandWindowFacts() }
-            let app = self.appWindow.flatMap { $0.isVisible ? $0.host?.attachedSessionId : nil }
+            // A minimised app window still holds its session (a click brings it back, never a second window).
+            let app = self.appWindow.flatMap { $0.isVisible || $0.isMiniaturized ? $0.host?.attachedSessionId : nil }
             return IslandWindowFacts(appWindowSessionId: app, detachedSessionIds: Set(self.detachedWindows.map(\.sessionId)))
         }
         let title: (String) -> String? = { [weak model] sid in
@@ -1234,7 +1242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sessions.windows = windowFacts
         sessions.perform = { [weak self, weak island] target in
-            island?.close()
+            // A click on a row while the island is already closing (a double click) does nothing.
+            guard let island, island.isOpen else { return }
+            island.close()
             self?.showIslandSessionTarget(target, title: title)
         }
 
@@ -1271,19 +1281,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showIslandSessionTarget(_ target: IslandSessionTarget, title: @escaping (String) -> String?) {
         switch target {
         case .appWindow(let sid):
+            appWindow?.deminiaturize()
             summonAppWindow(navigatingTo: .session(sid))
         case .detachedWindow(let sid):
-            if let window = detachedWindows.first(where: { $0.sessionId == sid }) { window.bringToFront() }
-            else { openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter") }
+            showIslandSessionWindow(sid, title: title)
         case .dispatch:
             summonAppWindow(navigatingTo: .mode(.dispatch))
         case .terminal(let tty, let sid):
             Task { @MainActor [weak self] in
                 if await TerminalRaiser.raise(tty: tty) == .notFound {
-                    self?.openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
+                    self?.showIslandSessionWindow(sid, title: title)
                 }
             }
         case .openDetached(let sid):
+            showIslandSessionWindow(sid, title: title)
+        }
+    }
+
+    /// The session's window: a detached window already showing it (re-checked NOW — one may have opened since the row
+    /// was judged), the app window holding it (even minimised), else a new detached window.
+    private func showIslandSessionWindow(_ sid: String, title: (String) -> String?) {
+        if let window = detachedWindows.first(where: { $0.sessionId == sid }) {
+            window.bringToFront()
+        } else if let app = appWindow, app.host?.attachedSessionId == sid, app.isVisible || app.isMiniaturized {
+            app.deminiaturize()
+            summonAppWindow(navigatingTo: .session(sid))
+        } else {
             openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
         }
     }

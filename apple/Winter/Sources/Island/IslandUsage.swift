@@ -67,10 +67,12 @@ enum IslandUsagePresentation {
         }
     }
 
-    /// PURE: the runtime's utilization as a fraction — a value above 1 is read as a percent; clamped to 0…1.
+    /// PURE: the runtime's utilization — a FRACTION 0…1 (`SDKRateLimitInfo.utilization`, typed after the upstream SDK
+    /// whose unified-limit utilization is a fraction; the pinned provider runtime's own `quotaEvent` never sends one).
+    /// Anything outside 0…1 is not that unit: no fill is shown rather than a guessed one.
     static func fraction(_ utilization: Double?) -> Double? {
-        guard let u = utilization, u.isFinite, u >= 0 else { return nil }
-        return min(1, u > 1 ? u / 100 : u)
+        guard let u = utilization, u.isFinite, (0...1).contains(u) else { return nil }
+        return u
     }
 
     /// PURE: a window's status as words.

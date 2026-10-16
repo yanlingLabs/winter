@@ -2102,7 +2102,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       socket.data.tty = p.tty ?? null;
       if (p.role === "harness" && p.capabilities?.includes(CLIENT_CAPABILITY_ISLAND) === true && opts.island) {
         const writer = socket.data.writer;
-        const client: IslandClient = { notify: () => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: {} })); } };
+        const client: IslandClient = { notify: (change = {}) => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: change })); } };
         socket.data.islandClient = client;
         opts.island.addClient(client);
       }

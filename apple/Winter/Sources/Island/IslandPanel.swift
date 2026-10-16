@@ -80,6 +80,19 @@ final class IslandPanel: NSPanel {
         onKeyInputChange?(false)
     }
 
+    /// Stop taking the keyboard WITHOUT handing it back: the user clicked another app or window, which keeps it.
+    func letGo() {
+        guard acceptsKeyInput else { return }
+        acceptsKeyInput = false
+        externalFocus = nil
+        if isKeyWindow {
+            resting = true
+            resignKey()
+            resting = false
+        }
+        onKeyInputChange?(false)
+    }
+
     /// The user took the keyboard elsewhere (a click in another window): the panel lets go, restoring nothing — the
     /// click already chose where focus goes.
     override func resignKey() {

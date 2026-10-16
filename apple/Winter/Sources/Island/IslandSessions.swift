@@ -320,3 +320,42 @@ func islandSessionStateColor(_ state: IslandSessionLiveState) -> Color {
     case .finished: return Color.white
     }
 }
+
+/// What one `island.changed` says (its params): the pending set changed (`{}`, phase 1's payload, or `pending: true`),
+/// and/or a turn started or ended somewhere (`working: true`). An older daemon only ever sends `{}`.
+struct IslandChangeKind: Equatable {
+    let pending: Bool
+    let working: Bool
+
+    init(pending: Bool, working: Bool) {
+        self.pending = pending
+        self.working = working
+    }
+
+    init(_ params: JSONValue) {
+        let working = params["working"]?.boolValue == true
+        self.init(pending: !working || params["pending"]?.boolValue == true, working: working)
+    }
+}
+
+/// Runs an async job at most once at a time: a request while it runs makes ONE more run after it (never a queue).
+@MainActor
+final class IslandCoalescedRun {
+    private let job: () async -> Void
+    private var running = false
+    private var again = false
+
+    init(_ job: @escaping () async -> Void) { self.job = job }
+
+    func request() {
+        guard !running else { again = true; return }
+        running = true
+        Task { @MainActor in
+            repeat {
+                again = false
+                await job()
+            } while again
+            running = false
+        }
+    }
+}

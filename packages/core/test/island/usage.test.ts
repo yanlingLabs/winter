@@ -66,12 +66,18 @@ describe("IslandUsageRegistry", () => {
     expect(r.snapshot().windows.length).toBeLessThanOrEqual(16);
   });
 
-  test("epochMs: seconds become ms, ms stay, junk is dropped", () => {
+  test("epochMs: the runtime's resetsAt is unix seconds; junk is dropped", () => {
     expect(epochMs(1_900_000_000)).toBe(1_900_000_000_000);
-    expect(epochMs(1_900_000_000_000)).toBe(1_900_000_000_000);
     expect(epochMs(-1)).toBeUndefined();
     expect(epochMs("1")).toBeUndefined();
   });
+});
+
+test("the pinned runtime's own report (status + resetsAt in seconds, no utilization) becomes a window with no fill", () => {
+  const r = new IslandUsageRegistry({ background }, () => 5);
+  // Exactly what the provider runtime's quotaEvent writes, as the agent runtime frames it ({status:"allowed", ...info}).
+  r.noteRateLimit("s1", { status: "rejected", resetsAt: Math.round(1_900_000_000_500 / 1000) });
+  expect(r.snapshot().windows).toEqual([{ status: "rejected", resetsAt: 1_900_000_001_000, at: 5, sessionId: "s1" }]);
 });
 
 describe("the projector hands a rate_limit_event to onRateLimit and still persists nothing", () => {

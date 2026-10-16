@@ -5,7 +5,9 @@ import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 //
 //  - Plan windows: the runtime's `rate_limit_event` frames (the agent SDK's subscription-shaped quota report — a
 //    five-hour or seven-day window, its status, utilization and reset), which the projector observes and never
-//    persists. The latest report per window kind is kept, in memory, since the daemon started.
+//    persists. The pinned provider runtime's one producer (`quotaEvent`) writes only `status` (`allowed` /
+//    `rejected`) and `resetsAt` in unix seconds; `rateLimitType` and `utilization` (typed after the upstream SDK, a
+//    fraction 0…1) are passed through only if a runtime ever sends them. The latest report per window kind is kept, in memory, since the daemon started.
 //  - Per session: the tokens its `turn_completed` events counted since the daemon started (often 0 for a provider row
 //    that reports no usage), and the last measured context size (`contextTokens`, sent only for a single-round turn).
 //  - The rest (Winter's background jobs' quota and subscription snapshot, a model's context window) is read from its
@@ -60,10 +62,11 @@ export const ISLAND_USAGE_MAX_SESSIONS = 256;
 /** Window kinds held at most (the SDK names six). */
 const MAX_WINDOWS = 16;
 
-/** PURE: a unix time in seconds or ms → ms (the SDK documents seconds; a value already in ms is kept). */
+/** PURE: the runtime's `resetsAt` — unix SECONDS (the provider runtime's `quotaEvent` writes
+ *  `Math.round(resumeAt / 1000)`) — as epoch ms. */
 export function epochMs(v: unknown): number | undefined {
   if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return undefined;
-  return v < 1e12 ? Math.round(v * 1000) : Math.round(v);
+  return Math.round(v * 1000);
 }
 
 function str(v: unknown, max = 64): string | undefined {

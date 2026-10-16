@@ -510,7 +510,9 @@ export const IslandPendingItemSchema = z.object({
   hosts: z.array(IslandHostSchema),
 });
 export const IslandPendingResult = z.object({ items: z.array(IslandPendingItemSchema) });
-/** The daemon → island-client notification: the pending set (or a pending session's hosts) may have changed. */
+/** The daemon → island-client notification: the pending set (or a pending session's hosts) may have changed — params
+ *  `{}` — and/or a turn started or ended in some session — params `{working: true}` (with `pending: true` when both
+ *  happened in one burst): the island's working count then re-lists `session.list`. */
 export const ISLAND_CHANGED_NOTIFICATION = "island.changed";
 /** The island client says it SHOWS these cards (their `callId` / `elicitationId`) — sent after each `island.pending`
  *  it applies. The desktop-switch prompt waits ~2 s for it before asking the Computer Use helper as well (a Winter.app

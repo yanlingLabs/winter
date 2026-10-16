@@ -23,11 +23,12 @@ final class IslandTabModels {
         self.devices = devices ?? IslandDevicesModel()
     }
 
-    /// Refreshes the data the tab with this id shows (on open, when the tab is shown, and while the island is open).
-    func refresh(tab id: String?) async {
+    /// Refreshes the data the tab with this id shows (on open and when the tab is shown; `periodic` — the open island's
+    /// light refresh — skips the Shelf, which resolves on open, on a tab change and on a drop).
+    func refresh(tab id: String?, periodic: Bool = false) async {
         switch id {
         case IslandTabRegistry.sessions.id?: await sessions.refresh()
-        case IslandTabRegistry.shelf.id?: shelf.resolveAll()
+        case IslandTabRegistry.shelf.id?: if !periodic { await shelf.resolveAll() }
         case IslandTabRegistry.usage.id?: await usage.refresh()
         case IslandTabRegistry.devices.id?: await devices.refresh()
         default: break

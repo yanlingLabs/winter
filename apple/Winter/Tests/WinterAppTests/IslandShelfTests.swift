@@ -64,18 +64,18 @@ final class IslandShelfTests: XCTestCase {
         XCTAssertEqual(shelf.items.count, 2)
     }
 
-    func testTheListSurvivesARestart() {
+    func testTheListSurvivesARestart() async throws {
         let a = makeFile("a.txt")
         let first = IslandShelfStore(persistence: persistence)
         first.add([a])
         let second = IslandShelfStore(persistence: persistence)
         XCTAssertTrue(second.items.isEmpty, "nothing is read until the shelf is first used")
-        second.resolveAll()
+        await second.resolveAll()
         XCTAssertEqual(second.items.map(\.lastPath), [a.path])
         XCTAssertEqual(second.url(of: second.items[0].id)?.resolvingSymlinksInPath().path, a.resolvingSymlinksInPath().path)
     }
 
-    func testABookmarkFollowsAMoveAndARenameAcrossARestart() throws {
+    func testABookmarkFollowsAMoveAndARenameAcrossARestart() async throws {
         let original = makeFile("Screenshot 1.png")
         let shelf = IslandShelfStore(persistence: persistence)
         shelf.add([original])
@@ -85,7 +85,7 @@ final class IslandShelfTests: XCTestCase {
         try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
         let moved = elsewhere.appendingPathComponent("Screenshot 1.png")
         try FileManager.default.moveItem(at: original, to: moved)
-        shelf.resolveAll()
+        await shelf.resolveAll()
         XCTAssertEqual(shelf.url(of: id)?.resolvingSymlinksInPath().path, moved.resolvingSymlinksInPath().path)
         XCTAssertEqual(URL(fileURLWithPath: shelf.items[0].lastPath).resolvingSymlinksInPath().path,
                        moved.resolvingSymlinksInPath().path, "the last known path follows")
@@ -93,19 +93,19 @@ final class IslandShelfTests: XCTestCase {
         let renamed = elsewhere.appendingPathComponent("Pricing table.png")
         try FileManager.default.moveItem(at: moved, to: renamed)
         let restarted = IslandShelfStore(persistence: persistence)
-        restarted.resolveAll()
+        await restarted.resolveAll()
         XCTAssertEqual(restarted.url(of: id)?.resolvingSymlinksInPath().path, renamed.resolvingSymlinksInPath().path)
         XCTAssertEqual(restarted.items[0].name, "Pricing table.png")
         XCTAssertEqual(try String(contentsOf: renamed, encoding: .utf8), "hello", "the file itself is never touched")
     }
 
-    func testADeletedFileShowsAsMissingAndRemovingItLeavesTheFileSystemAlone() throws {
+    func testADeletedFileShowsAsMissingAndRemovingItLeavesTheFileSystemAlone() async throws {
         let a = makeFile("gone.txt")
         let b = makeFile("kept.txt")
         let shelf = IslandShelfStore(persistence: persistence)
         shelf.add([a, b])
         try FileManager.default.removeItem(at: a)
-        shelf.resolveAll()
+        await shelf.resolveAll()
         let goneId = try XCTUnwrap(shelf.items.first { $0.name == "gone.txt" }?.id)
         let keptId = try XCTUnwrap(shelf.items.first { $0.name == "kept.txt" }?.id)
         XCTAssertEqual(shelf.resolution(of: goneId), .missing)
@@ -120,7 +120,7 @@ final class IslandShelfTests: XCTestCase {
         XCTAssertTrue(reloaded.items.isEmpty, "the removal is persisted")
     }
 
-    func testAScreenshotWhoseTemporaryFileWasCopiedAwayIsFoundByNameInTheScreenshotFolder() throws {
+    func testAScreenshotWhoseTemporaryFileWasCopiedAwayIsFoundByNameInTheScreenshotFolder() async throws {
         let temp = root.appendingPathComponent("TemporaryItems/NSIRD_screencaptureui_ab12", isDirectory: true)
         try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
         let shot = makeFile("Screenshot 2026-10-16 at 09.41.12.png", in: temp)
@@ -133,13 +133,45 @@ final class IslandShelfTests: XCTestCase {
         // Copied to its final place and the temporary one deleted (a new file: the bookmark cannot follow).
         try FileManager.default.copyItem(at: shot, to: folder.appendingPathComponent(shot.lastPathComponent))
         try FileManager.default.removeItem(at: shot)
-        shelf.resolveAll()
+        await shelf.resolveAll()
         XCTAssertEqual(shelf.url(of: id)?.lastPathComponent, shot.lastPathComponent)
         XCTAssertEqual(shelf.url(of: id)?.deletingLastPathComponent().resolvingSymlinksInPath().path,
                        folder.resolvingSymlinksInPath().path)
+        XCTAssertEqual(shelf.items[0].lastPath.hasSuffix("Screenshots/\(shot.lastPathComponent)"), true, "the found file is persisted")
         XCTAssertTrue(IslandShelfBookmarks.isScreenshotTemporary(temp.appendingPathComponent("x.png").path))
         XCTAssertFalse(IslandShelfBookmarks.isScreenshotTemporary(files.appendingPathComponent("x.png").path),
                        "an ordinary file is never matched by name")
+    }
+
+    func testAnOlderOrDifferentFileOfTheSameNameIsNeverAttachedToAScreenshot() async throws {
+        let temp = root.appendingPathComponent("TemporaryItems/NSIRD_screencaptureui_cd34", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let folder = root.appendingPathComponent("Screenshots", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let shelf = IslandShelfStore(persistence: persistence)
+        shelf.screenshotFolder = { folder }
+
+        // 1. A same-name file in the screenshot folder that is OLDER than the shelving (a day before): not this one.
+        let shot = makeFile("Screenshot 2026-10-16 at 10.00.00.png", in: temp, contents: "new shot")
+        let older = makeFile(shot.lastPathComponent, in: folder, contents: "new shot")
+        try FileManager.default.setAttributes([.creationDate: Date().addingTimeInterval(-86_400)], ofItemAtPath: older.path)
+        shelf.add([shot])
+        let item = shelf.items[0]
+        try FileManager.default.removeItem(at: shot)
+        await shelf.resolveAll()
+        XCTAssertEqual(shelf.resolution(of: item.id), .missing)
+        XCTAssertEqual(shelf.items[0].lastPath, item.lastPath, "a missing item keeps its path…")
+        XCTAssertEqual(shelf.items[0].bookmark, item.bookmark, "…and its bookmark: nothing is rewritten")
+
+        // 2. A same-name file made after the shelving but of another size: not this one either.
+        let shot2 = makeFile("Screenshot 2026-10-16 at 10.05.00.png", in: temp, contents: "twelve bytes")
+        shelf.add([shot2])
+        let item2 = try XCTUnwrap(shelf.items.first { $0.name == shot2.lastPathComponent })
+        try FileManager.default.removeItem(at: shot2)
+        makeFile(shot2.lastPathComponent, in: folder, contents: "a different, longer file")
+        await shelf.resolveAll()
+        XCTAssertEqual(shelf.resolution(of: item2.id), .missing)
+        XCTAssertNil(IslandShelfBookmarks.screenshotFallback(lastPath: shot2.path, addedAt: item2.addedAt, size: item2.size, folder: folder))
     }
 
     func testCopyPutsTheFileURLOnTheGivenPasteboardOnlyWhenAsked() throws {

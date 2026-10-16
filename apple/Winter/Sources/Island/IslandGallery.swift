@@ -186,7 +186,7 @@ enum IslandGallery {
         }
         shelf.add(urls.reversed())
         try? FileManager.default.removeItem(at: urls[3])
-        shelf.resolveAll()
+        shelf.resolveAllNow()
         shelf.selectedId = shelf.items.first?.id
         return IslandTabModels(sessions: sessions, shelf: shelf, usage: usage, devices: devices)
     }

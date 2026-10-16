@@ -12,14 +12,14 @@ final class IslandUsageTabTests: XCTestCase {
         let snapshot = IslandUsageSnapshot(
             windows: [IslandUsageWindow(rateLimitType: "seven_day", status: "allowed", utilization: 0.31,
                                         resetsAt: ms(3 * 86400 + 4 * 3600), at: ms(-120), sessionId: "s"),
-                      IslandUsageWindow(rateLimitType: "five_hour", status: "allowed_warning", utilization: 82,
+                      IslandUsageWindow(rateLimitType: "five_hour", status: "allowed_warning", utilization: 0.82,
                                         resetsAt: ms(2 * 3600 + 14 * 60), at: ms(-120), sessionId: "s"),
                       IslandUsageWindow(rateLimitType: "overage", status: "rejected", at: ms(-30), sessionId: "s")],
             background: .init(limited: false, inputTokens: 0, outputTokens: 0))
         let gauges = IslandUsagePresentation.gauges(snapshot, now: now)
         XCTAssertEqual(gauges.map(\.title), ["Extra usage", "5-hour window", "Weekly window"],
                        "a refused window first, then the fullest")
-        XCTAssertEqual(gauges[1].fraction ?? -1, 0.82, accuracy: 0.0001, "a percent is read as one")
+        XCTAssertEqual(gauges[1].fraction ?? -1, 0.82, accuracy: 0.0001)
         XCTAssertEqual(gauges[1].status, "Nearing the limit")
         XCTAssertEqual(gauges[1].resets, "resets in 2 h 14 min")
         XCTAssertEqual(gauges[2].resets, "resets in 3 d 4 h")
@@ -27,6 +27,24 @@ final class IslandUsageTabTests: XCTestCase {
         XCTAssertTrue(gauges[0].refused)
         XCTAssertEqual(gauges[0].status, "Limit reached")
         XCTAssertEqual(gauges[0].reported, "reported just now")
+    }
+
+    func testUtilizationIsAFractionAndAnythingElseShowsNoFill() {
+        // `SDKRateLimitInfo.utilization` is a fraction 0…1; the pinned runtime's own report carries none at all.
+        XCTAssertEqual(IslandUsagePresentation.fraction(0.82), 0.82)
+        XCTAssertEqual(IslandUsagePresentation.fraction(1), 1)
+        XCTAssertEqual(IslandUsagePresentation.fraction(0), 0)
+        XCTAssertNil(IslandUsagePresentation.fraction(82), "not the unit: no guessed ring")
+        XCTAssertNil(IslandUsagePresentation.fraction(-0.1))
+        XCTAssertNil(IslandUsagePresentation.fraction(nil))
+        // Exactly the runtime's report: status + reset, no fill.
+        let report = IslandUsageSnapshot(windows: [IslandUsageWindow(rateLimitType: nil, status: "rejected", resetsAt: ms(600),
+                                                                     at: ms(0), sessionId: "s")],
+                                         background: .init(limited: false, inputTokens: 0, outputTokens: 0))
+        let g = IslandUsagePresentation.gauges(report, now: now)
+        XCTAssertEqual(g.map(\.title), ["Plan window"])
+        XCTAssertNil(g[0].fraction)
+        XCTAssertEqual(g[0].resets, "resets in 10 min")
     }
 
     func testTheBackgroundJobsSubscriptionIsShownOnlyWhenNoRuntimeWindowOfItsKindIs() {

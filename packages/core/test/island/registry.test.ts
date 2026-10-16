@@ -100,6 +100,25 @@ describe("IslandRegistry", () => {
     expect(reg.hasClient()).toBe(false);
   });
 
+  test("a turn starting or ending tells island clients {working: true}; a card alone stays {} ; both in one burst say both", async () => {
+    const pending = new Set<string>();
+    const r = new IslandRegistry({ pending: sources(pending), facts: () => ({}), hosts: () => [] });
+    const told: unknown[] = [];
+    r.addClient({ notify: (change) => { told.push(change ?? {}); } });
+    r.observe(ev({ type: "turn_started", sessionId: "s1" }));
+    await flush();
+    r.observe(ev({ type: "turn_completed", sessionId: "s1", stopReason: "end_turn", inputTokens: 0, outputTokens: 0 }));
+    await flush();
+    pending.add("a:s2:c1");
+    r.observe(ev({ type: "approval_requested", sessionId: "s2", callId: "c1", toolName: "Bash", summary: "x" }));
+    await flush();
+    r.observe(ev({ type: "turn_started", sessionId: "s3" }));
+    pending.add("a:s3:c2");
+    r.observe(ev({ type: "approval_requested", sessionId: "s3", callId: "c2", toolName: "Bash", summary: "y" }));
+    await flush();
+    expect(told).toEqual([{ working: true }, { working: true }, {}, { working: true, pending: true }]);
+  });
+
   test("the entries held are bounded, oldest dropped first", () => {
     const pending = new Set(["a:s:c1", "a:s:c2", "a:s:c3"]);
     const reg = new IslandRegistry({ pending: sources(pending), facts: () => ({}), hosts: () => [], maxEntries: 2 });

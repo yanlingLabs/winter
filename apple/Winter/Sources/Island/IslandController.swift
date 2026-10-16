@@ -109,7 +109,7 @@ final class IslandController {
                 return true
             }
             // ⌘C on the Shelf: the selected item's file URL (the user's own copy).
-            if event.keyCode == 8, event.modifierFlags.contains(.command),
+            if event.charactersIgnoringModifiers?.lowercased() == "c", event.modifierFlags.contains(.command),
                self.store.tabs.selected?.id == IslandTabRegistry.shelf.id {
                 return self.tabModels.shelf.copySelected()
             }
@@ -163,9 +163,11 @@ final class IslandController {
         openRefresh?.cancel()
         let tabs = tabModels
         openRefresh = Task { @MainActor [weak self] in
+            var first = true
             while !Task.isCancelled {
                 guard let id = self?.store.tabs.selected?.id else { return }
-                await tabs.refresh(tab: id)
+                await tabs.refresh(tab: id, periodic: !first)
+                first = false
                 try? await Task.sleep(for: Self.openRefreshInterval)
             }
         }
@@ -195,6 +197,8 @@ final class IslandController {
                 self.store.tabs.select(IslandTabRegistry.shelf.id)
                 let taken = self.tabModels.shelf.add(urls) > 0 || !urls.isEmpty
                 self.relayoutSoon()
+                let shelf = self.tabModels.shelf
+                Task { await shelf.resolveAll() }
                 return taken
             })
     }
@@ -571,7 +575,9 @@ final class IslandController {
         restartOpenRefresh()
     }
 
-    func close() {
+    /// Closes the island. `outsideClick`: the user clicked another app or window — the keyboard is dropped WITHOUT
+    /// giving it back to the app it came from, so the app the user clicked keeps it.
+    func close(outsideClick: Bool = false) {
         guard isOpen else { return }
         isOpen = false
         removeOpenMonitors()
@@ -579,7 +585,7 @@ final class IslandController {
         openRefresh = nil
         openPointer.set(nil)
         tabModels.shelf.dropTargeted = false
-        islandPanel.rest()
+        if outsideClick { islandPanel.letGo() } else { islandPanel.rest() }
         if reduceMotion {
             islandPanel.orderOut(nil)
         } else {
@@ -637,7 +643,7 @@ final class IslandController {
         swipeRecognizer.reset()
         // A click in another app closes it (mouse-downs need no permission)…
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
-            MainActor.assumeIsolated { self?.close() }
+            MainActor.assumeIsolated { self?.close(outsideClick: true) }
         }) { openMonitors.append(m) }
         // …or in another of Winter's windows. A click on the strip toggles it itself.
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
@@ -645,7 +651,7 @@ final class IslandController {
                 guard let self, self.isOpen, let window = event.window else { return }
                 if window === self.islandPanel || window === self.stripPanel { return }
                 if String(describing: type(of: window)).contains("Menu") { return }
-                self.close()
+                self.close(outsideClick: true)
             }
             return event
         }) { openMonitors.append(m) }
