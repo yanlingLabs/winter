@@ -96,9 +96,18 @@ profile support are enforced via the evidence: the port must report profile
 observe a kernel; it only refuses evidence that does not say so.
 
 **F8.** Extra capture fields (home ID, launch ID, cwd, reader plan) stay inside the
-owner. The port's return type is the closed 13-field `CoworkContextRegistration`,
-returned as a fresh deep-frozen copy on every call. Grants, policy and source
-revocation stay with the existing planner, which is unchanged.
+owner: the owner hides its capture, and the registration omits those fields. The
+port's return type is the closed 13-field `CoworkContextRegistration`, returned as
+a fresh deep-frozen copy on every call. The capture itself is a frozen plain
+object, but a copy of it (a clone, a JSON round trip or a spread) is unusable
+because `prepare` accepts only objects that `captureCoworkGuestOwner` minted into a
+module-private `WeakSet` brand. Grants, policy and source revocation stay with the
+existing planner, which is unchanged.
+
+**One registry per process.** The composition root creates EXACTLY ONE
+`CoworkGuestContextOwners` registry. The "at most one owner per backend session"
+rule lives inside a registry, so two registries on one database would each vouch
+for the same backend ID. The issuer slice must enforce a single registry.
 
 **F3.** Lookup is synchronous, pure and cheap. It uses `recordedHomeIdentity()`,
 never `homeIdentity()`: the latter is a durable writer that throws
@@ -109,7 +118,9 @@ dep is reused instead of implementing `currentBootId`.
 ### Evidence port seam (F11)
 
 `CoworkGuestOwnerEvidencePort.evidence(capture)` is synchronous and never cached;
-it is called at every lookup. It returns data, not a decision: profile, Root
+it is called at every lookup, inside the planner's read transaction, so an
+implementation must not touch the canonical database and must not write durably.
+It returns data, not a decision: profile, Root
 registration ID, a seven-field owner mirroring the runtime's
 `LinuxGuidedReaderOwner` (workspace, logical session, backend session,
 incarnation, lease epoch, boot, generation), the launch ID, the SDK binding ID and
