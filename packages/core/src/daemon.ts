@@ -120,7 +120,8 @@ import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
-import { IslandRegistry } from "./island/registry";
+import { IslandRegistry, type IslandHost, type IslandSessionFacts } from "./island/registry";
+import { IslandActivity } from "./island/activity";
 import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
 import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
@@ -1259,27 +1260,29 @@ export async function startDaemon(opts: {
   // closures below do.
   // The Winter island (`docs/claude/island.md`): every card still pending in any session, for Winter.app's surface at
   // the camera housing (`island.pending`). Pending-ness is the brokers'; the payload is the request event, seen here.
+  const islandFacts = (sid: string): IslandSessionFacts | undefined => {
+    try {
+      const meta = store.meta(sid);
+      const title = store.getTitle(sid);
+      return {
+        ...(meta.mode === undefined ? {} : { mode: meta.mode }),
+        ...(meta.origin === undefined ? {} : { origin: meta.origin }),
+        ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }),
+        ...(title === null ? {} : { title }),
+      };
+    } catch { return undefined; }
+  };
+  const islandHosts = (sid: string): IslandHost[] => hub.attachedHarnesses(sid).map((h) => ({
+    clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
+  }));
   const islandRegistry = new IslandRegistry({
     pending: {
       approval: (sid, callId) => approvalBroker.pendingMeta(sid, callId) !== undefined,
       question: (sid, callId) => questions.isPending(sid, callId),
       elicitation: (sid, id) => elicitationBroker.urlFor(sid, id) !== undefined,
     },
-    facts: (sid) => {
-      try {
-        const meta = store.meta(sid);
-        const title = store.getTitle(sid);
-        return {
-          ...(meta.mode === undefined ? {} : { mode: meta.mode }),
-          ...(meta.origin === undefined ? {} : { origin: meta.origin }),
-          ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }),
-          ...(title === null ? {} : { title }),
-        };
-      } catch { return undefined; }
-    },
-    hosts: (sid) => hub.attachedHarnesses(sid).map((h) => ({
-      clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
-    })),
+    facts: islandFacts,
+    hosts: islandHosts,
   });
   hub.addObserver((event) => islandRegistry.observe(event));
 
@@ -1320,6 +1323,15 @@ export async function startDaemon(opts: {
     log: (line) => console.error(line),
   });
   hub.addObserver((event) => computerUseRuntime.observe(event));
+  // The Winter island's activity (phase 2, `island/activity.ts`): the sessions driving ComputerV2 now, the turns that
+  // just ended idle, and every armed wake trigger — for Winter.app's island (`island.activity`).
+  const islandActivity = new IslandActivity({
+    facts: islandFacts,
+    hosts: islandHosts,
+    watches: () => computerUseRuntime.control.wakesList?.() ?? [],
+    hasPendingCard: (sid) => islandRegistry.list().some((i) => i.answerSessionId === sid || i.sessionId === sid),
+  });
+  hub.addObserver((event) => islandActivity.observe(event));
 
   // ComputerV2 Phase 2 — Winter for Chrome's door into this daemon: `<home>/run/browser.sock`, where
   // `winter-browser-host` (inside the Winter Computer Use bundle) connects for each browser profile running the extension.
@@ -3033,6 +3045,7 @@ export async function startDaemon(opts: {
     hooks: hookRegistry,
     questions: questions ?? undefined,
     island: islandRegistry,
+    islandActivity,
     tasks: undefined,
     // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
     // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`

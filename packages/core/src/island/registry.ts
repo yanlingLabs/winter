@@ -42,6 +42,9 @@ export interface IslandPendingItem {
 /** One connected island client: told (with no payload) that the pending set may have changed. */
 export interface IslandClient {
   notify(): void;
+  /** Told (no payload) that the island's activity — computer use, turn results, watches — may have changed
+   *  (`island.activityChanged`, `island/activity.ts`). */
+  notifyActivity?(): void;
 }
 
 export interface IslandRegistryDeps {
