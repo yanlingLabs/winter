@@ -237,8 +237,9 @@ describe("decisions", () => {
     for (const row of [...COWORK_TOOL_ALLOWLIST, ...COWORK_TOOL_DENYLIST]) if (row.decision !== undefined) expect(ids).toContain(row.decision);
     for (const id of tagged("DECISION")) expect(open).toContain(id);
     for (const id of tagged("SETTLED")) expect(settled).toContain(id);
-    expect(tagged("DECISION").length).toBeGreaterThan(8);
-    expect(tagged("SETTLED").length).toBeGreaterThan(1);
+    // and the other way: every decision is tagged where the code depends on it
+    expect(tagged("DECISION").sort()).toEqual([...open].sort());
+    expect(tagged("SETTLED").sort()).toEqual([...settled].sort());
   });
 
   test("a spec-silent tool is allowed only with a decision; a not-specified tool is denied only with one", () => {
