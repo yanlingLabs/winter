@@ -5,9 +5,9 @@ import { basename, join } from "node:path";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { CoworkInstructions } from "../../src/cowork/instructions";
-import { COWORK_GUEST_TOOL_CLASSES, coworkHostDecision } from "../../src/cowork/host-policy";
+import { COWORK_GUEST_TOOL_CLASSES, COWORK_PATH_CLASSES, coworkConnectorVerdict, coworkHostDecision, type CoworkHostDecision } from "../../src/cowork/host-policy";
 import * as transition from "../../src/cowork/policy-transition";
-import { COWORK_CLASSIFIER_CELLS, classifyCoworkPolicyChange, CoworkPolicyTransitionMachine, type CoworkDrainOutcome, type CoworkPolicyChangeKind,
+import { COWORK_CLASSIFIER_CELLS, COWORK_CLASSIFIER_CONNECTOR_CELLS, classifyCoworkPolicyChange, CoworkPolicyTransitionMachine, type CoworkDrainOutcome, type CoworkPolicyChangeKind,
   type CoworkPolicyState, type CoworkTransitionPlan, type CoworkTransitionPorts, type CoworkTransitionSnapshot } from "../../src/cowork/policy-transition";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkError, type CapabilityCeiling } from "../../src/cowork/types";
@@ -26,13 +26,15 @@ const kind = (from: CoworkPolicyState, to: CoworkPolicyState): CoworkPolicyChang
 test("classifier: the policy change matrix is cell-wise, not a rank (plan <-> dont-ask is lateral)", () => {
   // Rows: from. Columns: to, in the order plan, dont-ask, ask, accept-edits, auto, bypass. Worked out cell by cell from the spec table:
   // e.g. dont-ask -> plan shrinks an explicitly allowed edit (allow -> deny) but grows unauthorized Bash (deny -> read-only-view allow).
+  // auto is lateral to dont-ask, ask and accept-edits because its Bash is ALWAYS reviewed: against an explicit allow (an unreviewed
+  // Bash there) auto shrinks, against an unauthorized call it grows. Lateral takes the narrowing protocol, the safe direction.
   const U = "unchanged", W = "widening", N = "narrowing", L = "lateral";
   const EXPECTED: Readonly<Record<ApprovalPolicy, readonly CoworkPolicyChangeKind[]>> = {
     "plan":         [U, L, W, W, W, W],
-    "dont-ask":     [L, U, W, W, W, W],
-    "ask":          [N, N, U, W, W, W],
-    "accept-edits": [N, N, N, U, W, W],
-    "auto":         [N, N, N, N, U, W],
+    "dont-ask":     [L, U, W, W, L, W],
+    "ask":          [N, N, U, W, L, W],
+    "accept-edits": [N, N, N, U, L, W],
+    "auto":         [N, L, L, L, U, W],
     "bypass":       [N, N, N, N, N, U],
   };
   for (const from of POLICIES) POLICIES.forEach((to, index) => expect({ from, to, kind: kind(state(from), state(to)) }).toEqual({ from, to, kind: EXPECTED[from][index]! }));
@@ -51,6 +53,35 @@ test("classifier: switching into plan is never a widening, and the cells cover e
   for (const [tool, path] of COWORK_CLASSIFIER_CELLS) expect(coworkHostDecision({ policy: "bypass", tool, path, ceiling: full }).reason).toBe("policy_table");
 });
 
+test("classifier: every cell the matrix can answer with a table verdict has a classifier cell, and every connector cell is listed", () => {
+  const full = ceiling(["read", "write", "execute"], "none", ["workspace.instructions.update"]);
+  const covered = new Set(COWORK_CLASSIFIER_CELLS.map(([tool, path]) => `${tool}/${path}`)), reachable = new Set<string>();
+  for (const policy of POLICIES) for (const tool of COWORK_GUEST_TOOL_CLASSES) for (const path of COWORK_PATH_CLASSES)
+    if (coworkHostDecision({ policy, tool, path, ceiling: full }).reason === "policy_table") reachable.add(`${tool}/${path}`);
+  expect([...reachable].sort()).toEqual([...covered].sort());
+  expect(COWORK_CLASSIFIER_CONNECTOR_CELLS).toHaveLength(8);
+  expect(new Set(COWORK_CLASSIFIER_CONNECTOR_CELLS.map(([setting, readOnly]) => `${setting}/${readOnly}`)).size).toBe(8);
+  for (const setting of [undefined, "allow", "ask", "deny"] as const) for (const readOnly of [false, true])
+    expect(COWORK_CLASSIFIER_CONNECTOR_CELLS.some(([s, r]) => s === setting && r === readOnly)).toBe(true);
+});
+
+test("classifier: the connector row is read too, so a change to it alone cannot escape classification", () => {
+  const allAllow = (): CoworkHostDecision => ({ verdict: "allow", reason: "policy_table", bashReview: false });
+  // With every tool cell identical, only the connector row can tell policies apart.
+  const connectorOnly = { decide: allAllow as typeof coworkHostDecision, connector: coworkConnectorVerdict };
+  expect(classifyCoworkPolicyChange(state("plan"), state("ask"), connectorOnly)).toBe("widening");   // unset mutation deny -> ask, explicit allow mutation deny -> allow
+  expect(classifyCoworkPolicyChange(state("ask"), state("plan"), connectorOnly)).toBe("narrowing");
+  expect(classifyCoworkPolicyChange(state("accept-edits"), state("auto"), connectorOnly)).toBe("widening"); // unset mutation ask -> allow
+  expect(classifyCoworkPolicyChange(state("ask"), state("dont-ask"), connectorOnly)).toBe("narrowing");  // explicit ask over read-only ask -> deny
+  // Take the connector row away (constant) and the same tool-identical pairs are indistinguishable.
+  const neither = { decide: allAllow as typeof coworkHostDecision, connector: (() => "allow") as typeof coworkConnectorVerdict };
+  for (const from of POLICIES) for (const to of POLICIES) expect(classifyCoworkPolicyChange(state(from), state(to), neither)).toBe("unchanged");
+  // And a connector-only change flips a real classification: here ask answers an unset mutation with allow while accept-edits denies it.
+  const skewed = { decide: coworkHostDecision, connector: ((setting, readOnly, policy) => policy === "ask" && setting === undefined && !readOnly ? "allow" : coworkConnectorVerdict(setting, readOnly, policy)) as typeof coworkConnectorVerdict };
+  expect(classifyCoworkPolicyChange(state("accept-edits"), state("ask"))).toBe("narrowing");
+  expect(classifyCoworkPolicyChange(state("accept-edits"), state("ask"), skewed)).toBe("lateral");
+});
+
 test("classifier: the capability ceiling is compared set by set", () => {
   const base = state("ask", ceiling(["read", "write"], "none", ["a"], ["c"]));
   const change = (c: CapabilityCeiling, policy: ApprovalPolicy = "ask") => kind(base, state(policy, c));
@@ -67,7 +98,7 @@ test("classifier: the capability ceiling is compared set by set", () => {
   // A policy widening with a ceiling narrowing is lateral; the same direction in both stays that direction.
   expect(change(ceiling(["read"], "none", ["a"], ["c"]), "bypass")).toBe("lateral");
   expect(change(ceiling(["read"], "none", ["a"], ["c"]), "plan")).toBe("narrowing");
-  expect(change(ceiling(["read", "write", "execute"], "none", ["a"], ["c"]), "auto")).toBe("widening");
+  expect(change(ceiling(["read", "write", "execute"], "none", ["a"], ["c"]), "bypass")).toBe("widening");
   // Fail closed: anything malformed or unknown takes the full narrowing protocol.
   for (const bad of [undefined, null, {}, { policy: "chat", ceiling: WIDE }, { policy: "ask" }, { policy: "ask", ceiling: { toolClasses: "read", hostServices: [], connectors: [], network: "none" } },
     { policy: "ask", ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "lan" } }, { policy: "ask", ceiling: { toolClasses: [1], hostServices: [], connectors: [], network: "none" } }] as unknown[]) {
@@ -290,6 +321,34 @@ test("snapshots are frozen copies: later edits to the caller's objects cannot ch
   expect(h.machine.snapshot()).toMatchObject({ effective: { policy: "plan", ceiling: { toolClasses: ["read", "write"] } } });
 });
 
+test("re-entrancy: a stable listener that starts another request cannot change the snapshot the first request reports", async () => {
+  const h = harness(state("auto"));
+  const second: string[] = [];
+  let nested: Promise<unknown> | undefined;
+  h.machine.subscribe(snapshot => { if (snapshot.phase === "stable" && snapshot.effective.policy === "plan" && !nested) nested = h.machine.request(state("bypass")); });
+  h.machine.subscribe(snapshot => { second.push(snapshot.phase === "pending" ? `pending:${snapshot.target.policy}:${snapshot.step}` : `${snapshot.phase}:${snapshot.effective.policy}`); });
+  const result = await h.machine.request(state("plan"));
+  // The returned result is the transition that just applied, not whatever the nested request has made of the machine since.
+  expect(result.status).toBe("applied");
+  expect(result.snapshot).toMatchObject({ phase: "stable", effective: { policy: "plan" }, epoch: 1 });
+  expect(nested).toBeDefined(); await nested;
+  expect(h.machine.snapshot()).toMatchObject({ phase: "stable", effective: { policy: "bypass" }, epoch: 2 });
+  // Every listener saw every phase, in order: the nested request's phases queue behind the delivery in progress.
+  expect(second).toEqual(["pending:plan:closing-admission", "pending:plan:draining", "pending:plan:installing-view", "stable:plan", "pending:bypass:installing-view", "stable:bypass"]);
+});
+
+test("re-entrancy: a failed listener that retries synchronously cannot change the failure the first request reports", async () => {
+  const h = harness(state("auto"));
+  h.mode.drain = "reject";
+  let retried: Promise<unknown> | undefined;
+  h.machine.subscribe(snapshot => { if (snapshot.phase === "failed" && !retried) { h.mode.drain = "auto"; retried = h.machine.retry(); } });
+  const result = await h.machine.request(state("plan"));
+  expect(result.status).toBe("failed");
+  expect(result.snapshot).toMatchObject({ phase: "failed", failure: "drain-failed", effective: { policy: "auto" } });
+  await retried;
+  expect(h.machine.snapshot()).toMatchObject({ phase: "stable", effective: { policy: "plan" } });
+});
+
 test("observers cannot affect the transition and can unsubscribe; a malformed initial state is refused", async () => {
   const h = harness(state("auto"));
   const seen: string[] = [];
@@ -374,7 +433,7 @@ test("anti-wiring: no src file imports the transition module, it has no barrel e
   const own = readFileSync(module, "utf8");
   expect([...own.matchAll(/^import (type )?[^;]*from "([^"]+)"/gm)].map(match => `${match[1] ? "type " : ""}${match[2]}`).sort())
     .toEqual(["./host-policy", "type ./types", "type @yanlinglabs/winter-protocol"]);
-  expect(Object.keys(transition).sort()).toEqual(["COWORK_CLASSIFIER_CELLS", "CoworkPolicyTransitionMachine", "classifyCoworkPolicyChange"]);
+  expect(Object.keys(transition).sort()).toEqual(["COWORK_CLASSIFIER_CELLS", "COWORK_CLASSIFIER_CONNECTOR_CELLS", "CoworkPolicyTransitionMachine", "classifyCoworkPolicyChange"]);
   // No timers, clock, I/O or environment: ports are the only way the machine touches anything.
   expect(own).not.toMatch(/\b(Date\.now|new Date|process\.|Bun\.|node:|fetch\(|setTimeout|setInterval|Math\.random)\b/);
 });

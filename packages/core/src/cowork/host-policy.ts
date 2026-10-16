@@ -7,12 +7,15 @@
 // class, the class of path it targets and the EFFECTIVE capability ceiling, is the call allowed, asked or
 // denied by the host policy check? It decides nothing else:
 //   - it is NOT the Bash reviewer ("Preserve Winter's existing `auto` reviewer semantics ...", line 82):
-//     Bash under `auto` is `allow` here with `bashReview: true` (false when an explicit allow applies:
-//     "recognized read-only/user-allowed commands may skip model review"); the reviewer is a separate layer;
+//     Bash under `auto` is `allow` here and ALWAYS carries `bashReview: true`, whether or not a saved rule or a
+//     delegation bound applies. The review skip belongs to the hook, not to this layer: in Code,
+//     `bashReviewerHook` (runtime-sdk/hooks.ts) skips the model review only for `bashLooksSafe` commands, never
+//     because of an explicit allow. A caller that sees `bashReview: true` must run that hook's logic;
 //   - it is NOT the plan execution view ("Enforce `plan` below command classification ...", line 74):
-//     Bash under `plan` is `allow` here with `planView: true`, meaning "only inside the read-only plan
+//     Bash under `plan` is the DISTINCT verdict `"allow-in-plan-view"`, meaning "only inside the read-only plan
 //     view"; the mount view is what makes it read-only, never this function and never command
-//     classification;
+//     classification. The verdict is not spelled `"allow"` on purpose: a caller that only knows
+//     `verdict === "allow"` treats it as not allowed (fails closed) instead of running it in a writable view;
 //   - it does not intersect grants: the caller passes the already-intersected EFFECTIVE ceiling
 //     (`intersectCeilings` over Project ceiling and conversation restrictions);
 //   - it does not resolve saved rules: the caller resolves explicit rules first ("The following defaults
@@ -42,6 +45,12 @@
 //     by a read-only tool view and content-bound host write operation, not a path-hook convention alone"
 //     (docs/cowork-spec.md, shared instructions section) and "Tool code cannot edit ... protected shared
 //     instructions" (docs/cowork-spec.md, host authority section);
+//   - `/workspace/outputs/<session-id>` and `/workspace/.winter/scratch/<session-id>` are path classes `outputs`
+//     and `scratch`. DECISION: the policy table has no cell for either (its "ordinary workspace edits" are the
+//     admitted source and Project memory; the plan paragraph only says plan's tool execution "receives ...
+//     separately scoped disposable/planning scratch", a mount fact, not a verdict), so every tool class on them is
+//     denied as `path_unclassified` under every policy until the spec gives the cells. They exist as classes so a
+//     caller cannot satisfy the matrix by calling them `admitted`;
 //   - the Ask in the instruction column does not depend on `alreadyAuthorized`: no reusable approval token
 //     exists for it (`CoworkInstructions.updateAgent` binds each card to the exact copied content);
 //   - the required ceiling class per tool follows `confinedToolVisibility` (guest-runtime.ts): Read needs
@@ -57,7 +66,17 @@
 //                                                           disables Linux control-state confinement or grants access to the
 //                                                           Mac.", line 78)
 //   4. effective ceiling lacks the class              deny  ("Skip ordinary prompts within grants", line 72)
-//   5. the policy table above
+//   5. outputs / scratch path class                 deny  (no table cell: DECISION above)
+//   6. the policy table above
+//
+// ── Wiring notes (for whoever wires this; none of it is done here) ───────────────────────────────────
+//   - Two sources of truth until wiring calls `coworkHostDecision`: `CoworkInstructions.agentScope` carries its own
+//     literal "plan or dont-ask" refusal for the shared-guidance edit, and this matrix carries the same cell.
+//     A test cross-checks them for all six policies; wiring must make the literal call this function instead.
+//   - The matrix knows Read, Write, Edit, Bash, Workflow and InstructionEdit. Glob and Grep must map to `Read`
+//     at wiring (the spec applies the same view to them: "Apply this to Glob/Grep, notebook/image tools and
+//     model-directed diff reads too", docs/cowork-execution-contracts.md). Notebook and image tools need an
+//     explicit mapping decision; until then they are unknown classes and denied.
 //
 // Nothing here may grow a new `CoworkErrorCode`: a denial is a value, not an error.
 
@@ -66,6 +85,8 @@ import type { ConnectorPermission } from "../agent/mcp/connector-permissions";
 import type { CapabilityCeiling } from "./types";
 
 export type CoworkVerdict = "allow" | "ask" | "deny";
+/** A tool decision adds one verdict: `plan` x Bash runs only inside the read-only plan view. Not `"allow"`, so it fails closed. */
+export type CoworkHostVerdict = CoworkVerdict | "allow-in-plan-view";
 
 /** The six policies, in the protocol's order. A test pins this against the protocol enum. */
 export const COWORK_APPROVAL_POLICIES: readonly ApprovalPolicy[] = Object.freeze(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const);
@@ -78,18 +99,20 @@ export const COWORK_GUEST_TOOL_CLASSES: readonly CoworkGuestToolClass[] = Object
  * What a call targets, as the HOST classified it (never the guest):
  *  - `admitted`             an admitted source root or the Project memory directory;
  *  - `shared-instructions`  the shared workspace instruction file (`/workspace/.winter/WINTER.md`);
+ *  - `outputs`              `/workspace/outputs/<session-id>` (no table cell: denied, see the header DECISION);
+ *  - `scratch`              `/workspace/.winter/scratch/<session-id>` (no table cell: denied, see the header DECISION);
  *  - `protected`            run homes, SDK stores, another conversation's store, the protected `.winter` skeleton;
  *  - `outside`              anything not admitted;
  *  - `none`                 the call names no path (Bash, Workflow), or the host could not classify one.
  */
-export type CoworkPathClass = "admitted" | "shared-instructions" | "protected" | "outside" | "none";
-export const COWORK_PATH_CLASSES: readonly CoworkPathClass[] = Object.freeze(["admitted", "shared-instructions", "protected", "outside", "none"] as const);
+export type CoworkPathClass = "admitted" | "shared-instructions" | "outputs" | "scratch" | "protected" | "outside" | "none";
+export const COWORK_PATH_CLASSES: readonly CoworkPathClass[] = Object.freeze(["admitted", "shared-instructions", "outputs", "scratch", "protected", "outside", "none"] as const);
 
 export type CoworkHostReason =
   | "policy_table"          // the spec table decided
   | "unknown_policy" | "unknown_tool_class" | "unknown_path_class"
   | "explicit_deny"         // a saved explicit deny applies
-  | "path_protected" | "path_outside" | "path_unclassified"
+  | "path_protected" | "path_outside" | "path_unclassified" // unclassified: `none` for a file tool, or `outputs`/`scratch` (no table cell)
   | "read_only_view"        // a tool aimed at the shared instruction file: only the host write operation may edit it
   | "path_class_mismatch"   // InstructionEdit for anything but the shared instruction file
   | "ceiling";              // the effective ceiling does not grant the class (or is malformed)
@@ -110,35 +133,33 @@ export interface CoworkHostDecisionInput {
 }
 
 export interface CoworkHostDecision {
-  readonly verdict: CoworkVerdict;
+  readonly verdict: CoworkHostVerdict;
   readonly reason: CoworkHostReason;
-  /** `auto` x Bash: the Winter reviewer semantics still apply on top of this allow (line 82). */
+  /** `auto` x Bash, always: the Winter reviewer semantics apply on top of this allow (line 82); skipping is the hook's `bashLooksSafe`, not a saved rule. */
   readonly bashReview: boolean;
-  /** `plan` x Bash: the allow holds only inside the read-only plan execution view (line 74). */
-  readonly planView: boolean;
 }
 
-interface Outcome { readonly verdict: CoworkVerdict; readonly bashReview?: true; readonly planView?: true }
+interface Outcome { readonly verdict: CoworkHostVerdict; readonly bashReview?: true }
 /** `fresh`: no explicit allow applies; `authorized`: the caller resolved one. */
 interface Cell { readonly fresh: Outcome; readonly authorized: Outcome }
-const outcome = (verdict: CoworkVerdict, flag?: "bashReview" | "planView"): Outcome =>
-  Object.freeze({ verdict, ...(flag === "bashReview" ? { bashReview: true as const } : {}), ...(flag === "planView" ? { planView: true as const } : {}) });
-const cell = (fresh: CoworkVerdict, authorized: CoworkVerdict = fresh): Cell => Object.freeze({ fresh: outcome(fresh), authorized: outcome(authorized) });
+const outcome = (verdict: CoworkHostVerdict, flag?: "bashReview"): Outcome =>
+  Object.freeze({ verdict, ...(flag === "bashReview" ? { bashReview: true as const } : {}) });
+const cell = (fresh: CoworkHostVerdict, authorized: CoworkHostVerdict = fresh): Cell => Object.freeze({ fresh: outcome(fresh), authorized: outcome(authorized) });
 
 interface Row { readonly edit: Cell; readonly bash: Cell; readonly workflow: Cell; readonly instruction: Cell }
 /** Admitted reads are Allow in every row, so they have no cell. */
 const TABLE: Readonly<Record<ApprovalPolicy, Row>> = Object.freeze({
   // "Deny" | "Planning/read operations only" | "Deny". Workflow: "denies under plan" (line 82).
-  "plan": Object.freeze({ edit: cell("deny"), bash: Object.freeze({ fresh: outcome("allow", "planView"), authorized: outcome("allow", "planView") }), workflow: cell("deny"), instruction: cell("deny") }),
+  "plan": Object.freeze({ edit: cell("deny"), bash: Object.freeze({ fresh: outcome("allow-in-plan-view"), authorized: outcome("allow-in-plan-view") }), workflow: cell("deny"), instruction: cell("deny") }),
   // "Only if already authorized without a prompt" | "Deny anything needing a prompt" | "Deny".
   "dont-ask": Object.freeze({ edit: cell("deny", "allow"), bash: cell("deny", "allow"), workflow: cell("deny", "allow"), instruction: cell("deny") }),
   // "Ask unless already authorized" | "Ask unless already authorized" | "Ask".
   "ask": Object.freeze({ edit: cell("ask", "allow"), bash: cell("ask", "allow"), workflow: cell("ask", "allow"), instruction: cell("ask") }),
   // "Allow the bounded edit class" | "Ask unless already authorized" | "Ask".
   "accept-edits": Object.freeze({ edit: cell("allow"), bash: cell("ask", "allow"), workflow: cell("ask", "allow"), instruction: cell("ask") }),
-  // "Allow" | "Normal mutation class allowed; Bash review below; Workflow still asks" | "Ask". Bash review: line 82,
-  // "recognized read-only/user-allowed commands may skip model review", so an explicit allow does not demand it.
-  "auto": Object.freeze({ edit: cell("allow"), bash: Object.freeze({ fresh: outcome("allow", "bashReview"), authorized: outcome("allow") }), workflow: cell("ask", "allow"), instruction: cell("ask") }),
+  // "Allow" | "Normal mutation class allowed; Bash review below; Workflow still asks" | "Ask". Bash review: line 82.
+  // The review is ALWAYS reported, explicit allow or not: only the hook's `bashLooksSafe` skips it.
+  "auto": Object.freeze({ edit: cell("allow"), bash: Object.freeze({ fresh: outcome("allow", "bashReview"), authorized: outcome("allow", "bashReview") }), workflow: cell("ask", "allow"), instruction: cell("ask") }),
   // "Allow" | "Skip ordinary prompts within grants" | "Ask". Workflow "follows bypass's ordinary no-prompt behavior".
   "bypass": Object.freeze({ edit: cell("allow"), bash: cell("allow"), workflow: cell("allow"), instruction: cell("ask") }),
 });
@@ -149,8 +170,8 @@ const PATH_SET: ReadonlySet<string> = new Set(COWORK_PATH_CLASSES);
 
 export const isCoworkApprovalPolicy = (value: unknown): value is ApprovalPolicy => typeof value === "string" && POLICY_SET.has(value);
 
-const decision = (verdict: CoworkVerdict, reason: CoworkHostReason, flags: { bashReview?: boolean; planView?: boolean } = {}): CoworkHostDecision =>
-  Object.freeze({ verdict, reason, bashReview: flags.bashReview === true, planView: flags.planView === true });
+const decision = (verdict: CoworkHostVerdict, reason: CoworkHostReason, bashReview = false): CoworkHostDecision =>
+  Object.freeze({ verdict, reason, bashReview });
 const DENY = (reason: CoworkHostReason): CoworkHostDecision => decision("deny", reason);
 
 function ceilingHas(ceiling: CapabilityCeiling, tool: CoworkGuestToolClass): boolean {
@@ -181,6 +202,8 @@ export function coworkHostDecision(input: CoworkHostDecisionInput): CoworkHostDe
   if (pathClass === "outside") return DENY("path_outside");
   // 4. The effective ceiling is the grant "within" which bypass skips prompts (line 72).
   if (!ceilingHas(input.ceiling, toolClass)) return DENY("ceiling");
+  // DECISION: no table cell exists for outputs or conversation scratch (see the header), so they are denied, never guessed.
+  if (pathClass === "outputs" || pathClass === "scratch") return DENY("path_unclassified");
   const row = TABLE[policy as ApprovalPolicy];
   switch (toolClass) {
     case "Read":
@@ -203,7 +226,7 @@ export function coworkHostDecision(input: CoworkHostDecisionInput): CoworkHostDe
 
 function fromCell(selected: Cell, authorized: boolean): CoworkHostDecision {
   const chosen = authorized ? selected.authorized : selected.fresh;
-  return decision(chosen.verdict, "policy_table", { bashReview: chosen.bashReview === true, planView: chosen.planView === true });
+  return decision(chosen.verdict, "policy_table", chosen.bashReview === true);
 }
 
 // ── The connector row (spec lines 84-92, "Give connectors an explicit Cowork row in the existing connector system") ──

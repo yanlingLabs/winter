@@ -17,8 +17,10 @@
 // ── The classifier ────────────────────────────────────────────────────────────────────────────────────
 // "These policies are not a linear privilege ranking." (spec, same section.) So a change is NOT compared by a
 // rank of the policy names. It is compared CELL BY CELL over the host policy decision itself (`host-policy.ts`:
-// every guest tool class on its path class, with and without an explicit allow) under a full ceiling, plus the
-// ceiling set by set. The classifier therefore cannot drift from the matrix: it reads the matrix.
+// every guest tool class on its path class, with and without an explicit allow) under a full ceiling, over every
+// cell of the Cowork connector row (each stored setting x read-only or not), plus the ceiling set by set. The
+// classifier therefore cannot drift from the matrix: it reads the matrix, and tests pin that every cell the
+// matrix can answer with a table verdict has a classifier cell.
 //   unchanged   no cell and no ceiling dimension differs
 //   widening    something grew and nothing shrank
 //   narrowing   something shrank and nothing grew
@@ -51,7 +53,7 @@
 // Nothing in `src/` imports this module. It never touches a record, a process or a view itself.
 
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
-import { coworkHostDecision, isCoworkApprovalPolicy, type CoworkGuestToolClass, type CoworkHostDecision, type CoworkPathClass } from "./host-policy";
+import { coworkConnectorVerdict, coworkHostDecision, isCoworkApprovalPolicy, type CoworkGuestToolClass, type CoworkHostDecision, type CoworkPathClass, type CoworkVerdict } from "./host-policy";
 import type { CapabilityCeiling } from "./types";
 
 export interface CoworkPolicyState { readonly policy: ApprovalPolicy; readonly ceiling: CapabilityCeiling }
@@ -63,24 +65,36 @@ export type CoworkPolicyChangeKind = "unchanged" | "widening" | "narrowing" | "l
 /** Every cell the matrix distinguishes, with the path class a well-formed call carries. */
 export const COWORK_CLASSIFIER_CELLS: ReadonlyArray<readonly [CoworkGuestToolClass, CoworkPathClass]> = Object.freeze([
   ["Read", "admitted"], ["Read", "shared-instructions"], ["Write", "admitted"], ["Edit", "admitted"],
-  ["Bash", "none"], ["Workflow", "none"], ["InstructionEdit", "shared-instructions"],
+  ["Bash", "admitted"], ["Bash", "none"], ["Workflow", "admitted"], ["Workflow", "none"], ["InstructionEdit", "shared-instructions"],
+]);
+/** Every cell of the connector row: stored setting (`undefined` = unset) x classified read-only. */
+export const COWORK_CLASSIFIER_CONNECTOR_CELLS: ReadonlyArray<readonly ["allow" | "ask" | "deny" | undefined, boolean]> = Object.freeze([
+  [undefined, false], [undefined, true], ["allow", false], ["allow", true], ["ask", false], ["ask", true], ["deny", false], ["deny", true],
 ]);
 /** The ceiling the cells are read under, so the ceiling never masks a policy difference. */
 const FULL_CEILING: CapabilityCeiling = { toolClasses: ["read", "write", "execute"], hostServices: ["workspace.instructions.update"], connectors: [], network: "none" };
 
-/** How much a cell lets through, weakest first: deny < allow-inside-the-read-only-plan-view < ask < allow-with-review < allow. */
+/** How much a tool cell lets through, weakest first: deny < allow-inside-the-read-only-plan-view < ask < allow-with-review < allow. */
 function reach(decision: CoworkHostDecision): number {
-  if (decision.verdict === "deny") return 0;
-  if (decision.verdict === "ask") return 2;
-  if (decision.planView) return 1;
-  return decision.bashReview ? 3 : 4;
+  switch (decision.verdict) {
+    case "deny": return 0;
+    case "allow-in-plan-view": return 1;
+    case "ask": return 2;
+    case "allow": return decision.bashReview ? 3 : 4;
+  }
 }
+const connectorReach = (verdict: CoworkVerdict): number => verdict === "deny" ? 0 : verdict === "ask" ? 1 : 2;
 
-/** The policy's cells under a full ceiling: one number per (cell, explicit-allow) pair. */
-function policyReach(policy: ApprovalPolicy): number[] {
+/** The two decision functions the classifier reads. The default is the real matrix; the parameter is a test seam. */
+export interface CoworkPolicyMatrix { readonly decide: typeof coworkHostDecision; readonly connector: typeof coworkConnectorVerdict }
+const MATRIX: CoworkPolicyMatrix = Object.freeze({ decide: coworkHostDecision, connector: coworkConnectorVerdict });
+
+/** The policy's cells under a full ceiling: one number per (tool cell, explicit-allow) pair, then one per connector cell. */
+function policyReach(policy: ApprovalPolicy, matrix: CoworkPolicyMatrix): number[] {
   const out: number[] = [];
   for (const [tool, path] of COWORK_CLASSIFIER_CELLS) for (const alreadyAuthorized of [false, true])
-    out.push(reach(coworkHostDecision({ policy, tool, path, ceiling: FULL_CEILING, alreadyAuthorized })));
+    out.push(reach(matrix.decide({ policy, tool, path, ceiling: FULL_CEILING, alreadyAuthorized })));
+  for (const [setting, readOnly] of COWORK_CLASSIFIER_CONNECTOR_CELLS) out.push(connectorReach(matrix.connector(setting, readOnly, policy)));
   return out;
 }
 // A test pins that these cells cover every tool class of the matrix, so a new class cannot escape the classifier.
@@ -96,10 +110,10 @@ function setDirection(from: unknown, to: unknown): Direction | undefined {
 }
 
 /** Fail closed: a malformed or unknown side is `lateral`, which takes the full narrowing protocol. */
-export function classifyCoworkPolicyChange(from: CoworkPolicyState, to: CoworkPolicyState): CoworkPolicyChangeKind {
+export function classifyCoworkPolicyChange(from: CoworkPolicyState, to: CoworkPolicyState, matrix: CoworkPolicyMatrix = MATRIX): CoworkPolicyChangeKind {
   if (!from || !to || !isCoworkApprovalPolicy(from.policy) || !isCoworkApprovalPolicy(to.policy) || !from.ceiling || !to.ceiling) return "lateral";
   let direction: Direction = "same";
-  const before = policyReach(from.policy), after = policyReach(to.policy);
+  const before = policyReach(from.policy, matrix), after = policyReach(to.policy, matrix);
   for (let index = 0; index < before.length; index += 1) direction = merge(direction, after[index]! < before[index]! ? "narrows" : after[index]! > before[index]! ? "widens" : "same");
   for (const dimension of ["toolClasses", "hostServices", "connectors"] as const) {
     const change = setDirection(from.ceiling[dimension], to.ceiling[dimension]);
@@ -166,6 +180,8 @@ export class CoworkPolicyTransitionMachine {
   private current: CoworkTransitionSnapshot;
   private readonly listeners = new Set<(snapshot: CoworkTransitionSnapshot) => void>();
   private plan: CoworkTransitionPlan | undefined;
+  private notifying = false;
+  private readonly queue: CoworkTransitionSnapshot[] = [];
 
   /** `initial` is the canonical record's current state; a fresh machine after a workspace restart starts here. */
   constructor(initial: CoworkPolicyState, private readonly ports: CoworkTransitionPorts, epoch = 0) {
@@ -177,7 +193,11 @@ export class CoworkPolicyTransitionMachine {
 
   snapshot(): CoworkTransitionSnapshot { return this.current; }
 
-  /** Notified synchronously after every phase change; a throwing listener cannot affect the machine. */
+  /**
+   * Notified after every phase change, in order, each snapshot delivered to every listener before the next one is.
+   * A listener may call `request()` or `retry()` synchronously: the nested phase changes are queued behind the one
+   * being delivered. A throwing listener cannot affect the machine.
+   */
   subscribe(listener: (snapshot: CoworkTransitionSnapshot) => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -208,9 +228,19 @@ export class CoworkPolicyTransitionMachine {
 
   private result(status: CoworkTransitionStatus): CoworkTransitionResult { return Object.freeze({ status, snapshot: this.current }); }
 
-  private publish(snapshot: CoworkTransitionSnapshot): void {
-    this.current = Object.freeze(snapshot);
-    for (const listener of [...this.listeners]) { try { listener(this.current); } catch { /* observers cannot affect the transition */ } }
+  /** Commit, then notify. Returns the committed snapshot so a caller reports THIS one, never whatever `current` has become after a re-entrant listener. */
+  private publish(snapshot: CoworkTransitionSnapshot): CoworkTransitionSnapshot {
+    const committed = Object.freeze(snapshot);
+    this.current = committed;
+    this.queue.push(committed);
+    if (!this.notifying) {
+      this.notifying = true;
+      try {
+        for (let next = this.queue.shift(); next !== undefined; next = this.queue.shift())
+          for (const listener of [...this.listeners]) { try { listener(next); } catch { /* observers cannot affect the transition */ } }
+      } finally { this.notifying = false; }
+    }
+    return committed;
   }
 
   private admissionDuring(step: CoworkTransitionStep, plan: CoworkTransitionPlan): CoworkAdmission {
@@ -235,13 +265,13 @@ export class CoworkPolicyTransitionMachine {
       if (failure !== undefined) {
         // Admission after a failure: where the step began, or closed once a drain step ran.
         const admission: CoworkAdmission = plan.kind === "widening" ? "open" : step === "closing-admission" ? "unknown" : "closed";
-        this.publish({ phase: "failed", failure, step, effective: this.effective, epoch: this.epoch, target: plan.to, kind: plan.kind, admission, workspaceRestartRequired: failure === "restart-required" });
-        return this.result("failed");
+        const failed = this.publish({ phase: "failed", failure, step, effective: this.effective, epoch: this.epoch, target: plan.to, kind: plan.kind, admission, workspaceRestartRequired: failure === "restart-required" });
+        return Object.freeze({ status: "failed", snapshot: failed });
       }
     }
     // The ONLY place the reported state changes, after installView resolved.
     this.effective = plan.to; this.epoch = plan.epoch; this.plan = undefined;
-    this.publish({ phase: "stable", effective: this.effective, epoch: this.epoch, admission: "open" });
-    return this.result("applied");
+    const stable = this.publish({ phase: "stable", effective: this.effective, epoch: this.epoch, admission: "open" });
+    return Object.freeze({ status: "applied", snapshot: stable });
   }
 }

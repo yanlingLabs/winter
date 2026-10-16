@@ -6,13 +6,13 @@ import { PermissionGate } from "../../src/agent/gate";
 import { connectorVerdict, type ConnectorPermission } from "../../src/agent/mcp/connector-permissions";
 import * as hostPolicy from "../../src/cowork/host-policy";
 import { COWORK_APPROVAL_POLICIES, COWORK_GUEST_TOOL_CLASSES, COWORK_PATH_CLASSES, coworkConnectorVerdict, coworkHostDecision, isCoworkApprovalPolicy,
-  type CoworkHostDecisionInput, type CoworkVerdict } from "../../src/cowork/host-policy";
+  type CoworkHostDecisionInput, type CoworkHostVerdict, type CoworkVerdict } from "../../src/cowork/host-policy";
 import type { CapabilityCeiling } from "../../src/cowork/types";
 
 type Policy = (typeof COWORK_APPROVAL_POLICIES)[number];
 const POLICIES: readonly Policy[] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"];
 const TOOLS = ["Read", "Write", "Edit", "Bash", "Workflow", "InstructionEdit"] as const;
-const PATHS = ["admitted", "shared-instructions", "protected", "outside", "none"] as const;
+const PATHS = ["admitted", "shared-instructions", "outputs", "scratch", "protected", "outside", "none"] as const;
 type Tool = (typeof TOOLS)[number];
 type Path = (typeof PATHS)[number];
 
@@ -31,8 +31,8 @@ const SPEC_TABLE: Readonly<Record<Policy, readonly [string, string, string, stri
   "bypass": ["Allow", "Allow", "Skip ordinary prompts within grants", "Ask"],
 };
 
-interface Expected { verdict: CoworkVerdict; bashReview: boolean; planView: boolean }
-const exp = (verdict: CoworkVerdict, flags: Partial<Omit<Expected, "verdict">> = {}): Expected => ({ verdict, bashReview: false, planView: false, ...flags });
+interface Expected { verdict: CoworkHostVerdict; bashReview: boolean }
+const exp = (verdict: CoworkHostVerdict, flags: Partial<Omit<Expected, "verdict">> = {}): Expected => ({ verdict, bashReview: false, ...flags });
 /** What each cell text means for a given tool and for "explicit allow applies". Workflow and Bash differ only where the spec says so (line 82). */
 function meaning(text: string, tool: "Write/Edit" | "Bash" | "Workflow" | "InstructionEdit", authorized: boolean): Expected {
   switch (text) {
@@ -43,11 +43,11 @@ function meaning(text: string, tool: "Write/Edit" | "Bash" | "Workflow" | "Instr
     case "Deny anything needing a prompt": return exp(authorized ? "allow" : "deny");
     case "Ask unless already authorized": return exp(authorized ? "allow" : "ask");
     case "Allow the bounded edit class": return exp("allow");
-    // "Planning/read operations only": Bash runs only inside the read-only plan view; Workflow "denies under plan" (line 82).
-    case "Planning/read operations only": return tool === "Workflow" ? exp("deny") : exp("allow", { planView: true });
-    // "Bash review below" (line 82: user-allowed commands may skip the review); "Workflow still asks" unless already authorized.
+    // "Planning/read operations only": Bash runs only inside the read-only plan view, a DISTINCT verdict; Workflow "denies under plan" (line 82).
+    case "Planning/read operations only": return tool === "Workflow" ? exp("deny") : exp("allow-in-plan-view");
+    // "Bash review below": ALWAYS reported (only the hook's bashLooksSafe skips the review, never a saved rule); "Workflow still asks" unless already authorized.
     case "Normal mutation class allowed; Bash review below; Workflow still asks":
-      return tool === "Workflow" ? exp(authorized ? "allow" : "ask") : exp("allow", { bashReview: !authorized });
+      return tool === "Workflow" ? exp(authorized ? "allow" : "ask") : exp("allow", { bashReview: true });
     // Workflow "follows bypass's ordinary no-prompt behavior within grants" (line 82).
     case "Skip ordinary prompts within grants": return exp("allow");
   }
@@ -66,12 +66,12 @@ function tableOutcome(policy: Policy, tool: Tool, authorized: boolean): Expected
 
 /** Literal path rule grid: where the table applies and where the host denies regardless of policy. */
 const PATH_RULES: Readonly<Record<Tool, Readonly<Record<Path, "table" | "deny">>>> = {
-  Read:            { "admitted": "table", "shared-instructions": "table", "protected": "deny", "outside": "deny", "none": "deny" },
-  Write:           { "admitted": "table", "shared-instructions": "deny",  "protected": "deny", "outside": "deny", "none": "deny" },
-  Edit:            { "admitted": "table", "shared-instructions": "deny",  "protected": "deny", "outside": "deny", "none": "deny" },
-  Bash:            { "admitted": "table", "shared-instructions": "deny",  "protected": "deny", "outside": "deny", "none": "table" },
-  Workflow:        { "admitted": "table", "shared-instructions": "deny",  "protected": "deny", "outside": "deny", "none": "table" },
-  InstructionEdit: { "admitted": "deny",  "shared-instructions": "table", "protected": "deny", "outside": "deny", "none": "deny" },
+  Read:            { "admitted": "table", "shared-instructions": "table", "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
+  Write:           { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
+  Edit:            { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
+  Bash:            { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "table" },
+  Workflow:        { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "table" },
+  InstructionEdit: { "admitted": "deny",  "shared-instructions": "table", "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
 };
 /** Literal ceiling requirement per tool (confinedToolVisibility, and CoworkInstructions.agentScope for InstructionEdit). */
 const REQUIRES: Readonly<Record<Tool, { classes: string[]; services: string[] }>> = {
@@ -87,7 +87,7 @@ function* ceilings(): Generator<CapabilityCeiling> {
 const granted = (tool: Tool, c: CapabilityCeiling) => REQUIRES[tool].classes.every(name => c.toolClasses.includes(name)) && REQUIRES[tool].services.every(name => c.hostServices.includes(name));
 
 const decide = (over: Partial<CoworkHostDecisionInput> & Pick<CoworkHostDecisionInput, "policy" | "tool" | "path">) => coworkHostDecision({ ceiling: FULL, ...over });
-const shape = (d: { verdict: CoworkVerdict; bashReview: boolean; planView: boolean }) => ({ verdict: d.verdict, bashReview: d.bashReview, planView: d.planView });
+const shape = (d: { verdict: CoworkHostVerdict; bashReview: boolean }) => ({ verdict: d.verdict, bashReview: d.bashReview });
 
 test("the policy list is the protocol's, in order", () => {
   expect([...COWORK_APPROVAL_POLICIES]).toEqual([...ApprovalPolicy.options]);
@@ -111,20 +111,20 @@ test("spec table copy: every policy row matches the module for every tool x path
     if (!alreadyAuthorized) expect(shape(coworkHostDecision({ policy, tool, path, ceiling: c }))).toEqual(shape(got));
     cases += 1;
   }
-  expect(cases).toBe(6 * 6 * 5 * 16 * 2);
+  expect(cases).toBe(6 * 6 * 7 * 16 * 2);
 });
 
 test("spec table copy: the verdict grid for the well-formed cells, written out", () => {
   // [fresh, authorized] for Write/Edit | Bash | Workflow | InstructionEdit, read straight from the quoted cells.
   const GRID: Readonly<Record<Policy, readonly [string, string, string, string]>> = {
-    "plan": ["deny/deny", "allow+plan/allow+plan", "deny/deny", "deny/deny"],
+    "plan": ["deny/deny", "allow-in-plan-view/allow-in-plan-view", "deny/deny", "deny/deny"],
     "dont-ask": ["deny/allow", "deny/allow", "deny/allow", "deny/deny"],
     "ask": ["ask/allow", "ask/allow", "ask/allow", "ask/ask"],
     "accept-edits": ["allow/allow", "ask/allow", "ask/allow", "ask/ask"],
-    "auto": ["allow/allow", "allow+review/allow", "ask/allow", "ask/ask"],
+    "auto": ["allow/allow", "allow+review/allow+review", "ask/allow", "ask/ask"],
     "bypass": ["allow/allow", "allow/allow", "allow/allow", "ask/ask"],
   };
-  const text = (d: ReturnType<typeof coworkHostDecision>) => `${d.verdict}${d.planView ? "+plan" : ""}${d.bashReview ? "+review" : ""}`;
+  const text = (d: ReturnType<typeof coworkHostDecision>) => `${d.verdict}${d.bashReview ? "+review" : ""}`;
   for (const policy of POLICIES) {
     const cells: Array<[Tool, string]> = [["Write", GRID[policy][0]], ["Edit", GRID[policy][0]], ["Bash", GRID[policy][1]], ["Workflow", GRID[policy][2]], ["InstructionEdit", GRID[policy][3]]];
     for (const [tool, cell] of cells) {
@@ -166,7 +166,7 @@ test("hard denials beat every policy, bypass and an explicit allow included", ()
 });
 
 test("unknown tool classes, paths, policies and malformed inputs are denied, never admitted", () => {
-  const unknownTools = ["", "read", "READ", "Read ", "Bash\n", "Task", "WebFetch", "Glob", "NotebookEdit", "mcp__x__y", "constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "Instructionedit"];
+  const unknownTools = ["", "read", "READ", "Read ", "Bash\n", "Task", "WebFetch", "Glob", "Grep", "NotebookEdit", "mcp__x__y", "constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "Instructionedit"];
   for (const policy of POLICIES) {
     for (const tool of unknownTools) expect(decide({ policy, tool, path: "admitted", alreadyAuthorized: true })).toMatchObject({ verdict: "deny", reason: "unknown_tool_class" });
     for (const tool of [undefined, null, 5, {}, [], ["Read"], true] as unknown[]) expect(decide({ policy, tool: tool as string, path: "admitted" })).toMatchObject({ verdict: "deny", reason: "unknown_tool_class" });
@@ -185,8 +185,38 @@ test("unknown tool classes, paths, policies and malformed inputs are denied, nev
 test("decisions are pure: frozen inputs are accepted, results do not alias the input, repeated calls agree", () => {
   const input = Object.freeze({ policy: "auto" as const, tool: "Bash", path: "none", ceiling: Object.freeze({ ...FULL }) });
   const first = coworkHostDecision(input), second = coworkHostDecision(input);
-  expect(first).toEqual(second); expect(first).toEqual({ verdict: "allow", reason: "policy_table", bashReview: true, planView: false });
+  expect(first).toEqual(second); expect(first).toEqual({ verdict: "allow", reason: "policy_table", bashReview: true });
   expect(Object.isFrozen(first)).toBe(true);
+});
+
+test("auto x Bash reports bashReview for every call, saved rule or not; no other cell ever does", () => {
+  for (const alreadyAuthorized of [false, true]) expect(decide({ policy: "auto", tool: "Bash", path: "none", alreadyAuthorized })).toMatchObject({ verdict: "allow", bashReview: true });
+  for (const policy of POLICIES) for (const tool of TOOLS) for (const path of PATHS) for (const alreadyAuthorized of [false, true]) {
+    const d = decide({ policy, tool, path, alreadyAuthorized });
+    expect(d.bashReview).toBe(policy === "auto" && tool === "Bash" && (path === "admitted" || path === "none"));
+  }
+});
+
+test("fail-closed shape: plan x Bash is a distinct verdict that is not \"allow\", and nothing else ever uses it", () => {
+  expect(decide({ policy: "plan", tool: "Bash", path: "none" })).toMatchObject({ verdict: "allow-in-plan-view", reason: "policy_table" });
+  expect(decide({ policy: "plan", tool: "Bash", path: "none", alreadyAuthorized: true }).verdict).toBe("allow-in-plan-view");
+  // A caller that only handles the three classic verdicts and switches on === "allow" never runs plan Bash in a writable view.
+  expect(decide({ policy: "plan", tool: "Bash", path: "none" }).verdict === "allow").toBe(false);
+  const inPlanView: string[] = [];
+  for (const policy of POLICIES) for (const tool of TOOLS) for (const path of PATHS) for (const alreadyAuthorized of [false, true])
+    if (decide({ policy, tool, path, alreadyAuthorized }).verdict === "allow-in-plan-view") inPlanView.push(`${policy}/${tool}/${path}/${alreadyAuthorized}`);
+  expect(inPlanView).toEqual(["plan/Bash/admitted/false", "plan/Bash/admitted/true", "plan/Bash/none/false", "plan/Bash/none/true"]);
+  // Plan allows plain "allow" only for reads.
+  for (const tool of TOOLS.filter(name => name !== "Read")) for (const path of PATHS) expect(decide({ policy: "plan", tool, path }).verdict).not.toBe("allow");
+});
+
+test("outputs and conversation scratch have no table cell: denied as path_unclassified for every policy and tool class, bypass included", () => {
+  // DECISION (see host-policy.ts): the spec table names neither, so neither may ever be satisfied by calling it admitted.
+  for (const policy of POLICIES) for (const tool of TOOLS) for (const path of ["outputs", "scratch"] as const) for (const alreadyAuthorized of [false, true])
+    expect(decide({ policy, tool, path, alreadyAuthorized })).toMatchObject({ verdict: "deny", reason: "path_unclassified", bashReview: false });
+  // An explicit deny and a missing ceiling still say why first.
+  expect(decide({ policy: "ask", tool: "Read", path: "scratch", explicitDeny: true }).reason).toBe("explicit_deny");
+  expect(coworkHostDecision({ policy: "ask", tool: "Read", path: "outputs", ceiling: ceiling([]) }).reason).toBe("ceiling");
 });
 
 // ── connector row ────────────────────────────────────────────────────────────────────────────────────────────────
