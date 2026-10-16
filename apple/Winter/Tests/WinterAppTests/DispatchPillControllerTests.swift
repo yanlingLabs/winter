@@ -538,6 +538,7 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(dispatchPillLocalCommand("/permissions"), .permissions)
         XCTAssertEqual(dispatchPillLocalCommand("  /Permissions \n"), .permissions)
         XCTAssertEqual(dispatchPillLocalCommand("/spawn"), .spawn)
+        XCTAssertEqual(dispatchPillLocalCommand(" /Terminal "), .terminal)
         XCTAssertNil(dispatchPillLocalCommand("/compact"), "the session's own built-in — sent as typed")
         XCTAssertEqual(dispatchPillLocalCommand("/permissions please"), .unknownPermissions("please"),
                        "an argument that names no mode is answered, not sent")
@@ -545,7 +546,7 @@ final class DispatchPillControllerTests: XCTestCase {
     }
 
     func testSlashMenuMatchesAndPicksTheClosest() {
-        XCTAssertEqual(dispatchPillMenu(draft: "/")?.matches, ["compact", "permissions", "spawn"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/")?.matches, ["compact", "permissions", "spawn", "terminal"])
         XCTAssertEqual(dispatchPillMenu(draft: "/")?.best, "compact")
         // The prefix match leads; commands that merely contain the letter follow.
         XCTAssertEqual(dispatchPillMenu(draft: "/p")?.matches, ["permissions", "compact", "spawn"])
@@ -553,7 +554,9 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(dispatchPillMenu(draft: "/pe")?.matches, ["permissions"])
         XCTAssertEqual(dispatchPillMenu(draft: "/SP")?.best, "spawn", "case-insensitive")
         // Prefix matches first, then the ones that merely contain what is typed.
-        XCTAssertEqual(dispatchPillMenu(draft: "/a")?.matches, ["compact", "spawn"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/a")?.matches, ["compact", "spawn", "terminal"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/te")?.matches, ["terminal"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/te")?.item("terminal")?.summary, "Open a terminal in this session's folder")
         XCTAssertNil(dispatchPillMenu(draft: "/zzz"), "nothing matches: no menu")
         XCTAssertNil(dispatchPillMenu(draft: "/compact keep the API"), "past the space it is the command's arguments")
         XCTAssertNil(dispatchPillMenu(draft: "hello"))
@@ -588,6 +591,34 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.submit(pill.adapter.composerDraft)
         XCTAssertTrue(pill.permissionsPickerOpen)
         XCTAssertEqual(sent, 0)
+    }
+
+    func testTerminalOpensAShellWithNoLineInItsOwnWindowAndClearsTheComposer() {
+        let pill = makePill()
+        pill.commandRuns.launchesProcesses = false
+        pill.commandRuns.presentsWindows = false
+        pill.commandWorkingDirectory = { "/tmp" }
+        pill.currentSessionId = { "session-a" }
+        pill.show()
+        pill.adapter.composerDraft = "/term"
+        pill.submit("/term")
+        XCTAssertEqual(pill.adapter.composerDraft, "/terminal", "the first Enter completes")
+        pill.submit("/terminal")
+        XCTAssertEqual(pill.adapter.composerDraft, "", "the composer clears")
+        guard let run = pill.commandRuns.runs.first else { return XCTFail("no terminal") }
+        XCTAssertEqual(pill.commandRuns.runs.count, 1)
+        XCTAssertTrue(run.isTerminal)
+        XCTAssertEqual(run.command, "", "no line of its own")
+        XCTAssertEqual(run.workingDirectory, "/tmp", "the session's folder")
+        XCTAssertEqual(run.sessionId, "session-a")
+        XCTAssertEqual(run.commandOutcome, .interactive)
+        XCTAssertTrue(run.shellIsLive, "the pill's live-shell state")
+        XCTAssertEqual(run.displayTitle, "Terminal")
+        XCTAssertEqual(pill.commandRuns.openedWindowsForTesting, [run.id], "its window opens at once")
+        XCTAssertEqual(run.transcriptScope, .session, "Add to transcript sends the session")
+        pill.adapter.composerDraft = "/"
+        pill.runMenuCommand("terminal")
+        XCTAssertEqual(pill.commandRuns.runs.count, 2, "a menu click opens one too")
     }
 
     func testAMenuClickRunsTheCommand() {
@@ -655,8 +686,8 @@ final class DispatchPillControllerTests: XCTestCase {
     func testArrowsWalkTheMatchingRowsAndWrap() {
         let menu = dispatchPillMenu(draft: "/")!
         XCTAssertEqual(menu.moved(from: nil, down: true), "permissions", "from the closest match")
-        XCTAssertEqual(menu.moved(from: "spawn", down: true), "compact", "wraps")
-        XCTAssertEqual(menu.moved(from: "compact", down: false), "spawn")
+        XCTAssertEqual(menu.moved(from: "terminal", down: true), "compact", "wraps")
+        XCTAssertEqual(menu.moved(from: "compact", down: false), "terminal")
         let narrowed = dispatchPillMenu(draft: "/a")!   // compact, spawn match; permissions does not
         XCTAssertEqual(narrowed.moved(from: "compact", down: true), "spawn", "skips rows that do not match")
     }

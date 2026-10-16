@@ -52,8 +52,14 @@ enum CommandRunPhase: Equatable {
 @MainActor
 final class CommandRun: ObservableObject, Identifiable {
     let id = UUID()
-    /// The line as the user typed it.
+    /// The line as the user typed it — EMPTY for a terminal opened with no line of its own (`/terminal`).
     let command: String
+    /// A terminal opened with no line (`/terminal`): a plain interactive login shell.
+    var isTerminal: Bool { command.isEmpty }
+    /// The shell's name (`zsh`), for a terminal's label.
+    let shellName: String
+    /// What the pill and the window call the run: `$ line`, or "Terminal" for a terminal.
+    var displayTitle: String { isTerminal ? "Terminal" : "$ " + command }
     let workingDirectory: String
     let homeDirectory: String
     /// The dispatch session the command was typed into, or nil when there was none — see
@@ -105,6 +111,7 @@ final class CommandRun: ObservableObject, Identifiable {
         self.workingDirectory = workingDirectory
         self.homeDirectory = environment.homeDirectory
         self.sessionId = sessionId
+        self.shellName = (environment.shell as NSString).lastPathComponent
         let nonce = loginShellRunNonce()
         self.nonce = nonce
         scanner = TerminalSemanticMarkScanner(tag: loginShellMarkTag(nonce))
@@ -123,6 +130,11 @@ final class CommandRun: ObservableObject, Identifiable {
             MainActor.assumeIsolated { self?.finish(status) }
         }
 
+        if command.isEmpty {
+            // No line to wait for: the shell is the whole thing from the start.
+            phase = .shell
+            commandOutcome = .interactive
+        }
         guard launch else { return }
         guard let shim = commandRunMakeShimDirectory() else {
             outcome = .failedToStart
@@ -228,7 +240,19 @@ final class CommandRun: ObservableObject, Identifiable {
 
     /// What "Add to transcript" sends: the line and its own output — or, once the user has gone on typing in the
     /// shell, the session's tail from the line's start (the later commands and their output included).
-    var transcriptScope: TerminalTranscriptScope { typedAfterCommand ? .session : .command }
+    var transcriptScope: TerminalTranscriptScope { typedAfterCommand || isTerminal ? .session : .command }
+
+    /// The paths on screen in the app the user is in, for the shell's autosuggestions: written — the PATHS only,
+    /// never the screen's text — to `paths` (0600) in the run's private shim folder, which goes with the run.
+    func writeOnScreenPaths(_ paths: [String]) {
+        guard let shimDirectory, outcome == .running else { return }
+        let clean = paths.filter { !$0.contains("\n") && !$0.contains("\0") }
+        let target = shimDirectory + "/" + loginShellOnScreenPathsFile
+        let staging = target + ".new"
+        guard FileManager.default.createFile(atPath: staging, contents: Data(clean.joined(separator: "\n").utf8),
+                                             attributes: [.posixPermissions: 0o600]) else { return }
+        _ = rename(staging, target)
+    }
 
     /// The message "Add to transcript" sends.
     func transcriptMessage() -> String {
@@ -296,6 +320,16 @@ final class CommandRun: ObservableObject, Identifiable {
     // MARK: Test seams (a run built with `launch: false`)
 
     func feedForTesting(_ bytes: [UInt8]) { capture(bytes[...]) }
+    /// The session's tail as plain text.
+    var sessionTextForTesting: String { terminalPlainText(sessionCapture.bytes()) }
+    /// The screen's rows around the cursor's — `rows` up to it and `after` past it (a suggestion may wrap on) —
+    /// as the emulator holds them, joined (a wrapped line reads whole).
+    func screenTailForTesting(rows: Int = 3, after: Int = 0) -> String {
+        let terminal = terminalView.getTerminal()
+        let y = terminal.getCursorLocation().y
+        return (max(0, y - rows + 1)...(y + after)).compactMap { terminal.getLine(row: $0)?.translateToString(trimRight: true) }
+            .joined()
+    }
     /// A run's own marks, as its shell writes them.
     func startMarkForTesting() -> String { "\u{1B}]133;C;\(loginShellMarkTag(nonce))\u{07}" }
     func endMarkForTesting(_ status: Int32) -> String { "\u{1B}]133;D;\(status);\(loginShellMarkTag(nonce))\u{07}" }
@@ -449,6 +483,23 @@ final class CommandRunStore: ObservableObject {
 
     /// Test seam: false builds runs without starting their process.
     var launchesProcesses = true
+    /// Test seam: false records the windows it would open instead (no test puts a window on screen).
+    var presentsWindows = true
+    private(set) var openedWindowsForTesting: [UUID] = []
+
+    /// The on-screen paths the pill holds now (a new run's shell starts with them). Wired by the pill.
+    var currentOnScreenPaths: (() -> [String])?
+    /// Reads the on-screen paths afresh, then hands them over (a terminal window became key). Wired by the pill.
+    var readOnScreenPaths: ((@escaping ([String]) -> Void) -> Void)?
+
+    /// `/terminal`: a plain interactive login shell — no line of its own — in `workingDirectory`, with its window
+    /// open at once.
+    @discardableResult
+    func startTerminal(workingDirectory: String, environment: CommandLineEnvironment, sessionId: String? = nil) -> CommandRun {
+        let run = start(command: "", workingDirectory: workingDirectory, environment: environment, sessionId: sessionId)
+        openWindow(run.id)
+        return run
+    }
 
     /// Sends a run's transcript message to the session it RECORDED — that session's own send path
     /// (`session.send`), never the focused session's. Wired by the app.
@@ -483,6 +534,8 @@ final class CommandRunStore: ObservableObject {
                sessionId: String? = nil) -> CommandRun {
         let run = CommandRun(command: command, workingDirectory: workingDirectory, environment: environment,
                              sessionId: sessionId, launch: launchesProcesses)
+        // The shell's autosuggestions start from what is on screen now.
+        run.writeOnScreenPaths(currentOnScreenPaths?() ?? [])
         if let session = run.session { launchedSessions.insert(session) }
         pruneEndedSessions()
         withAnimationIfVisible { runs.append(run) }
@@ -532,6 +585,10 @@ final class CommandRunStore: ObservableObject {
     /// A click on a command pill: its terminal window — brought forward when already open.
     func openWindow(_ id: UUID) {
         guard let run = run(id) else { return }
+        guard presentsWindows else {
+            openedWindowsForTesting.append(id)
+            return
+        }
         if let open = windows[id] {
             open.bringToFront()
             return
@@ -547,6 +604,11 @@ final class CommandRunStore: ObservableObject {
                 return await self.addToTranscript(run)
             })
         controller.onClosed = { [weak self] in self?.windows[id] = nil }
+        // Back to the terminal: its shell's autosuggestions get the paths on screen in the app the user came from.
+        controller.onBecameKey = { [weak self, weak run] in
+            guard let self, let run, let read = self.readOnScreenPaths else { return }
+            read { [weak run] paths in run?.writeOnScreenPaths(paths) }
+        }
         windows[id] = controller
         controller.show()
     }

@@ -19,7 +19,7 @@ enum CommandPillStatus: Equatable {
     init(_ outcome: CommandRunOutcome, waiting: Bool = false) {
         switch outcome {
         case .running: self = waiting ? .waiting : .running
-        case .typedByHand: self = .handedOver
+        case .typedByHand, .interactive: self = .handedOver
         case .exited(0): self = .succeeded
         default: self = .failed
         }
@@ -144,13 +144,13 @@ private struct CommandPill: View {
     }
 
     private var typedCommand: String {
-        let full = "$ " + run.command
+        let full = run.displayTitle
         return typed >= full.count ? full : String(full.prefix(typed))
     }
 
     /// The type-on: a character every few milliseconds, the first forty or so (the rest truncate anyway).
     private func typeOn() async {
-        let full = "$ " + run.command
+        let full = run.displayTitle
         let shown = min(full.count, 44)
         guard typed < shown else { return }
         for count in (typed + 1)...shown {

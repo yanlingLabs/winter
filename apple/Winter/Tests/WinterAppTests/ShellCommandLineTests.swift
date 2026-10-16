@@ -346,7 +346,10 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertEqual(Array(zsh.arguments.dropFirst(5)), ["-l", "-i"])
         XCTAssertEqual(zsh.environment, ["ZDOTDIR": "/tmp/shim"], "the startup shim — and no variable carries the line")
         XCTAssertEqual(zsh.files[loginShellLineFile], line, "the line travels in its own file, verbatim")
-        XCTAssertEqual(Set(zsh.files.keys), [".zshenv", ".zprofile", ".zshrc", ".zlogin", "run", loginShellLineFile])
+        XCTAssertEqual(Set(zsh.files.keys), [".zshenv", ".zprofile", ".zshrc", ".zlogin", "run", loginShellLineFile,
+                                             loginShellZshAutosuggestFile])
+        XCTAssertNil(loginShellSessionInvocation(shell: "/bin/zsh", line: "", shimDirectory: "/tmp/shim", nonce: "n")
+            .files[loginShellLineFile], "a terminal with no line has no line file")
         for (name, contents) in zsh.files where name != loginShellLineFile {
             XCTAssertFalse(contents.contains("whoami"), "\(name): the line is never spliced into a script")
         }
@@ -472,6 +475,35 @@ final class DispatchPillCommandModeTests: XCTestCase {
         func isDirectory(_ path: String) -> Bool { fake.isDirectory(path) }
         func isExecutableFile(_ path: String) -> Bool { fake.isExecutableFile(path) }
         func entries(ofDirectory path: String) -> [String]? { fake.entries(ofDirectory: path) }
+    }
+
+    func testTheGhostStaysStableBetweenVerdictsAndTrimsOnMatchingKeystrokes() {
+        XCTAssertEqual(commandGhostContinuation(evaluatedText: "open /tmp/x/no", ghost: "tes.md", text: "open /tmp/x/not"), "es.md")
+        XCTAssertEqual(commandGhostContinuation(evaluatedText: "open /tmp/x/no", ghost: "tes.md", text: "open /tmp/x/n"), "otes.md")
+        XCTAssertNil(commandGhostContinuation(evaluatedText: "open /tmp/x/no", ghost: "tes.md", text: "open /tmp/x/noq"))
+        XCTAssertNil(commandGhostContinuation(evaluatedText: "open /tmp/x/no", ghost: "tes.md", text: "open /tmp/x/notes.md"),
+                     "typed to its end: nothing left")
+
+        let mode = makeMode()
+        mode.evaluateNowForTesting("open /tmp/x/no")
+        var published = 0
+        let watch = mode.$ghost.dropFirst().sink { _ in published += 1 }
+        // Typing the ghost's own next characters: trimmed at once, never blank, before any verdict lands…
+        var shown: [String?] = []
+        var draft = "open /tmp/x/no"
+        for c in "tes.m" {
+            draft.append(c)
+            shown.append(mode.ghost(for: draft))
+            mode.evaluateNowForTesting(draft) // …and the verdict that lands says the same
+            shown.append(mode.ghost(for: draft))
+        }
+        XCTAssertEqual(shown, ["es.md", "es.md", "s.md", "s.md", ".md", ".md", "md", "md", "d", "d"])
+        // The same result recomputed: the ghost state does not change.
+        let before = published
+        mode.evaluateNowForTesting(draft)
+        mode.evaluateNowForTesting(draft)
+        XCTAssertEqual(published, before, "a same-result recompute never touches the ghost")
+        watch.cancel()
     }
 
     func testTheDebouncedPathPublishesTheVerdict() {

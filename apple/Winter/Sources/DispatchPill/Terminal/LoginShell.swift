@@ -173,12 +173,15 @@ func loginShellSessionInvocation(shell: String, line: String, shimDirectory: Str
     let tag = loginShellMarkTag(nonce)
     let run = shimDirectory + "/run"
     var environment: [String: String] = [:]
-    var files: [String: String] = [loginShellLineFile: line, "run": loginShellRunScript(shimDirectory: shimDirectory, tag: tag)]
+    // A terminal opened with no line of its own (`/terminal`) has no line file: the shell just starts.
+    var files: [String: String] = ["run": loginShellRunScript(shimDirectory: shimDirectory, tag: tag)]
+    if !line.isEmpty { files[loginShellLineFile] = line }
     let shellArguments: [String]
     switch dialect {
     case .zsh:
         environment["ZDOTDIR"] = shimDirectory
         files.merge(loginShellZshShimFiles(tag: tag)) { _, new in new }
+        files[loginShellZshAutosuggestFile] = loginShellZshAutosuggest()
         shellArguments = ["-l", "-i"]
     case .bash:
         files["bashrc"] = loginShellBashShim(shimDirectory: shimDirectory, tag: tag)
@@ -205,7 +208,7 @@ func loginShellRunScript(shimDirectory: String, tag: String) -> String {
     let typed = loginShellSingleQuoted(shimDirectory + "/" + loginShellTypedMarkerFile)
     return """
     # Winter: runs the line you typed into the Dispatch pill, once.
-    if [ "${__winter_state:-0}" = 0 ] && [ ! -e \(typed) ]; then
+    if [ "${__winter_state:-0}" = 0 ] && [ ! -e \(typed) ] && [ -f \(file) ]; then
       __winter_state=2
       if [ -f \(file) ]; then
         __winter_line=$(command cat -- \(file))
@@ -218,6 +221,7 @@ func loginShellRunScript(shimDirectory: String, tag: String) -> String {
       command printf '\\033]133;D;%d;\(tag)\\007' "$__winter_status"
       unset __winter_line __winter_status
     fi
+    [ "${__winter_state:-0}" = 0 ] && __winter_state=3
 
     """
 }
@@ -228,7 +232,7 @@ func loginShellFishRunScript(shimDirectory: String, tag: String) -> String {
     let typed = loginShellFishQuoted(shimDirectory + "/" + loginShellTypedMarkerFile)
     return """
     # Winter: runs the line you typed into the Dispatch pill, once.
-    if not set -q __winter_state; and not test -e \(typed)
+    if not set -q __winter_state; and not test -e \(typed); and test -f \(file)
       set -g __winter_state 2
       set -g __winter_line (command cat -- \(file) | string collect)
       command rm -f -- \(file)
@@ -275,6 +279,8 @@ func loginShellZshShimFiles(tag: String) -> [String: String] {
           (( __winter_state == 0 )) || return 0
           # The user typed it in by hand already ("Type it").
           if [[ -e $__winter_shim/\(loginShellTypedMarkerFile) ]]; then __winter_state=3; return 0; fi
+          # A terminal opened with no line of its own.
+          if [[ -z ${__winter_line-} ]]; then __winter_state=3; return 0; fi
           __winter_state=1
           # The line runs exactly as validated: no history expansion for it (`!` stays `!`). Emptying histchars is
           # what the lexer reads; toggling BANG_HIST here would be too late for this line.
@@ -303,10 +309,160 @@ func loginShellZshShimFiles(tag: String) -> [String: String] {
         add-zle-hook-widget line-init __winter_run_line
         add-zsh-hook preexec __winter_preexec
         precmd_functions=(__winter_precmd ${precmd_functions[@]})
+        [[ -r $__winter_shim/\(loginShellZshAutosuggestFile) ]] && builtin source $__winter_shim/\(loginShellZshAutosuggestFile)
 
         """
     return [".zshenv": zshenv, ".zprofile": header + source(".zprofile"), ".zshrc": header + source(".zshrc"),
             ".zlogin": zlogin]
+}
+
+/// The autosuggestions file in a zsh run's shim folder, and the paths file the app keeps next to it.
+let loginShellZshAutosuggestFile = "autosuggest.zsh"
+let loginShellOnScreenPathsFile = "paths"
+
+/// Autosuggestions for Winter's own zsh terminals, the way zsh-autosuggestions does them: on every change of the
+/// line, the rest of it is suggested after the cursor in dim text (`POSTDISPLAY`, highlighted through
+/// `region_highlight` — APPENDED to, with a `memo`, so zsh-syntax-highlighting's own entries stay). The suggestion
+/// is the most recent history entry starting with the line (`HISTORY_IGNORE` respected); failing that, when the
+/// word being typed is a path (`/`, `~`, `./`), a path that was on screen — the app keeps those, the PATHS only,
+/// in the shim folder's `paths` file. → or End at the end of the line accept it all; ⌥→ (forward-word) one word.
+/// Tab is untouched. Nothing per keystroke runs a command: one in-shell history search, and (for a path) one
+/// read of a ≤ 30-line file. If the user's own config loaded zsh-autosuggestions (now or later), this does
+/// nothing. It lives in this shell only — no dotfile is touched.
+func loginShellZshAutosuggest() -> String {
+    """
+    # Winter: autosuggestions for this terminal only — like zsh-autosuggestions (history, then the paths on screen).
+    __winter_as_present() {
+      (( ${+ZSH_AUTOSUGGEST_STRATEGY} || ${+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE} || ${+functions[_zsh_autosuggest_start]} || ${+widgets[autosuggest-accept]} ))
+    }
+    if ! __winter_as_present; then
+      builtin zmodload -i zsh/mapfile 2>/dev/null
+      typeset -g __winter_as_paths=$__winter_shim/\(loginShellOnScreenPathsFile)
+      typeset -g __winter_as_last=
+      typeset -g __winter_as_off=0
+
+      # REPLY: what to suggest after the line $1 (the rest of it), or nothing.
+      __winter_as_suggestion() {
+        emulate -L zsh
+        setopt extended_glob
+        REPLY=
+        local prefix=$1
+        [[ -n $prefix ]] || return 0
+        local pattern="${(b)prefix}?*"
+        [[ -n ${HISTORY_IGNORE-} ]] && pattern="(${pattern})~(${HISTORY_IGNORE})"
+        local found=${history[(r)$pattern]}
+        if [[ -n $found ]]; then
+          REPLY=${found:${#prefix}}
+          return 0
+        fi
+        local word=${prefix##*[[:space:]]}
+        [[ $word == (/|\\~|./)* ]] || return 0
+        [[ -r $__winter_as_paths ]] || return 0
+        local p candidate rest
+        for p in ${(f)mapfile[$__winter_as_paths]}; do
+          candidate=$p
+          if [[ $word == \\~* && $p == ${(b)HOME}/* ]]; then candidate="~/${p:$(( ${#HOME} + 1 ))}"
+          elif [[ $word == ./* && $p == ${(b)PWD}/* ]]; then candidate="./${p:$(( ${#PWD} + 1 ))}"
+          elif [[ $word == /* && $p == \\~/* ]]; then candidate="$HOME/${p:2}"
+          fi
+          # As it would be typed: backslash-escaped, a leading ~ or ./ kept.
+          if [[ $candidate == \\~/* ]]; then rest=${candidate:2}; candidate="~/${(q)rest}"
+          elif [[ $candidate == ./* ]]; then rest=${candidate:2}; candidate="./${(q)rest}"
+          else candidate=${(q)candidate}
+          fi
+          if [[ $candidate == ${(b)word}?* ]]; then
+            REPLY=${candidate:${#word}}
+            return 0
+          fi
+        done
+        return 0
+      }
+
+      __winter_as_highlight() {
+        region_highlight=( ${region_highlight:#*memo=winter-as*} )
+        [[ -n $POSTDISPLAY ]] && region_highlight+=( "${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=8,memo=winter-as" )
+      }
+
+      __winter_as_clear() {
+        POSTDISPLAY=
+        region_highlight=( ${region_highlight:#*memo=winter-as*} )
+      }
+
+      # Before every redraw: a new suggestion when the line changed (else the one shown stays, re-dimmed).
+      __winter_as_redraw() {
+        if (( __winter_as_off )) || __winter_as_present; then
+          __winter_as_off=1
+          [[ -n $POSTDISPLAY ]] && __winter_as_clear
+          return 0
+        fi
+        if [[ -z $BUFFER ]] || (( CURSOR != ${#BUFFER} )); then
+          __winter_as_clear
+          __winter_as_last=
+          return 0
+        fi
+        if [[ $BUFFER != "$__winter_as_last" ]]; then
+          __winter_as_last=$BUFFER
+          __winter_as_suggestion "$BUFFER"
+          POSTDISPLAY=$REPLY
+        fi
+        __winter_as_highlight
+      }
+
+      __winter_as_finish() {
+        __winter_as_clear
+        __winter_as_last=
+      }
+
+      # → / End at the end of the line: the whole suggestion; anywhere else, the key's own widget.
+      __winter_as_accept() {
+        if [[ -n $POSTDISPLAY ]] && (( CURSOR == ${#BUFFER} )) && (( ! __winter_as_off )); then
+          BUFFER+=$POSTDISPLAY
+          CURSOR=${#BUFFER}
+          __winter_as_clear
+          __winter_as_last=$BUFFER
+        else
+          zle __winter_as_orig_$WIDGET -- "$@"
+        fi
+      }
+
+      # ⌥→ (forward-word) at the end of the line: the suggestion's next word.
+      __winter_as_accept_word() {
+        if [[ -n $POSTDISPLAY ]] && (( CURSOR == ${#BUFFER} )) && (( ! __winter_as_off )); then
+          local next=${(M)POSTDISPLAY##[[:space:]]#[^[:space:]/]##(/|)}
+          [[ -n $next ]] || next=${POSTDISPLAY[1]}
+          BUFFER+=$next
+          CURSOR=${#BUFFER}
+          __winter_as_last=
+        else
+          zle __winter_as_orig_$WIDGET -- "$@"
+        fi
+      }
+
+      () {
+        setopt localoptions extended_glob
+        local w
+        for w in forward-char end-of-line vi-forward-char vi-end-of-line; do
+          zle -A $w __winter_as_orig_$w && zle -N $w __winter_as_accept
+        done
+        for w in forward-word emacs-forward-word vi-forward-word; do
+          zle -A $w __winter_as_orig_$w && zle -N $w __winter_as_accept_word
+        done
+        # ⌥→ and End as terminals send them, where nothing is bound yet.
+        local key
+        for key in '^[[1;3C' '^[[1;9C'; do
+          [[ $(builtin bindkey -- $key) == *undefined-key ]] && builtin bindkey -- $key forward-word
+        done
+        for key in '^[[F' '^[OF'; do
+          [[ $(builtin bindkey -- $key) == *undefined-key ]] && builtin bindkey -- $key end-of-line
+        done
+      }
+      zle -N __winter_as_redraw
+      zle -N __winter_as_finish
+      add-zle-hook-widget line-pre-redraw __winter_as_redraw
+      add-zle-hook-widget line-finish __winter_as_finish
+    fi
+
+    """
 }
 
 /// The bash shim (`--rcfile`): a login shell's files, then the run script, then the prompt.

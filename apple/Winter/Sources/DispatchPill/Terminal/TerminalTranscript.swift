@@ -130,6 +130,8 @@ enum CommandRunOutcome: Equatable {
     case failedToStart
     /// The user typed the line in by hand ("Type it"): the shell runs it, its status is not known.
     case typedByHand
+    /// A terminal opened with no line of its own (`/terminal`).
+    case interactive
 
     var isFinished: Bool { self != .running }
     var succeeded: Bool { self == .exited(0) }
@@ -171,18 +173,30 @@ func terminalTranscriptMessage(command: String, workingDirectory: String, home: 
     case .signaled(let signal): state = "stopped by signal \(signal)"
     case .failedToStart: state = "could not start"
     case .typedByHand: state = "typed into the shell"
+    case .interactive: state = "an open terminal"
     }
     let place = terminalDisplayPath(workingDirectory, home: home)
+    if command.isEmpty {
+        // A terminal opened with no line (`/terminal`): its session, as it stands.
+        let body = output.isEmpty ? "(no output)" : output
+        let fence = terminalTranscriptFence(body)
+        return "This is from my terminal in \(place):\n\(fence)\n\(body)\n\(fence)"
+    }
     let header = scope == .command
         ? "I ran this in my terminal in \(place) (\(state)):"
         : "I ran this in my terminal in \(place) (\(state)), then kept working in that shell:"
     let body = output.isEmpty ? "$ \(command)" : "$ \(command)\n\(output)"
+    let fence = terminalTranscriptFence(body)
+    return "\(header)\n\(fence)\n\(body)\n\(fence)"
+}
+
+/// A code fence longer than any backtick run in `body`.
+private func terminalTranscriptFence(_ body: String) -> String {
     var longest = 0, run = 0
     for c in body {
         if c == "`" { run += 1; longest = max(longest, run) } else { run = 0 }
     }
-    let fence = String(repeating: "`", count: max(3, longest + 1))
-    return "\(header)\n\(fence)\n\(body)\n\(fence)"
+    return String(repeating: "`", count: max(3, longest + 1))
 }
 
 // MARK: - OSC 133 semantic-prompt marks
