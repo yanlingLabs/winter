@@ -246,9 +246,10 @@ export function classAInvariantsHold(receipt: CoworkNativeOrderlyReceipt): boole
   const booted = receipt.guest.drain === "acked";
   if (booted !== (receipt.guest.powerOff === "observed")) return false;
   const [data, environment] = receipt.volumes;
-  if (data.attached !== environment.attached || data.attached && !booted) return false;
+  if (data.attached !== environment.attached) return false;
   return receipt.volumes.every(v => v.attached
-    ? v.finalFlush === "completed" && v.flushRequested === v.flushCompleted && v.capacityBytes > 0
+    // Held by the worker: every requested flush completed and a final flush followed. A guest that never booted wrote nothing, so its counters are zero.
+    ? v.finalFlush === "completed" && v.flushRequested === v.flushCompleted && v.capacityBytes > 0 && (booted || v.flushRequested === 0)
     : v.finalFlush === "not-attached" && v.flushRequested === 0 && v.flushCompleted === 0 && v.device === "0" && v.inode === "0" && v.capacityBytes === 0);
 }
 
