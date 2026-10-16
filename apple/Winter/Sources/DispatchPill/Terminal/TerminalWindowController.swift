@@ -41,6 +41,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             onZoom: { [weak window] in window?.performZoom(nil) },
             onStop: { [weak run] in run?.interrupt() },
             onEnd: { [weak run] in run?.endShell() },
+            onTypeLine: { [weak run] in run?.typeLineByHand() },
             canAddToTranscript: canAddToTranscript,
             onAddToTranscript: {
                 guard chrome.sendState != .sending, canAddToTranscript() else { return }
@@ -123,6 +124,7 @@ struct TerminalWindowRootView: View {
     let onZoom: () -> Void
     let onStop: () -> Void
     let onEnd: () -> Void
+    let onTypeLine: () -> Void
     let canAddToTranscript: () -> Bool
     let onAddToTranscript: () -> Void
 
@@ -131,6 +133,7 @@ struct TerminalWindowRootView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if run.needsManualStart { manualStartNotice }
             TerminalHost(view: run.terminalView)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -138,6 +141,25 @@ struct TerminalWindowRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
+    }
+
+    /// The shell did not run the line on its own: say so, and let the USER put it in — nothing is typed for them.
+    private var manualStartNotice: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Theme.commandPurple)
+            Text("Your shell didn’t run the line automatically (its startup overrides Winter’s).")
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Color.white.opacity(0.75))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TerminalChromeButton(symbol: "keyboard", label: "Type it",
+                                 help: "Type the line into this terminal and press Return", action: onTypeLine)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 40)
+        .background(Color.white.opacity(0.05))
     }
 
     private var header: some View {
@@ -186,8 +208,8 @@ struct TerminalWindowRootView: View {
 
     private var controls: some View {
         HStack(spacing: 8) {
-            TerminalRunStateBadge(outcome: run.commandOutcome, shellIsLive: run.shellIsLive)
-                .help(run.failureNote ?? "")
+            TerminalRunStateBadge(outcome: run.commandOutcome, shellIsLive: run.shellIsLive,
+                                  waiting: run.needsManualStart)
             if run.commandOutcome == .running {
                 TerminalChromeButton(symbol: "stop.fill", label: "Stop", help: "Stop this command (Ctrl-C) — the shell stays open",
                                      action: onStop)
@@ -282,6 +304,7 @@ private struct TerminalChromeButton: View {
 private struct TerminalRunStateBadge: View {
     let outcome: CommandRunOutcome
     let shellIsLive: Bool
+    var waiting = false
 
     var body: some View {
         HStack(spacing: 5) {
@@ -292,7 +315,7 @@ private struct TerminalRunStateBadge: View {
                     Circle().fill(Theme.commandPurple).frame(width: 7, height: 7).opacity(0.45 + 0.55 * phase)
                 }
                 .frame(width: 7, height: 7)
-                Text("Running")
+                Text(waiting ? "Waiting" : "Running")
             case .exited(0):
                 Image(systemName: "checkmark").font(Typography.caption(.semibold))
                 Text("Done")
@@ -304,7 +327,10 @@ private struct TerminalRunStateBadge: View {
                 Text("Stopped")
             case .failedToStart:
                 Circle().fill(Color.red).frame(width: 7, height: 7)
-                Text(shellIsLive ? "Didn’t run" : "Couldn’t start")
+                Text("Couldn’t start")
+            case .typedByHand:
+                Image(systemName: "keyboard").font(Typography.caption(.semibold))
+                Text("Typed in")
             }
             if shellIsLive {
                 Text("· shell open").foregroundStyle(Theme.commandPurple)

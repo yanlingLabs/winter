@@ -122,9 +122,7 @@ final class TerminalSessionIntegrationTests: XCTestCase {
 
     override func tearDownWithError() throws {
         if let home { try? FileManager.default.removeItem(atPath: home) }
-        CommandRun.fallbackAfter = 3
-        CommandRun.fallbackQuiet = 1
-        CommandRun.fallbackGiveUp = 5
+        CommandRun.waitingNoticeAfter = 5
         try super.tearDownWithError()
     }
 
@@ -222,7 +220,7 @@ final class TerminalSessionIntegrationTests: XCTestCase {
         XCTAssertEqual(run.commandOutcome, .exited(5), "only the run's own tagged mark ends it")
     }
 
-    func testTheFallbackRunsTheLineWhenThePromptHookNeverFires() throws {
+    func testWhenThePromptHookNeverFiresNothingIsTypedUntilTheUserClicksTypeIt() throws {
         // A plugin (zsh-vi-mode does this) replaces zle-line-init at the first prompt: the shim's hook never fires.
         try write(".zshrc", """
             __t_noop() { : }
@@ -230,16 +228,24 @@ final class TerminalSessionIntegrationTests: XCTestCase {
             precmd_functions+=(__t_rebind)
 
             """)
-        CommandRun.fallbackAfter = 1
-        CommandRun.fallbackQuiet = 0.5
-        let run = CommandRun(command: #"print -r -- "fallback fix!it" >> $HOME/runs; (exit 6)"#, workingDirectory: home,
+        CommandRun.waitingNoticeAfter = 1
+        let run = CommandRun(command: #"print -r -- "by hand" >> $HOME/runs"#, workingDirectory: home,
                              environment: environment(shell: "/bin/zsh"))
         defer { run.endShell(); _ = waitUntil(5) { run.outcome != .running } }
-        XCTAssertTrue(waitUntil(15) { run.commandOutcome != .running })
-        XCTAssertTrue(run.fallbackSentForTesting)
-        XCTAssertEqual(run.commandOutcome, .exited(6))
-        XCTAssertEqual(linesRun(), ["fallback fix!it"], "once, and never history-expanded")
+        XCTAssertTrue(waitUntil(10) { run.needsManualStart }, "the window offers Type it")
+        _ = waitUntil(2) { false }
+        XCTAssertEqual(run.appWrites, 0, "nothing was typed for the user")
+        XCTAssertEqual(linesRun(), [])
+        XCTAssertEqual(run.commandOutcome, .running, "waiting — never failed")
+        XCTAssertNotNil(run.shimDirectory, "the shim stays while the line may still start")
+        run.typeLineByHand()
+        run.typeLineByHand()
+        XCTAssertEqual(run.appWrites, 1, "the click writes the line exactly once")
+        XCTAssertTrue(waitUntil(10) { linesRun() == ["by hand"] })
+        XCTAssertEqual(run.commandOutcome, .typedByHand)
         XCTAssertEqual(run.outcome, .running)
+        _ = waitUntil(1) { false }
+        XCTAssertEqual(linesRun(), ["by hand"], "and the shim never ran it as well")
     }
 
     func testTheRunScriptRunsTheLineOnceFromItsFileWhenTheShimWasSkipped() throws {
@@ -267,18 +273,72 @@ final class TerminalSessionIntegrationTests: XCTestCase {
         }
     }
 
-    func testARunWhoseLineNeverStartsIsMarkedFailedNotLeftRunning() {
+    func testALineThatHasNotStartedWaitsAndNothingIsTypedAutomatically() {
         let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: [], homeDirectory: home,
                                                        fileSystem: LiveShellFileSystem())
         let run = CommandRun(command: "ls", workingDirectory: home, environment: environment, launch: false)
-        run.checkFallback(now: Date().addingTimeInterval(1))
-        XCTAssertFalse(run.fallbackSentForTesting, "too early")
-        run.checkFallback(now: Date().addingTimeInterval(4))
-        XCTAssertTrue(run.fallbackSentForTesting)
-        XCTAssertEqual(run.commandOutcome, .running)
-        run.checkFallback(now: Date().addingTimeInterval(10))
-        XCTAssertEqual(run.commandOutcome, .failedToStart)
-        XCTAssertNotNil(run.failureNote)
+        run.checkStarted(now: Date().addingTimeInterval(1))
+        XCTAssertFalse(run.needsManualStart, "too early")
+        for seconds in [6.0, 30, 600] { run.checkStarted(now: Date().addingTimeInterval(seconds)) }
+        XCTAssertTrue(run.needsManualStart)
+        XCTAssertEqual(run.appWrites, 0, "no automatic write, ever")
+        XCTAssertEqual(run.commandOutcome, .running, "waiting, never failed")
+        XCTAssertEqual(CommandPillStatus(run.commandOutcome, waiting: run.needsManualStart), .waiting)
+        // The line starts late after all: the notice goes.
+        run.feedForTesting(Array(run.startMarkForTesting().utf8))
+        XCTAssertFalse(run.needsManualStart)
+        XCTAssertEqual(run.phase, .command)
+        run.typeLineByHand()
+        XCTAssertEqual(run.appWrites, 0, "nothing to type once it started")
+    }
+
+    // MARK: Sessions, pinned to their leader's start time
+
+    final class FakeProcesses: @unchecked Sendable {
+        struct Proc { var sid: pid_t; var start: UInt64; var ignoresHangUp = false }
+        var table: [pid_t: Proc]
+        private(set) var signals: [(pid_t, Int32)] = []
+        init(_ table: [pid_t: Proc]) { self.table = table }
+        var processTable: CommandRunProcessTable {
+            CommandRunProcessTable(
+                allPids: { Array(self.table.keys) },
+                sessionId: { self.table[$0]?.sid },
+                startMicros: { self.table[$0]?.start },
+                send: { pid, signal in
+                    self.signals.append((pid, signal))
+                    if signal == SIGKILL || !(self.table[pid]?.ignoresHangUp ?? true) { self.table[pid] = nil }
+                })
+        }
+    }
+
+    func testOnlyTheRunsOwnSessionIsEverSignalled() {
+        let session = CommandRunSession(leader: 500, leaderStart: 1_000, runStart: 990)
+        // The leader is the run's: the whole session, nothing else.
+        let live = FakeProcesses([500: .init(sid: 500, start: 1_000), 501: .init(sid: 500, start: 1_100),
+                                  502: .init(sid: 500, start: 1_200), 900: .init(sid: 900, start: 50)])
+        XCTAssertEqual(Set(session.targets(in: live.processTable)), [500, 501, 502])
+        // The leader's pid now belongs to someone else's session (another terminal's leader): nothing.
+        let reused = FakeProcesses([500: .init(sid: 500, start: 5_000), 501: .init(sid: 500, start: 5_100)])
+        XCTAssertEqual(session.targets(in: reused.processTable), [])
+        // The leader is gone: only the session's processes that started after the run began.
+        let orphans = FakeProcesses([501: .init(sid: 500, start: 1_100), 777: .init(sid: 500, start: 10)])
+        XCTAssertEqual(session.targets(in: orphans.processTable), [501])
+    }
+
+    func testQuitHangsUpThenKillsAndForgetsSessionsWithNothingLeft() {
+        let processes = FakeProcesses([500: .init(sid: 500, start: 1_000),
+                                       501: .init(sid: 500, start: 1_100, ignoresHangUp: true),
+                                       600: .init(sid: 600, start: 9_999)])
+        var sessions: Set<CommandRunSession> = [
+            CommandRunSession(leader: 500, leaderStart: 1_000, runStart: 990),
+            CommandRunSession(leader: 600, leaderStart: 2_000, runStart: 1_990), // pid 600 reused since
+            CommandRunSession(leader: 700, leaderStart: 3_000, runStart: 2_990), // nothing left
+        ]
+        CommandRunStore.stopSessions(&sessions, table: processes.processTable, grace: 0.05)
+        XCTAssertEqual(processes.table.keys.sorted(), [600], "the run's session went — the job that ignored HUP too")
+        XCTAssertTrue(processes.signals.allSatisfy { $0.0 != 600 }, "a reused pid is never signalled")
+        XCTAssertTrue(processes.signals.contains { $0 == (501, SIGKILL) })
+        XCTAssertTrue(sessions.isEmpty, "and nothing is kept")
     }
 
     func testEndKillsTheWholeSessionEvenAJobThatIgnoresHangUp() throws {

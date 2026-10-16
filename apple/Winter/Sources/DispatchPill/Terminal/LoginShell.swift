@@ -125,19 +125,18 @@ func loginShellFishQuoted(_ text: String) -> String {
 }
 
 /// How a run starts: the executable and arguments (through the fd-closing trampoline), the variables to add to
-/// the run's environment (never the line), the files its private shim folder holds, and what to TYPE into the
-/// terminal if the shim was skipped.
+/// the run's environment (never the line), and the files its private shim folder holds.
 struct LoginShellSessionInvocation: Equatable {
     var executable: String
     var arguments: [String]
     var environment: [String: String]
     /// File name → contents, written into the shim folder (mode 0600) before the shell starts. `line` is the line.
     var files: [String: String]
-    /// The fallback: sources the folder's run script, which runs the line from the `line` file (or from the shim's
-    /// variable, if the shim read it) — unless it already started. Ends in Return; starts with a space (kept out
-    /// of history where the shell is set to).
-    var fallbackInput: String
 }
+
+/// The file the app creates in the shim folder when the USER typed the line in by hand ("Type it"): the shim then
+/// never runs it as well.
+let loginShellTypedMarkerFile = "typed"
 
 /// The name of the file the line travels in.
 let loginShellLineFile = "line"
@@ -163,9 +162,10 @@ let loginShellLineFile = "line"
 /// - **fish**: `-l -i --init-command "source <run.fish>"`.
 ///
 /// The RUN SCRIPT (`run`, POSIX; `run.fish`) runs the line with `eval` — never history-expanded — once: it does
-/// nothing when the line already started. When the shim was skipped (a `ZDOTDIR` set in `/etc/zshenv`) or its
-/// prompt hook never fired (a plugin that rebinds `zle-line-init`), the app types `fallbackInput`
-/// (`CommandRun`), which sources it.
+/// nothing when the line already started, or when the user typed it in by hand (`loginShellTypedMarkerFile`).
+/// When the shim was skipped (a `ZDOTDIR` set in `/etc/zshenv`) or its prompt hook never fired (a plugin that
+/// rebinds `zle-line-init`), NOTHING is typed for the user: the terminal window says so and offers "Type it"
+/// (`CommandRun`).
 func loginShellSessionInvocation(shell: String, line: String, shimDirectory: String,
                                  nonce: String) -> LoginShellSessionInvocation {
     let dialect = loginShellDialect(shell) ?? .zsh
@@ -175,7 +175,6 @@ func loginShellSessionInvocation(shell: String, line: String, shimDirectory: Str
     var environment: [String: String] = [:]
     var files: [String: String] = [loginShellLineFile: line, "run": loginShellRunScript(shimDirectory: shimDirectory, tag: tag)]
     let shellArguments: [String]
-    var fallback = " . " + loginShellSingleQuoted(run) + "\r"
     switch dialect {
     case .zsh:
         environment["ZDOTDIR"] = shimDirectory
@@ -191,22 +190,22 @@ func loginShellSessionInvocation(shell: String, line: String, shimDirectory: Str
     case .fish:
         files["run.fish"] = loginShellFishRunScript(shimDirectory: shimDirectory, tag: tag)
         let source = "source " + loginShellFishQuoted(shimDirectory + "/run.fish")
-        fallback = " " + source + "\r"
         shellArguments = ["-l", "-i", "--init-command", source]
     }
     return LoginShellSessionInvocation(
         executable: "/bin/zsh",
         arguments: ["-f", "-c", loginShellRunTrampoline, "winter-run", target] + shellArguments,
-        environment: environment, files: files, fallbackInput: fallback)
+        environment: environment, files: files)
 }
 
 /// The POSIX run script (zsh, bash, sh): the line once, between its marks. `__winter_state` — 0 not started,
 /// 1 accepted at the prompt (zsh), 2 running, 3 done — keeps it from running twice.
 func loginShellRunScript(shimDirectory: String, tag: String) -> String {
     let file = loginShellSingleQuoted(shimDirectory + "/" + loginShellLineFile)
+    let typed = loginShellSingleQuoted(shimDirectory + "/" + loginShellTypedMarkerFile)
     return """
     # Winter: runs the line you typed into the Dispatch pill, once.
-    if [ "${__winter_state:-0}" = 0 ]; then
+    if [ "${__winter_state:-0}" = 0 ] && [ ! -e \(typed) ]; then
       __winter_state=2
       if [ -f \(file) ]; then
         __winter_line=$(command cat -- \(file))
@@ -226,9 +225,10 @@ func loginShellRunScript(shimDirectory: String, tag: String) -> String {
 /// fish's run script.
 func loginShellFishRunScript(shimDirectory: String, tag: String) -> String {
     let file = loginShellFishQuoted(shimDirectory + "/" + loginShellLineFile)
+    let typed = loginShellFishQuoted(shimDirectory + "/" + loginShellTypedMarkerFile)
     return """
     # Winter: runs the line you typed into the Dispatch pill, once.
-    if not set -q __winter_state
+    if not set -q __winter_state; and not test -e \(typed)
       set -g __winter_state 2
       set -g __winter_line (command cat -- \(file) | string collect)
       command rm -f -- \(file)
@@ -273,6 +273,8 @@ func loginShellZshShimFiles(tag: String) -> [String: String] {
         __winter_histchars=
         __winter_run_line() {
           (( __winter_state == 0 )) || return 0
+          # The user typed it in by hand already ("Type it").
+          if [[ -e $__winter_shim/\(loginShellTypedMarkerFile) ]]; then __winter_state=3; return 0; fi
           __winter_state=1
           # The line runs exactly as validated: no history expansion for it (`!` stays `!`). Emptying histchars is
           # what the lexer reads; toggling BANG_HIST here would be too late for this line.

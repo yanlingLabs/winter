@@ -36,8 +36,8 @@ struct CommandModeSuppression: Equatable {
 /// on a background queue (the stat calls run there), and the verdict is memoized by text. Until a new verdict
 /// lands the last one stands (`displaysCommand`), so the purple does not flicker off on every keystroke.
 /// Return and Delete act only on a FRESH verdict for the exact text (`isActive(for:)`) — what the user saw
-/// purple — and never ask zsh: Return never upgrades white text to a run (a quick structural recheck may only
-/// downgrade it, say a path that vanished), and Delete opts out only of a purple that belongs to this text.
+/// purple — and never touch the filesystem or zsh: Return never upgrades white text to a run, and Delete opts out
+/// only of a purple that belongs to this text.
 /// The memo is keyed by text alone (the working directory rarely changes under a draft).
 @MainActor
 final class DispatchPillCommandMode: ObservableObject {
@@ -87,13 +87,11 @@ final class DispatchPillCommandMode: ObservableObject {
     }
 
     /// Return's question: RUN this text? Only when a verdict for this exact text was already shown purple — Return
-    /// never turns white text into a run. A quick structural recheck (stat calls; never zsh, never the engine
-    /// lock) may still DOWNGRADE it to a message, e.g. when a path it names has vanished since.
+    /// never turns white text into a run. It reads the SHOWN verdict alone: no filesystem access on the main thread
+    /// (a stat on a hung network mount would freeze the app), no zsh. The debounce keeps that verdict at most
+    /// `debounce` older than the text.
     func shouldRunOnReturn(_ text: String) -> Bool {
-        guard !text.isEmpty, isActive(for: text) else { return false }
-        let snapshot = environment.snapshot()
-        guard snapshot.enabled else { return false }
-        return shellLineIsCommand(text, context: snapshot.context(workingDirectory: workingDirectory()))
+        !text.isEmpty && environment.isEnabled && isActive(for: text)
     }
 
     /// Every edit of the draft.

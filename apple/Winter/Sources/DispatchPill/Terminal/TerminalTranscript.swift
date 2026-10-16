@@ -128,6 +128,8 @@ enum CommandRunOutcome: Equatable {
     case signaled(Int32)
     /// The process could not be started.
     case failedToStart
+    /// The user typed the line in by hand ("Type it"): the shell runs it, its status is not known.
+    case typedByHand
 
     var isFinished: Bool { self != .running }
     var succeeded: Bool { self == .exited(0) }
@@ -168,6 +170,7 @@ func terminalTranscriptMessage(command: String, workingDirectory: String, home: 
     case .exited(let code): state = "exit \(code)"
     case .signaled(let signal): state = "stopped by signal \(signal)"
     case .failedToStart: state = "could not start"
+    case .typedByHand: state = "typed into the shell"
     }
     let place = terminalDisplayPath(workingDirectory, home: home)
     let header = scope == .command

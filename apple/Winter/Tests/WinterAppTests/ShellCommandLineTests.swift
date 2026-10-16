@@ -304,6 +304,8 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertEqual(CommandPillStatus(.exited(0)), .succeeded)
         XCTAssertEqual(CommandPillStatus(.exited(1)), .failed)
         XCTAssertEqual(CommandPillStatus(.signaled(9)), .failed)
+        XCTAssertEqual(CommandPillStatus(.running, waiting: true), .waiting, "a line not started yet is never 'failed'")
+        XCTAssertEqual(CommandPillStatus(.typedByHand), .handedOver)
     }
 
     func testDisplayPathsAbbreviateHome() {
@@ -358,7 +360,6 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertTrue(zlogin.contains("add-zle-hook-widget line-init __winter_run_line"), "typed in at the first prompt")
         XCTAssertTrue(zlogin.contains("histchars=''"), "with history expansion off for it")
         XCTAssertTrue(zlogin.contains("133;C;winter-abc123") && zlogin.contains("133;D;%d;winter-abc123"), "marks carry the tag")
-        XCTAssertEqual(zsh.fallbackInput, " . '/tmp/shim/run'\r")
         XCTAssertTrue(zsh.files["run"]!.contains(#"eval "$__winter_line""#), "the fallback evals: no history expansion")
 
         let bash = loginShellSessionInvocation(shell: "/bin/bash", line: line, shimDirectory: "/tmp/shim", nonce: "n")
@@ -374,7 +375,6 @@ final class ShellCommandLineTests: XCTestCase {
         XCTAssertEqual(Array(fish.arguments.dropFirst(4)),
                        ["/opt/homebrew/bin/fish", "-l", "-i", "--init-command", "source '/tmp/shim/run.fish'"])
         XCTAssertEqual(fish.environment, [:])
-        XCTAssertEqual(fish.fallbackInput, " source '/tmp/shim/run.fish'\r")
         XCTAssertEqual(loginShellSingleQuoted("a'b"), #"'a'\''b'"#)
         XCTAssertNotEqual(loginShellRunNonce(), loginShellRunNonce())
     }
@@ -432,7 +432,7 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertFalse(mode.displaysCommand("hello there"), "…both ways")
     }
 
-    func testReturnNeverUpgradesButMayDowngrade() {
+    func testReturnNeverUpgradesAndNeverTouchesTheFilesystem() {
         var nodes = ShellCommandLineTests.fileSystem.nodes
         let fileSystem = MutableFileSystem(nodes: nodes)
         let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: ["open"],
@@ -443,12 +443,11 @@ final class DispatchPillCommandModeTests: XCTestCase {
         nodes["/tmp/later.md"] = .file
         fileSystem.nodes = nodes
         XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "white text never runs")
-        // Purple, then the file vanishes: Return downgrades to a message.
+        // Purple: Return runs on the shown verdict alone — no stat on the main thread.
         mode.evaluateNowForTesting("open /tmp/later.md")
+        let asked = fileSystem.questions
         XCTAssertTrue(mode.shouldRunOnReturn("open /tmp/later.md"))
-        nodes["/tmp/later.md"] = nil
-        fileSystem.nodes = nodes
-        XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "the path vanished: a message")
+        XCTAssertEqual(fileSystem.questions, asked, "Return asked the filesystem nothing")
     }
 
     func testReturnAndDeleteActOnlyOnAFreshVerdictForTheExactText() {
@@ -466,8 +465,9 @@ final class DispatchPillCommandModeTests: XCTestCase {
     /// A filesystem a test can change between two questions.
     private final class MutableFileSystem: ShellFileSystem {
         var nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]
+        private(set) var questions = 0
         init(nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]) { self.nodes = nodes }
-        private var fake: ShellCommandLineTests.FakeShellFileSystem { .init(nodes: nodes) }
+        private var fake: ShellCommandLineTests.FakeShellFileSystem { questions += 1; return .init(nodes: nodes) }
         func exists(_ path: String) -> Bool { fake.exists(path) }
         func isDirectory(_ path: String) -> Bool { fake.isDirectory(path) }
         func isExecutableFile(_ path: String) -> Bool { fake.isExecutableFile(path) }

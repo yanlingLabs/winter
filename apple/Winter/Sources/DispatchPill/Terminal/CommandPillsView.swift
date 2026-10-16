@@ -9,12 +9,17 @@ import SwiftUI
 /// whether the shell is still open after it is `CommandRun.shellIsLive`.
 enum CommandPillStatus: Equatable {
     case running
+    /// The shell has not started the line on its own: neutral, never "failed" (the window offers "Type it").
+    case waiting
+    /// The user typed the line in by hand: its status is not known.
+    case handedOver
     case succeeded
     case failed
 
-    init(_ outcome: CommandRunOutcome) {
+    init(_ outcome: CommandRunOutcome, waiting: Bool = false) {
         switch outcome {
-        case .running: self = .running
+        case .running: self = waiting ? .waiting : .running
+        case .typedByHand: self = .handedOver
         case .exited(0): self = .succeeded
         default: self = .failed
         }
@@ -110,7 +115,7 @@ private struct CommandPill: View {
     @State private var typed = 0
     @State private var hovering = false
 
-    private var status: CommandPillStatus { CommandPillStatus(run.commandOutcome) }
+    private var status: CommandPillStatus { CommandPillStatus(run.commandOutcome, waiting: run.needsManualStart) }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -183,6 +188,12 @@ private struct CommandPill: View {
                     .opacity(on ? 1 : 0.15)
             }
             .frame(width: 12, height: 20)
+        case .waiting, .handedOver:
+            // Neutral: a steady, dim cursor.
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Theme.commandPurple.opacity(0.45))
+                .frame(width: 7, height: 13)
+                .frame(width: 12, height: 20)
         case .succeeded:
             Image(systemName: "checkmark")
                 .font(Typography.caption(.semibold))
@@ -198,7 +209,7 @@ private struct CommandPill: View {
 
     @ViewBuilder
     private var trailingControl: some View {
-        if status == .running {
+        if status == .running || status == .waiting {
             Button(action: onStop) {
                 Image(systemName: "stop.fill")
                     .font(Typography.caption(.bold))
