@@ -369,6 +369,8 @@ export interface WinterLegDeps {
    * child before the call resolves) is swallowed at the call site, never surfaced here.
    */
   onSupportedAgents?: (sessionId: string, agents: import("@yanlinglabs/winter-agent-sdk").AgentInfo[]) => void;
+  /** The island's Usage tab: a session's `rate_limit_event` report (the projector's `onRateLimit`). */
+  onRateLimit?: (sessionId: string, info: Record<string, unknown>) => void;
   /**
    * Fix wave (review row 4): Winter's `SessionTitler` — P8b-10 keeps it on Winter's OWN provider
    * layer (never `sdk.query()`). Fired fire-and-forget after every MAIN-thread `turn_completed`
@@ -1285,6 +1287,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // C2 (lane C, 2026-09-22): a card the child abandoned (an interrupt's `[interrupted]` result)
         // is withdrawn before that result lands — this SDK never cancels the pending `canUseTool`.
         onToolResults: (callIds) => { for (const callId of callIds) canUseTool.withdrawPending(callId); },
+        ...(deps.onRateLimit === undefined ? {} : { onRateLimit: (info: Record<string, unknown>) => deps.onRateLimit!(sessionId, info) }),
         checkpoint: checkpoints,
         now: () => new Date().toISOString(),
         log: {

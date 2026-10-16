@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
-  IslandPendingResult, type SessionEvent, type WritableSocket,
+  IslandPendingResult, IslandHostsResult, IslandUsageResult, type SessionEvent, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
@@ -17,6 +17,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { IslandRegistry, type IslandPendingSources } from "../../src/island/registry";
+import { IslandUsageRegistry } from "../../src/island/usage";
 import { islandAwareDesktopPanel } from "../../src/computer-use/wiring";
 import type { DesktopVisitPanel } from "../../src/computer-use/policy";
 
@@ -261,9 +262,11 @@ describe("island.pending over the socket", () => {
       hosts: (sid) => hub.attachedHarnesses(sid).map((h) => ({ clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }) })),
     });
     hub.addObserver((e) => island.observe(e));
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub, broker, questions, island });
+    const islandUsage = new IslandUsageRegistry({ background: () => ({ kind: "ok", inputTokens: 0, outputTokens: 0 }) });
+    hub.addObserver((e) => islandUsage.observe(e));
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub, broker, questions, island, islandUsage });
     stop = () => { server.stop(); store.close(); };
-    return { store, hub, socketPath, tokens, broker, island };
+    return { store, hub, socketPath, tokens, broker, island, islandUsage };
   }
 
   test("an island client is registered by its hello, told on change, and lists cards with their terminal hosts", async () => {
@@ -325,5 +328,36 @@ describe("island.pending over the socket", () => {
     expect(await island.waitShown("cu_1", 5)).toBe(false);
     plugin.close();
     plain.close(); bad.close(); remote.close();
+  });
+  test("island.hosts lists who is attached to each session (the tty included); island.usage reads the registry; both local-only", async () => {
+    const { store, hub, socketPath, tokens, islandUsage } = await boot();
+    const sid = store.createSession("global", { cwd: tmpdir() });
+    const app = await TestClient.connect(socketPath);
+    await app.hello(tokens.harness, "orb", { capabilities: [CLIENT_CAPABILITY_ISLAND] });
+    expect(IslandHostsResult.parse((await app.request(METHODS.islandHosts, {})).result).sessions).toEqual([]);
+    const tui = await TestClient.connect(socketPath);
+    await tui.hello(tokens.harness, "cli-chat", { tty: "/dev/ttys009" });
+    await tui.request(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
+    const hosts = IslandHostsResult.parse((await app.request(METHODS.islandHosts, {})).result);
+    expect(hosts.sessions).toEqual([{ sessionId: sid, hosts: [{ clientName: "cli-chat", role: "harness", tty: "/dev/ttys009" }] }]);
+
+    islandUsage.noteRateLimit(sid, { status: "allowed", rateLimitType: "five_hour", utilization: 0.5, resetsAt: 1_900_000_000 });
+    hub.append(sid, { type: "turn_completed", sessionId: sid, threadId: "main", stopReason: "end_turn", inputTokens: 12, outputTokens: 3 } as never);
+    const usage = IslandUsageResult.parse((await app.request(METHODS.islandUsage, { sessionId: sid })).result);
+    expect(usage.windows[0]).toMatchObject({ rateLimitType: "five_hour", status: "allowed", utilization: 0.5, resetsAt: 1_900_000_000_000 });
+    expect(usage.session).toMatchObject({ sessionId: sid, turns: 1, inputTokens: 12, outputTokens: 3 });
+
+    expect(REMOTE_ALLOWED_METHODS.has(METHODS.islandHosts)).toBe(false);
+    expect(REMOTE_ALLOWED_METHODS.has(METHODS.islandUsage)).toBe(false);
+    const remote = await TestClient.connect(socketPath);
+    await remote.hello(tokens.remote, "iphone-gateway", {}, "remote");
+    expect((await remote.request(METHODS.islandHosts, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    expect((await remote.request(METHODS.islandUsage, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    const pluginToken = store.mintPluginToken("example-plugin");
+    const plugin = await TestClient.connect(socketPath);
+    await plugin.hello(pluginToken, "example-plugin", { pluginId: "example-plugin" }, "plugin");
+    expect((await plugin.request(METHODS.islandHosts, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    expect((await plugin.request(METHODS.islandUsage, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    app.close(); tui.close(); remote.close(); plugin.close();
   });
 });
