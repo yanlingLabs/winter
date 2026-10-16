@@ -13,8 +13,8 @@ import { CoworkError } from "./types";
  * Source of every row: docs/cowork-spec.md, docs/cowork-execution-contracts.md and docs/cowork-host-protocol.md.
  * Each row cites a heading (`spec#`, `contracts#`, `protocol#`), a code symbol (`code#<path>#<symbol>`) or, for a
  * tool the spec leaves unmentioned, the house list it mirrors (`house#<export of runtime-sdk/mode-options.ts>`).
- * A test resolves every citation. The decisions the spec leaves open (or settles) are DATA in COWORK_DECISIONS;
- * the owner document (docs/cowork-prompt-and-tools.md) is rendered from that data and from the rows below, and a
+ * A test resolves every citation. The decisions are DATA in COWORK_DECISIONS, each settled by the spec or by the
+ * owner (2026-10-16); the owner document (docs/cowork-prompt-and-tools.md) is rendered from that data and from the rows below, and a
  * test compares every block of it cell for cell.
  *
  * "Build the Cowork `winter__<key>` server/tool surface from this allowlist and its grants; do not reuse Code's
@@ -128,9 +128,14 @@ export interface CoworkDynamicToolFamily {
   readonly cite: readonly string[];
 }
 
+/**
+ * A decision is open (the owner has not ruled), settled by the spec, or settled by the owner. Every decision in
+ * COWORK_DECISIONS is settled today; the open shape stays so a new question can be recorded before it is answered.
+ */
 export type CoworkDecision =
   | { readonly id: string; readonly status: "open"; readonly title: string; readonly recommended: string; readonly instead: string; readonly why: string; readonly cite: readonly string[] }
-  | { readonly id: string; readonly status: "settled"; readonly title: string; readonly resolution: string; readonly why: string; readonly cite: readonly string[] };
+  | { readonly id: string; readonly status: "settled"; readonly by: "spec"; readonly title: string; readonly resolution: string; readonly why: string; readonly cite: readonly string[] }
+  | { readonly id: string; readonly status: "settled"; readonly by: "owner"; readonly decidedOn: string; readonly title: string; readonly resolution: string; readonly rejected: string; readonly why: string; readonly cite: readonly string[] };
 
 type Frozen = { readonly cite: readonly string[]; readonly brokers?: readonly string[]; readonly needs?: readonly string[]; readonly classes?: readonly string[]; readonly deniedUnder?: readonly string[]; readonly onlyUnder?: readonly string[] };
 function freezeAll<T extends Frozen>(rows: readonly T[]): readonly Readonly<T>[] {
@@ -160,9 +165,9 @@ const GUEST_FIRST = "spec#Credentials, host access and revocation";
 const VISIBILITY = "code#packages/core/src/cowork/guest-runtime.ts#confinedToolVisibility";
 const PEER_AUTHORITY = "code#packages/core/src/cowork/messaging-authority.ts#mayContactCoworkPeer";
 
-// DECISION: D13 — which ceiling class gates the tools the guest launch does not cover yet. The vocabulary is live
-// (read, write, execute); `classes` below mirrors confinedToolVisibility for Read, Edit, Write and Bash and extends
-// it to Glob, Grep, LSP (read), NotebookEdit (read and write, as Edit) and Monitor, Workflow (execute).
+// SETTLED: D13 — owner decision 2026-10-16. The ceiling vocabulary is live (read, write, execute); `classes` below
+// mirrors confinedToolVisibility for Read, Edit, Write and Bash and extends it to Glob, Grep, LSP (read),
+// NotebookEdit (read and write, as Edit) and Monitor, Workflow (execute).
 export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
   // --- Files and shell: the guest tool compartment ------------------------------------------------------------------
   { name: "Bash", runs: "guest", brokers: [], classes: ["execute"], needs: ["guest-compartment"], cite: [AUTHORITY, GUEST_FIRST, VISIBILITY],
@@ -193,8 +198,9 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
     why: "Approved skill content is exposed as read-only resources; scripts run as tool code in the compartment. The seeded Mac computer-use skill is omitted." },
 
   // --- Loading, bookkeeping and results -----------------------------------------------------------------------------
-  // DECISION: D2 — the spec does not mention these in-conversation tools. They touch no file, host service or
-  // network. Recommended: allow. ToolSearch is advertised only when Tool Search is on and something is deferred.
+  // SETTLED: D2 — owner decision 2026-10-16. The spec does not mention these in-conversation tools; they touch no
+  // file, host service or network, so they are allowed. ToolSearch is advertised only when Tool Search is on and
+  // something is deferred.
   { name: "ToolSearch", runs: "guest", brokers: [], when: "tool-search-needed", cite: ["house#DISPATCH_BUILTIN_TOOLS"], decision: "D2",
     why: "Loads deferred tool schemas. The runtime advertises it only when Tool Search is on and something is deferred." },
   { name: "TaskCreate", runs: "guest", brokers: [], cite: ["house#KNOWN_RUNTIME_BUILTINS"], decision: "D2",
@@ -205,12 +211,13 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
     why: "Reads the conversation's own to-do list." },
   { name: "TaskUpdate", runs: "guest", brokers: [], cite: ["house#KNOWN_RUNTIME_BUILTINS"], decision: "D2",
     why: "Updates the conversation's own to-do list." },
-  // DECISION: D8 — "Provide bounded transcript/output tools when an agent needs to inspect subagent results."
+  // SETTLED: D8 — owner decision 2026-10-16: TaskOutput is the bounded output tool the contracts call for.
   { name: "TaskOutput", runs: "guest", brokers: [], cite: [AUTHORITY], decision: "D8",
     why: "Bounded read of a task's or subagent's output, without opening the SDK store." },
   { name: "TaskStop", runs: "guest", brokers: [], cite: [MESSAGING, PEER_AUTHORITY],
     why: "Own tasks and descendants only. Membership in a Project never authorizes stopping a sibling conversation, and mayContactCoworkPeer already refuses the host-session leg." },
-  // DECISION: D3 — approving a plan changes the policy, which the guest runtime treats as a stop condition today.
+  // SETTLED: D3 — owner decision 2026-10-16. Approving a plan changes the policy, which the guest runtime treats as a
+  // stop condition today, so ExitPlanMode waits for `plan-transition` and is offered only under plan.
   { name: "ExitPlanMode", runs: "guest", brokers: [], needs: ["plan-transition"], onlyUnder: ["plan"],
     cite: [APPROVALS, "code#packages/core/src/runtime-sdk/plan-bridge.ts#setPolicy", "code#packages/core/src/cowork/guest-runtime.ts#stale_acknowledgment"], decision: "D3",
     why: "Presents a finished plan for the user's approval from a plan-policy conversation. Approval widens the policy, so the host must stage the transition first." },
@@ -218,8 +225,8 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
   // --- Web: guest execution, host-brokered provider and network routes ------------------------------------------------
   { name: "WebFetch", runs: "guest", brokers: ["provider-gateway", "network"], needs: ["host-provider-transport", "host-network-endpoint"], cite: [PROVIDER, "contracts#Network and mounted-folder behavior"],
     why: "Fetch obeys the network policy; the page-digest model is a separate authorized provider route." },
-  // DECISION: D10 — exactly one of Search / WebSearch, as in Chat and Dispatch.
-  // DECISION: D17 — Search is withheld in a workspace whose ceiling says network none (the brokers list carries "network").
+  // SETTLED: D10 — owner decision 2026-10-16: exactly one of Search / WebSearch, as in Chat and Dispatch.
+  // SETTLED: D17 — owner decision 2026-10-16: Search is withheld in a workspace whose ceiling says network none (the brokers list carries "network").
   { name: "Search", runs: "guest", brokers: ["provider-gateway", "network"], needs: ["host-provider-transport"], when: "exa-key", cite: [PROVIDER], decision: "D10",
     why: "Exa answer search, a separate authorized provider route. Offered only while an Exa key is stored, and not in a workspace with no network (D17)." },
   { name: "WebSearch", runs: "guest", brokers: ["network"], needs: ["host-network-endpoint"], when: "no-exa-key", cite: [GUEST_FIRST], decision: "D10",
@@ -245,7 +252,7 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
     why: "An agent-created wakeup continues its existing conversation." },
 
   // --- MCP bookkeeping: present only when a server has been admitted ---------------------------------------------------
-  // DECISION: D12 — read-only bookkeeping over MCP servers the user admitted. WaitForMcpServers is advertised only
+  // SETTLED: D12 — owner decision 2026-10-16. Read-only bookkeeping over MCP servers the user admitted. WaitForMcpServers is advertised only
   // when Tool Search is OFF (its descriptor says requiresToolSearchDisabled); Winter turns Tool Search on everywhere.
   { name: "ListMcpResourcesTool", runs: "guest", brokers: [], when: "mcp-servers", cite: [TRUST], decision: "D12",
     why: "Lists resources of an admitted MCP server." },
@@ -267,26 +274,26 @@ const HOST_CAPABILITY = TRUST;
 
 export const COWORK_TOOL_DENYLIST = freezeAll<CoworkDeniedTool>([
   // --- Tools the spec leaves unmentioned: unknown tool classes are not silently admitted --------------------------------
-  // DECISION: D3 — see ExitPlanMode above.
+  // SETTLED: D3 — owner decision 2026-10-16; see ExitPlanMode above.
   { name: "EnterPlanMode", runs: "guest", kind: "not-specified", cite: [APPROVALS], decision: "D3",
     why: "A model-initiated switch into plan is a policy narrowing that needs the host's pending-transition protocol." },
-  // DECISION: D4 — EnterWorktree/ExitWorktree move the conversation's working directory, which is host-bound state.
+  // SETTLED: D4 — owner decision 2026-10-16. EnterWorktree/ExitWorktree move the conversation's working directory, which is host-bound state.
   // Agents run `git worktree` inside the source instead (the planner admits in-source worktrees).
   { name: "EnterWorktree", runs: "guest", kind: "not-specified", cite: [APPROVALS, "spec#Concurrent Project work", "protocol#RPC inventory and caller access", "code#packages/core/src/cowork/current-context.ts#planCoworkCurrentContext"], decision: "D4",
     why: "Changes the working directory; Cowork retargets only through sources and session.retarget." },
   { name: "ExitWorktree", runs: "guest", kind: "not-specified", cite: [APPROVALS, "spec#Concurrent Project work", "protocol#RPC inventory and caller access"], decision: "D4",
     why: "Same reason as EnterWorktree." },
-  // DECISION: D5 — the spec names no notification tool; peer messages arrive as turn input.
+  // SETTLED: D5 — owner decision 2026-10-16: not offered in v1. The spec names no notification tool; peer messages arrive as turn input.
   { name: "PushNotification", runs: "host", kind: "not-specified", cite: [APPROVALS], decision: "D5",
     why: "A host effect the spec never describes. Revisit with a notification contract." },
   { name: "ReadNotifications", runs: "host", kind: "not-specified", cite: [APPROVALS, "spec#Same-Project SendMessage"], decision: "D5",
     why: "Drains the global messaging queue; the Cowork spec delivers peer messages as turn input instead." },
-  // DECISION: D6 — a structured review-result channel; no Cowork review flow exists.
+  // SETTLED: D6 — owner decision 2026-10-16: not offered. A structured review-result channel; no Cowork review flow exists.
   { name: "ReportFindings", runs: "guest", kind: "not-specified", cite: [APPROVALS], decision: "D6",
     why: "Nothing in the spec uses a review-result channel." },
 
   // --- Dispatch's session tools: host sessions are out of reach ----------------------------------------------------------------
-  // DECISION: D11 — the host leg is settled (denied). Whether an agent may create a sibling Cowork conversation is open.
+  // SETTLED: D11 — the host leg is denied by the contracts, and the owner decided on 2026-10-16 that an agent does not create a sibling Cowork conversation.
   { name: "SpawnSession", runs: "host", server: "sessions", kind: "never", cite: [MESSAGING], decision: "D11",
     why: "Guest spawn against host sessions is denied; creating a Cowork conversation has its own authorized path." },
   { name: "ListSessions", runs: "host", server: "sessions", kind: "never", cite: [MESSAGING], decision: "D11",
@@ -348,122 +355,122 @@ export const COWORK_DYNAMIC_TOOL_FAMILIES = freezeAll<CoworkDynamicToolFamily>([
 ]);
 
 // ---------------------------------------------------------------------------------------------------------
-// The decisions: open ones for the owner, settled ones for the record. The owner document is rendered from this.
+// The decisions: settled by the spec, or by the owner on 2026-10-16. The owner document is rendered from this.
 // ---------------------------------------------------------------------------------------------------------
 
 export const COWORK_DECISIONS: readonly Readonly<CoworkDecision>[] = Object.freeze([
   {
-    id: "D1", status: "settled", title: "Mac-side tools in v1 (Browser, Office, ComputerV2, Computer)",
+    id: "D1", status: "settled", by: "spec", title: "Mac-side tools in v1 (Browser, Office, ComputerV2, Computer)",
     resolution: "None is offered. The contracts make browser, Office, computer use and Xcode \"separate host capabilities with current grants and validated location/artifact references; unavailable by default without that capability\", and the spec calls them \"separate explicit opt-ins\".",
     why: "No grant or path validation exists, so there is nothing to offer. As a result no allowlisted tool executes on the Mac: the host rows are brokers that carry out a message, a schedule or a question on the guest's behalf, and none of them runs a command or opens a path the guest gives it. Which capability comes first, and with what grant, is a later question, not a v1 one.",
     cite: [TRUST, GUEST_FIRST],
   },
   {
-    id: "D2", status: "open", title: "ToolSearch and the task list, which the spec does not mention",
-    recommended: "Allow `ToolSearch`, `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate`.",
-    instead: "Leave them off until the spec names them.",
+    id: "D2", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "ToolSearch and the task list, which the spec does not mention",
+    resolution: "Allow `ToolSearch`, `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate`.",
+    rejected: "Leave them off until the spec names them.",
     why: "They touch no file, no host service and no network, and Chat and Dispatch both carry ToolSearch. The runtime advertises ToolSearch only when Tool Search is on and something is deferred, so `coworkOfferedTools` offers it only then. Something is deferred when an MCP server is admitted, or when `CronList` is offered: the profile marks `CronList` deferred because Code starts it deferred (`deferToolsFor`). That is an assumption, and dropping the `deferred` flag on that row undoes it. The spec's rule that unknown tool classes are not silently admitted is met by naming them here.",
     cite: [APPROVALS, "house#DISPATCH_BUILTIN_TOOLS", "house#deferToolsFor"],
   },
   {
-    id: "D3", status: "open", title: "Plan-mode tools",
-    recommended: "Offer `ExitPlanMode`, only under the plan policy and only once the host has staged a plan-to-ask/auto transition (readiness key `plan-transition`). Do not offer `EnterPlanMode`.",
-    instead: "Offer both, offer neither, or offer `ExitPlanMode` without waiting for the transition.",
+    id: "D3", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Plan-mode tools",
+    resolution: "Offer `ExitPlanMode`, only under the plan policy and only once the host has staged a plan-to-ask/auto transition (readiness key `plan-transition`). Do not offer `EnterPlanMode`.",
+    rejected: "Offer both, offer neither, or offer `ExitPlanMode` without waiting for the transition.",
     why: "Plan is a policy the user picks. Approving a plan calls `setPolicy` in the plan bridge, which widens the policy and swaps the plan view; the guest runtime treats a policy change as a stop condition (`stale_acknowledgment`). So the tool is not free: it stays withheld until the host can accept that change. A model switching itself into plan is a narrowing the spec says needs a pending transition, so `EnterPlanMode` stays with the user's policy control.",
     cite: [APPROVALS, "code#packages/core/src/runtime-sdk/plan-bridge.ts#setPolicy", "code#packages/core/src/cowork/guest-runtime.ts#stale_acknowledgment"],
   },
   {
-    id: "D4", status: "open", title: "Worktree tools",
-    recommended: "Do not offer `EnterWorktree` or `ExitWorktree`. Agents run `git worktree` through the shell and work in worktrees inside the source.",
-    instead: "Offer them.",
+    id: "D4", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Worktree tools",
+    resolution: "Do not offer `EnterWorktree` or `ExitWorktree`. Agents run `git worktree` through the shell and work in worktrees inside the source.",
+    rejected: "Offer them.",
     why: "Those two tools move the conversation's working directory. In Cowork the working directory is host-bound (a source plus a relative path, changed through `session.retarget`), and the spec forbids silently switching it. The current-context planner admits in-source directories and worktrees; a separate persistent worktree root or another source would need canonical registration it does not have yet.",
     cite: ["spec#Concurrent Project work", "code#packages/core/src/cowork/current-context.ts#planCoworkCurrentContext"],
   },
   {
-    id: "D5", status: "open", title: "Notification tools (`PushNotification`, `ReadNotifications`)",
-    recommended: "Do not offer them in v1.",
-    instead: "Offer `PushNotification` once a notification contract exists.",
+    id: "D5", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Notification tools (`PushNotification`, `ReadNotifications`)",
+    resolution: "Do not offer them in v1.",
+    rejected: "Offer `PushNotification` once a notification contract exists.",
     why: "The spec never describes them. Peer messages arrive as turn input, and approvals and blocked work are visible in the UI.",
     cite: [APPROVALS, "spec#Same-Project SendMessage"],
   },
   {
-    id: "D6", status: "open", title: "`ReportFindings`",
-    recommended: "Do not offer it.",
-    instead: "Offer it together with a review flow.",
+    id: "D6", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "`ReportFindings`",
+    resolution: "Do not offer it.",
+    rejected: "Offer it together with a review flow.",
     why: "It is a structured review-result channel. Nothing in the spec uses one.",
     cite: [APPROVALS],
   },
   {
-    id: "D7", status: "settled", title: "Schedule tools (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`)",
+    id: "D7", status: "settled", by: "spec", title: "Schedule tools (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`)",
     resolution: "They are on the allowlist because the spec requires them: \"Guest Cron and ScheduleWakeup tools must create/list/delete the same durable authority and report success only after host acceptance.\" They fail closed: each row needs the readiness key `scheduler-bridge`, which the host declares once the guest Cron bridge exists.",
     why: "Today `workspace.schedule.*` is local metadata only and no guest bridge exists. Until the host declares it ready the tools are not offered and the prompt has no Scheduling section.",
     cite: ["spec#Host-owned scheduling", "protocol#RPC inventory and caller access"],
   },
   {
-    id: "D8", status: "open", title: "Reading a subagent's result",
-    recommended: "`TaskOutput` is the bounded output tool the contracts call for. Build nothing new for v1.",
-    instead: "Design a dedicated transcript tool as well.",
-    why: "The contracts say \"Provide bounded transcript/output tools when an agent needs to inspect subagent results\", in the plural, without opening the SDK store. The existing tool reads a task's output; whether a transcript read is also needed is the owner's call.",
+    id: "D8", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Reading a subagent's result",
+    resolution: "`TaskOutput` is the bounded output tool the contracts call for. Build nothing new for v1.",
+    rejected: "Design a dedicated transcript tool as well.",
+    why: "The contracts say \"Provide bounded transcript/output tools when an agent needs to inspect subagent results\", in the plural, without opening the SDK store. The existing tool reads a task's output; the owner decided on 2026-10-16 that this tool is enough for v1.",
     cite: [AUTHORITY],
   },
   {
-    id: "D9", status: "open", title: "Editing the shared guidance file (WINTER.md) from the guest",
-    recommended: "Defer the guest-side trigger. v1 gives the agent no tool for it, and the prompt tells the agent to ask the user.",
-    instead: "Build the trigger now.",
+    id: "D9", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Editing the shared guidance file (WINTER.md) from the guest",
+    resolution: "Defer the guest-side trigger. v1 gives the agent no tool for it, and the prompt tells the agent to ask the user.",
+    rejected: "Build the trigger now.",
     why: "This defers behavior the spec does specify: an agent's edit requires \"the existing SDK user-instruction approval treatment\", enforced by a read-only tool view and a content-bound host write. The host side exists: an internal agent port asks for approval and needs the `write` class and the host service `workspace.instructions.update`. What is missing is the guest-facing tool or trigger that calls it, and the spec names none. The user can always edit the file directly or through `workspace.instructions.update`.",
     cite: ["spec#Workspace and repository instructions", "code#packages/core/src/cowork/instructions.ts#updateAgent"],
   },
   {
-    id: "D10", status: "open", title: "Which search tool",
-    recommended: "The Chat and Dispatch rule: `WebFetch` always, plus exactly one of `Search` (an Exa key is stored) or `WebSearch` (none is).",
-    instead: "Offer both.",
-    why: "The contracts list WebFetch and keyed search as separate authorized provider routes. The Exa answer endpoint cannot be called without a key, so one tool is always the right one, and the prompt names only that one. A light call.",
+    id: "D10", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Which search tool",
+    resolution: "The Chat and Dispatch rule: `WebFetch` always, plus exactly one of `Search` (an Exa key is stored) or `WebSearch` (none is).",
+    rejected: "Offer both.",
+    why: "The contracts list WebFetch and keyed search as separate authorized provider routes. The Exa answer endpoint cannot be called without a key, so one tool is always the right one, and the prompt names only that one.",
     cite: [PROVIDER],
   },
   {
-    id: "D11", status: "open", title: "An agent creating another Cowork conversation (`SpawnSession`, `ListSessions`)",
-    recommended: "Offer neither. Subagents come from `Agent`; a new conversation is created through the user's creation path.",
-    instead: "Offer a Cowork-only way for an agent to start a sibling conversation.",
+    id: "D11", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "An agent creating another Cowork conversation (`SpawnSession`, `ListSessions`)",
+    resolution: "Offer neither. Subagents come from `Agent`; a new conversation is created through the user's creation path.",
+    rejected: "Offer a Cowork-only way for an agent to start a sibling conversation.",
     why: "The host-session leg is settled: the contracts deny a Cowork guest send, list, stop and spawn against host Code and Dispatch sessions, and both tools only reach those. What the spec does not say is whether an agent may create a sibling Cowork conversation. Creation already has its own authorized path (the user, or a delegated Dispatch spawn with a grant).",
     cite: [MESSAGING],
   },
   {
-    id: "D12", status: "open", title: "MCP bookkeeping tools",
-    recommended: "Allow `ListMcpResourcesTool`, `ReadMcpResourceTool`, `ReadMcpResourceDirTool` and `RefreshMcpTools` when the user has admitted an MCP server. Keep `WaitForMcpServers` on the list but expect it to stay dormant.",
-    instead: "Leave them off.",
+    id: "D12", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "MCP bookkeeping tools",
+    resolution: "Allow `ListMcpResourcesTool`, `ReadMcpResourceTool`, `ReadMcpResourceDirTool` and `RefreshMcpTools` when the user has admitted an MCP server. Keep `WaitForMcpServers` on the list but expect it to stay dormant.",
+    rejected: "Leave them off.",
     why: "They are read-only bookkeeping over servers the user admitted. The servers themselves follow the trust rules in the contracts (stdio servers in the VM, HTTP servers through a host proxy). `WaitForMcpServers` is advertised only when Tool Search is off (its descriptor says so), and Winter turns Tool Search on in every mode, so it appears only if the host switches Tool Search off. Nothing here lets a server take a name under `mcp__winter__`.",
     cite: [TRUST],
   },
   {
-    id: "D13", status: "open", title: "Which ceiling class gates the tools the guest launch does not cover yet",
-    recommended: "Gate them as the allowlist does: Glob, Grep and LSP need `read`; NotebookEdit needs `read` and `write` like Edit; Monitor and Workflow need `execute`. Extend the guest launch's tool visibility with those families when they ship (readiness key `guest-tool-families`). Name no host service for the message, schedule or question tools until their bridges exist.",
-    instead: "Gate them by a different class, or leave them ungated.",
-    why: "The ceiling vocabulary is live, not undefined: the tool classes are `read`, `write` and `execute`, and the host services in use are `git.read`, `git.publish` and `workspace.instructions.update`. The guest launch already maps the classes to Read, Edit (read and write), Write and Bash, and \"unimplemented guest tool families remain unavailable\". The open question is how everything else maps. The allowlist rows carry the classes above; a test checks that the four tools the launch covers agree with it.",
+    id: "D13", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Which ceiling class gates the tools the guest launch does not cover yet",
+    resolution: "Gate them as the allowlist does: Glob, Grep and LSP need `read`; NotebookEdit needs `read` and `write` like Edit; Monitor and Workflow need `execute`. Extend the guest launch's tool visibility with those families when they ship (readiness key `guest-tool-families`). Name no host service for the message, schedule or question tools until their bridges exist.",
+    rejected: "Gate them by a different class, or leave them ungated.",
+    why: "The ceiling vocabulary is live, not undefined: the tool classes are `read`, `write` and `execute`, and the host services in use are `git.read`, `git.publish` and `workspace.instructions.update`. The guest launch already maps the classes to Read, Edit (read and write), Write and Bash, and \"unimplemented guest tool families remain unavailable\". The question was how everything else maps. The allowlist rows carry the classes above; a test checks that the four tools the launch covers agree with it.",
     cite: [VISIBILITY, "code#packages/core/src/cowork/git/authority.ts#git.publish", "code#packages/core/src/cowork/git/read-authority.ts#git.read", "code#packages/core/src/cowork/instructions.ts#workspace.instructions.update"],
   },
   {
-    id: "D14", status: "settled", title: "How the source list and the push default reach the model",
+    id: "D14", status: "settled", by: "spec", title: "How the source list and the push default reach the model",
     resolution: "They come from `CoworkCurrentContextPlanner`, which generates the source list, the effective-ceiling line and the completion default from the canonical host records on each call. This module generates none of them. The spec says to \"avoid independently maintained copies of policy text: generate from the same host record\".",
     why: "A second generator would drift from the planner's definition of GitHub-only and of the completion default. The prompt only tells the model that the host-context block exists and is authoritative.",
     cite: ["spec#Workspace and repository instructions", "code#packages/core/src/cowork/current-context.ts#planCoworkCurrentContext"],
   },
   {
-    id: "D15", status: "settled", title: "Language servers",
+    id: "D15", status: "settled", by: "spec", title: "Language servers",
     resolution: "The guest `LSP` built-in is allowed; the Mac's `mcp__winter__lsp__lsp` capability is not offered. The contracts say language servers are \"Guest Linux servers and paths\" and that host toolchains \"require an explicit host capability\".",
     why: "The guest tool is not built yet, so the row needs the readiness key `guest-lsp`.",
     cite: [TRUST, ROUTER],
   },
   {
-    id: "D16", status: "open", title: "Does the model see the workspace title?",
-    recommended: "Yes, as a sanitised quoted label. Never show source labels.",
-    instead: "Omit titles entirely, as the current-context planner does.",
+    id: "D16", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Does the model see the workspace title?",
+    resolution: "Yes, as a sanitised quoted label. Never show source labels.",
+    rejected: "Omit titles entirely, as the current-context planner does.",
     why: "The planner keeps labels and titles out of the facts it renders. A source label can come from a folder or repository name that someone else chose; a workspace title is typed by the user. The title is optional in the builder, so omitting it is a one-argument change. When shown, it is NFC-normalised, truncated to 120 characters with an ellipsis, stripped of control, line-break, bidirectional, zero-width and invisible-filler characters (replaced with U+FFFD), and printed as one JSON-quoted string.",
     cite: ["code#packages/core/src/cowork/current-context.ts#planCoworkCurrentContext"],
   },
   {
-    id: "D17", status: "open", title: "Is `Search` offered in a workspace whose ceiling says network none?",
-    recommended: "No. A no-network workspace gets no web tools, including `Search`.",
-    instead: "Keep `Search`, because Exa answer search is a host provider route and not guest network traffic.",
+    id: "D17", status: "settled", by: "owner", decidedOn: "2026-10-16", title: "Is `Search` offered in a workspace whose ceiling says network none?",
+    resolution: "No. A no-network workspace gets no web tools, including `Search`.",
+    rejected: "Keep `Search`, because Exa answer search is a host provider route and not guest network traffic.",
     why: "The contracts treat \"WebFetch digest and Exa search\" as provider routes, so the host could serve `Search` even when the guest has no network. But the ceiling's `network: none` is the user's statement about the workspace, and a search result is web content; the spec does not say which wins. WebFetch and WebSearch need the guest network, so they are removed either way.",
     cite: [PROVIDER, "contracts#Network and mounted-folder behavior"],
   },
@@ -562,7 +569,7 @@ const isSelector = (cp: number) => (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0
 const isNoncharacter = (cp: number) => (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
 const refused = (char: string, cp: number) => REFUSED_CHARACTER.test(char) || INVISIBLE_FILLERS.has(cp) || isNoncharacter(cp);
 
-// DECISION: D16 — whether the model sees the workspace title at all. It is optional; source labels are never shown.
+// SETTLED: D16 — owner decision 2026-10-16: the model sees a sanitised workspace title. It is optional; source labels are never shown.
 /**
  * A user-chosen title, made safe to show. It is never refused: this runs on every turn, so a title the host
  * accepted must not break generation. NFC; runs of space-like characters collapsed to one space and trimmed;
@@ -672,7 +679,7 @@ export function coworkSystemPrompt(facts: CoworkPromptFacts): string {
     "",
     "# Guidance and memory",
     "The workspace's shared guidance, and the WINTER.md files that apply to the source and directory you are working in, are loaded for you, so you do not need to read them to follow them. Guidance shapes how you work and can narrow what you do. It cannot widen what you are allowed to do, turn a tool on, or approve anything. A source's hooks, plugins and tool servers stay off until the user trusts that source.",
-    // DECISION: D9 — the guest-side trigger for an approved edit of the shared guidance is deferred; see COWORK_DECISIONS.
+    // SETTLED: D9 — owner decision 2026-10-16: the guest-side trigger for an approved edit of the shared guidance comes later; see COWORK_DECISIONS.
     "You cannot edit the shared guidance yourself. If it should change, tell the user what to change; an edit needs their approval.",
     `${project ? "/workspace/.winter/memory is shared by every conversation in this Project." : "/workspace/.winter/memory belongs to this workspace."} It holds plain files for knowledge that should outlast this conversation. You choose how it is organised${project ? ", and you agree with the other conversations who edits what" : ""}. Everything in it can be read by every conversation in the workspace, so keep secrets out.`,
     "",

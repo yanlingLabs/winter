@@ -215,32 +215,42 @@ describe("decisions", () => {
   const source = read("packages/core/src/cowork/session-profile.ts");
   const ids = COWORK_DECISIONS.map((decision) => decision.id);
   const open = COWORK_DECISIONS.filter((decision) => decision.status === "open").map((decision) => decision.id);
-  const settled = COWORK_DECISIONS.filter((decision) => decision.status === "settled").map((decision) => decision.id);
+  const bySpec = COWORK_DECISIONS.filter((decision) => decision.status === "settled" && decision.by === "spec").map((decision) => decision.id);
+  const byOwner = COWORK_DECISIONS.filter((decision) => decision.status === "settled" && decision.by === "owner").map((decision) => decision.id);
   const tagged = (word: string) => [...new Set([...source.matchAll(new RegExp(`// ${word}: (D\\d+)`, "g"))].map((match) => match[1]!))];
 
-  test("ids run D1.. in order, each decision is complete, and the open ones put the recommendation before the alternative", () => {
+  test("ids run D1.. in order and each decision is complete", () => {
     expect(ids).toEqual(Array.from({ length: ids.length }, (_value, index) => `D${index + 1}`));
     for (const decision of COWORK_DECISIONS) {
       expect(decision.title.length).toBeGreaterThan(5);
       expect(decision.why.length).toBeGreaterThan(30);
       if (decision.status === "open") { expect(decision.recommended.length).toBeGreaterThan(5); expect(decision.instead.length).toBeGreaterThan(5); }
-      else expect(decision.resolution.length).toBeGreaterThan(30);
+      else expect(decision.resolution.length).toBeGreaterThan(10);
+      if (decision.status === "settled" && decision.by === "owner") { expect(decision.decidedOn).toBe("2026-10-16"); expect(decision.rejected.length).toBeGreaterThan(5); }
     }
-    expect(open.length + settled.length).toBe(ids.length);
+    expect(open.length + bySpec.length + byOwner.length).toBe(ids.length);
   });
 
-  test("the reviewed statuses hold: D1, D7, D14 and D15 are settled by the spec, everything else is the owner's", () => {
-    expect(settled).toEqual(["D1", "D7", "D14", "D15"]);
-    expect(open).toEqual(["D2", "D3", "D4", "D5", "D6", "D8", "D9", "D10", "D11", "D12", "D13", "D16", "D17"]);
+  test("no decision is still open: four are settled by the spec and the other thirteen by the owner on 2026-10-16", () => {
+    expect(open).toEqual([]);
+    expect(COWORK_DECISIONS.every((decision) => decision.status === "settled")).toBe(true);
+    expect(bySpec).toEqual(["D1", "D7", "D14", "D15"]);
+    expect(byOwner).toEqual(["D2", "D3", "D4", "D5", "D6", "D8", "D9", "D10", "D11", "D12", "D13", "D16", "D17"]);
+  });
+
+  test("the owner's decision is the text that was recommended, and D9 still says the guest-side flow comes later", () => {
+    const d9 = COWORK_DECISIONS.find((decision) => decision.id === "D9")!;
+    expect(d9.status === "settled" && d9.resolution).toBe("Defer the guest-side trigger. v1 gives the agent no tool for it, and the prompt tells the agent to ask the user.");
+    const d3 = COWORK_DECISIONS.find((decision) => decision.id === "D3")!;
+    expect(d3.status === "settled" && d3.resolution).toContain("Offer `ExitPlanMode`, only under the plan policy");
+    expect(source).toContain("// SETTLED: D9 — owner decision 2026-10-16: the guest-side trigger for an approved edit of the shared guidance comes later");
   });
 
   test("every decision a row mentions exists, and every code comment tag agrees with the data", () => {
     for (const row of [...COWORK_TOOL_ALLOWLIST, ...COWORK_TOOL_DENYLIST]) if (row.decision !== undefined) expect(ids).toContain(row.decision);
-    for (const id of tagged("DECISION")) expect(open).toContain(id);
-    for (const id of tagged("SETTLED")) expect(settled).toContain(id);
-    // and the other way: every decision is tagged where the code depends on it
-    expect(tagged("DECISION").sort()).toEqual([...open].sort());
-    expect(tagged("SETTLED").sort()).toEqual([...settled].sort());
+    // nothing is tagged open any more, and every decision is tagged where the code depends on it
+    expect(tagged("DECISION")).toEqual([]);
+    expect(tagged("SETTLED").sort()).toEqual([...ids].sort());
   });
 
   test("a spec-silent tool is allowed only with a decision; a not-specified tool is denied only with one", () => {
@@ -706,7 +716,7 @@ describe("owner document", () => {
 
   test("every generated block is exactly what the code renders, cell for cell", () => {
     expect(docBlockProblems(doc)).toEqual([]);
-    expect(Object.keys(renderDocBlocks()).sort()).toEqual(["allowlist", "decisions-open", "decisions-settled", "denylist", "families", "prompt-sample", "readiness", "refusals", "servers", "summary"]);
+    expect(Object.keys(renderDocBlocks()).sort()).toEqual(["allowlist", "decisions-owner", "decisions-spec", "denylist", "families", "prompt-sample", "readiness", "refusals", "servers", "summary"]);
     const sample = readBlock(doc, "prompt-sample")!;
     expect(sample).toBe(["```text", coworkSystemPrompt(DOC_SAMPLE), "```"].join("\n"));
   });
@@ -715,8 +725,11 @@ describe("owner document", () => {
     const edits: Array<[string, (text: string) => string]> = [
       ["Bash runs on the host", (text) => text.replace(/^\| `Bash` \| guest \|/m, "| `Bash` | host |")],
       ["SpawnSession is allowed", (text) => text.replace(/^(\| `SpawnSession` \| host \(server `sessions`\) \| )Never \(the spec forbids it\)/m, "$1Allowed")],
-      ["D1 resolution rewritten", (text) => text.replace(/\*\*Settled:\*\* None is offered\./, "**Settled:** Browser is offered.")],
-      ["D4 recommendation rewritten", (text) => text.replace(/\*\*Recommended:\*\* Do not offer `EnterWorktree` or `ExitWorktree`\./, "**Recommended:** Offer `EnterWorktree` and `ExitWorktree`.")],
+      ["D1 resolution rewritten", (text) => text.replace(/\*\*Settled by the spec:\*\* None is offered\./, "**Settled by the spec:** Browser is offered.")],
+      ["D4 owner decision rewritten", (text) => text.replace(/\*\*Settled by the owner, 2026-10-16:\*\* Do not offer `EnterWorktree` or `ExitWorktree`\./, "**Settled by the owner, 2026-10-16:** Offer `EnterWorktree` and `ExitWorktree`.")],
+      ["D4 alternative swapped in", (text) => text.replace("**Alternative not taken:** Offer them.", "**Alternative not taken:** Do not offer them.")],
+      ["an owner decision dated differently", (text) => text.replace("**Settled by the owner, 2026-10-16:** Defer the guest-side trigger.", "**Settled by the owner, 2026-10-17:** Defer the guest-side trigger.")],
+      ["a decision claimed open again", (text) => text.replace("### D16 — ", "### D16 (open) — ")],
       ["a Why cell reworded", (text) => text.replace("There is no fallback to a Mac shell.", "There is a fallback to a Mac shell.")],
       ["a class cell changed", (text) => text.replace(/^(\| `Read` \| guest \| )read \|/m, "$1none |")],
       ["a needs note dropped", (text) => text.replace(/Needs `scheduler-bridge`\. /g, "")],
@@ -731,14 +744,18 @@ describe("owner document", () => {
     expect(docBlockProblems(doc.replace("<!-- allowlist:begin -->", ""))).toContain("allowlist");
   });
 
-  test("every decision in the code is in the document, open ones with the recommendation before the alternative", () => {
-    const open = readBlock(doc, "decisions-open")!, settled = readBlock(doc, "decisions-settled")!;
+  test("every decision in the code is in the document, none is open, and each says who settled it", () => {
+    const owner = readBlock(doc, "decisions-owner")!, spec = readBlock(doc, "decisions-spec")!;
     const idsIn = (block: string) => [...block.matchAll(/^### (D\d+) — /gm)].map((match) => match[1]!);
-    expect(idsIn(open)).toEqual(COWORK_DECISIONS.filter((decision) => decision.status === "open").map((decision) => decision.id));
-    expect(idsIn(settled)).toEqual(COWORK_DECISIONS.filter((decision) => decision.status === "settled").map((decision) => decision.id));
-    for (const section of open.split(/\n(?=### D)/)) expect(section.indexOf("**Recommended:**")).toBeLessThan(section.indexOf("**Instead:**"));
-    expect(open).not.toContain("**Settled:**");
-    expect(settled).not.toContain("**Recommended:**");
+    expect(idsIn(owner)).toEqual(COWORK_DECISIONS.filter((decision) => decision.status === "settled" && decision.by === "owner").map((decision) => decision.id));
+    expect(idsIn(spec)).toEqual(COWORK_DECISIONS.filter((decision) => decision.status === "settled" && decision.by === "spec").map((decision) => decision.id));
+    expect([...owner.matchAll(/^\*\*Settled by the owner, 2026-10-16:\*\* /gm)]).toHaveLength(13);
+    expect([...owner.matchAll(/^\*\*Alternative not taken:\*\* /gm)]).toHaveLength(13);
+    expect([...spec.matchAll(/^\*\*Settled by the spec:\*\* /gm)]).toHaveLength(4);
+    for (const block of [owner, spec]) { expect(block).not.toContain("**Recommended:**"); expect(block).not.toContain("**Instead:**"); }
+    expect(doc).not.toMatch(/^## Decisions for the owner$/m);
+    expect(doc).not.toMatch(/\bopen decisions?\b|decisions? (are|is) still open|still open for the owner/i);
+    expect(readBlock(doc, "summary")).toContain("All **17** decisions are settled: **4** by the spec and **13** by the owner on 2026-10-16.");
   });
 
   test("the implementation ledger links the document, and the follow-up box stays unticked", () => {

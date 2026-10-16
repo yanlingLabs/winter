@@ -1,6 +1,6 @@
 # Cowork session prompt and tool allowlist
 
-Status: draft for the owner to approve, 2026-10-16. **Data only. Nothing is wired and Cowork is still refused in production.** This is the text and the tool list that the open item in [follow_up.md](../follow_up.md) and [the implementation map](cowork-status.md) asks for: "the Cowork prompt text and the concrete tool allowlist". Nothing here creates a Cowork session or changes what a Code, Chat or Dispatch session can do.
+Status: all decisions settled (owner, 2026-10-16); the profile is still a draft until it is wired. **Data only. Nothing is wired and Cowork is still refused in production.** This is the text and the tool list that the open item in [follow_up.md](../follow_up.md) and [the implementation map](cowork-status.md) asks for: "the Cowork prompt text and the concrete tool allowlist". Nothing here creates a Cowork session or changes what a Code, Chat or Dispatch session can do.
 
 The source is `packages/core/src/cowork/session-profile.ts`. Where the specification ([spec](cowork-spec.md), [execution contracts](cowork-execution-contracts.md), [host protocol](cowork-host-protocol.md)) is silent or ambiguous, the row says so and points at a numbered decision. **Everything under a `generated` note below is rendered from that file and compared with this document exactly by a test, so a cell, a status or a decision edited here without the code fails the test.** The text around those blocks is commentary and is not pinned.
 
@@ -21,7 +21,7 @@ The prompt is not enforcement. The spec is explicit that none of its acceptance 
 - **36** allowlisted tools: **29** run in the guest and **7** are host brokers.
 - **21** of them are withheld by default until the host declares the readiness key they need.
 - **15** tools and **7** capability servers are not offered.
-- **13** open decisions for the owner; **4** settled by the spec.
+- All **17** decisions are settled: **4** by the spec and **13** by the owner on 2026-10-16.
 <!-- summary:end -->
 
 ## One owner per fact
@@ -269,18 +269,18 @@ Because the tool names are shared with Code, the most important refusals are abo
 | `host-credentials` | Provider and Git credentials stay on the Mac; the guest receives results, never reusable tokens. | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways) |
 <!-- refusals:end -->
 
-## Decisions for the owner
+## Decisions settled by the owner
 
-These are the decisions still open. Each gives the recommended answer first, and the code implements that answer today, so approving them as written needs no code change; choosing an alternative changes the named rows. The `// DECISION: Dn` comments in the code show where.
+All decisions are settled (owner, 2026-10-16). The owner approved the recommended answer to each of the thirteen the spec left open, and the code already implemented those answers, so settling them changed the record and not the behavior. The decision is the recommended text; the alternative that was not taken is kept beside it. The `// SETTLED: Dn` comments in the code show where each one applies. Moving any of them is a decision to reopen, with a test and a code change, not an edit to this document.
 
 *Generated.*
 
-<!-- decisions-open:begin -->
+<!-- decisions-owner:begin -->
 ### D2 — ToolSearch and the task list, which the spec does not mention
 
-**Recommended:** Allow `ToolSearch`, `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate`.
+**Settled by the owner, 2026-10-16:** Allow `ToolSearch`, `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate`.
 
-**Instead:** Leave them off until the spec names them.
+**Alternative not taken:** Leave them off until the spec names them.
 
 They touch no file, no host service and no network, and Chat and Dispatch both carry ToolSearch. The runtime advertises ToolSearch only when Tool Search is on and something is deferred, so `coworkOfferedTools` offers it only then. Something is deferred when an MCP server is admitted, or when `CronList` is offered: the profile marks `CronList` deferred because Code starts it deferred (`deferToolsFor`). That is an assumption, and dropping the `deferred` flag on that row undoes it. The spec's rule that unknown tool classes are not silently admitted is met by naming them here.
 
@@ -288,9 +288,9 @@ They touch no file, no host service and no network, and Chat and Dispatch both c
 
 ### D3 — Plan-mode tools
 
-**Recommended:** Offer `ExitPlanMode`, only under the plan policy and only once the host has staged a plan-to-ask/auto transition (readiness key `plan-transition`). Do not offer `EnterPlanMode`.
+**Settled by the owner, 2026-10-16:** Offer `ExitPlanMode`, only under the plan policy and only once the host has staged a plan-to-ask/auto transition (readiness key `plan-transition`). Do not offer `EnterPlanMode`.
 
-**Instead:** Offer both, offer neither, or offer `ExitPlanMode` without waiting for the transition.
+**Alternative not taken:** Offer both, offer neither, or offer `ExitPlanMode` without waiting for the transition.
 
 Plan is a policy the user picks. Approving a plan calls `setPolicy` in the plan bridge, which widens the policy and swaps the plan view; the guest runtime treats a policy change as a stop condition (`stale_acknowledgment`). So the tool is not free: it stays withheld until the host can accept that change. A model switching itself into plan is a narrowing the spec says needs a pending transition, so `EnterPlanMode` stays with the user's policy control.
 
@@ -298,9 +298,9 @@ Plan is a policy the user picks. Approving a plan calls `setPolicy` in the plan 
 
 ### D4 — Worktree tools
 
-**Recommended:** Do not offer `EnterWorktree` or `ExitWorktree`. Agents run `git worktree` through the shell and work in worktrees inside the source.
+**Settled by the owner, 2026-10-16:** Do not offer `EnterWorktree` or `ExitWorktree`. Agents run `git worktree` through the shell and work in worktrees inside the source.
 
-**Instead:** Offer them.
+**Alternative not taken:** Offer them.
 
 Those two tools move the conversation's working directory. In Cowork the working directory is host-bound (a source plus a relative path, changed through `session.retarget`), and the spec forbids silently switching it. The current-context planner admits in-source directories and worktrees; a separate persistent worktree root or another source would need canonical registration it does not have yet.
 
@@ -308,9 +308,9 @@ Those two tools move the conversation's working directory. In Cowork the working
 
 ### D5 — Notification tools (`PushNotification`, `ReadNotifications`)
 
-**Recommended:** Do not offer them in v1.
+**Settled by the owner, 2026-10-16:** Do not offer them in v1.
 
-**Instead:** Offer `PushNotification` once a notification contract exists.
+**Alternative not taken:** Offer `PushNotification` once a notification contract exists.
 
 The spec never describes them. Peer messages arrive as turn input, and approvals and blocked work are visible in the UI.
 
@@ -318,9 +318,9 @@ The spec never describes them. Peer messages arrive as turn input, and approvals
 
 ### D6 — `ReportFindings`
 
-**Recommended:** Do not offer it.
+**Settled by the owner, 2026-10-16:** Do not offer it.
 
-**Instead:** Offer it together with a review flow.
+**Alternative not taken:** Offer it together with a review flow.
 
 It is a structured review-result channel. Nothing in the spec uses one.
 
@@ -328,19 +328,19 @@ It is a structured review-result channel. Nothing in the spec uses one.
 
 ### D8 — Reading a subagent's result
 
-**Recommended:** `TaskOutput` is the bounded output tool the contracts call for. Build nothing new for v1.
+**Settled by the owner, 2026-10-16:** `TaskOutput` is the bounded output tool the contracts call for. Build nothing new for v1.
 
-**Instead:** Design a dedicated transcript tool as well.
+**Alternative not taken:** Design a dedicated transcript tool as well.
 
-The contracts say "Provide bounded transcript/output tools when an agent needs to inspect subagent results", in the plural, without opening the SDK store. The existing tool reads a task's output; whether a transcript read is also needed is the owner's call.
+The contracts say "Provide bounded transcript/output tools when an agent needs to inspect subagent results", in the plural, without opening the SDK store. The existing tool reads a task's output; the owner decided on 2026-10-16 that this tool is enough for v1.
 
 *Spec and code sources:* [contracts: Authority and Linux execution boundary](cowork-execution-contracts.md#authority-and-linux-execution-boundary)
 
 ### D9 — Editing the shared guidance file (WINTER.md) from the guest
 
-**Recommended:** Defer the guest-side trigger. v1 gives the agent no tool for it, and the prompt tells the agent to ask the user.
+**Settled by the owner, 2026-10-16:** Defer the guest-side trigger. v1 gives the agent no tool for it, and the prompt tells the agent to ask the user.
 
-**Instead:** Build the trigger now.
+**Alternative not taken:** Build the trigger now.
 
 This defers behavior the spec does specify: an agent's edit requires "the existing SDK user-instruction approval treatment", enforced by a read-only tool view and a content-bound host write. The host side exists: an internal agent port asks for approval and needs the `write` class and the host service `workspace.instructions.update`. What is missing is the guest-facing tool or trigger that calls it, and the spec names none. The user can always edit the file directly or through `workspace.instructions.update`.
 
@@ -348,19 +348,19 @@ This defers behavior the spec does specify: an agent's edit requires "the existi
 
 ### D10 — Which search tool
 
-**Recommended:** The Chat and Dispatch rule: `WebFetch` always, plus exactly one of `Search` (an Exa key is stored) or `WebSearch` (none is).
+**Settled by the owner, 2026-10-16:** The Chat and Dispatch rule: `WebFetch` always, plus exactly one of `Search` (an Exa key is stored) or `WebSearch` (none is).
 
-**Instead:** Offer both.
+**Alternative not taken:** Offer both.
 
-The contracts list WebFetch and keyed search as separate authorized provider routes. The Exa answer endpoint cannot be called without a key, so one tool is always the right one, and the prompt names only that one. A light call.
+The contracts list WebFetch and keyed search as separate authorized provider routes. The Exa answer endpoint cannot be called without a key, so one tool is always the right one, and the prompt names only that one.
 
 *Spec and code sources:* [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways)
 
 ### D11 — An agent creating another Cowork conversation (`SpawnSession`, `ListSessions`)
 
-**Recommended:** Offer neither. Subagents come from `Agent`; a new conversation is created through the user's creation path.
+**Settled by the owner, 2026-10-16:** Offer neither. Subagents come from `Agent`; a new conversation is created through the user's creation path.
 
-**Instead:** Offer a Cowork-only way for an agent to start a sibling conversation.
+**Alternative not taken:** Offer a Cowork-only way for an agent to start a sibling conversation.
 
 The host-session leg is settled: the contracts deny a Cowork guest send, list, stop and spawn against host Code and Dispatch sessions, and both tools only reach those. What the spec does not say is whether an agent may create a sibling Cowork conversation. Creation already has its own authorized path (the user, or a delegated Dispatch spawn with a grant).
 
@@ -368,9 +368,9 @@ The host-session leg is settled: the contracts deny a Cowork guest send, list, s
 
 ### D12 — MCP bookkeeping tools
 
-**Recommended:** Allow `ListMcpResourcesTool`, `ReadMcpResourceTool`, `ReadMcpResourceDirTool` and `RefreshMcpTools` when the user has admitted an MCP server. Keep `WaitForMcpServers` on the list but expect it to stay dormant.
+**Settled by the owner, 2026-10-16:** Allow `ListMcpResourcesTool`, `ReadMcpResourceTool`, `ReadMcpResourceDirTool` and `RefreshMcpTools` when the user has admitted an MCP server. Keep `WaitForMcpServers` on the list but expect it to stay dormant.
 
-**Instead:** Leave them off.
+**Alternative not taken:** Leave them off.
 
 They are read-only bookkeeping over servers the user admitted. The servers themselves follow the trust rules in the contracts (stdio servers in the VM, HTTP servers through a host proxy). `WaitForMcpServers` is advertised only when Tool Search is off (its descriptor says so), and Winter turns Tool Search on in every mode, so it appears only if the host switches Tool Search off. Nothing here lets a server take a name under `mcp__winter__`.
 
@@ -378,19 +378,19 @@ They are read-only bookkeeping over servers the user admitted. The servers thems
 
 ### D13 — Which ceiling class gates the tools the guest launch does not cover yet
 
-**Recommended:** Gate them as the allowlist does: Glob, Grep and LSP need `read`; NotebookEdit needs `read` and `write` like Edit; Monitor and Workflow need `execute`. Extend the guest launch's tool visibility with those families when they ship (readiness key `guest-tool-families`). Name no host service for the message, schedule or question tools until their bridges exist.
+**Settled by the owner, 2026-10-16:** Gate them as the allowlist does: Glob, Grep and LSP need `read`; NotebookEdit needs `read` and `write` like Edit; Monitor and Workflow need `execute`. Extend the guest launch's tool visibility with those families when they ship (readiness key `guest-tool-families`). Name no host service for the message, schedule or question tools until their bridges exist.
 
-**Instead:** Gate them by a different class, or leave them ungated.
+**Alternative not taken:** Gate them by a different class, or leave them ungated.
 
-The ceiling vocabulary is live, not undefined: the tool classes are `read`, `write` and `execute`, and the host services in use are `git.read`, `git.publish` and `workspace.instructions.update`. The guest launch already maps the classes to Read, Edit (read and write), Write and Bash, and "unimplemented guest tool families remain unavailable". The open question is how everything else maps. The allowlist rows carry the classes above; a test checks that the four tools the launch covers agree with it.
+The ceiling vocabulary is live, not undefined: the tool classes are `read`, `write` and `execute`, and the host services in use are `git.read`, `git.publish` and `workspace.instructions.update`. The guest launch already maps the classes to Read, Edit (read and write), Write and Bash, and "unimplemented guest tool families remain unavailable". The question was how everything else maps. The allowlist rows carry the classes above; a test checks that the four tools the launch covers agree with it.
 
 *Spec and code sources:* `confinedToolVisibility` in [`guest-runtime.ts`](../packages/core/src/cowork/guest-runtime.ts); `git.publish` in [`authority.ts`](../packages/core/src/cowork/git/authority.ts); `git.read` in [`read-authority.ts`](../packages/core/src/cowork/git/read-authority.ts); `workspace.instructions.update` in [`instructions.ts`](../packages/core/src/cowork/instructions.ts)
 
 ### D16 — Does the model see the workspace title?
 
-**Recommended:** Yes, as a sanitised quoted label. Never show source labels.
+**Settled by the owner, 2026-10-16:** Yes, as a sanitised quoted label. Never show source labels.
 
-**Instead:** Omit titles entirely, as the current-context planner does.
+**Alternative not taken:** Omit titles entirely, as the current-context planner does.
 
 The planner keeps labels and titles out of the facts it renders. A source label can come from a folder or repository name that someone else chose; a workspace title is typed by the user. The title is optional in the builder, so omitting it is a one-argument change. When shown, it is NFC-normalised, truncated to 120 characters with an ellipsis, stripped of control, line-break, bidirectional, zero-width and invisible-filler characters (replaced with U+FFFD), and printed as one JSON-quoted string.
 
@@ -398,25 +398,25 @@ The planner keeps labels and titles out of the facts it renders. A source label 
 
 ### D17 — Is `Search` offered in a workspace whose ceiling says network none?
 
-**Recommended:** No. A no-network workspace gets no web tools, including `Search`.
+**Settled by the owner, 2026-10-16:** No. A no-network workspace gets no web tools, including `Search`.
 
-**Instead:** Keep `Search`, because Exa answer search is a host provider route and not guest network traffic.
+**Alternative not taken:** Keep `Search`, because Exa answer search is a host provider route and not guest network traffic.
 
 The contracts treat "WebFetch digest and Exa search" as provider routes, so the host could serve `Search` even when the guest has no network. But the ceiling's `network: none` is the user's statement about the workspace, and a search result is web content; the spec does not say which wins. WebFetch and WebSearch need the guest network, so they are removed either way.
 
 *Spec and code sources:* [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways); [contracts: Network and mounted-folder behavior](cowork-execution-contracts.md#network-and-mounted-folder-behavior)
-<!-- decisions-open:end -->
+<!-- decisions-owner:end -->
 
 ## Settled by the spec
 
-For the record. Nothing here needs the owner unless the spec itself changes.
+Settled by the specification itself, for the record. Nothing here needs the owner unless the spec changes.
 
 *Generated.*
 
-<!-- decisions-settled:begin -->
+<!-- decisions-spec:begin -->
 ### D1 — Mac-side tools in v1 (Browser, Office, ComputerV2, Computer)
 
-**Settled:** None is offered. The contracts make browser, Office, computer use and Xcode "separate host capabilities with current grants and validated location/artifact references; unavailable by default without that capability", and the spec calls them "separate explicit opt-ins".
+**Settled by the spec:** None is offered. The contracts make browser, Office, computer use and Xcode "separate host capabilities with current grants and validated location/artifact references; unavailable by default without that capability", and the spec calls them "separate explicit opt-ins".
 
 No grant or path validation exists, so there is nothing to offer. As a result no allowlisted tool executes on the Mac: the host rows are brokers that carry out a message, a schedule or a question on the guest's behalf, and none of them runs a command or opens a path the guest gives it. Which capability comes first, and with what grant, is a later question, not a v1 one.
 
@@ -424,7 +424,7 @@ No grant or path validation exists, so there is nothing to offer. As a result no
 
 ### D7 — Schedule tools (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`)
 
-**Settled:** They are on the allowlist because the spec requires them: "Guest Cron and ScheduleWakeup tools must create/list/delete the same durable authority and report success only after host acceptance." They fail closed: each row needs the readiness key `scheduler-bridge`, which the host declares once the guest Cron bridge exists.
+**Settled by the spec:** They are on the allowlist because the spec requires them: "Guest Cron and ScheduleWakeup tools must create/list/delete the same durable authority and report success only after host acceptance." They fail closed: each row needs the readiness key `scheduler-bridge`, which the host declares once the guest Cron bridge exists.
 
 Today `workspace.schedule.*` is local metadata only and no guest bridge exists. Until the host declares it ready the tools are not offered and the prompt has no Scheduling section.
 
@@ -432,7 +432,7 @@ Today `workspace.schedule.*` is local metadata only and no guest bridge exists. 
 
 ### D14 — How the source list and the push default reach the model
 
-**Settled:** They come from `CoworkCurrentContextPlanner`, which generates the source list, the effective-ceiling line and the completion default from the canonical host records on each call. This module generates none of them. The spec says to "avoid independently maintained copies of policy text: generate from the same host record".
+**Settled by the spec:** They come from `CoworkCurrentContextPlanner`, which generates the source list, the effective-ceiling line and the completion default from the canonical host records on each call. This module generates none of them. The spec says to "avoid independently maintained copies of policy text: generate from the same host record".
 
 A second generator would drift from the planner's definition of GitHub-only and of the completion default. The prompt only tells the model that the host-context block exists and is authoritative.
 
@@ -440,12 +440,12 @@ A second generator would drift from the planner's definition of GitHub-only and 
 
 ### D15 — Language servers
 
-**Settled:** The guest `LSP` built-in is allowed; the Mac's `mcp__winter__lsp__lsp` capability is not offered. The contracts say language servers are "Guest Linux servers and paths" and that host toolchains "require an explicit host capability".
+**Settled by the spec:** The guest `LSP` built-in is allowed; the Mac's `mcp__winter__lsp__lsp` capability is not offered. The contracts say language servers are "Guest Linux servers and paths" and that host toolchains "require an explicit host capability".
 
 The guest tool is not built yet, so the row needs the readiness key `guest-lsp`.
 
 *Spec and code sources:* [contracts: Trust and extensions](cowork-execution-contracts.md#trust-and-extensions); [contracts: Guest router, file channel and immutable runtime](cowork-execution-contracts.md#guest-router-file-channel-and-immutable-runtime)
-<!-- decisions-settled:end -->
+<!-- decisions-spec:end -->
 
 ## Before this can be wired
 

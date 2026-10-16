@@ -79,20 +79,27 @@ function summary(): string {
   const guest = COWORK_TOOL_ALLOWLIST.filter((row) => row.runs === "guest").length, host = COWORK_TOOL_ALLOWLIST.length - guest;
   const withheld = COWORK_TOOL_ALLOWLIST.filter((row) => row.needs !== undefined).length;
   const open = COWORK_DECISIONS.filter((decision) => decision.status === "open").length;
+  const bySpec = COWORK_DECISIONS.filter((decision) => decision.status === "settled" && decision.by === "spec").length;
+  const byOwner = COWORK_DECISIONS.filter((decision) => decision.status === "settled" && decision.by === "owner");
+  const decided = byOwner.map((decision) => decision.status === "settled" && decision.by === "owner" ? decision.decidedOn : "");
   return [
     `- **${COWORK_TOOL_ALLOWLIST.length}** allowlisted tools: **${guest}** run in the guest and **${host}** are host brokers.`,
     `- **${withheld}** of them are withheld by default until the host declares the readiness key they need.`,
     `- **${COWORK_TOOL_DENYLIST.length}** tools and **${COWORK_UNBUILT_CAPABILITY_SERVERS.length}** capability servers are not offered.`,
-    `- **${open}** open decisions for the owner; **${COWORK_DECISIONS.length - open}** settled by the spec.`,
+    open === 0
+      ? `- All **${COWORK_DECISIONS.length}** decisions are settled: **${bySpec}** by the spec and **${byOwner.length}** by the owner on ${[...new Set(decided)].join(", ")}.`
+      : `- **${open}** decisions are still open for the owner; **${COWORK_DECISIONS.length - open}** are settled.`,
   ].join("\n");
 }
 
-function decisions(status: "open" | "settled"): string {
-  return COWORK_DECISIONS.filter((decision) => decision.status === status).map((decision) => {
+function decisions(kind: "open" | "spec" | "owner"): string {
+  return COWORK_DECISIONS.filter((decision) => (kind === "open" ? decision.status === "open" : decision.status === "settled" && decision.by === kind)).map((decision) => {
     const head = `### ${decision.id} — ${decision.title}`;
     const body = decision.status === "open"
       ? [`**Recommended:** ${decision.recommended}`, `**Instead:** ${decision.instead}`, decision.why]
-      : [`**Settled:** ${decision.resolution}`, decision.why];
+      : decision.by === "spec"
+        ? [`**Settled by the spec:** ${decision.resolution}`, decision.why]
+        : [`**Settled by the owner, ${decision.decidedOn}:** ${decision.resolution}`, `**Alternative not taken:** ${decision.rejected}`, decision.why];
     return [head, ...body, `*Spec and code sources:* ${decision.cite.map(renderCite).join("; ")}`].join("\n\n");
   }).join("\n\n");
 }
@@ -107,7 +114,7 @@ export function renderDocBlocks(): Record<string, string> {
   return {
     summary: summary(), "prompt-sample": ["```text", coworkSystemPrompt(DOC_SAMPLE), "```"].join("\n"), readiness: readiness(),
     allowlist: allowlist(), families: families(), denylist: denylist(), servers: servers(), refusals: refusals(),
-    "decisions-open": decisions("open"), "decisions-settled": decisions("settled"),
+    "decisions-owner": decisions("owner"), "decisions-spec": decisions("spec"),
   };
 }
 
