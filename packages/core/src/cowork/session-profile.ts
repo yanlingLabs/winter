@@ -216,7 +216,8 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
   // --- Web: guest execution, host-brokered provider and network routes ------------------------------------------------
   { name: "WebFetch", runs: "guest", brokers: ["provider-gateway", "network"], cite: [PROVIDER, "contracts#Network and mounted-folder behavior"],
     why: "Fetch obeys the network policy; the page-digest model is a separate authorized provider route." },
-  // DECISION: D10 — exactly one of Search / WebSearch, as in Chat and Dispatch. D17 — Search under network none.
+  // DECISION: D10 — exactly one of Search / WebSearch, as in Chat and Dispatch.
+  // DECISION: D17 — Search is withheld in a workspace whose ceiling says network none (the brokers list carries "network").
   { name: "Search", runs: "guest", brokers: ["provider-gateway", "network"], when: "exa-key", cite: [PROVIDER], decision: "D10",
     why: "Exa answer search, a separate authorized provider route. Offered only while an Exa key is stored, and not in a workspace with no network (D17)." },
   { name: "WebSearch", runs: "guest", brokers: ["network"], when: "no-exa-key", cite: [GUEST_FIRST], decision: "D10",
@@ -559,6 +560,7 @@ const isSelector = (cp: number) => (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0
 const isNoncharacter = (cp: number) => (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
 const refused = (char: string, cp: number) => REFUSED_CHARACTER.test(char) || INVISIBLE_FILLERS.has(cp) || isNoncharacter(cp);
 
+// DECISION: D16 — whether the model sees the workspace title at all. It is optional; source labels are never shown.
 /**
  * A user-chosen title, made safe to show. It is never refused: this runs on every turn, so a title the host
  * accepted must not break generation. NFC; runs of space-like characters collapsed to one space and trimmed;
