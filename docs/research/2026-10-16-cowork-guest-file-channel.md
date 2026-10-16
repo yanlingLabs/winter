@@ -31,11 +31,22 @@ Why Core, and why not the alternatives:
 
 ## Wire format
 
-One frame is one line: a single JSON object and a newline, in canonical `JSON.stringify` spelling. A parsed frame is re-serialized and must equal its own text, which refuses duplicate keys (JSON.parse keeps the last), whitespace, alternate escapes and alternate number spellings. A guest must therefore emit `JSON.stringify` output; a non-JavaScript guest has to match its escaping and number rules.
+One frame is one line: a single JSON object and a newline, in canonical `JSON.stringify` spelling. A parsed frame is re-serialized and must equal its own text, which refuses duplicate keys (JSON.parse keeps the last), whitespace, alternate escapes and alternate number spellings. The newline is the terminator: it must be the last character, and any other newline is JSON whitespace and fails the same compare.
+
+**Key order.** Core emits the key order in the table below. The parser accepts the keys in any order (it reads the listed keys by name, and the re-serialization compare preserves whatever order was sent), so a guest need not match Core's order.
+
+**Canonical JSON for a guest that is not TypeScript.** What the parser accepts is exactly what `JSON.stringify` produces for these frames, in any key order:
+
+- compact separators: `,` and `:` with no whitespace anywhere, and no pretty-printing;
+- no ASCII escaping: non-ASCII text (including U+2028 and U+2029) is written as raw UTF-8; only `"`, `\` and control characters below U+0020 are escaped (`\b \f \n \r \t`, others as lowercase `\u00xx`), and `/` and DEL are not escaped;
+- integers only: plain decimal digits, no fraction, no exponent, no leading zeros, no `-0`; every number is a safe integer (at most 2^53-1);
+- `true` and `false` literals, no `null` except where a field allows it (none of these frames do).
+
+Python: `json.dumps(frame, separators=(",", ":"), ensure_ascii=False)` plus `"\n"`, with integer values only (a float such as `1.0` is refused). Go's `encoding/json` and Swift's `JSONEncoder` do not match by default: Go escapes `<`, `>` and `&` unless `SetEscapeHTML(false)` and always escapes U+2028 and U+2029, and Swift writes `/` as `\/` unless `.withoutEscapingSlashes` is set. A guest in either language needs non-default settings or a hand-written string encoder, and should be checked by feeding its output through `parseCoworkGuestFileResponse` (and Core's request frames through `parseCoworkGuestFileRequest`).
 
 Every operation binds `workspaceId`, `sessionId`, `locationId`, `relativePath`, `incarnationId` and `sourceRevision`. Every response echoes all six and the request's `requestId` and `op`.
 
-| Frame | Keys (in order) |
+| Frame | Keys (the order Core emits; any order is accepted) |
 | --- | --- |
 | `stat` request | `version, requestId, op, <binding>` |
 | `read` request (first chunk, offset 0) | `... , expectedGeneration, maxBytes` |
@@ -68,22 +79,28 @@ The guest returns exactly `min(maxBytes, bytes - offset)` bytes starting at the 
 The client is `createCoworkGuestFileClient({ frames, authority, requestId? })`.
 
 1. Validate the input (closed keys, own data properties only, the strict request parser as the single validator). Nothing leaves the client and the authority is not asked for an invalid input (`invalid_request`).
-2. Abort check, then `authority.check(scope)` where `scope` is the bound operation. A throw, a promise or a malformed answer is `authority_denied`; a live incarnation or source revision that differs from the bound one is `stale_file`; a workspace with no running incarnation (`incarnationId: null`) is `file_unavailable` (guest-only data needs a wake; the wake itself is the consumer's business).
+2. Abort check, then `authority.check(scope)` where `scope` is the bound operation. The whole call and every read of its answer sit in one try, so a throw, a Proxy trap or a getter that throws, a promise or other thenable (its eventual rejection is absorbed so it never surfaces as an unhandled rejection) or a malformed answer is `authority_denied`; a live incarnation or source revision that differs from the bound one is `stale_file`; a workspace with no running incarnation (`incarnationId: null`) is `file_unavailable` (guest-only data needs a wake; the wake itself is the consumer's business).
 3. Send one request line; race the reply against the abort signal.
-4. **Recheck** the same port when the reply arrives, before one byte is parsed or returned. Revoked is `authority_denied`; a changed incarnation or source revision (or an incarnation that vanished) is `stale_file`. This wins over everything else, including a guest error and a transport failure, so nothing about the guest's files is learned after revocation.
+4. **Recheck** the same port when the reply arrives, before one byte is parsed or returned. Revoked is `authority_denied`; a changed incarnation or source revision (or an incarnation that vanished) is `stale_file`. This wins over everything about the reply, including a guest error and a transport failure, so nothing about the guest's files is learned after revocation. **An abort still wins over the recheck**: the abort check comes first, so a call that was aborted answers `file_unavailable` even if the scope was also revoked.
 5. Parse. The echo must match the request: another workspace, session, location or path is `authority_denied` (a reply meant for another scope is never delivered); another incarnation, source revision or generation is `stale_file`.
 
 | Condition | Code |
 | --- | --- |
 | Bad path, bad `maxBytes`/`offset`, unknown input key, bad options | `invalid_request` |
-| Revoked, authority throws or answers garbage, reply bound to another scope | `authority_denied` |
+| Revoked, authority throws or answers garbage, reply bound to another scope | `authority_denied` (see the caveat below) |
 | Incarnation, source revision or generation changed (before, during or per the reply) | `stale_file` |
 | Workspace not running before the call; any frame that is not exactly the closed frame; abort; transport failure (message dropped) | `file_unavailable` |
 | Frame, base64 text or decoded body over its bound | `response_too_large` |
 | Offset, length and eof do not add up | `file_incomplete` |
 | Guest-reported | `file_missing`, `file_unavailable`, `stale_file`, `file_incomplete`, `response_too_large`, `invalid_request`; any other code, including `authority_denied`, is `file_unavailable` |
 
+**`authority_denied` from this client is not proof that the host revoked anything.** A guest can provoke it by echoing another workspace, session, location or path in its reply. Consumers must not treat it as a host-side revocation signal (for example, must not drop grants, mark a workspace revoked or tell the user access was withdrawn because of it); the host's own records are the only source for that. It means only "do not use this reply".
+
 No code is added to `CoworkErrorCode`. A transport failure keeps only a read-failure code if it is a `CoworkError` with one; every other failure is a bare `file_unavailable`, so no message or path leaks.
+
+**No per-call deadline.** The client imposes no timeout of its own: a reply that never comes is waited for forever, and so is a port that never answers. Consumers must pass a deadline as the call's signal (for example `{ signal: AbortSignal.timeout(ms) }`, or an `AbortSignal.any` of that and a session-teardown signal). The abort listener is removed when the call settles, so one long-lived signal can be reused across many calls without growing.
+
+**Optional chunk size.** `maxBytes` is the one optional input. Absent, or explicitly `undefined` (an optional property passed straight through), it is the 64 KiB default; every other `undefined` or `null` input is `invalid_request`.
 
 **Abort.** An abort before the call, while the reply is pending, or in the gap after the reply settled but before the call continues answers `file_unavailable` with no result. A late reply or late transport failure is dropped unparsed and never becomes an unhandled rejection. The caller's signal is passed to the port so a real transport can stop work.
 
@@ -112,4 +129,4 @@ Also open before any consumer: the frame port (supervisor channel multiplexing, 
 
 ## Validation
 
-`packages/core/test/cowork/guest-file-channel.test.ts` uses an in-memory fake guest and fake authority only. It proves this module's logic: closed parse, bounds, offset/eof consistency, the authority sandwich, stale incarnation/revision/generation, abort, path validation, input hygiene, drift pins and the anti-wiring pin. It does not prove frame authenticity, guest confinement, transport behaviour, native admission or any real guest filesystem. No VM, worker, live home, Keychain, GUI or native test runs. Mutation checks (each applied, run, shown to fail the named test, reverted) are recorded in the pull request.
+`packages/core/test/cowork/guest-file-channel.test.ts` uses an in-memory fake guest and fake authority only. It proves this module's logic: closed parse, bounds (including the exact 4096-byte path edge and the per-request base64 bound), offset/eof consistency, the authority sandwich (including hostile and asynchronous authority answers), stale incarnation/revision/generation, abort and listener hygiene, path validation, input hygiene, drift pins and the anti-wiring pin. It does not prove frame authenticity, guest confinement, transport behaviour, native admission or any real guest filesystem. No VM, worker, live home, Keychain, GUI or native test runs. Mutation checks (each applied, run, shown to fail the named test, reverted) are recorded in the pull request.

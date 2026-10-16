@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { getEventListeners } from "node:events";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { COWORK_FILE_CHUNK_DEFAULT_BYTES, COWORK_FILE_CHUNK_MAX_BYTES, CoworkOutputPath } from "@yanlinglabs/winter-protocol";
@@ -181,6 +182,16 @@ test("the response parser accepts exactly the closed frames and refuses everythi
   refusedChunk(text.replace(/^\{/, `{"ok":false,`)); // duplicate key
   refusedChunk("{]\n"); refusedChunk("[]\n"); refusedChunk('"x"\n'); refusedChunk("null\n"); refusedChunk("\n"); refusedChunk("");
   for (const value of [undefined, null, 5, {}, [], Buffer.from(text), new Uint8Array(4)]) refusedChunk(value);
+});
+
+test("key order is free: the parsers accept a frame whose keys arrive in any order, and the client emits the listed order", () => {
+  const reversed = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).reverse());
+  const response = parseCoworkGuestFileResponse(line(reversed(chunkFrame())), chunkRequest());
+  expect("content" in response && [...response.content]).toEqual([...bytes(4)]);
+  expect(parseCode(line(reversed(statFrame())), statRequest())).toBe("returned");
+  const request = { version: 1, requestId: uuid(1), op: "readRange", ...binding, expectedGeneration: GENERATION, offset: 0, maxBytes: 10 };
+  expect(parseCoworkGuestFileRequest(line(reversed(request))).op).toBe("readRange");
+  expect(parseCode(line(reversed({ version: 1, requestId: uuid(9), op: "readRange", ok: false, code: "file_missing" })), chunkRequest())).toBe("file_missing");
 });
 
 test("prototype-slot keys, ill-formed strings (raw or escaped) and deep nesting are refused before anything is read from the frame", () => {
@@ -555,6 +566,182 @@ test("transport failures carry no message; only read-failure codes pass through 
   expect(await codeOf(rig(throwing(undefined)).client.stat(stat))).toBe("file_unavailable"); expect(await codeOf(rig(throwing("text")).client.stat(stat))).toBe("file_unavailable");
   expect(await codeOf(rig(() => Promise.reject(new Error("no"))).client.stat(stat))).toBe("file_unavailable");
   for (const reply of [undefined, null, 5, {}, Buffer.from(line(statFrame())), new Uint8Array(3)]) expect(await codeOf(rig(() => reply as never).client.stat(stat))).toBe("file_unavailable");
+});
+
+// ---------------------------------------------------------------- review follow-ups
+
+const listeners = (signal: AbortSignal) => getEventListeners(signal, "abort").length;
+const sized = (...sizes: number[]) => sizes.map(size => "é".repeat(Math.floor(size / 2)) + (size % 2 ? "x" : "")).join("/");
+const edge = (last: number) => [...Array(15).fill("x".repeat(255)), "x".repeat(100), "x".repeat(last)].join("/");
+
+test("an authority answer that throws while it is read (a Proxy trap) is authority_denied, before and after the call", async () => {
+  const hostile = (trap: string) => new Proxy({ incarnationId: INCARNATION, sourceRevision: REVISION }, { [trap]() { throw new Error(`${trap} trap`); } });
+  for (const trap of ["get", "getOwnPropertyDescriptor"]) {
+    const before = rig(honest(bytes(5)));
+    before.authority.malformed = hostile(trap);
+    expect(`${trap}:${await codeOf(before.client.stat(stat))}`).toBe(`${trap}:authority_denied`); expect(before.frames.length).toBe(0);
+    // Fine when asked first, hostile when the reply arrives: the bytes are discarded as a denial.
+    const after = rig(frame => { after.authority.malformed = hostile(trap); return honest(Buffer.from(SECRET))(frame); });
+    let error: unknown; try { await after.client.read(read); } catch (caught) { error = caught; }
+    expect(`${trap}:${(error as CoworkError | undefined)?.code}`).toBe(`${trap}:authority_denied`); expect(String(error)).not.toContain(SECRET);
+  }
+  // A getter on a plain answer that throws is the same denial, and so is a `then` getter that throws.
+  for (const answer of [{ get incarnationId(): string { throw new Error("getter"); }, sourceRevision: REVISION }, { incarnationId: INCARNATION, get then(): never { throw new Error("then getter"); }, sourceRevision: REVISION }]) {
+    const guest = rig(honest(bytes(5))); guest.authority.malformed = answer;
+    expect(await codeOf(guest.client.stat(stat))).toBe("authority_denied");
+  }
+});
+
+test("an asynchronous authority port is denied and its rejection never goes unhandled", async () => {
+  const unhandled: unknown[] = [], record = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", record);
+  try {
+    const answers: Record<string, () => unknown> = {
+      "async function that throws": async () => { throw new Error("db down"); },
+      "a rejected promise": () => Promise.reject(new Error("db down")),
+      "a thenable that rejects": () => ({ then(_resolve: unknown, reject: (reason: unknown) => void) { reject(new Error("db down")); } }),
+      "a thenable whose then throws": () => ({ then() { throw new Error("then threw"); } }),
+      "a promise that would have resolved to a valid answer": () => Promise.resolve({ incarnationId: INCARNATION, sourceRevision: REVISION }),
+    };
+    for (const [name, check] of Object.entries(answers)) {
+      const sent: string[] = [];
+      const before = createCoworkGuestFileClient({ frames: { send: async frame => { sent.push(frame); return honest(bytes(5))(frame); } }, authority: { check: check as never }, requestId: () => uuid(1) });
+      expect(`${name}:${await codeOf(before.stat(stat))}`).toBe(`${name}:authority_denied`); expect(sent.length).toBe(0);
+      // Asked fine first, asynchronous when the reply arrives.
+      let asked = 0;
+      const after = createCoworkGuestFileClient({ frames: { send: async frame => { sent.push(frame); return honest(Buffer.from(SECRET))(frame); } },
+        authority: { check: () => (++asked === 1 ? { incarnationId: INCARNATION, sourceRevision: REVISION } : check() as never) }, requestId: () => uuid(1) });
+      expect(`${name}:${await codeOf(after.stat(stat))}`).toBe(`${name}:authority_denied`); expect(sent.length).toBe(1);
+    }
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(unhandled).toEqual([]);
+  } finally { process.off("unhandledRejection", record); }
+});
+
+test("maxBytes: undefined is the default chunk size, exactly like an absent maxBytes; no other undefined field is accepted", async () => {
+  const guest = rig(honest(bytes(10)));
+  await guest.client.read({ ...read, maxBytes: undefined }); await guest.client.readRange({ ...range(2), maxBytes: undefined }); await guest.client.read(read); await guest.client.readRange(range(2));
+  expect(guest.frames.map(frame => (JSON.parse(frame) as { maxBytes: number }).maxBytes)).toEqual([65536, 65536, 65536, 65536]);
+  const before = guest.frames.length;
+  expect(await codeOf(guest.client.readRange({ ...read, offset: undefined } as never))).toBe("invalid_request");
+  expect(await codeOf(guest.client.read({ ...read, expectedGeneration: undefined } as never))).toBe("invalid_request");
+  expect(await codeOf(guest.client.stat({ ...stat, sourceRevision: undefined } as never))).toBe("invalid_request");
+  expect(await codeOf(guest.client.stat({ ...stat, relativePath: undefined } as never))).toBe("invalid_request");
+  expect(await codeOf(guest.client.read({ ...read, maxBytes: null } as never))).toBe("invalid_request");
+  const accessor = { ...read }; Object.defineProperty(accessor, "maxBytes", { enumerable: true, get: () => undefined });
+  expect(await codeOf(guest.client.read(accessor as never))).toBe("invalid_request");
+  expect(guest.frames.length).toBe(before);
+});
+
+test("the path boundary is exact: 4096 UTF-8 bytes are accepted, 4097 are refused, by bytes and not by characters", async () => {
+  const ascii = edge(155), over = edge(156);
+  expect(Buffer.byteLength(ascii)).toBe(4096); expect(ascii.length).toBe(4096); expect(parseCoworkGuestRelativePath(ascii)).toBe(ascii);
+  expect(Buffer.byteLength(over)).toBe(4097); expect(codeSync(() => parseCoworkGuestRelativePath(over))).toBe("invalid_request");
+  // Multibyte: the same byte totals in far fewer UTF-16 characters, so only the byte rule can tell them apart.
+  const wide = sized(...Array(15).fill(255), 100, 155), wideOver = sized(...Array(15).fill(255), 100, 156);
+  expect(Buffer.byteLength(wide)).toBe(4096); expect(wide.length).toBeLessThan(4096); expect(parseCoworkGuestRelativePath(wide)).toBe(wide);
+  expect(Buffer.byteLength(wideOver)).toBe(4097); expect(wideOver.length).toBeLessThan(4096); expect(codeSync(() => parseCoworkGuestRelativePath(wideOver))).toBe("invalid_request");
+  // 255 bytes per component is the same kind of edge.
+  expect(parseCoworkGuestRelativePath(sized(255))).toBeTruthy(); expect(codeSync(() => parseCoworkGuestRelativePath(sized(256)))).toBe("invalid_request");
+  // End to end, and through the request parser.
+  const guest = rig(honest(bytes(5)));
+  expect((await guest.client.stat({ ...stat, relativePath: ascii })).relativePath).toBe(ascii); expect((await guest.client.stat({ ...stat, relativePath: wide })).relativePath).toBe(wide);
+  expect(await codeOf(guest.client.stat({ ...stat, relativePath: over }))).toBe("invalid_request"); expect(await codeOf(guest.client.stat({ ...stat, relativePath: wideOver }))).toBe("invalid_request");
+  expect(guest.frames.length).toBe(2);
+  expect(parseCoworkGuestFileRequest(guest.frames[0]!).relativePath).toBe(ascii);
+  expect(codeSync(() => parseCoworkGuestFileRequest(guest.frames[0]!.replace(ascii, over)))).toBe("invalid_request");
+});
+
+test("the client leaves no abort listener on a long-lived signal: success, failure, guest error, revocation, garbage, abort", async () => {
+  const controller = new AbortController(), signal = controller.signal, options = { signal };
+  const ok = rig(honest(bytes(10)));
+  for (let i = 0; i < 5; i++) await ok.client.stat(stat, options);
+  expect(listeners(signal)).toBe(0);
+  const failing = rig(() => { throw new Error("boom"); });
+  for (let i = 0; i < 5; i++) expect(await codeOf(failing.client.stat(stat, options))).toBe("file_unavailable");
+  expect(listeners(signal)).toBe(0);
+  const failed = rig(() => Promise.reject(new Error("later")));
+  expect(await codeOf(failed.client.stat(stat, options))).toBe("file_unavailable"); expect(listeners(signal)).toBe(0);
+  const guestError = rig(frame => { const r = parseCoworkGuestFileRequest(frame); return line({ version: 1, requestId: r.requestId, op: r.op, ok: false, code: "file_missing" }); });
+  expect(await codeOf(guestError.client.stat(stat, options))).toBe("file_missing"); expect(listeners(signal)).toBe(0);
+  const revoked = rig(frame => { revoked.authority.revoked = true; return honest(bytes(5))(frame); });
+  expect(await codeOf(revoked.client.stat(stat, options))).toBe("authority_denied"); expect(listeners(signal)).toBe(0);
+  const garbage = rig(() => "garbage\n");
+  expect(await codeOf(garbage.client.stat(stat, options))).toBe("file_unavailable"); expect(listeners(signal)).toBe(0);
+  // Several in flight on one signal, then all settled.
+  const gates: ((reply: string) => void)[] = [], concurrent = rig(frame => new Promise<string>(resolve => { gates.push(reply => resolve(reply)); void frame; }));
+  const calls = [concurrent.client.stat(stat, options), concurrent.client.stat(stat, options), concurrent.client.stat(stat, options)];
+  expect(listeners(signal)).toBe(3);
+  gates.forEach((open, index) => open(honest(bytes(10))(concurrent.frames[index]!)));
+  await Promise.all(calls); expect(listeners(signal)).toBe(0);
+  // A pending reply that never settles: the abort itself removes its listener.
+  const lc = new AbortController(), hung = rig(() => new Promise<string>(() => {}));
+  const pending = hung.client.stat(stat, { signal: lc.signal });
+  expect(listeners(lc.signal)).toBe(1); lc.abort(); expect(await codeOf(pending)).toBe("file_unavailable"); expect(listeners(lc.signal)).toBe(0);
+  // Aborted before the call: nothing is ever registered.
+  const early = new AbortController(); early.abort();
+  expect(await codeOf(ok.client.stat(stat, { signal: early.signal }))).toBe("file_unavailable"); expect(listeners(early.signal)).toBe(0);
+  expect(controller.signal.aborted).toBe(false);
+});
+
+test("abort wins over revocation, and a call has no deadline of its own: the caller passes AbortSignal.timeout", async () => {
+  const controller = new AbortController(), guest = rig(frame => { guest.authority.revoked = true; controller.abort(); return honest(bytes(5))(frame); });
+  expect(await codeOf(guest.client.stat(stat, { signal: controller.signal }))).toBe("file_unavailable");
+  const revokedOnly = rig(frame => { revokedOnly.authority.revoked = true; return honest(bytes(5))(frame); });
+  expect(await codeOf(revokedOnly.client.stat(stat))).toBe("authority_denied");
+  // No signal: a reply that never comes is waited for indefinitely.
+  const silent = rig(() => new Promise<string>(() => {}));
+  expect(await settles(silent.client.stat(stat), 80)).toBe("hung");
+  // With a deadline signal the same call ends, and leaves no listener behind.
+  const deadline = AbortSignal.timeout(30);
+  expect(await settles(silent.client.stat(stat, { signal: deadline }), 1000)).toBe("file_unavailable"); expect(listeners(deadline)).toBe(0);
+});
+
+test("the per-request base64 bound is decided from the length alone, separately from the global bound", () => {
+  const small = chunkRequest("readRange", 0, 1024), allowed = 4 * Math.ceil(1024 / 3);
+  expect(allowed).toBe(1368);
+  const frame = (text: string) => line(chunkFrame({ bytes: 4096, offset: 0, nextOffset: 0, contentBase64: text }));
+  expect(parseCode(frame("!".repeat(allowed + 1)), small)).toBe("response_too_large");
+  expect(parseCode(frame("!".repeat(allowed + 4)), small)).toBe("response_too_large");
+  expect(parseCode(frame("!".repeat(allowed)), small)).toBe("file_unavailable"); // within the bound, so it is only "not base64"
+  // The same text is within the global bound, so a global-only check could not tell these apart.
+  expect(allowed + 4).toBeLessThan(COWORK_GUEST_FILE_LIMITS.base64MaxChars);
+  const max = chunkRequest("readRange", 0, COWORK_GUEST_FILE_LIMITS.chunkMaxBytes);
+  expect(parseCode(frame("!".repeat(COWORK_GUEST_FILE_LIMITS.base64MaxChars + 1)), max)).toBe("response_too_large");
+  expect(parseCode(frame("!".repeat(COWORK_GUEST_FILE_LIMITS.base64MaxChars)), max)).toBe("file_unavailable");
+});
+
+test("a frame must end in a newline: any other last character is refused, for requests and for responses", () => {
+  const response = line(chunkFrame()).slice(0, -1), request = line({ version: 1, requestId: uuid(1), op: "stat", ...binding }).slice(0, -1);
+  expect(response.endsWith("}")).toBe(true);
+  expect(parseCode(`${response}\n`, chunkRequest())).toBe("returned"); expect(codeSync(() => parseCoworkGuestFileRequest(`${request}\n`))).toBe("returned");
+  for (const tail of ["x", " ", "\r", " ", "\0", "}", "\\n", "\n\n"]) {
+    expect(`${JSON.stringify(tail)}:${parseCode(`${response}${tail}`, chunkRequest())}`).toBe(`${JSON.stringify(tail)}:file_unavailable`);
+    expect(`${JSON.stringify(tail)}:${codeSync(() => parseCoworkGuestFileRequest(`${request}${tail}`))}`).toBe(`${JSON.stringify(tail)}:invalid_request`);
+  }
+  // The terminator is not optional even where the text before it is complete JSON.
+  expect(parseCode(response, chunkRequest())).toBe("file_unavailable"); expect(parseCode(`${response}x`, chunkRequest())).toBe("file_unavailable");
+  expect(parseCode("\n", chunkRequest())).toBe("file_unavailable");
+});
+
+test("revisions are safe integers everywhere: a request, a reply echo and an authority answer past 2^53-1 are refused", async () => {
+  const big = Number.MAX_SAFE_INTEGER + 1, top = Number.MAX_SAFE_INTEGER;
+  const good = { version: 1, requestId: uuid(1), op: "stat", ...binding };
+  expect(parseCoworkGuestFileRequest(line({ ...good, sourceRevision: top })).sourceRevision).toBe(top);
+  expect(codeSync(() => parseCoworkGuestFileRequest(line({ ...good, sourceRevision: big })))).toBe("invalid_request");
+  // A reply echoing a revision that is not a safe integer is unparseable; a safe one that differs is merely stale.
+  expect(parseCode(line(chunkFrame({ sourceRevision: big })), chunkRequest())).toBe("file_unavailable");
+  expect(parseCode(line(chunkFrame({ sourceRevision: top })), chunkRequest())).toBe("stale_file");
+  // The authority's own answer.
+  const guest = rig(honest(bytes(5)));
+  guest.authority.malformed = { incarnationId: INCARNATION, sourceRevision: big };
+  expect(await codeOf(guest.client.stat(stat))).toBe("authority_denied"); expect(guest.frames.length).toBe(0);
+  guest.authority.malformed = { incarnationId: INCARNATION, sourceRevision: top };
+  expect(await codeOf(guest.client.stat(stat))).toBe("stale_file");
+  // The top of the range works end to end.
+  const edgeGuest = rig(honest(bytes(5))); edgeGuest.authority.sourceRevision = top;
+  expect((await edgeGuest.client.stat({ ...stat, sourceRevision: top })).sourceRevision).toBe(top);
+  expect(await codeOf(edgeGuest.client.stat({ ...stat, sourceRevision: big }))).toBe("invalid_request");
 });
 
 // ---------------------------------------------------------------- drift and anti-wiring

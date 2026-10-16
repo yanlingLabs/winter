@@ -127,7 +127,9 @@ function strictLine(raw: unknown, maxBytes: number): Record<string, unknown> {
   if (typeof raw !== "string") return bad();
   // UTF-16 length never exceeds the byte length, so check it first and never measure an arbitrarily long string.
   if (raw.length > maxBytes || Buffer.byteLength(raw, "utf8") > maxBytes) throw new CoworkError("response_too_large");
-  if (!raw.endsWith("\n") || raw.indexOf("\n") !== raw.length - 1 || !raw.isWellFormed()) return bad();
+  // The terminator is the last character. Any OTHER newline is JSON whitespace (or an illegal raw newline in a string), so it
+  // fails the exact re-serialization compare below; there is no separate "one line" check to keep in step with it.
+  if (!raw.endsWith("\n") || !raw.isWellFormed()) return bad();
   const body = raw.slice(0, -1);
   if (!nestsWithin(body, COWORK_GUEST_FILE_LIMITS.frameDepth)) return bad();
   const parsed: unknown = JSON.parse(body);
@@ -264,7 +266,9 @@ function candidate(op: CoworkGuestFileOperation, input: unknown, requestId: stri
   const out: Record<string, unknown> = { version: COWORK_GUEST_FILE_CHANNEL_VERSION, requestId, op };
   for (const key of wanted) {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (descriptor === undefined) { if (key === "maxBytes") { out[key] = COWORK_GUEST_FILE_LIMITS.chunkDefaultBytes; continue; } return invalid(); }
+    // `maxBytes` is the one optional field: absent, or explicitly `undefined` (an optional property passed through), is the default.
+    if (key === "maxBytes" && (descriptor === undefined || ("value" in descriptor && descriptor.value === undefined))) { out[key] = COWORK_GUEST_FILE_LIMITS.chunkDefaultBytes; continue; }
+    if (descriptor === undefined) return invalid();
     // No string in a request is longer than the path bound; stop an absurd one before it is ever serialized.
     if (!("value" in descriptor) || (typeof descriptor.value === "string" && descriptor.value.length > COWORK_GUEST_FILE_LIMITS.pathBytes)) return invalid();
     out[key] = descriptor.value;
@@ -300,15 +304,25 @@ export function createCoworkGuestFileClient(deps: CoworkGuestFileClientDeps): Co
   /** Current records against the bound request. `phase` only decides what a vanished incarnation means: before the call the
    * workspace is simply not running (wake it); after the call the bound incarnation is gone, so the reply is stale. */
   function verify(request: CoworkGuestFileRequest, phase: "before" | "after"): void {
-    let live: unknown;
-    try { live = check(Object.freeze({ operation: request.op, workspaceId: request.workspaceId, sessionId: request.sessionId, locationId: request.locationId,
-      relativePath: request.relativePath, incarnationId: request.incarnationId, sourceRevision: request.sourceRevision })); }
-    catch { throw new CoworkError("authority_denied"); }
-    if (live === null || typeof live !== "object") throw new CoworkError("authority_denied");
-    const incarnation = Object.getOwnPropertyDescriptor(live, "incarnationId"), revision = Object.getOwnPropertyDescriptor(live, "sourceRevision");
-    if (!incarnation || !("value" in incarnation) || !revision || !("value" in revision) || !Number.isSafeInteger(revision.value) || (incarnation.value !== null && typeof incarnation.value !== "string")) throw new CoworkError("authority_denied");
-    if (incarnation.value === null) throw new CoworkError(phase === "before" ? "file_unavailable" : "stale_file");
-    if (incarnation.value !== request.incarnationId || revision.value !== request.sourceRevision) throw new CoworkError("stale_file");
+    let incarnation: unknown, revision: unknown;
+    // The port's answer is untrusted shape: a Proxy trap, a getter or a hostile `then` can throw anywhere while it is read.
+    // Everything from the call to the last read is one try, and any throw is a denial.
+    try {
+      const live: unknown = check(Object.freeze({ operation: request.op, workspaceId: request.workspaceId, sessionId: request.sessionId, locationId: request.locationId,
+        relativePath: request.relativePath, incarnationId: request.incarnationId, sourceRevision: request.sourceRevision }));
+      if (live !== null && (typeof live === "object" || typeof live === "function") && typeof (live as { then?: unknown }).then === "function") {
+        // An asynchronous port is a denial, and its eventual rejection must not escape as an unhandled one.
+        try { Promise.resolve(live).then(undefined, () => {}); } catch { /* a hostile then: already denied */ }
+        throw new CoworkError("authority_denied");
+      }
+      if (live === null || typeof live !== "object") throw new CoworkError("authority_denied");
+      const incarnationField = Object.getOwnPropertyDescriptor(live, "incarnationId"), revisionField = Object.getOwnPropertyDescriptor(live, "sourceRevision");
+      if (!incarnationField || !("value" in incarnationField) || !revisionField || !("value" in revisionField)) throw new CoworkError("authority_denied");
+      incarnation = incarnationField.value; revision = revisionField.value;
+    } catch { throw new CoworkError("authority_denied"); }
+    if (!Number.isSafeInteger(revision) || (incarnation !== null && typeof incarnation !== "string")) throw new CoworkError("authority_denied");
+    if (incarnation === null) throw new CoworkError(phase === "before" ? "file_unavailable" : "stale_file");
+    if (incarnation !== request.incarnationId || revision !== request.sourceRevision) throw new CoworkError("stale_file");
   }
 
   async function call(op: CoworkGuestFileOperation, input: unknown, options: unknown): Promise<CoworkGuestFileStat | CoworkGuestFileChunk> {
