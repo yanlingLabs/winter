@@ -17,10 +17,11 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     static let defaultSize = NSSize(width: 780, height: 480)
 
     /// - Parameters:
-    ///   - canAddToTranscript: whether "Add to transcript" has somewhere to go (read live — the button disables
-    ///     only when the session the run recorded has been deleted; `commandTranscriptTarget`).
+    ///   - transcriptUnavailableReason: why "Add to transcript" cannot be used now, or nil when it can (read live —
+    ///     the button disables with that reason as its tooltip; `CommandRunStore.transcriptUnavailableReason`).
     ///   - onAddToTranscript: sends the run's message there; true when it went.
-    init(run: CommandRun, canAddToTranscript: @escaping () -> Bool, onAddToTranscript: @escaping () async -> Bool) {
+    init(run: CommandRun, transcriptUnavailableReason: @escaping () -> String?,
+         onAddToTranscript: @escaping () async -> Bool) {
         self.run = run
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -44,9 +45,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             onStop: { [weak run] in run?.interrupt() },
             onEnd: { [weak run] in run?.endShell() },
             onTypeLine: { [weak run] in run?.typeLineByHand() },
-            canAddToTranscript: canAddToTranscript,
+            transcriptUnavailableReason: transcriptUnavailableReason,
             onAddToTranscript: {
-                guard chrome.sendState != .sending, canAddToTranscript() else { return }
+                guard chrome.sendState != .sending, transcriptUnavailableReason() == nil else { return }
                 chrome.sendState = .sending
                 Task { @MainActor in
                     let ok = await onAddToTranscript()
@@ -128,7 +129,7 @@ struct TerminalWindowRootView: View {
     let onStop: () -> Void
     let onEnd: () -> Void
     let onTypeLine: () -> Void
-    let canAddToTranscript: () -> Bool
+    let transcriptUnavailableReason: () -> String?
     let onAddToTranscript: () -> Void
 
     static let headerBand: CGFloat = 56
@@ -227,16 +228,14 @@ struct TerminalWindowRootView: View {
     /// Re-asked every couple of seconds: the run's session can go away while the window is open.
     private var addToTranscriptButton: some View {
         TimelineView(.periodic(from: .now, by: 2)) { _ in
-            addToTranscriptControl(available: canAddToTranscript())
+            addToTranscriptControl(unavailable: transcriptUnavailableReason())
         }
     }
 
     @ViewBuilder
-    private func addToTranscriptControl(available: Bool) -> some View {
-        if !available, chrome.sendState != .sent {
-            TerminalChromeButton(symbol: "text.bubble", label: "Add to transcript",
-                                 help: "The Dispatch session this command was run from is gone",
-                                 action: {})
+    private func addToTranscriptControl(unavailable reason: String?) -> some View {
+        if let reason, chrome.sendState != .sent {
+            TerminalChromeButton(symbol: "text.bubble", label: "Add to transcript", help: reason, action: {})
                 .opacity(0.4)
                 .disabled(true)
         } else {

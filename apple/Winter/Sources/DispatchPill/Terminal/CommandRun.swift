@@ -238,6 +238,9 @@ final class CommandRun: ObservableObject, Identifiable {
         return group > 0 ? group : nil
     }
 
+    /// The terminal has printed anything at all (the session capture is never empty once it has).
+    var hasOutput: Bool { sessionCapture.count > 0 || commandCapture.count > 0 }
+
     /// What "Add to transcript" sends: the line and its own output — or, once the user has gone on typing in the
     /// shell, the session's tail from the line's start (the later commands and their output included).
     var transcriptScope: TerminalTranscriptScope { typedAfterCommand || isTerminal ? .session : .command }
@@ -507,8 +510,13 @@ final class CommandRunStore: ObservableObject {
     /// Sends a run's transcript message the way the pill's composer sends a message — to its current
     /// conversation, created if there is none. For a run that recorded no session. Wired by the pill.
     var onSendToCurrentConversation: ((_ text: String) async -> (sent: Bool, sessionId: String?))?
-    /// Whether a session still exists (the app's directory). A recorded session that is gone disables the button.
-    var sessionExists: ((String) -> Bool)?
+    /// Asked only after a send to a session FAILED: has that session been deleted? (The app re-lists its sessions
+    /// to find out.) A yes disables the button for every run that targets it. Being merely absent from the app's
+    /// session list is never taken as deleted: that list is refreshed only now and then, and a run's session is
+    /// often newer than its last refresh — which is what greyed the button out before.
+    var sessionIsGone: ((String) async -> Bool)?
+    /// Sessions a failed send proved deleted.
+    private(set) var goneSessions: Set<String> = []
 
     private var windows: [UUID: TerminalWindowController] = [:]
     private var outcomeWatch: [UUID: AnyCancellable] = [:]
@@ -551,28 +559,38 @@ final class CommandRunStore: ObservableObject {
 
     /// Where the run's "Add to transcript" would go now (`commandTranscriptTarget`).
     func transcriptTarget(_ run: CommandRun) -> CommandTranscriptTarget {
-        commandTranscriptTarget(recordedSessionId: run.sessionId ?? run.pinnedSessionId) { [sessionExists] in
-            sessionExists?($0) ?? false
+        commandTranscriptTarget(recordedSessionId: run.sessionId ?? run.pinnedSessionId) { [goneSessions] in
+            !goneSessions.contains($0)
         }
     }
 
-    /// "Add to transcript" is possible: there is a target, and a way to send to it.
-    func canAddToTranscript(_ run: CommandRun) -> Bool {
+    /// Why "Add to transcript" cannot be used right now — the disabled button's tooltip — or nil when it can.
+    func transcriptUnavailableReason(_ run: CommandRun) -> String? {
         switch transcriptTarget(run) {
-        case .recordedSession: return onSendToTranscript != nil
-        case .currentConversation: return onSendToCurrentConversation != nil
-        case .unavailable: return false
+        case .unavailable:
+            return "The Dispatch session this terminal belongs to has been deleted"
+        case .recordedSession where onSendToTranscript == nil, .currentConversation where onSendToCurrentConversation == nil:
+            return "Winter isn’t connected to Dispatch yet"
+        default:
+            break
         }
+        return run.hasOutput ? nil : "Nothing to add yet — the terminal has no output"
     }
+
+    /// "Add to transcript" is possible: there is output, a target that is not known to be deleted, and a way to send.
+    func canAddToTranscript(_ run: CommandRun) -> Bool { transcriptUnavailableReason(run) == nil }
 
     /// Sends the run's command and output to its target. False when it cannot (its session is gone, refused).
     func addToTranscript(_ run: CommandRun) async -> Bool {
         switch transcriptTarget(run) {
         case .recordedSession(let sessionId):
-            guard let send = onSendToTranscript else { return false }
-            return await send(sessionId, run.transcriptMessage())
+            guard let send = onSendToTranscript, run.hasOutput else { return false }
+            if await send(sessionId, run.transcriptMessage()) { return true }
+            // The send failed: deleted, or just a hiccup? Only a re-list that no longer has it says deleted.
+            if await sessionIsGone?(sessionId) == true { goneSessions.insert(sessionId) }
+            return false
         case .currentConversation:
-            guard let send = onSendToCurrentConversation else { return false }
+            guard let send = onSendToCurrentConversation, run.hasOutput else { return false }
             let result = await send(run.transcriptMessage())
             // The first click's conversation is the run's from now on: later clicks go there, wherever focus is.
             if result.sent, let sessionId = result.sessionId { run.pinnedSessionId = sessionId }
@@ -595,9 +613,9 @@ final class CommandRunStore: ObservableObject {
         }
         let controller = TerminalWindowController(
             run: run,
-            canAddToTranscript: { [weak self, weak run] in
-                guard let self, let run else { return false }
-                return self.canAddToTranscript(run)
+            transcriptUnavailableReason: { [weak self, weak run] in
+                guard let self, let run else { return "This terminal has closed" }
+                return self.transcriptUnavailableReason(run)
             },
             onAddToTranscript: { [weak self, weak run] in
                 guard let self, let run else { return false }

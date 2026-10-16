@@ -38,8 +38,15 @@ final class SessionDirectory: ObservableObject {
     /// timeout) leaves `rows` exactly as they were — a transient failure must never blank the
     /// sidebar out from under the user.
     func refresh() async {
-        guard let fetched = try? await lister() else { return }
+        await refreshReportingSuccess()
+    }
+
+    /// `refresh()`, saying whether the list was fetched (false: the rows are as they were).
+    @discardableResult
+    func refreshReportingSuccess() async -> Bool {
+        guard let fetched = try? await lister() else { return false }
         rows = fetched.sorted { $0.createdAt > $1.createdAt }
+        return true
     }
 
     /// FINAL-REVIEW FIX (M1): the wirers' (`AppModel.init` / `DetachedWindowController.init`) own

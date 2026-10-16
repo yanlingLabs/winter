@@ -590,28 +590,39 @@ final class DispatchPillCommandRunTests: XCTestCase {
         pill.currentSessionId = { focused }
         var delivered: [(String, String)] = []
         var alive: Set<String> = ["session-a", "session-b"]
-        pill.commandRuns.onSendToTranscript = { sessionId, text in delivered.append((sessionId, text)); return true }
-        pill.commandRuns.sessionExists = { alive.contains($0) }
+        pill.commandRuns.onSendToTranscript = { sessionId, text in
+            guard alive.contains(sessionId) else { return false }
+            delivered.append((sessionId, text))
+            return true
+        }
+        pill.commandRuns.sessionIsGone = { !alive.contains($0) }
         pill.adapter.composerDraft = "ls /tmp"
         pill.commandMode.evaluateNowForTesting("ls /tmp")
         pill.submit("ls /tmp")
         guard let run = pill.commandRuns.runs.first else { return XCTFail("no run") }
         XCTAssertEqual(run.sessionId, "session-a", "recorded at RUN time")
         focused = "session-b"
+        XCTAssertFalse(pill.commandRuns.canAddToTranscript(run), "no output yet")
+        XCTAssertEqual(pill.commandRuns.transcriptUnavailableReason(run), "Nothing to add yet — the terminal has no output")
+        run.feedForTesting(Array("x\r\n".utf8))
         XCTAssertTrue(pill.commandRuns.canAddToTranscript(run))
         let ok = await pill.commandRuns.addToTranscript(run)
         XCTAssertTrue(ok)
         XCTAssertEqual(delivered.map(\.0), ["session-a"], "never the focused session")
         XCTAssertEqual(sent(), [], "and never the composer's send-or-create path")
         alive.remove("session-a")
-        XCTAssertFalse(pill.commandRuns.canAddToTranscript(run), "its session is gone: the button disables")
+        XCTAssertTrue(pill.commandRuns.canAddToTranscript(run), "missing from a list is never taken as deleted")
         let refused = await pill.commandRuns.addToTranscript(run)
-        XCTAssertFalse(refused)
+        XCTAssertFalse(refused, "the send failed…")
+        XCTAssertFalse(pill.commandRuns.canAddToTranscript(run), "…and a re-list proved it deleted: the button disables")
+        XCTAssertEqual(pill.commandRuns.transcriptUnavailableReason(run),
+                       "The Dispatch session this terminal belongs to has been deleted")
         XCTAssertEqual(delivered.count, 1)
 
         let orphan = pill.commandRuns.start(command: "ls", workingDirectory: "/tmp",
                                             environment: pill.commandMode.environment, sessionId: nil)
         XCTAssertEqual(pill.commandRuns.transcriptTarget(orphan), .currentConversation)
+        orphan.feedForTesting(Array("x\r\n".utf8))
         XCTAssertTrue(pill.commandRuns.canAddToTranscript(orphan), "no session at run time: the current conversation")
         let viaComposer = await pill.commandRuns.addToTranscript(orphan)
         XCTAssertTrue(viaComposer)
@@ -625,6 +636,27 @@ final class DispatchPillCommandRunTests: XCTestCase {
         XCTAssertTrue(again)
         XCTAssertEqual(delivered.map(\.0), ["session-a", "session-b"])
         XCTAssertEqual(sent().count, 1)
+    }
+
+    func testATerminalWithOutputCanAddItsSessionTail() async {
+        let (pill, _) = makePill()
+        pill.commandRuns.presentsWindows = false
+        pill.currentSessionId = { "dispatch-1" } // a session the app's list may well not show (yet)
+        var delivered: [(String, String)] = []
+        pill.commandRuns.onSendToTranscript = { sessionId, text in delivered.append((sessionId, text)); return true }
+        pill.commandRuns.sessionIsGone = { _ in true } // never asked: nothing failed
+        pill.adapter.composerDraft = "/terminal"
+        pill.submit("/terminal")
+        guard let run = pill.commandRuns.runs.first, run.isTerminal else { return XCTFail("no terminal") }
+        XCTAssertEqual(pill.commandRuns.transcriptUnavailableReason(run), "Nothing to add yet — the terminal has no output")
+        run.feedForTesting(Array("% open --help\r\nUsage: open [-e] files\r\n% ".utf8))
+        XCTAssertNil(pill.commandRuns.transcriptUnavailableReason(run))
+        XCTAssertTrue(pill.commandRuns.canAddToTranscript(run), "a terminal with output: enabled")
+        let ok = await pill.commandRuns.addToTranscript(run)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(delivered.first?.0, "dispatch-1")
+        XCTAssertEqual(delivered.first?.1, "This is from my terminal in ~:\n```\n% open --help\nUsage: open [-e] files\n%\n```",
+                       "its session tail")
     }
 
     func testTheTranscriptTargetRule() {
