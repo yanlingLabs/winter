@@ -274,7 +274,7 @@ describe("daemon wiring — the retention sweep reads settings live", () => {
       await until("the sweep to observe the narrowed window", async () => (await rt.sweepNow()).deliveriesPruned === 1);
       expect(await rt.directory.deliveries.get("recent")).toBeUndefined();
     });
-  });
+  }, 15_000); // the wait on the live settings watcher is bounded at 8 s: the test's own timeout must sit above it
 });
 
 describe("daemon wiring — the retention sweep runs at boot and on its own interval", () => {
