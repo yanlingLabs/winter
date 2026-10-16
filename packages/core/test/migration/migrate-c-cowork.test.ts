@@ -202,6 +202,9 @@ describe("manifest-driven paths: a resumed or rolled-back run never moves Cowork
       { moved: [{ from: "COWORK/workspaces/ws_fixture/data.ext4", to: "sdk/x" }] }, { copied: ["Cowork/x"] }, { links: ["COWORK"] },
       { archiveDir: join(home, "COWORK", "archive") },
     ]) expect(coworkManifestProblem({ ...m, ...bad } as MigrationCManifest)).toContain("Cowork storage");
+    // A home whose directory is stored as COWORK (no `cowork` exists), so the spelling alone has to decide on any volume.
+    const upper = realpathSync(tempDir("winter-migc-upper-")); mkdirSync(join(upper, "COWORK", "workspaces", "w"), { recursive: true });
+    expect(coworkManifestProblem({ ...base, home: upper, archiveDir: join(upper, "migration", "c-t"), moved: [{ from: "COWORK/workspaces/w/data.ext4", to: "sdk/x" }] })).toContain("Cowork storage");
     mkdirSync(join(home, "memory", "cowork"), { recursive: true }); mkdirSync(join(home, "coworker"), { recursive: true });
     for (const ok of ["sessions/x", "coworker/x", "memory/cowork/notes.md", "sdk/cowork", "cowork.txt", "skills", "sdk/skills"]) {
       expect(coworkManifestProblem({ ...m, moved: [{ from: ok, to: "sdk/elsewhere" }], links: [ok], copied: [ok] } as MigrationCManifest)).toBeUndefined();
