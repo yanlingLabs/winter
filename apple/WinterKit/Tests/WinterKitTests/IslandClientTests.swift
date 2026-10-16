@@ -66,14 +66,14 @@ final class IslandClientTests: XCTestCase {
         let hosts = WinterClient.decodeIslandHosts(try JSONDecoder().decode(JSONValue.self, from: Data(hostsJSON.utf8)))
         XCTAssertEqual(hosts, ["s1": [IslandHost(clientName: "cli-chat", role: "harness", tty: "/dev/ttys003")]])
 
-        let usageJSON = #"{"windows":[{"rateLimitType":"five_hour","status":"allowed_warning","utilization":0.8,"resetsAt":1900000000000,"at":5,"sessionId":"s1"},{"rateLimitType":"x"}],"subscription":{"status":"allowed","resetsAt":1800000000000,"at":2},"background":{"kind":"limited","resumeAt":9,"inputTokens":10,"outputTokens":4},"session":{"sessionId":"s1","turns":2,"inputTokens":100,"outputTokens":20,"contextTokens":30000,"contextWindow":200000,"model":"anthropic/claude-x"}}"#
+        let usageJSON = #"{"windows":[{"rateLimitType":"five_hour","status":"allowed_warning","utilization":0.8,"resetsAt":1900000000000,"at":5,"sessionId":"s1"},{"rateLimitType":"x"}],"subscription":{"status":"allowed","resetsAt":1800000000000,"at":2},"background":{"kind":"limited","resumeAt":9,"inputTokens":10,"outputTokens":4},"session":{"sessionId":"s1","turns":2,"inputTokens":100,"outputTokens":20,"contextTokens":30000,"contextWindow":200000,"model":"example/model-x"}}"#
         let usage = WinterClient.decodeIslandUsage(try JSONDecoder().decode(JSONValue.self, from: Data(usageJSON.utf8)))
         XCTAssertEqual(usage.windows, [IslandUsageWindow(rateLimitType: "five_hour", status: "allowed_warning", utilization: 0.8,
                                                          resetsAt: 1_900_000_000_000, at: 5, sessionId: "s1")])
         XCTAssertEqual(usage.subscription, .init(status: "allowed", resetsAt: 1_800_000_000_000, at: 2))
         XCTAssertEqual(usage.background, .init(limited: true, resumeAt: 9, inputTokens: 10, outputTokens: 4))
         XCTAssertEqual(usage.session, .init(sessionId: "s1", turns: 2, inputTokens: 100, outputTokens: 20, contextTokens: 30_000,
-                                            contextWindow: 200_000, model: "anthropic/claude-x"))
+                                            contextWindow: 200_000, model: "example/model-x"))
         let empty = WinterClient.decodeIslandUsage(.object([:]))
         XCTAssertEqual(empty, IslandUsageSnapshot(windows: [], background: .init(limited: false, inputTokens: 0, outputTokens: 0)))
     }

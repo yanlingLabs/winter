@@ -156,9 +156,9 @@ enum IslandGallery {
                                         resetsAt: ms(3 * 86400 + 4 * 3600), at: ms(-180), sessionId: "s2")],
             background: .init(limited: false, inputTokens: 18_400, outputTokens: 2_150),
             session: .init(sessionId: "s1", turns: 7, inputTokens: 412_000, outputTokens: 18_300, contextTokens: 64_000,
-                           contextWindow: 200_000, model: "anthropic/claude-sonnet")),
-            roles: ["titles.model": ModelRoleValue(model: "openai/gpt-mini", explicit: false, constraint: "any", permitted: [],
-                                                   problem: ModelRoleProblem(reason: "rate-limited", model: "openai/gpt-mini"))],
+                           contextWindow: 200_000, model: "example/model-large")),
+            roles: ["titles.model": ModelRoleValue(model: "example/model-small", explicit: false, constraint: "any", permitted: [],
+                                                   problem: ModelRoleProblem(reason: "rate-limited", model: "example/model-small"))],
             sessionTitle: "Ship the island")
 
         // Devices.

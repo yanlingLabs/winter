@@ -30,15 +30,15 @@ describe("IslandUsageRegistry", () => {
   });
 
   test("sums a session's turn_completed tokens since start and keeps its last measured context", () => {
-    const r = new IslandUsageRegistry({ background, modelOf: () => ({ model: "openai/gpt-5", contextWindow: 400_000 }) });
+    const r = new IslandUsageRegistry({ background, modelOf: () => ({ model: "example/model-x", contextWindow: 400_000 }) });
     r.observe(turn("s1", 100, 20, 30_000));
     r.observe(turn("s1", 50, 10));
     r.observe(turn("s2", 1, 1));
     const snap = r.snapshot("s1");
     expect(snap.session).toEqual({ sessionId: "s1", turns: 2, inputTokens: 150, outputTokens: 30, contextTokens: 30_000,
-      model: "openai/gpt-5", contextWindow: 400_000 });
+      model: "example/model-x", contextWindow: 400_000 });
     expect(r.snapshot("unknown").session).toEqual({ sessionId: "unknown", turns: 0, inputTokens: 0, outputTokens: 0,
-      model: "openai/gpt-5", contextWindow: 400_000 });
+      model: "example/model-x", contextWindow: 400_000 });
     expect(r.snapshot().session).toBeUndefined();
     expect(IslandUsageResult.parse(snap)).toBeTruthy();
   });
