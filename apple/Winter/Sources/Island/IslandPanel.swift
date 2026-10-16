@@ -12,6 +12,9 @@ final class IslandPanel: NSPanel {
     var onMouseDown: ((CGPoint) -> Void)?
     /// Key-down while key (Esc closes the island).
     var onKeyDown: ((NSEvent) -> Bool)?
+    /// The panel took the keyboard (true) or no longer holds it (false: `rest()`, or the user clicked elsewhere).
+    var onKeyInputChange: ((Bool) -> Void)?
+    private var resting = false
 
     override var canBecomeKey: Bool { acceptsKeyInput }
     override var canBecomeMain: Bool { false }
@@ -47,6 +50,7 @@ final class IslandPanel: NSPanel {
                 externalFocus = ExternalFocusSnapshot.captureCurrent()
                 acceptsKeyInput = true
                 makeKey()
+                onKeyInputChange?(true)
             }
         }
         if event.type == .keyDown, let onKeyDown, onKeyDown(event) { return }
@@ -58,9 +62,22 @@ final class IslandPanel: NSPanel {
         guard acceptsKeyInput else { return }
         acceptsKeyInput = false
         let wasKey = isKeyWindow
+        resting = true
         if wasKey { resignKey() }
+        resting = false
         if wasKey { externalFocus?.restore() }
         externalFocus = nil
+        onKeyInputChange?(false)
+    }
+
+    /// The user took the keyboard elsewhere (a click in another window): the panel lets go, restoring nothing — the
+    /// click already chose where focus goes.
+    override func resignKey() {
+        super.resignKey()
+        guard !resting, acceptsKeyInput else { return }
+        acceptsKeyInput = false
+        externalFocus = nil
+        onKeyInputChange?(false)
     }
 
     private var externalFocus: ExternalFocusSnapshot?

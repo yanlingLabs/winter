@@ -34,6 +34,11 @@ struct IslandQueue: Equatable {
     private(set) var compacted: [Entry] = []
     /// The pointer is over the current card.
     private(set) var currentHovered = false
+    /// The user is typing into the current card (its panel holds the keyboard): it is held exactly like a hovered one —
+    /// never replaced, never compacted — so no keystroke can land anywhere else.
+    private(set) var currentTyping = false
+    /// Hovered or typed into: the current card stays.
+    var currentHeld: Bool { currentHovered || currentTyping }
 
     var badgeCount: Int { compacted.count }
     var isEmpty: Bool { current == nil && waiting == nil && compacted.isEmpty }
@@ -48,7 +53,7 @@ struct IslandQueue: Equatable {
 
     /// When the queue next has something to do by itself (a self-compaction), nil when nothing is due.
     var nextDeadline: TimeInterval? {
-        guard let current, !currentHovered else { return nil }
+        guard let current, !currentHeld else { return nil }
         return current.compactAt
     }
 
@@ -63,10 +68,11 @@ struct IslandQueue: Equatable {
         guard let cur = current else {
             current = new
             currentHovered = false
+            currentTyping = false
             return
         }
-        // Hovered, or a view request counting down: the newcomer waits below as a compact pill.
-        if currentHovered || !cur.selfCompacts {
+        // Hovered, typed into, or a view request counting down: the newcomer waits below as a compact pill.
+        if currentHeld || !cur.selfCompacts {
             if let old = waiting {
                 // A view request keeps the waiting slot over an approval or question; otherwise the newer waits there.
                 if !old.selfCompacts && new.selfCompacts {
@@ -88,15 +94,25 @@ struct IslandQueue: Equatable {
     mutating func hoverCurrent(_ hovered: Bool, now: TimeInterval) {
         guard current != nil, hovered != currentHovered else { return }
         currentHovered = hovered
-        if !hovered, var cur = current, let at = cur.compactAt, at < now + Self.hoverLeaveGrace {
-            cur.compactAt = now + Self.hoverLeaveGrace
-            current = cur
-        }
+        if !hovered { graceAfterRelease(now: now) }
+    }
+
+    /// The current card's panel took (or gave back) the keyboard.
+    mutating func typingCurrent(_ typing: Bool, now: TimeInterval) {
+        guard current != nil, typing != currentTyping else { return }
+        currentTyping = typing
+        if !typing { graceAfterRelease(now: now) }
+    }
+
+    private mutating func graceAfterRelease(now: TimeInterval) {
+        guard !currentHeld, var cur = current, let at = cur.compactAt, at < now + Self.hoverLeaveGrace else { return }
+        cur.compactAt = now + Self.hoverLeaveGrace
+        current = cur
     }
 
     /// The clock: self-compacts the current card when it is due (and unhovered), then the waiting one expands.
     mutating func tick(now: TimeInterval) {
-        guard let cur = current, !currentHovered, let at = cur.compactAt, now >= at else { return }
+        guard let cur = current, !currentHeld, let at = cur.compactAt, now >= at else { return }
         compact(cur)
         current = nil
         promoteWaiting(now: now)
@@ -109,6 +125,7 @@ struct IslandQueue: Equatable {
         waiting = nil
         current = entry(w.id, selfCompacts: w.selfCompacts, now: now)
         currentHovered = false
+        currentTyping = false
     }
 
     /// The pointer is on the badge: the NEWEST compacted card expands again (the current one, if any, compacts).
@@ -117,6 +134,7 @@ struct IslandQueue: Equatable {
         if let cur = current { compact(cur) }
         current = entry(newest.id, selfCompacts: newest.selfCompacts, now: now)
         currentHovered = false
+        currentTyping = false
     }
 
     /// Expand this compacted card (a click on it in a list, say). No-op for one not compacted.
@@ -126,6 +144,7 @@ struct IslandQueue: Equatable {
         if let cur = current { compact(cur) }
         current = entry(e.id, selfCompacts: e.selfCompacts, now: now)
         currentHovered = false
+        currentTyping = false
     }
 
     /// A card was answered anywhere (or is no longer pending): gone from every place. When it was the current card,
@@ -136,6 +155,7 @@ struct IslandQueue: Equatable {
         if current?.id == id {
             current = nil
             currentHovered = false
+            currentTyping = false
             promoteWaiting(now: now)
         }
     }
@@ -151,6 +171,7 @@ struct IslandQueue: Equatable {
         waiting = nil
         current = entry(w.id, selfCompacts: w.selfCompacts, now: now)
         currentHovered = false
+        currentTyping = false
     }
 
     private mutating func compact(_ e: Entry) {

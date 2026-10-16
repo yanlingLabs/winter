@@ -79,6 +79,8 @@ final class IslandStore: ObservableObject {
     var openURL: (URL) -> Bool = { _ in false }
     /// Told after every change of what is on top (the controller lays out its panels).
     var onChange: (() -> Void)?
+    /// Told the view requests now on top (`WinterClient.islandShown`).
+    var onShown: (([String]) -> Void)?
 
     // MARK: Reading
 
@@ -92,34 +94,59 @@ final class IslandStore: ObservableObject {
 
     // MARK: Refresh
 
-    private var refreshing = false
-    private var refreshAgain = false
+    // ONE pump serves both asks: a fetch (`refresh`) and a re-judging (`reroute`). Only one runs at a time; asks that
+    // arrive meanwhile collapse into one more pass, and a pass whose judgement went stale while it was being read (a
+    // newer ask came in — `generation` moved) is not applied: the next pass applies fresh facts instead.
+    private var pumping = false
+    private var wantFetch = false
+    private var wantRoute = false
+    /// Bumped by every ask; a judgement is applied only when no ask came in while it was read.
+    private(set) var generation = 0
+    /// The newest list fetched and not yet applied (kept across a pass skipped as stale).
+    private var fetched: [IslandCard]?
 
-    /// Ask the daemon again (on connect, and on every `island.changed`). Overlapping asks collapse into one more.
+    /// Ask the daemon again (on connect, and on every `island.changed`).
     func refresh() async {
-        if refreshing { refreshAgain = true; return }
-        refreshing = true
-        defer { refreshing = false }
-        repeat {
-            refreshAgain = false
-            guard let items = try? await fetch() else { return }
-            let next = items.compactMap(IslandCard.from)
-            await judgeTerminals(for: next)
-            apply(next)
-        } while refreshAgain
+        wantFetch = true
+        generation += 1
+        await pump()
     }
 
     /// Re-judge where every card goes (the focus changed: an app came to the front, a window became key, the
-    /// Dispatch pill showed or hid, a terminal's tab changed).
+    /// Dispatch pill showed or hid, a terminal's tab changed). Coalesced with any fetch or re-judging under way.
     func reroute() async {
-        guard !cards.isEmpty else { return }
-        await judgeTerminals(for: cards)
-        apply(cards)
+        guard !cards.isEmpty || wantFetch || fetched != nil else { return }
+        wantRoute = true
+        generation += 1
+        await pump()
     }
 
-    private func judgeTerminals(for cards: [IslandCard]) async {
+    private func pump() async {
+        guard !pumping else { return }
+        pumping = true
+        defer { pumping = false }
+        while wantFetch || wantRoute {
+            let fetchNow = wantFetch
+            wantFetch = false
+            wantRoute = false
+            let started = generation
+            if fetchNow {
+                guard let items = try? await fetch() else { continue }
+                fetched = items.compactMap(IslandCard.from)
+            }
+            let next = fetched ?? cards
+            let judged = await judgeTerminals(for: next)
+            // Stale: another ask came in while this one read the terminals — run again with what is true now.
+            guard started == generation, !wantFetch, !wantRoute else { continue }
+            terminalFrontness = judged
+            fetched = nil
+            apply(next)
+        }
+    }
+
+    private func judgeTerminals(for cards: [IslandCard]) async -> [String: TerminalFrontness] {
         let ttys = IslandRouter.ttysToJudge(cards, focus: focus())
-        terminalFrontness = ttys.isEmpty ? [:] : await readTerminals(ttys)
+        return ttys.isEmpty ? [:] : await readTerminals(ttys)
     }
 
     /// The cards' current focus, with the terminal judgements filled in.
@@ -145,8 +172,10 @@ final class IslandStore: ObservableObject {
         let focus = currentFocus()
         var placed: [String: IslandPlacement] = [:]
         for card in next { placed[card.id] = IslandRouter.placement(of: card, focus: focus) }
-        // Off the top: hidden behind its host, or the Dispatch pill shows it.
-        for id in queue.ids where placed[id] != .top { queue.resolve(id, now: now) }
+        // Off the top: hidden behind its host, or the Dispatch pill shows it — never the card being typed into.
+        for id in queue.ids where placed[id] != .top && !(queue.currentTyping && queue.current?.id == id) {
+            queue.resolve(id, now: now)
+        }
         // Onto the top: new ones arrive (oldest first, so the newest ends up expanded); ones seen before go to the badge.
         // (A card answered from here is not brought back by a list fetched before the answer landed.)
         for card in next where placed[card.id] == .top && !queue.ids.contains(card.id)
@@ -161,6 +190,10 @@ final class IslandStore: ObservableObject {
         cards = next
         placements = placed
         changed()
+        // Tell the daemon which view requests are on screen here (`island.shown`): the desktop-switch prompt asks the
+        // helper as well when no island says so (a connected but hung app).
+        let shownIds = next.filter { $0.kind == .viewRequest && placed[$0.id] == .top }.map(\.callId)
+        if !shownIds.isEmpty { onShown?(shownIds) }
     }
 
     // MARK: The queue's inputs
@@ -173,6 +206,13 @@ final class IslandStore: ObservableObject {
     func hoverCurrent(_ hovered: Bool) {
         guard queue.currentHovered != hovered else { return }
         queue.hoverCurrent(hovered, now: clock())
+        changed()
+    }
+
+    /// The current card's panel took the keyboard (a click in its text field) or gave it back.
+    func typingCurrent(_ typing: Bool) {
+        guard queue.currentTyping != typing else { return }
+        queue.typingCurrent(typing, now: clock())
         changed()
     }
 

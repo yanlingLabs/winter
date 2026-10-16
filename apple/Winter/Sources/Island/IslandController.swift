@@ -59,6 +59,8 @@ final class IslandController {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var wake: DispatchWorkItem?
     private let terminalWatcher = TerminalFocusWatcher()
+    /// The user dismissed the current card themselves (a click on the waiting pill).
+    private var explicitDismiss = false
 
     init(store: IslandStore) {
         self.store = store
@@ -71,7 +73,7 @@ final class IslandController {
             let pid = front?.processIdentifier
             let bundle = front?.bundleIdentifier
             return await Task.detached(priority: .userInitiated) {
-                let snapshot = TerminalSnapshotReader.read(frontPid: pid, frontBundleId: bundle)
+                let snapshot = TerminalSnapshotReader.read(frontPid: pid, frontBundleId: bundle, ttys: ttys)
                 var out: [String: TerminalFrontness] = [:]
                 for tty in ttys { out[tty] = TerminalWindowMatcher.frontness(of: tty, in: snapshot) }
                 return out
@@ -81,6 +83,13 @@ final class IslandController {
         stripPanel.title = "Winter island"
         topPanel.title = "Winter island cards"
         islandPanel.title = "Winter island"
+        topPanel.onKeyInputChange = { [weak store] typing in store?.typingCurrent(typing) }
+        topPanel.onKeyDown = { [weak self] event in
+            // Esc while typing into a card: stop typing (the keyboard goes back), the card stays.
+            guard event.keyCode == 53, let self else { return false }
+            self.topPanel.rest()
+            return true
+        }
         islandPanel.onKeyDown = { [weak self] event in
             guard event.keyCode == 53, let self, self.isOpen else { return false }
             self.close()
@@ -153,17 +162,37 @@ final class IslandController {
         guard let screen = IslandLayout.islandScreen() else { return }
         screenFrame = screen.frame
         shape = IslandLayout.shape(of: screen)
-        let strip = IslandLayout.strip(shape)
+        stripWaiting = nil
+        layoutStrip()
+        layoutTop()
+        if isOpen { layoutIsland() }
+    }
+
+    /// Whether the strip was last laid out with something waiting (nil: not laid out yet).
+    private var stripWaiting: Bool?
+
+    /// The strip's panel for the current count: the housing alone while nothing waits (nothing at all without a
+    /// housing), the wings or the tab while something does. Re-laid out only when that flips.
+    private func layoutStrip() {
+        let waiting = store.strip.waitingCount > 0
+        guard started, stripWaiting != waiting else { return }
+        stripWaiting = waiting
+        guard let strip = IslandLayout.strip(shape, waiting: waiting) else {
+            stripPanel.orderOut(nil)
+            return
+        }
         let view = IslandStripRoot(store: store, size: strip.size, housingWidth: shape.housing?.width) { [weak self] in
             self?.toggle()
         }
-        let host = IslandHostingView(rootView: view)
-        host.sizingOptions = []
-        stripPanel.contentView = host
+        if let host = stripPanel.contentView as? IslandHostingView<IslandStripRoot> {
+            host.rootView = view
+        } else {
+            let host = IslandHostingView(rootView: view)
+            host.sizingOptions = []
+            stripPanel.contentView = host
+        }
         stripPanel.setFrame(panelFrame(for: strip), display: true)
-        stripPanel.orderFrontRegardless()
-        layoutTop()
-        if isOpen { layoutIsland() }
+        if !stripPanel.isVisible { stripPanel.orderFrontRegardless() }
     }
 
     /// A rect measured from the island's centre and the screen's top → a screen frame.
@@ -175,12 +204,18 @@ final class IslandController {
 
     private func layoutTop() {
         guard started else { return }
+        layoutStrip()
         let current = store.currentCard
         // The card on top changed: the old one goes (back into the housing when it compacted or was answered here),
         // the new one is born.
         if shown?.id != current?.id {
-            // A card answered through its text field (or replaced) gives the keyboard back.
-            topPanel.rest()
+            // The keyboard is given back only when the card it was typed into is ANSWERED (here or anywhere) or the
+            // user dismissed it (a click on the waiting pill, Esc). A typed-into card is never replaced or compacted
+            // (`IslandQueue.currentTyping`), so no keystroke lands in the app behind.
+            if let old = shown, store.card(old.id) == nil || store.answeredHere.contains(old.id) || explicitDismiss {
+                topPanel.rest()
+            }
+            explicitDismiss = false
             if let old = shown, let card = store.card(old.id) ?? leavingCard(old.id) {
                 let compacted = store.queue.compacted.contains { $0.id == old.id }
                 if (compacted || store.answeredHere.contains(old.id)) && current == nil && !reduceMotion {
@@ -285,7 +320,10 @@ final class IslandController {
             waiting: waitingCard.map { ($0, waitingRect) },
             badge: showBadge ? (queue.badgeCount, badgeRect) : nil,
             reduceMotion: reduceMotion,
-            onWaitingClick: { [weak self] in self?.store.clickWaiting() })
+            onWaitingClick: { [weak self] in
+                self?.explicitDismiss = true
+                self?.store.clickWaiting()
+            })
         if let host = topPanel.contentView as? IslandHostingView<IslandTopRoot> {
             host.rootView = root
         } else {
@@ -536,7 +574,8 @@ struct IslandTopRoot: View {
         let dx = (panelSize.width - s.geometry.panelSize.width) / 2
         Group {
             if let prompt = s.prompt {
-                DesktopIslandView(model: prompt, geometry: s.geometry, state: s.state, reduceMotion: reduceMotion)
+                DesktopIslandView(model: prompt, geometry: s.geometry, state: s.state, reduceMotion: reduceMotion,
+                                  countdownInLabel: false)
             } else {
                 IslandRectShell(card: card, geometry: s.geometry, state: s.state, store: store, reduceMotion: reduceMotion)
             }

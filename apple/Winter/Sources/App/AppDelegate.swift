@@ -1163,10 +1163,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
-    /// Everything after activation policy. Split out so tests can drive it without
-    /// a real app launch. Returns true when boot completed (even degraded: a missing
-    /// daemon token must not prevent the orb from appearing).
-    @discardableResult
     /// The Winter island (`docs/claude/island.md`): every pending approval, question and view request across sessions,
     /// at the camera housing. It rides the main feed's connection — that hello advertises the island, so the daemon
     /// shows the desktop-switch prompt here rather than in the Computer Use helper — and never attaches to a session.
@@ -1176,6 +1172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let store = IslandStore()
         store.fetch = { try await client.islandPending() }
         store.responder = .live(client)
+        store.onShown = { ids in Task { try? await client.islandShown(ids: ids) } }
         let island = IslandController(store: store)
         island.focusSources = IslandFocusSources(
             dispatchPillVisible: { [weak pill] in pill?.isVisible ?? false },
@@ -1211,6 +1208,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
+    /// Everything after activation policy. Split out so tests can drive it without
+    /// a real app launch. Returns true when boot completed (even degraded: a missing
+    /// daemon token must not prevent the orb from appearing).
+    @discardableResult
     func boot() -> Bool {
         // Lifecycle T6 (T4 review finding 5f): migration MUST run before the supervisor's
         // socket-exists probe just below — a leftover `com.winter.core` KeepAlive launchd agent

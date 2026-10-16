@@ -134,4 +134,44 @@ final class IslandQueueTests: XCTestCase {
         q.addCompacted("b", selfCompacts: true)
         XCTAssertEqual(q.compacted.map(\.id), ["a"], "the current card is not also compacted")
     }
+
+    func testACardBeingTypedIntoIsNeverReplacedNewcomersWaitBelow() {
+        var q = IslandQueue()
+        q.arrive("a", selfCompacts: true, now: 0)
+        q.typingCurrent(true, now: 1)
+        q.arrive("b", selfCompacts: true, now: 2)
+        XCTAssertEqual(q.current?.id, "a", "no replacement while typing")
+        XCTAssertEqual(q.waiting?.id, "b")
+        q.arrive("view", selfCompacts: false, now: 3)
+        XCTAssertEqual(q.current?.id, "a", "not even by a view request")
+        XCTAssertEqual(q.waiting?.id, "view")
+    }
+
+    func testACardBeingTypedIntoNeverCompactsEvenAfterThePointerLeaves() {
+        var q = IslandQueue()
+        q.arrive("a", selfCompacts: true, now: 0)
+        q.hoverCurrent(true, now: 1)
+        q.typingCurrent(true, now: 2)
+        q.hoverCurrent(false, now: 3) // the pointer drifts off while the user types
+        XCTAssertNil(q.nextDeadline, "no wake-up while typing")
+        q.tick(now: 1_000)
+        XCTAssertEqual(q.current?.id, "a")
+        XCTAssertEqual(q.badgeCount, 0)
+        // The keyboard given back (Esc): the card compacts only after the grace.
+        q.typingCurrent(false, now: 1_000)
+        XCTAssertEqual(q.nextDeadline, 1_000 + IslandQueue.hoverLeaveGrace)
+        q.tick(now: 1_000 + IslandQueue.hoverLeaveGrace)
+        XCTAssertNil(q.current)
+    }
+
+    func testAnsweringTheTypedCardReleasesTheHoldForTheNextOne() {
+        var q = IslandQueue()
+        q.arrive("a", selfCompacts: true, now: 0)
+        q.typingCurrent(true, now: 0)
+        q.arrive("b", selfCompacts: true, now: 1)
+        q.resolve("a", now: 2)
+        XCTAssertEqual(q.current?.id, "b")
+        XCTAssertFalse(q.currentTyping)
+        XCTAssertEqual(q.nextDeadline, 2 + IslandQueue.selfCompactAfter)
+    }
 }

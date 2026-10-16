@@ -147,4 +147,60 @@ final class IslandStoreTests: XCTestCase {
         XCTAssertEqual(card.sessionLabel, "Inbox zero")
         XCTAssertEqual(islandBodyText(card), "Winter needs your view for a sec on Mail")
     }
+
+    func testWhileTypingNoNewCardOrRerouteTakesTheCardAway() async {
+        var focus = IslandFocus()
+        let store = IslandStore()
+        store.clock = { [unowned self] in self.now }
+        store.focus = { focus }
+        let typed = approval("a", hosts: [IslandHost(clientName: "tui", tty: "/dev/ttys004")])
+        store.apply([typed])
+        store.typingCurrent(true)
+        store.apply([typed, approval("b")])
+        XCTAssertEqual(store.currentCard?.id, typed.id, "no replacement while typing")
+        XCTAssertEqual(store.waitingCard?.callId, "b")
+        now = 100
+        store.tick()
+        XCTAssertEqual(store.currentCard?.id, typed.id, "no compaction while typing")
+        // Its terminal comes to the front: the card being typed into still stays.
+        focus.terminalFrontness = { _ in .front }
+        store.readTerminals = { ttys in Dictionary(uniqueKeysWithValues: ttys.map { ($0, .front) }) }
+        await store.reroute()
+        XCTAssertEqual(store.currentCard?.id, typed.id)
+    }
+
+    func testViewRequestsOnTopAreAcknowledgedToTheDaemon() {
+        let store = makeStore()
+        var acked: [[String]] = []
+        store.onShown = { acked.append($0) }
+        let view = IslandCard(callId: "cu_1", sessionId: "s", answerSessionId: "s", kind: .viewRequest,
+                              payload: .viewRequest(app: "Safari", bundleId: "com.apple.Safari", reason: ""))
+        store.apply([approval("a"), view])
+        XCTAssertEqual(acked, [["cu_1"]])
+    }
+
+    func testAStaleTerminalJudgementIsNotAppliedOverANewerOne() async {
+        let store = makeStore()
+        let card = approval("a", hosts: [IslandHost(clientName: "tui", tty: "/dev/ttys004")])
+        store.apply([card])
+        var calls = 0
+        var release: CheckedContinuation<Void, Never>?
+        store.readTerminals = { ttys in
+            calls += 1
+            if calls == 1 {
+                // The first read is slow; a newer ask arrives meanwhile.
+                await withCheckedContinuation { release = $0 }
+                return Dictionary(uniqueKeysWithValues: ttys.map { ($0, .front) })
+            }
+            return Dictionary(uniqueKeysWithValues: ttys.map { ($0, .notFront) })
+        }
+        let first = Task { await store.reroute() }
+        for _ in 0..<100 where release == nil { await Task.yield() }
+        await store.reroute() // coalesced: returns at once, the running pump takes it
+        release?.resume()
+        await first.value
+        XCTAssertEqual(calls, 2, "the stale pass was read again, not applied")
+        XCTAssertEqual(store.terminalFrontness["/dev/ttys004"], .notFront)
+        XCTAssertEqual(store.placements[card.id], .top)
+    }
 }
