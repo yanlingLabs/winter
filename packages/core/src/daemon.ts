@@ -1284,7 +1284,7 @@ export async function startDaemon(opts: {
   hub.addObserver((event) => islandRegistry.observe(event));
 
   const computerUseRuntime = createComputerUseRuntime({
-    islandClientPresent: () => islandRegistry.hasClient(),
+    island: islandRegistry,
     home: winterHome,
     profile,
     settings: () => settings,

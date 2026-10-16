@@ -512,6 +512,11 @@ export const IslandPendingItemSchema = z.object({
 export const IslandPendingResult = z.object({ items: z.array(IslandPendingItemSchema) });
 /** The daemon → island-client notification: the pending set (or a pending session's hosts) may have changed. */
 export const ISLAND_CHANGED_NOTIFICATION = "island.changed";
+/** The island client says it SHOWS these cards (their `callId` / `elicitationId`) — sent after each `island.pending`
+ *  it applies. The desktop-switch prompt waits ~2 s for it before asking the Computer Use helper as well (a Winter.app
+ *  that is connected but hung shows nothing). HARNESS role only. */
+export const IslandShownParams = z.object({ ids: z.array(z.string().min(1).max(256)).max(256) });
+export const IslandShownResult = z.object({ ok: z.literal(true) });
 
 /** ComputerV2 (2026-10-08) — Settings → Computer Use's daemon doors. LOCAL ROLE ONLY: never in
  *  `REMOTE_ALLOWED_METHODS` (the phone does not configure the Mac's computer use) and refused for any other role.
@@ -3366,6 +3371,7 @@ export const METHODS = {
   elicitationUrl: "elicitation.url",
   // The Winter island (Mac app): every pending card across sessions. HARNESS role only.
   islandPending: "island.pending",
+  islandShown: "island.shown",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",

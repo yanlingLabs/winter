@@ -108,29 +108,78 @@ describe("IslandRegistry", () => {
 });
 
 describe("the desktop-switch prompt's on-screen half", () => {
-  function recordingPanel(): DesktopVisitPanel & { shown: string[] } {
+  function recordingPanel(answer: "switch" | "refuse" | undefined = "switch"): DesktopVisitPanel & { shown: string[]; closed: string[] } {
     const shown: string[] = [];
+    const closed: string[] = [];
     return {
-      shown,
-      show(p) { shown.push(p.promptId); return { answer: Promise.resolve("switch" as const), close() {} }; },
+      shown, closed,
+      show(p) { shown.push(p.promptId); return { answer: Promise.resolve(answer), close() { closed.push(p.promptId); } }; },
     };
   }
   const prompt = { promptId: "cu_1", sessionId: "s1", app: "Safari", bundleId: "com.apple.Safari", reason: "to click", timeoutMs: 60_000, expiresAt: 1 };
+  const registry = () => new IslandRegistry({ pending: sources(new Set()), facts: () => ({}), hosts: () => [] });
+  const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-  test("goes to the helper's panel only while no island client is connected", async () => {
+  test("goes to the helper's panel only while no island client is connected and showing it", async () => {
     const helper = recordingPanel();
-    let island = false;
-    const panel = islandAwareDesktopPanel(helper, () => island, () => {});
+    const island = registry();
+    const panel = islandAwareDesktopPanel(helper, island, () => {}, 50);
     expect(await panel.show(prompt).answer).toBe("switch");
     expect(helper.shown).toEqual(["cu_1"]);
-    island = true;
+    const app = { notify() {} };
+    island.addClient(app);
     const shown = panel.show({ ...prompt, promptId: "cu_2" });
-    expect(await shown.answer).toBeUndefined(); // the card (answered in the island) decides
-    shown.close();
+    island.markShown(["cu_2"]); // the app shows the card
+    await tick(80);
     expect(helper.shown).toEqual(["cu_1"]);
-    island = false; // the app quit: the helper is the fallback again, decided at the prompt
+    shown.close(); // the card (answered in the island) decided
+    expect(await shown.answer).toBeUndefined();
+    island.removeClient(app); // the app quit: the helper is the fallback again, decided at the prompt
     panel.show({ ...prompt, promptId: "cu_3" });
     expect(helper.shown).toEqual(["cu_1", "cu_3"]);
+  });
+
+  test("the app leaving mid-prompt brings up the helper's panel with the same deadline, and its answer counts", async () => {
+    const helper = recordingPanel("refuse");
+    const island = registry();
+    const app = { notify() {} };
+    island.addClient(app);
+    const panel = islandAwareDesktopPanel(helper, island, () => {}, 10_000);
+    const shown = panel.show({ ...prompt, promptId: "cu_9", expiresAt: 12345 });
+    island.markShown(["cu_9"]);
+    await tick();
+    expect(helper.shown).toEqual([]);
+    island.removeClient(app); // a quit or a crash before any answer
+    expect(helper.shown).toEqual(["cu_9"]);
+    expect(await shown.answer).toBe("refuse");
+    shown.close();
+    expect(helper.closed).toEqual(["cu_9"]); // close() closes the fallback too
+  });
+
+  test("an app that is connected but never says it shows the card (hung) gets the helper's panel after the ack wait", async () => {
+    const helper = recordingPanel();
+    const island = registry();
+    island.addClient({ notify() {} });
+    const panel = islandAwareDesktopPanel(helper, island, () => {}, 30);
+    const shown = panel.show({ ...prompt, promptId: "cu_h" });
+    await tick(5);
+    expect(helper.shown).toEqual([]);
+    await tick(60);
+    expect(helper.shown).toEqual(["cu_h"]);
+    expect(await shown.answer).toBe("switch");
+  });
+
+  test("closed before the app leaves: nothing is shown afterwards", async () => {
+    const helper = recordingPanel();
+    const island = registry();
+    const app = { notify() {} };
+    island.addClient(app);
+    const panel = islandAwareDesktopPanel(helper, island, () => {}, 30);
+    const shown = panel.show(prompt);
+    shown.close();
+    island.removeClient(app);
+    await tick(60);
+    expect(helper.shown).toEqual([]);
   });
 });
 
@@ -236,6 +285,9 @@ describe("island.pending over the socket", () => {
     expect(parsed.items).toHaveLength(1);
     expect(parsed.items[0]!.answerSessionId).toBe(sid);
     expect(parsed.items[0]!.hosts).toEqual([{ clientName: "tui", role: "harness", tty: "/dev/ttys007" }]);
+    // The app says it shows the card (the desktop-switch prompt's ack).
+    expect((await app.request(METHODS.islandShown, { ids: ["c1"] })).result).toEqual({ ok: true });
+    expect(await island.waitShown("c1", 10)).toBe(true);
 
     // Answered elsewhere: gone from the list.
     broker.resolve(sid, "c1", true, "tui");

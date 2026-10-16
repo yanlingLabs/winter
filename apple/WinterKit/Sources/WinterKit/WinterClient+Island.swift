@@ -76,6 +76,12 @@ extension WinterClient {
         return (r["items"]?.arrayValue ?? []).compactMap(Self.decodeIslandItem)
     }
 
+    /// `island.shown`: this client shows these cards (their `callId`s / `elicitationId`s). The desktop-switch prompt waits
+    /// ~2 s for it before asking the Computer Use helper as well, so a connected but hung app never leaves it unseen.
+    public func islandShown(ids: [String]) async throws {
+        _ = try await request("island.shown", params: .object(["ids": .array(ids.map { .string($0) })]))
+    }
+
     /// PURE: one `island.pending` item, nil when it is malformed or its event unknown.
     public static func decodeIslandItem(_ v: JSONValue) -> IslandPendingItem? {
         guard let sessionId = v["sessionId"]?.stringValue, let answer = v["answerSessionId"]?.stringValue,

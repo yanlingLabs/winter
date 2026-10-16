@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -3461,6 +3461,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.pending is available to local clients only");
         parseParams(IslandPendingParams, params);
         return { items: opts.island?.list() ?? [] };
+      }
+      case METHODS.islandShown: {
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.shown is available to local clients only");
+        const p = parseParams(IslandShownParams, params);
+        opts.island?.markShown(p.ids);
+        return { ok: true };
       }
       case METHODS.elicitationUrl: {
         // WS-27: the full url of a PENDING card, for the local client about to open it — the url is

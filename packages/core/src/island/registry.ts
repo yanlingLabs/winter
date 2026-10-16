@@ -57,6 +57,20 @@ export interface IslandRegistryDeps {
 /** How many cards the registry keeps at most. Far above anything a person could be asked at once. */
 export const ISLAND_MAX_ENTRIES = 256;
 
+/** How long the desktop-switch prompt waits for the island client to say it SHOWS the card (`island.shown`) before
+ *  the helper's own panel is asked as well — a Winter.app that is connected but hung shows nothing. */
+export const ISLAND_SHOWN_ACK_MS = 2_000;
+
+/** What the desktop-switch prompt asks of the island (`islandAwareDesktopPanel`, `computer-use/wiring.ts`). */
+export interface IslandPresence {
+  /** Is any island client connected now? */
+  hasClient(): boolean;
+  /** Called once when the LAST island client leaves (a quit, a crash, a dropped socket). Returns the unsubscribe. */
+  onAllClientsGone(fn: () => void): () => void;
+  /** Resolves true when an island client says it shows the card `id` (`island.shown`), false after `ms`. */
+  waitShown(id: string, ms: number): Promise<boolean>;
+}
+
 interface Entry {
   kind: IslandItemKind;
   answerSessionId: string;
@@ -66,18 +80,63 @@ interface Entry {
   mirrored: boolean;
 }
 
-export class IslandRegistry {
+export class IslandRegistry implements IslandPresence {
   private readonly entries = new Map<string, Entry>();
   private readonly clients = new Set<IslandClient>();
   private notifyScheduled = false;
+  private readonly goneListeners = new Set<() => void>();
+  /** Card ids an island client said it shows, newest last (bounded), and the prompts waiting to hear it. */
+  private readonly shown = new Set<string>();
+  private readonly shownWaiters = new Map<string, Set<(shown: boolean) => void>>();
 
   constructor(private readonly deps: IslandRegistryDeps) {}
 
   /** A connection that advertised `CLIENT_CAPABILITY_ISLAND` in its hello. */
   addClient(client: IslandClient): void { this.clients.add(client); }
-  removeClient(client: IslandClient): void { this.clients.delete(client); }
+  removeClient(client: IslandClient): void {
+    if (!this.clients.delete(client) || this.clients.size > 0) return;
+    for (const fn of [...this.goneListeners]) {
+      try { fn(); } catch { /* a listener's failure is its own */ }
+    }
+  }
   /** Is any island client connected now? (The desktop-switch prompt then skips the helper's own panel.) */
   hasClient(): boolean { return this.clients.size > 0; }
+
+  onAllClientsGone(fn: () => void): () => void {
+    this.goneListeners.add(fn);
+    return () => { this.goneListeners.delete(fn); };
+  }
+
+  /** `island.shown`: the client shows these cards (by their callId / elicitationId). */
+  markShown(ids: readonly string[]): void {
+    for (const id of ids) {
+      this.shown.delete(id);
+      this.shown.add(id);
+      const waiters = this.shownWaiters.get(id);
+      if (waiters !== undefined) {
+        this.shownWaiters.delete(id);
+        for (const w of waiters) w(true);
+      }
+    }
+    while (this.shown.size > ISLAND_MAX_ENTRIES) this.shown.delete(this.shown.values().next().value as string);
+  }
+
+  waitShown(id: string, ms: number): Promise<boolean> {
+    if (this.shown.has(id)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let set = this.shownWaiters.get(id);
+      if (set === undefined) { set = new Set(); this.shownWaiters.set(id, set); }
+      const waiters = set;
+      const done = (shown: boolean): void => { clearTimeout(timer); resolve(shown); };
+      const timer = setTimeout(() => {
+        waiters.delete(done);
+        if (waiters.size === 0) this.shownWaiters.delete(id);
+        resolve(false);
+      }, ms);
+      (timer as { unref?: () => void }).unref?.();
+      waiters.add(done);
+    });
+  }
 
   /** Every appended event of every session (`SessionHub.addObserver`). */
   observe(event: SessionEvent): void {
