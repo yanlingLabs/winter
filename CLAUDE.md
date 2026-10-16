@@ -8,14 +8,6 @@ Winter is a macOS-native AI assistant: a TypeScript/Bun daemon (`winter-core`) p
 
 **The daemon runs no agent loop of its own.** Every session is a runtime child driven through the router (`@yanlinglabs/winter-runtime-sdk`) on the Winter agent runtime — the only leg; every model runs on it, Claude included. Code sessions spawn the `winter` binary; chat and dispatch run it EMBEDDED in `winter-core`, one Bun Worker per session. Session modes are `code`, `dispatch`, `chat`. **Cowork is not an implemented session mode** — the protocol names it (`SESSION_MODES`) but `session.create` refuses it for every role (`unsupported_topology`) and no runtime-facing type can hold it; see [docs/cowork-status.md](docs/cowork-status.md). The daemon owns everything around the child: IPC, event-sourced session storage, settings, approvals, the capability tools it hands the child over MCP, the hooks, and the SDK-message→`SessionEvent` projector.
 
-## Cowork and ordinary host execution policy
-
-Accepted policy on 2026-10-12: ordinary native Code, approved shell escapes, plugin hooks, LSP and third-party MCP tools do not receive a persistent outer Cowork Seatbelt profile. Keep each tool's own sandbox unchanged and never inject sandbox/GPU/Chromium/LSP compatibility overrides. Sandboxed Bash receives protected Cowork, runtime, control and socket roots in the existing `sandboxConfigFor` denyRead/denyWrite arrays, rendered as one profile. Approved escapes retain main's behavior and no Seatbelt; Cowork escape matching is write-shaped integrity guidance, not confidentiality.
-
-Core/SDK file tools keep canonical protected-path checks. For the first version, private disk images are plaintext with owner-only permissions and file identity checks. FileVault protects offline host-volume access when enabled; same-user processes, approved escapes and authenticated API access remain explicit residuals. Separate workspace encryption is deferred. Actual floors apply only to explicitly Winter-owned Cowork workers/bridges. Ordinary child execution history never requires a daemon restart before first activation.
-
-The installed SDK has no live sandbox-settings control. `refreshForStorage` awaits daemon policy consumers: Code holds queued work, lets its current turn finish, then recreates its logical incarnation/run home with the same session/backend identity and current sandbox paths; held work resumes there. With the independently accepted SDK v1 nine-family context contract, existing Chat/Dispatch Workers acknowledge live protected-path updates without aborting their turn or recreating the runtime; cold protected startup waits for its own matching acknowledgment. Namespace, version and family checks remain required. The unchanged installed SDK pin lacks this contract, so its existing Workers must close before activation and its protected Chat/Dispatch launches remain refused. A pending/failed policy refresh blocks provisioning, without claiming third-party descendants were stopped. Historical persistent-Code-floor reports describe the superseded approach.
-
 ## Commands
 
 ```sh
@@ -76,6 +68,7 @@ Plain links, not `@` imports — read the file whose area you are about to touch
 | [headless.md](docs/claude/headless.md) | Before touching the `headless` backend, the Winter Headless helper, its local-network rules or the Chromium embed layout. |
 | [testing.md](docs/claude/testing.md) | Before running or writing tests, a verify gate, the live computer-use suite, or anything reading daemon logs/temp dirs. |
 | [release.md](docs/claude/release.md) | Before bumping a version, writing release notes or cutting a release. |
+| [cowork.md](docs/claude/cowork.md) | Before touching `packages/core/src/cowork/**`, `packages/protocol/src/cowork.ts`, `apple/Cowork/**`, host-storage-fence or home-fence cowork roots, `refreshForStorage`, or the `workspace.*` / `project.*` methods and events. |
 
 Other references: `winter-vs-cc-tools.md` (repo root, the live tool comparison with Claude Code), `apple/ComputerUse/PROTOCOL.md` (the helper's wire contract), `apple/ComputerUse/WinterBrowserHost/PROTOCOL.md` (Winter for Chrome's).
 
@@ -88,7 +81,4 @@ Other references: `winter-vs-cc-tools.md` (repo root, the live tool comparison w
 - `packages/core/src/providers/codex-config.ts` self-identifies as `originator: "winter"` — a deliberate ToS decision; do not revert it to a first-party value.
 - Version strings are generated; edit only `VERSION`, through the bump/sync scripts.
 - The Sparkle public key in `apple/Winter/project.yml` (`SUPublicEDKey`) is the production key; the private half exists only in the login Keychain — never committed anywhere.
-
-### Cowork first-version storage scope (2026-10-12)
-
-The user deferred separate per-workspace encryption for the first version. Private VM images are plaintext, with owner-only permissions, verified file identity and backup exclusion. FileVault protects offline host-volume access when enabled; same-user processes and approved escaped commands can read images, and escapes run as the user. Existing Bash denyRead/denyWrite, file-tool path guards and write-shaped escape checks remain required. No outer sandbox is added to normal Code, hooks or LSP. VM isolation, host credential custody and active RAM return remain required; key-broker/LUKS work is preserved as deferred research, not an activation gate. See [the storage contract](docs/cowork-storage-security.md).
+- Ordinary Code, plugin hooks, LSP and third-party MCP tools get no outer Cowork Seatbelt; each tool's own sandbox is unchanged, and Cowork fences only through the existing `sandboxConfigFor` deny arrays ([cowork.md](docs/claude/cowork.md)).
