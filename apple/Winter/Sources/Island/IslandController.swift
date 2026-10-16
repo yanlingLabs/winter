@@ -179,6 +179,8 @@ final class IslandController {
         // The card on top changed: the old one goes (back into the housing when it compacted or was answered here),
         // the new one is born.
         if shown?.id != current?.id {
+            // A card answered through its text field (or replaced) gives the keyboard back.
+            topPanel.rest()
             if let old = shown, let card = store.card(old.id) ?? leavingCard(old.id) {
                 let compacted = store.queue.compacted.contains { $0.id == old.id }
                 if (compacted || store.answeredHere.contains(old.id)) && current == nil && !reduceMotion {
@@ -193,7 +195,8 @@ final class IslandController {
     private func leavingCard(_ id: String) -> IslandCard? { leaving?.card.id == id ? leaving?.card : nil }
 
     private func makeShown(_ card: IslandCard) -> Shown {
-        let state = DesktopIslandState(secondsLeft: 0)
+        let secondsLeft = card.expiresAt.map { max(0, Int((Double($0) - Date().timeIntervalSince1970 * 1000) / 1000)) } ?? 60
+        let state = DesktopIslandState(secondsLeft: secondsLeft)
         let geometry: DesktopIslandGeometry
         var prompt: CUDesktopPromptModel?
         if case .viewRequest(let app, let bundleId, let reason) = card.payload {

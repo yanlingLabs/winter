@@ -43,6 +43,8 @@ final class IslandPanel: NSPanel {
         if event.type == .leftMouseDown {
             onMouseDown?(event.locationInWindow)
             if !acceptsKeyInput, Self.isTextInput(contentView?.hitTest(event.locationInWindow)) {
+                // The app the user was typing in, given back by `rest()` (the Dispatch pill's rule).
+                externalFocus = ExternalFocusSnapshot.captureCurrent()
                 acceptsKeyInput = true
                 makeKey()
             }
@@ -51,12 +53,17 @@ final class IslandPanel: NSPanel {
         super.sendEvent(event)
     }
 
-    /// Stop taking the keyboard.
+    /// Stop taking the keyboard, and hand it back to the app that had it before the text-field click.
     func rest() {
         guard acceptsKeyInput else { return }
         acceptsKeyInput = false
-        if isKeyWindow { resignKey() }
+        let wasKey = isKeyWindow
+        if wasKey { resignKey() }
+        if wasKey { externalFocus?.restore() }
+        externalFocus = nil
     }
+
+    private var externalFocus: ExternalFocusSnapshot?
 
     /// PURE-ish: is this view (or one it sits in) where text is typed?
     static func isTextInput(_ view: NSView?) -> Bool {

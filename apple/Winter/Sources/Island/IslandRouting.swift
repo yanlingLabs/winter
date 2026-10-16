@@ -45,9 +45,6 @@ struct IslandFocus {
 }
 
 enum IslandRouter {
-    /// The clients that are this Mac's own windows (`AppModel.ownClientName`): never a terminal host.
-    static let appClientNames: Set<String> = ["orb"]
-
     /// PURE: is this card from Dispatch or one of its children?
     static func isDispatchFamily(_ card: IslandCard, dispatchSessionIds: Set<String>) -> Bool {
         if card.facts.mode == "dispatch" { return true }
