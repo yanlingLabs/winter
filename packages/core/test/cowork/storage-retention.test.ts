@@ -106,6 +106,13 @@ test("deleting one Project conversation never archives the shared workspace, and
   expect(retained(f)).toEqual(before);
 });
 
+test("ownership kind, not just the owner id, decides: a Project workspace whose owner id was corrupted to the session id still is not archived", () => {
+  const f = fixture("project");
+  f.db.db.run("UPDATE cowork_workspaces SET owner_id=? WHERE workspace_id=?", [f.sessionId, f.workspaceId]);
+  const life = lifecycle(f); remove(f, "store");
+  expect(lifecycle(f)).toEqual(life);
+});
+
 test("a standalone workspace that is not stopped, or is already past retained, keeps its state when its conversation goes", () => {
   for (const [power, state] of [["running", "retained"], ["starting", "retained"], ["draining", "retained"], ["uncertain", "retained"], ["stopped", "deleting"], ["stopped", "archived"]] as const) {
     const f = fixture();
