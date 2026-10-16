@@ -96,6 +96,21 @@ async function reapStrays(home: string): Promise<void> {
   for (let n = 0; n < 100 && list().length > 0; n++) await Bun.sleep(20);
 }
 
+/**
+ * A child's completion WAKES the coordinator a macrotask later (`dispatch-children`'s flush: ensure the coordinator's
+ * driver, send it a `<child_update>`). A test that then ENDS the coordinator's driver must let that wake -- and the turn it
+ * starts -- finish first: an `end()` that lands on the wake's still-OPENING driver refuses every send joined to it
+ * (`session_replaced`), and the driver table hands the SAME driver back, so the next test's `session.send` cannot recover.
+ */
+async function awaitCoordinatorWoken(h: { dispatchId: string; log(sid: string): SessionEvent[] }, children: string[]): Promise<void> {
+  const woken = await until(() => {
+    const wakes = h.log(h.dispatchId).filter((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake") as Array<{ text: string; seq: number }>;
+    if (!children.every((c) => wakes.some((w) => w.text.includes(`session: ${c}`)))) return undefined;
+    return wakes.filter((w) => children.some((c) => w.text.includes(`session: ${c}`))).at(-1);
+  }, 30_000, "the wake message for the finished child(ren)");
+  await until(() => h.log(h.dispatchId).some((e) => e.type === "turn_completed" && e.seq > woken.seq) || undefined, 30_000, "the coordinator's wake turn");
+}
+
 type ToolResult = { content: Array<{ type: string; text: string }>; isError: boolean };
 type ChildUpdate = Extract<SessionEvent, { type: "child_update" }>;
 
@@ -227,6 +242,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
       const call = [...h.log(h.dispatchId)].reverse().find((e) => e.type === "tool_call") as { name: string };
       expect(call.name).toBe("session_spawn");
       await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 30_000, "the model-spawned child's completed update");
+      await awaitCoordinatorWoken(h, [child!]);
     } finally {
       await h.daemon!.winter.get(h.dispatchId)?.end();
       h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
@@ -314,6 +330,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
         const reply = h.log(child).find((e) => e.type === "assistant_message") as { text?: string } | undefined;
         expect(reply?.text ?? "").toContain(specs[i]!.prompt);
       }
+      await awaitCoordinatorWoken(h, children);
     } finally {
       clearTimeout(giveUp);
       store.createSession = realCreate;
