@@ -87,9 +87,10 @@ struct IslandShelfTile: View {
                     .truncationMode(.middle)
                     .multilineTextAlignment(.center)
                     .frame(height: 28, alignment: .top)
-                if url == nil {
-                    Text("Missing").font(Typography.tiny(.semibold)).foregroundStyle(pillReviewAmber)
-                }
+                // The same height for every tile: the "Missing" line has its slot whether shown or not.
+                Text("Missing").font(Typography.tiny(.semibold)).foregroundStyle(pillReviewAmber)
+                    .opacity(url == nil ? 1 : 0)
+                    .accessibilityHidden(url != nil)
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 6)
