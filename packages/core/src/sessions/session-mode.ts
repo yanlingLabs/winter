@@ -54,7 +54,7 @@ export function isRunnableSessionMode(mode: string | null | undefined): mode is 
  *  relies on — and a runnable string is itself. ANYTHING ELSE is `undefined`: `cowork`, a mode a newer daemon
  *  wrote (this one was rolled back to), a hand-edited index. Such a row used to read as Code; it must be
  *  refused instead. The column has only ever held NULL, `code`, `dispatch` and `chat` (git history of the
- *  protocol's mode enum and the store's writers; the legacy Norma import carries no mode at all), so no legacy
+ *  protocol's mode enum and the store's writers; the pre-rename home import carries no mode at all), so no legacy
  *  spelling is lost by refusing the rest. */
 export function runnableModeOf(raw: string | null | undefined): RunnableSessionMode | undefined {
   if (raw === undefined || raw === null) return "code";
