@@ -59,13 +59,21 @@ final class CommandRun: ObservableObject, Identifiable {
     /// The dispatch session the command was typed into, or nil when there was none — see
     /// `commandTranscriptTarget` for where "Add to transcript" goes.
     let sessionId: String?
+    /// For a run that recorded none: the conversation its FIRST "Add to transcript" went to (or created) — every
+    /// later click goes there too.
+    var pinnedSessionId: String?
+    /// Why the line never ran, when it did not (`commandOutcome == .failedToStart` with the shell up).
+    @Published private(set) var failureNote: String?
+    /// The run's mark tag (`loginShellMarkTag`).
+    let nonce: String
     /// The SHELL's outcome: `.running` for as long as the session lives.
     @Published private(set) var outcome: CommandRunOutcome = .running
     /// The LINE's outcome: `.running` until the shell's `D` mark (or the shell's end, if that comes first).
     @Published private(set) var commandOutcome: CommandRunOutcome = .running
     let terminalView: WinterTerminalView
-    /// The process group the run started (forkpty made the shell a session leader, so its pid is the group's) —
-    /// kept after it finishes: background jobs it left behind are still that group.
+    /// The process group the run started — forkpty made the shell a SESSION leader, so its pid is also the
+    /// session's id: every job the shell starts (each in a process group of its own) stays in that session, and End
+    /// and quit kill the whole session (`commandRunSessionMembers`).
     private(set) var processGroup: pid_t?
     private(set) var phase = CommandRunPhase.startup
     /// The user pressed Return in the shell after the line ended — "Add to transcript" then sends the session.
@@ -74,9 +82,22 @@ final class CommandRun: ObservableObject, Identifiable {
     /// The line's output (between its `C` and `D` marks), and the session's tail from the line's start on.
     private var commandCapture = CapturedOutput(limit: TerminalTranscriptLimits.maxCapturedBytes)
     private var sessionCapture = CapturedOutput(limit: TerminalTranscriptLimits.maxCapturedBytes)
-    private var scanner = TerminalSemanticMarkScanner()
-    /// The startup shim's private folder — the shell deletes it itself; this is the backstop.
+    private var scanner: TerminalSemanticMarkScanner
+    /// The startup shim's private folder — removed once the line started (or the shell ended).
     private var shimDirectory: String?
+    /// What to type into the terminal if the shim was skipped (`LoginShellSessionInvocation.fallbackInput`).
+    private var fallbackInput: String?
+    private var launchedAt = Date()
+    private var firstOutputAt: Date?
+    private var lastOutputAt: Date?
+    private var fallbackSentAt: Date?
+
+    /// The line has not started this long after the shell's first output (and the shell has been quiet for
+    /// `fallbackQuiet`): the app types the fallback. If that has not started it either after `fallbackGiveUp`,
+    /// the run is marked failed.
+    static var fallbackAfter: TimeInterval = 3
+    static var fallbackQuiet: TimeInterval = 1
+    static var fallbackGiveUp: TimeInterval = 5
 
     /// `launch: false` builds the run without starting a process (tests — no test runs the user's shell).
     init(command: String, workingDirectory: String, environment: CommandLineEnvironment, sessionId: String? = nil,
@@ -85,6 +106,9 @@ final class CommandRun: ObservableObject, Identifiable {
         self.workingDirectory = workingDirectory
         self.homeDirectory = environment.homeDirectory
         self.sessionId = sessionId
+        let nonce = loginShellRunNonce()
+        self.nonce = nonce
+        scanner = TerminalSemanticMarkScanner(tag: loginShellMarkTag(nonce))
         let view = WinterTerminalView(frame: NSRect(x: 0, y: 0, width: 760, height: 420),
                                       font: Typography.terminalNS,
                                       options: TerminalOptions(scrollback: 10_000))
@@ -107,7 +131,9 @@ final class CommandRun: ObservableObject, Identifiable {
             return
         }
         shimDirectory = shim
-        let invocation = loginShellSessionInvocation(shell: environment.shell, line: command, shimDirectory: shim)
+        let invocation = loginShellSessionInvocation(shell: environment.shell, line: command, shimDirectory: shim,
+                                                     nonce: nonce)
+        fallbackInput = invocation.fallbackInput
         for (name, contents) in invocation.files {
             let path = shim + "/" + name
             guard FileManager.default.createFile(atPath: path, contents: Data(contents.utf8),
@@ -131,6 +157,40 @@ final class CommandRun: ObservableObject, Identifiable {
         processGroup = view.process.shellPid > 0 ? view.process.shellPid : nil
         // This run's pty master must not leak into the NEXT run's (or any other) child.
         shellSetCloseOnExec(view.process.childfd)
+        launchedAt = Date()
+        scheduleFallbackCheck()
+    }
+
+    // MARK: The fallback (the shim was skipped)
+
+    private func scheduleFallbackCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, self.phase == .startup, self.outcome == .running else { return }
+            self.checkFallback(now: Date())
+            if self.phase == .startup, self.commandOutcome == .running { self.scheduleFallbackCheck() }
+        }
+    }
+
+    /// Still no `C` mark: once the shell has been up `fallbackAfter` since its first output and quiet for
+    /// `fallbackQuiet`, type the fallback (it runs the line unless it already started); if THAT has not started it
+    /// within `fallbackGiveUp`, the line failed — never left `.running`.
+    func checkFallback(now: Date) {
+        guard phase == .startup, commandOutcome == .running, outcome == .running else { return }
+        if let sent = fallbackSentAt {
+            guard now.timeIntervalSince(sent) >= Self.fallbackGiveUp else { return }
+            failureNote = "The shell never ran the command — its startup files may bypass Winter's (a ZDOTDIR set in /etc/zshenv, a plugin that replaces the prompt hooks)."
+            commandOutcome = .failedToStart
+            removeShim()
+            return
+        }
+        let reference = firstOutputAt ?? launchedAt
+        let quietSince = lastOutputAt ?? launchedAt
+        guard now.timeIntervalSince(reference) >= Self.fallbackAfter,
+              now.timeIntervalSince(quietSince) >= Self.fallbackQuiet else { return }
+        fallbackSentAt = now
+        if let fallbackInput, terminalView.process.running {
+            terminalView.process.send(data: Array(fallbackInput.utf8)[...])
+        }
     }
 
     /// The shell is still there after its line ended — the pill's "live shell" state.
@@ -142,18 +202,15 @@ final class CommandRun: ObservableObject, Identifiable {
         terminalView.process.send(data: [0x03][...])
     }
 
-    /// End the SHELL: hang up its group and the terminal's foreground job, and kill them if they are still there
-    /// a moment later. (An interactive shell ignores SIGTERM; it ends on SIGHUP, hanging up its jobs.)
+    /// End the SHELL and everything it started: every process in its terminal SESSION — the shell, the foreground
+    /// job, background jobs in process groups of their own, ones that ignore SIGHUP — is hung up now and killed a
+    /// moment later, whether or not the shell has gone by then. (An interactive shell ignores SIGTERM; it ends on
+    /// SIGHUP.)
     func endShell() {
-        guard outcome == .running, let group = processGroup else { return }
-        let foreground = foregroundGroup()
-        for target in Set([group, foreground].compactMap { $0 }) {
-            kill(-target, SIGHUP)
-            kill(-target, SIGTERM)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, self.outcome == .running else { return }
-            for target in Set([group, foreground].compactMap { $0 }) { kill(-target, SIGKILL) }
+        guard let session = processGroup else { return }
+        commandRunSignalSession(session, SIGHUP)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) {
+            commandRunSignalSession(session, SIGKILL)
         }
     }
 
@@ -192,18 +249,22 @@ final class CommandRun: ObservableObject, Identifiable {
         guard !bytes.isEmpty else { return }
         sessionCapture.append(bytes)
         if phase == .command { commandCapture.append(bytes) }
+        let now = Date()
+        if firstOutputAt == nil { firstOutputAt = now }
+        lastOutputAt = now
     }
 
     private func handle(_ mark: TerminalSemanticMark) {
         switch (mark, phase) {
         case (.commandStart, .startup):
             phase = .command
+            // The line has been read: the shim folder has done its job.
+            removeShim()
             // What the startup files printed is not the line's — the session capture starts here.
             sessionCapture = CapturedOutput(limit: TerminalTranscriptLimits.maxCapturedBytes)
         case (.commandEnd(let status), .command):
             phase = .shell
             commandOutcome = .exited(status ?? 0)
-            removeShim()
         default:
             break // a later command's marks (the user's own shell integration) are not the line's
         }
@@ -232,6 +293,10 @@ final class CommandRun: ObservableObject, Identifiable {
     // MARK: Test seams (a run built with `launch: false`)
 
     func feedForTesting(_ bytes: [UInt8]) { capture(bytes[...]) }
+    /// A run's own marks, as its shell writes them.
+    func startMarkForTesting() -> String { "\u{1B}]133;C;\(loginShellMarkTag(nonce))\u{07}" }
+    func endMarkForTesting(_ status: Int32) -> String { "\u{1B}]133;D;\(status);\(loginShellMarkTag(nonce))\u{07}" }
+    var fallbackSentForTesting: Bool { fallbackSentAt != nil }
     func finishForTesting(waitStatus: Int32?) { finish(waitStatus) }
     /// Keys typed into the terminal, as the emulator hands them to the shell.
     func typeForTesting(_ text: String) {
@@ -239,6 +304,27 @@ final class CommandRun: ObservableObject, Identifiable {
         noteInput(bytes[...])
         if terminalView.process.running { terminalView.process.send(data: bytes[...]) }
     }
+}
+
+/// Every process whose SESSION is `session` (a run's shell is its terminal session's leader, so its pid names it).
+/// Still found after the shell itself has gone: the session id outlives its leader.
+func commandRunSessionMembers(_ session: pid_t) -> [pid_t] {
+    guard session > 1 else { return [] }
+    let count = proc_listallpids(nil, 0)
+    guard count > 0 else { return [] }
+    var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+    let got = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+    guard got > 0 else { return [] }
+    let me = getpid()
+    return pids.prefix(Int(got)).filter { $0 > 1 && $0 != me && getsid($0) == session }
+}
+
+/// `signal` to every process in `session`; true when there was any.
+@discardableResult
+func commandRunSignalSession(_ session: pid_t, _ signal: Int32) -> Bool {
+    let members = commandRunSessionMembers(session)
+    for pid in members { kill(pid, signal) }
+    return !members.isEmpty
 }
 
 /// A fresh private folder (0700) for one run's startup shim, in the user's temp directory.
@@ -318,7 +404,7 @@ final class CommandRunStore: ObservableObject {
     var onSendToTranscript: ((_ sessionId: String, _ text: String) async -> Bool)?
     /// Sends a run's transcript message the way the pill's composer sends a message — to its current
     /// conversation, created if there is none. For a run that recorded no session. Wired by the pill.
-    var onSendToCurrentConversation: ((_ text: String) async -> Bool)?
+    var onSendToCurrentConversation: ((_ text: String) async -> (sent: Bool, sessionId: String?))?
     /// Whether a session still exists (the app's directory). A recorded session that is gone disables the button.
     var sessionExists: ((String) -> Bool)?
 
@@ -360,7 +446,9 @@ final class CommandRunStore: ObservableObject {
 
     /// Where the run's "Add to transcript" would go now (`commandTranscriptTarget`).
     func transcriptTarget(_ run: CommandRun) -> CommandTranscriptTarget {
-        commandTranscriptTarget(recordedSessionId: run.sessionId) { [sessionExists] in sessionExists?($0) ?? false }
+        commandTranscriptTarget(recordedSessionId: run.sessionId ?? run.pinnedSessionId) { [sessionExists] in
+            sessionExists?($0) ?? false
+        }
     }
 
     /// "Add to transcript" is possible: there is a target, and a way to send to it.
@@ -380,7 +468,10 @@ final class CommandRunStore: ObservableObject {
             return await send(sessionId, run.transcriptMessage())
         case .currentConversation:
             guard let send = onSendToCurrentConversation else { return false }
-            return await send(run.transcriptMessage())
+            let result = await send(run.transcriptMessage())
+            // The first click's conversation is the run's from now on: later clicks go there, wherever focus is.
+            if result.sent, let sessionId = result.sessionId { run.pinnedSessionId = sessionId }
+            return result.sent
         case .unavailable:
             return false
         }
@@ -437,19 +528,16 @@ final class CommandRunStore: ObservableObject {
     /// The app is quitting: nothing any run started may outlive it — running or finished, its whole process
     /// group (background jobs included) is hung up, then killed after a short grace.
     private func stopAllForQuit() {
-        // A live shell's foreground job runs in a process group of its own (job control): it goes too.
-        let foreground = runs.filter { $0.outcome == .running }.compactMap { $0.foregroundGroup() }
-        let groups = launchedGroups.union(foreground).filter { kill(-$0, 0) == 0 }
-        guard !groups.isEmpty else { return }
-        for group in groups {
-            kill(-group, SIGHUP)
-            kill(-group, SIGTERM)
-        }
+        // Every terminal SESSION any run started — running or finished, dismissed included: the shell, its
+        // foreground job, background jobs in groups of their own and ones that ignore SIGHUP.
+        let sessions = launchedGroups.filter { !commandRunSessionMembers($0).isEmpty }
+        guard !sessions.isEmpty else { return }
+        for session in sessions { commandRunSignalSession(session, SIGHUP) }
         for _ in 0..<10 {
-            if groups.allSatisfy({ kill(-$0, 0) != 0 }) { return }
+            if sessions.allSatisfy({ commandRunSessionMembers($0).isEmpty }) { return }
             usleep(20_000)
         }
-        for group in groups { kill(-group, SIGKILL) }
+        for session in sessions { commandRunSignalSession(session, SIGKILL) }
     }
 
     private func withAnimationIfVisible(_ change: () -> Void) {

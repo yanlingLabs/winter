@@ -187,6 +187,7 @@ struct TerminalWindowRootView: View {
     private var controls: some View {
         HStack(spacing: 8) {
             TerminalRunStateBadge(outcome: run.commandOutcome, shellIsLive: run.shellIsLive)
+                .help(run.failureNote ?? "")
             if run.commandOutcome == .running {
                 TerminalChromeButton(symbol: "stop.fill", label: "Stop", help: "Stop this command (Ctrl-C) — the shell stays open",
                                      action: onStop)
@@ -303,7 +304,7 @@ private struct TerminalRunStateBadge: View {
                 Text("Stopped")
             case .failedToStart:
                 Circle().fill(Color.red).frame(width: 7, height: 7)
-                Text("Couldn’t start")
+                Text(shellIsLive ? "Didn’t run" : "Couldn’t start")
             }
             if shellIsLive {
                 Text("· shell open").foregroundStyle(Theme.commandPurple)

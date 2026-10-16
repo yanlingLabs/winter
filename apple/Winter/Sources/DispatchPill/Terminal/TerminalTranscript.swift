@@ -192,14 +192,20 @@ enum TerminalSemanticMark: Equatable {
     case commandEnd(Int32?)
 }
 
-/// PURE (stateful across chunks): finds OSC 133 `C`/`D` marks in a byte stream as it arrives — a mark split
-/// across two reads is still found. Every other OSC is skipped; a runaway OSC (no end within `maxBody` bytes)
-/// is dropped. The bytes themselves are not changed: the emulator still gets them (it ignores the marks).
+/// PURE (stateful across chunks): finds a run's OSC 133 `C`/`D` marks in a byte stream as it arrives — a mark split
+/// across two reads is still found. Only marks carrying the run's tag (`winter-<nonce>`, `loginShellMarkTag`)
+/// count: the same mark printed by the command, or by a shell nested in it, is ignored. Every other OSC is
+/// skipped; a runaway OSC (no end within `maxBody` bytes) is dropped. The bytes themselves are not changed: the
+/// emulator still gets them (it ignores the marks).
 struct TerminalSemanticMarkScanner {
     static let maxBody = 256
     private enum State { case ground, escape, osc, oscEscape }
     private var state = State.ground
     private var body: [UInt8] = []
+    /// The field a mark must carry to count.
+    let tag: String
+
+    init(tag: String) { self.tag = tag }
 
     /// The marks in `bytes`, each with the index just past its terminator (an index of `bytes`).
     mutating func feed(_ bytes: ArraySlice<UInt8>) -> [(end: Int, mark: TerminalSemanticMark)] {
@@ -214,7 +220,7 @@ struct TerminalSemanticMarkScanner {
                 if b == 0x5D { state = .osc; body.removeAll(keepingCapacity: true) } else { state = b == 0x1B ? .escape : .ground }
             case .osc:
                 if b == 0x07 {
-                    if let mark = Self.mark(body) { found.append((i + 1, mark)) }
+                    if let mark = Self.mark(body, tag: tag) { found.append((i + 1, mark)) }
                     state = .ground
                 } else if b == 0x1B {
                     state = .oscEscape
@@ -224,7 +230,7 @@ struct TerminalSemanticMarkScanner {
                     state = .ground
                 }
             case .oscEscape:
-                if b == 0x5C, let mark = Self.mark(body) { found.append((i + 1, mark)) }
+                if b == 0x5C, let mark = Self.mark(body, tag: tag) { found.append((i + 1, mark)) }
                 state = b == 0x5D ? .osc : .ground
                 if state == .osc { body.removeAll(keepingCapacity: true) }
             }
@@ -233,13 +239,14 @@ struct TerminalSemanticMarkScanner {
         return found
     }
 
-    /// PURE: an OSC body → a mark, when it is `133;C` or `133;D[;status[;…]]`.
-    static func mark(_ body: [UInt8]) -> TerminalSemanticMark? {
+    /// PURE: an OSC body → a mark, when it is `133;C;<tag>` or `133;D;<status>;<tag>` (the tag may be any later
+    /// field).
+    static func mark(_ body: [UInt8], tag: String) -> TerminalSemanticMark? {
         let fields = String(decoding: body, as: UTF8.self).split(separator: ";", omittingEmptySubsequences: false)
-        guard fields.count >= 2, fields[0] == "133" else { return nil }
+        guard fields.count >= 3, fields[0] == "133", fields.dropFirst(2).contains(Substring(tag)) else { return nil }
         switch fields[1] {
         case "C": return .commandStart
-        case "D": return .commandEnd(fields.count >= 3 ? Int32(fields[2]) : nil)
+        case "D": return .commandEnd(Int32(fields[2]))
         default: return nil
         }
     }

@@ -332,7 +332,9 @@ final class DispatchPillController: ObservableObject {
         // A run that recorded no session adds to the transcript the way the composer sends: the pill's current
         // conversation at click time, created if there is none.
         commandRuns.onSendToCurrentConversation = { [weak self] text in
-            await self?.onSubmit?(text) ?? false
+            guard let self, await self.onSubmit?(text) == true else { return (false, nil) }
+            // The conversation the send went to (or created) — the run keeps to it from now on.
+            return (true, self.currentSessionId?())
         }
     }
 
