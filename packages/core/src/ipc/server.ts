@@ -3725,6 +3725,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // NOT_FOUND below, not a confusing immunity error that implies the session exists.
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        // A stored `cowork` (or otherwise unrunnable) row has no policy to choose: refused like `session.setModel`,
+        // before any write, so the column stays exactly as it was.
+        if (isUnrunnableStoredMode(targetMode)) throw coworkSessionUnsupported(targetMode);
         if (targetMode === "chat") {
           throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions have a fixed policy and cannot be changed — chat never asks permissions");
         }
@@ -3937,6 +3940,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // which branch below ran (and is why none of them may refuse on an absent meta).
         let sessionMeta: { model?: string; mode?: string } | undefined;
         try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
+        // A stored `cowork` (or otherwise unrunnable) row has no effort to choose: refused like `session.setModel`,
+        // before validation or any write. An unknown id leaves `sessionMeta` undefined and is not refused here.
+        if (isUnrunnableStoredMode(sessionMeta?.mode)) throw coworkSessionUnsupported(sessionMeta?.mode);
         if (sessionMeta?.mode === "dispatch" && p.effort !== null) {
           throw new RpcFailure(ERR.INVALID_PARAMS, dispatchPinMessage(liveSettingsFor(opts)));
         }

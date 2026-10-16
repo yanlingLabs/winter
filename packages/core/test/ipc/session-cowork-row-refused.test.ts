@@ -149,6 +149,35 @@ describe("a stored cowork row is refused by the doors that would run it", () => 
     c.close();
   });
 
+  // The other two session setters match `session.setModel`: an unrunnable row's column is never written.
+  test("session.setPolicy and session.setEffort refuse a cowork row and an unknown-mode row, and the column is unchanged", async () => {
+    const { store, c } = await boot(table({ ensure: async () => undefined, leg: "winter" }), false);
+    const cowork = coworkRow(store);
+    const odd = store.createSession("global");
+    (store as any).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["something-new", odd]);
+    for (const id of [cowork, odd]) {
+      const before = { policy: store.meta(id).approvalPolicy, effort: store.meta(id).effort };
+      expect(before.effort).toBeUndefined();
+      for (const policy of ["auto", "plan", "bypass"]) {
+        const res = await c.request(METHODS.sessionSetPolicy, { sessionId: id, policy });
+        expect(res.error).toMatchObject({ code: ERR.INVALID_PARAMS, data: UNSUPPORTED_CODE });
+      }
+      for (const effort of ["high", "ultra", null]) {
+        const res = await c.request(METHODS.sessionSetEffort, { sessionId: id, effort });
+        expect(res.error).toMatchObject({ code: ERR.INVALID_PARAMS, data: UNSUPPORTED_CODE });
+      }
+      expect({ policy: store.meta(id).approvalPolicy, effort: store.meta(id).effort }).toEqual(before);
+    }
+    // An unknown id is still NOT_FOUND from both, and a Code session still works.
+    expect((await c.request(METHODS.sessionSetPolicy, { sessionId: "s_nope", policy: "auto" })).error?.code).toBe(ERR.NOT_FOUND);
+    expect((await c.request(METHODS.sessionSetEffort, { sessionId: "s_nope", effort: "high" })).error?.code).toBe(ERR.NOT_FOUND);
+    const code = store.createSession("global", { mode: "code" });
+    expect((await c.request(METHODS.sessionSetPolicy, { sessionId: code, policy: "auto" })).error).toBeUndefined();
+    expect(store.meta(code).approvalPolicy).toBe("auto");
+    expect((await c.request(METHODS.sessionSetEffort, { sessionId: code, effort: null })).error).toBeUndefined();
+    c.close();
+  });
+
   // S3: `workflow.run` launches agents that create CODE children with the row's cwd and policy.
   test("workflow.run and workflow.list refuse a cowork row: nothing is launched, no script resolved, nothing listed", async () => {
     const launched: unknown[] = [];

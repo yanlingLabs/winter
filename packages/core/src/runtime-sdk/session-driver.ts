@@ -274,13 +274,6 @@ function userRulesFrom(home: string, runHomeApplied: boolean): { userAllow?: rea
   return { ...(allow === undefined ? {} : { userAllow: allow }), userDeny: sdkDenyRules(home) };
 }
 
-/** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere).
- *
- *  `cowork` — and any other string that is not a runnable mode (a newer daemon's, a hand-edited index) — is
- *  REFUSED here, never narrowed: it used to read as "not chat, not dispatch, so code", which is the one
- *  fall-through a recognised-but-unrunnable mode must not have. Every runtime-facing `SessionMode` is the
- *  runnable set (`sessions/session-mode.ts`), so this is the only place a stored string becomes one.
- *  Exported for `session-driver.test.ts`. */
 /** The capability server KEYS (`sessions`, `browser`, …) of the servers one incarnation built — the record
  *  is keyed by server name, `winter__<key>`. A name of any other shape is not a capability server. */
 export function capabilityKeysOf(capabilities: CapabilityServerRecord): ReadonlySet<string> {
@@ -290,6 +283,13 @@ export function capabilityKeysOf(capabilities: CapabilityServerRecord): Readonly
 
 const unrunnableModeRefusal = (raw: string | null | undefined): WinterLegRefusal => new WinterLegRefusal(COWORK_SESSION_UNSUPPORTED_CODE, unrunnableModeMessage(raw));
 
+/** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere).
+ *
+ *  `cowork` — and any other string that is not a runnable mode (a newer daemon's, a hand-edited index) — is
+ *  REFUSED here, never narrowed: it used to read as "not chat, not dispatch, so code", which is the one
+ *  fall-through a recognised-but-unrunnable mode must not have. Every runtime-facing `SessionMode` is the
+ *  runnable set (`sessions/session-mode.ts`), so this is the only place a stored string becomes one.
+ *  Exported for `session-driver.test.ts`. */
 export const modeOf = (raw: string | null | undefined): SessionMode => {
   const mode = runnableModeOf(raw);
   if (mode === undefined) throw unrunnableModeRefusal(raw);
