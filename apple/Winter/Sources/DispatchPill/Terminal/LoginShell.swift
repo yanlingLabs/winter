@@ -427,6 +427,8 @@ func loginShellZshAutosuggest() -> String {
 
       # ⌥→ (forward-word) at the end of the line: the suggestion's next word.
       __winter_as_accept_word() {
+        # The word pattern uses ## and # — glob operators only under extended_glob, which most shells leave off.
+        setopt localoptions extended_glob
         if [[ -n $POSTDISPLAY ]] && (( CURSOR == ${#BUFFER} )) && (( ! __winter_as_off )); then
           local next=${(M)POSTDISPLAY##[[:space:]]#[^[:space:]/]##(/|)}
           [[ -n $next ]] || next=${POSTDISPLAY[1]}
