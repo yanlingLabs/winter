@@ -91,6 +91,9 @@ export interface ComputerUseRuntimeDeps {
   /** Wake triggers, Dispatch: is a turn of this child followed now; follow its wake turn (`DispatchChildren`). */
   followedNow?(sessionId: string): boolean;
   followWake?(sessionId: string, text: string): (() => void) | undefined;
+  /** The Winter island: is an island client (Winter.app) connected now? Then the desktop-switch prompt is the app's,
+   *  and the helper's own panel is not shown (`islandAwareDesktopPanel`). Read at each prompt. */
+  islandClientPresent?(): boolean;
   inject?: ComputerUseInjection;
   log?(line: string): void;
 }
@@ -196,6 +199,25 @@ export function helperDesktopPanel(helper: Pick<HelperClient, "request">, log: (
   };
 }
 
+/**
+ * The Winter island (`docs/claude/island.md`): while Winter.app is connected with an island (its hello advertised
+ * `CLIENT_CAPABILITY_ISLAND`), the desktop-switch prompt's on-screen half is the APP's — it shows the session's own
+ * card (`approval_requested`, `onTimeout: "allow"`) in the island, answered through `approval.respond` like any card,
+ * the first answer winning in the broker. The helper's own panel is then never asked for; it stays the fallback for a
+ * daemon with no island client (the app not running, a CLI-only setup). Decided at each prompt, never at boot.
+ */
+export function islandAwareDesktopPanel(helperPanel: DesktopVisitPanel, islandPresent: () => boolean, log: (line: string) => void): DesktopVisitPanel {
+  return {
+    show(p) {
+      if (islandPresent()) {
+        log(`computer-use: the desktop-switch prompt ${p.promptId} is shown by Winter's island, not the helper`);
+        return { answer: Promise.resolve(undefined), close: () => { /* nothing was shown here */ } };
+      }
+      return helperPanel.show(p);
+    },
+  };
+}
+
 export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): ComputerUseRuntime {
   const log = (line: string): void => deps.log?.(line);
   let written: { basis: Settings | null | undefined; next: Settings } | undefined;
@@ -255,7 +277,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       try { if (deps.store.meta(sessionId).mode === "dispatch") return false; } catch { return false; }
       return deps.hub.attachedHarnesses(sessionId).some((h) => h.role !== "remote" && h.clientName !== "iphone-gateway");
     },
-    desktopPanel: helperDesktopPanel(helper, log),
+    desktopPanel: islandAwareDesktopPanel(helperDesktopPanel(helper, log), () => deps.islandClientPresent?.() ?? false, log),
     log,
   });
 

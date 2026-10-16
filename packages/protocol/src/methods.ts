@@ -18,6 +18,15 @@ export type Role = z.infer<typeof Role>;
 export const ApprovalPolicy = z.enum(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]);
 export type ApprovalPolicy = z.infer<typeof ApprovalPolicy>;
 
+/** `hello`'s client `capabilities`: bounds, and the names a client may advertise. */
+export const CLIENT_CAPABILITY_MAX_LENGTH = 64;
+export const CLIENT_CAPABILITIES_MAX = 32;
+export const CLIENT_TTY_MAX_LENGTH = 64;
+/** The Winter island (the Mac app's surface at the camera housing, `docs/claude/island.md`): this client shows
+ *  every pending approval, question and request across sessions, the desktop-switch prompt included. While one is
+ *  connected the daemon does not ask the Winter Computer Use helper to show its own desktop-switch panel. */
+export const CLIENT_CAPABILITY_ISLAND = "island";
+
 export const HelloParams = z.object({
   protocolVersion: z.number().int(),
   role: Role,
@@ -28,6 +37,13 @@ export const HelloParams = z.object({
   // TokenAuthority — ipc/server.ts routes role "plugin" through SessionStore.verifyPluginToken
   // instead; a missing pluginId (or one with no minted/matching token) fails closed.
   pluginId: z.string().min(1).optional(),
+  /** What this CLIENT can do that the daemon should know (the mirror of `HelloResult.features`): e.g.
+   *  `CLIENT_CAPABILITY_ISLAND`. Unknown names are ignored; an older daemon strips the key. */
+  capabilities: z.array(z.string().min(1).max(CLIENT_CAPABILITY_MAX_LENGTH)).max(CLIENT_CAPABILITIES_MAX).optional(),
+  /** The controlling terminal of a terminal client (the CLI/TUI), as its device path (`/dev/ttys004`) — so a
+   *  local surface can tell whether that exact terminal window or tab is in front (`island.pending`'s
+   *  `hosts`). Absent for a client with no terminal. Never used for anything but that. */
+  tty: z.string().max(CLIENT_TTY_MAX_LENGTH).regex(/^\/dev\/[A-Za-z0-9._-]+$/).optional(),
 });
 export const HelloResult = z.object({
   ok: z.literal(true),
@@ -460,6 +476,42 @@ export const ElicitationUrlParams = z.object({
 });
 export const ElicitationUrlResult = z.object({ url: z.string().min(1) });
 export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
+
+/** The Winter island (`docs/claude/island.md`): every approval, question and URL-mode elicitation still pending
+ *  in ANY session, for the Mac app's "Needs you" surface. HARNESS role only (never remote, never a plugin): the
+ *  phone has its own per-session `approval.list`. Pending-ness is the brokers' (an answered, timed-out or cancelled
+ *  card is never listed); the payload is the request event itself, as the session's log holds it. A Dispatch child's
+ *  card mirrored onto the coordinator appears ONCE, as the child's. The daemon pushes a bare
+ *  `ISLAND_CHANGED_NOTIFICATION` (params `{}`) to every island client whenever this set, or the hosts of a session
+ *  in it, may have changed; the client then asks again. */
+export const IslandPendingParams = z.object({});
+/** Who is attached to a session right now: the connection's hello `clientName`, its role, and its terminal. */
+export const IslandHostSchema = z.object({
+  clientName: z.string(),
+  role: z.string().optional(),
+  tty: z.string().optional(),
+});
+export const IslandPendingItemSchema = z.object({
+  /** The session whose log holds `event` (for a Dispatch child's card, the child). */
+  sessionId: z.string().min(1),
+  /** The session an answer goes to (`approval.respond` / `ask_user.respond` / `elicitation.respond`'s `sessionId`). */
+  answerSessionId: z.string().min(1),
+  kind: z.enum(["approval", "question", "elicitation"]),
+  /** The `approval_requested` / `question_asked` / `elicitation_requested` event. */
+  event: SessionEvent,
+  /** The answer session's facts, for routing: its mode (absent = code), origin, coordinator and generated title. */
+  session: z.object({
+    mode: z.string().optional(),
+    origin: z.string().optional(),
+    parentSessionId: z.string().optional(),
+    title: z.string().optional(),
+  }),
+  /** Every connection attached to the answer session now (for a Dispatch child, the child's own). */
+  hosts: z.array(IslandHostSchema),
+});
+export const IslandPendingResult = z.object({ items: z.array(IslandPendingItemSchema) });
+/** The daemon → island-client notification: the pending set (or a pending session's hosts) may have changed. */
+export const ISLAND_CHANGED_NOTIFICATION = "island.changed";
 
 /** ComputerV2 (2026-10-08) — Settings → Computer Use's daemon doors. LOCAL ROLE ONLY: never in
  *  `REMOTE_ALLOWED_METHODS` (the phone does not configure the Mac's computer use) and refused for any other role.
@@ -3312,6 +3364,8 @@ export const METHODS = {
   approvalList: "approval.list",
   elicitationRespond: "elicitation.respond",
   elicitationUrl: "elicitation.url",
+  // The Winter island (Mac app): every pending card across sessions. HARNESS role only.
+  islandPending: "island.pending",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",

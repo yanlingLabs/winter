@@ -1,3 +1,4 @@
+import { controllingTtyName } from "./tty-name";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloResult, SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
@@ -67,6 +68,9 @@ export interface ConnectOptions {
   token: string;
   clientName: string;
   role?: "harness" | "admin";
+  /** The controlling terminal sent in the hello (`HelloParams.tty`) — the Winter island's "is this terminal in
+   *  front?" question. Default: detected (`controllingTtyName`); `null` sends none. */
+  tty?: string | null;
   timeoutMs?: number;
   onEvent: (event: SessionEvent) => void;
 }
@@ -132,6 +136,7 @@ export class WinterClient {
       role: opts.role ?? "harness",
       token: opts.token,
       clientName: opts.clientName,
+      ...helloTty(opts),
     });
     const parsed = HelloResult.safeParse(hello);
     client.features = new Set(parsed.success ? (parsed.data.features ?? []) : []);
@@ -499,4 +504,11 @@ export class WinterClient {
     return this.validated(WorkflowGetResult, await this.request(METHODS.workflowGet, { runId }), METHODS.workflowGet);
   }
   close(): void { this.socket.end(); }
+}
+
+/** The hello's `tty`: a harness client's terminal (explicit, or detected), never an admin's. */
+function helloTty(opts: ConnectOptions): { tty?: string } {
+  if ((opts.role ?? "harness") !== "harness" || opts.tty === null) return {};
+  const tty = opts.tty ?? controllingTtyName();
+  return tty === undefined ? {} : { tty };
 }
