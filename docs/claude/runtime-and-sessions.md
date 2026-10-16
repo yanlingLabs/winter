@@ -6,7 +6,7 @@
 
 - **The daemon runs no agent loop.** Every session is a runtime child driven through the router (`@yanlinglabs/winter-runtime-sdk`, pin `REQUIRED_WINTER_RUNTIME_SDK`) on the Winter agent runtime — the only leg, every model, Claude included; nothing loads `@anthropic-ai/claude-agent-sdk`.
 - Two topologies, one frame stream, one `query()`: **code** spawns the `winter` binary (`@yanlinglabs/winter-agent-sdk`); **chat/dispatch** run EMBEDDED, one Bun Worker per session (`runtime-sdk/embedded.ts`, `@yanlinglabs/winter-agent-runtime`). Dispatch children are code sessions, so subprocesses.
-- Modes `code | dispatch | chat` (`SessionMode`, `runtime-sdk/create.ts`). **Cowork is not implemented** (`SpawnSession` refuses `type: "cowork"`; [cowork-status.md](../cowork-status.md)).
+- Modes `code | dispatch | chat` (`SessionMode`, `runtime-sdk/create.ts`). **Cowork is not an implemented session mode, and no session can be created in it** (`SpawnSession` refuses `type: "cowork"`). Workspace metadata, guidance, schedules and outputs exist host-side ([cowork.md](./cowork.md), [cowork-status.md](../cowork-status.md)).
 
 ## Embedded host
 
