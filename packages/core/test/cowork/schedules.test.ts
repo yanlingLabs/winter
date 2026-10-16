@@ -2,7 +2,8 @@ import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
+import * as ts from "typescript";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkSchedules, nextCoworkScheduleTime } from "../../src/cowork/schedules";
@@ -333,16 +334,44 @@ test("a not-started answer folds a pending interval materialized meanwhile inste
     settle(gated, one.row.occurrenceId, claim); expect(await pendingOutcome).toEqual({ status: "uncertain" }); expect(durable(g, one.row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
   }
 });
-test("an uncertain or untrustworthy port answer is uncertain, never pending, and never handles a one-shot", async () => {
+test("an uncertain, malformed or hostile port answer is uncertain, never pending, never rejects, leaks nothing and never handles a one-shot", async () => {
+  const valid = (input: CoworkScheduleDispatchInput, token: string) => ({ occurrenceId: input.occurrence.occurrenceId, token, runRef: "r1" });
+  const trap = (message: string) => new Proxy({}, { get() { throw new Error(message); }, has() { throw new Error(message); }, ownKeys() { throw new Error(message); } });
   const wrong: Start[] = [() => ({ kind: "uncertain" }), (input, token) => ({ kind: "started", receipt: { occurrenceId: "another", token, runRef: "r" } }), (input) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token: "other-token", runRef: "r" } }),
     (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token, runRef: "../escape" } }), (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token } as any }),
-    () => ({}) as any, () => undefined as any, () => ({ kind: "started" }) as any, () => ({ kind: "not_started" }) as any, () => ({ kind: "Not-Started" }) as any, () => ({ kind: "notstarted" }) as any, () => "not-started" as any, () => ({ status: "not-started" }) as any];
+    () => ({}) as any, () => undefined as any, () => ({ kind: "started" }) as any, () => ({ kind: "not_started" }) as any, () => ({ kind: "Not-Started" }) as any, () => ({ kind: "notstarted" }) as any, () => "not-started" as any, () => ({ status: "not-started" }) as any,
+    // an `uncertain` answer is uncertain even when it carries an otherwise valid receipt; kinds are matched exactly
+    (input, token) => ({ kind: "uncertain", receipt: valid(input, token) }) as any, (input, token) => ({ kind: "STARTED", receipt: valid(input, token) }) as any, (input, token) => ({ kind: "Started", receipt: valid(input, token) }) as any,
+    (input, token) => ({ kind: "started ", receipt: valid(input, token) }) as any, (input, token) => ({ kind: ["started"], receipt: valid(input, token) }) as any, (input, token) => ({ kind: new String("started"), receipt: valid(input, token) }) as any,
+    (input, token) => ({ kind: "started", receipt: { ...valid(input, token), runRef: new String("r1") } }) as any, (input, token) => ({ kind: "started", receipt: { ...valid(input, token), runRef: "x".repeat(129) } }) as any,
+    (input, token) => ({ kind: "started", receipt: { ...valid(input, token), runRef: "bad\nref" } }) as any, (input, token) => ({ kind: "started", receipt: "receipt" }) as any,
+    // hostile answers: a throwing getter must not escape the settle transaction, leave the row dispatching or leak its text
+    () => ({ get kind(): never { throw new Error("secret-detail-kind"); } }) as any,
+    (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token, get runRef(): string { throw new Error("secret-detail-runref"); } } }) as any,
+    (input, token) => ({ kind: "started", receipt: { get occurrenceId(): string { throw new Error("secret-detail-echo"); }, token, runRef: "r1" } }) as any,
+    (input, token) => ({ kind: "started", get receipt(): never { throw new Error("secret-detail-receipt"); } }) as any,
+    () => trap("secret-detail-proxy") as any, (input, token) => ({ kind: "started", receipt: trap("secret-detail-receipt-proxy") }) as any,
+    () => ({ get then(): never { throw new Error("secret-detail-then"); } }) as any,
+    // a getter that changes its answer between reads cannot split the decision: the first read is the only one
+    (() => { let reads = 0; return (input: CoworkScheduleDispatchInput, token: string) => ({ get kind() { return ++reads === 1 ? "started" : "not-started"; }, receipt: { ...valid(input, token), get runRef() { return reads > 1 ? "../escape" : "r1"; } } }) as any; })(),
+  ];
+  // The flip-flopping getter is the last entry: its first read says `started`, which is honored exactly once and never re-read.
+  const stable = wrong.pop()!;
   for (const answer of wrong) {
     const f = fixture(), p = fakePort(f.db, answer), s = f.open(p.port), { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
-    expect(await s.beginDispatch(row.occurrenceId, token)).toEqual({ status: "uncertain" });
+    const out = await s.beginDispatch(row.occurrenceId, token); // must RESOLVE: a rejection here would leave the row dispatching holding the slot
+    expect(out).toEqual({ status: "uncertain" }); expect(JSON.stringify(out)).not.toContain("secret");
     expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
     expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined(); expect(p.calls).toHaveLength(1);
   }
+  const f = fixture(), p = fakePort(f.db, stable), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const out = await s.beginDispatch(row.occurrenceId, token); expect(out.status).toBe("started"); expect(durable(f, row.occurrenceId).state).toBe("dispatching"); expect(p.calls).toHaveLength(1);
+});
+test("a quarantine row inserted after the claim blocks the begin with invalid_schedule and never reaches the port", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  f.db.db.run("INSERT INTO cowork_schedule_quarantines VALUES(?,'invalid_schedule',?)", [a.scheduleId, 5]); // the definition itself still parses
+  expect(await s.beginDispatch(row.occurrenceId, token)).toEqual({ status: "blocked", reason: "invalid_schedule" });
+  expect(p.calls).toHaveLength(0); expect(durable(f, row.occurrenceId)).toEqual({ state: "pending", reason: "invalid_schedule", claim_token: null });
 });
 test("two DB handles on one file yield exactly one dispatch", async () => {
   const f = fixture(), counted = { calls: 0 }, count: Start = (input, token) => { counted.calls++; return ack(input, token); };
@@ -430,62 +459,69 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-/** Text between the parenthesis opening at `open` and its match, skipping string literals. */
-function parenthesized(text: string, open: number): string {
-  let depth = 0, quote = "";
-  for (let i = open; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
-    if (c === '"' || c === "'" || c === "`") quote = c;
-    else if (c === "(") depth++;
-    else if (c === ")" && --depth === 0) return text.slice(open + 1, i);
-  }
-  throw new Error("unbalanced parentheses");
-}
-/** Top-level comma-separated pieces of an argument or parameter list; `types` also nests on generic angle brackets (`=>` excepted). */
-function topLevel(list: string, types = false): string[] {
-  const parts: string[] = []; let depth = 0, quote = "", start = 0;
-  for (let i = 0; i < list.length; i++) {
-    const c = list[i]!;
-    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
-    if (c === '"' || c === "'" || c === "`") quote = c;
-    else if ("([{".includes(c) || (types && c === "<")) depth++;
-    else if (")]}".includes(c) || (types && c === ">" && list[i - 1] !== "=")) depth--;
-    else if (c === "," && depth === 0) { parts.push(list.slice(start, i)); start = i + 1; }
-  }
-  if (list.slice(start).trim()) parts.push(list.slice(start));
-  return parts.filter(part => part.trim());
-}
+const parse = (file: string) => ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+type Wrapper = ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion | ts.SatisfiesExpression;
+const isWrapper = (node: ts.Node): node is Wrapper => ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node);
+const unwrap = (node: ts.Expression): ts.Expression => isWrapper(node) ? unwrap(node.expression) : node;
+/*
+ * Anti-wiring pin for the schedule dispatch port.
+ *
+ * What this pin is and is not. The REAL backstop is the set of bans below: outside schedules.ts (and the types
+ * module itself) no src file may mention the port types, the `schedule-dispatch` module, `beginDispatch`, `.handled(`
+ * or `.uncertain(`. Without a driver that calls those, an injected port can never dispatch anything, whatever shape
+ * the construction takes. The AST scan on top is a convenience that names the likeliest violation (a src
+ * construction that fills the port position); it reads the REAL syntax tree, so comments, string and template
+ * literals, apostrophes, line breaks and parentheses cannot fool it, and it cannot be defeated by a spread argument
+ * because ANY spread argument is refused. It deliberately asserts nothing about where the port parameter sits in
+ * the constructor: another lane may append or insert parameters without tripping it.
+ */
 test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has no implementation and no src construction passes one", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "schedule-dispatch.ts"), owner = join(packages, "core", "src", "cowork", "schedules.ts"), service = join(packages, "core", "src", "cowork", "service.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
-  expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module); expect(sources).toContain(owner);
-  const needles = ["schedule-dispatch", "CoworkScheduleDispatchPort", "CoworkScheduleDispatchInput", "CoworkScheduleDispatchReceipt", "CoworkScheduleDispatchOutcome", "CoworkScheduleStartResult", "CoworkScheduleStartReceipt", "beginDispatch"];
+  expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module); expect(sources).toContain(owner); expect(sources).toContain(service);
+  const relative = (file: string) => file.slice(packages.length);
+  // 1. The bans (the real backstop): nothing but the owner and the types module may even name the boundary.
+  const needles = ["schedule-dispatch", "CoworkScheduleDispatchPort", "CoworkScheduleDispatchInput", "CoworkScheduleDispatchReceipt", "CoworkScheduleDispatchOutcome", "CoworkScheduleStartResult", "CoworkScheduleStartReceipt", "beginDispatch", ".handled(", ".uncertain("];
+  const banned: string[] = [];
+  for (const file of sources.filter(candidate => candidate !== module && candidate !== owner)) { const text = readFileSync(file, "utf8"); for (const needle of needles) if (text.includes(needle)) banned.push(`${relative(file)}:${needle}`); }
+  expect(banned).toEqual([]);
+  // 2. The one reference is erased at runtime: schedules.ts imports the port types with `import type`, and the module has no runtime code at all.
+  const ownTree = parse(owner), imports = ownTree.statements.filter((statement): statement is ts.ImportDeclaration => ts.isImportDeclaration(statement) && /schedule-dispatch/.test((statement.moduleSpecifier as ts.StringLiteral).text));
+  expect(imports).toHaveLength(1); expect(imports[0]!.importClause?.isTypeOnly).toBe(true); expect((imports[0]!.moduleSpecifier as ts.StringLiteral).text).toBe("./schedule-dispatch");
+  const typesTree = parse(module), kinds = typesTree.statements.map(statement => ts.SyntaxKind[statement.kind]);
+  expect([...new Set(kinds)].sort()).toEqual(["ImportDeclaration", "InterfaceDeclaration", "TypeAliasDeclaration"]);
+  expect(typesTree.statements.filter(ts.isImportDeclaration).every(statement => statement.importClause?.isTypeOnly === true)).toBe(true);
+  expect(typesTree.statements.filter(ts.isImportDeclaration).map(statement => (statement.moduleSpecifier as ts.StringLiteral).text).sort()).toEqual(["./types", "@yanlinglabs/winter-protocol"]);
+  // 3. No implementation of the port anywhere in src (a class implementing it, or a value annotated with it).
+  const implementing = sources.filter(file => /implements\s+CoworkScheduleDispatchPort|:\s*CoworkScheduleDispatchPort\s*=/.test(readFileSync(file, "utf8"))).map(relative);
+  expect(implementing).toEqual([]);
+  // 4. AST scan: every `new CoworkSchedules(...)` in src (parenthesized or cast included) must leave the port position empty and spread nothing,
+  //    and the class may not be used any other way (alias, `extends`, `Reflect.construct`) that could smuggle arguments past the count.
+  const cls = ownTree.statements.find((statement): statement is ts.ClassDeclaration => ts.isClassDeclaration(statement) && statement.name?.text === "CoworkSchedules")!;
+  const portIndex = cls.members.find(ts.isConstructorDeclaration)!.parameters.findIndex(parameter => parameter.type?.getText(ownTree).includes("CoworkScheduleDispatchPort"));
+  expect(portIndex).toBeGreaterThan(2);
+  const problems: string[] = []; let constructions = 0;
   for (const file of sources.filter(candidate => candidate !== module && candidate !== owner)) {
-    const text = readFileSync(file, "utf8");
-    for (const needle of needles) expect(`${file.slice(packages.length)}:${needle}:${text.includes(needle)}`).toBe(`${file.slice(packages.length)}:${needle}:false`);
+    const tree = parse(file);
+    const visit = (node: ts.Node): void => {
+      if (ts.isNewExpression(node)) {
+        const callee = unwrap(node.expression);
+        if (ts.isIdentifier(callee) && callee.text === "CoworkSchedules") {
+          constructions++; const args = node.arguments ?? [];
+          if (args.some(ts.isSpreadElement)) problems.push(`${relative(file)}: spread argument`);
+          if (args.length > portIndex) problems.push(`${relative(file)}: ${args.length} arguments reach the port position ${portIndex}`);
+        }
+      } else if (ts.isIdentifier(node) && node.text === "CoworkSchedules") {
+        let top: ts.Node = node; while (top.parent && isWrapper(top.parent)) top = top.parent;
+        const parent = top.parent, aliased = ts.isImportSpecifier(parent) && parent.propertyName?.text === "CoworkSchedules"; // `import { CoworkSchedules as X }` would hide later constructions
+        const allowed = !aliased && (ts.isImportSpecifier(parent) || ts.isTypeReferenceNode(parent) || (ts.isNewExpression(parent) && parent.expression === top));
+        if (!allowed) problems.push(`${relative(file)}: CoworkSchedules used as ${ts.SyntaxKind[parent.kind]}`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
   }
-  // The one reference is erased at runtime: schedules.ts imports the port types with `import type`, and the module has no runtime code at all.
-  const own = readFileSync(owner, "utf8"), imports = own.split("\n").filter(line => line.includes("schedule-dispatch"));
-  expect(imports).toHaveLength(1); expect(imports[0]).toMatch(/^import type \{[^}]*\} from "\.\/schedule-dispatch";$/);
-  const types = readFileSync(module, "utf8"); expect(types).not.toMatch(/^(export\s+(const|let|var|function|class|enum|default|async)|import\s+(?!type\s))/m);
-  expect([...types.matchAll(/^import .* from "([^"]+)"/gm)].map(match => match[1]).sort()).toEqual(["./types", "@yanlinglabs/winter-protocol"]);
-  // No implementation of the port anywhere in src, and the service constructs CoworkSchedules with no dispatch argument.
-  for (const file of sources) expect(`${basename(file)}:${/implements\s+CoworkScheduleDispatchPort|:\s*CoworkScheduleDispatchPort\s*=/.test(readFileSync(file, "utf8"))}`).toBe(`${basename(file)}:false`);
-  // Robust to other lanes changing the constructor: find the port's parameter position from the declaration itself,
-  // then require that no src construction reaches it. (Test files may pass a port; src may not.)
-  const declaration = own.slice(own.indexOf("constructor(", own.indexOf("export class CoworkSchedules")));
-  const parameters = topLevel(parenthesized(declaration, declaration.indexOf("(")), true), portIndex = parameters.findIndex(parameter => parameter.includes("CoworkScheduleDispatchPort"));
-  expect(portIndex).toBeGreaterThan(2); expect(parameters.length).toBe(portIndex + 1);
-  let constructions = 0;
-  for (const file of sources) {
-    const text = readFileSync(file, "utf8");
-    for (const match of text.matchAll(/new\s+CoworkSchedules\s*\(/g)) {
-      constructions++; const args = topLevel(parenthesized(text, match.index! + match[0].length - 1));
-      expect(`${file.slice(packages.length)}:${args.length <= portIndex}`).toBe(`${file.slice(packages.length)}:true`);
-    }
-  }
-  expect(constructions).toBeGreaterThan(0); expect(readFileSync(service, "utf8")).toMatch(/new\s+CoworkSchedules\s*\(/);
+  expect(problems).toEqual([]); expect(constructions).toBeGreaterThan(0);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false); expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/schedule-dispatch|from "\.\/cowork/);
 });

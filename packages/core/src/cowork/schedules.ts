@@ -94,12 +94,23 @@ export function nextCoworkScheduleTime(specText: string, timezone: string, from:
 
 /** The port's run reference is opaque and unpersisted; its shape is bounded (no control characters, no path syntax, <=128) so a future log or UI line can carry it safely. A violating ack is uncertain, not trusted. */
 const RUN_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
-/** The port's acknowledgement, or undefined when it is not a well-formed receipt echoing exactly this claim. */
-function ackedRunRef(result: unknown, occurrenceId: string, token: string): string | undefined {
-  if (!result || typeof result !== "object" || (result as { kind?: unknown }).kind !== "started") return undefined;
-  const receipt = (result as { receipt?: Record<string, unknown> }).receipt;
-  if (!receipt || typeof receipt !== "object" || receipt.occurrenceId !== occurrenceId || receipt.token !== token) return undefined;
-  return typeof receipt.runRef === "string" && RUN_REF.test(receipt.runRef) ? receipt.runRef : undefined;
+/**
+ * Classify a port answer exactly ONCE, before any transaction, and never throw. Every field is read a single time
+ * (a getter that answers differently on a second read cannot split the decision), and a hostile or exotic answer
+ * (a throwing getter, a throwing proxy trap, a non-object) is simply untrustworthy: `uncertain`. Only an exact
+ * `{ kind: "not-started" }` is `not-started`; only a `started` answer whose receipt echoes exactly this claim and
+ * carries a well-formed run reference yields a `runRef`.
+ */
+function classifyAnswer(result: unknown, occurrenceId: string, token: string): "not-started" | "uncertain" | { runRef: string } {
+  try {
+    if (!result || typeof result !== "object") return "uncertain";
+    const { kind, receipt } = result as { kind?: unknown; receipt?: unknown };
+    if (kind === "not-started") return "not-started";
+    if (kind !== "started" || !receipt || typeof receipt !== "object") return "uncertain";
+    const { occurrenceId: echoedOccurrence, token: echoedToken, runRef } = receipt as Record<string, unknown>;
+    if (echoedOccurrence !== occurrenceId || echoedToken !== token || typeof runRef !== "string" || !RUN_REF.test(runRef)) return "uncertain";
+    return { runRef };
+  } catch { return "uncertain"; }
 }
 
 /**
@@ -277,12 +288,21 @@ export class CoworkSchedules {
     this.run("UPDATE cowork_schedule_occurrences SET state='uncertain',reason='recovery_required' WHERE occurrence_id=? AND state='dispatching'", occurrenceId);
   }
   /**
-   * claimed -> dispatching (durable, rechecked) -> port.start -> acknowledged. Without an injected port this
-   * refuses with `unsupported_topology` before any write, exactly as before. The synchronous part throws
-   * `request_conflict` for an unknown, reused or wrong-token claim; after it, nothing is held open across the
-   * port call and the returned promise settles to an outcome (it rejects only on a store failure, which leaves
-   * the row `dispatching` for `recover()` to mark uncertain). `dispatching` is committed BEFORE `start` runs,
-   * so a crash at any later point can only produce `uncertain`, never a replay.
+   * claimed -> dispatching (durable, rechecked) -> port.start -> acknowledged.
+   *
+   * MIXED SYNCHRONOUS/ASYNCHRONOUS BY DESIGN: every precondition failure THROWS SYNCHRONOUSLY, before any write
+   * (`unsupported_topology` with no injected port, exactly as before this slice; `request_conflict` for an
+   * unknown, reused, wrong-token or no-longer-claimed occurrence). Only the port wait is asynchronous, and the
+   * returned promise settles to an outcome (`started`, `blocked`, `not-started`, `uncertain`); it rejects ONLY
+   * on a store failure, which leaves the row `dispatching` for `recover()` to mark uncertain. A caller must
+   * therefore use `try { await beginDispatch(...) }`, not a bare `.then()` chain, to see the precondition errors.
+   * The synchronous throw is kept so the pre-existing contract (`beginDispatch` throws `unsupported_topology`
+   * without a port) is unchanged.
+   *
+   * Nothing is held open across the port call, and `dispatching` is committed BEFORE `start` runs, so a crash
+   * at any later point can only produce `uncertain`, never a replay. Only a returned `not-started` goes back to
+   * `pending`; a throw, a malformed answer or a hostile one is `uncertain`, and the port's own error text is
+   * never kept or returned.
    */
   beginDispatch(occurrenceId: string, token: string): Promise<CoworkScheduleDispatchOutcome> {
     const port = this.port;
@@ -307,20 +327,19 @@ export class CoworkSchedules {
   }
   private async launch(port: CoworkScheduleDispatchPort, input: CoworkScheduleDispatchInput, token: string): Promise<CoworkScheduleDispatchOutcome> {
     const occurrenceId = input.occurrence.occurrenceId;
-    let result: unknown;
-    try { result = await port.start(input, token); }
+    let answer: ReturnType<typeof classifyAnswer>;
+    try { answer = classifyAnswer(await port.start(input, token), occurrenceId, token); }
     catch {
-      // A throw is NEVER "nothing launched": the effect may exist. Only a returned `not-started` goes back to pending.
+      // A throw (or a rejection, or a missing `start`) is NEVER "nothing launched": the effect may exist. Only a returned `not-started` goes back to pending.
       return this.tx((): CoworkScheduleDispatchOutcome => { if (this.dispatching(occurrenceId, token)) this.markUncertain(occurrenceId); return { status: "uncertain" }; });
     }
     return this.tx((): CoworkScheduleDispatchOutcome => {
       // Guarded on state AND token: a cancel() or recover() that already recorded recovery_required is never clobbered back to pending.
       const row = this.dispatching(occurrenceId, token);
       if (!row) return { status: "uncertain" }; // cancel()/recover() got there first and recorded it durably
-      if (result && typeof result === "object" && (result as { kind?: unknown }).kind === "not-started") { this.release(row, "execution_unavailable"); return { status: "not-started" }; }
-      const runRef = ackedRunRef(result, occurrenceId, token);
-      if (runRef === undefined) { this.markUncertain(occurrenceId); return { status: "uncertain" }; } // an ack that cannot be trusted may still have launched
-      const receipt: CoworkScheduleDispatchReceipt = Object.freeze({ occurrenceId, runRef });
+      if (answer === "not-started") { this.release(row, "execution_unavailable"); return { status: "not-started" }; }
+      if (answer === "uncertain") { this.markUncertain(occurrenceId); return { status: "uncertain" }; } // uncertain, malformed or untrustworthy: an effect may exist
+      const receipt: CoworkScheduleDispatchReceipt = Object.freeze({ occurrenceId, runRef: answer.runRef });
       this.receipts.set(receipt, { occurrenceId, token });
       return { status: "started", receipt };
     });
@@ -338,7 +357,12 @@ export class CoworkSchedules {
     });
     this.receipts.delete(receipt);
   }
-  /** dispatching -> uncertain for the execution owner reporting that it can no longer vouch for the work. Needs the claim token, never a receipt, and is never replayed. */
+  /**
+   * dispatching -> uncertain for the execution owner reporting that it can no longer vouch for the work. Needs the
+   * claim token, never a receipt, and is never replayed. An `uncertain` occurrence of a ONE-SHOT leaves the schedule
+   * `enabled` and the occurrence holding the job's active slot until a recovery path (not part of this slice)
+   * resolves it: it is neither retried nor marked handled.
+   */
   uncertain(occurrenceId: string, token: string): void {
     this.tx(() => {
       if (!this.dispatching(occurrenceId, token)) throw new CoworkError("request_conflict");
