@@ -2367,3 +2367,61 @@ describe("WS-23: a legacy claude-agent record is adopted onto the Winter leg at 
     } finally { t.close(); }
   });
 });
+
+// Cowork (session door): a STORED session whose mode is `cowork` — `session.create` refuses to mint one, so
+// this is a rolled-back newer daemon's row, a rebuilt log's, or a hand-edited index's — must be refused
+// typed BEFORE anything runs. `modeOf` used to read every mode but chat/dispatch as Code, so such a row
+// resumed as a Code session; now it answers `unsupported_topology` with no record read or adopted, no run
+// home built and no child spawned.
+describe("createWinterSessionDrivers — a stored cowork row is refused, never read as Code", () => {
+  const asCowork = (t: ReturnType<typeof table>, sid: string): string => {
+    (t.store as unknown as { db: { run(sql: string, params: unknown[]): void } }).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["cowork", sid]);
+    return sid;
+  };
+  const refusal = { name: "WinterLegRefusal", code: "unsupported_topology", message: "Cowork unavailable" };
+
+  test("create / ensure / runTurn on a record-less cowork row all refuse typed; nothing is recorded, built or spawned", async () => {
+    const t = table();
+    try {
+      const sid = asCowork(t, t.store.createSession("t", { mode: "code", model: "winter-test/echo" }));
+      await expect(t.drivers.create(sid)).rejects.toMatchObject(refusal);
+      // `ensure` used to answer `undefined` for a record-less row (the IPC layer then said "phone-owned session").
+      await expect(t.drivers.ensure(sid)).rejects.toMatchObject(refusal);
+      await expect(t.drivers.runTurn(sid, "hello", "fixture")).rejects.toMatchObject(refusal);
+      expect(t.records.get(sid)).toBeUndefined();
+      expect(t.drivers.get(sid)).toBeUndefined();
+      expect(t.queries).toHaveLength(0);
+      expect(t.runHomes.built).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("a recorded session flipped to cowork is refused at its next resume — the old driver's death does not reopen it as Code", async () => {
+    const t = table();
+    try {
+      const cwd = mkdtempSync(join(tmpdir(), "winter-cowork-flip-"));
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd });
+      await t.drivers.create(sid);
+      expect(t.queries).toHaveLength(1);
+      expect(t.runHomes.built).toHaveLength(1);
+      await t.drivers.evict(sid);
+      asCowork(t, sid);
+      await expect(t.drivers.ensure(sid)).rejects.toMatchObject(refusal);
+      await expect(t.drivers.runTurn(sid, "again", "fixture")).rejects.toMatchObject(refusal);
+      expect(t.drivers.get(sid)).toBeUndefined();
+      expect(t.queries).toHaveLength(1);        // no second child
+      expect(t.runHomes.built).toHaveLength(1); // no second run home
+      rmSync(cwd, { recursive: true, force: true });
+    } finally { t.close(); }
+  });
+
+  test("the refusal costs the table nothing: an unknown id still answers undefined, and a Code session still opens", async () => {
+    const t = table();
+    try {
+      expect(await t.drivers.ensure("s_nope")).toBeUndefined();
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(t.queries).toHaveLength(1);
+      await session.end();
+    } finally { t.close(); }
+  });
+});

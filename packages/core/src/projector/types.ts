@@ -6,11 +6,13 @@
 import type { ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeKind } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
+import type { RunnableSessionMode } from "../sessions/session-mode";
 
 export type { ProtocolSdkMessage };
 
-/** `code` | `dispatch` | `chat` — the same three the session store records (`sessions/store.ts`). */
-export type SessionMode = "code" | "dispatch" | "chat";
+/** `code` | `dispatch` | `chat` — the modes that can run (`sessions/session-mode.ts`'s `RunnableSessionMode`);
+ *  the protocol's recognised-but-unrunnable `cowork` never reaches a projector. */
+export type SessionMode = RunnableSessionMode;
 
 /** The projector's logging surface. Structural and tiny on purpose: `packages/core` has no Logger
  *  type, every module logs through `console`, and a projector that took one would drag a new

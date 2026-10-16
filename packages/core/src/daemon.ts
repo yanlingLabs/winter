@@ -20,6 +20,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
+import { isCoworkSessionMode } from "./sessions/session-mode";
 import { CallThreads } from "./sessions/call-threads";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
@@ -278,7 +279,7 @@ export interface RunningDaemon {
  *  through, so the approval card's summary reads it off this closure's own parameter instead of
  *  a synchronous set/get side-channel (the former `peripheralClassHint` map) that only stayed
  *  race-safe because nothing ever awaited between the set and the card emit. */
-function buildLeasePolicy(deps: {
+export function buildLeasePolicy(deps: {
   store: SessionStore;
   approvals: ApprovalBroker;
   hub: SessionHub;
@@ -308,6 +309,8 @@ function buildLeasePolicy(deps: {
     // stale-row test (packages/core/test/peripheral/e2e.test.ts) that GRANTS instead of denying
     // without this `mode` check.
     if (meta.mode === "chat") return "denied";
+    // A stored `cowork` row can run nothing, so it never holds a lease either — whatever its policy says.
+    if (isCoworkSessionMode(meta.mode)) return "denied";
     if (meta.approvalPolicy === "plan") return "denied";
     if (meta.approvalPolicy === "auto") return "granted";
 

@@ -89,6 +89,7 @@ import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
+import { COWORK_SESSION_UNSUPPORTED_CODE, COWORK_SESSION_UNSUPPORTED_MESSAGE, isCoworkSessionMode } from "../sessions/session-mode";
 import { isSessionReplaced, withReplacementRetry } from "../runtime-sdk/session-replaced";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
@@ -616,6 +617,13 @@ export function deferMintSweep(run: () => void): () => void {
 
 class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
 
+/** The refusal a door gives the recognised-but-unrunnable `cowork` session mode: INVALID_PARAMS with
+ *  `{ code: "unsupported_topology" }`, the shape of the `Cowork unavailable` answer `COWORK_RPC` methods give
+ *  a daemon without the Cowork service (`sessions/session-mode.ts`). */
+function coworkSessionUnsupported(): RpcFailure {
+  return new RpcFailure(ERR.INVALID_PARAMS, COWORK_SESSION_UNSUPPORTED_MESSAGE, { code: COWORK_SESSION_UNSUPPORTED_CODE });
+}
+
 /** P8b Task 16: a `WinterLegRefusal` (or the driver's own typed errors) as the RPC error a client
  *  can branch on. Anything else is rethrown untouched. */
 function rpcFromWinterRefusal(err: unknown): never {
@@ -626,6 +634,8 @@ function rpcFromWinterRefusal(err: unknown): never {
     // official leg created whose transcript cannot move to the Winter leg as it stands.
     // `session_cwd_unavailable`: the session's own working directory is gone — the user restores it
     // or starts a new session, so it is theirs to fix, not a daemon fault.
+    // `unsupported_topology`: a stored `cowork` session — a recognised mode nothing can run; the same
+    // INVALID_PARAMS + `data.code` `session.create` gives it, so one client branch covers both doors.
     // `session_replaced` (`runtime-sdk/session-replaced.ts`): nothing was done and repeating the request
     // succeeds -- RETRY, never INTERNAL. The send doors already retried once before it got here.
     if (isSessionReplaced(err)) {
@@ -633,7 +643,7 @@ function rpcFromWinterRefusal(err: unknown): never {
     }
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
       || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused"
-      || err.code === "session_cwd_unavailable";
+      || err.code === "session_cwd_unavailable" || err.code === "unsupported_topology";
     // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
     // several distinct situations, and `"no-credential"` is the one a client should render as "you
     // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
@@ -808,13 +818,15 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
  *
  *  Chat mode Slice C lifted chat into this set — the phone now gets its own chat surface. Dispatch
  *  has been reachable since Phase 7 (the phone drives the shared dispatch session via
- *  `session.dispatch`, itself REMOTE_ALLOWED_METHODS-listed). Nothing today has a wire-expressible
- *  `mode` outside this set (`SessionCreateParams.mode`'s zod enum stays three-valued), but this is
- *  written as an ALLOWLIST — not "everything except chat" — on purpose: a future Mac/apps-only mode
- *  (e.g. a cowork surface) needs ZERO edits here to stay Mac-local; it's excluded simply by not
- *  being one of these three. remote-chat-gate.test.ts proves this with a synthetic cowork-shaped
- *  row written directly to the store (no protocol/session.create support exists for it — that's the
- *  point: refusal is the gate's default, not an opt-in list of blocked modes to maintain). */
+ *  `session.dispatch`, itself REMOTE_ALLOWED_METHODS-listed). The one wire-expressible `mode` outside
+ *  this set is `cowork` (`SESSION_MODES` recognises it; `session.create` refuses it for every role with
+ *  `unsupported_topology`, so no row carries it today). This is written as an ALLOWLIST — not
+ *  "everything except chat" — on purpose: a Mac/apps-only mode needs ZERO edits here to stay
+ *  Mac-local; it's excluded simply by not being one of these three. Cowork stays excluded until its
+ *  per-record and parameter gates exist (docs/cowork-host-protocol.md, "Producer/consumer and release
+ *  checklist": "Add Cowork to the separate remote-eligible session-mode set only after…").
+ *  remote-chat-gate.test.ts proves it with a synthetic cowork-shaped row written directly to the
+ *  store — refusal is the gate's default, not an opt-in list of blocked modes to maintain. */
 // Winter Phase 8d (Task 4.4 fix round 1): exported so `packages/core/scripts/capability-matrix.ts`
 // reads this SAME set for its ios-remote surface-reachability row instead of a duplicated literal
 // — the capability matrix is a Winter-repo-internal consumer (no dependency-direction problem, the
@@ -1429,6 +1441,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  stays the answer exactly as before 8b. */
   function refuseIfPredatesWinterLeg(sessionId: string): void {
     if (opts.winter === undefined) return;
+    // A stored `cowork` row (a recognised mode nothing can run) is refused as exactly that — before the
+    // record-less "phone-owned session" answer below, whose advice (start a new session) would be wrong for it.
+    let stored: string | undefined;
+    try { stored = opts.store.meta(sessionId).mode; } catch { /* unknown id: the handler's own not-found wins */ }
+    if (isCoworkSessionMode(stored)) throw coworkSessionUnsupported();
     const leg = opts.winter.legOf(sessionId);
     if (leg === undefined) {
       throw new RpcFailure(
@@ -2135,6 +2152,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     switch (method) {
       case METHODS.sessionCreate: {
         const p = parseParams(SessionCreateParams, params);
+        // Cowork (session door): `mode: "cowork"` is RECOGNISED on the wire so it can be answered with a typed
+        // refusal, and refused for EVERY role — local, harness, plugin and remote alike — before anything
+        // else: no cwd/approval handling, no model resolution, no `assertAvailable`, no store row, no run
+        // folder, no runtime child, no broadcast. Nothing can run a Cowork session yet (docs/cowork-status.md),
+        // so there is no Cowork-specific parameter to inspect here. This is also the type-level gate: past this
+        // line `p.mode` can no longer be "cowork", which is what lets it flow into
+        // `InternalSessionCreateInput.mode` ("code" | "chat") below. Adding Cowork to the remote-eligible
+        // modes is a separate step that waits for its per-record and parameter gates
+        // (docs/cowork-host-protocol.md, "Producer/consumer and release checklist").
+        if (isCoworkSessionMode(p.mode)) throw coworkSessionUnsupported();
         // Dispatch (Phase 7): the singleton dispatch session is minted ONLY by session.dispatch's
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
@@ -2142,9 +2169,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Chat mode Slice C: a remote (phone) caller may now mint a chat session too — the daemon
         // supplies cwd (homedir(), just below) and coerces approvalPolicy to "chat" (also below)
         // exactly as it always has for local/harness callers; the phone sends `mode` only. A mode
-        // that stays Mac-local for remote (REMOTE_ELIGIBLE_SESSION_MODES above) has nothing to
-        // reject HERE because it isn't wire-expressible in SessionCreateParams' mode enum at all —
-        // there is no third "unlisted mode" branch to write.
+        // that stays Mac-local for remote (REMOTE_ELIGIBLE_SESSION_MODES above) has nothing more to
+        // reject HERE: the one such mode on the wire, `cowork`, was refused for every role at the top of
+        // this case — there is no third "unlisted mode" branch to write.
         // SP3.4 hardening: the phone never picks a working directory or approval policy — the
         // spec's "the phone does not browse the Mac's filesystem" is enforced here, not just
         // convention. Local/harness callers are unchanged. Checked against the RAW wire params
@@ -3068,6 +3095,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                   code: !disallowedByMode.code.has(childName),
                   dispatch: !disallowedByMode.dispatch.has(childName),
                   chat: !disallowedByMode.chat.has(childName),
+                  // Cowork is recognised but never runnable (`sessions/session-mode.ts`): there is no Cowork
+                  // tool surface, so a LITERAL false on every row — never a `disallowedToolsFor` lookup,
+                  // which only accepts the runnable modes (a fail-closed table, not a computed one).
+                  cowork: false,
                 },
               };
             });

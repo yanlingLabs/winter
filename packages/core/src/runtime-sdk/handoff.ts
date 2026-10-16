@@ -45,6 +45,7 @@ import { rowForTag, testProviderNameFor } from "./provider-selection";
 // Types only: `session-driver.ts` imports this module (`renderNoCredentialHint`), so the refusal below is
 // recognised by its `code` rather than by `instanceof` — no value cycle between the two.
 import type { WinterSessionDrivers } from "./session-driver";
+import { COWORK_SESSION_UNSUPPORTED_CODE, COWORK_SESSION_UNSUPPORTED_MESSAGE, isCoworkSessionMode } from "../sessions/session-mode";
 
 /**
  * The one router door this module needs: `reviewSwitch(session, requested)`, reading the canonical
@@ -88,7 +89,19 @@ function reviewerFor(deps: HandoffDeps): SwitchReviewer | undefined {
   return deps.barrier ?? (runtimeSdkInternals(deps.runtime.sdk)?.barrier as SwitchReviewer | undefined);
 }
 
-const modeOf = (raw: string | undefined): SessionMode => (raw === "chat" || raw === "dispatch" ? raw : "code");
+/** A stored `mode` as the runnable `SessionMode`. `cowork` THROWS instead of reading as Code (the
+ *  `session-driver.ts` `modeOf` twin): `planAndApplySwitch` refuses a cowork session before it gets here,
+ *  and `materializeDirectoryRow`'s `try` turns a throw into "could not materialize", so a cowork row can
+ *  never be given a runtime-directory row or a selection decision as a Code session. */
+const modeOf = (raw: string | undefined): SessionMode => {
+  if (isCoworkSessionMode(raw)) throw new Error(COWORK_SESSION_UNSUPPORTED_MESSAGE);
+  return raw === "chat" || raw === "dispatch" ? raw : "code";
+};
+
+/** Is the session's stored mode `cowork`? An id the store does not know is not (the caller's own not-found wins). */
+function isStoredCowork(deps: Pick<HandoffDeps, "store">, sessionId: string): boolean {
+  try { return isCoworkSessionMode(deps.store.meta(sessionId).mode); } catch { return false; }
+}
 
 function sessionKeyFor(record: RuntimeSessionRecord): SessionKey | undefined {
   if (record.backendSessionId === undefined) return undefined;
@@ -202,7 +215,7 @@ export type PlanSwitchOutcome =
   | { kind: "same-runtime"; decided?: RuntimeSelection }
   // `reason` (WS-23): the refusal's own sub-classification, carried to `error.data.reason` — set for
   // `legacy_session_migration_refused`, whose `reason` says which of its refusals fired.
-  | { kind: "refused"; code: "runtime_selection_refused" | "legacy_session_migration_refused"; detail: string; reason?: string }
+  | { kind: "refused"; code: "runtime_selection_refused" | "legacy_session_migration_refused" | "unsupported_topology"; detail: string; reason?: string }
   // Winter Phase 10b (D1-6, W18-22): `portable` names what the pre-flight review found still carries
   // (`SwitchClassification.portable`) — additive alongside `warnings`, `[]` when the review itself is
   // unreachable or found nothing portable to name.
@@ -289,6 +302,9 @@ export function modelLabelFor(model: string): string {
  * preference asks for a specific selection.
  */
 export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, model: string | null, confirmLossy: boolean): Promise<PlanSwitchOutcome> {
+  // A `cowork` session has no runtime to switch and must not be decided as Code: refused first, typed, with
+  // nothing read, adopted or written (`session.setModel` maps `refused` to INVALID_PARAMS + `data.code`).
+  if (isStoredCowork(deps, sessionId)) return { kind: "refused", code: COWORK_SESSION_UNSUPPORTED_CODE, detail: COWORK_SESSION_UNSUPPORTED_MESSAGE };
   if (model === null) return { kind: "same-runtime" };
   let record = deps.records.get(sessionId);
   // WS-23 (R2): a record the retired official leg wrote moves onto the Winter leg FIRST — transcript

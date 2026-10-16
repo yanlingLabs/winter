@@ -963,3 +963,34 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
     });
   });
 });
+
+// Cowork (session door): a stored `cowork` session has no runtime to switch and must never be decided as
+// Code (`modeOf` used to read every mode but chat/dispatch as "code"). Refused first, typed, with nothing
+// read from the records store, nothing asked of the router and nothing written.
+describe("planAndApplySwitch — a stored cowork session", () => {
+  const coworkDeps = (overrides: Partial<HandoffDeps> = {}): HandoffDeps => deps({
+    store: { meta: () => ({ mode: "cowork", cwd: "/x" }) },
+    records: { get: () => { throw new Error("records must not be read for a cowork session"); } } as unknown as RuntimeSessionRecords,
+    runtime: fakeRuntime({ selectRuntimeFor: async () => { throw new Error("the selector must not run for a cowork session"); } }),
+    ...overrides,
+  });
+
+  test("a model switch is refused unsupported_topology before the records store or the router is touched", async () => {
+    const out = await planAndApplySwitch(coworkDeps(), "s_cowork", "anthropic/claude-sonnet-5", false);
+    expect(out).toEqual({ kind: "refused", code: "unsupported_topology", detail: "Cowork unavailable" });
+  });
+
+  test("clearing the override (model: null) is refused too — there is no Cowork runtime to fall back to", async () => {
+    const out = await planAndApplySwitch(coworkDeps(), "s_cowork", null, true);
+    expect(out).toEqual({ kind: "refused", code: "unsupported_topology", detail: "Cowork unavailable" });
+  });
+
+  test("every runnable mode still reaches its decision, and an unknown session is left to the caller's own error", async () => {
+    for (const mode of ["code", "chat", "dispatch", undefined]) {
+      const out = await planAndApplySwitch(deps({ store: { meta: () => ({ mode, cwd: "/x" }) } }), "s1", null, false);
+      expect(out).toEqual({ kind: "same-runtime" });
+    }
+    const unknown = await planAndApplySwitch(deps({ store: { meta: () => { throw new Error("unknown session: s_nope"); } } }), "s_nope", null, false);
+    expect(unknown).toEqual({ kind: "same-runtime" });
+  });
+});
