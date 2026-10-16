@@ -225,16 +225,54 @@ final class OnScreenPathTests: XCTestCase {
 
     // MARK: Tab again
 
-    func testTabAgainCyclesWhileTheTextIsUnchanged() {
-        let offer = OnScreenPathOffer(head: "open ", typed: "", candidates: ["/a", "/b", "/c"])
-        var cycle = OnScreenPathCycle(accepting: offer)
-        XCTAssertEqual(cycle.acceptedText, "open /a")
-        XCTAssertNil(cycle.next(for: "open /a2"), "the text changed: no cycling")
-        XCTAssertEqual(cycle.next(for: "open /a"), ComposerTabEdit(replacingSuffix: "/a", insert: "/b"))
-        XCTAssertEqual(cycle.next(for: "open /b"), ComposerTabEdit(replacingSuffix: "/b", insert: "/c"))
-        XCTAssertEqual(cycle.next(for: "open /c"), ComposerTabEdit(replacingSuffix: "/c", insert: "/a"), "and round")
-        var single = OnScreenPathCycle(accepting: OnScreenPathOffer(head: "ls ", typed: "/t", candidates: ["/tmp/x"]))
-        XCTAssertEqual(single.next(for: "ls /tmp/x"), ComposerTabEdit(replacingSuffix: "", insert: ""), "consumed, no change")
+    func testTabCyclesForwardBackAndRound() {
+        let found = ShellCandidates(head: "open ", typed: "", candidates: ["/a", "~/b", "./c"])
+        guard let started = CompletionCycle.start(found), var cycle = started.cycle else { return XCTFail("no cycle") }
+        XCTAssertEqual(started.edit, ComposerTabEdit(replacingSuffix: "", insert: "/a"), "the first candidate")
+        XCTAssertEqual(cycle.position?.index, 1)
+        XCTAssertEqual(cycle.step(text: "open /a", forward: true), ComposerTabEdit(replacingSuffix: "/a", insert: "~/b"))
+        XCTAssertEqual(cycle.step(text: "open ~/b", forward: true), ComposerTabEdit(replacingSuffix: "~/b", insert: "./c"))
+        XCTAssertEqual(cycle.step(text: "open ./c", forward: true), ComposerTabEdit(replacingSuffix: "./c", insert: "/a"), "wraps")
+        XCTAssertEqual(cycle.step(text: "open /a", forward: false), ComposerTabEdit(replacingSuffix: "/a", insert: "./c"),
+                       "Shift-Tab goes back, round too")
+        XCTAssertEqual(cycle.position?.index, 3)
+        XCTAssertEqual(cycle.position?.count, 3)
+        XCTAssertNil(cycle.step(text: "open ./c2", forward: true), "another key changed the text: the cycle has ended")
+    }
+
+    func testTheCommonPrefixGoesInFirst() {
+        let found = ShellCandidates(head: "", typed: "mak", candidates: ["make", "makeinfo", "makefile-lint"])
+        guard let started = CompletionCycle.start(found), var cycle = started.cycle else { return XCTFail("no cycle") }
+        XCTAssertEqual(started.edit, ComposerTabEdit(replacingSuffix: "mak", insert: "make"), "the shared prefix first")
+        XCTAssertNil(cycle.position, "no candidate counted yet")
+        XCTAssertEqual(cycle.step(text: "make", forward: true), ComposerTabEdit(replacingSuffix: "make", insert: "make"),
+                       "then the first candidate")
+        XCTAssertEqual(cycle.step(text: "make", forward: true), ComposerTabEdit(replacingSuffix: "make", insert: "makeinfo"))
+        var back = CompletionCycle.start(found)!.cycle!
+        XCTAssertEqual(back.step(text: "make", forward: false), ComposerTabEdit(replacingSuffix: "make", insert: "makefile-lint"))
+        // One candidate: simply in, no cycle.
+        let one = CompletionCycle.start(ShellCandidates(head: "ls ", typed: "/t", candidates: ["/tmp/"]))
+        XCTAssertNil(one?.cycle)
+        XCTAssertEqual(one?.edit, ComposerTabEdit(replacingSuffix: "/t", insert: "/tmp/"))
+        XCTAssertNil(CompletionCycle.start(ShellCandidates(head: "ls ", typed: "/tmp/", candidates: ["/tmp/"])))
+    }
+
+    func testCandidatesAreOnScreenPathsThenTheFolderWithFoldersSlashed() {
+        let c = context()
+        let found = shellCompletionCandidates(for: "cat /tmp/x/", context: c, commandNames: ["cat"],
+                                              onScreenPaths: ["/tmp/x/notes.md", "/elsewhere/z.txt"])
+        XCTAssertEqual(found?.typed, "/tmp/x/")
+        XCTAssertEqual(found?.candidates, ["/tmp/x/notes.md", #"/tmp/x/My\ Files/"#, "/tmp/x/a.log", "/tmp/x/b.log"],
+                       "the on-screen path first, then the folder's entries (folders with /), no repeats")
+        XCTAssertEqual(shellCompletionCandidates(for: "gi", context: c, commandNames: ["git", "gitk", "grep"],
+                                                 onScreenPaths: [])?.candidates, ["git", "gitk"], "the command word")
+        XCTAssertNil(shellCompletionCandidates(for: "please say \"hi", context: c, commandNames: [], onScreenPaths: []))
+    }
+
+    func testNextWordOfAGhost() {
+        XCTAssertEqual(commandGhostNextWord("ello world"), "ello")
+        XCTAssertEqual(commandGhostNextWord(" status --short"), " status")
+        XCTAssertEqual(commandGhostNextWord("tmp/x/notes.md"), "tmp/")
     }
 }
 
@@ -250,24 +288,41 @@ final class OnScreenPathCommandModeTests: XCTestCase {
         return mode
     }
 
-    func testTabAcceptsThenCyclesOnScreenPaths() {
+    func testTabCyclesTheCandidatesShowingWhichAndShiftTabGoesBack() {
         let mode = makeMode(paths: ["/tmp/x/notes.md", "/tmp/x/a.log"])
         mode.evaluateNowForTesting("open ")
-        XCTAssertEqual(mode.ghost(for: "open "), "/tmp/x/notes.md")
+        XCTAssertEqual(mode.ghostDisplay(for: "open "), "/tmp/x/notes.md", "the ghost, before any Tab")
+        XCTAssertEqual(mode.candidates?.candidates, ["/tmp/x/notes.md", "/tmp/x/a.log", "build.sh", "src/"],
+                       "on-screen paths, then the working folder's entries")
         XCTAssertEqual(mode.tab(text: "open "), ComposerTabEdit(replacingSuffix: "", insert: "/tmp/x/notes.md"))
-        // The draft changes to the accepted text; its own verdict lands.
         mode.draftChanged("open /tmp/x/notes.md")
-        mode.evaluateNowForTesting("open /tmp/x/notes.md")
-        XCTAssertTrue(mode.isActive(for: "open /tmp/x/notes.md"), "an existing path: a command")
+        XCTAssertEqual(mode.ghostDisplay(for: "open /tmp/x/notes.md"), "  1/4", "while cycling: which, of how many")
         XCTAssertEqual(mode.tab(text: "open /tmp/x/notes.md"),
                        ComposerTabEdit(replacingSuffix: "/tmp/x/notes.md", insert: "/tmp/x/a.log"))
         mode.draftChanged("open /tmp/x/a.log")
-        XCTAssertEqual(mode.tab(text: "open /tmp/x/a.log"),
+        mode.evaluateNowForTesting("open /tmp/x/a.log") // its own verdict lands mid-cycle: the cycle holds
+        XCTAssertEqual(mode.ghostDisplay(for: "open /tmp/x/a.log"), "  2/4")
+        XCTAssertEqual(mode.backTab(text: "open /tmp/x/a.log"),
                        ComposerTabEdit(replacingSuffix: "/tmp/x/a.log", insert: "/tmp/x/notes.md"))
-        // Typing ends the cycle: Tab is the ghost's again (none here → AppKit's).
-        mode.draftChanged("open /tmp/x/notes.md ")
-        mode.evaluateNowForTesting("open /tmp/x/notes.md ")
-        XCTAssertNotEqual(mode.tab(text: "open /tmp/x/notes.md")?.replacingSuffix, "/tmp/x/notes.md")
+        mode.draftChanged("open /tmp/x/notes.md")
+        XCTAssertEqual(mode.backTab(text: "open /tmp/x/notes.md"),
+                       ComposerTabEdit(replacingSuffix: "/tmp/x/notes.md", insert: "src/"), "back past the first: round")
+        mode.draftChanged("open src/")
+        XCTAssertNil(mode.acceptGhost(text: "open src/", word: false), "→ never accepts while cycling")
+        // Any other key ends the cycle, keeping what is in.
+        mode.endCycle()
+        XCTAssertNil(mode.cycle)
+        XCTAssertNil(mode.backTab(text: "open src/"), "Shift-Tab is AppKit's again")
+    }
+
+    func testRightArrowAcceptsTheGhostOrItsNextWord() {
+        let mode = makeMode(paths: [])
+        mode.evaluateNowForTesting("open /tmp/x/no")
+        XCTAssertEqual(mode.acceptGhost(text: "open /tmp/x/no", word: false), ComposerTabEdit(replacingSuffix: "", insert: "tes.md"))
+        mode.evaluateNowForTesting("open /tm")
+        XCTAssertEqual(mode.acceptGhost(text: "open /tm", word: true), ComposerTabEdit(replacingSuffix: "", insert: "p/"))
+        mode.evaluateNowForTesting("please list the files")
+        XCTAssertNil(mode.acceptGhost(text: "please list the files", word: false), "a message has no ghost: → is AppKit's")
     }
 
     func testAnOnScreenPathStillHasToValidateToTurnPurple() {
@@ -277,6 +332,71 @@ final class OnScreenPathCommandModeTests: XCTestCase {
         mode.evaluateNowForTesting("open ~/Desktop/shot.png")
         // The file is not there (a fake filesystem): it stays white — the on-screen offer never bypasses the validator.
         XCTAssertFalse(mode.isActive(for: "open ~/Desktop/shot.png"))
+    }
+
+    private func composer(_ text: String, caret: Int? = nil) -> CommandTextView {
+        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 40))
+        view.string = text
+        view.setSelectedRange(NSRange(location: caret ?? (text as NSString).length, length: 0))
+        return view
+    }
+
+    func testRightArrowAtTheEndWithAGhostAcceptsIt() {
+        let view = composer("open /tmp/x/no")
+        view.ghostSuffix = "tes.md"
+        var asked: [(String, Bool)] = []
+        view.onAcceptGhost = { text, word in asked.append((text, word)); return ComposerTabEdit(replacingSuffix: "", insert: word ? "tes" : "tes.md") }
+        view.doCommand(by: #selector(NSResponder.moveRight(_:)))
+        XCTAssertEqual(view.string, "open /tmp/x/notes.md")
+        let word = composer("open /tmp/x/no")
+        word.ghostSuffix = "tes.md"
+        word.onAcceptGhost = view.onAcceptGhost
+        word.doCommand(by: #selector(NSResponder.moveWordRight(_:)))
+        XCTAssertEqual(word.string, "open /tmp/x/notes", "⌥→: one word")
+        XCTAssertEqual(asked.map(\.1), [false, true])
+    }
+
+    func testRightArrowMidLineMovesTheCaret() {
+        let view = composer("open /tmp/x/no", caret: 3)
+        view.ghostSuffix = "tes.md"
+        var asked = 0
+        view.onAcceptGhost = { _, _ in asked += 1; return ComposerTabEdit(replacingSuffix: "", insert: "tes.md") }
+        view.doCommand(by: #selector(NSResponder.moveRight(_:)))
+        XCTAssertEqual(view.string, "open /tmp/x/no")
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 4, length: 0), "the caret moved")
+        XCTAssertEqual(asked, 0)
+    }
+
+    func testRightArrowAtTheEndWithNoGhostIsAppKits() {
+        let view = composer("open /tmp/x/no")
+        var asked = 0
+        view.onAcceptGhost = { _, _ in asked += 1; return ComposerTabEdit(replacingSuffix: "", insert: "x") }
+        view.doCommand(by: #selector(NSResponder.moveRight(_:)))
+        XCTAssertEqual(view.string, "open /tmp/x/no")
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 14, length: 0))
+        XCTAssertEqual(asked, 0, "no ghost: never asked")
+    }
+
+    func testShiftRightArrowSelectsAsBeforeAndNeverAccepts() {
+        let view = composer("open /tmp/x/no", caret: 10)
+        view.ghostSuffix = "tes.md"
+        var asked = 0
+        view.onAcceptGhost = { _, _ in asked += 1; return ComposerTabEdit(replacingSuffix: "", insert: "tes.md") }
+        view.doCommand(by: #selector(NSResponder.moveRightAndModifySelection(_:)))
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 10, length: 1), "it extended the selection")
+        let atEnd = composer("open /tmp/x/no")
+        atEnd.ghostSuffix = "tes.md"
+        atEnd.onAcceptGhost = view.onAcceptGhost
+        atEnd.doCommand(by: #selector(NSResponder.moveRightAndModifySelection(_:)))
+        XCTAssertEqual(atEnd.string, "open /tmp/x/no")
+        XCTAssertEqual(asked, 0)
+    }
+
+    func testShiftTabIsAppKitsUnlessACycleHolds() {
+        let view = composer("open /tmp/x/a.log")
+        view.onBackTab = { _ in ComposerTabEdit(replacingSuffix: "/tmp/x/a.log", insert: "/tmp/x/notes.md") }
+        view.doCommand(by: #selector(NSResponder.insertBacktab(_:)))
+        XCTAssertEqual(view.string, "open /tmp/x/notes.md")
     }
 
     func testTheComposerAppliesTabsEdit() {

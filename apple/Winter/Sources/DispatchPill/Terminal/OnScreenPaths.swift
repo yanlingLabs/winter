@@ -246,42 +246,178 @@ func onScreenPathOffer(for line: String, onScreenPaths: [String], context: Shell
     return OnScreenPathOffer(head: head, typed: typed, candidates: candidates)
 }
 
-// MARK: - Tab, and Tab again
+// MARK: - Tab cycles the candidates (zsh's menu-complete)
 
-/// An edit Tab makes at the end of the composer: the text's last `replacingSuffix` is replaced by `insert`.
-/// (`replacingSuffix` empty = a plain insertion; both empty = Tab consumed, nothing changed.)
+/// An edit made at the end of the composer: the text's last `replacingSuffix` is replaced by `insert`.
+/// (`replacingSuffix` empty = a plain insertion; both empty = the key consumed, nothing changed.)
 struct ComposerTabEdit: Equatable {
     var replacingSuffix: String
     var insert: String
 }
 
-/// PURE: Tab accepted an on-screen ghost; pressing Tab again with the text UNCHANGED since cycles to the next
-/// on-screen candidate (and round), replacing the one accepted.
-struct OnScreenPathCycle: Equatable {
-    /// The text right after the last accept — Tab cycles only while the composer still holds exactly this.
-    private(set) var acceptedText: String
+/// The completion candidates for the word at the end of a line: the line up to it, the word as typed, and the
+/// candidates — each a full replacement for the word, as it would be inserted (escaped; folders end in `/`).
+struct ShellCandidates: Equatable {
+    var head: String
+    var typed: String
+    var candidates: [String]
+}
+
+/// How many candidates one Tab cycle offers at most.
+let shellCandidateLimit = 100
+
+/// PURE (given its source and filesystem — call it OFF the main thread): the candidates for the word at the end of
+/// `line`, in the order Tab cycles them: the paths on screen first (most recent; `onScreenPathOffer`), then zsh's
+/// candidates for the position (subcommands, branches, targets, files — the same engine and gates as the ghost;
+/// nothing runs), then the directory's entries for a path or a file argument (folders with a trailing `/`). The
+/// FIRST word gets the command names. Nil when there is nothing to complete.
+func shellCompletionCandidates(for line: String, context: ShellCommandContext, commandNames: [String],
+                               onScreenPaths: [String], source: ShellCompletionSource? = nil,
+                               deadline: Date = .distantFuture) -> ShellCandidates? {
+    guard !line.isEmpty, line.count <= 1000 else { return nil }
+    let chars = Array(line)
+    let breakers: Set<Character> = [" ", "\t", "\n", "|", "&", ";", "(", ")", "<", ">"]
+    var start = 0
+    var k = 0
+    while k < chars.count {
+        if chars[k] == "\\" { k += 2; continue }
+        if breakers.contains(chars[k]) { start = k + 1 }
+        k += 1
+    }
+    let typed = String(chars[min(start, chars.count)...])
+    guard !typed.contains(where: { "'\"$`".contains($0) }) else { return nil }
+    let head = String(chars[..<min(start, chars.count)])
+    guard case .complete(let tokens) = shellTokenize(head) else { return nil }
+    var current: [ShellToken] = []
+    for token in tokens {
+        if case .op(let op) = token, shellCommandSeparators.contains(op) { current = [] } else { current.append(token) }
+    }
+    let command = current.lazy.compactMap { token -> ShellWord? in
+        if case .word(let word) = token { return word } else { return nil }
+    }.first { $0.wasQuoted || !shellIsAssignment($0.text) }
+
+    var out: [String] = []
+    func add(_ candidate: String) {
+        guard candidate != typed, candidate.hasPrefix(typed), !out.contains(candidate), out.count < shellCandidateLimit else { return }
+        out.append(candidate)
+    }
+    guard let command else {
+        // The command word itself.
+        guard !typed.isEmpty, !typed.contains("/") else { return nil }
+        commandNames.filter { $0.hasPrefix(typed) }.sorted().forEach { add(shellEscapedForInsertion($0)) }
+        return out.isEmpty ? nil : ShellCandidates(head: head, typed: typed, candidates: out)
+    }
+    guard !typed.hasPrefix("-") || source != nil else { return nil }
+    // 1. The paths on screen.
+    if let offer = onScreenPathOffer(for: line, onScreenPaths: onScreenPaths, context: context, source: source,
+                                     deadline: deadline) {
+        offer.candidates.forEach(add)
+    }
+    // 2. zsh's candidates for the position.
+    var takesFiles = shellFileTakingCommands.contains(command.text)
+    if let source, !typed.contains("\\"), zshLineMayBeShown(line), shellFirstWordResolves(head, context: context),
+       let capture = source.capture(buffer: line, directory: context.workingDirectory, deadline: deadline) {
+        if capture.kinds.contains(.files) { takesFiles = true }
+        for hit in capture.hits where hit.hasPrefix(typed) {
+            add(typed + shellEscapedForInsertion(String(hit.dropFirst(typed.count))))
+        }
+    }
+    // 3. The directory's entries, for a path or a file argument.
+    if shellTextLooksLikePath(typed) || (takesFiles && !typed.hasPrefix("-")) {
+        let directoryPart: String, base: String
+        if typed.hasSuffix("/") || typed.isEmpty {
+            directoryPart = typed
+            base = ""
+        } else if let slash = typed.lastIndex(of: "/") {
+            directoryPart = String(typed[...slash])
+            base = String(typed[typed.index(after: slash)...])
+        } else if typed == "~" {
+            directoryPart = "~/"
+            base = ""
+        } else {
+            directoryPart = ""
+            base = typed
+        }
+        let directory = directoryPart.isEmpty ? context.workingDirectory
+            : shellExpandedPath(directoryPart, tildeUnquoted: true, context: context)
+        if let directory, !base.contains("\\"), let entries = context.fileSystem.entries(ofDirectory: directory) {
+            for name in entries.sorted() where name.hasPrefix(base) && (base.hasPrefix(".") || !name.hasPrefix(".")) {
+                guard out.count < shellCandidateLimit else { break }
+                let full = directory.hasSuffix("/") ? directory + name : directory + "/" + name
+                let slash = context.fileSystem.isDirectory(full) ? "/" : ""
+                add(directoryPart + shellEscapedForInsertion(name) + slash)
+            }
+        }
+    }
+    return out.isEmpty ? nil : ShellCandidates(head: head, typed: typed, candidates: out)
+}
+
+/// PURE: Tab's cycle through the candidates, like zsh's menu-complete. The first Tab inserts the candidates'
+/// common prefix when it is longer than what was typed (else the first candidate); every further Tab replaces
+/// what is in with the next candidate, round and round; Shift-Tab goes back. The cycle holds only while the
+/// composer still ends exactly as it left it — any other key ends it, keeping what was inserted.
+struct CompletionCycle: Equatable {
     let head: String
+    let typed: String
     let candidates: [String]
+    let commonPrefix: String?
+    /// -1: the common prefix is in; else the candidate.
     private(set) var index: Int
+    /// The composer's text right after the last step.
+    private(set) var acceptedText: String
 
-    /// Tab took `offer`'s ghost.
-    init(accepting offer: OnScreenPathOffer) {
-        head = offer.head
-        candidates = offer.candidates
-        index = offer.index
-        acceptedText = offer.head + offer.candidates[offer.index]
+    /// What the cycle has put in for the word.
+    var current: String { index < 0 ? (commonPrefix ?? typed) : candidates[index] }
+    /// "2/7" — which candidate is in, of how many (nil while only the common prefix is).
+    var position: (index: Int, count: Int)? { index < 0 ? nil : (index + 1, candidates.count) }
+
+    /// The first Tab: the edit, and the cycle to keep (nil when there was only one candidate — it is simply in).
+    static func start(_ found: ShellCandidates) -> (cycle: CompletionCycle?, edit: ComposerTabEdit)? {
+        let candidates = found.candidates.filter { $0 != found.typed }
+        guard let first = candidates.first else { return nil }
+        if candidates.count == 1 {
+            return (nil, ComposerTabEdit(replacingSuffix: found.typed, insert: first))
+        }
+        let common = shellCommonPrefix(candidates)
+        let prefix = common.count > found.typed.count ? common : nil
+        let cycle = CompletionCycle(head: found.head, typed: found.typed, candidates: candidates, commonPrefix: prefix,
+                                    index: prefix == nil ? 0 : -1,
+                                    acceptedText: found.head + (prefix ?? first))
+        return (cycle, ComposerTabEdit(replacingSuffix: found.typed, insert: cycle.current))
     }
 
-    /// Tab again on `text`: the edit to the next candidate, or nil when `text` changed since the accept. With
-    /// one candidate Tab is consumed and changes nothing.
-    mutating func next(for text: String) -> ComposerTabEdit? {
-        guard text == acceptedText else { return nil }
-        guard candidates.count > 1 else { return ComposerTabEdit(replacingSuffix: "", insert: "") }
-        let current = candidates[index]
-        index = (index + 1) % candidates.count
-        acceptedText = head + candidates[index]
-        return ComposerTabEdit(replacingSuffix: current, insert: candidates[index])
+    /// Tab (`forward`) or Shift-Tab on `text`: the edit to the next (or previous) candidate, or nil when `text`
+    /// is not what the cycle left — it has ended.
+    mutating func step(text: String, forward: Bool) -> ComposerTabEdit? {
+        guard text == acceptedText, !candidates.isEmpty else { return nil }
+        let was = current
+        let count = candidates.count
+        if forward {
+            index = index < 0 ? 0 : (index + 1) % count
+        } else {
+            index = index <= 0 ? count - 1 : index - 1
+        }
+        acceptedText = head + current
+        return ComposerTabEdit(replacingSuffix: was, insert: current)
     }
+}
+
+/// PURE: the next word of a ghost — what ⌥→ accepts: leading spaces, then up to the next space, or through the
+/// next `/`.
+func commandGhostNextWord(_ ghost: String) -> String {
+    var out = ""
+    var sawWord = false
+    for c in ghost {
+        if c.isWhitespace {
+            if sawWord { break }
+            out.append(c)
+            continue
+        }
+        sawWord = true
+        out.append(c)
+        if c == "/" { break }
+    }
+    return out
 }
 
 // MARK: - The ghost, all told
