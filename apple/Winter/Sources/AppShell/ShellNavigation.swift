@@ -17,8 +17,8 @@ import Foundation
 /// The Dashboard is reached from the bottom account-style row, NOT a fifth session-like row.
 /// `ShellDestination` below is where that distinction lives.
 ///
-/// Cowork is a reserved UI mode, not a supported daemon session: `session.create` excludes it
-/// and `SpawnSession` pre-flight-rejects it. Its landing is the "Coming soon" shell (Task 5),
+/// Cowork is a reserved UI mode, not a supported daemon session: `session.create` recognises the
+/// value but refuses it (`unsupported_topology`) and `SpawnSession` pre-flight-rejects it. Its landing is the "Coming soon" shell (Task 5),
 /// not a functional session list.
 enum SessionMode: String, CaseIterable, Identifiable, Sendable {
     case code, dispatch, cowork, chat

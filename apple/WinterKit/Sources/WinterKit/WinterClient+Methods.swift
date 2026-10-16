@@ -689,7 +689,7 @@ extension WinterClient {
     /// Collapsing the two (`?? []`) is how a chat window grows a folder menu whose every tap comes
     /// back `DIRS_MODE_REFUSAL`.
     /// Cowork recognition here is groundwork for synthetic/future rows, not a supported daemon
-    /// mode: `session.create` excludes it and `SpawnSession` rejects its reserved argument.
+    /// mode: `session.create` recognises the value but refuses it (`unsupported_topology`) and `SpawnSession` rejects its reserved argument.
     ///
     /// `cwd` is the ALIAS of `dirs[0]?.path` for a participating row — the daemon overwrites it at
     /// `session.list` time from the dirs set, because `session.setDirs` deliberately never touches
