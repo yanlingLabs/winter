@@ -337,12 +337,13 @@ export function coworkManifestProblem(m: MigrationCManifest): string | undefined
     ...m.moved.flatMap((e) => [e.from, e.to]), ...(m.displaced ?? []).flatMap((e) => [e.from, e.to]),
     ...(m.moving === undefined ? [] : [m.moving.from, m.moving.to]), ...m.links, ...m.copied, ...m.archived.flatMap((e) => [e.from, e.to]),
     m.archiveDir, ...Object.values(m.backups ?? {}).filter((p): p is string => typeof p === "string"), ...m.reconciled.map((r) => r.root),
-    ...(m.rekeyed ?? []).flatMap((e) => [e.from, e.to].flatMap((key) => [join("sdk", "projects", key), ...e.entries.map((name) => join("sdk", "projects", key, name))])),
+    ...(m.rekeyed ?? []).flatMap((e) => [e.from, e.to].flatMap((key) => [["sdk", "projects", key].join(sep), ...e.entries.map((name) => ["sdk", "projects", key, name].join(sep))])),
   ];
   const outside = (p: string): boolean => { const r = rel(p); return r === ".." || r.startsWith("../"); };
-  // Lexical first, then through the filesystem: relative paths are joined to the recorded home, so a symlinked parent
-  // (`innocent` -> `cowork/workspaces/ws`) or a case-different spelling (`COWORK/...`) is still Cowork storage.
-  const cowork = named.find((p) => typeof p === "string" && (isCoworkStorageRel(rel(p)) || resolvesIntoCoworkStorage(m.home, isAbsolute(p) ? p : join(m.home, p))));
+  // Lexical first, then through the filesystem: relative paths are appended to the recorded home WITHOUT `join` (which would
+  // collapse `..` before the kernel could apply it to a symlink's target), so a symlinked parent (`innocent` ->
+  // `cowork/workspaces/ws`, `innocent/../ws2/...`) or a case-different spelling (`COWORK/...`) is still Cowork storage.
+  const cowork = named.find((p) => typeof p === "string" && (isCoworkStorageRel(rel(p)) || resolvesIntoCoworkStorage(m.home, isAbsolute(p) ? p : `${m.home}${sep}${p}`)));
   if (cowork !== undefined) return `its manifest names Cowork storage (${cowork}); a migration never moves, copies or removes it`;
   const escaped = named.find((p) => typeof p === "string" && outside(p));
   return escaped === undefined ? undefined : `its manifest names a path outside the home (${escaped})`;

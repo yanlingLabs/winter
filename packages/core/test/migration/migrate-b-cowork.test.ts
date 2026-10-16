@@ -232,7 +232,13 @@ function destinationWithImage() {
   const workspace = join(home, "cowork", "workspaces", WORKSPACE), image = join(workspace, "data.ext4");
   write(image, IMAGE_BYTES);
   symlinkSync(workspace, join(home, "innocent"));
-  return { home, image, viaLink: join(home, "innocent", "data.ext4") };
+  // `..` after the symlink: the kernel reads `innocent/../ws2` as `cowork/workspaces/ws2`, path.join as `<home>/ws2`.
+  const sibling = join(home, "cowork", "workspaces", "ws2", "data.ext4");
+  write(sibling, IMAGE_BYTES);
+  mkdirSync(join(home, "sessions", "s1", "deep"), { recursive: true });
+  symlinkSync(join(home, "sessions", "s1", "deep"), join(home, "escape"));
+  symlinkSync(join(home, "sessions", "s1"), join(home, "linked"));
+  return { home, image, sibling, viaLink: join(home, "innocent", "data.ext4"), dotdot: `${home}/innocent/../ws2/data.ext4` };
 }
 
 describe("resolvesIntoCoworkStorage", () => {
@@ -245,6 +251,13 @@ describe("resolvesIntoCoworkStorage", () => {
     expect(resolvesIntoCoworkStorage(home, join(home, "Cowork"))).toBe(true);
     expect(resolvesIntoCoworkStorage("/home-that-does-not-exist", "/home-that-does-not-exist/cowork/x")).toBe(true);
     for (const rel of ["sessions/s1/a.jsonl", "coworker/x", "cowork.txt", "memory/cowork/notes.md", "sdk/cowork"]) expect(resolvesIntoCoworkStorage(home, join(home, rel))).toBe(false);
+    // `..` after a symlinked parent is applied by the kernel to the symlink's TARGET (path.join would collapse it first).
+    expect(resolvesIntoCoworkStorage(home, `${home}/innocent/../ws2/data.ext4`)).toBe(true); // innocent -> cowork/workspaces/ws_fixture, so ../ws2 is a Cowork sibling
+    expect(resolvesIntoCoworkStorage(home, `${home}/escape/../../../cowork/workspaces/ws2/data.ext4`)).toBe(true); // escape -> sessions/s1/deep: three ups reach the home, then cowork/
+    expect(resolvesIntoCoworkStorage(home, `${home}/innocent/../../../sessions/x`)).toBe(false); // ws_fixture -> workspaces -> cowork -> ... lands back at the home's sessions/
+    expect(resolvesIntoCoworkStorage(home, `${home}/cowork/../sessions/x`)).toBe(false); // a plain real directory: the kernel and the lexical form agree
+    expect(resolvesIntoCoworkStorage(home, `${home}/linked/../memory/x`)).toBe(false); // linked -> sessions/s1: lands in sessions/memory/x, not Cowork
+    expect(resolvesIntoCoworkStorage(home, `${home}/sessions/./s1/../s1/a.jsonl`)).toBe(false);
     expect(resolvesIntoCoworkStorage(home, join(tempDir(), "cowork", "x"))).toBe(false); // outside this home entirely
   });
 });
@@ -275,6 +288,40 @@ describe("rollback keeps Cowork storage reached through a symlinked parent or an
       expect(readFileSync(image, "utf8")).toBe(IMAGE_BYTES);
     });
   }
+  // `..` after a symlinked parent: stat/unlink hand the raw path to the kernel, which applies `..` to the symlink's TARGET.
+  for (const [label, make] of [
+    ["copied with a recorded hash", (dest: string) => entry(dest, "copied")],
+    ["copied with an empty sha256", (dest: string) => ({ ...entry(dest, "copied"), sha256: "" })],
+    ["rebuilt", (dest: string) => entry(dest, "rebuilt")],
+  ] as const) {
+    test(`a ${label} entry written as <home>/innocent/../ws2/... is kept and the rollback carries on to later entries`, async () => {
+      const { home, sibling, dotdot } = destinationWithImage();
+      write(join(home, "sessions", "later.jsonl"), "later");
+      manifestOf(home, [make(dotdot), entry(join(home, "sessions", "later.jsonl"), "copied", "later")]);
+      const logs: string[] = [];
+      await rollbackMigrationB(home, { log: line => logs.push(line) });
+      expect(readFileSync(sibling, "utf8")).toBe(IMAGE_BYTES);
+      expect(logs.some(line => line.includes(dotdot) && line.includes("kept") && line.includes("Cowork storage is never removed"))).toBe(true);
+      expect(existsSync(join(home, "sessions", "later.jsonl"))).toBe(false); // not crashed partway: the next entry was processed
+    });
+  }
+  test("a destination that climbs out of a symlinked directory back into Cowork is kept too", async () => {
+    const { home, sibling } = destinationWithImage();
+    const via = `${home}/escape/../../../cowork/workspaces/ws2/data.ext4`;
+    manifestOf(home, [{ ...entry(via, "rebuilt") }]);
+    await rollbackMigrationB(home, { log: () => {} });
+    expect(readFileSync(sibling, "utf8")).toBe(IMAGE_BYTES);
+  });
+  test("a destination with `..` that really stays outside Cowork (cowork/../sessions, linked/../memory) is still removed", async () => {
+    const { home } = destinationWithImage();
+    write(join(home, "sessions", "x"), "plain"); write(join(home, "sessions", "memory", "x"), "via link");
+    // (`rebuilt` for the symlinked one: a recorded hash would be read through a stream that normalizes `..` lexically, a
+    // pre-existing quirk of hand-edited manifests that is not what this test is about.)
+    manifestOf(home, [entry(`${home}/cowork/../sessions/x`, "copied", "plain"), entry(`${home}/linked/../memory/x`, "rebuilt")]);
+    await rollbackMigrationB(home, { log: () => {} });
+    expect(existsSync(join(home, "sessions", "x"))).toBe(false);
+    expect(existsSync(join(home, "sessions", "memory", "x"))).toBe(false);
+  });
   test("ordinary migrated files — including lookalikes and a symlinked parent that is not Cowork — are still removed", async () => {
     const home = realpathSync(tempDir());
     write(join(home, "sessions", "s1", "a.jsonl"), "session"); write(join(home, "coworker", "x"), "lookalike"); write(join(home, "memory", "cowork", "notes.md"), "notes");
@@ -308,6 +355,16 @@ describe("the executor refuses plans that reach Cowork storage through a symlink
       plan.entries = [{ src: join(legacy, "innocent", "data.ext4"), dest: join(home, "x.ext4"), status }];
       expect((await refusalOf(() => runMigrationB(plan, deps()))).code).toBe("cowork_storage_present");
       expect(existsSync(join(home, "x.ext4"))).toBe(false);
+    });
+    test(`a ${status} destination written as innocent/../ws2/... (the kernel's reading) is refused`, async () => {
+      const source = tempDir(); seedSource(source);
+      const { home, sibling, dotdot } = destinationWithImage();
+      const before = snapshot(home);
+      const plan = await planMigrationB({ legacyHome: source, home: tempDir(), profile: "dev" });
+      plan.home = home; plan.entries = [{ src: join(source, "settings.json"), dest: dotdot, status }];
+      expect((await refusalOf(() => runMigrationB(plan, deps()))).code).toBe("cowork_storage_present");
+      expect(readFileSync(sibling, "utf8")).toBe(IMAGE_BYTES);
+      expect(snapshot(home)).toEqual(before);
     });
     test(`a ${status} destination spelled COWORK/ is refused`, async () => {
       const source = tempDir(), home = realpathSync(tempDir()); seedSource(source);

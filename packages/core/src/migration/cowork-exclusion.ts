@@ -8,7 +8,7 @@
 import { Database } from "bun:sqlite";
 import { copyFileSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { COWORK_TABLES } from "../cowork/schema";
 
 /** Home-relative root of every Cowork backing, control and shared-file tree. */
@@ -21,12 +21,26 @@ export function isCoworkStorageRel(rel: string): boolean {
 
 /** Where does `p` really live? A lexical `cowork/` prefix check is bypassed by a symlinked parent
  * (`home/innocent` -> `home/cowork/workspaces/ws`) and, on a case-insensitive volume, by a different
- * spelling (`home/COWORK/...`). This resolves the deepest existing ancestor through the filesystem (the path
- * itself may not exist yet) and compares the first segment under the resolved home, case-insensitively. It
+ * spelling (`home/COWORK/...`), and `..` after a symlinked parent lands elsewhere than its lexical form. This
+ * resolves the deepest existing ancestor through the filesystem (the path itself may not exist yet), walks `..`
+ * with kernel semantics, and compares the first segment under the resolved home, case-insensitively. It
  * is deliberately over-inclusive on a case-sensitive volume (a `Cowork/` directory counts): a guard that
  * refuses or keeps is the safe direction. Keep `isCoworkStorageRel` as the cheap first check. */
 export function resolvesIntoCoworkStorage(home: string, p: string): boolean {
   const resolve = (q: string): string => {
+    // `..` after a symlinked parent: the kernel applies it to the symlink's TARGET (`innocent/../ws2` with
+    // `innocent` -> `cowork/workspaces/ws` is `cowork/workspaces/ws2`), but `realpath` here collapses `..`
+    // lexically first (`<home>/ws2`). So walk the components with kernel semantics instead of trusting it.
+    if (q.split(sep).includes("..")) {
+      let at = isAbsolute(q) ? sep : process.cwd();
+      for (const part of q.split(sep)) {
+        if (part === "" || part === ".") continue;
+        if (part === "..") { at = dirname(at); continue; }
+        const next = join(at, part);
+        try { at = realpathSync.native(next); } catch { at = next; }
+      }
+      return at;
+    }
     const tail: string[] = []; let cur = q;
     for (;;) {
       try { return join(realpathSync.native(cur), ...tail.reverse()); }
