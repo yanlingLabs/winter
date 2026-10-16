@@ -150,7 +150,7 @@ private func onScreenPathKey(_ path: String, home: String) -> String {
 
 /// PURE (given its filesystem): the candidates that exist, in order. Every path is checked — under Desktop,
 /// Documents and the like macOS may ask the user once whether Winter may look (the live reader's filesystem is
-/// `VolumeGuardedFileSystem`, so a slow volume never stalls it).
+/// `SlowMountGuardedFileSystem`, so a slow mount never stalls it).
 func onScreenPathsThatExist(_ paths: [String], home: String, fileSystem: ShellFileSystem) -> [String] {
     paths.filter { fileSystem.exists(onScreenExpandedPath($0, home: home)) }
 }

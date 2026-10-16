@@ -224,8 +224,8 @@ final class CommandLineEnvironment: @unchecked Sendable {
             .filter { seen.insert($0).inserted }
         let snapshot = Snapshot(enabled: true, pathDirectories: path, aliases: [], commandNames: [],
                                 homeDirectory: home,
-                                // A slow or sleeping volume never stalls a keystroke's verdict.
-                                fileSystem: VolumeGuardedFileSystem(inner: LiveShellFileSystem()),
+                                // A slow network or FUSE mount never stalls a keystroke's verdict.
+                                fileSystem: SlowMountGuardedFileSystem(inner: LiveShellFileSystem()),
                                 wholeCommandCheck: true)
         return CommandLineEnvironment(snapshot: snapshot, isLive: true, shell: shell,
                                       runEnvironment: loginShellEnvironment(from: processEnvironment, home: home,

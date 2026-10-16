@@ -403,7 +403,7 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertFalse(mode.displaysCommand("hello there"), "…both ways")
     }
 
-    func testReturnNeverUpgradesButMayDowngrade() {
+    func testReturnNeverUpgradesAndNeverTouchesTheFilesystem() {
         var nodes = ShellCommandLineTests.fileSystem.nodes
         let fileSystem = MutableFileSystem(nodes: nodes)
         let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: ["open"],
@@ -414,12 +414,11 @@ final class DispatchPillCommandModeTests: XCTestCase {
         nodes["/tmp/later.md"] = .file
         fileSystem.nodes = nodes
         XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "white text never runs")
-        // Purple, then the file vanishes: Return downgrades to a message.
+        // Purple: Return runs on the shown verdict alone — no stat on the main thread.
         mode.evaluateNowForTesting("open /tmp/later.md")
+        let asked = fileSystem.questions
         XCTAssertTrue(mode.shouldRunOnReturn("open /tmp/later.md"))
-        nodes["/tmp/later.md"] = nil
-        fileSystem.nodes = nodes
-        XCTAssertFalse(mode.shouldRunOnReturn("open /tmp/later.md"), "the path vanished: a message")
+        XCTAssertEqual(fileSystem.questions, asked, "Return asked the filesystem nothing")
     }
 
     func testReturnAndDeleteActOnlyOnAFreshVerdictForTheExactText() {
@@ -437,8 +436,9 @@ final class DispatchPillCommandModeTests: XCTestCase {
     /// A filesystem a test can change between two questions.
     private final class MutableFileSystem: ShellFileSystem {
         var nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]
+        private(set) var questions = 0
         init(nodes: [String: ShellCommandLineTests.FakeShellFileSystem.Kind]) { self.nodes = nodes }
-        private var fake: ShellCommandLineTests.FakeShellFileSystem { .init(nodes: nodes) }
+        private var fake: ShellCommandLineTests.FakeShellFileSystem { questions += 1; return .init(nodes: nodes) }
         func exists(_ path: String) -> Bool { fake.exists(path) }
         func isDirectory(_ path: String) -> Bool { fake.isDirectory(path) }
         func isExecutableFile(_ path: String) -> Bool { fake.isExecutableFile(path) }

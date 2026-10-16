@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import Winter
 
-/// On-screen paths, the pure half: extraction from a window's text, existence (and the /Volumes guard)
+/// On-screen paths, the pure half: extraction from a window's text, existence (and the slow-mount guard)
 /// (an injected filesystem probe that must never be asked about them), and the argument ghost's ranking.
 final class OnScreenPathTests: XCTestCase {
     private let home = "/Users/u"
@@ -93,32 +93,53 @@ final class OnScreenPathTests: XCTestCase {
                        "every path is checked (macOS may ask once for Documents and the like)")
     }
 
-    func testAVolumeIsAskedOnceThenFromMemoryAndASlowOneIsLeftAlone() {
+    private let mounts = [ShellMount(mountPoint: "/", type: "apfs"), ShellMount(mountPoint: "/net", type: "autofs"),
+                          ShellMount(mountPoint: "/Users/u/remote", type: "macfuse"),
+                          ShellMount(mountPoint: "/Volumes/Share", type: "smbfs"),
+                          ShellMount(mountPoint: "/Volumes/USB", type: "msdos"),
+                          ShellMount(mountPoint: "/Volumes/Nas", type: "nfs")]
+
+    func testSlowMountsAreToldApartByFilesystemTypeNotByName() {
+        XCTAssertEqual(shellSlowMount(for: "/net/host/x", in: mounts), "/net", "autofs")
+        XCTAssertEqual(shellSlowMount(for: "/Users/u/remote/a.txt", in: mounts), "/Users/u/remote", "sshfs in home")
+        XCTAssertEqual(shellSlowMount(for: "/System/Volumes/Data/Volumes/Share/x", in: mounts), "/Volumes/Share",
+                       "the Data volume's spelling")
+        XCTAssertNil(shellSlowMount(for: "/Volumes/USB/x", in: mounts), "a local disk under /Volumes is not slow")
+        XCTAssertNil(shellSlowMount(for: "/Users/u/remotely/x", in: mounts))
+        XCTAssertNil(shellSlowMount(for: "/tmp/x", in: mounts))
+        XCTAssertTrue(shellFilesystemTypeIsSlow("fuse-t"))
+        XCTAssertFalse(shellFilesystemTypeIsSlow("apfs"))
+    }
+
+    func testASlowMountIsAskedOneQuestionAtATimeFromMemoryAndLeftAloneWhenItHangs() {
         var nodes = ShellCommandLineTests.fileSystem.nodes
-        nodes["/Volumes"] = .directory
-        nodes["/Volumes/USB"] = .directory
-        nodes["/Volumes/USB/a.mov"] = .file
+        nodes["/Volumes/Share/a.mov"] = .file
+        nodes["/Volumes/Nas/b.mov"] = .file
         let probe = RecordingFileSystem(ShellCommandLineTests.FakeShellFileSystem(nodes: nodes))
-        var clock = Date(timeIntervalSince1970: 0)
-        let guarded = VolumeGuardedFileSystem(inner: probe, timeout: 0.2, now: { clock })
-        XCTAssertTrue(guarded.exists("/Volumes/USB/a.mov"))
-        XCTAssertTrue(guarded.exists("/Volumes/USB/a.mov"))
-        XCTAssertEqual(probe.asked, ["/Volumes/USB/a.mov"], "the second answer comes from memory")
+        let mounts = mounts
+        let guarded = SlowMountGuardedFileSystem(inner: probe, timeout: 0.2, mounts: { mounts })
+        XCTAssertTrue(guarded.exists("/Volumes/Share/a.mov"))
+        XCTAssertTrue(guarded.exists("/Volumes/Share/a.mov"))
+        XCTAssertEqual(probe.asked, ["/Volumes/Share/a.mov"], "the second answer comes from memory")
         XCTAssertTrue(guarded.exists("/tmp/x/notes.md"))
         XCTAssertTrue(guarded.exists("/tmp/x/notes.md"))
-        XCTAssertEqual(probe.asked.filter { $0 == "/tmp/x/notes.md" }.count, 2, "outside /Volumes: asked directly")
-        clock.addTimeInterval(VolumeGuardedFileSystem.memoLifetime + 1)
-        // A volume that takes too long: "no" within the timeout, and left alone for a while.
+        XCTAssertEqual(probe.asked.filter { $0 == "/tmp/x/notes.md" }.count, 2, "a local disk: asked directly")
+        // A hung mount: "no" within the timeout…
         probe.delay = 1
         let started = Date()
-        XCTAssertFalse(guarded.exists("/Volumes/USB/a.mov"))
+        XCTAssertFalse(guarded.isDirectory("/Volumes/Share"))
         XCTAssertLessThan(Date().timeIntervalSince(started), 0.8, "never waits on it")
         let askedSoFar = probe.asked.count
-        XCTAssertFalse(guarded.isDirectory("/Volumes/USB"))
-        XCTAssertNil(guarded.entries(ofDirectory: "/Volumes/USB/"))
-        XCTAssertEqual(probe.asked.count, askedSoFar, "a slow volume is not asked again for a while")
-        XCTAssertEqual(VolumeGuardedFileSystem.volume(of: "/Volumes/USB/x/y"), "/Volumes/USB")
-        XCTAssertNil(VolumeGuardedFileSystem.volume(of: "/tmp/Volumes/x"))
+        // …and while that stat is still out, no second one starts (no new thread), even on another slow mount.
+        XCTAssertFalse(guarded.exists("/Volumes/Nas/b.mov"))
+        XCTAssertNil(guarded.entries(ofDirectory: "/net/host"))
+        XCTAssertEqual(probe.asked.count, askedSoFar)
+        // Once it is back, another mount is asked again; the hung one is left alone for a while.
+        probe.delay = 0
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertTrue(guarded.exists("/Volumes/Nas/b.mov"))
+        XCTAssertFalse(guarded.exists("/Volumes/Share/a2.mov"))
+        XCTAssertEqual(probe.asked.count, askedSoFar + 1)
     }
 
     func testTheValidatorAndZshWorkInDocumentsLikeAnywhereElse() {

@@ -259,7 +259,7 @@ final class OnScreenPathStore {
     /// The user's screen: the frontmost app (never Winter itself, never a Chromium-family app), through accessibility
     /// when already trusted.
     static func live(home: String = NSHomeDirectory()) -> OnScreenPathStore {
-        let fileSystem = VolumeGuardedFileSystem(inner: LiveShellFileSystem())
+        let fileSystem = SlowMountGuardedFileSystem(inner: LiveShellFileSystem())
         return OnScreenPathStore(
             frontmostProcess: {
                 // A Chromium-family app exposes nothing unless asked to, and Winter never asks: no paths.
