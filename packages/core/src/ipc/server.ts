@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -81,6 +81,7 @@ import type { PanelCommandRegistry } from "../panel/commands";
 import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
+import type { IslandClient, IslandRegistry } from "../island/registry";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
@@ -176,6 +177,10 @@ interface ConnState {
   authedRole: string | null;
   clientName: string;
   hubClient: HubClient | null;
+  /** The hello's controlling terminal (`HelloParams.tty`), carried onto this connection's `HubClient`. */
+  tty: string | null;
+  /** Set when the hello advertised `CLIENT_CAPABILITY_ISLAND` (harness role): told by `IslandRegistry` on change. */
+  islandClient: IslandClient | null;
   helloTimer: ReturnType<typeof setTimeout> | null;
   writer: ConnWriter;
   // Phase 4b Task 2: set on a successful role:"plugin" hello (the specific installed plugin id
@@ -511,6 +516,9 @@ export interface IpcServerOptions {
   // being absent elsewhere in this file.
   hooks?: HookRegistry;
   questions?: QuestionBroker; // in-flight ask_user questions; ask_user.respond
+  /** The Winter island (`island/registry.ts`): every pending card across sessions (`island.pending`), and the island
+   *  clients — a harness hello advertising `CLIENT_CAPABILITY_ISLAND` — it tells when that set changes. */
+  island?: IslandRegistry;
   tasks?: TaskStore;         // session task lists; task.list
   plans?: PlanBridge;        // in-flight exit_plan_mode plans; plan.respond
   peripheral?: PeripheralBroker; // lease machinery; peripheral.* verbs (Phase 2f)
@@ -1953,6 +1961,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           authedRole: null,
           clientName: "",
           hubClient: null,
+          tty: null,
+          islandClient: null,
           helloTimer: setTimeout(() => socket.end(), helloTimeoutMs),
           writer: new ConnWriter(socket as unknown as WritableSocket),
           pluginId: null,
@@ -1968,6 +1978,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
+        if (socket.data.islandClient) opts.island?.removeClient(socket.data.islandClient);
         // ComputerV2 Phase 2: the connection that carried Winter.app's browser link is gone — the built-in browser
         // reads "Winter isn't running" until the app attaches again (every command in flight fails `disconnected`).
         opts.browserLink?.connectionClosed(socket.data);
@@ -2083,6 +2094,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       if (socket.data.helloTimer) { clearTimeout(socket.data.helloTimer); socket.data.helloTimer = null; }
       socket.data.decoder = new LineDecoder(); // authed: default 8 MiB line cap
       if (p.role === "harness") harnessConns.add(socket.data);
+      // The Winter island: a terminal client's tty (its hosts' "in front?" question), and an island client — told,
+      // with no payload, when the cross-session pending set changes (`island.changed`; it then asks `island.pending`).
+      socket.data.tty = p.tty ?? null;
+      if (p.role === "harness" && p.capabilities?.includes(CLIENT_CAPABILITY_ISLAND) === true && opts.island) {
+        const writer = socket.data.writer;
+        const client: IslandClient = { notify: () => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: {} })); } };
+        socket.data.islandClient = client;
+        opts.island.addClient(client);
+      }
       // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
       // omits the field, and the client then falls back).
       return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES] };
@@ -2276,6 +2296,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // record of how it authenticated — `"remote"` is the phone's gateway, and a phone must
           // never lose a running turn to a connection blip whatever it calls itself.
           role: socket.data.authedRole,
+          tty: socket.data.tty,
           deliver(event: SessionEvent): boolean {
             // The remote live/replay policy (sessions/remote-stream.ts): allowlist the type,
             // then bound the serialized size. Harness/admin connections are untouched — they
@@ -3433,6 +3454,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "elicitation.respond is available to local clients only");
         const p = parseParams(ElicitationRespondParams, params);
         return opts.elicitations?.respond(p.sessionId, p.elicitationId, p.action, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
+      }
+      case METHODS.islandPending: {
+        // The Winter island: LOCAL harness clients only — never in `REMOTE_ALLOWED_METHODS` or the plugin list, and
+        // the explicit check keeps it so if either ever widens (the phone has its own per-session `approval.list`).
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.pending is available to local clients only");
+        parseParams(IslandPendingParams, params);
+        return { items: opts.island?.list() ?? [] };
+      }
+      case METHODS.islandShown: {
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.shown is available to local clients only");
+        const p = parseParams(IslandShownParams, params);
+        opts.island?.markShown(p.ids);
+        return { ok: true };
       }
       case METHODS.elicitationUrl: {
         // WS-27: the full url of a PENDING card, for the local client about to open it — the url is

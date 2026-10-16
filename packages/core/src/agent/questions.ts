@@ -17,6 +17,11 @@ export class QuestionBroker {
     });
   }
 
+  /** Is this question still waiting for an answer? (The Winter island lists only what is.) */
+  isPending(sessionId: string, callId: string): boolean {
+    return this.pending.has(this.key(sessionId, callId));
+  }
+
   respond(sessionId: string, callId: string, answers: Record<string, string>, by: string, notes?: Record<string, string>): { ok: true; alreadyResolved: boolean } {
     const k = this.key(sessionId, callId);
     const entry = this.pending.get(k);

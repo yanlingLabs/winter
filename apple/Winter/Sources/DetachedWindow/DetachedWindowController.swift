@@ -91,6 +91,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// without exposing `window` itself past this seam (same convention as
     /// `OrbWindowController.panelFrameForTesting`/`windowForTesting`-style accessors elsewhere).
     var windowForTesting: NSWindow? { window }
+    /// The Winter island's routing: this window is key or main (a card of its session is then in front).
+    var isKeyOrMain: Bool { window.isKeyWindow || window.isMainWindow }
 
     /// Task 5 (2e-iii): this window's current on-screen frame — legitimate PRODUCTION use (unlike
     /// `windowForTesting` above), read by `AppDelegate.registerDetachedWindow`'s

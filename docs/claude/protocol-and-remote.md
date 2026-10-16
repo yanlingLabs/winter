@@ -16,6 +16,7 @@ A new or changed **`SessionEvent` variant**, in order:
 
 - A new **RPC method** skips 2–3 and 5 (`generate.ts` reads only `events.ts`): schema in `methods.ts`, handler in `packages/core/src/ipc/server.ts`, a Swift call site if needed, the four remote mirrors below if remote-reachable.
 - **A new FIELD trips no compile-time trap**: sweep its PRODUCERS by meaning in both languages (`WinterChatKit`'s `ChatEngine` is a second producer, via `sync.push`) and ask whether a consumer's fallback silently accepts the old shape.
+- The hello's client `capabilities` (`CLIENT_CAPABILITY_ISLAND`) and `tty`, and `island.pending`/`island.changed`, are local-only ([island](./island.md)): no event changed, nothing remote.
 - A new **transient** goes in `TRANSIENT_EVENT_TYPES`, which `REMOTE_STREAM_EVENT_TYPES` spreads. Left out, remote clients never see it; the parity tests pin "exactly the current set" and cannot catch that.
 
 ## Remote allowlists
