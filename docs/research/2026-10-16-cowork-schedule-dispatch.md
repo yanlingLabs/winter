@@ -21,7 +21,7 @@ that work ran. Production still constructs `CoworkSchedules` without a port, so
   identical behavior. No schema change, no new enum value, no new error code, no
   change to `tick()`, `claim()`, `cancel()`, `status()` or any RPC handler.
 - `packages/core/test/cowork/schedules.test.ts`: the two raw-SQL boundary fakes are
-  replaced by a counting fake port; 18 new tests (42 in the file, up from 24).
+  replaced by a counting fake port; 19 new tests (43 in the file, up from 24).
 
 ## State machine (existing columns and states only)
 
@@ -47,7 +47,10 @@ pending --claim--> claimed --beginDispatch--> dispatching --handled(receipt)--> 
 3. Outside any transaction the port's `start` runs. The fake port in the tests
    asserts the row was already `dispatching` with the claim token and that
    `db.inTransaction` was false at that instant.
-4. A short transaction settles the answer, always guarded on
+4. The answer is classified exactly once, before any transaction, inside a
+   try/catch: each field is read a single time and any throw while reading counts as
+   untrustworthy, never as `not-started`, and the port's error text is neither kept
+   nor returned. Then a short transaction settles it, always guarded on
    `state='dispatching' AND claim_token=?`:
    - a well-formed ack echoing the occurrence and token: the row stays
      `dispatching`, the host mints a frozen receipt and returns `started`;
@@ -55,8 +58,8 @@ pending --claim--> claimed --beginDispatch--> dispatching --handled(receipt)--> 
      `pending`/`execution_unavailable` (token cleared, any coalesced pending folded
      in), `not-started`. This is the only answer that reaches `pending`;
    - the port threw or rejected, answered `{ kind: "uncertain" }`, or the answer is
-     malformed or echoes the wrong occurrence or token:
-     `uncertain`/`recovery_required`;
+     malformed, hostile (a throwing getter or proxy trap) or echoes the wrong
+     occurrence or token: `uncertain`/`recovery_required`;
    - the row is no longer `dispatching` (cancel or recovery got there first):
      nothing is touched, `uncertain` is returned.
 
@@ -102,12 +105,17 @@ uncertain`; it never replays.
    `handled` is impossible and recovery is the only path. That is the intended
    "never replay, never silently complete" behavior, but it is a constraint on the
    future owner: it must hold the receipt from `beginDispatch`.
-4. **Signature changes.** `beginDispatch` returns `Promise<CoworkScheduleDispatchOutcome>`
-   (was `never`). Its precondition failures (`unsupported_topology`,
-   `request_conflict`) still throw synchronously; the returned promise settles to
+4. **Signature changes, and the mixed sync/async shape is deliberate.**
+   `beginDispatch` returns `Promise<CoworkScheduleDispatchOutcome>` (was `never`).
+   Chosen: keep it MIXED. Every precondition failure (`unsupported_topology` with
+   no port, `request_conflict` for an unknown, reused or wrong-token claim) still
+   throws SYNCHRONOUSLY, before any write, so the pre-existing contract is
+   unchanged; only the port wait is asynchronous. The returned promise settles to
    an outcome and rejects only on a store failure, which leaves the row
-   `dispatching` for `recover()` to mark uncertain. `handled` gained a required
-   third parameter. Nothing in `src/` calls either.
+   `dispatching` for `recover()` to mark uncertain. A caller therefore needs
+   `try { await beginDispatch(...) }`, not a bare `.then()` chain. This is written
+   in the method's doc comment. `handled` gained a required third parameter.
+   Nothing in `src/` calls either.
 5. **Type-only import.** The rule that nothing in `src/` imports a new module is
    bent in one place: `schedules.ts` has a single `import type` from
    `schedule-dispatch.ts`, erased at runtime, because the constructor must name the
@@ -117,43 +125,67 @@ uncertain`; it never replays.
    `execution_unavailable` is still the "not blocked" sentinel, so with a port a
    dispatchable pending occurrence reads `execution_unavailable` too. `start` has
    no timeout here; a hung port leaves `dispatching` until `recover()`.
-7. **`handled` and `uncertain` are unreachable in production, on purpose.** Nothing in
+7. **`handled` and `uncertain` are unreachable in production, on purpose, and an
+   uncertain one-shot stays `enabled`.** Nothing in
    `src/` calls them, and without a port no receipt can be minted, so `handled`
    always refuses. That is a delta from before, when the two-argument `handled` was
-   callable on any `dispatching` row (reachable only through raw SQL in tests).
-8. **The `service.ts` check is structural, not text.** The anti-wiring test reads the
-   port's parameter position from the `CoworkSchedules` constructor declaration and
-   requires that every `new CoworkSchedules(...)` in `src/` passes fewer arguments
-   than that position (a small balanced-paren scan), plus that no other `src/` file
-   mentions the port types or `beginDispatch` and that `schedules.ts` has a single
-   `import type` from `schedule-dispatch.ts`. Another lane adding or reordering
-   constructor parameters moves the position and cannot trip it; a `src/` caller
-   that reaches the port position does.
+   callable on any `dispatching` row (reachable only through raw SQL in tests). An
+   occurrence made `uncertain` (by a throw, recovery, cancellation or the owner)
+   leaves a one-shot schedule `enabled` and keeps the job's active slot until a
+   recovery path, which does not exist in this slice, resolves it: it is neither
+   retried nor marked handled.
+8. **The construction pin reads the syntax tree.** The anti-wiring test parses every
+   `src/` file with the TypeScript compiler API (`typescript` is a root dev
+   dependency) and, for every `new CoworkSchedules(...)` (parenthesized or cast
+   included), fails if the argument count reaches the port's parameter index (read
+   from the constructor declaration itself) or any argument is a spread. It also
+   fails on any other use of the class name outside an import, a type position or a
+   `new` (an alias, an `extends`, `Reflect.construct`, a namespace member, an
+   `import { CoworkSchedules as X }`). Comments, string and template literals and
+   line breaks cannot fool it, and it asserts nothing about where the port parameter
+   sits, so another lane may append or insert constructor parameters. The REAL
+   backstop is the set of text bans: outside `schedules.ts` and the types module no
+   `src/` file may mention the port types, the module path, `beginDispatch`,
+   `.handled(` or `.uncertain(`; without a driver calling those, an injected port
+   dispatches nothing whatever the construction looks like. Known and accepted: a
+   setter-style assignment to the private `port` field of a constructed instance
+   (via a cast) names none of the banned things and is not caught by the AST scan;
+   it too could dispatch nothing without a banned call.
 9. **Anti-wiring pin location.** The pin is a new test in `schedules.test.ts`
    rather than an edit to the two existing pin tests, to avoid cross-lane conflicts.
 
 ## Tests and mutation checks
 
 `bun test test/cowork` from `packages/core`: see the PR for the final count;
-`schedules.test.ts` has 42 tests. `bun run typecheck` exits 0.
+`schedules.test.ts` has 43 tests. `bun run typecheck` exits 0.
 
-Mutations were applied one at a time to `schedules.ts`, the file run, and the file
-restored (script kept in the lane scratch folder, not committed):
+Mutations were applied one at a time, the schedule test file (or only the pin test,
+for the `P` rows) run, and the source restored. The script is kept in the lane
+scratch folder, not committed.
 
-| Mutation | Result | Failing tests (first) |
-| --- | --- | --- |
-| skip the begin-time `blockedReason` recheck | killed | "blockedReason is re-run at begin ..." |
-| skip the claim-token compare | killed | "crash window after claim ...", "a wrong, unknown or reused token ..." |
-| `handled` skips the `dispatching` state check | killed | "crash window after the port ack ...", "the execution owner can report ..." |
-| `handled` skips the receipt | killed | "a one-shot is never marked handled without the receipt ..." |
-| a port THROW goes back to `pending` | killed | "a port throw (sync or async) is never read as nothing launched ..." |
-| same, and without the `dispatching` guard | killed | the throw test and the cancellation test |
-| a malformed answer is treated as `not-started` | killed | "an uncertain or untrustworthy port answer is uncertain ..." |
-| an untrustworthy ack is accepted | killed | "an uncertain or untrustworthy port answer is uncertain ..." |
-| the `not-started` path skips the `dispatching` guard | killed | "crash window after begin ...", "a not-started answer folds ..." |
-| `release` does not fold the pending interval | killed | four tests, including the restart-merge tests |
-| a `src/` construction passes a sixth argument | killed | the anti-wiring pin |
-| another lane adds a fourth argument in `service.ts` | not tripped (expected) | none |
+| Mutation | Result |
+| --- | --- |
+| skip the begin-time `blockedReason` recheck | killed |
+| skip the claim-token compare | killed |
+| begin skips the quarantine check | killed (quarantine-after-claim test) |
+| `handled` skips the `dispatching` state check | killed |
+| `handled` skips the receipt | killed |
+| a port THROW goes back to `pending` (with and without the `dispatching` guard) | killed |
+| an uncertain or malformed answer is accepted as started | killed |
+| `{ kind: "uncertain" }` treated as started | killed (uncertain answer carrying a valid receipt) |
+| `kind` matched case-insensitively | killed (`"STARTED"`) |
+| any non-started answer treated as `not-started` | killed |
+| run reference, token echo or occurrence echo unchecked | killed (three mutations) |
+| the `not-started` path skips the `dispatching` guard | killed |
+| `release` does not fold the pending interval | killed |
+| the answer is read unguarded INSIDE the settle transaction (the original defect) | killed (throwing-getter answers) |
+| pin: a 6th argument, multi-line with comments, apostrophes in comments, a template literal with a paren, a variable named `port` | killed |
+| pin: a spread of a 6-element tuple, a spread of a short array, a spread with the plain call kept | killed |
+| pin: subclass `super(...)`, alias, `Reflect.construct`, `new (CoworkSchedules)(...)`, a cast, an import alias, a namespace member | killed |
+| pin: the port type imported into `service.ts` | killed |
+| pin: another lane appends a 7th constructor parameter after the port | not tripped (expected) |
+| pin: another lane inserts a parameter before the port, or adds a 4th argument in `service.ts` | not tripped (expected) |
+| pin: setter-style `port` assignment via a cast | not caught, by design (see note 8) |
 
 ## Still deferred
 
