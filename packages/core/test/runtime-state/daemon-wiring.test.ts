@@ -307,7 +307,7 @@ describe("daemon wiring — the retention sweep runs at boot and on its own inte
         store.close();
       }
     });
-  });
+  }, 15_000); // its wait is bounded at 4 s by until: the test's own timeout must sit above it
 });
 
 describe("daemon wiring — Major 1: the claude-resume-* staging sweep's root is injectable", () => {

@@ -112,5 +112,5 @@ describe("a daemon with injected secrets never builds a Keychain MCP OAuth store
       daemonKeychain.mockRestore();
       sdkKeychain.mockRestore();
     }
-  });
+  }, 30_000); // its 2 waits are bounded at 10 s each by until: the test's own timeout must sit above them
 });

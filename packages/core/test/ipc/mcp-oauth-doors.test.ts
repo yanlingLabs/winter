@@ -145,7 +145,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
     // Nothing secret on the listing.
     const raw = (await oauthStore.read(mcpOAuthTokenAccount(fx.mcpUrl)))!;
     expect(JSON.stringify(after.result)).not.toContain(JSON.parse(raw).accessToken);
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("an unknown login id, and a login nobody completes within its lifetime, read `expired` — and the listener is closed", async () => {
     const fx = fixture();
@@ -154,7 +154,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
     const start = await c.request(METHODS.mcpLogin, { name: "linear" });
     await until(async () => (await c.request(METHODS.mcpLoginStatus, { loginId: start.result.loginId })).result.state === "expired");
     await expect(fx.approve(start.result.authUrl)).rejects.toThrow();
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("a changed authorization server needs confirmation: typed, both origins, the stored registration put back; confirmed → proceeds", async () => {
     const fx = fixture();
@@ -174,7 +174,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
     expect(confirmed.error).toBeUndefined();
     await fx.approve(confirmed.result.authUrl);
     await until(async () => (await c.request(METHODS.mcpLoginStatus, { loginId: confirmed.result.loginId })).result.state === "done");
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("mcp.logout revokes and signs out, keeping the client registration; forgetClient removes it too", async () => {
     const fx = fixture();
@@ -195,7 +195,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
     await signIn();
     expect((await c.request(METHODS.mcpLogout, { name: "linear", forgetClient: true })).result).toEqual({ ok: true });
     expect(await oauthStore.read(mcpOAuthClientAccount(fx.mcpUrl))).toBeNull();
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("mcp.setClientSecret: the DERIVED account, bound to the user server's own issuer; never echoed; the sign-in then uses it", async () => {
     const port = freePort();
@@ -238,7 +238,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
     } finally {
       errSpy.mockRestore();
     }
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("mcp.setClientSecret refuses: a project server with no user-scope counterpart, a non-pre-registered server, a stdio server, an unknown name", async () => {
     const fx = fixture();
@@ -336,5 +336,5 @@ describe("the MCP sign-in doors (WS-25)", () => {
     releaseIdle();
     await until(async () => calls.length >= 2);
     expect(calls).toEqual([`${idle}:linear`, `${busy}:linear-work`]);
-  });
+  }, 20_000); // its 2 waits are bounded at 5 s each by until: the test's own timeout must sit above them
 });
