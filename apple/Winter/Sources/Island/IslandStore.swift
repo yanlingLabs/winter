@@ -79,7 +79,7 @@ final class IslandStore: ObservableObject {
     var openURL: (URL) -> Bool = { _ in false }
     /// Told after every change of what is on top (the controller lays out its panels).
     var onChange: (() -> Void)?
-    /// Told the view requests now on top (`WinterClient.islandShown`).
+    /// Acks view requests the controller has on screen (`WinterClient.islandShown`).
     var onShown: (([String]) -> Void)?
 
     // MARK: Reading
@@ -104,6 +104,9 @@ final class IslandStore: ObservableObject {
     private(set) var generation = 0
     /// The newest list fetched and not yet applied (kept across a pass skipped as stale).
     private var fetched: [IslandCard]?
+    /// A pass skipped as stale this many times in a row is applied anyway: a burst of asks never starves the island.
+    static let maxStaleSkips = 3
+    private var staleSkips = 0
 
     /// Ask the daemon again (on connect, and on every `island.changed`).
     func refresh() async {
@@ -130,14 +133,20 @@ final class IslandStore: ObservableObject {
             wantFetch = false
             wantRoute = false
             let started = generation
-            if fetchNow {
-                guard let items = try? await fetch() else { continue }
+            // A failed fetch keeps whatever re-judging was asked with it: the pass goes on with the cards it has.
+            if fetchNow, let items = try? await fetch() {
                 fetched = items.compactMap(IslandCard.from)
             }
             let next = fetched ?? cards
             let judged = await judgeTerminals(for: next)
-            // Stale: another ask came in while this one read the terminals — run again with what is true now.
-            guard started == generation, !wantFetch, !wantRoute else { continue }
+            // Stale: another ask came in while this one read the terminals — run again with what is true now, unless
+            // that has already happened `maxStaleSkips` times in a row (then this one is applied, and the next pass
+            // still runs for the newer ask).
+            if started != generation || wantFetch || wantRoute, staleSkips < Self.maxStaleSkips {
+                staleSkips += 1
+                continue
+            }
+            staleSkips = 0
             terminalFrontness = judged
             fetched = nil
             apply(next)
@@ -190,10 +199,13 @@ final class IslandStore: ObservableObject {
         cards = next
         placements = placed
         changed()
-        // Tell the daemon which view requests are on screen here (`island.shown`): the desktop-switch prompt asks the
-        // helper as well when no island says so (a connected but hung app).
-        let shownIds = next.filter { $0.kind == .viewRequest && placed[$0.id] == .top }.map(\.callId)
-        if !shownIds.isEmpty { onShown?(shownIds) }
+    }
+
+    /// The view requests the queue holds on top (expanded, waiting or compacted): what the controller acks to the
+    /// daemon (`island.shown`) once its panel is actually on screen.
+    var viewRequestsOnTop: [IslandCard] {
+        let held = queue.ids
+        return cards.filter { $0.kind == .viewRequest && held.contains($0.id) }
     }
 
     // MARK: The queue's inputs
@@ -214,6 +226,9 @@ final class IslandStore: ObservableObject {
         guard queue.currentTyping != typing else { return }
         queue.typingCurrent(typing, now: clock())
         changed()
+        // Typing held the card on top whatever the routing said; now the routing decides again (its host may have
+        // come to the front meanwhile).
+        if !typing { Task { await reroute() } }
     }
 
     func clickWaiting() {

@@ -231,11 +231,13 @@ export function islandAwareDesktopPanel(
         inner.answer.then(settle, () => settle(undefined));
       };
       const unsubscribe = island.onAllClientsGone(() => fallBack("Winter's island left"));
-      void island.waitShown(p.promptId, ackMs).then((shown) => { if (!shown) fallBack("Winter's island did not show it"); });
+      const ackWait = new AbortController();
+      void island.waitShown(p.promptId, ackMs, ackWait.signal).then((shown) => { if (!shown) fallBack("Winter's island did not show it"); });
       return {
         answer,
         close: () => {
           closed = true;
+          ackWait.abort(); // the 2 s ack timer goes with the prompt
           unsubscribe();
           try { inner?.close(); } catch { /* already gone */ }
           settle(undefined);

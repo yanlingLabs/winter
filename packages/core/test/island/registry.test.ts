@@ -176,7 +176,9 @@ describe("the desktop-switch prompt's on-screen half", () => {
     island.addClient(app);
     const panel = islandAwareDesktopPanel(helper, island, () => {}, 30);
     const shown = panel.show(prompt);
+    expect(island.shownWaiting).toBe(1);
     shown.close();
+    expect(island.shownWaiting).toBe(0); // the ack timer is cleared with the prompt
     island.removeClient(app);
     await tick(60);
     expect(helper.shown).toEqual([]);
@@ -299,8 +301,8 @@ describe("island.pending over the socket", () => {
     tui.close();
   });
 
-  test("a client without the capability is no island client; a bad tty is refused; island.pending is local-only", async () => {
-    const { socketPath, tokens, island } = await boot();
+  test("a client without the capability is no island client; a bad tty is refused; island.pending and island.shown are local-only", async () => {
+    const { store, socketPath, tokens, island } = await boot();
     const plain = await TestClient.connect(socketPath);
     expect((await plain.hello(tokens.harness, "orb")).result.ok).toBe(true);
     expect(island.hasClient()).toBe(false);
@@ -312,6 +314,16 @@ describe("island.pending over the socket", () => {
     await remote.hello(tokens.remote, "iphone-gateway", { capabilities: [CLIENT_CAPABILITY_ISLAND] }, "remote");
     expect(island.hasClient()).toBe(false); // a remote connection never becomes an island client
     expect((await remote.request(METHODS.islandPending, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    // island.shown is the local app's alone: a phone (remote) or a plugin cannot fake the desktop-switch ack.
+    expect((await remote.request(METHODS.islandShown, { ids: ["cu_1"] })).error?.code).toBe(ERR.UNAUTHORIZED);
+    expect(REMOTE_ALLOWED_METHODS.has(METHODS.islandShown)).toBe(false);
+    const pluginToken = store.mintPluginToken("example-plugin");
+    const plugin = await TestClient.connect(socketPath);
+    expect((await plugin.hello(pluginToken, "example-plugin", { pluginId: "example-plugin" }, "plugin")).result.ok).toBe(true);
+    expect((await plugin.request(METHODS.islandShown, { ids: ["cu_1"] })).error?.code).toBe(ERR.UNAUTHORIZED);
+    expect((await plugin.request(METHODS.islandPending, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    expect(await island.waitShown("cu_1", 5)).toBe(false);
+    plugin.close();
     plain.close(); bad.close(); remote.close();
   });
 });

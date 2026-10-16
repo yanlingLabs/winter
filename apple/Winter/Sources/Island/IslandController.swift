@@ -111,6 +111,8 @@ final class IslandController {
         removePointerMonitors()
         removeOpenMonitors()
         wake?.cancel()
+        pendingReroute?.cancel()
+        pendingReroute = nil
         terminalWatcher.stop()
         for o in observers { NotificationCenter.default.removeObserver(o) }
         for o in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
@@ -124,8 +126,40 @@ final class IslandController {
     /// The focus changed somewhere (an app came to the front, a window became key, the Dispatch pill showed or hid, a
     /// terminal's tab changed): re-judge where the cards go. Nothing to do while nothing is pending.
     func focusChanged() {
-        guard !store.cards.isEmpty else { return }
-        Task { await store.reroute() }
+        guard !store.cards.isEmpty, pendingReroute == nil else { return }
+        // Trailing coalesce: a burst of notifications (an app switch raises several) is ONE re-route.
+        let item = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingReroute = nil
+                Task { await self.store.reroute() }
+            }
+        }
+        pendingReroute = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.focusCoalesce, execute: item)
+    }
+
+    /// How long focus notifications are gathered into one re-route.
+    static let focusCoalesce: TimeInterval = 0.1
+    private var pendingReroute: DispatchWorkItem?
+    /// View requests already acked to the daemon (`island.shown`).
+    private var acked: Set<String> = []
+
+    /// Ack the view requests the top panel actually shows — only once it is ordered in on a screen.
+    private func ackShownViewRequests() {
+        let onScreen: [String]
+        if islandPanel.isVisible, islandPanel.screen != nil {
+            // The open island lists every view request in Needs you.
+            onScreen = store.cards.filter { $0.kind == .viewRequest }.map(\.callId)
+        } else if topPanel.isVisible, topPanel.screen != nil {
+            onScreen = store.viewRequestsOnTop.map(\.callId)
+        } else {
+            return
+        }
+        let ids = islandAckIds(onScreen, alreadyAcked: acked)
+        guard !ids.isEmpty else { return }
+        acked.formUnion(ids)
+        store.onShown?(ids)
     }
 
     private func observeFocus() {
@@ -333,6 +367,8 @@ final class IslandController {
         }
         topPanel.setFrame(panelFrame(for: CGRect(x: -width / 2, y: 0, width: width, height: height)), display: true)
         if !topPanel.isVisible { topPanel.orderFrontRegardless() }
+        acked.formIntersection(Set(store.cards.map(\.callId)))
+        ackShownViewRequests()
         updatePointerMonitors(active: true)
         pointerMoved()
         watchTerminalsIfNeeded()
@@ -419,6 +455,7 @@ final class IslandController {
         layoutIsland()
         openModel.open = false
         islandPanel.orderFrontRegardless()
+        ackShownViewRequests()
         DispatchQueue.main.async { [openModel, reduceMotion] in
             if reduceMotion { openModel.open = true } else {
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { openModel.open = true }
@@ -624,4 +661,10 @@ struct IslandOpenRoot: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .environment(\.colorScheme, .dark)
     }
+}
+
+/// PURE: the view requests to ack now — those on screen not acked before.
+func islandAckIds(_ onScreen: [String], alreadyAcked: Set<String>) -> [String] {
+    var seen = Set<String>()
+    return onScreen.filter { !alreadyAcked.contains($0) && seen.insert($0).inserted }
 }

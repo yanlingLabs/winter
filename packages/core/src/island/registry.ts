@@ -67,8 +67,9 @@ export interface IslandPresence {
   hasClient(): boolean;
   /** Called once when the LAST island client leaves (a quit, a crash, a dropped socket). Returns the unsubscribe. */
   onAllClientsGone(fn: () => void): () => void;
-  /** Resolves true when an island client says it shows the card `id` (`island.shown`), false after `ms`. */
-  waitShown(id: string, ms: number): Promise<boolean>;
+  /** Resolves true when an island client says it shows the card `id` (`island.shown`), false after `ms` — or at once
+   *  when `signal` aborts (its timer cleared). */
+  waitShown(id: string, ms: number, signal?: AbortSignal): Promise<boolean>;
 }
 
 interface Entry {
@@ -121,21 +122,33 @@ export class IslandRegistry implements IslandPresence {
     while (this.shown.size > ISLAND_MAX_ENTRIES) this.shown.delete(this.shown.values().next().value as string);
   }
 
-  waitShown(id: string, ms: number): Promise<boolean> {
+  waitShown(id: string, ms: number, signal?: AbortSignal): Promise<boolean> {
     if (this.shown.has(id)) return Promise.resolve(true);
+    if (signal?.aborted === true) return Promise.resolve(false);
     return new Promise((resolve) => {
       let set = this.shownWaiters.get(id);
       if (set === undefined) { set = new Set(); this.shownWaiters.set(id, set); }
       const waiters = set;
-      const done = (shown: boolean): void => { clearTimeout(timer); resolve(shown); };
-      const timer = setTimeout(() => {
+      const forget = (): void => {
+        clearTimeout(timer);
         waiters.delete(done);
-        if (waiters.size === 0) this.shownWaiters.delete(id);
-        resolve(false);
-      }, ms);
+        if (waiters.size === 0 && this.shownWaiters.get(id) === waiters) this.shownWaiters.delete(id);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const done = (shown: boolean): void => { forget(); resolve(shown); };
+      const onAbort = (): void => done(false);
+      const timer = setTimeout(() => done(false), ms);
       (timer as { unref?: () => void }).unref?.();
       waiters.add(done);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  /** Test seam: prompts still waiting to hear `island.shown` (each holds a timer). */
+  get shownWaiting(): number {
+    let n = 0;
+    for (const set of this.shownWaiters.values()) n += set.size;
+    return n;
   }
 
   /** Every appended event of every session (`SessionHub.addObserver`). */

@@ -169,14 +169,74 @@ final class IslandStoreTests: XCTestCase {
         XCTAssertEqual(store.currentCard?.id, typed.id)
     }
 
-    func testViewRequestsOnTopAreAcknowledgedToTheDaemon() {
+    func testOnlyViewRequestsTheQueueHoldsOnTopAreOfferedForTheAckAndEachOnce() {
         let store = makeStore()
         var acked: [[String]] = []
         store.onShown = { acked.append($0) }
         let view = IslandCard(callId: "cu_1", sessionId: "s", answerSessionId: "s", kind: .viewRequest,
                               payload: .viewRequest(app: "Safari", bundleId: "com.apple.Safari", reason: ""))
         store.apply([approval("a"), view])
-        XCTAssertEqual(acked, [["cu_1"]])
+        XCTAssertEqual(acked, [], "the store acks nothing itself: only a panel on screen does (the controller)")
+        XCTAssertEqual(store.viewRequestsOnTop.map(\.callId), ["cu_1"])
+        XCTAssertEqual(islandAckIds(["cu_1", "cu_2", "cu_2"], alreadyAcked: ["cu_1"]), ["cu_2"])
+    }
+
+    func testABurstOfFocusChangesStillApplies() async {
+        let store = makeStore()
+        let card = approval("a", hosts: [IslandHost(clientName: "tui", tty: "/dev/ttys004")])
+        store.apply([card])
+        var reads = 0
+        store.readTerminals = { [unowned store] ttys in
+            reads += 1
+            // Every read sees a newer ask arrive (a notification storm).
+            if reads < 50 { Task { await store.reroute() } ; await Task.yield() }
+            return Dictionary(uniqueKeysWithValues: ttys.map { ($0, .front) })
+        }
+        await store.reroute()
+        for _ in 0..<200 where store.placements[card.id] != .hidden { await Task.yield() }
+        XCTAssertEqual(store.placements[card.id], .hidden, "applied after at most \(IslandStore.maxStaleSkips) skipped passes")
+    }
+
+    func testAFailedFetchKeepsTheRerouteQueuedWithIt() async {
+        let store = makeStore()
+        let card = approval("a", hosts: [IslandHost(clientName: "tui", tty: "/dev/ttys004")])
+        store.apply([card])
+        struct Down: Error {}
+        store.fetch = { throw Down() }
+        var reads = 0
+        var release: CheckedContinuation<Void, Never>?
+        store.readTerminals = { ttys in
+            reads += 1
+            if reads == 1 {
+                await withCheckedContinuation { release = $0 }
+                return Dictionary(uniqueKeysWithValues: ttys.map { ($0, .notFront) })
+            }
+            return Dictionary(uniqueKeysWithValues: ttys.map { ($0, .front) })
+        }
+        let first = Task { await store.reroute() }
+        for _ in 0..<100 where release == nil { await Task.yield() }
+        // While the first pass reads, a fetch AND a re-route are asked; the fetch will fail.
+        await store.refresh()
+        await store.reroute()
+        release?.resume()
+        await first.value
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(store.placements[card.id], .hidden, "the re-route still ran, on the cards in hand")
+        XCTAssertEqual(store.cards.map(\.id), [card.id])
+    }
+
+    func testTheEndOfTypingReroutesSoACardWhoseHostCameToTheFrontLeaves() async {
+        let store = makeStore()
+        let card = approval("a", hosts: [IslandHost(clientName: "tui", tty: "/dev/ttys004")])
+        store.apply([card])
+        store.typingCurrent(true)
+        store.readTerminals = { ttys in Dictionary(uniqueKeysWithValues: ttys.map { ($0, .front) }) }
+        await store.reroute()
+        XCTAssertEqual(store.currentCard?.id, card.id, "held while typing")
+        store.typingCurrent(false)
+        for _ in 0..<200 where store.currentCard != nil { await Task.yield() }
+        XCTAssertNil(store.currentCard, "typing over: the routing decides again and hides it")
+        XCTAssertEqual(store.placements[card.id], .hidden)
     }
 
     func testAStaleTerminalJudgementIsNotAppliedOverANewerOne() async {
