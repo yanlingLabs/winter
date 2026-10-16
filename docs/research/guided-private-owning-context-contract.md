@@ -9,7 +9,9 @@ Slice A (the private owning slot, `packages/core/src/cowork/guest-context-owner.
 is source only. It adds no issuer, callback registration, profile, public export,
 barrel entry, daemon method or execution path. Its evidence port is an abstract
 interface with no implementation anywhere in `src/`, so production context
-construction stays refused. Slice B (the per-invocation reader adapter) is next.
+construction stays refused. Slice B (the per-invocation reader adapter,
+`packages/core/src/cowork/guided-reader-adapter.ts`) is implemented in the stacked
+PR on top of this one and is equally source only; see "Slice B implementation notes".
 
 ## Existing mechanisms and missing issuer
 
@@ -125,7 +127,7 @@ check), and its authenticity is a separate review.
 Core's SDK pin (0.0.53) has no guided module, so the slot imports no SDK guided
 type; the correlation and evidence are plain-data mirrors of the SDK shapes.
 
-## Per-invocation adapter (Slice B, not in this PR)
+## Per-invocation adapter (Slice B)
 
 **F1.** Core cannot call the SDK's private `readGuidedQueryInstructions`, and its
 SDK pin does not contain it. The per-invocation reader adapter therefore sits
@@ -176,6 +178,32 @@ controller's canonical authority/ownership projection and the worker's
 authenticated parser/reader surface are distinct responsibilities, and Core
 receives only the already-parsed, closed, bounded `frame.snapshot` data. Their
 production transport placement is still required before this adapter can activate.
+
+### Slice B implementation notes
+
+`createCoworkGuidedRuntimeContextHandler` is a sibling of the existing factory. Per SDK
+callback it composes a fresh copy of the unchanged handler with a reader that closes over
+that invocation's original signal and calls the abstract `readFrame(signal)` port, which
+has no implementation in `src/`. Nothing imports the module, there is no barrel export and
+the existing factory, resolver and mapper are byte-identical.
+
+- The owner is consumed structurally (its registration port plus the capture's plain
+  data), because Slice A's anti-wiring pin forbids any `src/` importer of the slot. Every
+  call re-checks the live registration against the capture field by field. The capture
+  must carry a reader plan; without one construction is refused.
+- The frame definition (keys, six-field inner owner, views, limits, version, 320 KiB bound)
+  is a copy of the SDK's, with the SDK source paths in the module and a drift test that pins
+  it against an independent literal (plus an opt-in test that reads the SDK source text).
+- Parser order: size, single line, UTF-8, raw nesting bound, `JSON.parse`, exact
+  re-serialization (the duplicate-key defense), no prototype-slot keys, exact key sets,
+  version, read id, owner/views/limits. Only `snapshot` reaches the mapper. The frame's read
+  id is the SDK's, never Core's canonical read id. It is single use per handler from the
+  first well-formed sighting, in a set bounded at the SDK's 4096, and fails closed when full.
+- A late or aborted reply is dropped before any parsing. The resolver's derived signal only
+  ends the wait; the SDK scope is closed by the SDK callback's own completion or abort.
+- The parser runs in Core here so the adapter is testable. F10's production placement (in
+  the sandboxed host worker, not the credential daemon) is unchanged and still required
+  before this adapter can activate.
 
 ## Open SDK-side decision (F2)
 
