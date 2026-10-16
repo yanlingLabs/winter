@@ -208,7 +208,9 @@ export interface OrderlyVolume {
   readonly purpose: CoworkNativeVolumePurpose; readonly device: string; readonly inode: string; readonly capacityBytes: number;
   readonly attached: boolean; readonly flushRequested: number; readonly flushCompleted: number; readonly finalFlush: "completed" | "not-attached";
 }
-const orderlyVolumeSpec = (purpose: CoworkNativeVolumePurpose): Spec => [["purpose", literal(purpose)], ["device", decimal64], ["inode", decimal64], ["capacityBytes", capacity], ["attached", bool],
+/** A volume the worker never received cannot be named by the launcher, so an unattached entry carries zeros: device "0", inode "0",
+ * capacityBytes 0 (`classAInvariantsHold` demands it). An attached entry carries the real identity, in the capacity range. */
+const orderlyVolumeSpec = (purpose: CoworkNativeVolumePurpose): Spec => [["purpose", literal(purpose)], ["device", decimal64], ["inode", decimal64], ["capacityBytes", value => value === 0 ? 0 : capacity(value)], ["attached", bool],
   ["flushRequested", uint()], ["flushCompleted", uint()], ["finalFlush", oneOf(["completed", "not-attached"] as const)]];
 const ORDERLY_SPEC: Spec = [["v", literal(1)], ["class", literal("A")], ["confirmationId", token], ["stopNonce", nonce], ["origin", oneOf(COWORK_NATIVE_STOP_ORIGINS)], ["launcherInstanceId", label],
   ["admissionId", token], ["homeId", token], ["workspaceId", token], ["incarnationId", token], ["leaseEpoch", epochOf], ["controllerInstanceId", token], ["workerInstanceId", token],
@@ -245,7 +247,9 @@ export function classAInvariantsHold(receipt: CoworkNativeOrderlyReceipt): boole
   if (booted !== (receipt.guest.powerOff === "observed")) return false;
   const [data, environment] = receipt.volumes;
   if (data.attached !== environment.attached || data.attached && !booted) return false;
-  return receipt.volumes.every(v => v.attached ? v.finalFlush === "completed" && v.flushRequested === v.flushCompleted : v.finalFlush === "not-attached" && v.flushRequested === 0 && v.flushCompleted === 0);
+  return receipt.volumes.every(v => v.attached
+    ? v.finalFlush === "completed" && v.flushRequested === v.flushCompleted && v.capacityBytes > 0
+    : v.finalFlush === "not-attached" && v.flushRequested === 0 && v.flushCompleted === 0 && v.device === "0" && v.inode === "0" && v.capacityBytes === 0);
 }
 
 /** Parse the text of ONE receipt (the durable store's file content, and the exact text embedded in `stopped`/`uncertain`). */

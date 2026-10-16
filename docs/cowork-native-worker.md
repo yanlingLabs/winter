@@ -174,7 +174,7 @@ issuedAtMs`. The chain it attests: the guest halted through a `drain` frame and 
 `waitpid` confirmed the exit of the process it owns, and the worker's flush receipt shows every requested flush completed and a
 final flush after power-off. It is valid only when all of these hold (`classAInvariantsHold`): `guest.drain = acked` exactly when
 `guest.powerOff = observed`; both volumes attached or neither; attached implies a booted guest, `finalFlush = completed` and
-`flushRequested = flushCompleted`; not attached implies `finalFlush = not-attached` and both counters zero. A launcher that cannot state
+`flushRequested = flushCompleted`; not attached implies `finalFlush = not-attached`, both counters zero, and `device`, `inode` and `capacityBytes` all `0` (the launcher cannot name a file it never received); an attached entry names the exact file the daemon sent. A launcher that cannot state
 all of this emits Class B instead. `stopNonce` is the daemon's nonce from `stop` (`origin = host-stop`) or a launcher-minted one
 (`origin = owner-loss-drain`). The launcher writes the receipt to its durable store and fsyncs BEFORE sending it, and keeps it until
 the daemon sends `receipt_retire`.
