@@ -9,12 +9,15 @@ final class IslandTabsTests: XCTestCase {
         IslandTab(id: "usage", title: "Usage and limits", symbol: "gauge"),
     ]
 
-    func testPhaseOneRegistersOneTabNeedsYouAndShowsNoDots() {
+    func testNeedsYouComesFirstWatchesIsRegisteredAndOneTabShowsNoDots() {
         let state = IslandTabState()
-        XCTAssertEqual(state.tabs.map(\.id), ["needs-you"])
+        XCTAssertEqual(state.tabs.first?.id, "needs-you")
         XCTAssertEqual(state.selected?.title, "Needs you")
-        XCTAssertFalse(state.showsDots)
-        var s = state
+        XCTAssertTrue(state.tabs.contains(IslandTabRegistry.watches), "phase 2: the Watches tab")
+        XCTAssertTrue(state.showsDots)
+        let one = IslandTabState(tabs: [IslandTabRegistry.needsYou])
+        XCTAssertFalse(one.showsDots)
+        var s = one
         XCTAssertFalse(s.swipe(.left), "nowhere to go with one tab")
         XCTAssertFalse(s.swipe(.right))
     }

@@ -472,6 +472,7 @@ struct IslandExpandedView: View {
     @ViewBuilder private var tabBody: some View {
         switch store.tabs.selected?.id {
         case IslandTabRegistry.needsYou.id?: IslandNeedsYouList(store: store, scrolls: scrolls)
+        case IslandTabRegistry.watches.id?: IslandWatchesList(activity: store.activity, scrolls: scrolls)
         default: Spacer()
         }
     }

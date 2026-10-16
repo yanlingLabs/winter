@@ -15,9 +15,11 @@ struct IslandTab: Identifiable, Equatable {
 
 enum IslandTabRegistry {
     static let needsYou = IslandTab(id: "needs-you", title: "Needs you", symbol: "hand.raised.fill")
+    /// Phase 2: every armed computer-use watch (`wakeWhen`), with Stop.
+    static let watches = IslandTab(id: "watches", title: "Watches", symbol: "eye")
 
     /// The tabs this build shows, in swipe order. Phase 2 adds `sessions`, `usage`, `devices`, `shelf`, `watches`.
-    static let tabs: [IslandTab] = [needsYou]
+    static let tabs: [IslandTab] = [needsYou, watches]
 }
 
 /// Which tab is showing. Pure.

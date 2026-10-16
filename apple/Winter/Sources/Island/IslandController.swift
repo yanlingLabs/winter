@@ -34,7 +34,13 @@ final class IslandController {
     private let topPanel = IslandPanel(level: .statusBar)
     private let islandPanel = IslandPanel(level: .statusBar)
     private var shape = IslandScreenShape(housing: nil, menuBarHeight: 24)
-    private var screenFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    private(set) var screenFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    /// The island screen's top (phase 2's activity slot hangs from the same housing).
+    var screenShape: IslandScreenShape { shape }
+    /// Told after every redraw of the cards on top and every open/close (phase 2's activity slot yields to them).
+    var onTopChanged: (() -> Void)?
+    /// Told on every change of focus (phase 2's computer-use pill hides while its session's host is in front).
+    var onFocusChanged: (() -> Void)?
     private let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     /// The pointer over the top panel, for the buttons' glow (`pillHoverGlow`).
     private let pointer = DispatchPillPointer()
@@ -126,6 +132,7 @@ final class IslandController {
     /// The focus changed somewhere (an app came to the front, a window became key, the Dispatch pill showed or hid, a
     /// terminal's tab changed): re-judge where the cards go. Nothing to do while nothing is pending.
     func focusChanged() {
+        onFocusChanged?()
         guard !store.cards.isEmpty, pendingReroute == nil else { return }
         // Trailing coalesce: a burst of notifications (an app switch raises several) is ONE re-route.
         let item = DispatchWorkItem { [weak self] in
@@ -310,6 +317,7 @@ final class IslandController {
     }
 
     private func drawTop() {
+        defer { onTopChanged?() }
         let queue = store.queue
         let currentCard = store.currentCard
         let waitingCard = store.waitingCard
@@ -503,7 +511,9 @@ final class IslandController {
     /// scrolls past the island's maximum).
     private func islandContentHeight() -> CGFloat {
         let header: CGFloat = 46
-        guard !store.cards.isEmpty else { return header + 90 }
+        // Room for the tallest tab, so a swipe between them needs no new layout.
+        let watches = islandWatchesHeight(store.activity, header: header)
+        guard !store.cards.isEmpty else { return max(header + 90, watches) }
         var rows: CGFloat = 0
         for card in store.cards.reversed() {
             let host = NSHostingView(rootView: IslandNeedsYouRow(card: card, store: store)
@@ -511,7 +521,7 @@ final class IslandController {
             rows += ceil(host.fittingSize.height) + 10
             if header + rows > IslandLayout.islandMaxHeight { break }
         }
-        return header + rows + 14
+        return max(header + rows + 14, watches)
     }
 
     private func installOpenMonitors() {

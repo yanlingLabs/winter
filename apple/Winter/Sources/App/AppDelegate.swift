@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var pillController: DispatchPillController?
     /// The Winter island at the camera housing (`docs/claude/island.md`); nil under unit tests and without a token.
     private(set) var islandController: IslandController?
+    /// Phase 2 of the island: the computer-use pill and its mirror, turn results (`IslandActivityController`).
+    private(set) var islandActivityController: IslandActivityController?
     /// The background watchdog for a stalled main thread (never constructed under unit tests).
     private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
@@ -1189,6 +1191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         islandController = island
         island.start()
+        startIslandActivity(store: store, island: island, client: client)
         // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
         let changes = client.notifications(method: WinterClient.islandChangedNotification)
         Task { @MainActor [weak store] in
@@ -1199,6 +1202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onClientConnected = { [weak store] in
             previous?()
             Task { await store?.refresh() }
+            Task { await store?.activity.refresh() }
         }
         // The Dispatch pill showing or hiding moves Dispatch's cards between it and the island.
         pill.$isVisible
@@ -1206,6 +1210,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak island] _ in island?.focusChanged() }
             .store(in: &cancellables)
+    }
+
+    /// The island's phase 2 (`docs/claude/island.md`): the computer-use pill (its words from the agent cursor through the
+    /// mirror coordinator), its mirror (the helper's frames, only while one is on screen), turn-result cards and the
+    /// Watches tab, from the daemon's `island.activity`.
+    private func startIslandActivity(store: IslandStore, island: IslandController, client: WinterClient) {
+        let activity = store.activity
+        activity.fetch = { try await client.islandActivity() }
+        activity.focus = { [weak store] in store?.focus() ?? IslandFocus() }
+        activity.readTerminals = { [weak store] ttys in await store?.readTerminals(ttys) ?? [:] }
+        activity.openSession = { [weak self] sid in self?.summonAppWindow(navigatingTo: .session(sid)) }
+        activity.disarm = { sid, wakeId in (try? await client.cancelWake(sessionId: sid, wakeId: wakeId)) ?? false }
+        let coordinator = mirrorCoordinator
+        activity.onCursorSessionsChange = { [weak coordinator] ids in coordinator?.setIslandCursorSessions(ids) }
+        coordinator?.onIslandCursor = { [weak activity] sid, kind, text, app in
+            activity?.cursor(sessionId: sid, kind: kind, text: text, appName: app)
+        }
+        let controller = IslandActivityController(store: activity, island: island,
+                                                  mirrors: coordinator.map { IslandMirrorLifecycle(capture: $0) })
+        controller.mirrorModel = { [weak coordinator] sid in coordinator?.islandMirrorModel(for: sid) }
+        island.onTopChanged = { [weak controller] in controller?.layout() }
+        island.onFocusChanged = { [weak activity] in Task { await activity?.reroute() } }
+        islandActivityController = controller
+        controller.start()
+        // Asked for BEFORE the connect, like `island.changed`; each one asks the daemon again.
+        let changes = client.notifications(method: WinterClient.islandActivityChangedNotification)
+        Task { @MainActor [weak activity] in
+            for await _ in changes { await activity?.refresh() }
+        }
     }
 
     /// Everything after activation policy. Split out so tests can drive it without
