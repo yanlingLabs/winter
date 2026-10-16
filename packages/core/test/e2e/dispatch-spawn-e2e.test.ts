@@ -27,6 +27,7 @@ import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
+import { guardHeadlessNotifications, type NotificationGuard } from "../helpers/headless-notifications";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
 class TestClient {
@@ -117,7 +118,12 @@ type ChildUpdate = Extract<SessionEvent, { type: "child_update" }>;
 function harnessFor(settings: (home: string) => Record<string, unknown>) {
   const s = {
     home: "", work: "", daemon: undefined as RunningDaemon | undefined, client: undefined as unknown as TestClient, dispatchId: "",
+    // The daemon's headless-notification fallback is caught, not run: a finished child with nobody attached to the
+    // coordinator would otherwise post a REAL macOS notification (`osascript`) from every test run.
+    notifications: undefined as unknown as NotificationGuard,
     async boot(): Promise<void> {
+      s.notifications?.restore();
+      s.notifications = guardHeadlessNotifications();
       s.home = mkdtempSync(join(tmpdir(), "winter-dispatch-spawn-e2e-"));
       s.work = join(s.home, "work");
       mkdirSync(s.work);
@@ -136,6 +142,7 @@ function harnessFor(settings: (home: string) => Record<string, unknown>) {
       const stopping = s.daemon?.stop();
       s.daemon = undefined;
       await stopping;
+      s.notifications?.restore();
       // BACKSTOP only: the daemon no longer spawns into a stop (`beginShutdown`, `spawnRefusal`, an end
       // mid-open -- `spawn-during-stop-e2e.test.ts` drives that race). Should a child still outlive the
       // daemon, every child's command line carries its config, whose cwd is under this home -- so any
@@ -482,6 +489,10 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     await until(() => h.daemon!.winter.get(busyId)?.turnRunning === false || undefined, 30_000, "the second child's stop");
     expect(refused!.isError).toBe(true);
     expect(refused!.output).toContain("only code sessions can currently be messaged or stopped");
+    // Nobody has the coordinator open, so the stopped child's end reaches the headless fallback -- with the child's title.
+    // The guard caught it: no real notification was posted.
+    const posted = await until(() => h.notifications.posted.find((n) => n.title === "Spinner 2"), 10_000, "the headless notification for the stopped child");
+    expect(posted.message).toBe("finished");
   }, 180_000);
 
   test("(8) a TERMINAL that attaches to a turn it did not start and detaches leaves it running; a human-started turn still aborts", async () => {

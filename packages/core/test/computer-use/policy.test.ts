@@ -168,8 +168,7 @@ describe("the per-app card's answers", () => {
     // un-awaited authorize() whose timer later fires rejects with nobody listening and fails whatever test runs then.
     child.approvals.resolve("s1", c.callId, false, "test");
     plain.approvals.resolve("s1", p.callId, false, "test");
-    await failsWith(childRun, "NotAllowed");
-    await failsWith(plainRun, "NotAllowed");
+    await Promise.all([failsWith(childRun, "NotAllowed"), failsWith(plainRun, "NotAllowed")]);
   });
 });
 

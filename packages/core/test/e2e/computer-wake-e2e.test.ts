@@ -20,6 +20,7 @@ import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type Wr
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
+import { guardHeadlessNotifications, type NotificationGuard } from "../helpers/headless-notifications";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 import { FakeHelper } from "../computer-use/fake-helper";
 import { FakeWakeBackend } from "../computer-use/wake-fakes";
@@ -102,6 +103,9 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
   let fake: FakeHelper;
   let app: FakeWakeBackend;
   let tab: FakeWakeBackend;
+  // The daemon's headless-notification fallback is caught, not run: a Dispatch child that finishes with nobody attached
+  // to the coordinator would otherwise post a REAL macOS notification (`osascript`) from every test run.
+  let notifications: NotificationGuard;
 
   const boot = async (): Promise<void> => {
     fake = new FakeHelper();
@@ -128,6 +132,7 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
   };
 
   beforeAll(async () => {
+    notifications = guardHeadlessNotifications();
     home = realpathSync(mkdtempSync(join(tmpdir(), "winter-wake-e2e-")));
     cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-wake-e2e-cwd-")));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
@@ -141,6 +146,7 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
   });
   afterAll(async () => {
     await stop();
+    notifications.restore();
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   });
@@ -304,6 +310,10 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
     await until(() => updates().filter((s) => s === "completed").length >= 2 || undefined, 60_000, "the wake turn's report");
     expect(updates()).toEqual(["running", "completed", "running", "completed"]);
     await until(() => log(dispatchId).filter((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake").length > wakesBefore || undefined, 30_000, "the coordinator's wake");
+    // Nobody has the coordinator open, so each finished report reaches the headless fallback -- with the child's title.
+    // The guard caught it: no real notification was posted.
+    const posted = await until(() => notifications.posted.find((n) => n.title === "Listing"), 10_000, "the headless notification for the finished child");
+    expect(posted.message).toBe("finished");
   }, 180_000);
 
   test("restart: an armed trigger ends `restart` at the next boot and its session is woken once", async () => {
