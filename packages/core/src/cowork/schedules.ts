@@ -3,6 +3,7 @@ import { CoworkScheduleDefinition, type CoworkSchedule, type CoworkScheduleOccur
 import { parseSpec, type CronField } from "../routines/spec";
 import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver } from "./authority";
 import type { CoworkRepository } from "./repository";
+import type { CoworkScheduleDispatchOutcome, CoworkScheduleDispatchPort, CoworkScheduleDispatchReceipt, CoworkScheduleDispatchInput } from "./schedule-dispatch";
 import { CoworkError, type CapabilityCeiling } from "./types";
 
 type Row = Record<string, any>;
@@ -91,11 +92,37 @@ export function nextCoworkScheduleTime(specText: string, timezone: string, from:
   throw new CoworkError("invalid_request");
 }
 
-/** Canonical host state only. No runtime session creation, guest cwd or Code runner dependency. */
+/** The port's run reference is opaque and unpersisted; its shape is bounded (no control characters, no path syntax, <=128) so a future log or UI line can carry it safely. A violating ack is uncertain, not trusted. */
+const RUN_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+/**
+ * Classify a port answer exactly ONCE, before any transaction, and never throw. Every field is read a single time
+ * (a getter that answers differently on a second read cannot split the decision), and a hostile or exotic answer
+ * (a throwing getter, a throwing proxy trap, a non-object) is simply untrustworthy: `uncertain`. Only an exact
+ * `{ kind: "not-started" }` is `not-started`; only a `started` answer whose receipt echoes exactly this claim and
+ * carries a well-formed run reference yields a `runRef`.
+ */
+function classifyAnswer(result: unknown, occurrenceId: string, token: string): "not-started" | "uncertain" | { runRef: string } {
+  try {
+    if (!result || typeof result !== "object") return "uncertain";
+    const { kind, receipt } = result as { kind?: unknown; receipt?: unknown };
+    if (kind === "not-started") return "not-started";
+    if (kind !== "started" || !receipt || typeof receipt !== "object") return "uncertain";
+    const { occurrenceId: echoedOccurrence, token: echoedToken, runRef } = receipt as Record<string, unknown>;
+    if (echoedOccurrence !== occurrenceId || echoedToken !== token || typeof runRef !== "string" || !RUN_REF.test(runRef)) return "uncertain";
+    return { runRef };
+  } catch { return "uncertain"; }
+}
+
+/**
+ * Canonical host state only. No runtime session creation, guest cwd or Code runner dependency. Execution is
+ * reachable only through an injected CoworkScheduleDispatchPort; without one `beginDispatch` stays refused.
+ */
 export class CoworkSchedules {
   private closed = false;
   private readonly authority: CoworkAuthority;
-  constructor(readonly records: CoworkRepository, grants: CoworkGrantResolver, private readonly now = () => Date.now(), private readonly branch?: (workspaceId: string, sourceId: string) => string | undefined, private readonly calendarLimits?: CoworkCalendarLimits) {
+  /** In-memory proof, per instance and never persisted, that THIS process's port acknowledged a claim: the only thing `handled` accepts. */
+  private readonly receipts = new WeakMap<object, { occurrenceId: string; token: string }>();
+  constructor(readonly records: CoworkRepository, grants: CoworkGrantResolver, private readonly now = () => Date.now(), private readonly branch?: (workspaceId: string, sourceId: string) => string | undefined, private readonly calendarLimits?: CoworkCalendarLimits, private readonly port?: CoworkScheduleDispatchPort) {
     this.authority = new CoworkAuthority(records, grants);
   }
   private one(sql: string, ...values: any[]): Row | null { return this.records.rs.db.query(sql).get(...values) as Row | null; }
@@ -244,31 +271,109 @@ export class CoworkSchedules {
       return this.run("UPDATE cowork_schedule_occurrences SET state='claimed',claim_token=?,reason=NULL WHERE schedule_id=? AND occurrence_id=? AND state='pending'", token, scheduleId, occurrenceId).changes ? token : undefined;
     });
   }
-  /** No execution owner is admitted in this slice. A durable claim is not dispatch proof. */
-  beginDispatch(_occurrenceId: string, _token: string): never {
-    throw new CoworkError("unsupported_topology");
+  /** Return a claimed or dispatching occurrence to pending, folding any coalesced pending interval into it first. `reason` undefined leaves the stored reason alone. */
+  private release(row: Row, reason?: Reason): void {
+    const pending = this.one("SELECT * FROM cowork_schedule_occurrences WHERE schedule_id=? AND state='pending'", row.schedule_id);
+    if (pending) {
+      this.run("UPDATE cowork_schedule_occurrences SET latest_due_at=?,missed_count=? WHERE occurrence_id=?", pending.latest_due_at, row.missed_count + pending.missed_count + 1, row.occurrence_id);
+      this.run("DELETE FROM cowork_schedule_occurrences WHERE occurrence_id=?", pending.occurrence_id);
+    }
+    this.run("UPDATE cowork_schedule_occurrences SET state='pending',claim_token=NULL WHERE occurrence_id=?", row.occurrence_id);
+    if (reason) this.run("UPDATE cowork_schedule_occurrences SET reason=? WHERE occurrence_id=?", reason, row.occurrence_id);
   }
-  handled(occurrenceId: string, token: string): void {
+  private dispatching(occurrenceId: string, token: string): Row | null {
+    return this.one("SELECT * FROM cowork_schedule_occurrences WHERE occurrence_id=? AND state='dispatching' AND claim_token=?", occurrenceId, token);
+  }
+  private markUncertain(occurrenceId: string): void {
+    this.run("UPDATE cowork_schedule_occurrences SET state='uncertain',reason='recovery_required' WHERE occurrence_id=? AND state='dispatching'", occurrenceId);
+  }
+  /**
+   * claimed -> dispatching (durable, rechecked) -> port.start -> acknowledged.
+   *
+   * MIXED SYNCHRONOUS/ASYNCHRONOUS BY DESIGN: every precondition failure THROWS SYNCHRONOUSLY, before any write
+   * (`unsupported_topology` with no injected port, exactly as before this slice; `request_conflict` for an
+   * unknown, reused, wrong-token or no-longer-claimed occurrence). Only the port wait is asynchronous, and the
+   * returned promise settles to an outcome (`started`, `blocked`, `not-started`, `uncertain`); it rejects ONLY
+   * on a store failure, which leaves the row `dispatching` for `recover()` to mark uncertain. A caller must
+   * therefore use `try { await beginDispatch(...) }`, not a bare `.then()` chain, to see the precondition errors.
+   * The synchronous throw is kept so the pre-existing contract (`beginDispatch` throws `unsupported_topology`
+   * without a port) is unchanged.
+   *
+   * Nothing is held open across the port call, and `dispatching` is committed BEFORE `start` runs, so a crash
+   * at any later point can only produce `uncertain`, never a replay. Only a returned `not-started` goes back to
+   * `pending`; a throw, a malformed answer or a hostile one is `uncertain`, and the port's own error text is
+   * never kept or returned.
+   */
+  beginDispatch(occurrenceId: string, token: string): Promise<CoworkScheduleDispatchOutcome> {
+    const port = this.port;
+    if (!port) throw new CoworkError("unsupported_topology");
+    const begun = this.tx((): { blocked: Reason } | { input: CoworkScheduleDispatchInput } => {
+      const row = this.one("SELECT * FROM cowork_schedule_occurrences WHERE occurrence_id=? AND state='claimed'", occurrenceId);
+      if (!row || row.claim_token !== token) throw new CoworkError("request_conflict");
+      const parent = this.one("SELECT * FROM cowork_schedules WHERE schedule_id=?", row.schedule_id);
+      if (!parent || parent.state !== "enabled") throw new CoworkError("request_conflict");
+      const refuse = (reason: Reason) => { this.release(row, reason); return { blocked: reason }; };
+      if (this.quarantined(row.schedule_id)) return refuse("invalid_schedule");
+      let value: CoworkSchedule;
+      try { value = schedule(parent); } catch { this.quarantine(parent); return refuse("invalid_schedule"); }
+      // A claim is not authority: archive, grants, policy, source and branch are re-decided at the instant of flip.
+      const reason = this.blockedReason(value);
+      if (reason !== "execution_unavailable") return refuse(reason);
+      const effective = this.effective(value.workspaceId, value.scheduleId);
+      if (!this.run("UPDATE cowork_schedule_occurrences SET state='dispatching',reason=NULL WHERE occurrence_id=? AND state='claimed'", occurrenceId).changes) throw new CoworkError("request_conflict");
+      return { input: Object.freeze({ schedule: value, occurrence: occurrence({ ...row, state: "dispatching", reason: null }), effective }) };
+    });
+    return "blocked" in begun ? Promise.resolve({ status: "blocked", reason: begun.blocked }) : this.launch(port, begun.input, token);
+  }
+  private async launch(port: CoworkScheduleDispatchPort, input: CoworkScheduleDispatchInput, token: string): Promise<CoworkScheduleDispatchOutcome> {
+    const occurrenceId = input.occurrence.occurrenceId;
+    let answer: ReturnType<typeof classifyAnswer>;
+    try { answer = classifyAnswer(await port.start(input, token), occurrenceId, token); }
+    catch {
+      // A throw (or a rejection, or a missing `start`) is NEVER "nothing launched": the effect may exist. Only a returned `not-started` goes back to pending.
+      return this.tx((): CoworkScheduleDispatchOutcome => { if (this.dispatching(occurrenceId, token)) this.markUncertain(occurrenceId); return { status: "uncertain" }; });
+    }
+    return this.tx((): CoworkScheduleDispatchOutcome => {
+      // Guarded on state AND token: a cancel() or recover() that already recorded recovery_required is never clobbered back to pending.
+      const row = this.dispatching(occurrenceId, token);
+      if (!row) return { status: "uncertain" }; // cancel()/recover() got there first and recorded it durably
+      if (answer === "not-started") { this.release(row, "execution_unavailable"); return { status: "not-started" }; }
+      if (answer === "uncertain") { this.markUncertain(occurrenceId); return { status: "uncertain" }; } // uncertain, malformed or untrustworthy: an effect may exist
+      const receipt: CoworkScheduleDispatchReceipt = Object.freeze({ occurrenceId, runRef: answer.runRef });
+      this.receipts.set(receipt, { occurrenceId, token });
+      return { status: "started", receipt };
+    });
+  }
+  /** dispatching -> handled, only with the receipt this instance's port issued for exactly this claim. A one-shot is never handled without one. */
+  handled(occurrenceId: string, token: string, receipt: CoworkScheduleDispatchReceipt): void {
     this.tx(() => {
+      const proof = this.receipts.get(receipt);
+      if (!proof || proof.occurrenceId !== occurrenceId || proof.token !== token) throw new CoworkError("request_conflict");
       const row = this.one("SELECT * FROM cowork_schedule_occurrences WHERE occurrence_id=? AND state='dispatching' AND claim_token=?", occurrenceId, token);
       if (!row) throw new CoworkError("request_conflict");
       this.run("UPDATE cowork_schedule_occurrences SET state='handled',claim_token=NULL WHERE occurrence_id=?", occurrenceId);
       const parent = this.one("SELECT * FROM cowork_schedules WHERE schedule_id=?", row.schedule_id)!;
       if (schedule(parent).definition.timing.kind === "once" && parent.state === "enabled") this.run("UPDATE cowork_schedules SET state='handled',revision=revision+1 WHERE schedule_id=?", row.schedule_id);
     });
+    this.receipts.delete(receipt);
+  }
+  /**
+   * dispatching -> uncertain for the execution owner reporting that it can no longer vouch for the work. Needs the
+   * claim token, never a receipt, and is never replayed. An `uncertain` occurrence of a ONE-SHOT leaves the schedule
+   * `enabled` and the occurrence holding the job's active slot until a recovery path (not part of this slice)
+   * resolves it: it is neither retried nor marked handled.
+   */
+  uncertain(occurrenceId: string, token: string): void {
+    this.tx(() => {
+      if (!this.dispatching(occurrenceId, token)) throw new CoworkError("request_conflict");
+      this.markUncertain(occurrenceId);
+    });
   }
   /** Only call once after host ownership is established, never upon opening a second DB handle. */
   recover(): void {
     this.tx(() => {
       if (this.closed) return;
-      for (const row of this.all("SELECT * FROM cowork_schedule_occurrences WHERE state='claimed'")) {
-        const pending = this.one("SELECT * FROM cowork_schedule_occurrences WHERE schedule_id=? AND state='pending'", row.schedule_id);
-        if (pending) {
-          this.run("UPDATE cowork_schedule_occurrences SET latest_due_at=?,missed_count=? WHERE occurrence_id=?", pending.latest_due_at, row.missed_count + pending.missed_count + 1, row.occurrence_id);
-          this.run("DELETE FROM cowork_schedule_occurrences WHERE occurrence_id=?", pending.occurrence_id);
-        }
-        this.run("UPDATE cowork_schedule_occurrences SET state='pending',claim_token=NULL WHERE occurrence_id=?", row.occurrence_id);
-      }
+      for (const row of this.all("SELECT * FROM cowork_schedule_occurrences WHERE state='claimed'")) this.release(row);
       this.run("UPDATE cowork_schedule_occurrences SET state='uncertain',reason='recovery_required' WHERE state='dispatching'");
     });
   }
