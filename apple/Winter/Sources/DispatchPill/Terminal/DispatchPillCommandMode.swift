@@ -47,12 +47,24 @@ final class DispatchPillCommandMode: ObservableObject {
     @Published private(set) var evaluatedValid = false
     /// The ghost completion for `evaluatedText`, or nil.
     @Published private(set) var ghost: String?
+    /// When the ghost is an on-screen path: the offer it came from (Tab again cycles through it).
+    private(set) var ghostOffer: OnScreenPathOffer?
     /// The opt-out record.
     @Published private(set) var suppression = CommandModeSuppression()
 
     let environment: CommandLineEnvironment
     /// Where a line would run — read when an evaluation is scheduled.
     var workingDirectory: () -> String
+    /// The paths on screen in the app the user is in, most recent first (`OnScreenPathStore`) — read when an
+    /// evaluation is scheduled.
+    var onScreenPaths: () -> [String] = { [] }
+    /// An evaluation is about to offer on-screen paths: refresh them if they are stale.
+    var onScreenPathsWanted: (() -> Void)?
+    /// Command mode turned ON for the draft (the pill reads the screen again then).
+    var onCommandModeTurnedOn: (() -> Void)?
+
+    /// Tab accepted an on-screen ghost: Tab again with the text unchanged cycles.
+    private var cycle: OnScreenPathCycle?
 
     static let debounce: TimeInterval = 0.05
     static let memoLimit = 512
@@ -86,6 +98,22 @@ final class DispatchPillCommandMode: ObservableObject {
         text == evaluatedText ? ghost : nil
     }
 
+    /// Tab, with the caret at the end of `text` (`ComposerTextView.onTab`): Tab AGAIN with the text unchanged since
+    /// an on-screen path was accepted cycles to the next on-screen candidate; otherwise the ghost is accepted. Nil
+    /// when there is nothing to do (AppKit's own Tab).
+    func tab(text: String) -> ComposerTabEdit? {
+        if var cycle, let edit = cycle.next(for: text) {
+            self.cycle = cycle
+            return edit
+        }
+        guard let ghost = ghost(for: text), !ghost.isEmpty else {
+            cycle = nil
+            return nil
+        }
+        cycle = ghostOffer.map(OnScreenPathCycle.init(accepting:))
+        return ComposerTabEdit(replacingSuffix: "", insert: ghost)
+    }
+
     /// Return's question: RUN this text? Only when a verdict for this exact text was already shown purple — Return
     /// never turns white text into a run. It reads the SHOWN verdict alone: no filesystem access on the main thread
     /// (a stat on a hung network mount would freeze the app), no zsh. The debounce keeps that verdict at most
@@ -97,6 +125,8 @@ final class DispatchPillCommandMode: ObservableObject {
     /// Every edit of the draft.
     func draftChanged(_ text: String) {
         let generation = latest.bump()
+        // An edit other than Tab's own ends the cycling.
+        if let cycle, cycle.acceptedText != text { self.cycle = nil }
         if text.isEmpty {
             publish(text: "", valid: false, ghost: nil)
             return
@@ -105,13 +135,16 @@ final class DispatchPillCommandMode: ObservableObject {
             publish(text: text, valid: false, ghost: nil)
             return
         }
+        // An argument is being typed: the on-screen paths should be fresh for its ghost.
+        if text.contains(where: \.isWhitespace) { onScreenPathsWanted?() }
         let cwd = workingDirectory()
+        let paths = onScreenPaths()
         let environment = environment
         let latest = latest
         queue.asyncAfter(deadline: .now() + Self.debounce) { [weak self] in
             // Only the newest edit is evaluated; older ones were overtaken while they waited.
             guard latest.value == generation else { return }
-            let result = Self.evaluate(text, environment: environment, workingDirectory: cwd)
+            let result = Self.evaluate(text, environment: environment, workingDirectory: cwd, onScreenPaths: paths)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.remember(text, valid: result.valid)
@@ -132,6 +165,7 @@ final class DispatchPillCommandMode: ObservableObject {
         if consumed {
             lastDisplayed = false
             ghost = nil
+            ghostOffer = nil
         }
         return consumed
     }
@@ -139,20 +173,23 @@ final class DispatchPillCommandMode: ObservableObject {
     /// A run or a send spent the draft.
     func reset() {
         suppression.reset()
+        cycle = nil
         latest.bump()
         publish(text: "", valid: false, ghost: nil)
     }
 
     // MARK: Evaluation
 
-    private func evaluate(_ text: String, ghost: Bool = true) -> (valid: Bool, ghost: String?) {
-        let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory(), ghost: ghost)
+    private func evaluate(_ text: String, ghost: Bool = true) -> (valid: Bool, ghost: ShellGhost?) {
+        let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory(),
+                                   onScreenPaths: onScreenPaths(), ghost: ghost)
         remember(text, valid: result.valid)
         return result
     }
 
-    nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment,
-                                     workingDirectory: String, ghost wantsGhost: Bool = true) -> (valid: Bool, ghost: String?) {
+    nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment, workingDirectory: String,
+                                     onScreenPaths: [String] = [],
+                                     ghost wantsGhost: Bool = true) -> (valid: Bool, ghost: ShellGhost?) {
         let snapshot = environment.snapshot()
         guard snapshot.enabled else { return (false, nil) }
         let context = snapshot.context(workingDirectory: workingDirectory)
@@ -164,9 +201,10 @@ final class DispatchPillCommandMode: ObservableObject {
                                                deadline: Date().addingTimeInterval(shellCompletionCheckBudget))
         }
         guard wantsGhost else { return (valid, nil) }
-        let ghost = shellCompletion(for: text, context: context, commandNames: snapshot.commandNames,
-                                    source: snapshot.completion,
-                                    deadline: Date().addingTimeInterval(shellCompletionGhostBudget))
+        // On-screen paths rank above the filesystem's and zsh's completion.
+        let ghost = shellGhost(for: text, context: context, commandNames: snapshot.commandNames,
+                               onScreenPaths: onScreenPaths, source: snapshot.completion,
+                               deadline: Date().addingTimeInterval(shellCompletionGhostBudget))
         return (valid, ghost)
     }
 
@@ -175,11 +213,14 @@ final class DispatchPillCommandMode: ObservableObject {
         memo[text] = valid
     }
 
-    private func publish(text: String, valid: Bool, ghost: String?) {
+    private func publish(text: String, valid: Bool, ghost: ShellGhost?) {
+        let wasDisplayed = lastDisplayed
         if evaluatedText != text { evaluatedText = text }
         if evaluatedValid != valid { evaluatedValid = valid }
-        if self.ghost != ghost { self.ghost = ghost }
+        ghostOffer = ghost?.offer
+        if self.ghost != ghost?.suffix { self.ghost = ghost?.suffix }
         lastDisplayed = suppression.isCommandMode(text: text, isValid: valid)
+        if lastDisplayed, !wasDisplayed { onCommandModeTurnedOn?() }
     }
 
     // MARK: Test seams

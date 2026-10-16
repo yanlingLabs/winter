@@ -439,7 +439,10 @@ final class CommandLineEnvironment: @unchecked Sendable {
         let path = (inherited + ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"])
             .filter { seen.insert($0).inserted }
         let snapshot = Snapshot(enabled: true, pathDirectories: path, aliases: [], commandNames: [],
-                                homeDirectory: home, fileSystem: LiveShellFileSystem(), wholeCommandCheck: true)
+                                homeDirectory: home,
+                                // A slow network or FUSE mount never stalls a keystroke's verdict.
+                                fileSystem: SlowMountGuardedFileSystem(inner: LiveShellFileSystem()),
+                                wholeCommandCheck: true)
         return CommandLineEnvironment(snapshot: snapshot, isLive: true, shell: shell,
                                       runEnvironment: loginShellEnvironment(from: processEnvironment, home: home,
                                                                             user: user, shell: shell))
