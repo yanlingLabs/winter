@@ -159,7 +159,7 @@ Full guest startup is still disabled, and Winter's SDK pin is unchanged.
 *Later status (2026-10-15):* agent SDK PR #5 is merged (2026-10-12, merge commit
 `41ac3df21`), as are PR #4 (the Linux ARM64 guest runtime artifact) and PR #7
 (guest provider turns through a private host proxy), both on 2026-10-12. Merged
-is not released: confined-guest query startup still refuses on the SDK's `main`.
+is not released: confined-guest query startup refuses unless a native Linux session admission is presented; none exists yet.
 
 The two-disk fixture at `9a588735` is built and signed with 60 Python regressions
 and two strict-C handoff runs passing, but has no independent launch-admission
@@ -193,7 +193,7 @@ broker, are on hold pending owner decision; not implemented.
 | Guest execution | Merged remote transport; confined text file and foreground-process helpers; protected-store bootstrap seam | Immutable runtime/supervisor, native ownership and termination adapters, complete process/extension routes, run-home/instructions and cold VM parent/child restoration |
 | Network and credentials | Native egress and bounded Git publication foundations, isolated package receipts | Guest parser outside credential daemon; brokered sockets and providers/MCP; GitHub auth/private clone/service wiring; native resource bounds and revocation draining |
 | Workspace behavior | Durable source/policy metadata transitions and replay-safe mutations | Real source admission and live add/remove/revoke, context refresh and trust, artifact/export/backup retention, same-Project messaging |
-| Product integration | CLI metadata and guidance commands, with guidance content from `--content`, `--stdin` or `--content-file` (#37); Swift RPC methods; shared-guidance get/update/provenance, host schedule records, a durable per-conversation outbox and local watch leases (#36); bounded local reads of workspace outputs (#38); Mac workspace list, shared-guidance editor and schedules view (#39). Production create remains refused | Mac/CLI/iOS creation and execution, schedule creation (needs trusted ceiling and target inputs), guest integration, kit/SDK version integration and end-to-end checks |
+| Product integration *(updated 2026-10-15)* | CLI metadata and guidance commands, with guidance content from `--content`, `--stdin` or `--content-file` (#37); Swift RPC methods; shared-guidance get/update/provenance, host schedule records, a durable per-conversation outbox and local watch leases (#36); bounded local reads of workspace outputs (#38); Mac workspace list, shared-guidance editor and schedules view (#39). Production create remains refused | Mac/CLI/iOS creation and execution, schedule creation (needs trusted ceiling and target inputs), guest integration, kit/SDK version integration and end-to-end checks |
 
 Internal repositories and fake backends do not enable a session creation door.
 Source/policy changes require the trusted controller to refresh its epoch before
@@ -249,11 +249,13 @@ workflow `reader-native-reviewed`, branch `cowork/reader-hosted-dependency-probe
 head `2f7bd17c`, attempt 1. Its dependency probe returned the healthy record that
 was recorded as the expectation before the run, with no outside canary visible, and
 the reader case set passed (`readerCaseSetPassed: true`). This is one run on fixed
-public data. It does not explain the earlier failed run (C59): the reader binary
+public data. It does not explain the earlier failed run (runtime SDK run 38642484250, head `c59e9ba9`): the reader binary
 was the same, but the compartment launcher, an added probe case and the runner
 instance all differed, and one run does not separate them. It does not verify any
 guided guest turn: `guidedGuestTurnVerified`, VM execution, production activation
 and cleanup proof all remain false.
+
+Related reader PRs merged on the SDK `main` branches on 2026-10-16: agent SDK #26 (reader compartment and native dependency probe, `c2c793dc`), #25 (guided reader owner composition, `6a6425a1`) and #19 (source-only isolated Linux instruction reader role, `f6d88d9a`), and runtime SDK #17 (reader packet, dependency probe and single-run hosted harness, `29eede4b`). Confined-guest query startup still refuses unless a native Linux session admission is presented; none exists yet.
 
 ## Completion evidence still required
 

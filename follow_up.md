@@ -6,7 +6,7 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 
 Cowork is unavailable: no Cowork session can be created. The [implementation map](docs/cowork-status.md) separates working shared infrastructure from reserved hooks and UI placeholders.
 
-- [ ] Finish defining Cowork's product behavior. The [specification](docs/cowork-spec.md) was accepted 2026-10-11; only the Cowork prompt text and the concrete tool allowlist remain open. Existing reserved mode names do not decide them.
+- [ ] Finish defining Cowork's product behavior. The [specification](docs/cowork-spec.md) direction was accepted 2026-10-11 (detailed mechanisms remain proposed until validated); the Cowork prompt text and the concrete tool allowlist are among the open items. Existing reserved mode names do not decide them.
 - [ ] Implement supported Cowork session creation and execution across the protocol, store, daemon, runtime/run-home modes, and capability policies, with coverage through the real creation path. Decide its remote/iOS contract explicitly.
 - [ ] Wire the Cowork composer, folder and approval controls, session windows, and Dispatch's `/spawn` hook to that implementation. Folder preparation and the workspace list, shared-guidance and schedules views exist on the Mac; the composer send, the folder and approval chips, session windows and `/spawn` remain, and the iOS surface is an unavailable placeholder.
 
