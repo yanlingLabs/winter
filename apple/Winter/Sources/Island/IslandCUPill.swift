@@ -138,7 +138,10 @@ struct IslandCUState: Equatable {
     /// The agent cursor did something in `sessionId` (in the app `appName`).
     mutating func cursor(sessionId: String, kind: String, text: String?, appName: String?, now: TimeInterval) {
         guard var s = sessions[sessionId] else { return }
-        if kind == "foreground" { s.usingMouse = text != "off" }
+        if kind == "foreground" {
+            s.usingMouse = text != "off"
+            sessions[sessionId] = s
+        }
         if kind == "waitEnd" {
             // The wait is over: back to the script's own words until the next act.
             if s.line.hasPrefix("Waiting") { s.line = islandCUScriptLine(s.item); s.lineFromCaptionAt = nil }
