@@ -172,11 +172,17 @@ final class DesktopPromptPanel: NSPanel {
     }
 
     /// The camera housing's size on `screen`, nil when it has none.
-    static func housing(of screen: NSScreen) -> CGSize? {
+    static func housing(of screen: NSScreen) -> CGSize? { CUScreenHousing.size(of: screen) }
+
+}
+
+/// The camera housing of a screen — shared with Winter.app's island, which is born from the same place.
+public enum CUScreenHousing {
+    /// The housing's size on `screen` (the band between the menu bar's two usable areas), nil when it has none.
+    @MainActor public static func size(of screen: NSScreen) -> CGSize? {
         let top = screen.safeAreaInsets.top
         guard top > 0, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea else { return nil }
         let width = screen.frame.width - left.width - right.width
         return width > 0 ? CGSize(width: width, height: top) : nil
     }
-
 }

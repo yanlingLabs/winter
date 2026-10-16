@@ -227,7 +227,7 @@ describe("island.pending over the socket", () => {
     expect((await tui.hello(tokens.harness, "tui", { tty: "/dev/ttys007" })).result.ok).toBe(true);
     await tui.request(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
 
-    void broker.wait(sid, "c1", 60_000, { toolName: "Bash", summary: "rm -rf build" });
+    void broker.wait(sid, "c1", 60_000, { toolName: "Bash", summary: "rm -rf build", issuedAt: Date.now(), expiresAt: Date.now() + 60_000 });
     hub.append(sid, { type: "approval_requested", sessionId: sid, threadId: "main", callId: "c1", toolName: "Bash", summary: "rm -rf build" } as never);
     await until(() => app.notifications.includes(ISLAND_CHANGED_NOTIFICATION));
 

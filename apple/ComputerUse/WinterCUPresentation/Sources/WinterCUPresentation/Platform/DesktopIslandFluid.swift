@@ -6,30 +6,32 @@ import Foundation
 /// of liquid that falls on a heavy spring; the neck between them pinches in like an hourglass and parts; once free,
 /// the body spreads into the pill on an underdamped spring — overshooting and squashing, then settling like jelly. Drawn through a blur and an alpha
 /// threshold, the shapes melt into one surface. Pure: a function of the seconds since the birth began.
-struct DesktopIslandFluid {
+public struct DesktopIslandFluid {
     let geometry: DesktopIslandGeometry
 
+    public init(geometry: DesktopIslandGeometry) { self.geometry = geometry }
+
     /// One mass at a moment: an ellipse, or a capsule (the pill).
-    struct Blob: Equatable {
-        enum Kind: Equatable { case ellipse, capsule, roundedRect(CGFloat) }
-        var rect: CGRect
-        var kind: Kind
+    public struct Blob: Equatable {
+        public enum Kind: Equatable { case ellipse, capsule, roundedRect(CGFloat) }
+        public var rect: CGRect
+        public var kind: Kind
     }
 
     /// One frame: the masses, the melt's blur, how much of the crisp pill and of the words show.
-    struct Frame: Equatable {
-        var blobs: [Blob]
-        var blur: CGFloat
+    public struct Frame: Equatable {
+        public var blobs: [Blob]
+        public var blur: CGFloat
         /// The crisp pill (an anti-aliased capsule over the melt), at `pill`.
-        var crisp: Double
-        var pill: CGRect
-        var content: Double
+        public var crisp: Double
+        public var pill: CGRect
+        public var content: Double
     }
 
     /// The birth is over (the wobble has settled) after this many seconds.
-    static let settle: Double = 1.35
+    public static let settle: Double = 1.35
     /// The way back up (answered on the pill) plays the birth backwards this much faster.
-    static let returnSpeed: Double = 1.8
+    public static let returnSpeed: Double = 1.8
 
     // Timings, in seconds.
     // The drip snaps first (the tail gone, the melt's blur thinned so the free drop and the housing can't join
@@ -41,7 +43,7 @@ struct DesktopIslandFluid {
     static let crispIn = (from: 0.44, to: 0.52)
     static let contentIn = (from: 0.62, to: 0.92)
 
-    func frame(at seconds: Double) -> Frame {
+    public func frame(at seconds: Double) -> Frame {
         let t = max(0, seconds)
         let g = geometry
         let pillHeight = g.pill.height
@@ -113,7 +115,9 @@ struct DesktopIslandFluid {
                 }
             }
         }
-        let round = h >= w * 0.92 ? Blob.Kind.ellipse : .capsule
+        // A rounded rectangle's body (an island card) keeps its corners; never rounder than half its height.
+        let round = h >= w * 0.92 ? Blob.Kind.ellipse
+            : g.bodyCornerRadius.map { Blob.Kind.roundedRect(min($0, min(w, h) / 2)) } ?? .capsule
         if body.width > 0.5, body.height > 0.5 { blobs.append(Blob(rect: body, kind: round)) }
 
         let blur = 11 * CGFloat(1 - Self.easeInOut(Self.phase(t, Self.meltEnd.from, Self.meltEnd.to)))
