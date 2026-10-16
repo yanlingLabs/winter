@@ -224,8 +224,8 @@ final class CommandLineEnvironment: @unchecked Sendable {
             .filter { seen.insert($0).inserted }
         let snapshot = Snapshot(enabled: true, pathDirectories: path, aliases: [], commandNames: [],
                                 homeDirectory: home,
-                                // Never a stat, a listing or a privacy prompt under a gated folder: judged by name there.
-                                fileSystem: TCCGatedFileSystem(inner: LiveShellFileSystem(), home: home),
+                                // A slow or sleeping volume never stalls a keystroke's verdict.
+                                fileSystem: VolumeGuardedFileSystem(inner: LiveShellFileSystem()),
                                 wholeCommandCheck: true)
         return CommandLineEnvironment(snapshot: snapshot, isLive: true, shell: shell,
                                       runEnvironment: loginShellEnvironment(from: processEnvironment, home: home,

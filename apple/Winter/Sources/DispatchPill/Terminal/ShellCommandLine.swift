@@ -48,25 +48,7 @@ struct LiveShellFileSystem: ShellFileSystem {
     }
 }
 
-// MARK: - Privacy-gated folders: judged by name, never touched
-
-/// The folders macOS guards with a privacy prompt (TCC): the first stat, listing or `chdir` inside one asks
-/// the user, in Winter's name, whether Winter may read it. Nothing command mode does on its own may cause
-/// that prompt, so a path under one of these is judged LEXICALLY — accepted as existing, never listed, never
-/// statted (`TCCGatedFileSystem`), and never shown to zsh (`shellLineTouchesGatedPath`).
-func shellTCCGatedRoots(home: String) -> [String] {
-    let home = shellNormalizedPath(home)
-    return [home + "/Desktop", home + "/Documents", home + "/Downloads", home + "/Library/Mobile Documents",
-            home + "/Library/CloudStorage", "/Volumes"]
-}
-
-/// PURE: is the absolute `path` one of the gated folders or inside one? Component-wise after `.`/`..` are
-/// resolved lexically, so `~/Desktopper` is not gated and `/tmp/../Volumes/x` is.
-func shellPathIsTCCGated(_ path: String, home: String) -> Bool {
-    guard path.hasPrefix("/") else { return false }
-    let normalized = shellNormalizedPath(path)
-    return shellTCCGatedRoots(home: home).contains { normalized == $0 || normalized.hasPrefix($0 + "/") }
-}
+// MARK: - Paths by name
 
 /// PURE: `path` with `.`, `..` and repeated or trailing slashes resolved by name (no symlinks followed).
 func shellNormalizedPath(_ path: String) -> String {
@@ -79,54 +61,88 @@ func shellNormalizedPath(_ path: String) -> String {
     return "/" + parts.joined(separator: "/")
 }
 
-/// The filesystem as command mode may ask it: `inner` everywhere except under a privacy-gated folder
-/// (`shellPathIsTCCGated`), where the answer is LEXICAL and `inner` is never called — anything there exists
-/// (and may be a directory), nothing there is listed, and nothing there counts as an executable (a script in
-/// `~/Downloads` is not turned into a command on a name alone).
-struct TCCGatedFileSystem: ShellFileSystem {
+// MARK: - Mounted volumes: never block on a slow one
+
+/// The filesystem with a guard for `/Volumes`: a network or sleeping disk can take seconds to answer a stat, and
+/// command mode asks on every keystroke. Under `/Volumes` every answer is memoized for `memoLifetime`; a question
+/// not answered within `timeout` gets "no" (nothing there), and that volume is left alone for `slowLifetime` —
+/// asked again only after it. Everywhere else `inner` answers directly. (Folders macOS guards with a privacy
+/// prompt are checked normally: macOS may ask the user once whether Winter may look there.)
+final class VolumeGuardedFileSystem: ShellFileSystem, @unchecked Sendable {
     let inner: ShellFileSystem
-    let home: String
+    let timeout: TimeInterval
+    static let memoLifetime: TimeInterval = 10
+    static let slowLifetime: TimeInterval = 30
+
+    private enum Answer {
+        case bool(Bool), entries([String]?)
+        var bool: Bool { if case .bool(let b) = self { return b } else { return false } }
+        var entries: [String]? { if case .entries(let e) = self { return e } else { return nil } }
+    }
+    private let lock = NSLock()
+    private var memo: [String: (answer: Answer, at: Date)] = [:]
+    private var slowUntil: [String: Date] = [:]
+    private let now: () -> Date
+
+    init(inner: ShellFileSystem, timeout: TimeInterval = 0.25, now: @escaping () -> Date = Date.init) {
+        self.inner = inner
+        self.timeout = timeout
+        self.now = now
+    }
 
     func exists(_ path: String) -> Bool {
-        shellPathIsTCCGated(path, home: home) ? true : inner.exists(path)
+        guarded("e", path, .bool(false)) { .bool($0.exists(path)) }.bool
     }
 
     func isDirectory(_ path: String) -> Bool {
-        shellPathIsTCCGated(path, home: home) ? true : inner.isDirectory(path)
+        guarded("d", path, .bool(false)) { .bool($0.isDirectory(path)) }.bool
     }
 
     func isExecutableFile(_ path: String) -> Bool {
-        shellPathIsTCCGated(path, home: home) ? false : inner.isExecutableFile(path)
+        guarded("x", path, .bool(false)) { .bool($0.isExecutableFile(path)) }.bool
     }
 
     func entries(ofDirectory path: String) -> [String]? {
-        shellPathIsTCCGated(path, home: home) ? nil : inner.entries(ofDirectory: path)
+        guarded("l", path, .entries(nil)) { .entries($0.entries(ofDirectory: path)) }.entries
     }
-}
 
-/// PURE: would asking zsh about `line` in `context.workingDirectory` touch a gated folder? Completion lists the
-/// directory a word is in and `cd`s the engine into the working directory, so: the working directory is gated,
-/// or any word — resolved like a path against the working directory (`~/…` against home), the part after an
-/// `=` too — names a gated folder or something inside one. Then zsh is never asked: the prose guard and the
-/// structural rules (which judge gated paths by name) decide.
-func shellLineTouchesGatedPath(_ line: String, context: ShellCommandContext) -> Bool {
-    let home = context.homeDirectory
-    if shellPathIsTCCGated(context.workingDirectory, home: home) { return true }
-    guard case .complete(let tokens) = shellTokenize(line) else { return true }
-    for case .word(let word) in tokens {
-        var texts = [word.text]
-        if let eq = word.text.firstIndex(of: "=") { texts.append(String(word.text[word.text.index(after: eq)...])) }
-        for text in texts where !text.isEmpty {
-            if text.hasPrefix("~"), !(text == "~" || text.hasPrefix("~/")) { return true } // `~user`: unknown, so gated
-            let absolute: String
-            if text == "~" { absolute = home }
-            else if text.hasPrefix("~/") { absolute = home + "/" + text.dropFirst(2) }
-            else if text.hasPrefix("/") { absolute = text }
-            else { absolute = context.workingDirectory + "/" + text }
-            if shellPathIsTCCGated(absolute, home: home) { return true }
-        }
+    /// The volume a path is on (`/Volumes/<name>`), or nil when it is not under `/Volumes`.
+    static func volume(of path: String) -> String? {
+        let normalized = shellNormalizedPath(path)
+        let parts = normalized.split(separator: "/", maxSplits: 2, omittingEmptySubsequences: true)
+        guard parts.count >= 2, parts[0] == "Volumes" else { return nil }
+        return "/Volumes/" + parts[1]
     }
-    return false
+
+    private func guarded(_ kind: String, _ path: String, _ fallback: Answer,
+                         _ ask: @escaping @Sendable (ShellFileSystem) -> Answer) -> Answer {
+        guard let volume = Self.volume(of: path) else { return ask(inner) }
+        let key = kind + "\u{0}" + path
+        let started = now()
+        lock.lock()
+        if let until = slowUntil[volume], until > started { lock.unlock(); return fallback }
+        if let hit = memo[key], started.timeIntervalSince(hit.at) < Self.memoLifetime { lock.unlock(); return hit.answer }
+        lock.unlock()
+
+        let box = AnswerBox()
+        let done = DispatchSemaphore(value: 0)
+        let inner = inner
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.answer = ask(inner)
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + timeout) == .success, let answer = box.answer else {
+            lock.lock(); slowUntil[volume] = started.addingTimeInterval(Self.slowLifetime); lock.unlock()
+            return fallback
+        }
+        lock.lock()
+        if memo.count > 512 { memo.removeAll(keepingCapacity: true) }
+        memo[key] = (answer, now())
+        lock.unlock()
+        return answer
+    }
+
+    private final class AnswerBox: @unchecked Sendable { var answer: Answer? }
 }
 
 // MARK: - The context
@@ -739,8 +755,7 @@ func shellCompletion(for line: String, context: ShellCommandContext, commandName
     guard case .complete(let tokensBefore) = shellTokenize(before) else { return nil }
     let isFirstWord = !tokensBefore.contains { if case .word = $0 { return true } else { return false } }
 
-    if !isFirstWord, let source, zshLineMayBeShown(line), !shellLineTouchesGatedPath(line, context: context),
-       shellFirstWordResolves(before, context: context),
+    if !isFirstWord, let source, zshLineMayBeShown(line), shellFirstWordResolves(before, context: context),
        let capture = source.capture(buffer: line, directory: context.workingDirectory, deadline: deadline) {
         let candidates = capture.hits.filter { $0.hasPrefix(word) && $0 != word }
         guard !candidates.isEmpty, !capture.hits.contains(word) else { return nil }

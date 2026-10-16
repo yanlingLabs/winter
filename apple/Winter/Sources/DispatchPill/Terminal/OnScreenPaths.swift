@@ -146,14 +146,13 @@ private func onScreenPathKey(_ path: String, home: String) -> String {
     shellNormalizedPath(onScreenExpandedPath(path, home: home))
 }
 
-// MARK: - Existence (never under a gated folder)
+// MARK: - Existence
 
-/// PURE (given its filesystem): the candidates that exist, in order. A path under a privacy-gated folder
-/// (`shellPathIsTCCGated`) is kept by NAME — `fileSystem` is never asked about it, so reading the screen can never
-/// cause a privacy prompt.
+/// PURE (given its filesystem): the candidates that exist, in order. Every path is checked — under Desktop,
+/// Documents and the like macOS may ask the user once whether Winter may look (the live reader's filesystem is
+/// `VolumeGuardedFileSystem`, so a slow volume never stalls it).
 func onScreenPathsThatExist(_ paths: [String], home: String, fileSystem: ShellFileSystem) -> [String] {
-    let gated = TCCGatedFileSystem(inner: fileSystem, home: home)
-    return paths.filter { gated.exists(onScreenExpandedPath($0, home: home)) }
+    paths.filter { fileSystem.exists(onScreenExpandedPath($0, home: home)) }
 }
 
 // MARK: - The ghost: on-screen paths at a file argument
@@ -220,7 +219,7 @@ func onScreenPathOffer(for line: String, onScreenPaths: [String], context: Shell
     guard let command, shellFirstWordResolves(head, context: context) else { return nil }
 
     var takesFiles = afterRedirection || shellFileTakingCommands.contains(command.text)
-    if !takesFiles, let source, zshLineMayBeShown(line), !shellLineTouchesGatedPath(line, context: context),
+    if !takesFiles, let source, zshLineMayBeShown(line),
        let capture = source.capture(buffer: line, directory: context.workingDirectory, deadline: deadline) {
         takesFiles = capture.kinds.contains(.files)
     }

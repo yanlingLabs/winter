@@ -603,8 +603,6 @@ final class DispatchPillController: ObservableObject {
     /// Where a command runs: the bound session's working directory when it has one that exists, else home.
     func commandDirectory() -> String {
         if let dir = commandWorkingDirectory?(), !dir.isEmpty {
-            // A session folder under a privacy-gated one is taken by name — checking it could prompt.
-            if shellPathIsTCCGated(dir, home: commandMode.environment.homeDirectory) { return dir }
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: dir, isDirectory: &isDirectory), isDirectory.boolValue { return dir }
         }

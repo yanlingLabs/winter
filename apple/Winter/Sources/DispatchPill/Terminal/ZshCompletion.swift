@@ -139,9 +139,8 @@ func shellCompletionCheckPasses(_ line: String, context: ShellCommandContext, so
                                 deadline: Date) -> Bool {
     guard case .complete(let tokens) = shellTokenize(line) else { return false }
     let chars = Array(line)
-    // Nothing that zsh could evaluate while completing is ever shown to it — nor anything that would have it
-    // list or enter a privacy-gated folder (a privacy prompt in Winter's name).
-    let engine = zshLineMayBeShown(line) && !shellLineTouchesGatedPath(line, context: context) ? source : nil
+    // Nothing that zsh could evaluate while completing is ever shown to it.
+    let engine = zshLineMayBeShown(line) ? source : nil
 
     // Simple commands: words, with redirection targets set apart (they were judged structurally already).
     var commands: [[ShellWord]] = [[]]
@@ -321,8 +320,6 @@ final class ZshCompletionEngine: ShellCompletionSource, @unchecked Sendable {
 
     func capture(buffer: String, directory: String, deadline: Date) -> ZshCompletionCapture? {
         guard zshBufferIsSafe(buffer), let escaped = zshEngineQuoted(buffer) else { return nil }
-        // Belt and braces behind the callers' `shellLineTouchesGatedPath`: never into a privacy-gated folder.
-        guard !shellPathIsTCCGated(directory, home: NSHomeDirectory()) else { return nil }
         guard lock.lock(before: deadline) else { return nil }
         defer { lock.unlock() }
         let key = directory + "\u{0}" + buffer

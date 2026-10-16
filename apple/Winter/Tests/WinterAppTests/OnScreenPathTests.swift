@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import Winter
 
-/// On-screen paths, the pure half: extraction from a window's text, the privacy-gated folders judged by name
+/// On-screen paths, the pure half: extraction from a window's text, existence (and the /Volumes guard)
 /// (an injected filesystem probe that must never be asked about them), and the argument ghost's ranking.
 final class OnScreenPathTests: XCTestCase {
     private let home = "/Users/u"
@@ -61,87 +61,87 @@ final class OnScreenPathTests: XCTestCase {
         XCTAssertEqual(capped.last, "/tmp/f15.txt")
     }
 
-    // MARK: Privacy-gated folders: by name, never touched
+    // MARK: Existence, and slow volumes
 
-    /// A filesystem that records every path it is asked about.
-    final class RecordingFileSystem: ShellFileSystem {
+    /// A filesystem that records every path it is asked about, and can be slow.
+    final class RecordingFileSystem: ShellFileSystem, @unchecked Sendable {
         let inner: ShellFileSystem
-        private(set) var asked: [String] = []
+        var delay: TimeInterval = 0
+        private let lock = NSLock()
+        private var _asked: [String] = []
+        var asked: [String] { lock.lock(); defer { lock.unlock() }; return _asked }
         init(_ inner: ShellFileSystem) { self.inner = inner }
-        func exists(_ path: String) -> Bool { asked.append(path); return inner.exists(path) }
-        func isDirectory(_ path: String) -> Bool { asked.append(path); return inner.isDirectory(path) }
-        func isExecutableFile(_ path: String) -> Bool { asked.append(path); return inner.isExecutableFile(path) }
-        func entries(ofDirectory path: String) -> [String]? { asked.append(path); return inner.entries(ofDirectory: path) }
-
-        func askedAboutGated(home: String) -> [String] { asked.filter { shellPathIsTCCGated($0, home: home) } }
+        private func note(_ path: String) {
+            lock.lock(); _asked.append(path); lock.unlock()
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+        }
+        func exists(_ path: String) -> Bool { note(path); return inner.exists(path) }
+        func isDirectory(_ path: String) -> Bool { note(path); return inner.isDirectory(path) }
+        func isExecutableFile(_ path: String) -> Bool { note(path); return inner.isExecutableFile(path) }
+        func entries(ofDirectory path: String) -> [String]? { note(path); return inner.entries(ofDirectory: path) }
     }
 
-    func testTheGatedFolders() {
-        for gated in ["/Users/u/Desktop", "/Users/u/Desktop/x.png", "/Users/u/Documents/a/b", "/Users/u/Downloads/z.zip",
-                      "/Users/u/Library/Mobile Documents/com~apple~CloudDocs/n.txt",
-                      "/Users/u/Library/CloudStorage/Dropbox/d.txt", "/Volumes/USB/x", "/tmp/../Volumes/x",
-                      "/Users/u/proj/../Desktop/y"] {
-            XCTAssertTrue(shellPathIsTCCGated(gated, home: home), gated)
-        }
-        for open in ["/Users/u", "/Users/u/Desktopper/x", "/Users/u/proj/Documents/x", "/tmp/x", "/Users/v/Desktop/x",
-                     "Desktop/x"] {
-            XCTAssertFalse(shellPathIsTCCGated(open, home: home), open)
-        }
-    }
-
-    func testOnScreenPathsUnderGatedFoldersAreKeptByNameAndNeverStatted() {
-        let probe = RecordingFileSystem(ShellCommandLineTests.fileSystem)
-        let kept = onScreenPathsThatExist(["~/Desktop/shot.png", "/tmp/x/notes.md", "/tmp/gone.txt",
-                                           "/Volumes/USB/a.mov", "/Users/u/Documents/plan.key"],
+    func testOnScreenPathsAreCheckedLikeAnyOtherPathDocumentsIncluded() {
+        var nodes = ShellCommandLineTests.fileSystem.nodes
+        nodes["/Users/u/Documents"] = .directory
+        nodes["/Users/u/Documents/plan.key"] = .file
+        let probe = RecordingFileSystem(ShellCommandLineTests.FakeShellFileSystem(nodes: nodes))
+        let kept = onScreenPathsThatExist(["~/Documents/plan.key", "/tmp/x/notes.md", "/tmp/gone.txt", "~/Desktop/gone.png"],
                                           home: home, fileSystem: probe)
-        XCTAssertEqual(kept, ["~/Desktop/shot.png", "/tmp/x/notes.md", "/Volumes/USB/a.mov", "/Users/u/Documents/plan.key"])
-        XCTAssertEqual(probe.asked, ["/tmp/x/notes.md", "/tmp/gone.txt"], "the probe is asked about open folders only")
+        XCTAssertEqual(kept, ["~/Documents/plan.key", "/tmp/x/notes.md"])
+        XCTAssertEqual(probe.asked, ["/Users/u/Documents/plan.key", "/tmp/x/notes.md", "/tmp/gone.txt", "/Users/u/Desktop/gone.png"],
+                       "every path is checked (macOS may ask once for Documents and the like)")
     }
 
-    private func gatedContext(_ probe: RecordingFileSystem, cwd: String = "/Users/u/proj") -> ShellCommandContext {
-        ShellCommandContext(pathDirectories: ["/usr/bin", "/bin"], homeDirectory: home, workingDirectory: cwd,
-                            fileSystem: TCCGatedFileSystem(inner: probe, home: home))
+    func testAVolumeIsAskedOnceThenFromMemoryAndASlowOneIsLeftAlone() {
+        var nodes = ShellCommandLineTests.fileSystem.nodes
+        nodes["/Volumes"] = .directory
+        nodes["/Volumes/USB"] = .directory
+        nodes["/Volumes/USB/a.mov"] = .file
+        let probe = RecordingFileSystem(ShellCommandLineTests.FakeShellFileSystem(nodes: nodes))
+        var clock = Date(timeIntervalSince1970: 0)
+        let guarded = VolumeGuardedFileSystem(inner: probe, timeout: 0.2, now: { clock })
+        XCTAssertTrue(guarded.exists("/Volumes/USB/a.mov"))
+        XCTAssertTrue(guarded.exists("/Volumes/USB/a.mov"))
+        XCTAssertEqual(probe.asked, ["/Volumes/USB/a.mov"], "the second answer comes from memory")
+        XCTAssertTrue(guarded.exists("/tmp/x/notes.md"))
+        XCTAssertTrue(guarded.exists("/tmp/x/notes.md"))
+        XCTAssertEqual(probe.asked.filter { $0 == "/tmp/x/notes.md" }.count, 2, "outside /Volumes: asked directly")
+        clock.addTimeInterval(VolumeGuardedFileSystem.memoLifetime + 1)
+        // A volume that takes too long: "no" within the timeout, and left alone for a while.
+        probe.delay = 1
+        let started = Date()
+        XCTAssertFalse(guarded.exists("/Volumes/USB/a.mov"))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.8, "never waits on it")
+        let askedSoFar = probe.asked.count
+        XCTAssertFalse(guarded.isDirectory("/Volumes/USB"))
+        XCTAssertNil(guarded.entries(ofDirectory: "/Volumes/USB/"))
+        XCTAssertEqual(probe.asked.count, askedSoFar, "a slow volume is not asked again for a while")
+        XCTAssertEqual(VolumeGuardedFileSystem.volume(of: "/Volumes/USB/x/y"), "/Volumes/USB")
+        XCTAssertNil(VolumeGuardedFileSystem.volume(of: "/tmp/Volumes/x"))
     }
 
-    func testTheValidatorJudgesGatedPathsByNameAndNeverShowsThemToZsh() {
-        let probe = RecordingFileSystem(ShellCommandLineTests.fileSystem)
-        let context = gatedContext(probe)
-        let zsh = ZshCompletionTests.FakeCompletionSource(captures: [:], functions: ["open": true, "ls": true, "cat": true])
-        for line in ["open ~/Desktop/report.pdf", "open /Users/u/Downloads/a.zip", "cat /Volumes/USB/notes.txt"] {
-            XCTAssertTrue(shellLineIsCommand(line, context: context), line)
-            XCTAssertTrue(shellCompletionCheckPasses(line, context: context, source: zsh, deadline: .distantFuture), line)
-        }
-        XCTAssertEqual(probe.askedAboutGated(home: home), [], "no stat under a gated folder")
-        XCTAssertEqual(zsh.asked, [], "zsh never asked to complete there")
-        // Its ghost lists nothing there, and zsh is not asked either.
-        XCTAssertNil(shellCompletion(for: "ls ~/Desktop/sh", context: context, commandNames: ["ls"], source: zsh))
-        XCTAssertNil(shellCompletion(for: "ls /Users/u/Documents/", context: context, commandNames: ["ls"], source: zsh))
-        XCTAssertEqual(probe.askedAboutGated(home: home), [])
-        XCTAssertEqual(zsh.asked, [])
-        // A working directory inside one: zsh is never sent there.
-        let inside = gatedContext(probe, cwd: "/Users/u/Documents/proj")
-        XCTAssertTrue(shellCompletionCheckPasses("ls src", context: inside, source: zsh, deadline: .distantFuture))
-        XCTAssertEqual(zsh.asked, [])
-        XCTAssertEqual(probe.askedAboutGated(home: home), [])
-        // A line elsewhere is still shown to zsh.
-        _ = shellCompletionCheckPasses("ls /tmp", context: context, source: zsh, deadline: .distantFuture)
-        XCTAssertFalse(zsh.asked.isEmpty)
-    }
-
-    func testWhichLinesTouchAGatedFolder() {
-        let context = gatedContext(RecordingFileSystem(ShellCommandLineTests.fileSystem), cwd: home)
-        XCTAssertTrue(shellLineTouchesGatedPath("ls Desktop/", context: context), "relative, against the working directory")
-        XCTAssertTrue(shellLineTouchesGatedPath("cp a --target=~/Downloads/x", context: context), "after an =")
-        XCTAssertTrue(shellLineTouchesGatedPath("ls ~other/x", context: context), "another user's ~ is unknown")
-        XCTAssertFalse(shellLineTouchesGatedPath("git status", context: context))
-        XCTAssertFalse(shellLineTouchesGatedPath("ls ~/proj /tmp", context: context))
+    func testTheValidatorAndZshWorkInDocumentsLikeAnywhereElse() {
+        var nodes = ShellCommandLineTests.fileSystem.nodes
+        nodes["/Users/u/Documents"] = .directory
+        nodes["/Users/u/Documents/report.pdf"] = .file
+        let context = ShellCommandContext(pathDirectories: ["/usr/bin", "/bin"], homeDirectory: home,
+                                          workingDirectory: "/Users/u/Documents",
+                                          fileSystem: ShellCommandLineTests.FakeShellFileSystem(nodes: nodes))
+        XCTAssertTrue(shellLineIsCommand("open ~/Documents/report.pdf", context: context))
+        XCTAssertFalse(shellLineIsCommand("open ~/Documents/missing.pdf", context: context), "checked, not taken by name")
+        let zsh = ZshCompletionTests.FakeCompletionSource(captures: ["touch grass": ZshCompletionCapture(hits: [], kinds: [])],
+                                                          functions: ["touch": true])
+        XCTAssertFalse(shellCompletionCheckPasses("touch grass", context: context, source: zsh, deadline: .distantFuture),
+                       "zsh is asked in a Documents project too: `touch grass` stays a message")
+        XCTAssertEqual(zsh.asked, ["touch grass"])
     }
 
     // MARK: The ghost
 
     private func context(_ fileSystem: ShellFileSystem = ShellCommandLineTests.fileSystem) -> ShellCommandContext {
         ShellCommandContext(pathDirectories: ["/usr/bin", "/bin"], homeDirectory: home, workingDirectory: "/Users/u/proj",
-                            fileSystem: TCCGatedFileSystem(inner: fileSystem, home: home))
+                            fileSystem: fileSystem)
     }
 
     private let onScreen = ["/tmp/x/notes.md", "~/Desktop/shot one.png", "/tmp/x/a.log"]
@@ -199,8 +199,7 @@ final class OnScreenPathTests: XCTestCase {
     func testCdOffersDirectoriesOnly() {
         let ghost = shellGhost(for: "cd ", context: context(), commandNames: ["cd"],
                                onScreenPaths: ["/tmp/x/notes.md", "/tmp/x/My Files", "~/Documents/proj"])
-        XCTAssertEqual(ghost?.offer?.candidates, [#"/tmp/x/My\ Files"#, "~/Documents/proj"],
-                       "a gated folder counts as one by name")
+        XCTAssertEqual(ghost?.offer?.candidates, [#"/tmp/x/My\ Files"#], "a folder that is not there is not offered")
     }
 
     // MARK: Tab again
@@ -250,13 +249,12 @@ final class OnScreenPathCommandModeTests: XCTestCase {
         XCTAssertNotEqual(mode.tab(text: "open /tmp/x/notes.md")?.replacingSuffix, "/tmp/x/notes.md")
     }
 
-    func testAGatedOnScreenPathStillHasToValidateToTurnPurple() {
+    func testAnOnScreenPathStillHasToValidateToTurnPurple() {
         let mode = makeMode(paths: ["~/Desktop/shot.png"])
         mode.evaluateNowForTesting("open ")
         XCTAssertEqual(mode.ghost(for: "open "), "~/Desktop/shot.png")
         mode.evaluateNowForTesting("open ~/Desktop/shot.png")
-        // The fixed test environment is a plain fake filesystem: the file is not there, so it stays white — the
-        // on-screen offer never bypasses the validator.
+        // The file is not there (a fake filesystem): it stays white — the on-screen offer never bypasses the validator.
         XCTAssertFalse(mode.isActive(for: "open ~/Desktop/shot.png"))
     }
 
@@ -297,6 +295,7 @@ final class OnScreenTextReaderTests: XCTestCase {
         let count: Int?
         private(set) var valueReads = 0
         private(set) var rangeAsked: NSRange?
+        private(set) var childLimitAsked: Int?
         var onBasics: (() -> Void)?
 
         init(_ role: String?, subrole: String? = nil, value: String? = nil, title: String? = nil, count: Int? = nil,
@@ -309,9 +308,13 @@ final class OnScreenTextReaderTests: XCTestCase {
             self.children = children
         }
 
-        func basics() -> (role: String?, subrole: String?, children: [OnScreenAXElement]) {
+        func roles() -> (role: String?, subrole: String?) {
             onBasics?()
-            return (role, subrole, children.map { $0 as OnScreenAXElement })
+            return (role, subrole)
+        }
+        func children(limit: Int) -> [OnScreenAXElement] {
+            childLimitAsked = limit
+            return children.prefix(limit).map { $0 as OnScreenAXElement }
         }
         func value() -> String? { valueReads += 1; return text }
         func title() -> String? { titleText }
@@ -439,5 +442,27 @@ final class OnScreenTextReaderTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         XCTAssertEqual(store.paths, [], "dropped on hide")
         XCTAssertNil(store.capturedAt)
+    }
+
+    func testLongTextIsAskedForAsARangeOrSkippedAndChildrenAreCapped() {
+        let longStatic = FakeElement("AXStaticText", value: "never copied", count: 100_000)
+        let huge = FakeElement("AXTextField", value: "never copied", count: 9_000_000)
+        let many = FakeElement("AXGroup", children: (0..<300).map { FakeElement("AXStaticText", value: "/tmp/c\($0).txt") })
+        let window = FakeElement("AXWindow", children: [longStatic, huge, many])
+        let text = OnScreenTextReader.read(from: FakeSource(window: window)) ?? ""
+        XCTAssertEqual(longStatic.valueReads, 0, "a long static text: only its tail, as a range")
+        XCTAssertEqual(longStatic.rangeAsked, NSRange(location: 100_000 - 65_536, length: 65_536))
+        XCTAssertEqual(huge.valueReads, 0, "past the cap: skipped")
+        XCTAssertNil(huge.rangeAsked)
+        XCTAssertEqual(many.childLimitAsked, OnScreenReadBudget.standard.maxChildren)
+        XCTAssertTrue(text.contains("/tmp/c199.txt"))
+        XCTAssertFalse(text.contains("/tmp/c200.txt"), "the first 200 children only")
+    }
+
+    func testChromiumFamilyAppsAreRecognized() {
+        XCTAssertTrue(onScreenAppIsChromiumFamily(bundleId: "com.google.Chrome", frameworkNames: []))
+        XCTAssertTrue(onScreenAppIsChromiumFamily(bundleId: "com.example.chat", frameworkNames: ["Electron Framework.framework"]))
+        XCTAssertTrue(onScreenAppIsChromiumFamily(bundleId: nil, frameworkNames: ["Chromium Embedded Framework.framework"]))
+        XCTAssertFalse(onScreenAppIsChromiumFamily(bundleId: "com.apple.Terminal", frameworkNames: ["Sparkle.framework"]))
     }
 }
