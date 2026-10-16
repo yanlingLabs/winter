@@ -49,6 +49,9 @@ export interface IslandChange {
 /** One connected island client: told that the pending set, or some session's working state, may have changed. */
 export interface IslandClient {
   notify(change?: IslandChange): void;
+  /** Told (no payload) that the island's activity — computer use, turn results, watches — may have changed
+   *  (`island.activityChanged`, `island/activity.ts`). */
+  notifyActivity?(): void;
 }
 
 /** PURE: the notification's params for a burst — `{}` for the pending set alone (as phase 1 sent it). */

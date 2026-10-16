@@ -18,9 +18,11 @@ enum IslandTabRegistry {
     static let shelf = IslandTab(id: "shelf", title: "Shelf", symbol: "tray.full")
     static let usage = IslandTab(id: "usage", title: "Usage and limits", symbol: "gauge.with.dots.needle.50percent")
     static let devices = IslandTab(id: "devices", title: "Devices", symbol: "laptopcomputer.and.iphone")
+    /// Every armed computer-use watch (`wakeWhen`), with Stop.
+    static let watches = IslandTab(id: "watches", title: "Watches", symbol: "eye")
 
-    /// The tabs this build shows, in swipe order: Needs you first, then Sessions, Shelf, Usage and limits, Devices.
-    static let tabs: [IslandTab] = [needsYou, sessions, shelf, usage, devices]
+    /// The tabs this build shows, in swipe order: Needs you first, then Sessions, Shelf, Usage and limits, Devices, Watches.
+    static let tabs: [IslandTab] = [needsYou, sessions, shelf, usage, devices, watches]
 }
 
 /// Which tab is showing. Pure.

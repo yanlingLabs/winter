@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -82,6 +82,7 @@ import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { IslandClient, IslandRegistry } from "../island/registry";
+import type { IslandActivity } from "../island/activity";
 import type { IslandUsageRegistry } from "../island/usage";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
@@ -520,6 +521,9 @@ export interface IpcServerOptions {
   /** The Winter island (`island/registry.ts`): every pending card across sessions (`island.pending`), and the island
    *  clients — a harness hello advertising `CLIENT_CAPABILITY_ISLAND` — it tells when that set changes. */
   island?: IslandRegistry;
+  /** The Winter island's activity (`island/activity.ts`, phase 2): computer use, turn results and watches across
+   *  sessions (`island.activity`), told to the same island clients (`island.activityChanged`). */
+  islandActivity?: IslandActivity;
   /** The island's Usage tab (`island/usage.ts`, `island.usage`). */
   islandUsage?: IslandUsageRegistry;
   tasks?: TaskStore;         // session task lists; task.list
@@ -1981,7 +1985,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
-        if (socket.data.islandClient) opts.island?.removeClient(socket.data.islandClient);
+        if (socket.data.islandClient) {
+          opts.island?.removeClient(socket.data.islandClient);
+          opts.islandActivity?.removeClient(socket.data.islandClient);
+        }
         // ComputerV2 Phase 2: the connection that carried Winter.app's browser link is gone — the built-in browser
         // reads "Winter isn't running" until the app attaches again (every command in flight fails `disconnected`).
         opts.browserLink?.connectionClosed(socket.data);
@@ -2102,9 +2109,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       socket.data.tty = p.tty ?? null;
       if (p.role === "harness" && p.capabilities?.includes(CLIENT_CAPABILITY_ISLAND) === true && opts.island) {
         const writer = socket.data.writer;
-        const client: IslandClient = { notify: (change = {}) => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: change })); } };
+        const client: IslandClient = {
+          notify: (change = {}) => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: change })); },
+          notifyActivity: () => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_ACTIVITY_CHANGED_NOTIFICATION, params: {} })); },
+        };
         socket.data.islandClient = client;
         opts.island.addClient(client);
+        opts.islandActivity?.addClient(client);
       }
       // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
       // omits the field, and the client then falls back).
@@ -3464,6 +3475,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.pending is available to local clients only");
         parseParams(IslandPendingParams, params);
         return { items: opts.island?.list() ?? [] };
+      }
+      case METHODS.islandActivity: {
+        // The Winter island's activity: LOCAL harness clients only, like `island.pending`.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.activity is available to local clients only");
+        parseParams(IslandActivityParams, params);
+        return opts.islandActivity?.list() ?? { computerUse: [], results: [], watches: [] };
       }
       case METHODS.islandShown: {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.shown is available to local clients only");

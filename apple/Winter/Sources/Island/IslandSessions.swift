@@ -228,6 +228,14 @@ final class IslandSessionsModel: ObservableObject {
     /// Test and gallery seam: hosts as `island.hosts` would give them.
     func setHostsForTesting(_ hosts: [String: [IslandHost]]) { self.hosts = hosts }
 
+    /// Moves the user's view for a session opened from elsewhere on the island (a turn-result card's Open) — resolved
+    /// exactly like a row's click, with the hosts the caller knows (else the tab's own).
+    var reveal: (IslandSessionTarget) -> Void = { _ in }
+    func openFromIsland(_ sessionId: String, hosts known: [IslandHost], isDispatch: Bool) {
+        let hosts = known.isEmpty ? (self.hosts[sessionId] ?? []) : known
+        reveal(IslandSessionsBuilder.target(of: sessionId, hosts: hosts, windows: windows(), isDispatch: isDispatch))
+    }
+
     func open(_ row: IslandSessionRow) {
         perform(IslandSessionsBuilder.target(of: row.sessionId, hosts: hosts[row.sessionId] ?? [], windows: windows(),
                                              isDispatch: row.mode == "Dispatch"))

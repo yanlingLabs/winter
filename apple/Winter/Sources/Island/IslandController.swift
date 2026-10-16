@@ -36,7 +36,13 @@ final class IslandController {
     private let topPanel = IslandPanel(level: .statusBar)
     private let islandPanel = IslandPanel(level: .statusBar)
     private var shape = IslandScreenShape(housing: nil, menuBarHeight: 24)
-    private var screenFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    private(set) var screenFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    /// The island screen's top (phase 2's activity slot hangs from the same housing).
+    var screenShape: IslandScreenShape { shape }
+    /// Told after every redraw of the cards on top and every open/close (phase 2's activity slot yields to them).
+    var onTopChanged: (() -> Void)?
+    /// Told on every change of focus (phase 2's computer-use pill hides while its session's host is in front).
+    var onFocusChanged: (() -> Void)?
     private let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     /// The pointer over the top panel, for the buttons' glow (`pillHoverGlow`).
     private let pointer = DispatchPillPointer()
@@ -139,6 +145,7 @@ final class IslandController {
             tabModels.shelf.$items.map { _ in () }.eraseToAnyPublisher(),
             tabModels.usage.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             tabModels.devices.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            store.activity.$watches.map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(changes)
             .sink { [weak self] in self?.relayoutSoon() }
@@ -234,6 +241,7 @@ final class IslandController {
     /// The focus changed somewhere (an app came to the front, a window became key, the Dispatch pill showed or hid, a
     /// terminal's tab changed): re-judge where the cards go. Nothing to do while nothing is pending.
     func focusChanged() {
+        onFocusChanged?()
         guard !store.cards.isEmpty, pendingReroute == nil else { return }
         // Trailing coalesce: a burst of notifications (an app switch raises several) is ONE re-route.
         let item = DispatchWorkItem { [weak self] in
@@ -419,6 +427,7 @@ final class IslandController {
     }
 
     private func drawTop() {
+        defer { onTopChanged?() }
         let queue = store.queue
         let currentCard = store.currentCard
         let waitingCard = store.waitingCard
@@ -621,6 +630,10 @@ final class IslandController {
     /// scrolls past the island's maximum).
     private func islandContentHeight() -> CGFloat {
         let header: CGFloat = 46
+        if store.tabs.selected?.id == IslandTabRegistry.watches.id {
+            // The Watches tab (phase 2, lane B): its rows measured at the island's width.
+            return islandWatchesHeight(store.activity, header: header)
+        }
         if let id = store.tabs.selected?.id, id != IslandTabRegistry.needsYou.id {
             // A phase-2 tab: its flat body measured at the island's width.
             let host = NSHostingView(rootView: VStack(spacing: 0) { IslandTabBody(id: id, models: tabModels, scrolls: false) }

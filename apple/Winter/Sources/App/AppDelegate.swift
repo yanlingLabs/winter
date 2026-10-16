@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var pillController: DispatchPillController?
     /// The Winter island at the camera housing (`docs/claude/island.md`); nil under unit tests and without a token.
     private(set) var islandController: IslandController?
+    /// Phase 2 of the island: the computer-use pill and its mirror, turn results (`IslandActivityController`).
+    private(set) var islandActivityController: IslandActivityController?
     /// The background watchdog for a stalled main thread (never constructed under unit tests).
     private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
@@ -1190,6 +1192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireIslandTabs(island, model: model, pill: pill)
         islandController = island
         island.start()
+        startIslandActivity(store: store, island: island, client: client)
         // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
         let changes = client.notifications(method: WinterClient.islandChangedNotification)
         // `{working: true}`: a turn started or ended somewhere — the strip's working count re-lists the sessions
@@ -1207,6 +1210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onClientConnected = { [weak store] in
             previous?()
             Task { await store?.refresh() }
+            Task { await store?.activity.refresh() }
         }
         // The Dispatch pill showing or hiding moves Dispatch's cards between it and the island.
         pill.$isVisible
@@ -1214,6 +1218,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak island] _ in island?.focusChanged() }
             .store(in: &cancellables)
+    }
+
+    /// The island's phase 2 (`docs/claude/island.md`): the computer-use pill (its words from the agent cursor through the
+    /// mirror coordinator), its mirror (the helper's frames, only while one is on screen), turn-result cards and the
+    /// Watches tab, from the daemon's `island.activity`.
+    private func startIslandActivity(store: IslandStore, island: IslandController, client: WinterClient) {
+        let activity = store.activity
+        activity.fetch = { try await client.islandActivity() }
+        activity.focus = { [weak store] in store?.focus() ?? IslandFocus() }
+        activity.readTerminals = { [weak store] ttys in await store?.readTerminals(ttys) ?? [:] }
+        // A result's Open goes where a Sessions row's click goes (`IslandSessionsModel.openFromIsland`).
+        activity.openSession = { [weak island] sid, hosts, isDispatch in
+            island?.tabModels.sessions.openFromIsland(sid, hosts: hosts, isDispatch: isDispatch)
+        }
+        activity.disarm = { sid, wakeId in (try? await client.cancelWake(sessionId: sid, wakeId: wakeId)) ?? false }
+        let coordinator = mirrorCoordinator
+        activity.onCursorSessionsChange = { [weak coordinator] ids in coordinator?.setIslandCursorSessions(ids) }
+        coordinator?.onIslandCursor = { [weak activity] sid, kind, text, app in
+            activity?.cursor(sessionId: sid, kind: kind, text: text, appName: app)
+        }
+        coordinator?.onIslandConnectionLost = { [weak activity] in activity?.helperConnectionLost() }
+        let controller = IslandActivityController(store: activity, island: island,
+                                                  mirrors: coordinator.map { IslandMirrorLifecycle(capture: $0) })
+        controller.mirrorModel = { [weak coordinator] sid in coordinator?.islandMirrorModel(for: sid) }
+        island.onTopChanged = { [weak controller] in controller?.layout() }
+        island.onFocusChanged = { [weak activity] in Task { await activity?.reroute() } }
+        islandActivityController = controller
+        controller.start()
+        // Asked for BEFORE the connect, like `island.changed`; each one asks the daemon again.
+        let changes = client.notifications(method: WinterClient.islandActivityChangedNotification)
+        Task { @MainActor [weak activity] in
+            for await _ in changes { await activity?.refresh() }
+        }
     }
 
     /// The island's phase-2 tabs (`docs/claude/island.md`): Sessions, Usage and limits, Devices read the app's own
@@ -1241,6 +1278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Dictionary((model?.session.state.children ?? []).map { ($0.sessionId, $0.status) }, uniquingKeysWith: { a, _ in a })
         }
         sessions.windows = windowFacts
+        sessions.reveal = { [weak self] target in self?.showIslandSessionTarget(target, title: title) }
         sessions.perform = { [weak self, weak island] target in
             // A click on a row while the island is already closing (a double click) does nothing.
             guard let island, island.isOpen else { return }

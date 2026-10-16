@@ -9,9 +9,9 @@ final class IslandTabsTests: XCTestCase {
         IslandTab(id: "usage", title: "Usage and limits", symbol: "gauge"),
     ]
 
-    func testTheTabsAreNeedsYouFirstThenSessionsShelfUsageDevices() {
+    func testTheTabsAreNeedsYouFirstThenSessionsShelfUsageDevicesWatches() {
         let state = IslandTabState()
-        XCTAssertEqual(state.tabs.map(\.id), ["needs-you", "sessions", "shelf", "usage", "devices"])
+        XCTAssertEqual(state.tabs.map(\.id), ["needs-you", "sessions", "shelf", "usage", "devices", "watches"])
         XCTAssertEqual(state.selected?.title, "Needs you", "Needs you is where the island opens")
         XCTAssertTrue(state.showsDots)
         var s = state

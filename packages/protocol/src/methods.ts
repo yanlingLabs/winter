@@ -520,6 +520,64 @@ export const ISLAND_CHANGED_NOTIFICATION = "island.changed";
 export const IslandShownParams = z.object({ ids: z.array(z.string().min(1).max(256)).max(256) });
 export const IslandShownResult = z.object({ ok: z.literal(true) });
 
+/** The Winter island's ACTIVITY (phase 2, `docs/claude/island.md`): what the Mac's island shows besides the cards
+ *  that wait for an answer, across every session — the sessions driving ComputerV2 now (`computerUse`), the turns
+ *  that just ended with their session idle (`results`, the last assistant text cut short), and every armed
+ *  ComputerV2 wake trigger (`watches`; disarm through `computerUse.wakes.cancel`). HARNESS role only, never remote.
+ *  The daemon pushes a bare `ISLAND_ACTIVITY_CHANGED_NOTIFICATION` (params `{}`) to every island client when it may
+ *  have changed; the client then asks again. */
+export const IslandActivityParams = z.object({});
+const IslandActivitySessionFacts = z.object({
+  mode: z.string().optional(),
+  origin: z.string().optional(),
+  parentSessionId: z.string().optional(),
+  title: z.string().optional(),
+});
+export const IslandComputerUseItemSchema = z.object({
+  sessionId: z.string().min(1),
+  /** Epoch ms: the turn's first ComputerV2 call, and its latest event. */
+  startedAt: z.number().int().nonnegative(),
+  lastAt: z.number().int().nonnegative(),
+  /** A script runs right now (false between two scripts of the same turn). */
+  running: z.boolean(),
+  /** The latest script's `title`, when it sent one. */
+  title: z.string().max(80).optional(),
+  /** The apps and sites the latest script opens, as names. */
+  apps: z.array(z.string().max(40)).max(3),
+  session: IslandActivitySessionFacts,
+  hosts: z.array(IslandHostSchema),
+});
+export const IslandResultItemSchema = z.object({
+  /** Stable per turn end. */
+  id: z.string().min(1),
+  sessionId: z.string().min(1),
+  /** The turn's last assistant text, on one line, cut short. */
+  summary: z.string().max(240),
+  /** Epoch ms of the turn's end. */
+  at: z.number().int().nonnegative(),
+  session: IslandActivitySessionFacts,
+  hosts: z.array(IslandHostSchema),
+});
+export const IslandWatchItemSchema = z.object({
+  sessionId: z.string().min(1),
+  wakeId: z.string().min(1),
+  /** `wake_armed`'s condition kind (clicked, submitted, navigated, appeared, gone, changed, titled). */
+  condition: z.string().min(1),
+  targetLabel: z.string(),
+  elementLabel: z.string().optional(),
+  /** Epoch ms. */
+  armedAt: z.number().int().nonnegative(),
+  expiresAt: z.number().int().nonnegative(),
+  session: IslandActivitySessionFacts,
+});
+export const IslandActivityResult = z.object({
+  computerUse: z.array(IslandComputerUseItemSchema),
+  results: z.array(IslandResultItemSchema),
+  watches: z.array(IslandWatchItemSchema),
+});
+/** The daemon → island-client notification: the island's activity may have changed — ask `island.activity` again. */
+export const ISLAND_ACTIVITY_CHANGED_NOTIFICATION = "island.activityChanged";
+
 /** The island's Sessions tab (`docs/claude/island.md`): who is attached to each session right now, for every session
  *  with at least one attachment — where a click on a row moves the user's view (a Winter window, or the EXACT terminal
  *  through its `tty`). `session.list` carries no hosts. HARNESS role only (never remote, never a plugin). */
@@ -3426,6 +3484,7 @@ export const METHODS = {
   // The Winter island (Mac app): every pending card across sessions. HARNESS role only.
   islandPending: "island.pending",
   islandShown: "island.shown",
+  islandActivity: "island.activity",
   // The island's Sessions and Usage tabs. HARNESS role only.
   islandHosts: "island.hosts",
   islandUsage: "island.usage",

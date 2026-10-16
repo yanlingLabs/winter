@@ -59,6 +59,8 @@ final class IslandStore: ObservableObject {
     private(set) var terminalFrontness: [String: TerminalFrontness] = [:]
     /// Typed answers to question cards in the Needs-you list (`TranscriptInteractionCard`), by card id.
     var drafts: [String: PendingCardDraft] = [:]
+    /// Phase 2's activity — the computer-use pill, turn results, the Watches tab (`IslandActivityStore`).
+    let activity = IslandActivityStore()
 
     // MARK: Seams
 

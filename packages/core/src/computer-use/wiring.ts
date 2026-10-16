@@ -139,6 +139,8 @@ export interface ComputerUseControl {
   /** Wake triggers: how many the session has armed (the session list's mark), and the Mac's [Stop waiting]. */
   wakesArmed?(sessionId: string): number;
   wakesCancel?(sessionId: string, wakeId: string): boolean;
+  /** Every armed trigger across sessions (the Mac island's Watches tab). */
+  wakesList?(): { sessionId: string; wakeId: string; condition: string; targetLabel: string; elementLabel?: string; armedAt: number; expiresAt: number }[];
 }
 
 export interface ComputerUseRuntime {
@@ -532,6 +534,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     wakesArmed: (sessionId) => wakeRegistry.countFor(sessionId),
     wakesCancel: (sessionId, wakeId) => wakeRegistry.cancel(sessionId, wakeId, "user"),
+    wakesList: () => wakeRegistry.listAll(),
   };
 
   return {
