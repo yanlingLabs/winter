@@ -329,6 +329,16 @@ final class CommandRun: ObservableObject, Identifiable {
     /// The app is quitting: the shim folder goes now.
     func cleanUpForQuit() { removeShim() }
 
+    /// An idle-ended run is let go: its shim folder and everything it captured are freed now (the shell itself is
+    /// already being ended — `endForIdle`).
+    func discard() {
+        removeShim()
+        commandCapture = CapturedOutput(limit: TerminalTranscriptLimits.maxCapturedBytes)
+        sessionCapture = CapturedOutput(limit: TerminalTranscriptLimits.maxCapturedBytes)
+        terminalView.onData = nil
+        terminalView.onInput = nil
+    }
+
     private func removeShim() {
         guard let shimDirectory else { return }
         self.shimDirectory = nil
@@ -339,6 +349,7 @@ final class CommandRun: ObservableObject, Identifiable {
 
     func feedForTesting(_ bytes: [UInt8]) { capture(bytes[...]) }
     /// A run built without a process, given a terminal session as if its shell were `leader`.
+    func adoptShimForTesting(_ path: String) { shimDirectory = path }
     func adoptSessionForTesting(leader: pid_t, leaderStart: UInt64, runStart: UInt64) {
         processGroup = leader
         session = CommandRunSession(leader: leader, leaderStart: leaderStart, runStart: runStart)
@@ -723,6 +734,7 @@ final class CommandRunStore: ObservableObject {
                 if now.timeIntervalSince(since.since) >= Self.idleShellLifetime {
                     idleSince[run.id] = nil
                     run.endForIdle(table: processTable)
+                    vanish(run)
                 }
             } else {
                 idleSince[run.id] = (now, run.activityCount)
@@ -747,6 +759,19 @@ final class CommandRunStore: ObservableObject {
         outcomeWatch[id] = nil
         withAnimationIfVisible { runs.removeAll { $0.id == id } }
         updateIdleTimer()
+    }
+
+    /// An idle-ended run leaves the row at once — its pill rolls back up (the row's own exit, on the child row's
+    /// spring, so the stack re-flows in the same motion) — and is discarded: no finished pill is left behind.
+    /// Its terminal session stays recorded until quit, in case anything of it lingers.
+    private func vanish(_ run: CommandRun) {
+        let id = run.id
+        outcomeWatch[id] = nil
+        idleSince[id] = nil
+        windows[id] = nil
+        openWindowIds.remove(id)
+        run.discard()
+        withAnimationIfVisible { runs.removeAll { $0.id == id } }
     }
 
     /// Too many runs: the oldest finished ones with no window open go.
