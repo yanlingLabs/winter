@@ -21,7 +21,7 @@ enum IslandGallery {
         let plain = IslandScreenShape(housing: nil, menuBarHeight: 24)
 
         for (name, shape, count) in [("strip-housing-idle", notched, 0), ("strip-housing-3", notched, 3), ("strip-no-housing-2", plain, 2)] {
-            let strip = IslandLayout.strip(shape)
+            guard let strip = IslandLayout.strip(shape, waiting: count > 0) else { continue }
             let view = IslandStripView(model: IslandStripModel(waitingCount: count), size: strip.size, housingWidth: shape.housing?.width)
             out.append(try write(scene(shape, width: 520, height: 90) { view }, directory, "island-\(name)@2x.png"))
         }

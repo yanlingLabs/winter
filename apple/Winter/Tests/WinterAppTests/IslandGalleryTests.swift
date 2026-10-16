@@ -21,6 +21,9 @@ final class IslandGalleryTests: XCTestCase {
 
     func testTheLayoutHangsFromTheHousingOrTheTopEdge() {
         let notched = IslandScreenShape(housing: CGSize(width: 185, height: 32), menuBarHeight: 32)
+        // Idle: exactly the housing (no wings over the menu bar); without a housing, nothing at all.
+        XCTAssertEqual(IslandLayout.strip(notched, waiting: false), CGRect(x: -92.5, y: 0, width: 185, height: 32))
+        XCTAssertNil(IslandLayout.strip(IslandScreenShape(housing: nil, menuBarHeight: 24), waiting: false))
         let strip = IslandLayout.strip(notched)
         XCTAssertEqual(strip.width, 185 + 2 * IslandLayout.stripWing, "the strip extends the housing on both sides")
         XCTAssertEqual(strip.height, 32)

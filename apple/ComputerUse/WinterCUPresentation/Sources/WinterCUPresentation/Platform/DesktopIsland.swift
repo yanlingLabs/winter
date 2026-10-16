@@ -131,12 +131,17 @@ public struct DesktopIslandView: View {
     let geometry: DesktopIslandGeometry
     @ObservedObject var state: DesktopIslandState
     var reduceMotion = false
+    /// Read the seconds left in the VoiceOver label — only where something keeps `state.secondsLeft` current (the
+    /// helper's ticker); Winter.app's island has none, and says what happens instead.
+    var countdownInLabel = true
 
-    public init(model: CUDesktopPromptModel, geometry: DesktopIslandGeometry, state: DesktopIslandState, reduceMotion: Bool = false) {
+    public init(model: CUDesktopPromptModel, geometry: DesktopIslandGeometry, state: DesktopIslandState, reduceMotion: Bool = false,
+                countdownInLabel: Bool = true) {
         self.model = model
         self.geometry = geometry
         self.state = state
         self.reduceMotion = reduceMotion
+        self.countdownInLabel = countdownInLabel
     }
 
     public var body: some View {
@@ -151,7 +156,8 @@ public struct DesktopIslandView: View {
         }
         .frame(width: geometry.panelSize.width, height: geometry.panelSize.height, alignment: .topLeading)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(model.title) Switching in \(state.secondsLeft) seconds.")
+        .accessibilityLabel(countdownInLabel ? "\(model.title) Switching in \(state.secondsLeft) seconds."
+                                             : "\(model.title) Winter switches by itself if you don't answer.")
     }
 
     private func frameView(at date: Date) -> IslandFrameView {

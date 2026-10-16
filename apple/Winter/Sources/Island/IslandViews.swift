@@ -27,7 +27,10 @@ struct IslandStripView: View {
                                            style: .continuous)
         ZStack {
             shape.fill(Color.black)
-            if let housingWidth {
+            if model.waitingCount == 0 {
+                // Idle: exactly the housing, black on black — nothing drawn beside it.
+                EmptyView()
+            } else if let housingWidth {
                 HStack(spacing: 0) {
                     icon.frame(width: IslandLayout.stripWing)
                     Spacer(minLength: housingWidth)
@@ -539,7 +542,38 @@ struct IslandNeedsYouRow: View {
         VStack(alignment: .leading, spacing: 6) {
             IslandCardHeader(card: card)
                 .padding(.horizontal, 6)
-            if let record = islandInteractionRecord(card) {
+            if case .elicitation(let server, _, let host, _) = card.payload {
+                // A link request: its words, then ✕ (decline) and ↗ (open link) together at the trailing edge, like
+                // every other island card.
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(islandBodyText(card))
+                        .font(Typography.body(.light))
+                        .foregroundStyle(Color.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.fill")
+                            .font(Typography.caption(.semibold))
+                            .foregroundStyle(Theme.textMuted)
+                        Text(host)
+                            .font(Typography.labelMono())
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                        if let error = store.errors[card.id] {
+                            Text(error).font(Typography.caption()).foregroundStyle(pillReviewAmber).lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        let enabled = !store.inFlight.contains(card.id)
+                        IslandAnswerButton(role: .refuse, enabled: enabled) { store.answerElicitation(card, accept: false) }
+                            .accessibilityLabel("Decline \(server)'s link")
+                        IslandAnswerButton(role: .accept, symbol: "arrow.up.right", enabled: enabled) {
+                            store.answerElicitation(card, accept: true)
+                        }
+                        .accessibilityLabel("Open \(host)")
+                    }
+                }
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.08)))
+            } else if let record = islandInteractionRecord(card) {
                 TranscriptInteractionCard(record: record, wiring: wiring)
             } else {
                 // A view request: the pill's own line and buttons.

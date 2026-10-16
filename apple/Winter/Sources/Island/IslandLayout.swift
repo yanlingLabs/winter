@@ -40,7 +40,19 @@ enum IslandLayout {
     static let islandMaxHeight: CGFloat = 560
     static let islandCorner: CGFloat = 32
 
-    /// The strip's rect (x from the centre).
+    /// The strip's rect (x from the centre), or nil when it is not there. While NOTHING waits it never covers anything
+    /// the menu bar could have: with a housing it is exactly the housing (where no menu item can be — a click there
+    /// still opens the island), without one there is none (an empty island has nothing to show). Its wings — and the
+    /// tab without a housing — appear, and take clicks, only while they show something.
+    static func strip(_ shape: IslandScreenShape, waiting: Bool) -> CGRect? {
+        if !waiting {
+            guard let housing = shape.housing else { return nil }
+            return CGRect(x: -housing.width / 2, y: 0, width: housing.width, height: housing.height)
+        }
+        return strip(shape)
+    }
+
+    /// The strip with something waiting (x from the centre).
     static func strip(_ shape: IslandScreenShape) -> CGRect {
         if let housing = shape.housing {
             let width = housing.width + 2 * stripWing
