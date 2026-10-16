@@ -303,3 +303,16 @@ test("a start refuses, before the incarnation moves, while a previous owner stil
   expect([ws.power, ws.leaseEpoch, ws.incarnationId]).toEqual(["stopped", 0, null]);
   expect(h.launcher.spawned).toEqual([]); expect(h.ledger.listActive()).toEqual([]);
 });
+
+test("a running workspace's launcher chatter is not kept: only terminal verdicts are queued, so a flood cannot grow memory", async () => {
+  const h = createHarness(), running = await h.host.start(h.workspaceId), session = h.launcher.last;
+  for (let n = 0; n < 500; n++) {
+    session.push({ t: "pong", id: `ping-${n % 9}` });
+    session.push({ t: "worker_state", state: "vm_running" });
+    session.push({ t: "mux_up", frame: { class: "runtime", seq: n + 1, payload: new Uint8Array(8) } });
+  }
+  await Bun.sleep(10);
+  expect(h.host.queuedLauncherMessages(h.workspaceId)).toBe(0);
+  expect(h.records.get(h.workspaceId).power).toBe("running"); // chatter is not a verdict
+  expect(await running.stop()).toEqual({ released: true, evidence: "orderly-receipt" });
+});

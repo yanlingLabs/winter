@@ -95,13 +95,20 @@ class SessionInbox {
   private ended: CoworkNativeHostError | null = null;
   private readonly off: (() => void)[];
   constructor(session: CoworkLauncherSession) { this.off = [session.onMessage(message => this.push(message)), session.onClose(() => this.end(new CoworkNativeHostError("closed", "launcher channel ended")))]; }
+  private sealed = false;
   private push(message: CoworkNativeToDaemon): void {
     for (const [index, waiter] of this.waiters.entries()) {
       const picked = waiter.pick(message);
       if (picked !== undefined) { this.waiters.splice(index, 1); clearTimeout(waiter.timer); waiter.resolve(picked); return; }
     }
+    // After the start every unmatched message is noise to this inbox (runtime frames have no consumer in this slice); only the
+    // verdicts a later stop waits for are worth keeping, and a flood of the rest must not grow without bound.
+    if (this.sealed && message.t !== "stopped" && message.t !== "uncertain" && message.t !== "fault") return;
     this.queue.push(message);
   }
+  /** Keep only terminal messages from now on, and forget what is already queued. */
+  seal(): void { this.sealed = true; this.queue.splice(0); }
+  get size(): number { return this.queue.length; }
   end(error: CoworkNativeHostError): void {
     if (this.ended) return; this.ended = error;
     for (const waiter of this.waiters.splice(0)) { clearTimeout(waiter.timer); waiter.reject(error); }
@@ -145,6 +152,8 @@ export class CoworkNativeHost {
     return () => { const at = this.uncertainHandlers.indexOf(handler); if (at >= 0) this.uncertainHandlers.splice(at, 1); };
   }
   activeWorkspaces(): string[] { return [...this.runs.keys()]; }
+  /** Launcher messages held for a running workspace (diagnostics and tests): bounded, terminal verdicts only. */
+  queuedLauncherMessages(workspaceId: string): number { return this.runs.get(workspaceId)?.inbox?.size ?? 0; }
 
   /** Daemon start: delegates to recovery (the ledger's own reconcile, then every workspace that is not stopped). */
   bootReconcile(): CoworkNativeRecoveryReport[] { return this.deps.recovery.bootReconcile(new Set(this.runs.keys())); }
@@ -183,6 +192,7 @@ export class CoworkNativeHost {
       throw error instanceof CoworkNativeHostError ? error : new CoworkNativeHostError("start_failed", error instanceof Error ? error.name : "unknown", { cause: error });
     }
     run.phase = "running";
+    run.inbox!.seal();
     this.hook("power-running");
     this.watch(run);
     return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
