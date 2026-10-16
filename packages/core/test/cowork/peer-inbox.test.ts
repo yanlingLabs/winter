@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkError } from "../../src/cowork/types";
-import { CoworkPeerInbox, InMemoryPeerInboxStore, PEER_INBOX_LIMITS, peerSendDigest, type CoworkPeerInboxOptions, type PeerEpoch, type PeerSendRequest } from "../../src/cowork/peer-inbox";
+import { CoworkPeerInbox, InMemoryPeerInboxStore, PEER_INBOX_LIMITS, createPeerInboxMemoryState, peerSendDigest, type CoworkPeerInboxOptions, type PeerEpoch, type PeerInboxCaps, type PeerSendRequest } from "../../src/cowork/peer-inbox";
+import type { CoworkMessagingRecords } from "../../src/cowork/messaging-authority";
 import * as peerInboxModule from "../../src/cowork/peer-inbox";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { authorityFixtureSessions } from "./committed-sessions";
@@ -228,6 +229,7 @@ test("an archived or unknown recipient is refused at accept: no record, no body,
   expect(inbox.accept(f.req(a, foreign, "cross project", "m6"))).toEqual({ outcome: "refused", reason: "not_found" });
   f.setBinding(a, "archived");
   expect(inbox.accept(f.req(a, f.bind(p), "from an archived sender", "m7"))).toEqual({ outcome: "refused", reason: "not_found" });
+  expect(inbox.accept(f.req(a, archived, "archived to archived", "m9"))).toEqual({ outcome: "refused", reason: "not_found" }); // only an ACTIVE member is told "archived"
   f.setBinding(a, "active");
 
   expect(f.store.recipients()).toEqual([]); // a refusal persists nothing: no record, no body, no receipt
@@ -332,22 +334,44 @@ test("the record keeps digest and size; the body is an opaque handle released at
   expect(JSON.stringify(done)).not.toContain(text);
 });
 
-test("a damaged or missing body blocks fail-closed and nothing is delivered past it", () => {
+test("a damaged or missing HEAD body holds the queue, untouched after the first block, until the body heals or the host exit drops it", () => {
   class DamagedStore extends InMemoryPeerInboxStore {
-    mode: "ok" | "tampered" | "missing" = "ok";
-    override readBody(handle: string) { return this.mode === "tampered" ? "tampered text" : this.mode === "missing" ? undefined : super.readBody(handle); }
+    /** Handles whose body reads back damaged (`tampered`) or absent (`missing`). Other bodies stay healthy. */
+    damaged = new Map<string, "tampered" | "missing">();
+    override readBody(handle: string) { const mode = this.damaged.get(handle); return mode === "tampered" ? "tampered text" : mode === "missing" ? undefined : super.readBody(handle); }
   }
   const store = new DamagedStore(), f = fixture({ store }), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
   inbox.accept(f.req(a, r, "first", "m1")); inbox.accept(f.req(a, r, "second", "m2"));
+  const headHandle = store.find(f.id(a, "m1"))!.bodyHandle!;
   for (const mode of ["tampered", "missing"] as const) {
-    store.mode = mode;
-    expect(inbox.offer(r, epoch)).toBeUndefined();
+    store.damaged.set(headHandle, mode); // ONLY the head is damaged; the second message is healthy
+    expect(inbox.offer(r, epoch)).toBeUndefined(); // the healthy second message is NOT offered past the damaged head
     const parked = inbox.lookup(f.id(a, "m1"))!;
     expect([parked.state, parked.reason, parked.attempts]).toEqual(["blocked", "recovery", 0]);
     expect(inbox.lookup(f.id(a, "m2"))!.attempts).toBe(0);
   }
-  store.mode = "ok";
-  expect(f.drain(inbox, r, epoch)).toEqual(["first", "second"]);
+  // Already parked as blocked/recovery: further offers do not rewrite the record (no version or timestamp churn).
+  const before = store.get(inbox.lookup(f.id(a, "m1"))!.receiptId)!;
+  f.advance(5_000);
+  for (let i = 0; i < 3; i++) expect(inbox.offer(r, epoch)).toBeUndefined();
+  expect(store.get(before.receiptId)).toEqual(before);
+
+  // The host exit drops a provably damaged head only, then the queue moves on.
+  expect(codeOf(() => inbox.discard(inbox.lookup(f.id(a, "m2"))!.receiptId, { kind: "host", reason: "unrecoverable_body" }))).toBe("invalid_request"); // a healthy record cannot be dropped this way
+  expect(codeOf(() => inbox.discard(before.receiptId, { kind: "host", reason: "whatever" } as never))).toBe("invalid_request"); // only the named host reason
+  expect(store.get(before.receiptId)).toEqual(before);
+  const dropped = inbox.discard(before.receiptId, { kind: "host", reason: "unrecoverable_body" });
+  expect([dropped.state, dropped.reason]).toEqual(["refused", "unrecoverable"]);
+  expect(store.audit()).toEqual({ unresolvedWithoutBody: [], terminalWithBody: [], orphanBodies: 0 });
+  expect(f.drain(inbox, r, epoch)).toEqual(["second"]);
+
+  // And a head that heals is simply offered again.
+  inbox.accept(f.req(a, r, "third", "m3"));
+  const thirdHandle = store.find(f.id(a, "m3"))!.bodyHandle!;
+  store.damaged.set(thirdHandle, "tampered");
+  expect(inbox.offer(r, epoch)).toBeUndefined();
+  store.damaged.delete(thirdHandle);
+  expect(f.drain(inbox, r, epoch)).toEqual(["third"]);
 });
 
 // ---------------------------------------------------------------- blocked, cancel, bounded retention
@@ -356,16 +380,17 @@ test("block parks a message visibly (host-only, not runnable) until an offer ret
   const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
   inbox.accept(f.req(a, r, "one", "m1")); inbox.accept(f.req(a, r, "two", "m2")); inbox.accept(f.req(a, r, "three", "m3"));
   const offer = inbox.offer(r, epoch)!;
-  const parked = inbox.block(offer.receipt.receiptId, "resources");
-  expect([parked.state, parked.reason]).toEqual(["blocked", "resources"]);
-  expect(f.store.get(parked.receiptId)!.offered).toBeNull();
+  const parkedReceipt = inbox.block(offer.receipt.receiptId, epoch, "resources");
+  expect([parkedReceipt.state, parkedReceipt.reason]).toEqual(["blocked", "resources"]);
+  expect(f.store.get(parkedReceipt.receiptId)!.offered).toBeNull();
   expect(inbox.owed(r)).toEqual({ runnable: 2, blocked: 1 });
-  expect(codeOf(() => inbox.ack({ receiptId: parked.receiptId, recipientSessionId: r, epoch }))).toBe("stale_acknowledgment"); // nothing is offered while blocked
-  expect(codeOf(() => inbox.block(parked.receiptId, "authority" as never))).toBe("invalid_request");
+  expect(codeOf(() => inbox.ack({ receiptId: parkedReceipt.receiptId, recipientSessionId: r, epoch }))).toBe("stale_acknowledgment"); // nothing is offered while blocked
+  expect(codeOf(() => inbox.block(parkedReceipt.receiptId, epoch, "authority" as never))).toBe("invalid_request");
+  expect(inbox.block(parkedReceipt.receiptId, { incarnationId: "any-other", leaseEpoch: 99 }, "grants")).toEqual(parkedReceipt); // already blocked: a no-op for any caller
 
   // Strict FIFO: the blocked head is retried first and nothing is delivered past it.
   expect(f.drain(inbox, r, epoch)).toEqual(["one", "two", "three"]);
-  expect(inbox.block(parked.receiptId, "grants").state).toBe("delivered"); // a late block cannot undo a terminal state
+  expect(inbox.block(parkedReceipt.receiptId, epoch, "grants").state).toBe("delivered"); // a late block cannot undo a terminal state
 
   inbox.accept(f.req(a, r, "cancel me", "m4"));
   const canceled = inbox.cancel(f.id(a, "m4"));
@@ -396,7 +421,7 @@ test("retention is bounded: the inbox caps unresolved records, terminal ones are
   expect(inbox.prune()).toBe(0);
   expect(codeOf(() => f.store.remove(inbox.pending(r)[0]!.receiptId))).toBe("invalid_request"); // the store itself refuses
   expect(f.drain(inbox, r, epoch)).toEqual(["t4"]);
-  expect(PEER_INBOX_LIMITS).toEqual({ maxMessageBytes: 65_536, maxUnresolvedPerRecipient: 256, terminalKeepPerRecipient: 100, terminalTtlMs: 86_400_000 });
+  expect(PEER_INBOX_LIMITS).toEqual({ maxMessageBytes: 65_536, maxUnresolvedPerRecipient: 256, maxUnresolvedPerSenderRecipient: 32, maxUnresolvedBytesPerRecipient: 4_194_304, terminalKeepPerRecipient: 100, terminalTtlMs: 86_400_000 });
 });
 
 test("malformed requests are invalid_request and persist nothing", () => {
@@ -405,6 +430,7 @@ test("malformed requests are invalid_request and persist nothing", () => {
     f.req(a, r, "", "m1"), f.req("", r, "x", "m1"), f.req(a, "", "x", "m1"), f.req(a, r, "x", ""), f.req(a, r, "x", "m1", ""),
     f.req(a, r, "x", "line\nbreak"), f.req(a, r, "x".repeat(PEER_INBOX_LIMITS.maxMessageBytes + 1), "m2"), f.req(a, r, "x", "i".repeat(257)),
     { ...f.req(a, r, "x", "m3"), text: 7 as unknown as string },
+    f.req(a, r, "broken \ud83d tail", "m5"), f.req(a, r, "\udc00", "m6"), f.req(a, r, "   \n\t ", "m7"), f.req(a, r, "\u00a0", "m8"),
   ];
   for (const request of bad) expect(codeOf(() => inbox.accept(request))).toBe("invalid_request");
   expect(inbox.accept(f.req(a, r, "x".repeat(PEER_INBOX_LIMITS.maxMessageBytes), "m4")).outcome).toBe("accepted");
@@ -414,12 +440,277 @@ test("malformed requests are invalid_request and persist nothing", () => {
   expect(f.store.unresolved(r)).toHaveLength(1);
 });
 
+// ---------------------------------------------------------------- review round: gone senders, exhaustion, fences, sweeps
+
+const CLEAN = { unresolvedWithoutBody: [], terminalWithBody: [], orphanBodies: 0 };
+const setPower = (f: ReturnType<typeof fixture>, workspaceId: string, power: string) => { f.db.db.run("UPDATE cowork_workspaces SET power=? WHERE workspace_id=?", [power, workspaceId]); };
+
+test("a deleted sender's records end as sender_gone, release their bodies and free the inbox; an archived sender is only parked", () => {
+  const f = fixture({ limits: { maxUnresolvedPerRecipient: 3 } }), p = f.project(), a = f.bind(p), b = f.bind(p), c = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  for (const n of [1, 2, 3]) inbox.accept(f.req(a, r, `t${n}`, `m${n}`));
+  expect(inbox.accept(f.req(b, r, "blocked out", "x1"))).toEqual({ outcome: "refused", reason: "inbox_full" });
+
+  f.setBinding(a, "archived"); // archived is NOT deleted: the records are parked and still hold their slots
+  expect(inbox.offer(r, epoch)).toBeUndefined();
+  for (const n of [1, 2, 3]) expect([inbox.lookup(f.id(a, `m${n}`))!.state, inbox.lookup(f.id(a, `m${n}`))!.reason]).toEqual(["blocked", "authority"]);
+  expect(inbox.accept(f.req(b, r, "blocked out", "x1"))).toEqual({ outcome: "refused", reason: "inbox_full" });
+
+  setPower(f, p.workspaceId, "stopped"); // the sweep needs no guest epoch, so it works while the workspace is stopped
+  f.setBinding(a, "deleted");
+  inbox.settle(r);
+  setPower(f, p.workspaceId, "starting");
+  for (const n of [1, 2, 3]) {
+    const receipt = inbox.lookup(f.id(a, `m${n}`))!;
+    expect([receipt.state, receipt.reason]).toEqual(["refused", "sender_gone"]);
+    expect(f.store.get(receipt.receiptId)!.bodyHandle).toBeNull();
+  }
+  expect(f.store.audit()).toEqual(CLEAN);
+  expect(inbox.pending(r)).toEqual([]);
+  expect(inbox.cancel(f.id(a, "m1")).reason).toBe("sender_gone"); // a deleted sender can never cancel; the terminal record is returned unchanged
+  expect(inbox.accept(f.req(b, r, "blocked out", "x1")).outcome).toBe("accepted"); // the slots are free again
+  expect(f.drain(inbox, r, epoch)).toEqual(["blocked out"]);
+
+  // `offer` sweeps too, and the recipient being gone wins when both are gone.
+  inbox.accept(f.req(c, r, "from c", "c1"));
+  f.setBinding(c, "deleted");
+  expect(inbox.offer(r, epoch)).toBeUndefined();
+  expect(inbox.lookup(f.id(c, "c1"))).toMatchObject({ state: "refused", reason: "sender_gone" });
+  const d = f.bind(p), r2 = f.bind(p);
+  inbox.accept(f.req(d, r2, "to nobody", "d1"));
+  f.setBinding(d, "deleted"); f.setBinding(r2, "deleted");
+  inbox.settle(r2);
+  expect(inbox.lookup(f.id(d, "d1"))).toMatchObject({ state: "refused", reason: "not_found" });
+  expect(f.store.audit()).toEqual(CLEAN);
+});
+
+test("discard is the user's door for a record nobody else can end; it is idempotent and never touches a delivered record", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  inbox.accept(f.req(a, r, "kept", "m1")); inbox.accept(f.req(a, r, "other", "m2"));
+  f.setBinding(a, "archived"); inbox.settle(r); // an indefinitely archived sender: it can never cancel
+  const receiptId = inbox.lookup(f.id(a, "m1"))!.receiptId, user = { kind: "user", principalId: "local-user" } as const;
+
+  for (const bad of [{ kind: "user", principalId: "" }, { kind: "peer" }, { kind: "host", reason: "anything" }, undefined] as const) expect(codeOf(() => inbox.discard(receiptId, bad as never))).toBe("invalid_request");
+  expect(codeOf(() => inbox.discard("receipt-unknown", user))).toBe("not_found");
+  expect(codeOf(() => inbox.discard(receiptId, { kind: "host", reason: "unrecoverable_body" }))).toBe("invalid_request"); // the host exit is for a damaged body only
+  expect(inbox.lookup(f.id(a, "m1"))!.state).toBe("blocked");
+
+  const discarded = inbox.discard(receiptId, user);
+  expect([discarded.state, discarded.reason]).toEqual(["refused", "discarded"]);
+  expect(f.store.get(receiptId)!.bodyHandle).toBeNull();
+  expect(inbox.discard(receiptId, user)).toEqual(discarded);
+  expect(inbox.lookup(f.id(a, "m2"))!.state).toBe("blocked"); // others untouched
+  expect(f.store.audit()).toEqual(CLEAN);
+
+  f.setBinding(a, "active");
+  expect(f.drain(inbox, r, epoch)).toEqual(["other"]);
+  expect(inbox.discard(inbox.lookup(f.id(a, "m2"))!.receiptId, user).state).toBe("delivered");
+});
+
+test("the caps ride into the store's atomic append: per-sender quota, recipient count and body bytes; authority is decided before any cap", () => {
+  class SpyStore extends InMemoryPeerInboxStore {
+    caps: PeerInboxCaps[] = []; unresolvedReads = 0;
+    override append(...args: Parameters<InMemoryPeerInboxStore["append"]>) { this.caps.push(args[2]); return super.append(...args); }
+    override unresolved(recipient: string) { this.unresolvedReads++; return super.unresolved(recipient); }
+  }
+  const store = new SpyStore(), limits = { maxUnresolvedPerRecipient: 3, maxUnresolvedPerSenderRecipient: 2, maxUnresolvedBytesPerRecipient: 25 };
+  const f = fixture({ store, limits }), p = f.project(), a = f.bind(p), b = f.bind(p), c = f.bind(p), r = f.bind(p), r2 = f.bind(p), foreign = f.bind(f.project()), epoch = f.epochOf(p), inbox = f.make();
+  const send = (from: string, to: string, text: string, id: string, incarnation?: string) => inbox.accept(f.req(from, to, text, id, incarnation));
+
+  expect(send(a, r, "aaaaa", "m1").outcome).toBe("accepted"); expect(send(a, r, "aaaaa", "m2").outcome).toBe("accepted");
+  expect(send(a, r, "aaaaa", "m3")).toEqual({ outcome: "refused", reason: "sender_quota" });
+  expect(send(a, r, "aaaaa", "m3", "inc-2")).toEqual({ outcome: "refused", reason: "sender_quota" }); // a restarted sender does not escape its quota
+  expect(send(b, r, "bbbbb", "m4").outcome).toBe("accepted"); // another sender is unaffected
+  expect(send(c, r, "ccccc", "m5")).toEqual({ outcome: "refused", reason: "inbox_full" });
+  expect(send(foreign, r, "x", "m6")).toEqual({ outcome: "refused", reason: "not_found" }); // authority first: never inbox_full for an outsider
+
+  expect(send(a, r2, "a".repeat(20), "m7").outcome).toBe("accepted");
+  expect(send(b, r2, "b".repeat(6), "m8")).toEqual({ outcome: "refused", reason: "inbox_bytes_full" });
+  expect(send(foreign, r2, "x".repeat(6), "m9")).toEqual({ outcome: "refused", reason: "not_found" });
+  expect(send(b, r2, "b".repeat(5), "m10").outcome).toBe("accepted"); // exactly at the byte budget
+
+  // The cap decision is the store's single atomic step: the ledger never reads the queue first, and passes its limits in.
+  expect(store.unresolvedReads).toBe(0);
+  expect(store.caps.length).toBeGreaterThan(0);
+  for (const caps of store.caps) expect(caps).toEqual(limits);
+  expect(inbox.pending(r)).toHaveLength(3);
+  expect(store.audit()).toEqual(CLEAN);
+  for (const refused of [["m3", a], ["m5", c], ["m6", foreign], ["m8", b], ["m9", foreign]] as const) expect(inbox.lookup(f.id(refused[1], refused[0]))).toBeUndefined();
+
+  // Delivering frees capacity.
+  f.step(inbox, r, epoch);
+  expect(send(a, r, "aaaaa", "m3").outcome).toBe("accepted");
+});
+
+test("block is fenced by the epoch the message was offered under: a stale owner cannot un-offer what the current epoch holds", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), old = f.epochOf(p), inbox = f.make();
+  inbox.accept(f.req(a, r, "hello", "m1")); inbox.accept(f.req(a, r, "second", "m2"));
+  const receiptId = inbox.lookup(f.id(a, "m1"))!.receiptId, secondId = inbox.lookup(f.id(a, "m2"))!.receiptId;
+  inbox.offer(r, old);
+  const fresh = f.bump(p); // the guest restarted
+  const reoffer = inbox.offer(r, fresh)!;
+  expect(reoffer.receipt.attempts).toBe(2);
+
+  // The stale owner of the old incarnation tries to park the message the new epoch holds.
+  expect(codeOf(() => inbox.block(receiptId, old, "resources"))).toBe("stale_acknowledgment");
+  expect(codeOf(() => inbox.block(receiptId, { incarnationId: fresh.incarnationId, leaseEpoch: fresh.leaseEpoch + 1 }, "resources"))).toBe("stale_acknowledgment");
+  expect(codeOf(() => inbox.block(receiptId, { incarnationId: "forged", leaseEpoch: fresh.leaseEpoch }, "resources"))).toBe("stale_acknowledgment");
+  expect(f.store.get(receiptId)).toMatchObject({ state: "accepted", offered: fresh, attempts: 2 });
+  expect(inbox.ack({ receiptId, recipientSessionId: r, epoch: fresh }).state).toBe("delivered"); // the current epoch's ack is not livelocked
+
+  // Never offered, so there is nothing to un-offer: the fence needs state accepted AND the same offered epoch.
+  expect(codeOf(() => inbox.block(secondId, fresh, "grants"))).toBe("stale_acknowledgment");
+  expect(inbox.lookup(f.id(a, "m2"))!.state).toBe("accepted");
+  // The owner of the current offer may block, and a stopped guest can no longer speak for it.
+  inbox.offer(r, fresh);
+  setPower(f, p.workspaceId, "stopped");
+  expect(codeOf(() => inbox.block(secondId, fresh, "grants"))).toBe("stale_acknowledgment");
+  setPower(f, p.workspaceId, "starting");
+  expect(inbox.block(secondId, fresh, "grants")).toMatchObject({ state: "blocked", reason: "grants" });
+  // Terminal and already-blocked records stay no-ops for any caller.
+  expect(inbox.block(secondId, old, "resources")).toMatchObject({ state: "blocked", reason: "grants" });
+  expect(inbox.block(receiptId, old, "resources").state).toBe("delivered");
+});
+
+test("owed() counts only accepted work its sender may still send; settle sweeps without an epoch and offer runs it first", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), b = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  inbox.accept(f.req(a, r, "one", "m1")); inbox.accept(f.req(b, r, "two", "m2"));
+  expect(inbox.owed(r)).toEqual({ runnable: 2, blocked: 0 });
+
+  f.setBinding(r, "archived"); // nothing has swept yet
+  expect(inbox.owed(r)).toEqual({ runnable: 0, blocked: 2 }); // an archived recipient shows no runnable work
+  expect(inbox.pending(r).map(receipt => receipt.state)).toEqual(["accepted", "accepted"]); // owed() is read-only
+  setPower(f, p.workspaceId, "stopped"); // no guest, no epoch: settle does not need one
+  inbox.settle(r);
+  expect(inbox.pending(r).map(receipt => [receipt.state, receipt.reason])).toEqual([["blocked", "authority"], ["blocked", "authority"]]);
+  expect(inbox.owed(r)).toEqual({ runnable: 0, blocked: 2 });
+  setPower(f, p.workspaceId, "starting");
+
+  // The recipient is back; one sender is archived. A parked record whose pair may send again is runnable work again.
+  f.setBinding(r, "active"); f.setBinding(a, "archived");
+  expect(inbox.owed(r)).toEqual({ runnable: 1, blocked: 1 });
+  // A delivery owner's block is never runnable.
+  f.setBinding(a, "active");
+  const offer = inbox.offer(r, epoch)!;
+  inbox.block(offer.receipt.receiptId, epoch, "grants");
+  expect(inbox.owed(r)).toEqual({ runnable: 1, blocked: 1 });
+
+  // With nothing eligible, offer sweeps and returns undefined even for an epoch that is not current.
+  f.setBinding(r, "archived");
+  expect(inbox.offer(r, { incarnationId: "bogus", leaseEpoch: 7 })).toBeUndefined();
+  expect(inbox.pending(r).map(receipt => [receipt.state, receipt.reason])).toEqual([["blocked", "authority"], ["blocked", "authority"]]);
+});
+
+test("an archived recipient parks queued messages as blocked, never refused; they deliver after the explicit restore", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  inbox.accept(f.req(a, r, "hello", "m1"));
+  f.setBinding(r, "archived"); // archived MID-FLIGHT
+  expect(inbox.offer(r, epoch)).toBeUndefined();
+  const parked = inbox.lookup(f.id(a, "m1"))!;
+  expect([parked.state, parked.reason]).toEqual(["blocked", "authority"]);
+  expect(f.store.readBody(f.store.get(parked.receiptId)!.bodyHandle!)).toBe("hello");
+  f.setBinding(r, "active");
+  expect(f.drain(inbox, r, epoch)).toEqual(["hello"]);
+});
+
+test("the epoch fence also needs a live guest: the same incarnation and lease epoch is stale once the workspace stopped or left retained", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  inbox.accept(f.req(a, r, "one", "m1")); inbox.accept(f.req(a, r, "two", "m2"));
+  for (const power of ["stopped", "draining", "uncertain"]) {
+    setPower(f, p.workspaceId, power);
+    expect(codeOf(() => inbox.offer(r, epoch))).toBe("stale_acknowledgment");
+  }
+  setPower(f, p.workspaceId, "running");
+  const offer = inbox.offer(r, epoch)!;
+  setPower(f, p.workspaceId, "stopped");
+  expect(codeOf(() => inbox.ack({ receiptId: offer.receipt.receiptId, recipientSessionId: r, epoch }))).toBe("stale_acknowledgment");
+  setPower(f, p.workspaceId, "running");
+  expect(inbox.ack({ receiptId: offer.receipt.receiptId, recipientSessionId: r, epoch }).state).toBe("delivered");
+
+  // A workspace that is no longer retained: the fence answers first, ahead of the authority check that would also fail.
+  const second = inbox.offer(r, epoch)!;
+  f.db.db.run("UPDATE cowork_workspaces SET state='archived' WHERE workspace_id=?", [p.workspaceId]);
+  expect(codeOf(() => inbox.ack({ receiptId: second.receipt.receiptId, recipientSessionId: r, epoch }))).toBe("stale_acknowledgment");
+  expect(codeOf(() => inbox.block(second.receipt.receiptId, epoch, "grants"))).toBe("stale_acknowledgment");
+  expect(inbox.lookup(f.id(a, "m2"))!.state).toBe("accepted");
+});
+
+test("one authority verdict per sender-recipient pair per pass: a transient read failure parks the pair, never reorders it", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p);
+  let flaky = false, reads = 0;
+  const records = new Proxy(f.records, { get(target, property, receiver) {
+    const value = Reflect.get(target, property, receiver);
+    if (property === "binding" && flaky) return (id: string) => { if (++reads === 1) throw new Error("SQLITE_BUSY"); return (value as CoworkRepository["binding"]).call(target, id); };
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  const inbox = f.make({ records: records as unknown as CoworkMessagingRecords });
+  inbox.accept(f.req(a, r, "first", "m1")); inbox.accept(f.req(a, r, "second", "m2"));
+  flaky = true;
+  expect(inbox.offer(r, epoch)).toBeUndefined(); // the first candidate's check failed, so the whole pair is parked, not just it
+  expect(inbox.pending(r).map(receipt => [receipt.sendId, receipt.state, receipt.reason])).toEqual([["m1", "blocked", "authority"], ["m2", "blocked", "authority"]]);
+  flaky = false;
+  expect(f.drain(inbox, r, epoch)).toEqual(["first", "second"]); // and the order survives
+});
+
+test("ill-formed and blank text is refused before anything is stored; NUL, astral and separator characters survive delivery intact", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  for (const bad of ["broken \ud83d tail", "\udc00 first", " \n\t ", " "]) expect(codeOf(() => inbox.accept(f.req(a, r, bad, `bad-${bad.length}`)))).toBe("invalid_request");
+  // The ledger rejects the text itself, before authority and before the store is asked: an outsider gets invalid_request, not a refusal.
+  expect(codeOf(() => inbox.accept(f.req("s_outsider", r, "broken \ud83d tail", "bad-outsider")))).toBe("invalid_request");
+  expect(f.store.recipients()).toEqual([]);
+  const texts = ["a\u0000b", "emoji \u{1F600} café 日本語", "x y\r\nz", "  padded  "];
+  texts.forEach((text, index) => expect(inbox.accept(f.req(a, r, text, `ok-${index}`)).outcome).toBe("accepted"));
+  expect(f.drain(inbox, r, epoch)).toEqual(texts);
+});
+
+test("prune ends expired terminal records without touching fresh ones, and never removes a record twice", () => {
+  const f = fixture({ limits: { terminalKeepPerRecipient: 2, terminalTtlMs: 1_000 } }), p = f.project(), a = f.bind(p), r = f.bind(p), epoch = f.epochOf(p), inbox = f.make();
+  for (const n of [1, 2, 3]) inbox.accept(f.req(a, r, `t${n}`, `m${n}`));
+  f.step(inbox, r, epoch); f.step(inbox, r, epoch); // m1 and m2 are delivered now
+  f.advance(1_500);
+  f.step(inbox, r, epoch); // m3 is delivered 1.5 s later
+  expect(inbox.prune()).toBe(2); // m1 and m2 are past the TTL; m3 is fresh and within the keep
+  expect(inbox.lookup(f.id(a, "m1"))).toBeUndefined();
+  expect(inbox.lookup(f.id(a, "m2"))).toBeUndefined();
+  expect(inbox.lookup(f.id(a, "m3"))!.state).toBe("delivered");
+  expect(inbox.prune()).toBe(0);
+});
+
+test("disclosure of `archived` needs the same Project AND workspace: a record whose workspace differs gets the uniform not_found", () => {
+  const f = fixture(), p = f.project(), q = f.project(), a = f.bind(p), archived = f.bind(p), inbox = f.make();
+  f.setBinding(archived, "archived");
+  expect(inbox.accept(f.req(a, archived, "x", "m1"))).toEqual({ outcome: "refused", reason: "recipient_archived" });
+  // An inconsistent row (same project id, another workspace) must not be disclosed to: foreign keys off only to forge it.
+  f.db.db.run("PRAGMA foreign_keys=OFF");
+  f.db.db.run("UPDATE cowork_conversations SET workspace_id=? WHERE session_id=?", [q.workspaceId, archived]);
+  expect(inbox.accept(f.req(a, archived, "x", "m2"))).toEqual({ outcome: "refused", reason: "not_found" });
+});
+
+test("the in-memory audit sees a torn record, a leaked body and an orphan body", () => {
+  const state = createPeerInboxMemoryState(), store = new InMemoryPeerInboxStore(state);
+  expect(store.audit()).toEqual(CLEAN);
+  state.bodies.set("body_orphan", "left behind"); // an orphan body
+  expect(store.audit()).toEqual({ ...CLEAN, orphanBodies: 1 });
+  const f = fixture({ store }), p = f.project(), a = f.bind(p), r = f.bind(p), inbox = f.make();
+  inbox.accept(f.req(a, r, "one", "m1")); inbox.accept(f.req(a, r, "two", "m2"));
+  const [first, second] = f.store.unresolved(r);
+  state.bodies.delete(first!.bodyHandle!); // a torn record: unresolved with no body
+  state.records.set(second!.receiptId, { ...second!, state: "delivered" }); // a leaked body: terminal that still holds its handle
+  expect(store.audit()).toEqual({ unresolvedWithoutBody: [first!.receiptId], terminalWithBody: [second!.receiptId], orphanBodies: 1 });
+});
+
 // ---------------------------------------------------------------- the store port contract
 
+/** The in-memory store with a failure seam inside append, so the failure-atomicity cases are not vacuous. */
+class FaultyMemoryStore extends InMemoryPeerInboxStore {
+  private failAt = 0; private writes = 0;
+  arm(step: number) { this.failAt = step; this.writes = 0; }
+  protected override beforeWrite() { if (this.failAt > 0 && ++this.writes === this.failAt) { this.failAt = 0; throw new Error("injected write failure"); } }
+}
 for (const conformance of peerInboxStoreConformanceCases()) {
   test(`conformance (in-memory): ${conformance.name}`, () => {
-    const base = new InMemoryPeerInboxStore();
-    conformance.run({ open: () => base.reopen() });
+    const root = new FaultyMemoryStore(createPeerInboxMemoryState());
+    let last: FaultyMemoryStore = root;
+    conformance.run({ open: () => (last = root.reopen()), failAppendAtStep: step => last.arm(step) });
   });
 }
 
@@ -436,7 +727,7 @@ test("anti-wiring: no src file imports the ledger, it has no barrel export, no S
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
   for (const file of sources.filter(candidate => candidate !== module)) {
     const text = readFileSync(file, "utf8");
-    for (const needle of ["peer-inbox", "CoworkPeerInbox", "PeerInboxStore", "InMemoryPeerInboxStore", "PeerInboxRecord", "peerSendDigest", "PEER_INBOX_LIMITS", "isTerminalPeerState"])
+    for (const needle of ["peer-inbox", "CoworkPeerInbox", "PeerInboxStore", "InMemoryPeerInboxStore", "PeerInboxRecord", "peerSendDigest", "PEER_INBOX_LIMITS", "isTerminalPeerState", "createPeerInboxMemoryState", "PeerInboxCaps", "PeerInboxAudit"])
       expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
     expect(text).not.toMatch(/implements\s+PeerInboxStore/);
   }
@@ -449,7 +740,7 @@ test("anti-wiring: no src file imports the ledger, it has no barrel export, no S
   expect([...own.matchAll(/from "([^"]+)"/g)].map(match => match[1]!).sort()).toEqual(["./messaging-authority", "./types", "node:crypto"]);
   const code = own.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\s\/\/ .*$/gm, ""); // comments may name what the module is NOT
   for (const forbidden of ["bun:sqlite", "CREATE TABLE", "cowork_peer", "session-messaging", "SessionMessaging", "@yanlinglabs", "daemon", "ensure(", "wake(", "resume("]) expect(`${forbidden}:${code.includes(forbidden)}`).toBe(`${forbidden}:false`);
-  expect(Object.keys(peerInboxModule).sort()).toEqual(["CoworkPeerInbox", "InMemoryPeerInboxStore", "PEER_INBOX_LIMITS", "isTerminalPeerState", "peerSendDigest"]);
+  expect(Object.keys(peerInboxModule).sort()).toEqual(["CoworkPeerInbox", "InMemoryPeerInboxStore", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState", "isTerminalPeerState", "peerSendDigest"]);
   // No table: the schema and the runtime-state DB do not mention the inbox at all.
   for (const file of [join(packages, "core", "src", "cowork", "schema.ts"), join(packages, "core", "src", "runtime-state", "db.ts")])
     expect(readFileSync(file, "utf8")).not.toMatch(/peer_inbox|peer-inbox|cowork_peer|PeerInbox/i);
