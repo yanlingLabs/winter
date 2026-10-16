@@ -33,6 +33,9 @@ struct FrontTerminalSnapshot: Equatable {
     /// no Accessibility trust, or the app answered nothing).
     let windowTitle: String?
     let tabTitle: String?
+    /// Whether the front app has a focused window on this Space at all (false: minimised, on another Space, none);
+    /// nil when it was not read.
+    var hasFocusedWindow: Bool? = nil
 }
 
 enum TerminalWindowMatcher {
@@ -90,6 +93,8 @@ enum TerminalWindowMatcher {
         // The frontmost app does not host that terminal at all (another app is in front, or it runs inside tmux/ssh,
         // whose pty belongs to a server): not in front as far as anything can tell — the card shows either way.
         guard ttys[target] != nil else { return .notFront }
+        // No window of it in front (minimised, on another Space, a closed tab's leftover): nothing is proven.
+        if snapshot.hasFocusedWindow == false { return .unknown }
         let titles = [snapshot.tabTitle, snapshot.windowTitle].compactMap { $0 }.filter { !$0.isEmpty }
 
         // 1. A title that names a tty names exactly one.
@@ -101,18 +106,36 @@ enum TerminalWindowMatcher {
         guard let bundle = snapshot.frontBundleId, dedicatedTerminals.contains(bundle) else { return .unknown }
         // 2. The app runs ONE terminal: whatever of it is in front is that one.
         if ttys.count == 1 { return .front }
-        // 3. A title names the program running in exactly one of its terminals (Terminal.app's default title shows
-        //    the foreground process: "user — winter — 80×24").
+        // 3. A title's PROCESS segment names the program running in exactly one of its terminals (Terminal.app's
+        //    default title: "folder — winter — 80×24"; never the folder's name).
         for title in titles {
+            guard let segment = processSegment(of: title) else { continue }
             var matches = Set<String>()
             for (name, commands) in ttys {
                 for command in commands where command.count >= 3 && !unnamedCommands.contains(command) {
-                    if Self.title(title, mentions: command) { matches.insert(name); break }
+                    if Self.title(segment, mentions: command) { matches.insert(name); break }
                 }
             }
             if matches.count == 1 { return matches.first == target ? .front : .notFront }
         }
         return .unknown
+    }
+
+    /// PURE: the part of a title naming the running process — the segment before the size in Terminal.app's
+    /// "folder — process — 80×24", or a whole title with no segments (a tab's title, a terminal that titles itself
+    /// with its command). Nil when the title has segments but no size to anchor them (which one is the process is
+    /// then not known).
+    static func processSegment(of title: String) -> String? {
+        let parts = title.components(separatedBy: " — ").map { $0.trimmingCharacters(in: .whitespaces) }
+        if parts.count == 1 { return parts[0].isEmpty ? nil : parts[0] }
+        guard let last = parts.last, isTerminalSize(last), parts.count >= 2 else { return nil }
+        return parts[parts.count - 2]
+    }
+
+    /// "80×24" (or "80x24").
+    static func isTerminalSize(_ s: String) -> Bool {
+        let pieces = s.split(whereSeparator: { $0 == "×" || $0 == "x" })
+        return pieces.count == 2 && pieces.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
     }
 }
 
@@ -120,15 +143,34 @@ enum TerminalWindowMatcher {
 /// app's focused window through accessibility — read-only, only when `AXIsProcessTrusted()` (never prompts), a 0.1 s
 /// messaging timeout, a shallow walk for the tab group, nothing set on the app. Off the main thread.
 enum TerminalSnapshotReader {
-    static func read(frontPid: Int32?, frontBundleId: String?) -> FrontTerminalSnapshot {
+    /// The window is read only when one of `ttys` belongs to the front app's process tree — otherwise the answer is
+    /// already "not in front" and no accessibility call is made (which would also wake a Chromium app's AX tree).
+    static func read(frontPid: Int32?, frontBundleId: String?, ttys: Set<String>) -> FrontTerminalSnapshot {
         let processes = Self.processTable()
         var windowTitle: String?
         var tabTitle: String?
-        if let frontPid, AXIsProcessTrusted() {
-            (windowTitle, tabTitle) = Self.focusedTitles(pid: frontPid)
+        var hasWindow: Bool?
+        if let frontPid {
+            let hosted = TerminalWindowMatcher.ttysUnder(frontPid, processes: processes)
+            if ttys.contains(where: { hosted[TerminalWindowMatcher.deviceName($0)] != nil }) {
+                if AXIsProcessTrusted() {
+                    (windowTitle, tabTitle, hasWindow) = Self.focusedTitles(pid: frontPid)
+                } else {
+                    hasWindow = Self.hasOnScreenWindow(pid: frontPid)
+                }
+            }
         }
         return FrontTerminalSnapshot(frontPid: frontPid, frontBundleId: frontBundleId, processes: processes,
-                                     windowTitle: windowTitle, tabTitle: tabTitle)
+                                     windowTitle: windowTitle, tabTitle: tabTitle, hasFocusedWindow: hasWindow)
+    }
+
+    /// Without Accessibility: does the app have a normal window on screen (the window server's list; no titles read)?
+    static func hasOnScreenWindow(pid: Int32) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return false }
+        return list.contains { info in
+            (info[kCGWindowOwnerPID as String] as? Int32) == pid && (info[kCGWindowLayer as String] as? Int) == 0
+        }
     }
 
     /// Every process: pid, parent, terminal and short name.
@@ -157,11 +199,14 @@ enum TerminalSnapshotReader {
         return out
     }
 
-    /// The focused window's title and its selected tab's title.
-    static func focusedTitles(pid: Int32) -> (String?, String?) {
+    /// The focused window's title, its selected tab's title, and whether there is a focused window at all.
+    static func focusedTitles(pid: Int32) -> (String?, String?, Bool) {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.1)
-        guard let window = Self.element(app, kAXFocusedWindowAttribute) else { return (nil, nil) }
+        guard let window = Self.element(app, kAXFocusedWindowAttribute) else { return (nil, nil, false) }
+        var minimized: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized) == .success,
+           (minimized as? NSNumber)?.boolValue == true { return (nil, nil, false) }
         let windowTitle = Self.string(window, kAXTitleAttribute)
         var tabTitle: String?
         // The tab group sits at most two levels down (Terminal.app: the window's direct child).
@@ -175,7 +220,7 @@ enum TerminalSnapshotReader {
                 break
             }
         }
-        return (windowTitle, tabTitle)
+        return (windowTitle, tabTitle, true)
     }
 
     private static func element(_ e: AXUIElement, _ attribute: String) -> AXUIElement? {

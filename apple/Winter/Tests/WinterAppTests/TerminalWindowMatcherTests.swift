@@ -84,4 +84,22 @@ final class TerminalWindowMatcherTests: XCTestCase {
         XCTAssertTrue(TerminalWindowMatcher.title("(ttys004)", mentions: "ttys004"))
         XCTAssertEqual(TerminalWindowMatcher.deviceName("/dev/ttys004"), "ttys004")
     }
+
+    func testNoFocusedWindowProvesNothing() {
+        var s = snapshot(front: 400, bundle: "com.mitchellh.ghostty", window: nil)
+        s.hasFocusedWindow = false // minimised, or on another Space
+        XCTAssertEqual(TerminalWindowMatcher.frontness(of: "/dev/ttys009", in: s), .unknown, "the card shows")
+        s.hasFocusedWindow = true
+        XCTAssertEqual(TerminalWindowMatcher.frontness(of: "/dev/ttys009", in: s), .front)
+    }
+
+    func testOnlyTheTitlesProcessSegmentNamesTheProgram() {
+        // The FOLDER is called "winter" while the tab sits at a shell prompt: not proof the TUI is in front.
+        let folder = snapshot(window: "winter — -zsh — 80×24")
+        XCTAssertEqual(TerminalWindowMatcher.frontness(of: "/dev/ttys004", in: folder), .unknown)
+        XCTAssertEqual(TerminalWindowMatcher.processSegment(of: "winter — vim — 120×40"), "vim")
+        XCTAssertEqual(TerminalWindowMatcher.processSegment(of: "winter"), "winter")
+        XCTAssertNil(TerminalWindowMatcher.processSegment(of: "a — b"), "segments with no size: which is the process is unknown")
+        XCTAssertEqual(TerminalWindowMatcher.frontness(of: "/dev/ttys004", in: snapshot(window: "projects — vim — 80×24")), .notFront)
+    }
 }
