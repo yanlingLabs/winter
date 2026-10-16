@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, symlinkSync, linkSync, statfsSync, readdirSync, existsSync, fstatSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, symlinkSync, linkSync, statfsSync, readdirSync, existsSync, fstatSync, statSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { CoworkInstructionUpdate, CoworkInstructionRead, CoworkInstructionProvenance, CoworkInstructionMetadata, COWORK_INSTRUCTION_MAX_BYTES } from "@yanlinglabs/winter-protocol";
@@ -165,6 +165,71 @@ native("editor save after rename supersedes debt only when recorded temp is gone
   else { const value = owner.get(user, f.workspaceId); expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("editor wins"); expect(value.instructionRevision).toBe(2); expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "superseded" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_outbox WHERE kind='workspace_instructions_changed'").get()).toEqual({ n: 1 }); }
   expect(readFileSync(f.path, "utf8")).toBe("editor wins");
  }
+});
+/** Process death after the journal commit and before renameat. The update's checkpoint throws and the abort SQL is
+ * unavailable, so (exactly as after a real crash) the pending operation, the journal row and the recorded temp remain. */
+function crashBeforeRename(content = "proposal") {
+ let crashed = false;
+ const f = fixture(phase => { if (phase === "before-replace" && !crashed) { crashed = true; throw new Error("crash before renameat"); } });
+ f.owner.initialize(f.workspaceId, "old"); const input = f.input(content), run = f.db.db.run.bind(f.db.db);
+ f.db.db.run = ((...args: any[]) => { if (String(args[0]).startsWith("UPDATE cowork_operations SET status='failed'")) throw new Error("process died"); return (run as any)(...args); }) as typeof f.db.db.run;
+ try { refusal(() => f.owner.update(user, input), "recovery_required"); } finally { f.db.db.run = run; }
+ const debt = f.db.db.query<any, []>("SELECT * FROM cowork_instruction_mutations").get()!, temp = join(f.root, debt.temporary_name);
+ expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "pending" });
+ expect(readFileSync(temp, "utf8")).toBe(content); expect(readFileSync(f.path, "utf8")).toBe("old");
+ return { f, input, temp, debt };
+}
+const editorSave = (f: ReturnType<typeof fixture>, content = "editor wins") => { const editor = join(f.root, "editor"); writeFileSync(editor, content, { mode: 0o600 }); renameSync(editor, f.path); };
+const count = (f: ReturnType<typeof fixture>, kind: string) => (f.db.db.query<any, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE kind=?").get(kind) as { n: number }).n;
+native("crash before rename then a user save: the verified orphan temp is removed, the user's file wins and the update is superseded", () => {
+ for (const save of ["editor replacement", "in-place write"] as const) {
+  const { f, input, temp } = crashBeforeRename();
+  if (save === "editor replacement") editorSave(f); else writeFileSync(f.path, "editor wins");
+  const saved = statSync(f.path);
+  const owner = new CoworkInstructions(f.records, f.home, grants), value = owner.get(user, f.workspaceId);
+  expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("editor wins"); expect(value.instructionRevision).toBe(2);
+  expect(readFileSync(f.path, "utf8")).toBe("editor wins"); expect(statSync(f.path).ino).toBe(saved.ino); expect(statSync(f.path).mtimeMs).toBe(saved.mtimeMs);
+  expect(existsSync(temp)).toBe(false); expect(readdirSync(f.root)).toEqual(["WINTER.md"]);
+  expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "superseded" });
+  expect(f.db.db.query("SELECT pending_operation FROM cowork_instructions").get()).toEqual({ pending_operation: null }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 });
+  expect(f.db.db.query("SELECT payload_json FROM cowork_outbox WHERE kind='workspace_operation_changed'").get()).toEqual({ payload_json: JSON.stringify({ status: "superseded", terminal: true }) });
+  expect(count(f, "workspace_instructions_changed")).toBe(1);
+  // The replay of the superseded request is refused, never silently re-applied; a new request works on the user's file.
+  refusal(() => owner.update(user, input), "recovery_required"); expect(readFileSync(f.path, "utf8")).toBe("editor wins");
+  expect(owner.update(user, { ...f.input("after repair", "retry-new-request") }).value.instructionRevision).toBe(3); expect(readFileSync(f.path, "utf8")).toBe("after repair");
+ }
+});
+native("crash before rename then a user save: a temp that is not the recorded file is never removed and recovery stays required", () => {
+ for (const tamper of ["overwritten in place", "same-length overwrite", "recreated with the same bytes", "extra hard link", "symlink", "directory"] as const) {
+  const { f, temp } = crashBeforeRename(), outside = join(f.home, "outside-target"); writeFileSync(outside, "outside", { mode: 0o600 });
+  if (tamper === "overwritten in place") writeFileSync(temp, "tampered!");
+  if (tamper === "same-length overwrite") writeFileSync(temp, "PROPOSAL");
+  if (tamper === "recreated with the same bytes") { rmSync(temp); writeFileSync(temp, "proposal", { mode: 0o600 }); }
+  if (tamper === "extra hard link") linkSync(temp, join(f.root, "alias"));
+  if (tamper === "symlink") { rmSync(temp); symlinkSync(outside, temp); }
+  if (tamper === "directory") { rmSync(temp); mkdirSync(temp, { mode: 0o700 }); }
+  editorSave(f); const saved = statSync(f.path);
+  const owner = new CoworkInstructions(f.records, f.home, grants);
+  refusal(() => owner.get(user, f.workspaceId), "recovery_required"); refusal(() => owner.get(user, f.workspaceId), "recovery_required");
+  const kept = lstatSync(temp); expect(tamper === "symlink" ? kept.isSymbolicLink() : tamper === "directory" ? kept.isDirectory() : kept.isFile()).toBe(true);
+  if (tamper === "extra hard link") expect(lstatSync(join(f.root, "alias")).ino).toBe(kept.ino);
+  if (tamper === "overwritten in place") expect(readFileSync(temp, "utf8")).toBe("tampered!");
+  if (tamper === "same-length overwrite") expect(readFileSync(temp, "utf8")).toBe("PROPOSAL");
+  expect(readFileSync(outside, "utf8")).toBe("outside"); expect(readFileSync(f.path, "utf8")).toBe("editor wins"); expect(statSync(f.path).ino).toBe(saved.ino);
+  expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "pending" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 1 });
+  expect(count(f, "workspace_operation_changed")).toBe(0); expect(f.records.get(f.workspaceId).instructionRevision).toBe(1);
+ }
+});
+native("a crash during the orphan repair itself leaves the existing superseded state and the next recovery completes it once", () => {
+ const { f, temp } = crashBeforeRename(); editorSave(f);
+ let crashed = false; const owner = new CoworkInstructions(f.records, f.home, grants, undefined, phase => { if (phase === "orphan-temporary-removed" && !crashed) { crashed = true; throw new Error("crash after unlink"); } });
+ refusal(() => owner.get(user, f.workspaceId), "recovery_required"); expect(crashed).toBe(true);
+ expect(existsSync(temp)).toBe(false); expect(readFileSync(f.path, "utf8")).toBe("editor wins");
+ expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "pending" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 1 });
+ const restarted = new CoworkInstructions(f.records, f.home, grants), value = restarted.get(user, f.workspaceId);
+ expect(Buffer.from(value.contentBase64, "base64").toString()).toBe("editor wins"); expect(value.instructionRevision).toBe(2);
+ expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "superseded" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 0 });
+ expect(count(f, "workspace_operation_changed")).toBe(1); expect(count(f, "workspace_instructions_changed")).toBe(1); expect(restarted.get(user, f.workspaceId).instructionRevision).toBe(2);
 });
 native("immediate pre-rename editor conflict aborts known unapplied debt and next read absorbs the user save", () => {
  let edited = false; const f = fixture(phase => { if (phase === "before-replace" && !edited) { edited = true; const editor = join(f.root, "editor"); writeFileSync(editor, "editor wins", { mode: 0o600 }); renameSync(editor, f.path); } });

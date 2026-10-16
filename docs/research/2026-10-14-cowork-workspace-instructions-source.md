@@ -241,3 +241,39 @@ with failed operation, cleared debt and retained refused orphan. Default focus:
 **9 pass,13 skip,61 assertions,0 fail**. Protocol/Core/CLI no-emit typechecks and
 diff check pass; CLI remains unchanged from its15-test152-assertion pass. Reviewed
 filesystem/fullsync/scoped-transaction leaf hashes remain byte-identical.
+
+## Later status (2026-10-15): orphaned temp after crash and editor save
+
+The R1 note above left one case for host repair: the process dies after the
+journal commit and before renameat, then a user editor save replaces or edits
+WINTER.md while the recorded temp is still on disk. Restart recovery found the
+file matching neither recorded image and the temp present, so it kept
+`recovery_required` and every read or update of that workspace refused.
+
+Restart recovery now resolves it without a manual step. The user's file is never
+written, renamed or removed. The temp is the host's own unapplied proposal and is
+never replayed, which is the same rule the superseded outcome already used: a
+direct edit is guidance, so the user's file stands and the next observation
+absorbs it as a direct edit. Before removing the temp, recovery proves it is exactly
+what the journal recorded: it opens the recorded name read-only without following
+links, and requires a regular file with one link, owned by the daemon user at
+0600, with the recorded device, inode, owner and mode, the recorded length and the
+recorded SHA-256. It then removes only that generated temporary name through the
+held directory descriptor, requests a full sync of the directory, and takes the
+existing superseded transaction (operation `superseded`, pending ownership and
+journal cleared, one terminal outbox event). A crash after the removal leaves
+"neither image and temp gone", which that rule already handled.
+
+Anything else at the recorded name (different bytes, a recreated file with the
+same bytes, an extra hard link, a symlink or a directory) is unknown. It is left in
+place and recovery keeps `recovery_required`.
+
+The read-only open reuses the existing 3-argument `openat` binding with the same
+flags as the WINTER.md open and a name that must match the generated temporary
+pattern. No new FFI symbol and no mode-bearing flag was added; this is a new call
+site of the reviewed binding, not a new primitive.
+
+Tests (`instructions.test.ts`, run with `WINTER_COWORK_INSTRUCTION_FS_FIXTURE=1`
+like the other native cases) reproduce the crash image by failing the abort SQL at
+the `before-replace` checkpoint, then apply an editor replacement or an in-place
+write, and cover each refusal case above plus a crash during the repair itself.
