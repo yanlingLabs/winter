@@ -46,10 +46,11 @@ test.skipIf(!supported)("verifyItemExcluded needs tmutil's answer for THAT path 
   // tmutil reports the whole TMPDIR as excluded, so without the descriptor check an unmarked image would pass.
   expect(timeMachineVolumeBackup.verifyItemExcluded(t.sibling, t.siblingFd)).toBe(false);
   expect(timeMachineVolumeBackup.verifyItemExcluded(t.marked, t.siblingFd)).toBe(false); // a named path whose descriptor lacks the marker
-  // tmutil canonicalizes the path it prints; a different spelling is not the vetted item.
-  expect(timeMachineVolumeBackup.verifyItemExcluded(join(t.dir, "..", basename(t.dir), "data.ext4"), t.markedFd)).toBe(false);
+  // tmutil canonicalizes the path it prints; a different spelling is not the vetted item. (Plain concatenation:
+  // path.join would normalize the ".." away and hand tmutil the canonical spelling after all.)
+  expect(timeMachineVolumeBackup.verifyItemExcluded(`${t.dir}/../${basename(t.dir)}/data.ext4`, t.markedFd)).toBe(false);
   mkdirSync(join(t.dir, "nested")); // a path in a directory that is not the pinned image's
-  expect(timeMachineVolumeBackup.verifyItemExcluded(join(dirname(t.marked), "nested", "..", "data.ext4"), t.markedFd)).toBe(false);
+  expect(timeMachineVolumeBackup.verifyItemExcluded(`${dirname(t.marked)}/nested/../data.ext4`, t.markedFd)).toBe(false);
   // tmutil's own verdict is required: a path it reports as included (a read-only query on a system folder) never passes,
   // even with a descriptor that carries the marker.
   expect(timeMachineVolumeBackup.verifyItemExcluded("/Applications", t.markedFd)).toBe(false);
