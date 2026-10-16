@@ -155,15 +155,20 @@ describe("the per-app card's answers", () => {
 
   test("a Dispatch child's card is bounded like every relayed card; a plain session's waits for its human", async () => {
     const child = setup({ facts: { origin: "dispatch-child", mode: "code" } });
-    void child.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" });
+    const childRun = child.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" });
     await Promise.resolve();
     const c = cards(child.events)[0]!;
     expect(c.expiresAt! - c.issuedAt!).toBe(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
     const plain = setup();
-    void plain.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" });
+    const plainRun = plain.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" });
     await Promise.resolve();
     const p = cards(plain.events)[0]!;
     expect(p.expiresAt! - p.issuedAt!).toBeGreaterThan(24 * 3600_000);
+    // Answer both cards: no pending card (and so no 600 s / 24.8-day broker timer) may outlive the test — an
+    // un-awaited authorize() whose timer later fires rejects with nobody listening and fails whatever test runs then.
+    child.approvals.resolve("s1", c.callId, false, "test");
+    plain.approvals.resolve("s1", p.callId, false, "test");
+    await Promise.all([failsWith(childRun, "NotAllowed"), failsWith(plainRun, "NotAllowed")]);
   });
 });
 
