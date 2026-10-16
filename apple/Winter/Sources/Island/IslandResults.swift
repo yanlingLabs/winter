@@ -129,6 +129,8 @@ struct IslandActivityDecision: Equatable {
 
 /// PURE precedence of everything born from the housing (`IslandActivityArbiterTests`):
 ///
+///   0. the agent uses the REAL mouse (rung 4) → nothing here: no click of the user's or the agent's may land on the
+///      island while the pointer is the agent's (the helper refuses a hardware click a Winter window covers);
 ///   1. the island open → nothing here (its tabs show it all; the Watches tab lists the computer's waits);
 ///   2. a card needing an answer (approval, question, link, view request) expanded on top, or waiting under it → nothing
 ///      here: the computer-use pill and its mirror YIELD (hidden, the mirror's capture stopped), a result is held;
@@ -137,8 +139,8 @@ struct IslandActivityDecision: Equatable {
 /// With only the badge up (cards compacted), 3 and 4 sit just below it — the pill in its compact form.
 enum IslandActivityArbiter {
     static func decide(cardOnTop: Bool, badgeUp: Bool, islandOpen: Bool, result: String?, computerUse: String?,
-                       mirrorOpen: Bool) -> IslandActivityDecision {
-        if islandOpen || cardOnTop { return .none }
+                       mirrorOpen: Bool, realMouse: Bool = false) -> IslandActivityDecision {
+        if realMouse || islandOpen || cardOnTop { return .none }
         if let result { return IslandActivityDecision(slot: .result(result), belowBadge: badgeUp, compact: false) }
         if let computerUse {
             return IslandActivityDecision(slot: .computerUse(sessionId: computerUse, expanded: mirrorOpen), belowBadge: badgeUp,

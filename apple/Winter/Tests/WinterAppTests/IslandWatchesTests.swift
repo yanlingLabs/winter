@@ -54,6 +54,9 @@ final class IslandWatchesTests: XCTestCase {
         XCTAssertTrue(done)
         XCTAssertEqual(store.watches.map(\.wakeId), ["w1"])
         XCTAssertFalse(store.disarming.contains("w1"))
+        // The watch ends anyway (fired, expired): its line goes with it.
+        store.apply(IslandActivitySnapshot(watches: []))
+        XCTAssertTrue(store.disarmErrors.isEmpty)
     }
 
     func testTheWatchesTabIsRegistered() {

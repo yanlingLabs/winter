@@ -21,9 +21,16 @@ import type { IslandClient, IslandHost, IslandSessionFacts } from "./registry";
 const COMPUTER_V2_NAMES: ReadonlySet<string> = new Set(["computer_v2", "ComputerV2"]);
 /** The projector's own pass-through `user_message` (never a host push; `turn-origins.ts`). */
 const PROJECTOR_PASSTHROUGH_CLIENT = "winter";
-/** Turn origins whose end is not shown: another agent's message, and Dispatch's own child prompts (Dispatch reports
- *  those itself, then wakes with a `dispatch-wake` turn whose end IS shown). */
-const NO_RESULT_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch"]);
+/** Turn origins whose end is not shown — every door that starts a turn with nobody waiting on it: another agent's
+ *  message (`messaging`), Dispatch's own child prompts (`dispatch`; Dispatch reports those itself, then wakes with a
+ *  `dispatch-wake` turn whose end IS shown), a Workflow's `agent()` child (`workflow`, `daemon.ts`'s `runTurn`), a
+ *  scheduled routine (`routine`, `routines/runner.ts`) and the embedded runtime's self-check (`embedded-probe`). The
+ *  human doors (the app, the TUI, the phone, `-p`) and the wakes (`dispatch-wake`, `computer-wake`) are shown. */
+export const ISLAND_NO_RESULT_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch", "workflow", "routine", "embedded-probe"]);
+/** Sessions whose turns are never shown, whoever started them: a Workflow's children and scheduled routines'. */
+function automatedSession(origin: string | undefined): boolean {
+  return origin === "workflow-child" || origin === "routine" || origin?.startsWith("routine/") === true;
+}
 
 /** How long a turn end is held before it counts as "the session is idle, waiting for the user". */
 export const ISLAND_RESULT_SETTLE_MS = 1_500;
@@ -33,8 +40,9 @@ export const ISLAND_RESULT_TTL_MS = 10 * 60_000;
 export const ISLAND_RESULTS_MAX = 32;
 export const ISLAND_FOLLOWED_SESSIONS_MAX = 512;
 export const ISLAND_RESULT_SUMMARY_MAX = 240;
-/** A computer-use entry with no event for this long (a turn end that never came) is dropped. */
-export const ISLAND_CU_STALE_MS = 30 * 60_000;
+/** A computer-use entry with no ComputerV2 call or result for this long is dropped, running or not (a turn end that
+ *  never came, a child that died without one): a generous cap, past any script's 300 s timeout. */
+export const ISLAND_CU_STALE_MS = 10 * 60_000;
 /** The most apps a computer-use entry names, and the longest app name. */
 const CU_APPS_MAX = 3;
 const CU_APP_NAME_MAX = 40;
@@ -192,6 +200,11 @@ export class IslandActivity {
         if (text.length > 0) f.lastText = text;
         return;
       }
+      case "agent_error":
+        // The turn failed (a provider error, the runtime child died): its computer use is over.
+        this.followed.get(event.sessionId)?.pairer.other();
+        if (this.cu.delete(event.sessionId)) this.changed();
+        return;
       case "turn_completed": {
         const f = this.follow(event.sessionId);
         f.pairer.other();
@@ -210,7 +223,7 @@ export class IslandActivity {
   list(): IslandActivitySnapshot {
     const now = this.now();
     for (const [sid, e] of [...this.cu]) {
-      if (e.running.size === 0 && now - e.lastAt > ISLAND_CU_STALE_MS) this.cu.delete(sid);
+      if (now - e.lastAt > ISLAND_CU_STALE_MS) this.cu.delete(sid);
     }
     for (const [id, r] of [...this.results]) {
       if (now - r.at > ISLAND_RESULT_TTL_MS) this.results.delete(id);
@@ -268,7 +281,32 @@ export class IslandActivity {
     if (label.title === undefined) delete e.title; else e.title = label.title;
     // A script that names no app keeps the apps the turn already bound (the runtime keeps them between scripts).
     if (label.apps.length > 0) e.apps = label.apps;
+    this.armStaleCheck();
     this.changed();
+  }
+
+  /** While anything is listed as using the computer, ONE one-shot at the oldest entry's stale time drops what went
+   *  quiet and tells the clients (no timer otherwise). */
+  private cancelStale?: () => void;
+  private staleAt?: number;
+  private armStaleCheck(): void {
+    let oldest: number | undefined;
+    for (const e of this.cu.values()) oldest = oldest === undefined ? e.lastAt : Math.min(oldest, e.lastAt);
+    if (oldest === undefined) { this.cancelStale?.(); this.cancelStale = undefined; this.staleAt = undefined; return; }
+    const at = oldest + ISLAND_CU_STALE_MS;
+    if (this.cancelStale !== undefined && this.staleAt === at) return;
+    this.cancelStale?.();
+    this.staleAt = at;
+    const setTimer = this.deps.setTimer ?? defaultTimer;
+    this.cancelStale = setTimer(() => {
+      this.cancelStale = undefined;
+      this.staleAt = undefined;
+      const before = this.cu.size;
+      const now = this.now();
+      for (const [sid, e] of [...this.cu]) if (now - e.lastAt > ISLAND_CU_STALE_MS) this.cu.delete(sid);
+      if (this.cu.size !== before) this.changed();
+      this.armStaleCheck();
+    }, Math.max(0, at - this.now()) + 1);
   }
 
   private turnEnded(sid: string, f: Followed, stopReason: string, seq: number, ts: number): void {
@@ -277,7 +315,10 @@ export class IslandActivity {
     // Shown only to an island client, only for a turn that ended normally with something said, and not for a turn
     // another agent or Dispatch's spawn started. An interrupted turn: the user stopped it (or it was stopped for them).
     if (this.clients.size === 0 || stopReason !== "end_turn" || text === undefined) return;
-    if (f.origin !== undefined && NO_RESULT_ORIGINS.has(f.origin)) return;
+    if (f.origin !== undefined && ISLAND_NO_RESULT_ORIGINS.has(f.origin)) return;
+    let origin: string | undefined;
+    try { origin = this.deps.facts(sid)?.origin; } catch { origin = undefined; }
+    if (automatedSession(origin)) return;
     const generation = f.generation;
     f.cancelSettle?.();
     const setTimer = this.deps.setTimer ?? defaultTimer;
@@ -306,6 +347,7 @@ export class IslandActivity {
 
   /** Tells every island client, once per burst (one microtask). */
   private changed(): void {
+    this.armStaleCheck();
     if (this.clients.size === 0 || this.notifyScheduled) return;
     this.notifyScheduled = true;
     queueMicrotask(() => {

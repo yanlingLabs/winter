@@ -74,7 +74,13 @@ struct IslandCUState: Equatable {
         /// The line now, and whether it came from a caption (and when).
         var line: String
         var lineFromCaptionAt: TimeInterval?
+        /// Rung 4: the agent uses the REAL mouse now (the cursor's `foreground` on, until off) — the island gets out of
+        /// the way, so no click of it can land on Winter's own windows.
+        var usingMouse = false
     }
+
+    /// Some session uses the real mouse now.
+    var usingRealMouse: Bool { sessions.values.contains { $0.usingMouse } }
 
     /// The sessions using the computer now, by id.
     private(set) var sessions: [String: Session] = [:]
@@ -132,6 +138,7 @@ struct IslandCUState: Equatable {
     /// The agent cursor did something in `sessionId` (in the app `appName`).
     mutating func cursor(sessionId: String, kind: String, text: String?, appName: String?, now: TimeInterval) {
         guard var s = sessions[sessionId] else { return }
+        if kind == "foreground" { s.usingMouse = text != "off" }
         if kind == "waitEnd" {
             // The wait is over: back to the script's own words until the next act.
             if s.line.hasPrefix("Waiting") { s.line = islandCUScriptLine(s.item); s.lineFromCaptionAt = nil }

@@ -67,6 +67,25 @@ final class IslandMirrorTests: XCTestCase {
         XCTAssertTrue(islandDetachedMirrorEnded(sessionId: "s1", cu: cu))
     }
 
+    func testADetachedMirrorOpensAtTheBottomRightAwayFromTheTopCentre() {
+        let visible = CGRect(x: 0, y: 80, width: 1512, height: 870)
+        let f = IslandDetachedMirrorPanel.initialFrame(visible: visible)
+        XCTAssertEqual(f.maxX, visible.maxX - IslandDetachedMirrorPanel.inset)
+        XCTAssertEqual(f.minY, visible.minY + IslandDetachedMirrorPanel.inset)
+        XCTAssertGreaterThan(f.minX, visible.midX, "clear of the island and the top centre")
+    }
+
+    func testWithAPhoneWatchingTheIslandMirrorCapturesAtTheIslandsRateAndThePhoneGetsItsOwnBack() {
+        let coordinator = MirrorCoordinator(client: FakeHelperClient(), makeSink: { _ in RecordingSink() }, sleep: { _ in await Task.yield() })
+        coordinator.addRemoteViewer("s1")
+        XCTAssertEqual(coordinator.subscription(for: "s1"), .phone)
+        coordinator.startCapture(sessionId: "s1")
+        XCTAssertEqual(coordinator.subscription(for: "s1"), .island, "one capture at the larger rate; the phone's relay paces itself to 5 fps")
+        coordinator.stopCapture(sessionId: "s1")
+        XCTAssertEqual(coordinator.subscription(for: "s1"), .phone)
+        coordinator.shutdown()
+    }
+
     func testTheCoordinatorFollowsThePillsCursorWithoutFramesAndTheMirrorWithFramesAtTheIslandsCaps() async {
         let client = FakeHelperClient()
         client.setTargets([.fake("t1", app: "Google Chrome")], for: "s1")

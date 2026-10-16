@@ -87,6 +87,21 @@ final class IslandCUPillTests: XCTestCase {
         XCTAssertEqual(s, before)
     }
 
+    func testRungFourMarksTheRealMouseInUseUntilItEnds() {
+        var s = IslandCUState()
+        s.apply([item("s1"), item("s2")], now: 0)
+        XCTAssertFalse(s.usingRealMouse)
+        s.cursor(sessionId: "s2", kind: "foreground", text: "on", appName: "Notes", now: 1)
+        XCTAssertTrue(s.usingRealMouse)
+        XCTAssertEqual(s.presentation()?.line, "Using your mouse")
+        s.cursor(sessionId: "s2", kind: "foreground", text: "off", appName: "Notes", now: 2)
+        XCTAssertFalse(s.usingRealMouse)
+        s.cursor(sessionId: "s1", kind: "foreground", text: nil, appName: "Notes", now: 3)
+        XCTAssertTrue(s.usingRealMouse)
+        s.apply([item("s2")], now: 4)
+        XCTAssertFalse(s.usingRealMouse, "the session's turn ended: its pointer is the user's again")
+    }
+
     func testTheCursorsWordsAndTheScriptsWords() {
         XCTAssertEqual(islandCUActionLine(kind: "caption", text: "Choosing File › Save", appName: "Notes"), "Choosing File › Save in Notes")
         XCTAssertEqual(islandCUActionLine(kind: "caption", text: "Clicking “Save” in Notes", appName: "Notes"), "Clicking “Save” in Notes")

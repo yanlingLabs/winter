@@ -710,6 +710,10 @@ final class MirrorCoordinator: ObservableObject {
     /// neither does.
     func subscription(for sessionId: String) -> Subscription {
         if macWantsFrames(sessionId) { return .mac }
+        // The island's mirror and a phone at once: ONE helper subscription per session per connection, so the capture
+        // runs at the larger of the two (the island's 8 fps). The phone still gets ≤ 5 fps: its relay paces what it sends
+        // itself (`RemoteMirrorRelay`, `MirrorWire.activeFps`/`idleFps`), exactly as beside a Mac window (helper default).
+        // A second subscription at the phone's rate would cost a second capture for no gain.
         if islandWantsFrames(sessionId) { return .island }
         if remoteViewers[sessionId] != nil { return .phone }
         return .none

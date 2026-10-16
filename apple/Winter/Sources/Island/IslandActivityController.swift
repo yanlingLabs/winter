@@ -34,6 +34,11 @@ final class IslandActivityController {
     private var detached: [String: IslandDetachedMirrorPanel] = [:]
     private var laying = false
     private var dirty = false
+    /// The full layout's screen rect (the panel itself is cut to what is drawn once it rests), and the cut.
+    private var fullFrame: CGRect = .zero
+    /// A mirror closing springs back to the pill: its area stays in the panel until the spring is done.
+    private var collapseHold: (rect: CGRect, until: TimeInterval)?
+    private var wasExpanded = false
 
     init(store: IslandActivityStore, island: IslandController, mirrors: IslandMirrorLifecycle?) {
         self.store = store
@@ -82,10 +87,17 @@ final class IslandActivityController {
         let cu = store.cuPresentation
         decision = IslandActivityArbiter.decide(cardOnTop: cardOnTop, badgeUp: badgeUp, islandOpen: island.isOpen,
                                                 result: store.currentResult?.id, computerUse: cu?.sessionId,
-                                                mirrorOpen: store.mirrorOpen)
+                                                mirrorOpen: store.mirrorOpen, realMouse: store.usingRealMouse)
         // The in-island mirror's pictures flow only while it is on screen.
         if case .computerUse(let sid, true) = decision.slot { mirrors?.setIslandMirror(sid) } else { mirrors?.setIslandMirror(nil) }
         closeEndedDetachedMirrors()
+        // Rung 4 (the agent's hardware pointer): the detached mirrors go fully transparent and click-through, so the
+        // helper's hit test (which skips alpha-0 windows) never finds Winter in the way and no click lands on them.
+        for window in detached.values {
+            let away = store.usingRealMouse
+            window.alphaValue = away ? 0 : 1
+            window.ignoresMouseEvents = away
+        }
 
         let key: String? = switch decision.slot {
         case .none: nil
@@ -186,6 +198,7 @@ final class IslandActivityController {
         }
         let expanded: Bool = if case .computerUse(_, true) = decision.slot { true } else { false }
         shown?.expanded = expanded
+        let previousContent = contentRect
         if let shown {
             let dx = (width - shown.geometry.panelSize.width) / 2
             let size = expanded ? IslandActivityLayout.mirrorSize : shown.geometry.pill.size
@@ -194,9 +207,27 @@ final class IslandActivityController {
         } else {
             contentRect = .zero
         }
+        let now = ProcessInfo.processInfo.systemUptime
+        if wasExpanded, !expanded {
+            collapseHold = (previousContent, now + 0.5)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+                guard let self, let island = self.island else { return }
+                self.draw(island)
+            }
+        }
+        wasExpanded = expanded
+        // At rest the panel is cut to what is drawn (and its shadow): no transparent area of Winter's sits over the
+        // menu bar or the app below — the window server, and the helper's hit test, see only the pill or card.
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        var crop = bounds
+        if let shown, leaving == nil, shown.state.still, !contentRect.isEmpty {
+            var r = contentRect
+            if let hold = collapseHold, hold.until > now { r = r.union(hold.rect) } else { collapseHold = nil }
+            crop = r.insetBy(dx: -IslandActivityLayout.shadowRoom, dy: -IslandActivityLayout.shadowRoom).intersection(bounds).integral
+        }
         let mirrorSession: String? = if case .computerUse(let sid, true) = decision.slot { sid } else { nil }
         let root = IslandActivityRoot(
-            activity: store, panelSize: CGSize(width: width, height: height), pointer: pointer, current: shown,
+            activity: store, panelSize: CGSize(width: width, height: height), crop: crop, pointer: pointer, current: shown,
             leaving: leaving, mirrorModel: mirrorSession.flatMap(mirrorModel), reduceMotion: reduceMotion,
             onPill: { [weak self] in self?.store.setMirrorOpen(true) },
             onCollapse: { [weak self] in self?.store.setMirrorOpen(false) },
@@ -211,7 +242,9 @@ final class IslandActivityController {
             panel.contentView = host
         }
         let screen = island.screenFrame
-        panel.setFrame(CGRect(x: screen.midX - width / 2, y: screen.maxY - height, width: width, height: height), display: true)
+        fullFrame = CGRect(x: screen.midX - width / 2, y: screen.maxY - height, width: width, height: height)
+        panel.setFrame(CGRect(x: fullFrame.minX + crop.minX, y: fullFrame.maxY - crop.maxY, width: crop.width, height: crop.height),
+                       display: true)
         if !panel.isVisible { panel.orderFrontRegardless() }
         updatePointerMonitors(active: true)
         pointerMoved()
@@ -231,8 +264,8 @@ final class IslandActivityController {
         }
         let host = NSHostingView(rootView: IslandDetachedMirrorView(title: title, model: mirrorModel(sid), onClose: close))
         window.contentView = host
-        window.setFrame(IslandDetachedMirrorPanel.initialFrame(screen: island.screenFrame, topInset: island.screenShape.topInset),
-                        display: true)
+        let visible = IslandLayout.islandScreen()?.visibleFrame ?? island.screenFrame
+        window.setFrame(IslandDetachedMirrorPanel.initialFrame(visible: visible), display: true)
         detached[window.windowId] = window
         window.orderFrontRegardless()
         store.setMirrorOpen(false)
@@ -278,9 +311,9 @@ final class IslandActivityController {
     private func pointerMoved() {
         guard panel.isVisible else { return }
         let mouse = NSEvent.mouseLocation
-        let frame = panel.frame
+        let frame = fullFrame
         let local = CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y)
-        let point: CGPoint? = frame.contains(mouse) ? local : nil
+        let point: CGPoint? = panel.frame.contains(mouse) ? local : nil
         pointer.set(point)
         let over = point.map { contentRect.insetBy(dx: -4, dy: -4).contains($0) } ?? false
         if let shown {
@@ -345,6 +378,8 @@ final class IslandActivityShown: ObservableObject {
 struct IslandActivityRoot: View {
     @ObservedObject var activity: IslandActivityStore
     let panelSize: CGSize
+    /// The part of the layout the panel shows (panel-local, top-left origin).
+    let crop: CGRect
     let pointer: DispatchPillPointer
     let current: IslandActivityShown?
     let leaving: IslandActivityShown?
@@ -363,6 +398,8 @@ struct IslandActivityRoot: View {
         }
         .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
         .coordinateSpace(name: DispatchPillView.canvasSpace)
+        .offset(x: -crop.minX, y: -crop.minY)
+        .frame(width: crop.width, height: crop.height, alignment: .topLeading)
         .environment(\.dispatchPillPointer, pointer)
         .environment(\.colorScheme, .dark)
     }

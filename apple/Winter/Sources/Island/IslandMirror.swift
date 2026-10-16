@@ -129,9 +129,11 @@ final class IslandDetachedMirrorPanel: NSPanel {
         title = "Winter computer use — live view"
     }
 
-    /// Where a new detached window goes: below the island, a little to the right of the screen's centre.
-    static func initialFrame(screen: CGRect, topInset: CGFloat) -> CGRect {
-        CGRect(x: screen.midX + 140, y: screen.maxY - topInset - 40 - defaultSize.height,
+    /// Where a new detached window goes: the bottom-right corner of the island's screen (its visible frame, clear of the
+    /// Dock and menu bar) — away from the top centre, where the work the agent watches (and the island) usually is.
+    static let inset: CGFloat = 20
+    static func initialFrame(visible: CGRect) -> CGRect {
+        CGRect(x: visible.maxX - inset - defaultSize.width, y: visible.minY + inset,
                width: defaultSize.width, height: defaultSize.height)
     }
 }

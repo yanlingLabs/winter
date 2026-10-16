@@ -18,6 +18,8 @@ enum IslandActivityLayout {
     /// The mirror in the island: its outer size and corner.
     static let mirrorSize = CGSize(width: 380, height: 300)
     static let mirrorCorner: CGFloat = 24
+    /// Room kept around a resting slot for its shadow and hover grow (the panel is cut to it).
+    static let shadowRoom: CGFloat = 22
     /// Below the badge: how far the slot moves down so it hangs under it.
     static var belowBadgeShift: CGFloat { IslandLayout.badgeHeight - IslandLayout.badgeTuck + 6 }
 }

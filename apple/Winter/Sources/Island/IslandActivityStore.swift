@@ -18,8 +18,9 @@ final class IslandActivityStore: ObservableObject {
     @Published private(set) var watches: [IslandWatchItem] = []
     /// Computer-use sessions whose host is in front (their pill is not shown: the user sees the work there).
     @Published private(set) var hiddenSessions: Set<String> = []
-    /// The user opened the pill into its mirror.
+    /// The user opened the pill into its mirror — of THIS session (another session taking the pill closes it).
     @Published private(set) var mirrorOpen = false
+    private(set) var mirrorSessionId: String?
     /// Watches being disarmed, and a failed one's line.
     @Published private(set) var disarming: Set<String> = []
     @Published private(set) var disarmErrors: [String: String] = [:]
@@ -53,6 +54,8 @@ final class IslandActivityStore: ObservableObject {
     // MARK: Reading
 
     var cuPresentation: IslandCUPresentation? { cu.presentation(hidden: hiddenSessions) }
+    /// Rung 4 somewhere: the agent's hardware pointer is in use — the island's slot and detached mirrors step aside.
+    var usingRealMouse: Bool { cu.usingRealMouse }
     var currentResult: IslandResultItem? { results.current.flatMap { resultItems[$0.id] } }
 
     // MARK: Refresh
@@ -111,7 +114,6 @@ final class IslandActivityStore: ObservableObject {
             hidden.insert(item.sessionId)
         }
         if hidden != hiddenSessions { hiddenSessions = hidden }
-        if cu.presentation(hidden: hidden) == nil, mirrorOpen { mirrorOpen = false }
 
         // Results: born once, or dropped once (never deferred); one the daemon no longer lists (the session moved on)
         // goes.
@@ -132,6 +134,8 @@ final class IslandActivityStore: ObservableObject {
         let w = snapshot.watches.sorted { $0.armedAt == $1.armedAt ? $0.wakeId < $1.wakeId : $0.armedAt < $1.armedAt }
         if w != watches { watches = w }
         disarming.formIntersection(Set(w.map(\.wakeId)))
+        let armed = Set(w.map(\.wakeId))
+        if disarmErrors.keys.contains(where: { !armed.contains($0) }) { disarmErrors = disarmErrors.filter { armed.contains($0.key) } }
         changed()
     }
 
@@ -158,7 +162,6 @@ final class IslandActivityStore: ObservableObject {
         let now = clock()
         cu.tick(now: now)
         results.tick(now: now)
-        if cuPresentation == nil, mirrorOpen { mirrorOpen = false }
         pruneResultItems()
         changed()
     }
@@ -187,6 +190,7 @@ final class IslandActivityStore: ObservableObject {
         let next = open && cuPresentation != nil
         guard next != mirrorOpen else { return }
         mirrorOpen = next
+        mirrorSessionId = next ? cuPresentation?.sessionId : nil
         changed()
     }
 
@@ -215,6 +219,12 @@ final class IslandActivityStore: ObservableObject {
     }
 
     private func changed() {
+        // The mirror shows the session it was opened on: when the pill moves to another session (a focus or recency
+        // change), or has nothing left, the mirror closes back to the pill — never another session's pictures.
+        if mirrorOpen, cuPresentation?.sessionId != mirrorSessionId {
+            mirrorOpen = false
+            mirrorSessionId = nil
+        }
         let deadlines = [cu.nextDeadline, results.nextDeadline].compactMap { $0 }
         scheduleWake(deadlines.min())
         let sessions = cu.activeSessionIds

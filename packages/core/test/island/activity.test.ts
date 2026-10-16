@@ -15,7 +15,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { IslandRegistry } from "../../src/island/registry";
 import {
-  IslandActivity, computerV2Facts, islandResultSummary, ISLAND_RESULT_SUMMARY_MAX, type IslandActivityDeps,
+  IslandActivity, computerV2Facts, islandResultSummary, ISLAND_RESULT_SUMMARY_MAX, ISLAND_NO_RESULT_ORIGINS, type IslandActivityDeps,
 } from "../../src/island/activity";
 
 let seq = 0;
@@ -84,8 +84,29 @@ describe("IslandActivity — computer use", () => {
     const list = activity.list().computerUse;
     expect(list.map((c) => [c.sessionId, c.apps])).toEqual([["s1", ["example.com"]], ["s2", ["Safari"]]]);
     activity.observe(ev({ type: "tool_result", sessionId: "s1", callId: "c1", output: "", isError: false }));
-    now += 31 * 60_000;
-    expect(activity.list().computerUse.map((c) => c.sessionId)).toEqual(["s2"]); // s2 still runs: never stale
+    now += 11 * 60_000;
+    // Ten minutes without a ComputerV2 call or result: stale, running or not (a child that died mid-script).
+    expect(activity.list().computerUse).toEqual([]);
+  });
+
+  test("a failed turn ends its computer use, and a quiet one goes stale by itself: one timer, a notice, then none", async () => {
+    let now = 1_000_000;
+    const { activity, told, timers } = harness({ now: () => now });
+    activity.observe(cuCall("s1", "c1", {}));
+    activity.observe(ev({ type: "agent_error", sessionId: "s1", message: "the runtime exited" }));
+    expect(activity.list().computerUse).toEqual([]);
+
+    activity.observe(cuCall("s2", "c2", {}));
+    const live = timers.filter((t) => !t.cancelled);
+    expect(live.length).toBe(1); // one stale check while anything is listed
+    await flush();
+    const before = told();
+    now += 11 * 60_000;
+    live[0]!.fn();
+    expect(activity.list().computerUse).toEqual([]);
+    await flush();
+    expect(told()).toBe(before + 1);
+    expect(timers.filter((t) => !t.cancelled && t !== live[0]).length).toBe(0); // nothing listed: no timer left
   });
 
   test("the facts read off a script: title first, apps and sites in order, bounded", () => {
@@ -139,9 +160,13 @@ describe("IslandActivity — turn results", () => {
     expect(activity.list().results.map((r) => r.summary)).toEqual(["all done"]);
   });
 
-  test("no result for an aborted or failed turn, a silent turn, another agent's or Dispatch's prompt, a card still waiting, or no island client", () => {
+  test("no result for an aborted or failed turn, a silent turn, an automated door's turn, a workflow child or routine, a card still waiting, or no island client", () => {
     const pendingCard = new Set<string>();
-    const { activity, settle, timers } = harness({ hasPendingCard: (sid) => pendingCard.has(sid) });
+    const origins: Record<string, string> = { w1: "workflow-child", r1: "routine/nightly-triage", r2: "routine" };
+    const { activity, settle, timers } = harness({
+      hasPendingCard: (sid) => pendingCard.has(sid),
+      facts: (sid) => ({ mode: "code", ...(origins[sid] === undefined ? {} : { origin: origins[sid] }) }),
+    });
     for (const [sid, reason] of [["s1", "aborted"], ["s2", "error"]] as const) {
       userTurn(activity, sid);
       activity.observe(ev({ type: "assistant_message", sessionId: sid, text: "partial" }));
@@ -149,9 +174,19 @@ describe("IslandActivity — turn results", () => {
     }
     userTurn(activity, "s3");
     end(activity, "s3"); // nothing said
-    for (const [sid, origin] of [["s4", "messaging"], ["s5", "dispatch"]] as const) {
-      userTurn(activity, sid, origin);
-      activity.observe(ev({ type: "assistant_message", sessionId: sid, text: "reply" }));
+    // Every automated door: another agent's message, Dispatch's spawn prompt, a Workflow agent() child's turn
+    // (`runTurn(…, "workflow")`), a scheduled routine (`runTurn(…, "routine")`), the embedded runtime's self-check.
+    for (const origin of ["messaging", "dispatch", "workflow", "routine", "embedded-probe"]) {
+      expect(ISLAND_NO_RESULT_ORIGINS.has(origin)).toBe(true);
+      userTurn(activity, `o-${origin}`, origin);
+      activity.observe(ev({ type: "assistant_message", sessionId: `o-${origin}`, text: "reply" }));
+      end(activity, `o-${origin}`);
+    }
+    expect(timers.length).toBe(0);
+    // A Workflow's child or a routine's session, even on a turn a person typed into it.
+    for (const sid of ["w1", "r1", "r2"]) {
+      userTurn(activity, sid);
+      activity.observe(ev({ type: "assistant_message", sessionId: sid, text: "done" }));
       end(activity, sid);
     }
     expect(timers.length).toBe(0);
@@ -289,9 +324,24 @@ describe("island.activity over the socket", () => {
 
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.islandActivity)).toBe(false);
     const remote = await TestClient.connect(socketPath);
-    await remote.hello(tokens.remote, "iphone-gateway", {}, "remote");
+    await remote.hello(tokens.remote, "iphone-gateway", { capabilities: [CLIENT_CAPABILITY_ISLAND] }, "remote");
     expect((await remote.request(METHODS.islandActivity, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    const pluginToken = store.mintPluginToken("example-plugin");
+    const plugin = await TestClient.connect(socketPath);
+    expect((await plugin.hello(pluginToken, "example-plugin", { pluginId: "example-plugin", capabilities: [CLIENT_CAPABILITY_ISLAND] }, "plugin")).result.ok).toBe(true);
+    expect((await plugin.request(METHODS.islandActivity, {})).error?.code).toBe(ERR.UNAUTHORIZED);
+    const plain = await TestClient.connect(socketPath);
+    expect((await plain.hello(tokens.harness, "tui")).result.ok).toBe(true);
+
+    // A change now: only the island client hears of it — never the phone, a plugin or a harness without the capability.
+    const heard = app.notifications.filter((n) => n === ISLAND_ACTIVITY_CHANGED_NOTIFICATION).length;
+    hub.append(sid, { type: "tool_result", sessionId: sid, threadId: "main", callId: "c1", output: "", isError: false } as never);
+    await until(() => app.notifications.filter((n) => n === ISLAND_ACTIVITY_CHANGED_NOTIFICATION).length > heard);
+    await new Promise((r) => setTimeout(r, 30));
+    for (const other of [remote, plugin, plain]) expect(other.notifications).not.toContain(ISLAND_ACTIVITY_CHANGED_NOTIFICATION);
     app.close();
     remote.close();
+    plugin.close();
+    plain.close();
   });
 });

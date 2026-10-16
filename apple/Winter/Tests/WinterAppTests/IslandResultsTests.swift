@@ -140,6 +140,9 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: true, islandOpen: false, result: "r", computerUse: nil, mirrorOpen: false),
                        IslandActivityDecision(slot: .result("r"), belowBadge: true, compact: false))
         XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: false, islandOpen: false, result: nil, computerUse: nil, mirrorOpen: false), .none)
+        // The agent's hardware pointer (rung 4): nothing of the island's in its way.
+        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: false, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: true,
+                                realMouse: true), .none)
     }
 
     func testACardOnTopHoldsAResultAndItIsBornWhenTheTopFrees() {
@@ -177,6 +180,33 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertFalse(store.mirrorOpen)
         store.setMirrorOpen(true)
         XCTAssertFalse(store.mirrorOpen, "nothing to open")
+    }
+
+    func testTheMirrorClosesWhenThePillMovesToAnotherSessionInsteadOfSwitchingPictures() {
+        let store = makeStore()
+        store.apply(IslandActivitySnapshot(computerUse: [cu("s1"), cu("s2")]))
+        let first = store.cuPresentation?.sessionId
+        store.setMirrorOpen(true)
+        XCTAssertEqual(store.mirrorSessionId, first)
+        // The same session acting keeps it open.
+        store.cursor(sessionId: first!, kind: "type", text: nil, appName: "Notes")
+        XCTAssertTrue(store.mirrorOpen)
+        // The other session becomes the most recent: back to the pill, never its pictures.
+        let other = first == "s1" ? "s2" : "s1"
+        store.cursor(sessionId: other, kind: "type", text: nil, appName: "Mail")
+        XCTAssertEqual(store.cuPresentation?.sessionId, other)
+        XCTAssertFalse(store.mirrorOpen)
+        XCTAssertNil(store.mirrorSessionId)
+        // Its host coming to the front hides it: the mirror on it closes too.
+        store.setMirrorOpen(true)
+        XCTAssertEqual(store.mirrorSessionId, other)
+        let hiding = IslandActivityStore()
+        hiding.clock = { [unowned self] in self.now }
+        hiding.apply(IslandActivitySnapshot(computerUse: [cu("s1")]))
+        hiding.setMirrorOpen(true)
+        hiding.focus = { IslandFocus(winterFrontmost: true, keyOrMainWindowSessionIds: ["s1"]) }
+        hiding.apply(IslandActivitySnapshot(computerUse: [cu("s1")]))
+        XCTAssertFalse(hiding.mirrorOpen)
     }
 
     func testThePillHidesWhileItsSessionsHostIsInFrontButNotBehindTheDispatchPill() {
