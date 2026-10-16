@@ -89,7 +89,7 @@ import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
-import { COWORK_SESSION_UNSUPPORTED_CODE, COWORK_SESSION_UNSUPPORTED_MESSAGE, isCoworkSessionMode } from "../sessions/session-mode";
+import { COWORK_SESSION_UNSUPPORTED_CODE, COWORK_SESSION_UNSUPPORTED_MESSAGE, isUnrunnableSessionMode, isUnrunnableStoredMode, unrunnableModeMessage } from "../sessions/session-mode";
 import { isSessionReplaced, withReplacementRetry } from "../runtime-sdk/session-replaced";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
@@ -620,13 +620,23 @@ class RpcFailure extends Error { constructor(public code: number, message: strin
 /** The refusal a door gives the recognised-but-unrunnable `cowork` session mode: INVALID_PARAMS with
  *  `{ code: "unsupported_topology" }`, the shape of the `Cowork unavailable` answer `COWORK_RPC` methods give
  *  a daemon without the Cowork service (`sessions/session-mode.ts`). */
-function coworkSessionUnsupported(): RpcFailure {
-  return new RpcFailure(ERR.INVALID_PARAMS, COWORK_SESSION_UNSUPPORTED_MESSAGE, { code: COWORK_SESSION_UNSUPPORTED_CODE });
+function coworkSessionUnsupported(storedMode?: string): RpcFailure {
+  return new RpcFailure(ERR.INVALID_PARAMS, storedMode === undefined ? COWORK_SESSION_UNSUPPORTED_MESSAGE : unrunnableModeMessage(storedMode), { code: COWORK_SESSION_UNSUPPORTED_CODE });
 }
 
 /** P8b Task 16: a `WinterLegRefusal` (or the driver's own typed errors) as the RPC error a client
  *  can branch on. Anything else is rethrown untouched. */
-function rpcFromWinterRefusal(err: unknown): never {
+export function rpcFromWinterRefusal(err: unknown): never {
+  // A store-level Cowork refusal (`SessionStore.createSession` on a mode nothing can run) is the numeric RPC error
+  // with the string code in `data.code`, like every other refusal here — never an uncaught Error that reaches
+  // the client as INTERNAL. Same shape `COWORK_RPC` gives a `CoworkError`.
+  if (err instanceof CoworkError) {
+    throw new RpcFailure(
+      err.code === "authority_denied" ? ERR.UNAUTHORIZED : ERR.INVALID_PARAMS,
+      err.code === COWORK_SESSION_UNSUPPORTED_CODE ? COWORK_SESSION_UNSUPPORTED_MESSAGE : "Cowork request refused",
+      { code: err.code, ...(err.currentRevision === undefined ? {} : { currentRevision: err.currentRevision }) },
+    );
+  }
   if (err instanceof WinterLegRefusal) {
     // Client-actionable refusals, in the same shape as `session_predates_winter_leg` (the caller can
     // fix its own input — configure a credential, pick a servable model, repair a transcript) rather
@@ -1445,7 +1455,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     // record-less "phone-owned session" answer below, whose advice (start a new session) would be wrong for it.
     let stored: string | undefined;
     try { stored = opts.store.meta(sessionId).mode; } catch { /* unknown id: the handler's own not-found wins */ }
-    if (isCoworkSessionMode(stored)) throw coworkSessionUnsupported();
+    if (isUnrunnableStoredMode(stored)) throw coworkSessionUnsupported(stored);
     const leg = opts.winter.legOf(sessionId);
     if (leg === undefined) {
       throw new RpcFailure(
@@ -2161,7 +2171,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `InternalSessionCreateInput.mode` ("code" | "chat") below. Adding Cowork to the remote-eligible
         // modes is a separate step that waits for its per-record and parameter gates
         // (docs/cowork-host-protocol.md, "Producer/consumer and release checklist").
-        if (isCoworkSessionMode(p.mode)) throw coworkSessionUnsupported();
+        if (isUnrunnableSessionMode(p.mode)) throw coworkSessionUnsupported();
         // Dispatch (Phase 7): the singleton dispatch session is minted ONLY by session.dispatch's
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
@@ -3095,10 +3105,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                   code: !disallowedByMode.code.has(childName),
                   dispatch: !disallowedByMode.dispatch.has(childName),
                   chat: !disallowedByMode.chat.has(childName),
-                  // Cowork is recognised but never runnable (`sessions/session-mode.ts`): there is no Cowork
-                  // tool surface, so a LITERAL false on every row — never a `disallowedToolsFor` lookup,
-                  // which only accepts the runnable modes (a fail-closed table, not a computed one).
-                  cowork: false,
+                  // No `cowork` key, deliberately: Cowork is recognised but not runnable
+                  // (`sessions/session-mode.ts`), so no tool is registered for it (pinned by
+                  // `session-mode.test.ts`) and a `false` would read in the Mac Library tab as "withheld in
+                  // cowork" on every row — an absent mode is how that tab knows the daemon said nothing.
                 },
               };
             });
@@ -3807,6 +3817,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        // A stored `cowork` (or otherwise unrunnable) row has no model to choose. Refused HERE, not only in
+        // `planAndApplySwitch`: that is wired only when the daemon has a handoff, and without it the store write
+        // below would stamp the column. Before `resolveModelSelection`, so nothing is resolved either.
+        if (isUnrunnableStoredMode(targetMode)) throw coworkSessionUnsupported(targetMode);
         if (targetMode === "dispatch" && p.model !== null) {
           throw new RpcFailure(ERR.INVALID_PARAMS, dispatchPinMessage(liveSettingsFor(opts)));
         }
@@ -4244,6 +4258,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        // A stored `cowork` (or otherwise unrunnable) row has no workflows to list: its cwd and policy are not
+        // a Code session's to borrow (see `workflow.run`).
+        if (isUnrunnableStoredMode(meta.mode)) throw coworkSessionUnsupported(meta.mode);
         const cwd = p.cwd ?? meta.cwd;
         const running = opts.workflows?.list(p.sessionId) ?? [];
         const saved = opts.workflowStore?.list(cwd) ?? [];
@@ -4257,6 +4274,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        // A stored `cowork` (or otherwise unrunnable) row must not host a workflow: `launch` spawns agents
+        // that create CODE child sessions with this row's cwd and approval policy — a Cowork conversation
+        // would run host Code through the back door. Refused before the script is resolved or anything launches.
+        if (isUnrunnableStoredMode(meta.mode)) throw coworkSessionUnsupported(meta.mode);
         if (!opts.workflows) throw new RpcFailure(ERR.INTERNAL, "workflows are not available on this server (no WorkflowRuntime configured)");
         let source: string;
         if (p.name) {

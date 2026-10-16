@@ -12,7 +12,7 @@ import { SESSION_MODES, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { CoworkError } from "../../src/cowork/types";
 import { SessionStore } from "../../src/sessions/store";
 import {
-  COWORK_SESSION_UNSUPPORTED_CODE, RUNNABLE_SESSION_MODES, UNRUNNABLE_SESSION_MODES, isCoworkSessionMode,
+  COWORK_SESSION_UNSUPPORTED_CODE, RUNNABLE_SESSION_MODES, UNRUNNABLE_SESSION_MODES, isRunnableSessionMode, isUnrunnableSessionMode, isUnrunnableStoredMode, runnableModeOf,
   type RunnableSessionMode,
 } from "../../src/sessions/session-mode";
 import { toolsFor, disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
@@ -35,10 +35,26 @@ describe("the protocol's modes are exactly the runnable ones plus the unrunnable
     expect(RUNNABLE_SESSION_MODES.some((m) => (m as string) === "cowork")).toBe(false);
   });
 
-  test("isCoworkSessionMode is true for exactly 'cowork' — absent and unknown strings are NOT cowork", () => {
-    expect(isCoworkSessionMode("cowork")).toBe(true);
-    for (const other of [undefined, null, "", "code", "chat", "dispatch", "Cowork", "COWORK", "cowork ", "workspace"]) expect(isCoworkSessionMode(other)).toBe(false);
+  test("isUnrunnableSessionMode is derived from the list: true for exactly 'cowork' — absent and unknown strings are NOT it", () => {
+    for (const mode of UNRUNNABLE_SESSION_MODES) expect(isUnrunnableSessionMode(mode)).toBe(true);
+    expect(isUnrunnableSessionMode("cowork")).toBe(true);
+    for (const other of [undefined, null, "", "code", "chat", "dispatch", "Cowork", "COWORK", "cowork ", "workspace"]) expect(isUnrunnableSessionMode(other)).toBe(false);
+    for (const mode of RUNNABLE_SESSION_MODES) expect(isRunnableSessionMode(mode)).toBe(true);
+    for (const other of [undefined, null, "", "cowork", "Code", "agent"]) expect(isRunnableSessionMode(other)).toBe(false);
     expect(COWORK_SESSION_UNSUPPORTED_CODE).toBe("unsupported_topology");
+  });
+
+  // The column has only ever held NULL, code, dispatch and chat, so refusing every other string loses no legacy
+  // spelling; absent/null stays Code (every session older than the column).
+  test("runnableModeOf: absent/null is code, a runnable string is itself, EVERYTHING else is refused — not read as Code", () => {
+    expect(runnableModeOf(undefined)).toBe("code");
+    expect(runnableModeOf(null)).toBe("code");
+    for (const mode of RUNNABLE_SESSION_MODES) expect(runnableModeOf(mode)).toBe(mode);
+    for (const other of ["cowork", "", "Code", "CHAT", "something-new", "plan", "agent"]) {
+      expect(runnableModeOf(other)).toBeUndefined();
+      expect(isUnrunnableStoredMode(other)).toBe(true);
+    }
+    for (const fine of [undefined, null, "code", "chat", "dispatch"]) expect(isUnrunnableStoredMode(fine)).toBe(false);
   });
 });
 

@@ -8,7 +8,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, ERR, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
-import { startIpcServer } from "../../src/ipc/server";
+import { rpcFromWinterRefusal, startIpcServer, type InternalSessionCreator } from "../../src/ipc/server";
+import { CoworkError } from "../../src/cowork/types";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
@@ -55,7 +56,7 @@ const UNSUPPORTED_CODE = { code: "unsupported_topology" };
 function table(opts: { ensure: WinterSessionDrivers["ensure"]; leg: ReturnType<WinterSessionDrivers["legOf"]> }): WinterSessionDrivers {
   const never = (): never => { throw new Error("not reached by this test"); };
   return {
-    legForNewSession: never, legOf: () => opts.leg, assertAvailable: never, create: never,
+    legForNewSession: never, legOf: () => opts.leg, assertAvailable: () => {}, create: never,
     get: () => undefined, runTurn: never, ensure: opts.ensure, evict: async () => {}, list: () => [], endAll: async () => {},
   };
 }
@@ -64,7 +65,7 @@ describe("a stored cowork row is refused by the doors that would run it", () => 
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(winter: WinterSessionDrivers, withHandoff = false) {
+  async function boot(winter: WinterSessionDrivers, withHandoff = false, extra: Record<string, unknown> = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-cowork-row-"));
     const store = new SessionStore(home);
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -72,6 +73,7 @@ describe("a stored cowork row is refused by the doors that would run it", () => 
     const socketPath = join(home, "core.sock");
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store, winter, winterHome: home,
+      ...extra,
       ...(withHandoff ? { handoff: { planAndApplySwitch: (sessionId: string, model: string | null, confirmLossy: boolean) =>
         planAndApplySwitch({ runtime: {} as never, winter, records: { get: () => undefined } as never, store, settings: () => null }, sessionId, model, confirmLossy) } } : {}),
     });
@@ -126,5 +128,75 @@ describe("a stored cowork row is refused by the doors that would run it", () => 
     expect(ok.error).toBeUndefined();
     expect(store.meta(code).model).toBe("anthropic/claude-opus-5");
     c.close();
+  });
+  // S2: the refusal must not depend on a handoff being wired — without one, `store.setModel` would stamp the column.
+  test("session.setModel is refused for a cowork row even with NO handoff wired, and nothing is written", async () => {
+    const { store, c } = await boot(table({ ensure: async () => undefined, leg: "winter" }), false);
+    const cowork = coworkRow(store);
+    const odd = store.createSession("global");
+    (store as any).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["something-new", odd]);
+    for (const id of [cowork, odd]) {
+      for (const model of ["anthropic/claude-opus-5", null]) {
+        const res = await c.request(METHODS.sessionSetModel, { sessionId: id, model });
+        expect(res.error).toMatchObject({ code: ERR.INVALID_PARAMS, data: UNSUPPORTED_CODE });
+      }
+      expect(store.meta(id).model).toBeUndefined();
+    }
+    expect((await c.request(METHODS.sessionSetModel, { sessionId: "s_nope", model: "anthropic/claude-opus-5" })).error?.code).toBe(ERR.NOT_FOUND);
+    const code = store.createSession("global", { mode: "code" });
+    expect((await c.request(METHODS.sessionSetModel, { sessionId: code, model: "anthropic/claude-opus-5" })).error).toBeUndefined();
+    expect(store.meta(code).model).toBe("anthropic/claude-opus-5");
+    c.close();
+  });
+
+  // S3: `workflow.run` launches agents that create CODE children with the row's cwd and policy.
+  test("workflow.run and workflow.list refuse a cowork row: nothing is launched, no script resolved, nothing listed", async () => {
+    const launched: unknown[] = [];
+    let listed = 0, read = 0;
+    const workflows = { launch: (input: unknown) => { launched.push(input); return "run_1"; }, list: () => { listed++; return []; } };
+    const workflowStore = { read: () => { read++; return { body: "x" }; }, list: () => { listed++; return []; } };
+    const { store, c } = await boot(table({ ensure: async () => undefined, leg: "winter" }), false, { workflows, workflowStore });
+    const cowork = coworkRow(store);
+    const odd = store.createSession("global");
+    (store as any).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["something-new", odd]);
+    for (const id of [cowork, odd]) {
+      const byScript = await c.request(METHODS.workflowRun, { sessionId: id, script: "return 1" });
+      expect(byScript.error).toMatchObject({ code: ERR.INVALID_PARAMS, data: UNSUPPORTED_CODE });
+      const byName = await c.request(METHODS.workflowRun, { sessionId: id, name: "saved" });
+      expect(byName.error).toMatchObject({ code: ERR.INVALID_PARAMS, data: UNSUPPORTED_CODE });
+      expect((await c.request(METHODS.workflowList, { sessionId: id })).error).toMatchObject({ code: ERR.INVALID_PARAMS, data: UNSUPPORTED_CODE });
+    }
+    expect([launched.length, listed, read]).toEqual([0, 0, 0]);
+    // The same handlers still serve a Code session, and an unknown id is still NOT_FOUND.
+    const code = store.createSession("global", { mode: "code" });
+    const run = await c.request(METHODS.workflowRun, { sessionId: code, script: "return 1" });
+    expect(run.error).toBeUndefined();
+    expect(launched).toHaveLength(1);
+    expect((await c.request(METHODS.workflowList, { sessionId: code })).error).toBeUndefined();
+    expect((await c.request(METHODS.workflowRun, { sessionId: "s_nope", script: "x" })).error?.code).toBe(ERR.NOT_FOUND);
+    c.close();
+  });
+
+  // L1: the store-level guard's `CoworkError` becomes the numeric RPC error, not an uncaught string-coded Error.
+  test("the store guard's CoworkError maps to INVALID_PARAMS + data.code (rpcFromWinterRefusal), reached through the internal creator", async () => {
+    let creator: InternalSessionCreator | undefined;
+    const { store } = await boot(table({ ensure: async () => undefined, leg: "winter" }), false, { onSessionCreator: (c: InternalSessionCreator) => { creator = c; } });
+    // The daemon's own doors create through this: a cowork mode smuggled past its type reaches `SessionStore.createSession`.
+    let thrown: unknown;
+    try { await creator!({ scope: "global", approvalPolicy: "ask", mode: "cowork" as never }); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(CoworkError);
+    expect((thrown as CoworkError).code).toBe("unsupported_topology");
+    expect(store.list()).toEqual([]);
+
+    let mapped: any;
+    try { rpcFromWinterRefusal(thrown); } catch (err) { mapped = err; }
+    expect(mapped).toMatchObject({ code: ERR.INVALID_PARAMS, message: "Cowork unavailable", data: { code: "unsupported_topology" } });
+    // Another CoworkError code keeps the Cowork doors' own numeric mapping.
+    let denied: any;
+    try { rpcFromWinterRefusal(new CoworkError("authority_denied")); } catch (err) { denied = err; }
+    expect(denied).toMatchObject({ code: ERR.UNAUTHORIZED, message: "Cowork request refused", data: { code: "authority_denied" } });
+    // And anything that is not a refusal is still rethrown untouched.
+    const other = new Error("boom");
+    expect(() => rpcFromWinterRefusal(other)).toThrow(other);
   });
 });

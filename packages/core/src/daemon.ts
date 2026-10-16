@@ -20,7 +20,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
-import { isCoworkSessionMode } from "./sessions/session-mode";
+import { isUnrunnableStoredMode } from "./sessions/session-mode";
 import { CallThreads } from "./sessions/call-threads";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
@@ -309,8 +309,9 @@ export function buildLeasePolicy(deps: {
     // stale-row test (packages/core/test/peripheral/e2e.test.ts) that GRANTS instead of denying
     // without this `mode` check.
     if (meta.mode === "chat") return "denied";
-    // A stored `cowork` row can run nothing, so it never holds a lease either — whatever its policy says.
-    if (isCoworkSessionMode(meta.mode)) return "denied";
+    // A stored `cowork` row (or any mode that is not a runnable one) can run nothing, so it never holds a lease
+    // either — whatever its policy says.
+    if (isUnrunnableStoredMode(meta.mode)) return "denied";
     if (meta.approvalPolicy === "plan") return "denied";
     if (meta.approvalPolicy === "auto") return "granted";
 

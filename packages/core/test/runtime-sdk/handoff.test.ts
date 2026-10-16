@@ -17,7 +17,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeDirectoryEntry, RuntimeSelection, SelectionAlternative, SessionKey } from "@yanlinglabs/winter-runtime-sdk";
-import { modelLabelFor, planAndApplySwitch, renderNoCredentialHint, type HandoffDeps, type SwitchReviewer } from "../../src/runtime-sdk/handoff";
+import { modeOf, modelLabelFor, planAndApplySwitch, renderNoCredentialHint, type HandoffDeps, type SwitchReviewer } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
@@ -983,6 +983,18 @@ describe("planAndApplySwitch — a stored cowork session", () => {
   test("clearing the override (model: null) is refused too — there is no Cowork runtime to fall back to", async () => {
     const out = await planAndApplySwitch(coworkDeps(), "s_cowork", null, true);
     expect(out).toEqual({ kind: "refused", code: "unsupported_topology", detail: "Cowork unavailable" });
+  });
+
+  test("an unrecognised stored mode (a newer daemon's, a hand-edited index) is refused too — never decided as Code", async () => {
+    const out = await planAndApplySwitch(coworkDeps({ store: { meta: () => ({ mode: "something-new", cwd: "/x" }) } }), "s_odd", "anthropic/claude-sonnet-5", false);
+    expect(out).toEqual({ kind: "refused", code: "unsupported_topology", detail: "This session's mode is not supported by this Winter" });
+  });
+
+  test("modeOf: absent/null is code, a runnable string is itself, cowork and any other string THROW (never read as code)", () => {
+    expect([modeOf(undefined), modeOf(null)]).toEqual(["code", "code"]);
+    for (const mode of ["code", "dispatch", "chat"] as const) expect(modeOf(mode)).toBe(mode);
+    expect(() => modeOf("cowork")).toThrow("Cowork unavailable");
+    for (const unknown of ["something-new", "", "Code"]) expect(() => modeOf(unknown)).toThrow("This session's mode is not supported by this Winter");
   });
 
   test("every runnable mode still reaches its decision, and an unknown session is left to the caller's own error", async () => {

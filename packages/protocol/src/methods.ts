@@ -1315,9 +1315,11 @@ export const CapabilityToolInfoSchema = z.object({
   deferred: z.union([z.literal(true), z.array(SessionModeSchema)]).optional(),
   /** Per-mode: whether the child is actually handed this tool today (`!disallowedToolsFor(mode).includes(name)`). */
   exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean(),
-    /** Cowork is recognised but never runnable (`SESSION_MODES`): the child is handed NO tool in it, so this is
-     *  a literal `false` on every row, not a table lookup. */
-    cowork: z.boolean() }),
+    /** Optional and NEVER emitted today: Cowork is recognised but not runnable (`SESSION_MODES`), there is no
+     *  Cowork tool surface to describe, and a `false` here would make the Mac Library tab render every tool as
+     *  "withheld in cowork" (an absent mode means "the daemon said nothing" to it). Declared so a future daemon
+     *  that does describe a Cowork surface is a schema-valid answer, not so this one says anything. */
+    cowork: z.boolean().optional() }),
 });
 
 export const CapabilityServerInfoSchema = z.object({

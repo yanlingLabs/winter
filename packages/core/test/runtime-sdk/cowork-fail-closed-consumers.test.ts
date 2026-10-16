@@ -21,11 +21,13 @@ describe("computer-use policy facts never read a stored cowork row as Code", () 
     expect(computerPolicyModeOf("dispatch")).toBe("dispatch");
   });
 
-  test("cowork is refused NotAllowed — there are no policy facts for a session nothing can run", () => {
-    let thrown: unknown;
-    try { computerPolicyModeOf("cowork"); } catch (err) { thrown = err; }
-    expect(isAutomationFailure(thrown)).toBe(true);
-    expect(thrown).toMatchObject({ kind: "NotAllowed" });
+  test("cowork — and any string that is not a runnable mode — is refused NotAllowed: no policy facts for a session nothing can run", () => {
+    for (const stored of ["cowork", "something-new", ""]) {
+      let thrown: unknown;
+      try { computerPolicyModeOf(stored); } catch (err) { thrown = err; }
+      expect(isAutomationFailure(thrown)).toBe(true);
+      expect(thrown).toMatchObject({ kind: "NotAllowed" });
+    }
   });
 });
 
@@ -43,6 +45,9 @@ describe("a peripheral lease is denied to a stored cowork row, whatever its appr
   test("cowork + auto → denied (auto is 'granted' for Code); code + auto → granted; chat → denied; unknown session → denied", async () => {
     const t = setup();
     try {
+      const odd = t.store.createSession("global", { approvalPolicy: "auto" });
+      (t.store as any).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["something-new", odd]); // a newer daemon's / hand-edited mode
+      expect(await t.policy(odd, "keyboard" as never)).toBe("denied");
       const cowork = asCowork(t.store, t.store.createSession("global", { approvalPolicy: "auto" }));
       const code = t.store.createSession("global", { approvalPolicy: "auto", mode: "code" });
       const chat = t.store.createSession("global", { approvalPolicy: "auto", mode: "chat" });

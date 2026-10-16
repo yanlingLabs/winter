@@ -45,7 +45,7 @@ import { rowForTag, testProviderNameFor } from "./provider-selection";
 // Types only: `session-driver.ts` imports this module (`renderNoCredentialHint`), so the refusal below is
 // recognised by its `code` rather than by `instanceof` — no value cycle between the two.
 import type { WinterSessionDrivers } from "./session-driver";
-import { COWORK_SESSION_UNSUPPORTED_CODE, COWORK_SESSION_UNSUPPORTED_MESSAGE, isCoworkSessionMode } from "../sessions/session-mode";
+import { COWORK_SESSION_UNSUPPORTED_CODE, isUnrunnableStoredMode, runnableModeOf, unrunnableModeMessage } from "../sessions/session-mode";
 
 /**
  * The one router door this module needs: `reviewSwitch(session, requested)`, reading the canonical
@@ -89,18 +89,22 @@ function reviewerFor(deps: HandoffDeps): SwitchReviewer | undefined {
   return deps.barrier ?? (runtimeSdkInternals(deps.runtime.sdk)?.barrier as SwitchReviewer | undefined);
 }
 
-/** A stored `mode` as the runnable `SessionMode`. `cowork` THROWS instead of reading as Code (the
- *  `session-driver.ts` `modeOf` twin): `planAndApplySwitch` refuses a cowork session before it gets here,
- *  and `materializeDirectoryRow`'s `try` turns a throw into "could not materialize", so a cowork row can
- *  never be given a runtime-directory row or a selection decision as a Code session. */
-const modeOf = (raw: string | undefined): SessionMode => {
-  if (isCoworkSessionMode(raw)) throw new Error(COWORK_SESSION_UNSUPPORTED_MESSAGE);
-  return raw === "chat" || raw === "dispatch" ? raw : "code";
+/** A stored `mode` as the runnable `SessionMode`. `cowork` and any other non-runnable string THROW instead of
+ *  reading as Code (the `session-driver.ts` `modeOf` twin): `planAndApplySwitch` refuses such a session before
+ *  it gets here, and `materializeDirectoryRow`'s `try` turns a throw into "could not materialize", so such a row
+ *  can never be given a runtime-directory row or a selection decision as a Code session. Exported for tests. */
+export const modeOf = (raw: string | null | undefined): SessionMode => {
+  const mode = runnableModeOf(raw);
+  if (mode === undefined) throw new Error(unrunnableModeMessage(raw));
+  return mode;
 };
 
-/** Is the session's stored mode `cowork`? An id the store does not know is not (the caller's own not-found wins). */
-function isStoredCowork(deps: Pick<HandoffDeps, "store">, sessionId: string): boolean {
-  try { return isCoworkSessionMode(deps.store.meta(sessionId).mode); } catch { return false; }
+/** The stored mode of the session if it is one a child cannot run (`cowork`, or anything unrecognised);
+ *  `undefined` otherwise. An id the store does not know is not refused here (the caller's own not-found wins). */
+function unrunnableStoredMode(deps: Pick<HandoffDeps, "store">, sessionId: string): { mode: string | undefined } | undefined {
+  let mode: string | undefined;
+  try { mode = deps.store.meta(sessionId).mode; } catch { return undefined; }
+  return isUnrunnableStoredMode(mode) ? { mode } : undefined;
 }
 
 function sessionKeyFor(record: RuntimeSessionRecord): SessionKey | undefined {
@@ -302,9 +306,10 @@ export function modelLabelFor(model: string): string {
  * preference asks for a specific selection.
  */
 export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, model: string | null, confirmLossy: boolean): Promise<PlanSwitchOutcome> {
-  // A `cowork` session has no runtime to switch and must not be decided as Code: refused first, typed, with
+  // A `cowork` (or otherwise unrunnable) session has no runtime to switch and must not be decided as Code: refused first, typed, with
   // nothing read, adopted or written (`session.setModel` maps `refused` to INVALID_PARAMS + `data.code`).
-  if (isStoredCowork(deps, sessionId)) return { kind: "refused", code: COWORK_SESSION_UNSUPPORTED_CODE, detail: COWORK_SESSION_UNSUPPORTED_MESSAGE };
+  const unrunnable = unrunnableStoredMode(deps, sessionId);
+  if (unrunnable !== undefined) return { kind: "refused", code: COWORK_SESSION_UNSUPPORTED_CODE, detail: unrunnableModeMessage(unrunnable.mode) };
   if (model === null) return { kind: "same-runtime" };
   let record = deps.records.get(sessionId);
   // WS-23 (R2): a record the retired official leg wrote moves onto the Winter leg FIRST — transcript

@@ -114,7 +114,7 @@ describe("capabilities.list", () => {
     expect(byKey.get("computer_v2").tools).toEqual([{
       name: "mcp__winter__computer_v2__script", plainName: "ComputerV2", modes: ["code", "dispatch"],
       ...(byKey.get("computer_v2").tools[0].deferred === undefined ? {} : { deferred: byKey.get("computer_v2").tools[0].deferred }),
-      exposure: { code: true, dispatch: true, chat: false, cowork: false },
+      exposure: { code: true, dispatch: true, chat: false },
     }]);
     expect(byKey.get("lsp").enabled).toBe(true);
     // Every other key has no settings gate at all — always live.
@@ -169,10 +169,10 @@ describe("capabilities.list", () => {
         expect(tool.exposure.code).toBe(!disallowed.code.has(childName));
         expect(tool.exposure.dispatch).toBe(!disallowed.dispatch.has(childName));
         expect(tool.exposure.chat).toBe(!disallowed.chat.has(childName));
-        // Cowork (session door): recognised, never runnable — no Cowork tool surface exists, so the child is
-        // handed NONE of the daemon's capability tools in it (a literal false, not a table lookup), and no
-        // tool registers it.
-        expect(tool.exposure.cowork).toBe(false);
+        // Cowork (session door): recognised, never runnable — no tool registers it, and the exposure map carries NO
+        // `cowork` key at all: the Mac Library tab reads every `false` in the map as "withheld in <mode>", so an
+        // emitted `cowork: false` would label every row "withheld in cowork" (an absent mode = "daemon said nothing").
+        expect(Object.keys(tool.exposure).sort()).toEqual(["chat", "code", "dispatch"]);
         expect(tool.modes).not.toContain("cowork");
         expect(tool.deferred ?? []).not.toContain("cowork");
       }
@@ -180,14 +180,14 @@ describe("capabilities.list", () => {
     // Spot-check one concretely: the sessions trio is dispatch-only, shown as `SpawnSession`, loaded up front.
     const sessionsGroup = result.result.capabilities.find((x: any) => x.key === "sessions");
     const spawn = sessionsGroup.tools.find((t: any) => t.name === "mcp__winter__sessions__session_spawn");
-    expect(spawn.exposure).toEqual({ code: false, dispatch: true, chat: false, cowork: false });
+    expect(spawn.exposure).toEqual({ code: false, dispatch: true, chat: false });
     expect(spawn.plainName).toBe("SpawnSession");
     expect(spawn.deferred).toBeUndefined();
     // …and `Browser` starts deferred in every mode it is offered; office is code-only.
     const browser = result.result.capabilities.find((x: any) => x.key === "browser").tools[0];
     expect(browser).toMatchObject({ name: "mcp__winter__browser__browser", plainName: "Browser", deferred: ["code", "dispatch", "chat"] });
     const docs = result.result.capabilities.find((x: any) => x.key === "office").tools.find((t: any) => t.name === "mcp__winter__office__docs");
-    expect(docs.exposure).toEqual({ code: true, dispatch: false, chat: false, cowork: false });
+    expect(docs.exposure).toEqual({ code: true, dispatch: false, chat: false });
     expect(result.result.capabilities.some((x: any) => x.key === "research")).toBe(false);
     c.close();
   });

@@ -15,7 +15,7 @@ import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
-import { isCoworkSessionMode } from "../sessions/session-mode";
+import { runnableModeOf } from "../sessions/session-mode";
 import { AutomationFailure } from "./errors";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
@@ -167,12 +167,13 @@ export interface ComputerUseRuntime {
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
 /** The `mode` of the facts `ComputerPolicy` judges a session by, from the stored column (absent = code, as
- *  everywhere). A stored `cowork` row is a recognised mode nothing can run: it is REFUSED here — `NotAllowed`,
- *  which the policy and the helper's own callers already treat as a plain refusal — never read as Code by the
- *  `: "code"` default, so a computer-use call on a cowork row's behalf has no policy facts at all. */
+ *  everywhere). A stored `cowork` row — or any other string that is not a runnable mode — is REFUSED here:
+ *  `NotAllowed`, which the policy and the helper's own callers already treat as a plain refusal, never read as
+ *  Code by a `: "code"` default, so a computer-use call on such a row's behalf has no policy facts at all. */
 export function computerPolicyModeOf(stored: string | undefined): "code" | "dispatch" | "chat" {
-  if (isCoworkSessionMode(stored)) throw new AutomationFailure("NotAllowed", "computer use is not available in this session");
-  return stored === "chat" || stored === "dispatch" ? stored : "code";
+  const mode = runnableModeOf(stored);
+  if (mode === undefined) throw new AutomationFailure("NotAllowed", "computer use is not available in this session");
+  return mode;
 }
 
 /**

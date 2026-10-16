@@ -8,7 +8,7 @@ import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, SESSION_TITLE_MAX_CHARS, type
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
-import { isCoworkSessionMode, type RunnableSessionMode } from "./session-mode";
+import { isUnrunnableSessionMode, type RunnableSessionMode } from "./session-mode";
 import { outdirPath } from "./outdir";
 import { BashEditPairer, bashCommandOf } from "./bash-edits";
 import { removeSessionDiffs } from "../diffs/store";
@@ -527,7 +527,7 @@ export class SessionStore {
   ): string {
     // Defence in depth behind `session.create`'s own refusal: no store write, no directory, no log for a mode
     // nothing can run. A future Cowork door will mint its sessions through its own transaction.
-    if (isCoworkSessionMode(opts.mode)) throw new CoworkError("unsupported_topology");
+    if (isUnrunnableSessionMode(opts.mode)) throw new CoworkError("unsupported_topology");
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
     mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });

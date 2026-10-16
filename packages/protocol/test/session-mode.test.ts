@@ -43,9 +43,15 @@ describe("SessionModeSchema recognises cowork", () => {
     expect(() => SessionEvent.parse({ ...wire, mode: "coworker" })).toThrow();
   });
 
-  test("capabilities.list names cowork in its exposure map (a literal false: no Cowork tool surface)", () => {
-    const tool = { name: "mcp__winter__sessions__SpawnSession", modes: ["dispatch"], exposure: { code: false, dispatch: true, chat: false, cowork: false } };
-    expect(CapabilityToolInfoSchema.parse(tool).exposure.cowork).toBe(false);
-    expect(() => CapabilityToolInfoSchema.parse({ ...tool, exposure: { code: false, dispatch: true, chat: false } })).toThrow();
+  // The exposure map's `cowork` key is OPTIONAL and never emitted: the Mac Library tab renders every `false` in the
+  // map as "withheld in <mode>", so a `cowork: false` on every tool would read "withheld in cowork" on every row.
+  // An absent mode is how that tab knows the daemon said nothing (apple/Winter/Sources/Library/LibraryMcpTab.swift).
+  test("capabilities.list's exposure map accepts the three-key shape this daemon emits, and an optional cowork key", () => {
+    const tool = { name: "mcp__winter__sessions__SpawnSession", modes: ["dispatch"], exposure: { code: false, dispatch: true, chat: false } };
+    const parsed = CapabilityToolInfoSchema.parse(tool);
+    expect(parsed.exposure).toEqual({ code: false, dispatch: true, chat: false });
+    expect("cowork" in parsed.exposure).toBe(false);
+    expect(CapabilityToolInfoSchema.parse({ ...tool, exposure: { ...tool.exposure, cowork: false } }).exposure.cowork).toBe(false);
+    expect(() => CapabilityToolInfoSchema.parse({ ...tool, exposure: { code: false, dispatch: true } })).toThrow(); // the three runnable modes stay required
   });
 });
