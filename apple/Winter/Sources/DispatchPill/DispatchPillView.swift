@@ -300,7 +300,11 @@ struct DispatchPillComposerBar: View {
                         highlightColorForText: { [commandMode] text in
                             commandMode.displaysCommand(text) ? dispatchPillCommandPurpleNS : dispatchPillCommandBlueNS
                         },
-                        ghostSuffix: commandMode.ghost(for: draft),
+                        ghostSuffix: commandMode.ghostDisplay(for: draft),
+                        onTab: { [commandMode] text in commandMode.tab(text: text) },
+                        onBackTab: { [commandMode] text in commandMode.backTab(text: text) },
+                        onAcceptGhost: { [commandMode] text, word in commandMode.acceptGhost(text: text, word: word) },
+                        onNonTabKey: { [commandMode] in commandMode.endCycle() },
                         onDeleteBackwardAtEnd: { controller.handleDeleteBackwardAtEnd() },
                         onHorizontalKey: { controller.handleHorizontalKey(left: $0) }
                     )

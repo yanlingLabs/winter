@@ -7,23 +7,38 @@ import SwiftUI
 // white ✕ and a blue ✓. The words come from `CUDesktopPromptModel`; nothing here decides anything.
 
 /// Where everything is inside the island's panel, in points, top-left origin (the panel's top is the screen's top).
-struct DesktopIslandGeometry: Equatable {
-    var panelSize: CGSize
+/// Public for Winter.app's island (`apple/Winter/Sources/Island/`), which grows its own pills and rectangles out of the
+/// housing with this same liquid.
+public struct DesktopIslandGeometry: Equatable {
+    public var panelSize: CGSize
     /// What the pill is born from: the camera housing, or a thin strip at the top edge without one.
-    var source: CGRect
-    var sourceIsHousing: Bool
+    public var source: CGRect
+    public var sourceIsHousing: Bool
     /// Where the pill comes to rest.
-    var pill: CGRect
+    public var pill: CGRect
     /// A second prompt: no birth from the top, the pill just grows in place below the first.
-    var floating: Bool
+    public var floating: Bool
+    /// The resting shape's corner radius: nil for a capsule (the pill), a radius for a rounded rectangle (the
+    /// island's approval and question cards). The liquid's body takes the same shape.
+    public var bodyCornerRadius: CGFloat?
 
-    static let pillHeight: CGFloat = 44
+    public init(panelSize: CGSize, source: CGRect, sourceIsHousing: Bool, pill: CGRect, floating: Bool,
+                bodyCornerRadius: CGFloat? = nil) {
+        self.panelSize = panelSize
+        self.source = source
+        self.sourceIsHousing = sourceIsHousing
+        self.pill = pill
+        self.floating = floating
+        self.bodyCornerRadius = bodyCornerRadius
+    }
+
+    public static let pillHeight: CGFloat = 44
     /// Between the housing (or the menu bar) and the resting pill.
-    static let gap: CGFloat = 10
+    public static let gap: CGFloat = 10
     /// Room for the shadow around the pill inside its panel.
-    static let margin: CGFloat = 24
-    static let stack: CGFloat = 10
-    static let widthRange: ClosedRange<CGFloat> = 300...560
+    public static let margin: CGFloat = 24
+    public static let stack: CGFloat = 10
+    public static let widthRange: ClosedRange<CGFloat> = 300...560
     /// The line's face: the Dispatch pill's typed text (Winter's composer field) — 14 pt, light in a dark appearance,
     /// regular in a light one.
     static let fontSize: CGFloat = 14
@@ -32,13 +47,13 @@ struct DesktopIslandGeometry: Equatable {
     }
     @MainActor static var font: NSFont { .systemFont(ofSize: fontSize, weight: fontWeight) }
     /// While the shape still moves, the content blurs by how far it has to go (the Dispatch pill's morph blur).
-    static let maxMorphBlur: CGFloat = 8
-    static let morphBlurFalloff: CGFloat = 12
+    public static let maxMorphBlur: CGFloat = 8
+    public static let morphBlurFalloff: CGFloat = 12
     /// Under the pointer the pill grows by this much — the Dispatch pill's own hover (`DispatchPillMetrics.hoverScale`).
-    static let hoverScale: CGFloat = 1.03
+    public static let hoverScale: CGFloat = 1.03
 
     /// The pill's width for its line: the text, then the two buttons, within `widthRange`.
-    @MainActor static func pillWidth(for headline: String) -> CGFloat {
+    @MainActor public static func pillWidth(for headline: String) -> CGFloat {
         let text = ceil((headline as NSString).size(withAttributes: [.font: font]).width)
         // The row: leading, the text, three spacings (text–spacer–✕–✓), the spacer's minimum, the buttons, trailing,
         // and a little slack so the line never truncates by a rounding hair.
@@ -51,13 +66,13 @@ struct DesktopIslandGeometry: Equatable {
     ///   - housing: the camera housing's size, nil on a screen without one.
     ///   - menuBarHeight: the top inset with no housing (the pill rests below it).
     /// The content's blur for a pill of `size` heading to `target` (none within `morphBlurFalloff` of it).
-    static func morphBlur(size: CGSize, target: CGSize) -> CGFloat {
+    public static func morphBlur(size: CGSize, target: CGSize) -> CGFloat {
         let remaining = max(abs(target.width - size.width), abs(target.height - size.height))
         let radius = min(maxMorphBlur, remaining / morphBlurFalloff)
         return radius < 0.25 ? 0 : radius
     }
 
-    static func make(housing: CGSize?, menuBarHeight: CGFloat, pillWidth: CGFloat, slot: Int) -> Self {
+    public static func make(housing: CGSize?, menuBarHeight: CGFloat, pillWidth: CGFloat, slot: Int) -> Self {
         let m = margin
         if slot > 0 {
             let size = CGSize(width: pillWidth + 2 * m, height: pillHeight + 2 * m)
@@ -76,7 +91,7 @@ struct DesktopIslandGeometry: Equatable {
 
     /// Where a slot's panel's top sits below the screen's top: slot 0 at the top, each later one below the pill
     /// above it.
-    static func panelTop(slot: Int, housing: CGSize?, menuBarHeight: CGFloat) -> CGFloat {
+    public static func panelTop(slot: Int, housing: CGSize?, menuBarHeight: CGFloat) -> CGFloat {
         guard slot > 0 else { return 0 }
         let top = (housing?.height ?? 0) > 0 ? housing!.height : max(menuBarHeight, 22)
         return top + gap + pillHeight + CGFloat(slot - 1) * (pillHeight + stack) + stack - margin
@@ -85,25 +100,25 @@ struct DesktopIslandGeometry: Equatable {
 }
 
 /// The island's live state: the surface writes it, the view draws it.
-@MainActor final class DesktopIslandState: ObservableObject {
+@MainActor public final class DesktopIslandState: ObservableObject {
     /// When the birth began (nil: not yet shown).
-    @Published var bornAt: Date?
+    @Published public var bornAt: Date?
     /// When the way back up began (answered on the pill).
-    @Published var returningAt: Date?
+    @Published public var returningAt: Date?
     /// The birth (or the way back) is over: the frame driver stops, nothing redraws.
-    @Published var still = false
-    @Published var secondsLeft: Int
+    @Published public var still = false
+    @Published public var secondsLeft: Int
     /// Where the pointer is over the panel (top-left origin), nil when it is outside: the buttons grow under it.
-    @Published var pointer: CGPoint?
+    @Published public var pointer: CGPoint?
     /// The answer came from the pill's own buttons (it then goes back into the housing before it closes).
-    var answeredHere = false
-    var onSwitch: (() -> Void)?
-    var onRefuse: (() -> Void)?
+    public var answeredHere = false
+    public var onSwitch: (() -> Void)?
+    public var onRefuse: (() -> Void)?
 
-    init(secondsLeft: Int) { self.secondsLeft = secondsLeft }
+    public init(secondsLeft: Int) { self.secondsLeft = secondsLeft }
 
     /// The seconds into the birth to draw at `now`: forward from `bornAt`, then backwards faster on the way up.
-    func seconds(at now: Date) -> Double {
+    public func seconds(at now: Date) -> Double {
         guard let bornAt else { return 0 }
         let forward = min(now.timeIntervalSince(bornAt), DesktopIslandFluid.settle)
         guard let returningAt else { return forward }
@@ -111,13 +126,25 @@ struct DesktopIslandGeometry: Equatable {
     }
 }
 
-struct DesktopIslandView: View {
+public struct DesktopIslandView: View {
     let model: CUDesktopPromptModel
     let geometry: DesktopIslandGeometry
     @ObservedObject var state: DesktopIslandState
     var reduceMotion = false
+    /// Read the seconds left in the VoiceOver label — only where something keeps `state.secondsLeft` current (the
+    /// helper's ticker); Winter.app's island has none, and says what happens instead.
+    var countdownInLabel = true
 
-    var body: some View {
+    public init(model: CUDesktopPromptModel, geometry: DesktopIslandGeometry, state: DesktopIslandState, reduceMotion: Bool = false,
+                countdownInLabel: Bool = true) {
+        self.model = model
+        self.geometry = geometry
+        self.state = state
+        self.reduceMotion = reduceMotion
+        self.countdownInLabel = countdownInLabel
+    }
+
+    public var body: some View {
         // Display-rate frames while the liquid moves. At rest (`still`) — or not yet born — the frame is drawn without a
         // timeline: a paused TimelineView also freezes its content, and the buttons must still answer the pointer.
         Group {
@@ -129,7 +156,8 @@ struct DesktopIslandView: View {
         }
         .frame(width: geometry.panelSize.width, height: geometry.panelSize.height, alignment: .topLeading)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(model.title) Switching in \(state.secondsLeft) seconds.")
+        .accessibilityLabel(countdownInLabel ? "\(model.title) Switching in \(state.secondsLeft) seconds."
+                                             : "\(model.title) Winter switches by itself if you don't answer.")
     }
 
     private func frameView(at date: Date) -> IslandFrameView {
@@ -176,6 +204,57 @@ struct IslandFrameView: View {
     }
 
     var body: some View {
+        CUIslandLiquidFrame(frame: frame, geometry: geometry, hovered: pillHovered,
+                            interactive: frame.content > 0.9 && state.returningAt == nil) {
+            DesktopIslandRow(model: model, state: state, hovered: hoveredButton)
+        }
+    }
+}
+
+/// The shell's outline: a capsule (`cornerRadius` nil), or a continuous rounded rectangle. Insettable, so the hairline
+/// rim is drawn inside the edge for either.
+public struct CUIslandShellShape: InsettableShape {
+    public var cornerRadius: CGFloat?
+    var inset: CGFloat = 0
+
+    public init(cornerRadius: CGFloat?) { self.cornerRadius = cornerRadius }
+
+    public func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: inset, dy: inset)
+        guard let cornerRadius else { return Capsule(style: .continuous).path(in: r) }
+        return RoundedRectangle(cornerRadius: max(0, min(cornerRadius, min(r.width, r.height) / 2) - inset),
+                                style: .continuous).path(in: r)
+    }
+
+    public func inset(by amount: CGFloat) -> CUIslandShellShape {
+        var s = self
+        s.inset += amount
+        return s
+    }
+}
+
+/// One frame of the liquid around ANY content: the melt (blur + alpha threshold) while it still shows anything the crisp
+/// shell does not, then the Dispatch pill's shell — the content laid out at the resting height, as wide as the shape is
+/// now, blurred by how far the spring still has to travel, clipped to the shape, on black, with a hairline rim and its
+/// shadow, growing a little under the pointer. The desktop-switch pill's row is one such content; Winter.app's island
+/// cards are others.
+public struct CUIslandLiquidFrame<Content: View>: View {
+    let frame: DesktopIslandFluid.Frame
+    let geometry: DesktopIslandGeometry
+    let hovered: Bool
+    let interactive: Bool
+    let content: Content
+
+    public init(frame: DesktopIslandFluid.Frame, geometry: DesktopIslandGeometry, hovered: Bool, interactive: Bool,
+                @ViewBuilder content: () -> Content) {
+        self.frame = frame
+        self.geometry = geometry
+        self.hovered = hovered
+        self.interactive = interactive
+        self.content = content()
+    }
+
+    public var body: some View {
         let pill = frame.pill
         ZStack(alignment: .topLeading) {
             // The melt is only drawn while it shows anything the crisp pill does not.
@@ -201,8 +280,8 @@ struct IslandFrameView: View {
             // The Dispatch pill's shell: content laid out at the pill's resting height, as wide as the shape is now
             // (the buttons ride its edge), blurred by how far the spring still has to travel, clipped to the shape,
             // a hairline edge and its shadow.
-            let shape = Capsule(style: .continuous)
-            DesktopIslandRow(model: model, state: state, hovered: hoveredButton)
+            let shape = CUIslandShellShape(cornerRadius: geometry.bodyCornerRadius)
+            content
                 .frame(width: max(pill.width, 0), height: geometry.pill.height)
                 .frame(width: max(pill.width, 0), height: max(pill.height, 0))
                 .blur(radius: DesktopIslandGeometry.morphBlur(size: pill.size, target: geometry.pill.size)
@@ -216,11 +295,11 @@ struct IslandFrameView: View {
                 // A slight grow under the pointer, from the pill's top edge (away from the housing); the animation is
                 // scoped to the scale alone.
                 .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
-                    view.scaleEffect(pillHovered ? DesktopIslandGeometry.hoverScale : 1, anchor: .top)
+                    view.scaleEffect(hovered ? DesktopIslandGeometry.hoverScale : 1, anchor: .top)
                 }
                 .opacity(frame.crisp)
                 .offset(x: pill.minX, y: pill.minY)
-                .allowsHitTesting(frame.content > 0.9 && state.returningAt == nil)
+                .allowsHitTesting(interactive)
         }
         .frame(width: geometry.panelSize.width, height: geometry.panelSize.height, alignment: .topLeading)
     }
@@ -267,15 +346,24 @@ struct DesktopIslandRow: View {
     }
 }
 
-struct IslandCircleButtonStyle: ButtonStyle {
+public struct IslandCircleButtonStyle: ButtonStyle {
     let fill: Color
     let glyph: Color
     var hovered = false
 
     static let glowNear = 0.45
     static let glowFar = 0.22
+    /// The ✓'s blue and the circles' size, for Winter.app's island (the same buttons as this pill's).
+    public static let blue = DesktopIslandRow.blue
+    public static let size = DesktopIslandRow.button
 
-    func makeBody(configuration: Configuration) -> some View {
+    public init(fill: Color, glyph: Color, hovered: Bool = false) {
+        self.fill = fill
+        self.glyph = glyph
+        self.hovered = hovered
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
         return configuration.label
             .font(.system(size: 12, weight: .bold))
             .foregroundStyle(glyph)

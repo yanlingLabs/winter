@@ -33,6 +33,15 @@ public actor WinterClient {
     /// the composer then puts each path in the text itself (an older daemon's schema would strip `files`).
     public var supportsAttachmentFiles: Bool { daemonFeatures.contains(Self.featureAttachmentFiles) }
 
+    /// What this CLIENT can do that the daemon should know — `hello.capabilities` (e.g. `capabilityIsland`). Sent in
+    /// EVERY hello, reconnects included (a reconnect that dropped it would silently change what the daemon does —
+    /// the island's desktop-switch prompt would go back to the helper). Set before `connect`.
+    public private(set) var clientCapabilities: [String] = []
+
+    public func setClientCapabilities(_ capabilities: [String]) {
+        clientCapabilities = capabilities
+    }
+
     /// One request, encoded exactly as it goes on the wire: compact JSON, and — the part that matters — slashes
     /// NOT escaped. `JSONEncoder` writes every `/` as `\/` by default, and base64 is full of them: a 5.76 MB
     /// white TIFF (all 0xFF bytes, so all slashes) encoded to a 15.36 MB line and the daemon dropped the
@@ -191,12 +200,14 @@ public actor WinterClient {
         decoder = LineDecoder()
         try await t.open()
         startPump(t)
-        let hello = try await request("protocol.hello", params: .object([
+        var helloParams: [String: JSONValue] = [
             "protocolVersion": .number(Double(Self.protocolVersion)),
             "role": .string(role),
             "token": .string(token),
             "clientName": .string(clientName),
-        ]))
+        ]
+        if !clientCapabilities.isEmpty { helloParams["capabilities"] = .array(clientCapabilities.map { .string($0) }) }
+        let hello = try await request("protocol.hello", params: .object(helloParams))
         // An older daemon sends no `features`: it then has none, and a feature-gated path falls back.
         if case .array(let names)? = hello["features"] {
             daemonFeatures = Set(names.compactMap { $0.stringValue })

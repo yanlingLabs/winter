@@ -130,7 +130,12 @@ final class AppModel: ObservableObject {
         return AppModel(makeTransport: { UnixSocketTransport(path: path) }, token: token)
     }
 
+    /// What this app's main connection advertises in its hello (`hello.capabilities`) — the Winter island's flag. Set
+    /// before `start()`; every reconnect re-sends it (`WinterClient.clientCapabilities`).
+    var clientCapabilities: [String] = []
+
     func start() async {
+        if !clientCapabilities.isEmpty { await client.setClientCapabilities(clientCapabilities) }
         await feed.start()
     }
 

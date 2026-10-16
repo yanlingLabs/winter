@@ -756,7 +756,11 @@ export class FakeCdpTransport implements CdpTransport {
         if (!(value instanceof Promise)) return r({ result: { type: "object", value } });
         // An op that waits (a site tool): a navigation meanwhile ends its world, as Chrome answers it.
         const doc = t.doc;
-        const settled = await Promise.race([value.then((v) => ({ v })), (async () => { while (t.doc === doc) await new Promise((res) => setTimeout(res, 5)); return undefined; })()]);
+        // The navigation watcher ends with the op (settled or rejected): left running it would poll every 5 ms for as long
+        // as this document lives, one more loop per settled op.
+        let done = false;
+        void value.then(() => { done = true; }, () => { done = true; });
+        const settled = await Promise.race([value.then((v) => ({ v })), (async () => { while (!done && t.doc === doc) await new Promise((res) => setTimeout(res, 5)); return undefined; })()]);
         if (settled === undefined) throw new TransportError("cdp_error", "navigated", { cdpCode: -32000, cdpMessage: "Inspected target navigated or closed" });
         return r({ result: { type: "object", value: settled.v } });
       }

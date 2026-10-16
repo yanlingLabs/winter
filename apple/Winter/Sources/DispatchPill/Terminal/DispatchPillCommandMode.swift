@@ -29,6 +29,26 @@ struct CommandModeSuppression: Equatable {
     mutating func reset() { suppressedText = nil }
 }
 
+// MARK: - The ghost between verdicts (pure — `DispatchPillCommandModeTests`)
+
+/// PURE: the ghost to show for `text` when the last verdict was for `evaluatedText` with `ghost`. The same text:
+/// that ghost. The user typed on INTO it (the new characters are the ghost's next ones): the rest of it. The user
+/// deleted back (`text` is a prefix of `evaluatedText`): what was deleted, then the ghost — still the same
+/// completed line. Anything else: none until the next verdict.
+func commandGhostContinuation(evaluatedText: String, ghost: String?, text: String) -> String? {
+    guard let ghost, !ghost.isEmpty, !text.isEmpty else { return nil }
+    if text == evaluatedText { return ghost }
+    if text.hasPrefix(evaluatedText) {
+        let typed = text.dropFirst(evaluatedText.count)
+        guard ghost.hasPrefix(typed), ghost.count > typed.count else { return nil }
+        return String(ghost.dropFirst(typed.count))
+    }
+    if evaluatedText.hasPrefix(text) {
+        return String(evaluatedText.dropFirst(text.count)) + ghost
+    }
+    return nil
+}
+
 // MARK: - The live model the pill reads
 
 /// Command mode for the Dispatch pill's composer: whether the draft is a command right now, and the ghost
@@ -36,8 +56,8 @@ struct CommandModeSuppression: Equatable {
 /// on a background queue (the stat calls run there), and the verdict is memoized by text. Until a new verdict
 /// lands the last one stands (`displaysCommand`), so the purple does not flicker off on every keystroke.
 /// Return and Delete act only on a FRESH verdict for the exact text (`isActive(for:)`) — what the user saw
-/// purple — and never ask zsh: Return never upgrades white text to a run (a quick structural recheck may only
-/// downgrade it, say a path that vanished), and Delete opts out only of a purple that belongs to this text.
+/// purple — and never touch the filesystem or zsh: Return never upgrades white text to a run, and Delete opts out
+/// only of a purple that belongs to this text.
 /// The memo is keyed by text alone (the working directory rarely changes under a draft).
 @MainActor
 final class DispatchPillCommandMode: ObservableObject {
@@ -47,12 +67,24 @@ final class DispatchPillCommandMode: ObservableObject {
     @Published private(set) var evaluatedValid = false
     /// The ghost completion for `evaluatedText`, or nil.
     @Published private(set) var ghost: String?
+    /// The completion candidates for `evaluatedText`'s last word — what Tab cycles (`shellCompletionCandidates`).
+    private(set) var candidates: ShellCandidates?
     /// The opt-out record.
     @Published private(set) var suppression = CommandModeSuppression()
 
     let environment: CommandLineEnvironment
     /// Where a line would run — read when an evaluation is scheduled.
     var workingDirectory: () -> String
+    /// The paths on screen in the app the user is in, most recent first (`OnScreenPathStore`) — read when an
+    /// evaluation is scheduled.
+    var onScreenPaths: () -> [String] = { [] }
+    /// An evaluation is about to offer on-screen paths: refresh them if they are stale.
+    var onScreenPathsWanted: (() -> Void)?
+    /// Command mode turned ON for the draft (the pill reads the screen again then).
+    var onCommandModeTurnedOn: (() -> Void)?
+
+    /// Tab's cycle through the candidates, while it holds (`CompletionCycle`).
+    @Published private(set) var cycle: CompletionCycle?
 
     static let debounce: TimeInterval = 0.05
     static let memoLimit = 512
@@ -81,24 +113,73 @@ final class DispatchPillCommandMode: ObservableObject {
         return lastDisplayed
     }
 
-    /// The ghost text to show after the caret for `text`, or nil.
+    /// The ghost text to show after the caret for `text`, or nil — STABLE between verdicts: while the next one is
+    /// on its way the shown ghost stays, trimmed by what was typed into it (or grown by what was deleted), so a
+    /// recompute that lands with the same suggestion changes nothing on screen (`commandGhostContinuation`).
     func ghost(for text: String) -> String? {
-        text == evaluatedText ? ghost : nil
+        commandGhostContinuation(evaluatedText: evaluatedText, ghost: ghost, text: text)
+    }
+
+    /// What the composer draws after the caret: the ghost — or, while Tab is cycling, a quiet "2/7" (which candidate
+    /// is in, of how many) instead.
+    func ghostDisplay(for text: String) -> String? {
+        if let cycle, cycle.acceptedText == text {
+            return cycle.position.map { "  \($0.index)/\($0.count)" }
+        }
+        return ghost(for: text)
+    }
+
+    /// Tab, with the caret at the end of `text` (`ComposerTextView.onTab`) — zsh's menu-complete: the first Tab puts
+    /// in the candidates' common prefix (or the first candidate), each further Tab the next candidate, round and
+    /// round (`CompletionCycle`). With no candidates for this exact text yet, the ghost is accepted. Nil when there
+    /// is nothing to do (AppKit's own Tab).
+    func tab(text: String) -> ComposerTabEdit? {
+        if var cycle, let edit = cycle.step(text: text, forward: true) {
+            self.cycle = cycle
+            return edit
+        }
+        cycle = nil
+        if text == evaluatedText, let candidates, let started = CompletionCycle.start(candidates) {
+            cycle = started.cycle
+            return started.edit
+        }
+        guard let ghost = ghost(for: text), !ghost.isEmpty else { return nil }
+        return ComposerTabEdit(replacingSuffix: "", insert: ghost)
+    }
+
+    /// Shift-Tab: back one candidate — only while a cycle holds (nil otherwise: AppKit's own).
+    func backTab(text: String) -> ComposerTabEdit? {
+        guard var cycle, let edit = cycle.step(text: text, forward: false) else { return nil }
+        self.cycle = cycle
+        return edit
+    }
+
+    /// Any key but Tab and Shift-Tab: the cycle ends, keeping what it put in.
+    func endCycle() {
+        if cycle != nil { cycle = nil }
+    }
+
+    /// → (or ⌥→, `word`) at the end of `text` with a ghost showing (the text view checks the caret, the selection,
+    /// marked text and the modifiers): the whole ghost, or its next word. Nil — the key's own meaning — when no
+    /// ghost shows (a ghost exists only in command mode) or a cycle holds.
+    func acceptGhost(text: String, word: Bool) -> ComposerTabEdit? {
+        guard cycle?.acceptedText != text, let ghost = ghost(for: text), !ghost.isEmpty else { return nil }
+        return ComposerTabEdit(replacingSuffix: "", insert: word ? commandGhostNextWord(ghost) : ghost)
     }
 
     /// Return's question: RUN this text? Only when a verdict for this exact text was already shown purple — Return
-    /// never turns white text into a run. A quick structural recheck (stat calls; never zsh, never the engine
-    /// lock) may still DOWNGRADE it to a message, e.g. when a path it names has vanished since.
+    /// never turns white text into a run. It reads the SHOWN verdict alone: no filesystem access on the main thread
+    /// (a stat on a hung network mount would freeze the app), no zsh. The debounce keeps that verdict at most
+    /// `debounce` older than the text.
     func shouldRunOnReturn(_ text: String) -> Bool {
-        guard !text.isEmpty, isActive(for: text) else { return false }
-        let snapshot = environment.snapshot()
-        guard snapshot.enabled else { return false }
-        return shellLineIsCommand(text, context: snapshot.context(workingDirectory: workingDirectory()))
+        !text.isEmpty && environment.isEnabled && isActive(for: text)
     }
 
     /// Every edit of the draft.
     func draftChanged(_ text: String) {
         let generation = latest.bump()
+        // An edit other than Tab's own ends the cycling.
+        if let cycle, cycle.acceptedText != text { self.cycle = nil }
         if text.isEmpty {
             publish(text: "", valid: false, ghost: nil)
             return
@@ -107,18 +188,21 @@ final class DispatchPillCommandMode: ObservableObject {
             publish(text: text, valid: false, ghost: nil)
             return
         }
+        // An argument is being typed: the on-screen paths should be fresh for its ghost.
+        if text.contains(where: \.isWhitespace) { onScreenPathsWanted?() }
         let cwd = workingDirectory()
+        let paths = onScreenPaths()
         let environment = environment
         let latest = latest
         queue.asyncAfter(deadline: .now() + Self.debounce) { [weak self] in
             // Only the newest edit is evaluated; older ones were overtaken while they waited.
             guard latest.value == generation else { return }
-            let result = Self.evaluate(text, environment: environment, workingDirectory: cwd)
+            let result = Self.evaluate(text, environment: environment, workingDirectory: cwd, onScreenPaths: paths)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.remember(text, valid: result.valid)
                 guard latest.value == generation else { return }
-                self.publish(text: text, valid: result.valid, ghost: result.ghost)
+                self.publish(text: text, valid: result.valid, ghost: result.ghost, candidates: result.candidates)
             }
         }
     }
@@ -134,6 +218,7 @@ final class DispatchPillCommandMode: ObservableObject {
         if consumed {
             lastDisplayed = false
             ghost = nil
+            candidates = nil
         }
         return consumed
     }
@@ -141,22 +226,25 @@ final class DispatchPillCommandMode: ObservableObject {
     /// A run or a send spent the draft.
     func reset() {
         suppression.reset()
+        cycle = nil
         latest.bump()
         publish(text: "", valid: false, ghost: nil)
     }
 
     // MARK: Evaluation
 
-    private func evaluate(_ text: String, ghost: Bool = true) -> (valid: Bool, ghost: String?) {
-        let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory(), ghost: ghost)
+    private func evaluate(_ text: String, ghost: Bool = true) -> CommandEvaluation {
+        let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory(),
+                                   onScreenPaths: onScreenPaths(), ghost: ghost)
         remember(text, valid: result.valid)
         return result
     }
 
-    nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment,
-                                     workingDirectory: String, ghost wantsGhost: Bool = true) -> (valid: Bool, ghost: String?) {
+    nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment, workingDirectory: String,
+                                     onScreenPaths: [String] = [],
+                                     ghost wantsGhost: Bool = true) -> CommandEvaluation {
         let snapshot = environment.snapshot()
-        guard snapshot.enabled else { return (false, nil) }
+        guard snapshot.enabled else { return CommandEvaluation(valid: false, ghost: nil, candidates: nil) }
         let context = snapshot.context(workingDirectory: workingDirectory)
         // The structural rules first (cheap); then, for a line that passes them, whole-command validation on
         // zsh's completion system within its budget — the prose guard when zsh cannot answer.
@@ -165,11 +253,16 @@ final class DispatchPillCommandMode: ObservableObject {
             valid = shellCompletionCheckPasses(text, context: context, source: snapshot.completion,
                                                deadline: Date().addingTimeInterval(shellCompletionCheckBudget))
         }
-        guard wantsGhost else { return (valid, nil) }
-        let ghost = shellCompletion(for: text, context: context, commandNames: snapshot.commandNames,
-                                    source: snapshot.completion,
-                                    deadline: Date().addingTimeInterval(shellCompletionGhostBudget))
-        return (valid, ghost)
+        guard wantsGhost else { return CommandEvaluation(valid: valid, ghost: nil, candidates: nil) }
+        // On-screen paths rank above the filesystem's and zsh's completion.
+        let ghost = shellGhost(for: text, context: context, commandNames: snapshot.commandNames,
+                               onScreenPaths: onScreenPaths, source: snapshot.completion,
+                               deadline: Date().addingTimeInterval(shellCompletionGhostBudget))
+        // What Tab would cycle — the same engine (its replies are memoized) and the same gates.
+        let candidates = shellCompletionCandidates(for: text, context: context, commandNames: snapshot.commandNames,
+                                                   onScreenPaths: onScreenPaths, source: snapshot.completion,
+                                                   deadline: Date().addingTimeInterval(shellCompletionGhostBudget))
+        return CommandEvaluation(valid: valid, ghost: ghost, candidates: candidates)
     }
 
     private func remember(_ text: String, valid: Bool) {
@@ -177,11 +270,14 @@ final class DispatchPillCommandMode: ObservableObject {
         memo[text] = valid
     }
 
-    private func publish(text: String, valid: Bool, ghost: String?) {
+    private func publish(text: String, valid: Bool, ghost: ShellGhost?, candidates: ShellCandidates? = nil) {
+        let wasDisplayed = lastDisplayed
         if evaluatedText != text { evaluatedText = text }
         if evaluatedValid != valid { evaluatedValid = valid }
-        if self.ghost != ghost { self.ghost = ghost }
+        self.candidates = candidates
+        if self.ghost != ghost?.suffix { self.ghost = ghost?.suffix }
         lastDisplayed = suppression.isCommandMode(text: text, isValid: valid)
+        if lastDisplayed, !wasDisplayed { onCommandModeTurnedOn?() }
     }
 
     // MARK: Test seams
@@ -190,8 +286,15 @@ final class DispatchPillCommandMode: ObservableObject {
     func evaluateNowForTesting(_ text: String) {
         latest.bump()
         let result = evaluate(text)
-        publish(text: text, valid: result.valid, ghost: result.ghost)
+        publish(text: text, valid: result.valid, ghost: result.ghost, candidates: result.candidates)
     }
+}
+
+/// One verdict: whether the text is a command, its ghost, and the candidates Tab would cycle.
+struct CommandEvaluation {
+    var valid: Bool
+    var ghost: ShellGhost?
+    var candidates: ShellCandidates?
 }
 
 /// A counter two threads read: the main actor bumps it per edit, the evaluation queue checks it.

@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
     /// follows (`AppModel.session`), through its own adapter.
     private(set) var pillController: DispatchPillController?
+    /// The Winter island at the camera housing (`docs/claude/island.md`); nil under unit tests and without a token.
+    private(set) var islandController: IslandController?
     /// The background watchdog for a stalled main thread (never constructed under unit tests).
     private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
@@ -486,13 +488,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A command typed into the pill runs in the bound session's working directory when it has one (a
         // dispatch session usually does not — then the pill falls back to the home folder).
         // "Add to transcript" sends to the session the command was RUN from — that session's own send, never the
-        // focused one, never a new one; a session that is gone disables the button.
+        // focused one; a run that recorded none goes through the pill's own send (`onSubmit`, below). Only a
+        // session a failed send proved deleted (re-listed, and not there) disables the button — never one merely
+        // missing from the directory, which is refreshed only now and then.
         pill.commandRuns.onSendToTranscript = { [weak self] sessionId, text in
             guard let client = self?.appModel?.client else { return false }
             return (try? await client.send(sessionId: sessionId, text: text)) != nil
         }
-        pill.commandRuns.sessionExists = { [weak model] sessionId in
-            model?.directory.rows.contains { $0.sessionId == sessionId } ?? false
+        pill.commandRuns.sessionIsGone = { [weak model] sessionId in
+            guard let model, await model.directory.refreshReportingSuccess() else { return false }
+            return !model.directory.rows.contains { $0.sessionId == sessionId }
         }
         pill.commandWorkingDirectory = { [weak model] in
             guard let model, let sid = model.focusedSessionId,
@@ -1158,6 +1163,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    /// The Winter island (`docs/claude/island.md`): every pending approval, question and view request across sessions,
+    /// at the camera housing. It rides the main feed's connection — that hello advertises the island, so the daemon
+    /// shows the desktop-switch prompt here rather than in the Computer Use helper — and never attaches to a session.
+    private func startIsland(model: AppModel, pill: DispatchPillController) {
+        model.clientCapabilities = [WinterClient.capabilityIsland]
+        let client = model.client
+        let store = IslandStore()
+        store.fetch = { try await client.islandPending() }
+        store.responder = .live(client)
+        store.onShown = { ids in Task { try? await client.islandShown(ids: ids) } }
+        let island = IslandController(store: store)
+        island.focusSources = IslandFocusSources(
+            dispatchPillVisible: { [weak pill] in pill?.isVisible ?? false },
+            dispatchSessionIds: { [weak model] in
+                Set(model?.directory.rows.filter { $0.mode == "dispatch" }.map(\.sessionId) ?? [])
+                    .union(model?.focusedSessionId.map { [$0] } ?? [])
+            },
+            keyOrMainWindowSessionIds: { [weak self] in
+                guard let self else { return [] }
+                var ids = Set<String>()
+                if let app = self.appWindow, app.isKeyOrMain, let sid = app.host?.attachedSessionId { ids.insert(sid) }
+                for window in self.detachedWindows where window.isKeyOrMain { ids.insert(window.sessionId) }
+                return ids
+            })
+        islandController = island
+        island.start()
+        // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
+        let changes = client.notifications(method: WinterClient.islandChangedNotification)
+        Task { @MainActor [weak store] in
+            for await _ in changes { await store?.refresh() }
+        }
+        // Every (re)connect re-reads the whole set (cards raised while the app was away included).
+        let previous = model.onClientConnected
+        model.onClientConnected = { [weak store] in
+            previous?()
+            Task { await store?.refresh() }
+        }
+        // The Dispatch pill showing or hiding moves Dispatch's cards between it and the island.
+        pill.$isVisible
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak island] _ in island?.focusChanged() }
+            .store(in: &cancellables)
+    }
+
     /// Everything after activation policy. Split out so tests can drive it without
     /// a real app launch. Returns true when boot completed (even degraded: a missing
     /// daemon token must not prevent the orb from appearing).
@@ -1473,9 +1523,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Command mode reads the user's own login shell — never under unit tests (`.inert`: nothing is a
         // command), so no test ever runs the developer's shell or its profile.
         let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings,
-                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live())
+                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live(),
+                                          onScreenPaths: Self.isRunningUnitTests ? .inert : .live())
         pillController = pill
         wireDispatchPill(pill, model: model)
+        if !Self.isRunningUnitTests && !tokenMissing { startIsland(model: model, pill: pill) }
 
         // Task 6 (2e-iii): the morph window's width-responsive sidebars. `onSelect` refocuses the
         // orb's own follow-focus feed in place (`focusSession`); `onNewSession` creates+focuses a

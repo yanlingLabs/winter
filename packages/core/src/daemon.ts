@@ -125,6 +125,7 @@ import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
+import { IslandRegistry } from "./island/registry";
 import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
 import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
@@ -1267,7 +1268,34 @@ export async function startDaemon(opts: {
   // (cheap: nothing connects or spawns until a script runs); the capability is built per session only while
   // computer use is on. `interrupt` reaches `winterDrivers` late (the helper's Esc), as the capability
   // closures below do.
+  // The Winter island (`docs/claude/island.md`): every card still pending in any session, for Winter.app's surface at
+  // the camera housing (`island.pending`). Pending-ness is the brokers'; the payload is the request event, seen here.
+  const islandRegistry = new IslandRegistry({
+    pending: {
+      approval: (sid, callId) => approvalBroker.pendingMeta(sid, callId) !== undefined,
+      question: (sid, callId) => questions.isPending(sid, callId),
+      elicitation: (sid, id) => elicitationBroker.urlFor(sid, id) !== undefined,
+    },
+    facts: (sid) => {
+      try {
+        const meta = store.meta(sid);
+        const title = store.getTitle(sid);
+        return {
+          ...(meta.mode === undefined ? {} : { mode: meta.mode }),
+          ...(meta.origin === undefined ? {} : { origin: meta.origin }),
+          ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }),
+          ...(title === null ? {} : { title }),
+        };
+      } catch { return undefined; }
+    },
+    hosts: (sid) => hub.attachedHarnesses(sid).map((h) => ({
+      clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
+    })),
+  });
+  hub.addObserver((event) => islandRegistry.observe(event));
+
   const computerUseRuntime = createComputerUseRuntime({
+    island: islandRegistry,
     home: winterHome,
     profile,
     settings: () => settings,
@@ -3034,6 +3062,7 @@ export async function startDaemon(opts: {
     // restart, even on a no-provider daemon where the facade itself was never built.
     hooks: hookRegistry,
     questions: questions ?? undefined,
+    island: islandRegistry,
     tasks: undefined,
     // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
     // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`

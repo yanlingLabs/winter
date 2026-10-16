@@ -7,8 +7,8 @@ import Foundation
 // The probe mirrors the daemon's (`packages/core/src/login-shell-path.ts`): `$SHELL -l -c <script>` with the
 // interactive rc file sourced explicitly (stdin from /dev/null, its output discarded), the PATH printed between
 // two markers so whatever a profile prints can never be mistaken for it, its own process group, a hard
-// deadline after which the whole group is SIGKILLed. A RUN sources the same rc file the same way before it
-// evaluates the line, so what the validator found on PATH is what the run can reach.
+// deadline after which the whole group is SIGKILLed. A RUN is an interactive login shell with the user's own
+// startup files (`loginShellSessionInvocation`), so what the validator found on PATH is what the run can reach.
 //
 // Nothing here logs a command line, a PATH value or anything a shell printed.
 
@@ -102,21 +102,393 @@ private func loginShellBetween(_ text: String, _ start: String, _ end: String) -
 /// descriptor above 2 and then `exec`s the user's shell — nothing of the app's reaches the user's command.
 let loginShellRunTrampoline = #"{ for __fd in /dev/fd/<3->(N:t); do exec {__fd}>&-; done } 2>/dev/null; exec "$@""#
 
-/// PURE: how a line runs — the executable and its arguments. Through the trampoline above, the user's shell: a
-/// POSIX dialect sources the rc file the way the probe does and then `eval`s the line, handed over as `$1`
-/// (never spliced into the script, so no quoting can break out of it) and cleared from the positional
-/// parameters before it runs. fish takes the line as its `-c` script.
-func loginShellRunInvocation(shell: String, line: String) -> (executable: String, arguments: [String]) {
+// MARK: - A run is a terminal tab: an interactive login shell that runs the line first
+
+/// A run's random tag (16 hex digits). Its OSC 133 marks carry `winter-<nonce>`, and only marks carrying it count —
+/// a `133;D;0` printed by the command itself, or by a shell nested in it (ssh, tmux, nix-shell), is not the line's end.
+func loginShellRunNonce() -> String {
+    var generator = SystemRandomNumberGenerator()
+    return String(format: "%016llx", generator.next() as UInt64)
+}
+
+/// The mark field that names a run.
+func loginShellMarkTag(_ nonce: String) -> String { "winter-" + nonce }
+
+/// `text` as ONE single-quoted POSIX shell word.
+func loginShellSingleQuoted(_ text: String) -> String {
+    "'" + text.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+}
+
+/// `text` as ONE single-quoted fish word.
+func loginShellFishQuoted(_ text: String) -> String {
+    "'" + text.replacingOccurrences(of: #"\"#, with: #"\\"#).replacingOccurrences(of: "'", with: #"\'"#) + "'"
+}
+
+/// How a run starts: the executable and arguments (through the fd-closing trampoline), the variables to add to
+/// the run's environment (never the line), and the files its private shim folder holds.
+struct LoginShellSessionInvocation: Equatable {
+    var executable: String
+    var arguments: [String]
+    var environment: [String: String]
+    /// File name → contents, written into the shim folder (mode 0600) before the shell starts. `line` is the line.
+    var files: [String: String]
+}
+
+/// The file the app creates in the shim folder when the USER typed the line in by hand ("Type it"): the shim then
+/// never runs it as well.
+let loginShellTypedMarkerFile = "typed"
+
+/// The name of the file the line travels in.
+let loginShellLineFile = "line"
+
+/// PURE: a run as an INTERACTIVE LOGIN SHELL — the user's own shell with their own startup files, which runs the
+/// typed line once and then stays at its prompt, like a terminal tab.
+///
+/// The line travels in a FILE — `line`, mode 0600, in the run's private 0700 `mkdtemp` folder — that the shell
+/// reads and deletes as it starts; no environment variable or argument ever carries it. The marks it writes are
+/// `133;C;winter-<nonce>` as the line starts and `133;D;<status>;winter-<nonce>` when it ends.
+///
+/// - **zsh**: a ZDOTDIR shim. `ZDOTDIR` points at the folder, whose `.zshenv`, `.zprofile`, `.zshrc` and `.zlogin`
+///   each source the user's real file of that name (from the user's own `ZDOTDIR`, or `$HOME`) at top level —
+///   never inside a function, so their `typeset`s stay global — and point `ZDOTDIR` back at the shim between
+///   files. `.zshenv` reads and deletes `line`; the last file restores the user's `ZDOTDIR` (and a `HISTFILE`
+///   macOS's `/etc/zshrc` aimed at the shim) and registers a one-shot `zle-line-init` hook: at the FIRST prompt
+///   the line is put in the editing buffer and accepted as if typed — job control, Ctrl-C, history, the user's
+///   prompt and hooks all as usual — with HISTORY EXPANSION OFF for that one line (`histchars` emptied, so `!` is
+///   never expanded: it runs exactly what was validated) and back on as it starts. Chosen over writing the line into the pty, which
+///   would have to guess when the prompt is ready.
+/// - **bash**: `--rcfile <shim> -i`; the shim does a login shell's files, then sources the run script.
+/// - **sh / ksh / dash**: `-l -i` with `ENV` naming the shim, which sources the run script.
+/// - **fish**: `-l -i --init-command "source <run.fish>"`.
+///
+/// The RUN SCRIPT (`run`, POSIX; `run.fish`) runs the line with `eval` — never history-expanded — once: it does
+/// nothing when the line already started, or when the user typed it in by hand (`loginShellTypedMarkerFile`).
+/// When the shim was skipped (a `ZDOTDIR` set in `/etc/zshenv`) or its prompt hook never fired (a plugin that
+/// rebinds `zle-line-init`), NOTHING is typed for the user: the terminal window says so and offers "Type it"
+/// (`CommandRun`).
+func loginShellSessionInvocation(shell: String, line: String, shimDirectory: String,
+                                 nonce: String) -> LoginShellSessionInvocation {
     let dialect = loginShellDialect(shell) ?? .zsh
     let target = loginShellDialect(shell) == nil ? "/bin/zsh" : shell
+    let tag = loginShellMarkTag(nonce)
+    let run = shimDirectory + "/run"
+    var environment: [String: String] = [:]
+    // A terminal opened with no line of its own (`/terminal`) has no line file: the shell just starts.
+    var files: [String: String] = ["run": loginShellRunScript(shimDirectory: shimDirectory, tag: tag)]
+    if !line.isEmpty { files[loginShellLineFile] = line }
     let shellArguments: [String]
-    if dialect == .fish {
-        shellArguments = ["-l", "-c", line]
-    } else {
-        let script = loginShellRcPrelude(dialect) + #"__winter_line=$1; set --; eval "$__winter_line""#
-        shellArguments = ["-l", "-c", script, (target as NSString).lastPathComponent, line]
+    switch dialect {
+    case .zsh:
+        environment["ZDOTDIR"] = shimDirectory
+        files.merge(loginShellZshShimFiles(tag: tag)) { _, new in new }
+        files[loginShellZshAutosuggestFile] = loginShellZshAutosuggest()
+        shellArguments = ["-l", "-i"]
+    case .bash:
+        files["bashrc"] = loginShellBashShim(shimDirectory: shimDirectory, tag: tag)
+        shellArguments = ["--rcfile", shimDirectory + "/bashrc", "-i"]
+    case .posix:
+        environment["ENV"] = shimDirectory + "/env.sh"
+        files["env.sh"] = "unset ENV\n. " + loginShellSingleQuoted(run) + "\n"
+        shellArguments = ["-l", "-i"]
+    case .fish:
+        files["run.fish"] = loginShellFishRunScript(shimDirectory: shimDirectory, tag: tag)
+        let source = "source " + loginShellFishQuoted(shimDirectory + "/run.fish")
+        shellArguments = ["-l", "-i", "--init-command", source]
     }
-    return ("/bin/zsh", ["-f", "-c", loginShellRunTrampoline, "winter-run", target] + shellArguments)
+    return LoginShellSessionInvocation(
+        executable: "/bin/zsh",
+        arguments: ["-f", "-c", loginShellRunTrampoline, "winter-run", target] + shellArguments,
+        environment: environment, files: files)
+}
+
+/// The POSIX run script (zsh, bash, sh): the line once, between its marks. `__winter_state` — 0 not started,
+/// 1 accepted at the prompt (zsh), 2 running, 3 done — keeps it from running twice.
+func loginShellRunScript(shimDirectory: String, tag: String) -> String {
+    let file = loginShellSingleQuoted(shimDirectory + "/" + loginShellLineFile)
+    let typed = loginShellSingleQuoted(shimDirectory + "/" + loginShellTypedMarkerFile)
+    return """
+    # Winter: runs the line you typed into the Dispatch pill, once.
+    if [ "${__winter_state:-0}" = 0 ] && [ ! -e \(typed) ] && [ -f \(file) ]; then
+      __winter_state=2
+      if [ -f \(file) ]; then
+        __winter_line=$(command cat -- \(file))
+        command rm -f -- \(file)
+      fi
+      command printf '\\033]133;C;\(tag)\\007'
+      eval "$__winter_line"
+      __winter_status=$?
+      __winter_state=3
+      command printf '\\033]133;D;%d;\(tag)\\007' "$__winter_status"
+      unset __winter_line __winter_status
+    fi
+    [ "${__winter_state:-0}" = 0 ] && __winter_state=3
+
+    """
+}
+
+/// fish's run script.
+func loginShellFishRunScript(shimDirectory: String, tag: String) -> String {
+    let file = loginShellFishQuoted(shimDirectory + "/" + loginShellLineFile)
+    let typed = loginShellFishQuoted(shimDirectory + "/" + loginShellTypedMarkerFile)
+    return """
+    # Winter: runs the line you typed into the Dispatch pill, once.
+    if not set -q __winter_state; and not test -e \(typed); and test -f \(file)
+      set -g __winter_state 2
+      set -g __winter_line (command cat -- \(file) | string collect)
+      command rm -f -- \(file)
+      printf '\\e]133;C;\(tag)\\a'
+      eval $__winter_line
+      set -g __winter_status $status
+      set -g __winter_state 3
+      printf '\\e]133;D;%d;\(tag)\\a' $__winter_status
+      set -e __winter_line __winter_status
+    end
+
+    """
+}
+
+/// The zsh shim's four startup files (see `loginShellSessionInvocation`).
+func loginShellZshShimFiles(tag: String) -> [String: String] {
+    // Between files ZDOTDIR is the shim's; while a user's file runs it is the user's own (unset = $HOME).
+    func source(_ name: String) -> String {
+        """
+        if [[ -n $__winter_zd ]]; then ZDOTDIR=$__winter_zd; else builtin unset ZDOTDIR; fi
+        [[ -f ${ZDOTDIR:-$HOME}/\(name) ]] && builtin source ${ZDOTDIR:-$HOME}/\(name)
+        __winter_zd=${ZDOTDIR-}
+        ZDOTDIR=$__winter_shim
+
+        """
+    }
+    let header = "# Winter: a run's one-time startup shim — it sources your own startup files.\n"
+    let zshenv = header + """
+        __winter_shim=$ZDOTDIR
+        __winter_state=0
+        if [[ -f $__winter_shim/\(loginShellLineFile) ]]; then
+          __winter_line=$(<$__winter_shim/\(loginShellLineFile))
+          command rm -f -- $__winter_shim/\(loginShellLineFile)
+        fi
+        __winter_zd=
+
+        """ + source(".zshenv")
+    let zlogin = header + source(".zlogin") + """
+        if [[ -n $__winter_zd ]]; then builtin export ZDOTDIR=$__winter_zd; else builtin unset ZDOTDIR; fi
+        [[ ${HISTFILE-} == $__winter_shim/* ]] && HISTFILE=${ZDOTDIR:-$HOME}/${HISTFILE##*/}
+        builtin unset __winter_zd
+        __winter_histchars=
+        __winter_run_line() {
+          (( __winter_state == 0 )) || return 0
+          # The user typed it in by hand already ("Type it").
+          if [[ -e $__winter_shim/\(loginShellTypedMarkerFile) ]]; then __winter_state=3; return 0; fi
+          # A terminal opened with no line of its own.
+          if [[ -z ${__winter_line-} ]]; then __winter_state=3; return 0; fi
+          __winter_state=1
+          # The line runs exactly as validated: no history expansion for it (`!` stays `!`). Emptying histchars is
+          # what the lexer reads; toggling BANG_HIST here would be too late for this line.
+          __winter_histchars=$histchars
+          histchars=''
+          BUFFER=$__winter_line
+          CURSOR=${#BUFFER}
+          zle .accept-line
+        }
+        __winter_preexec() {
+          (( __winter_state == 1 )) || return 0
+          __winter_state=2
+          histchars=$__winter_histchars
+          builtin printf '\\033]133;C;\(tag)\\007'
+        }
+        __winter_precmd() {
+          local __winter_status=$?
+          (( __winter_state == 2 )) || return $__winter_status
+          __winter_state=3
+          builtin printf '\\033]133;D;%d;\(tag)\\007' $__winter_status
+          builtin unset __winter_line
+          return $__winter_status
+        }
+        builtin autoload -Uz add-zle-hook-widget add-zsh-hook
+        zle -N __winter_run_line
+        add-zle-hook-widget line-init __winter_run_line
+        add-zsh-hook preexec __winter_preexec
+        precmd_functions=(__winter_precmd ${precmd_functions[@]})
+        [[ -r $__winter_shim/\(loginShellZshAutosuggestFile) ]] && builtin source $__winter_shim/\(loginShellZshAutosuggestFile)
+
+        """
+    return [".zshenv": zshenv, ".zprofile": header + source(".zprofile"), ".zshrc": header + source(".zshrc"),
+            ".zlogin": zlogin]
+}
+
+/// The autosuggestions file in a zsh run's shim folder, and the paths file the app keeps next to it.
+let loginShellZshAutosuggestFile = "autosuggest.zsh"
+let loginShellOnScreenPathsFile = "paths"
+
+/// Autosuggestions for Winter's own zsh terminals, the way zsh-autosuggestions does them: on every change of the
+/// line, the rest of it is suggested after the cursor in dim text (`POSTDISPLAY`, highlighted through
+/// `region_highlight` — APPENDED to, with a `memo`, so zsh-syntax-highlighting's own entries stay). The suggestion
+/// is the most recent history entry starting with the line (`HISTORY_IGNORE` respected); failing that, when the
+/// word being typed is a path (`/`, `~`, `./`), a path that was on screen — the app keeps those, the PATHS only,
+/// in the shim folder's `paths` file. → or End at the end of the line accept it all; ⌥→ (forward-word) one word.
+/// Tab is untouched. Nothing per keystroke runs a command: one in-shell history search, and (for a path) one
+/// read of a ≤ 30-line file. If the user's own config loaded zsh-autosuggestions (now or later), this does
+/// nothing. It lives in this shell only — no dotfile is touched.
+func loginShellZshAutosuggest() -> String {
+    """
+    # Winter: autosuggestions for this terminal only — like zsh-autosuggestions (history, then the paths on screen).
+    __winter_as_present() {
+      (( ${+ZSH_AUTOSUGGEST_STRATEGY} || ${+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE} || ${+functions[_zsh_autosuggest_start]} || ${+widgets[autosuggest-accept]} ))
+    }
+    if ! __winter_as_present; then
+      builtin zmodload -i zsh/mapfile 2>/dev/null
+      typeset -g __winter_as_paths=$__winter_shim/\(loginShellOnScreenPathsFile)
+      typeset -g __winter_as_last=
+      typeset -g __winter_as_off=0
+
+      # REPLY: what to suggest after the line $1 (the rest of it), or nothing.
+      __winter_as_suggestion() {
+        emulate -L zsh
+        setopt extended_glob
+        REPLY=
+        local prefix=$1
+        [[ -n $prefix ]] || return 0
+        local pattern="${(b)prefix}?*"
+        [[ -n ${HISTORY_IGNORE-} ]] && pattern="(${pattern})~(${HISTORY_IGNORE})"
+        local found=${history[(r)$pattern]}
+        if [[ -n $found ]]; then
+          REPLY=${found:${#prefix}}
+          return 0
+        fi
+        local word=${prefix##*[[:space:]]}
+        [[ $word == (/|\\~|./)* ]] || return 0
+        [[ -r $__winter_as_paths ]] || return 0
+        local p candidate rest
+        for p in ${(f)mapfile[$__winter_as_paths]}; do
+          candidate=$p
+          if [[ $word == \\~* && $p == ${(b)HOME}/* ]]; then candidate="~/${p:$(( ${#HOME} + 1 ))}"
+          elif [[ $word == ./* && $p == ${(b)PWD}/* ]]; then candidate="./${p:$(( ${#PWD} + 1 ))}"
+          elif [[ $word == /* && $p == \\~/* ]]; then candidate="$HOME/${p:2}"
+          fi
+          # As it would be typed: backslash-escaped, a leading ~ or ./ kept.
+          if [[ $candidate == \\~/* ]]; then rest=${candidate:2}; candidate="~/${(q)rest}"
+          elif [[ $candidate == ./* ]]; then rest=${candidate:2}; candidate="./${(q)rest}"
+          else candidate=${(q)candidate}
+          fi
+          if [[ $candidate == ${(b)word}?* ]]; then
+            REPLY=${candidate:${#word}}
+            return 0
+          fi
+        done
+        return 0
+      }
+
+      __winter_as_highlight() {
+        region_highlight=( ${region_highlight:#*memo=winter-as*} )
+        [[ -n $POSTDISPLAY ]] && region_highlight+=( "${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=8,memo=winter-as" )
+      }
+
+      __winter_as_clear() {
+        POSTDISPLAY=
+        region_highlight=( ${region_highlight:#*memo=winter-as*} )
+      }
+
+      # Before every redraw: a new suggestion when the line changed (else the one shown stays, re-dimmed).
+      __winter_as_redraw() {
+        if (( __winter_as_off )) || __winter_as_present; then
+          __winter_as_off=1
+          [[ -n $POSTDISPLAY ]] && __winter_as_clear
+          return 0
+        fi
+        if [[ -z $BUFFER ]] || (( CURSOR != ${#BUFFER} )); then
+          __winter_as_clear
+          __winter_as_last=
+          return 0
+        fi
+        if [[ $BUFFER != "$__winter_as_last" ]]; then
+          __winter_as_last=$BUFFER
+          __winter_as_suggestion "$BUFFER"
+          POSTDISPLAY=$REPLY
+        fi
+        __winter_as_highlight
+      }
+
+      __winter_as_finish() {
+        __winter_as_clear
+        __winter_as_last=
+      }
+
+      # → / End at the end of the line: the whole suggestion; anywhere else, the key's own widget.
+      __winter_as_accept() {
+        if [[ -n $POSTDISPLAY ]] && (( CURSOR == ${#BUFFER} )) && (( ! __winter_as_off )); then
+          BUFFER+=$POSTDISPLAY
+          CURSOR=${#BUFFER}
+          __winter_as_clear
+          __winter_as_last=$BUFFER
+        else
+          zle __winter_as_orig_$WIDGET -- "$@"
+        fi
+      }
+
+      # ⌥→ (forward-word) at the end of the line: the suggestion's next word.
+      __winter_as_accept_word() {
+        # The word pattern uses ## and # — glob operators only under extended_glob, which most shells leave off.
+        setopt localoptions extended_glob
+        if [[ -n $POSTDISPLAY ]] && (( CURSOR == ${#BUFFER} )) && (( ! __winter_as_off )); then
+          local next=${(M)POSTDISPLAY##[[:space:]]#[^[:space:]/]##(/|)}
+          [[ -n $next ]] || next=${POSTDISPLAY[1]}
+          BUFFER+=$next
+          CURSOR=${#BUFFER}
+          __winter_as_last=
+        else
+          zle __winter_as_orig_$WIDGET -- "$@"
+        fi
+      }
+
+      () {
+        setopt localoptions extended_glob
+        local w
+        for w in forward-char end-of-line vi-forward-char vi-end-of-line; do
+          zle -A $w __winter_as_orig_$w && zle -N $w __winter_as_accept
+        done
+        for w in forward-word emacs-forward-word vi-forward-word; do
+          zle -A $w __winter_as_orig_$w && zle -N $w __winter_as_accept_word
+        done
+        # ⌥→ and End as terminals send them, where nothing is bound yet.
+        local key
+        for key in '^[[1;3C' '^[[1;9C'; do
+          [[ $(builtin bindkey -- $key) == *undefined-key ]] && builtin bindkey -- $key forward-word
+        done
+        for key in '^[[F' '^[OF'; do
+          [[ $(builtin bindkey -- $key) == *undefined-key ]] && builtin bindkey -- $key end-of-line
+        done
+      }
+      zle -N __winter_as_redraw
+      zle -N __winter_as_finish
+      add-zle-hook-widget line-pre-redraw __winter_as_redraw
+      add-zle-hook-widget line-finish __winter_as_finish
+    fi
+
+    """
+}
+
+/// The bash shim (`--rcfile`): a login shell's files, then the run script, then the prompt.
+func loginShellBashShim(shimDirectory: String, tag: String) -> String {
+    """
+    # Winter: a run's one-time startup shim — it sources your own startup files.
+    [ -f /etc/profile ] && builtin source /etc/profile
+    if [ -f "$HOME/.bash_profile" ]; then builtin source "$HOME/.bash_profile"
+    elif [ -f "$HOME/.bash_login" ]; then builtin source "$HOME/.bash_login"
+    elif [ -f "$HOME/.profile" ]; then builtin source "$HOME/.profile"
+    fi
+    # A line interrupted before its own end mark still reports, at the first prompt.
+    __winter_done() {
+      local __winter_last=$?
+      if [ "${__winter_state:-0}" = 2 ]; then
+        __winter_state=3
+        builtin printf '\\033]133;D;%d;\(tag)\\007' "$__winter_last"
+      fi
+      return $__winter_last
+    }
+    PROMPT_COMMAND="__winter_done${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+    builtin source \(loginShellSingleQuoted(shimDirectory + "/run"))
+
+    """
 }
 
 /// PURE: the environment a run (and the probe) starts from. A Mac app's own environment is LaunchServices'
@@ -198,15 +570,17 @@ final class CommandLineEnvironment: @unchecked Sendable {
                                isLive: false, shell: "/bin/zsh", runEnvironment: [:])
     }
 
-    /// A synthetic shell (tests). With no `completion`, only the structural rules apply.
+    /// A synthetic shell (tests). With no `completion`, only the structural rules apply. A test that starts a
+    /// real run hands in a `runEnvironment` whose HOME is a throwaway folder — never the user's.
     static func fixed(pathDirectories: [String], commandNames: [String], aliases: Set<String> = [],
                       homeDirectory: String, fileSystem: ShellFileSystem,
-                      completion: ShellCompletionSource? = nil) -> CommandLineEnvironment {
+                      completion: ShellCompletionSource? = nil, shell: String = "/bin/zsh",
+                      runEnvironment: [String: String] = [:]) -> CommandLineEnvironment {
         CommandLineEnvironment(snapshot: Snapshot(enabled: true, pathDirectories: pathDirectories, aliases: aliases,
                                                   commandNames: commandNames.sorted(), homeDirectory: homeDirectory,
                                                   fileSystem: fileSystem, wholeCommandCheck: completion != nil,
                                                   completion: completion),
-                               isLive: false, shell: "/bin/zsh", runEnvironment: [:])
+                               isLive: false, shell: shell, runEnvironment: runEnvironment)
     }
 
     /// The user's own shell. Until the first probe lands, the process PATH plus the standard Homebrew
@@ -223,7 +597,10 @@ final class CommandLineEnvironment: @unchecked Sendable {
         let path = (inherited + ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"])
             .filter { seen.insert($0).inserted }
         let snapshot = Snapshot(enabled: true, pathDirectories: path, aliases: [], commandNames: [],
-                                homeDirectory: home, fileSystem: LiveShellFileSystem(), wholeCommandCheck: true)
+                                homeDirectory: home,
+                                // A slow network or FUSE mount never stalls a keystroke's verdict.
+                                fileSystem: SlowMountGuardedFileSystem(inner: LiveShellFileSystem()),
+                                wholeCommandCheck: true)
         return CommandLineEnvironment(snapshot: snapshot, isLive: true, shell: shell,
                                       runEnvironment: loginShellEnvironment(from: processEnvironment, home: home,
                                                                             user: user, shell: shell))
