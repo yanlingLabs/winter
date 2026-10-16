@@ -158,8 +158,7 @@ const DESTRUCTIVE = new RegExp([
   String.raw`\brm\s*\(`, String.raw`\bunlinkat\b`, String.raw`\brenameat\b`,
   String.raw`\bO_TRUNC\b`, // an open that truncates
   String.raw`\bBun\.write\s*\(`, // Bun's overwrite-by-default writer
-  String.raw`["'\x60](?:/(?:usr/)?bin/)?rm(?:["'\x60\s])`, // spawning rm: ["rm", ...], "/bin/rm", "rm -rf ..."
-  String.raw`\$\x60\s*rm\b`, // Bun shell: $\`rm ...\`
+  String.raw`["'\x60](?:/(?:usr/)?bin/)?rm(?:["'\x60\s])`, // spawning rm: ["rm", ...], "/bin/rm", "rm -rf ...", and Bun shell $\`rm ...\`
 ].join("|"));
 test("the ratchet pattern recognizes each removal, rename-over and truncation form, and not lookalikes", () => {
   for (const code of [
