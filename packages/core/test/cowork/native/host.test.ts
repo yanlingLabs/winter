@@ -293,3 +293,13 @@ test("an orderly stop after an interrupted replay keeps the old writer's receipt
   expect(h.volumes.records(h.workspaceId)[0]!.filesystemJournal!.replayDebt).toBeUndefined();
   expect(h.receipts.size).toBe(0);
 });
+
+test("a start refuses, before the incarnation moves, while a previous owner still holds the volumes", async () => {
+  const h = createHarness();
+  const owner = { controllerInstanceId: "ctl-boot-one-0000000f", workerInstanceId: "wrk-held", incarnationId: "inc-held", leaseEpoch: 1, runtimeImageDigest: IMAGE_DIGEST };
+  h.db.db.run("UPDATE cowork_volumes SET owner_json=? WHERE workspace_id=?", [JSON.stringify(owner), h.workspaceId]);
+  await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "owner_held" });
+  const ws = h.records.get(h.workspaceId);
+  expect([ws.power, ws.leaseEpoch, ws.incarnationId]).toEqual(["stopped", 0, null]);
+  expect(h.launcher.spawned).toEqual([]); expect(h.ledger.listActive()).toEqual([]);
+});

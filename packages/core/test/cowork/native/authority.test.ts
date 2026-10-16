@@ -3,7 +3,7 @@ import { CoworkNativeAuthority, CoworkNativeAuthorityError, CoworkNativeChannelB
 import { sortedCanonical } from "../../../src/cowork/native/protocol";
 import { mintControllerInstanceId, mintOrderlyStopProof, type CoworkNativeOwnerRecoverAttestation } from "../../../src/cowork/native/stop-proof";
 import type { CoworkVolumeOwner, CoworkVolumeRequest } from "../../../src/cowork/volumes";
-import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../../../src/cowork/volume-filesystem";
+import { matchesFilesystemReceipt, type VolumeFilesystemPlan, type VolumeFilesystemReceipt } from "../../../src/cowork/volume-filesystem";
 import { receiptFor } from "./fake-launcher";
 import { cleanupHarnesses, createHarness, IMAGE_DIGEST, type Harness } from "./harness";
 
@@ -89,8 +89,11 @@ describe("volume authority", () => {
       Object.freeze({ kind: "native-volume-proof", workspaceId: h.workspaceId }), foreign.request().proof];
     for (const proof of forged) for (const action of ["claim", "open"] as const) expect(`${action}:${h.authority.volumes.authorize(action, { ...real, proof }, h.homeId)}`).toBe(`${action}:false`);
     expect(h.authority.volumes.authorize("claim", real, h.homeId)).toBe(true);
-    // the same sealed object offered to ANOTHER authority is just as dead
+    // the same sealed object offered to ANOTHER authority is just as dead: even one over the very same database and registry
     expect(other.authority.volumes.authorize("claim", real, other.homeId)).toBe(false);
+    const sibling = new CoworkNativeAuthority({ records: h.records, hostBoot: h.hostBoot, registry: h.registry });
+    expect(sibling.volumes.authorize("claim", real, h.homeId)).toBe(false);
+    expect(h.authority.volumes.authorize("claim", real, h.homeId)).toBe(true);
   });
   test("a closed binding, a closed link and a drifted request all fail", () => {
     const h = createHarness(), ctx = begin(h); ctx.binding.advance("begun");
@@ -211,6 +214,10 @@ describe("filesystem authority and the bootstrap receipt", () => {
     expect(h.authority.filesystem.verifyReceipt(request, plan, { ...receipt, extra: 1 } as never, proof)).toBe(false);
     for (const forged of [{}, { ...proof }, JSON.parse(JSON.stringify(proof)), Object.create(proof), null]) expect(h.authority.filesystem.verifyReceipt(request, plan, receipt, forged)).toBe(false);
     expect(h.authority.filesystem.verifyReceipt(request, { ...plan, operationId: "filesystem_other" } as VolumeFilesystemPlan, receipt, proof)).toBe(false);
+    // another receipt that ALSO matches the plan (a transient feature differs) is still not the one this proof was minted for
+    const sibling = structuredClone(receipt); (sibling.volumes[0] as { transientFilesystemFeatures: string[] }).transientFilesystemFeatures = ["needs_recovery"];
+    expect(matchesFilesystemReceipt(plan, sibling)).toBe(true);
+    expect(h.authority.filesystem.verifyReceipt(request, plan, sibling, proof)).toBe(false);
     // spent: the second use is a replay
     ctx.binding.consumeReceipt(proof);
     expect(h.authority.filesystem.verifyReceipt(request, plan, receipt, proof)).toBe(false);
@@ -239,6 +246,8 @@ describe("filesystem authority and the bootstrap receipt", () => {
     const check = (value = debt, home = h.homeId) => h.authority.filesystem.verifyPreviousReplayStopped!(request, home, value, h.volumes.records(h.workspaceId));
     expect(check()).toBe(false); // same boot, no evidence
     expect(check({ operationId: "x", owner: request.owner })).toBe(false); // the current owner can never vouch for itself
+    h.registry.noteStopped(request.owner, "orderly-receipt"); // ...even if something wrongly recorded it as stopped
+    expect(check({ operationId: "x", owner: request.owner })).toBe(false);
     expect(check(debt, "home-other")).toBe(false);
     h.registry.noteStopped(foreign, "orderly-receipt");
     expect(check()).toBe(true);

@@ -98,6 +98,19 @@ this rule: descriptors arriving with any other data are a protocol violation; th
 control buffer (`MSG_CTRUNC`) is fatal because the kernel may already have installed descriptors nobody will see. In every
 refusal the receiver closes everything it was handed. **The launcher never sends descriptors to the daemon.**
 
+Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned by tests:
+
+* `Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore", fd] })` DOES pass a descriptor above 2: each numeric entry is dup2'd into that slot
+  of the child, and every other descriptor of the daemon stays closed in it. The daemon makes the socketpair through `bun:ffi`, passes the
+  launcher end as fd 3 and **closes its own copy of that end immediately**; only then does the launcher's death produce EOF on the daemon side.
+* **A plain `read()` installs rights on macOS.** Descriptors a peer attaches to a stream socket are installed in the reader's table by an
+  ordinary `read()`, by `fs.read` and by `Bun.file(fd).stream()` alike, invisibly (reproduced with a C program and with Bun). Every reader of
+  every link, in every language, must use `recvmsg` with a control buffer and close what it did not ask for. The daemon therefore never reads
+  L1 any other way: `FdReceiver` runs `poll` and `recvmsg` on a worker thread, and `net.Socket({ fd })` and `Bun.connect` are not used.
+* `sendmsg` and `recvmsg` go through `bun:ffi` against libSystem (struct layouts checked against clang). Ancillary truncation (`MSG_CTRUNC`)
+  can leave descriptors installed that the reader cannot see, so it is fatal for the channel.
+* Bun leaves one descriptor open per Worker it ever starts (a Worker that does nothing reproduces it): one per launched workspace.
+
 ## 5. L2: launcher and worker (envelopes)
 
 16 byte header: `"WEV1"`, `u8 version = 1`, `u8 kind`, `u16 flags = 0`, `u32 seq` (from 1, +1 per direction), `u32 payload length`.
@@ -249,3 +262,22 @@ drain completed it writes a Class A with `origin = owner-loss-drain`. Either way
 * Authentication of a retained receipt that is read back from the launcher's durable store is the launcher slice's design (S2). The
   adapter accepts such a receipt only through a port that must attest it; file presence alone is never proof.
 * Sleep and wake, free-space admission and the guest side are other slices.
+
+## 11. The host adapter
+
+`packages/core/src/cowork/native/` holds the TypeScript side: `protocol.ts` (this contract), `host.ts` (`CoworkNativeHost`: start, stop, recover),
+`authority.ts` (both volume authority ports over sealed proofs minted from a live channel binding), `power.ts` (compare-and-set `power`
+transitions), `stop-proof.ts` (the D1 release policy and the sealed stop proofs), `recovery.ts` (boot reconcile and the shared release
+flow), `fd-channel.ts` and `fd-receiver-worker.ts` (descriptor passing). Every collaborator is an injected port: the launcher (`CoworkLauncherPort`),
+the image pin (`CoworkNativeImagePins`, to be bound to `CoworkImagePins.assertPinned`), the host boot (`CoworkNativeHostBoot`), the launcher's
+retained receipts (`CoworkNativeDurableReceiptPort`) and the owner's recover input (`CoworkNativeOwnerRecoverPort`, with its two guard probes).
+Nothing in `src/` implements or imports them; an anti-wiring test pins that.
+
+The host runs: `beginIncarnation`, admission `reserve`, launcher spawn, `begin`, `claim`, `prepareFilesystems`, `open` x 2, the `volumes` line
+with the two descriptors, the bootstrap exchange (`plan` with a fresh nonce, `receipt`), `confirmFilesystems`, `ready`, `mounted`, then `power`
+`running` and admission `running`. A failure after the worker exists is answered with a `stop`; only a valid orderly receipt for THAT request
+releases, anything else leaves the workspace and its admission `uncertain` with the owner retained. Release order is volumes, admission,
+power, then the proof is spent; each step is idempotent and re-derives its evidence, so a crash between any two is finished by the next run.
+Boot reconcile runs `CoworkAdmissionLedger.reconcile()` first, then settles every workspace that is not `stopped`. A replay debt (an interrupted
+journal replay) names a previous writer; the next incarnation proves THAT writer stopped from memory, from the boot id inside its owner tuple, or
+from the launcher's retained receipt, which is therefore kept until the debt is settled.

@@ -25,6 +25,12 @@ function files(count: number): { fds: number[]; names: string[]; dir: string } {
 function pair(kind: "stream" | "dgram"): [number, number] {
   const [a, b] = socketPair(kind); cleanup.push(() => closeDescriptor(a)); cleanup.push(() => closeDescriptor(b)); return [a, b];
 }
+/** The error a promise rejects with. Not `expect(promise).rejects`: Bun spins its loop synchronously there and a rejection that depends
+ * on a worker thread's message may never be delivered (the test then times out and the process never exits). */
+async function failure(promise: Promise<unknown>): Promise<unknown> {
+  try { await promise; } catch (error) { return error; }
+  throw new Error("expected a rejection");
+}
 function refusal(body: () => unknown): FdChannelError {
   try { body(); } catch (error) { expect(error).toBeInstanceOf(FdChannelError); return error as FdChannelError; }
   throw new Error("expected an FdChannelError");
@@ -173,15 +179,15 @@ describe("FdLineChannel and FdReceiver", () => {
   live("a line over its bound ends the channel with oversize, with or without a newline in sight", async () => {
     const [a, b] = pair("stream"), channel = new FdLineChannel(b, { maxLine: 16 }); cleanup.push(() => { void channel.close(); });
     sendMessage(a, encode("x".repeat(40)));
-    await expect(channel.lines().next()).rejects.toMatchObject({ code: "oversize" });
+    expect(await failure(channel.lines().next())).toMatchObject({ code: "oversize" });
     const [c, d] = pair("stream"), second = new FdLineChannel(d, { maxLine: 16 }); cleanup.push(() => { void second.close(); });
     sendMessage(c, encode(`${"y".repeat(20)}\n`));
-    await expect(second.lines().next()).rejects.toMatchObject({ code: "oversize" });
+    expect(await failure(second.lines().next())).toMatchObject({ code: "oversize" });
   });
   live("a peer that closes in the middle of a line is a truncation, not a clean end", async () => {
     const [a, b] = pair("stream"), channel = new FdLineChannel(b, { maxLine: 64 }); cleanup.push(() => { void channel.close(); });
     sendMessage(a, encode("half a li")); closeDescriptor(a);
-    await expect(channel.lines().next()).rejects.toMatchObject({ code: "closed" });
+    expect(await failure(channel.lines().next())).toMatchObject({ code: "closed" });
   });
   live("close ends iteration, closes only the receiver's own duplicates and is idempotent", async () => {
     const [a, b] = pair("stream"), channel = new FdLineChannel(b, { maxLine: 64 }), iterator = channel.lines();
@@ -192,12 +198,12 @@ describe("FdLineChannel and FdReceiver", () => {
     await channel.close(); expect(open(stranger)).toBe(true);
   });
   live("a descriptor sent to a channel that takes none is CLOSED, never left installed, and the channel ends unexpected_rights", async () => {
-    const { fds } = files(1), [a, b] = pair("stream"), channel = new FdLineChannel(b, { maxLine: 64 });
-    // The receiver's private duplicates and its wake pair exist from here on; only what arrives with the message must not stay.
-    await Bun.sleep(50);
+    const { fds } = files(1), [a, b] = pair("stream"), channel = new FdLineChannel(b, { maxLine: 64 }), iterator = channel.lines();
+    // A round trip proves the worker thread is up, so everything it (and Bun) allocates exists before the snapshot is taken.
+    sendMessage(a, encode("hello\n")); expect((await iterator.next()).value).toBe("hello\n");
     const before = new Set<number>(); for (let fd = 3; fd < 300; fd++) if (open(fd)) before.add(fd);
     sendMessage(a, encode("with-rights\n"), fds);
-    await expect(channel.lines().next()).rejects.toMatchObject({ code: "unexpected_rights" });
+    expect(await failure(iterator.next())).toMatchObject({ code: "unexpected_rights" });
     await channel.close();
     for (let fd = 3; fd < 300; fd++) if (open(fd) && !before.has(fd)) throw new Error(`leaked descriptor ${fd}`);
   });

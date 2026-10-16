@@ -230,3 +230,38 @@ describe("evidence is the only way out", () => {
     expect(() => h.host.recover(h.workspaceId)).toThrow("busy");
   });
 });
+
+describe("volume ownership that does not describe the current incarnation is never guessed at", () => {
+  const setOwner = (h: Harness, purpose: "data" | "environment", owner: object | null) => h.db.db.run("UPDATE cowork_volumes SET owner_json=? WHERE workspace_id=? AND purpose=?", [owner === null ? null : JSON.stringify(owner), h.workspaceId, purpose]);
+  test("an owner from another epoch, a half-owned pair and two different owners are retained, whatever receipt exists", async () => {
+    const h = createHarness({ crashAt: "power-running" });
+    await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);
+    const owner = h.volumes.records(h.workspaceId)[0]!.owner!, receipt = serializeCoworkNativeStopReceipt(h.launcher.last.stagedOrderly("ab".repeat(16), { origin: "owner-loss-drain" }));
+    h.restart(); h.receipts.set(keyOf(h), receipt);
+    for (const [name, change] of [
+      ["another epoch", () => { setOwner(h, "data", { ...owner, leaseEpoch: 9 }); setOwner(h, "environment", { ...owner, leaseEpoch: 9 }); }],
+      ["another incarnation", () => { setOwner(h, "data", { ...owner, incarnationId: "inc-older" }); setOwner(h, "environment", { ...owner, incarnationId: "inc-older" }); }],
+      ["half owned", () => { setOwner(h, "data", owner); setOwner(h, "environment", null); }],
+      ["two owners", () => { setOwner(h, "data", owner); setOwner(h, "environment", { ...owner, workerInstanceId: "wrk-other" }); }],
+    ] as const) {
+      change();
+      expect(`${name}:${JSON.stringify(h.host.recover(h.workspaceId))}`).toContain(`"action":"retained"`);
+      expect(h.calls.volumeRelease + h.calls.ledgerRelease).toBe(0);
+    }
+    setOwner(h, "data", owner); setOwner(h, "environment", owner);
+    expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "released" }); // restored and attested: the receipt works again
+  });
+  test("boot evidence does not paper over it either: a changed, confirmed boot still retains a pair that is not one owner's", async () => {
+    const h = createHarness({ crashAt: "power-running" });
+    await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);
+    const owner = h.volumes.records(h.workspaceId)[0]!.owner!;
+    h.restart({ newBoot: true }); h.hostBoot.ended = true;
+    setOwner(h, "environment", { ...owner, workerInstanceId: "wrk-other" });
+    expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "retained", reason: "volume ownership does not match the current incarnation", ownerRetained: true });
+    setOwner(h, "environment", null);
+    expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "retained" });
+    expect(h.calls.volumeRelease).toBe(0);
+    setOwner(h, "environment", owner);
+    expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "released", evidence: "new-boot" });
+  });
+});
