@@ -165,8 +165,11 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
   // The existing TaskOutput is taken to be that tool; no new tool is invented. Recommended: yes.
   { name: "TaskOutput", runs: "guest", brokers: [], cite: [AUTHORITY], decision: "D8",
     why: "Bounded read of a task's or subagent's output, without opening the SDK store." },
+  // REVIEW: TaskStop also has a host leg in Code (it can stop a host session by its id). "guest" is truthful only if
+  // wiring refuses that leg for a Cowork caller; messaging-authority.ts already answers false for "stop".
   { name: "TaskStop", runs: "guest", brokers: [], cite: [MESSAGING],
-    why: "Own tasks and descendants only. Membership in a Project never authorizes stopping a sibling conversation." },
+    why: "Own tasks and descendants only. Membership in a Project never authorizes stopping a sibling conversation.",
+    needs: "wiring must refuse its host-session leg (stop by session id) for Cowork callers" },
   // DECISION: D3 — ExitPlanMode is how a plan-policy conversation hands its plan to the user. EnterPlanMode is
   // denied below: switching into plan is a policy narrowing the host must stage. Recommended: Exit in, Enter out.
   { name: "ExitPlanMode", runs: "guest", brokers: [], cite: [APPROVALS], decision: "D3",
@@ -185,7 +188,7 @@ export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
 
   // --- Host-brokered: the daemon carries out the effect ---------------------------------------------------------------
   { name: "AskUserQuestion", runs: "host", brokers: ["questions"], cite: [APPROVALS, "protocol#RPC inventory and caller access"],
-    why: "Cards belong to the target conversation and are answered by an authorized user client." },
+    why: "Cards belong to the target conversation and are answered by an authorized user client. Denied under dont-ask, so the prompt omits it there." },
   { name: "SendMessage", runs: "host", brokers: ["messaging"], cite: ["spec#Same-Project SendMessage", MESSAGING],
     why: "Same-Project Cowork peers and own descendants only. Never a host Code, Dispatch or cross-workspace session." },
   { name: "ListAgents", runs: "host", brokers: ["messaging"], cite: [MESSAGING],
@@ -417,6 +420,9 @@ function resolve(facts: CoworkPromptFacts): ResolvedFacts {
   for (const name of withheld) if (!known.has(name)) throw new CoworkError("invalid_request");
   const offered = new Set(coworkToolsFor(facts.exposure));
   for (const name of withheld) offered.delete(name);
+  // Under dont-ask "anything needing a prompt" is denied (contracts, Approval policies), and a question is a prompt:
+  // the SDK denies AskUserQuestion in that mode too (runtime-sdk/mode-options.ts). Naming it would invite a refused call.
+  if (facts.approvalPolicy === "dont-ask") offered.delete("AskUserQuestion");
   if (facts.network === "none") for (const tool of COWORK_TOOL_ALLOWLIST) if (tool.brokers.includes("network")) offered.delete(tool.name);
   return { title, facts, sources, offered };
 }

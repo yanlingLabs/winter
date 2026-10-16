@@ -169,6 +169,10 @@ describe("allowlist and denylist", () => {
     expect(citationProblems(["spec#Nonexistent heading", "house#NOT_AN_EXPORT", "memo#Whatever"])).toHaveLength(3);
   });
 
+  test("a tool with a host leg that the profile does not use says so in its row", () => {
+    expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === "TaskStop")?.needs).toContain("host-session leg");
+  });
+
   test("a spec-silent tool is allowed only with a decision; a not-specified tool is denied only with one", () => {
     for (const row of COWORK_TOOL_ALLOWLIST) if (row.cite.every((cite) => cite.startsWith("house#"))) expect(row.decision).toBeDefined();
     for (const row of COWORK_TOOL_DENYLIST) if (row.kind === "not-specified") expect(row.decision).toBeDefined();
@@ -331,6 +335,7 @@ describe("prompt text", () => {
         const rendered = coworkSystemPrompt(input);
         const offered = new Set(coworkToolsFor({ exaKeyPresent }));
         for (const name of withheldTools) offered.delete(name);
+        if (approvalPolicy === "dont-ask") offered.delete("AskUserQuestion");
         if (network === "none") for (const row of COWORK_TOOL_ALLOWLIST) if (row.brokers.includes("network")) offered.delete(row.name);
         const stray = namesIn(rendered).filter((name) => !offered.has(name));
         expect(`${ownership}/${network}/${exaKeyPresent}/${approvalPolicy}:${stray.join(",")}`).toBe(`${ownership}/${network}/${exaKeyPresent}/${approvalPolicy}:`);
@@ -339,6 +344,13 @@ describe("prompt text", () => {
     // and no denied tool is ever named, whatever the facts
     const denied = new Set(COWORK_TOOL_DENYLIST.map((row) => row.name));
     expect(namesIn(text).filter((name) => denied.has(name))).toEqual([]);
+  });
+
+  test("under dont-ask the prompt does not offer AskUserQuestion, because a question is a prompt and that policy denies prompts", () => {
+    const dontAsk = coworkSystemPrompt(facts({ approvalPolicy: "dont-ask" }));
+    expect(dontAsk).not.toContain("AskUserQuestion");
+    expect(dontAsk).toContain("Don't-ask mode: ");
+    for (const policy of ["plan", "ask", "accept-edits", "auto", "bypass"] as const) expect(coworkSystemPrompt(facts({ approvalPolicy: policy }))).toContain("AskUserQuestion");
   });
 
   test("withheldTools refuses a name that is not allowlisted", () => {
