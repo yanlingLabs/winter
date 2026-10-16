@@ -1,0 +1,105 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index ea0673c..f60c3af 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -283,6 +283,66 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+                        bool direct_io,
+                        uint32_t sync_mode);
+ 
++/* ====== Cowork production profile (N2): Apple Silicon/macOS + blk builds only ======
++ *
++ * The production profile is a separate gate from the fixture opt-ins below. It admits exactly: the
++ * two admitted RAW volumes, the generic runtime port, TWO vCPUs and 768..1024 MiB. The device
++ * inventory is the admitted one (virtio block x2, console/runtime port, rng, balloon); no shutdown
++ * GPIO device, no network, no vsock, no HVC bootstrap stream and no fixture trace. The limits are
++ * enforced inside the reviewed start-time gate, so krun_start_enter refuses any other geometry
++ * before it allocates anything. Raising either ceiling lifts that gate: it needs a fresh drain and
++ * pin review. A build without the feature `cowork-fixture-oracle` exports none of the fixture
++ * entry points; this header then hides them (KRUN_COWORK_FIXTURE_ORACLE is not defined).
++ *
++ * Call order: krun_create_ctx, the usual non-device setters (kernel, console, krun_set_vm_config
++ * with exactly KRUN_COWORK_PRODUCTION_VCPUS and a memory size in range),
++ * krun_cowork_enable_production_profile, krun_cowork_create_runtime_port,
++ * krun_cowork_set_workspace_disks, optionally krun_cowork_validate_production_profile, and last
++ * krun_start_enter. Every function returns zero (or a descriptor >= 3) or a negative errno.
++ */
++#define KRUN_COWORK_PRODUCTION_VCPUS 2
++#define KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB 768
++#define KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB 1024
++
++struct krun_cowork_volume_identity {
++    uint64_t device;
++    uint64_t inode;
++    uint64_t capacity_bytes;
++    uint32_t uid;
++    uint32_t mode;
++};
++
++/** Opt in to the production profile. Accepted once, only on a context that carries no fixture opt-in
++ * (-EINVAL otherwise, including after any fixture entry point). It also switches on the reduced-device
++ * machinery the profile shares with the fixture; nothing else is enabled. */
++int32_t krun_cowork_enable_production_profile(uint32_t ctx_id);
++
++/** Production runtime port: the one generic non-console virtio port, no keys and no authority.
++ * Returns only the opposite PEER fd (>= 3, CLOEXEC); the caller owns it and must close it. The device
++ * endpoint and every alias stay internal. A duplicate call, a context without the production profile
++ * and the fixture factories all refuse (-EINVAL), publishing no fd. The caller's sandbox must deny
++ * process fork/exec BEFORE this call and never fork afterwards: CLOEXEC covers exec only. */
++int32_t krun_cowork_create_runtime_port(uint32_t ctx_id);
++
++/** Production admitted workspace RAW pair, otherwise the same contract as the fixture oracle's pair
++ * setter documented in the fixture section. Descriptors are BORROWED for the synchronous call, duplicated
++ * CLOEXEC and validated (regular, nlink 1, current-UID exact 0600, O_RDWR non-append, expected
++ * dev/ino/size, 16MiB..256GiB aligned 4096). Errors close only newly owned duplicates; caller
++ * descriptors are never closed. Expected identities corroborate host admission, they authenticate
++ * no daemon, home, workspace, worker, incarnation or lease. FD closure is never a native stop or
++ * disk-release proof. */
++int32_t krun_cowork_set_workspace_disks(uint32_t ctx_id,
++    int32_t data_fd, const struct krun_cowork_volume_identity *data,
++    int32_t environment_fd, const struct krun_cowork_volume_identity *environment);
++
++/** Preflight of the production gate's first phase. Zero when krun_start_enter would pass the same
++ * admission; -EINVAL otherwise (-ENOENT for an unknown context). Starts nothing and opens nothing. */
++int32_t krun_cowork_validate_production_profile(uint32_t ctx_id);
++
++#ifdef KRUN_COWORK_FIXTURE_ORACLE
++/* ====== Fixture oracle: present only when built with `cowork-fixture-oracle` ======
++ * Regression oracle for the reviewed fixture profile. Never a production API. A context that carries
++ * the production profile refuses all of these. */
+ /** Developer-only admitted workspace RAW pair; Apple Silicon/macOS + blk only.
+  * Requires reduced guarded reclaim opt-in; launch additionally requires the generic runtime port,
+  * exactly two admitted disks, 2 vCPUs/768MiB and no path-backed/extra devices.
+@@ -298,16 +358,10 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+  */
+ /* Existing developer-only reduced-profile opt-in, also required for this pair API. */
+ int32_t krun_enable_cowork_block_fixture_reclaim(uint32_t ctx_id);
+-struct krun_cowork_volume_identity {
+-    uint64_t device;
+-    uint64_t inode;
+-    uint64_t capacity_bytes;
+-    uint32_t uid;
+-    uint32_t mode;
+-};
+ int32_t krun_set_cowork_workspace_disks(uint32_t ctx_id,
+     int32_t data_fd, const struct krun_cowork_volume_identity *data,
+     int32_t environment_fd, const struct krun_cowork_volume_identity *environment);
++#endif /* KRUN_COWORK_FIXTURE_ORACLE */
+ 
+ /* Supported virtio-fs permission semantics */
+ 
+@@ -1426,6 +1480,7 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
+  */
+ int32_t krun_start_enter(uint32_t ctx_id);
+ 
++#ifdef KRUN_COWORK_FIXTURE_ORACLE
+ /* TEST-ONLY closed single-port bootstrap/runtime stream factory; blk/macOS only.
+  * Call after krun_enable_cowork_block_fixture_reclaim. Returns only the opposite PEER fd
+  * (>=3, CLOEXEC) on success; caller owns it and must close it. Device endpoint and all
+@@ -1444,6 +1499,7 @@ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
+ int32_t krun_enable_cowork_runtime_port_fixture_trace(uint32_t ctx_id);
+ /* DEPRECATED TEST API: caller-supplied descriptors are always refused (-EINVAL). */
+ int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);
++#endif /* KRUN_COWORK_FIXTURE_ORACLE */
+ 
+ #ifdef __cplusplus
+ }

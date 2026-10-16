@@ -65,5 +65,59 @@
     "krun_split_irqchip",
     "krun_start_enter"
   ],
-  "runtimeReclaimControlExport": false
+  "runtimeReclaimControlExport": false,
+  "productionProfile": {
+    "candidate": "production-profile-candidate.json",
+    "build": "cargo rustc -p libkrun --release --locked --offline --no-default-features --features blk --crate-type staticlib, then ZERO_AR_DATE=1 strip -S",
+    "strippedArchiveSha256": "f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38",
+    "exportCount": 66,
+    "productionExports": [
+      "krun_cowork_create_runtime_port",
+      "krun_cowork_enable_production_profile",
+      "krun_cowork_set_workspace_disks",
+      "krun_cowork_validate_production_profile"
+    ],
+    "fixtureOracleOnlyExports": [
+      "krun_create_cowork_bootstrap_stream",
+      "krun_create_cowork_runtime_stream",
+      "krun_enable_cowork_block_fixture_reclaim",
+      "krun_enable_cowork_fixture_reclaim",
+      "krun_enable_cowork_runtime_port_fixture_trace",
+      "krun_set_cowork_bootstrap_stream",
+      "krun_set_cowork_workspace_disks"
+    ],
+    "fixtureSymbolsExportedByProduction": [],
+    "fixtureOracleSymbolsExported": [
+      "_krun_create_cowork_bootstrap_stream",
+      "_krun_create_cowork_runtime_stream",
+      "_krun_enable_cowork_block_fixture_reclaim",
+      "_krun_enable_cowork_fixture_reclaim",
+      "_krun_enable_cowork_runtime_port_fixture_trace",
+      "_krun_set_cowork_bootstrap_stream",
+      "_krun_set_cowork_workspace_disks"
+    ],
+    "blockTraceRowStringsInProduction": [],
+    "headerGuard": "KRUN_COWORK_FIXTURE_ORACLE",
+    "cargoFeature": "cowork-fixture-oracle",
+    "limits": {
+      "vcpus": 2,
+      "minMemoryMiB": 768,
+      "maxMemoryMiB": 1024,
+      "fixtureWorkspaceMemoryMiB": 768
+    },
+    "deviceInventory": {
+      "virtioIds": [
+        2,
+        2,
+        3,
+        4,
+        5
+      ],
+      "maxDevices": 3,
+      "maxPins": 48,
+      "maxPinnedBytes": 8388608,
+      "shutdownGpio": false
+    },
+    "note": "exports above the unpatched baseline list: the six upstream blk disk setters (the baseline was built without blk) and the four production entry points"
+  }
 }

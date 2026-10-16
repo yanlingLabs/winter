@@ -1,0 +1,221 @@
+{
+  "vmStarted": false,
+  "workerBuilt": false,
+  "krunStartEnterCalled": false,
+  "ignoredTestsRun": false,
+  "productionReady": false,
+  "fullSourceDiffSha256": "e067b60ec68919f85588125475101e63993fb43e4c720561be1f5d9c62da537b",
+  "patches": {
+    "patches/0014-proposed-krun-vmm-unit-harness.patch": "b5bda53c97f86c1b130639340f3d97c9a96d37765a63820a6ca9c86664c88844",
+    "patches/0015-proposed-cowork-production-profile.patch": "e3c6c42ab5e30f33586f8d07e5a6c5e6fcc38e5a5e20393c824d08edf5f90daf",
+    "patches/0016-proposed-production-block-trace-off.patch": "97708943e9ac82db658fe0c322d5140f66966cab201bae4b33e3e56e334fbdf8"
+  },
+  "toolchain": {
+    "rustc": "1.90.0 1159e78c4747b02ef996e55082b704c09b970588",
+    "host": "aarch64-apple-darwin",
+    "cargo": "cargo 1.90.0 (840b83a10 2025-07-30)"
+  },
+  "runs": [
+    {
+      "package": "krun-vmm",
+      "features": "blk",
+      "filter": "",
+      "profile": "dev",
+      "passed": 53,
+      "ignored": [
+        {
+          "test": "macos::vstate::tests::test_vm_memory_init",
+          "reason": "creates a Hypervisor.framework VM (hv_vm_create); runs only at an owner-approved native gate"
+        }
+      ],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "workspace_disks",
+      "profile": "dev",
+      "passed": 8,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "runtime_port",
+      "profile": "dev",
+      "passed": 28,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "cowork_stream",
+      "profile": "dev",
+      "passed": 25,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "cowork_rng",
+      "profile": "dev",
+      "passed": 1,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "reclaim_access::tests",
+      "profile": "dev",
+      "passed": 11,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "cowork_frq",
+      "profile": "dev",
+      "passed": 6,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "cowork_block",
+      "profile": "dev",
+      "passed": 16,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "block_bounce::tests",
+      "profile": "dev",
+      "passed": 8,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "libkrun",
+      "features": "blk",
+      "filter": "",
+      "profile": "dev",
+      "passed": 30,
+      "ignored": [
+        {
+          "test": "cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected",
+          "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+        },
+        {
+          "test": "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm",
+          "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+        }
+      ],
+      "exitCode": 0
+    },
+    {
+      "package": "libkrun",
+      "features": "blk,cowork-fixture-oracle",
+      "filter": "",
+      "profile": "dev",
+      "passed": 30,
+      "ignored": [
+        {
+          "test": "cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected",
+          "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+        },
+        {
+          "test": "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm",
+          "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+        }
+      ],
+      "exitCode": 0
+    },
+    {
+      "package": "libkrun",
+      "features": "blk",
+      "filter": "",
+      "profile": "release",
+      "passed": 30,
+      "ignored": [
+        {
+          "test": "cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected",
+          "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+        },
+        {
+          "test": "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm",
+          "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+        }
+      ],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-vmm",
+      "features": "blk",
+      "filter": "",
+      "profile": "release",
+      "passed": 53,
+      "ignored": [
+        {
+          "test": "macos::vstate::tests::test_vm_memory_init",
+          "reason": "creates a Hypervisor.framework VM (hv_vm_create); runs only at an owner-approved native gate"
+        }
+      ],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "cowork_block",
+      "profile": "release",
+      "passed": 16,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "block_bounce::tests",
+      "profile": "release",
+      "passed": 8,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "package": "krun-devices",
+      "features": "blk",
+      "filter": "workspace_disks",
+      "profile": "release",
+      "passed": 8,
+      "ignored": [],
+      "exitCode": 0
+    },
+    {
+      "command": "cargo check -p libkrun --features blk",
+      "exitCode": 0
+    }
+  ],
+  "testsPassed": 331,
+  "ignoredTests": [
+    {
+      "test": "cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected",
+      "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+    },
+    {
+      "test": "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm",
+      "reason": "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"
+    },
+    {
+      "test": "macos::vstate::tests::test_vm_memory_init",
+      "reason": "creates a Hypervisor.framework VM (hv_vm_create); runs only at an owner-approved native gate"
+    }
+  ],
+  "passed": true
+}

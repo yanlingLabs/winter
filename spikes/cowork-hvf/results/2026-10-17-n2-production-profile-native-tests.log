@@ -1,0 +1,842 @@
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-vmm --jobs 2 -- --test-threads=1 --nocapture
+
+running 54 tests
+test builder::tests::test_error_messages ... ok
+test builder::tests::test_kernel_cmdline_err_to_startuvm_err ... ok
+test cowork_barrier::tests::exact_roster_and_epoch_before_any_mapping ... ok
+test cowork_barrier::tests::partial_failure_never_acknowledges_or_resumes ... ok
+test cowork_barrier::tests::stale_unknown_duplicate_acks_permanently_forbid_mutation ... ok
+test cowork_barrier::tests::stop_wins_over_every_pause_or_mapping_phase ... ok
+test cowork_barrier::tests::unknown_or_duplicate_roster_refused ... ok
+test cowork_control::tests::actual_boot_wait_parks_then_preserves_boot_arrival ... ok
+test cowork_control::tests::actual_handler_rejects_wrong_resume_epoch ... ok
+test cowork_control::tests::actual_step_stop_bypasses_queued_pause_ack ... ok
+test cowork_control::tests::actual_step_unlocks_mmio_before_pause_ack ... ok
+test cowork_control::tests::actual_wfe_deadline_captured_before_post_emulation_park_does_not_restart ... ok
+test cowork_control::tests::actual_wfe_deadline_is_not_restarted_after_pause ... ok
+test cowork_control::tests::actual_wfe_preserves_irq_received_while_parked ... ok
+test cowork_coordinator::tests::actual_transaction_limit_rejection_returns_heads_without_mapping ... ok
+test cowork_coordinator::tests::actual_transaction_malformed_frq_never_maps_acks_or_resumes ... ok
+test cowork_coordinator::tests::actual_transaction_partial_map_failure_stays_parked_without_ack ... ok
+test cowork_coordinator::tests::actual_transaction_planner_rejection_acks_noop_and_allows_resume ... ok
+test cowork_coordinator::tests::actual_transaction_two_kicks_one_batch_second_is_empty_no_ack ... ok
+test cowork_ops::tests::empty_plan_is_not_a_replacement ... ok
+test cowork_ops::tests::every_partial_hvf_or_mmap_failure_forbids_ack_resume ... ok
+test cowork_ops::tests::full_sequence_preserves_every_hva_and_delays_used_ack ... ok
+test cowork_ops::tests::malformed_report_or_ring_intersection_rejected_before_any_map_call ... ok
+test cowork_ops::tests::missing_stale_duplicate_cpu_means_zero_map_calls ... ok
+test cowork_ops::tests::stop_at_each_transition_prevents_more_operations_or_ack ... ok
+test cowork_ranges::tests::adjacent_regions_are_not_one_owned_span ... ok
+test cowork_ranges::tests::bounded_fixture_limit_and_descriptor_count ... ok
+test cowork_ranges::tests::dma_or_ring_exclusion_even_one_byte ... ok
+test cowork_ranges::tests::duplicate_or_overlapping_reports_rejected ... ok
+test cowork_ranges::tests::explicit_limit_can_narrow_admission_to_region_budget ... ok
+test cowork_ranges::tests::full_span_translation ... ok
+test cowork_ranges::tests::overflow_and_empty_inputs ... ok
+test cowork_ranges::tests::partial_host_pages_are_never_rounded ... ok
+test cowork_ranges::tests::registry_rejects_aliases_shared_memory_and_unaligned_hva ... ok
+test cowork_ranges::tests::valid_start_invalid_full_span ... ok
+test device_manager::hvf::mmio::tests::test_device_info ... ok
+test device_manager::hvf::mmio::tests::test_dummy_device ... ok
+test device_manager::hvf::mmio::tests::test_error_messages ... ok
+test device_manager::hvf::mmio::tests::test_register_too_many_devices ... ok
+test device_manager::hvf::mmio::tests::test_register_virtio_device ... ok
+test macos::vstate::tests::test_configure_vcpu ... ok
+test macos::vstate::tests::test_invalid_tls ... ok
+test macos::vstate::tests::test_set_mmio_bus ... ok
+test macos::vstate::tests::test_vcpu_tls ... ok
+test macos::vstate::tests::test_vm_memory_init ... ignored, creates a Hypervisor.framework VM (hv_vm_create); runs only at an owner-approved native gate
+test resources::tests::test_set_vm_config ... ok
+test resources::tests::test_set_vsock_device ... ok
+test resources::tests::test_vcpu_config ... ok
+test resources::tests::test_vm_config ... ok
+test vmm_config::block::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test vmm_config::machine_config::tests::test_display_cpu_features_template ... ok
+test vmm_config::machine_config::tests::test_display_vm_config_error ... ok
+test vmm_config::vsock::tests::test_error_messages ... ok
+test vmm_config::vsock::tests::test_vsock_insert ... ok
+
+test result: ok. 53 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling libc v0.2.183
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.0
+   Compiling memoffset v0.9.1
+   Compiling syn v2.0.117
+   Compiling cfg_aliases v0.2.1
+   Compiling nix v0.30.1
+   Compiling thiserror v2.0.18
+   Compiling crossbeam-utils v0.8.21
+   Compiling bitflags v2.11.0
+   Compiling thiserror-impl v2.0.18
+   Compiling bitflags v1.3.2
+   Compiling vm-memory v0.17.1
+   Compiling crossbeam-channel v0.5.15
+   Compiling vmm-sys-util v0.14.0
+   Compiling log v0.4.29
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.47
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/utils)
+   Compiling semver v1.0.27
+   Compiling rustc_version v0.4.1
+   Compiling virtue v0.0.18
+   Compiling adler2 v2.0.1
+   Compiling once_cell v1.21.4
+   Compiling simd-adler32 v0.3.8
+   Compiling pin-project-lite v0.2.17
+   Compiling miniz_oxide v0.8.9
+   Compiling tracing-core v0.1.36
+   Compiling bincode_derive v2.0.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_core v0.9.5
+   Compiling imago v0.2.3
+   Compiling krun-smbios v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/smbios)
+   Compiling tracing-attributes v0.1.31
+   Compiling foldhash v0.2.0
+   Compiling crc32fast v1.5.0
+   Compiling unty v0.0.4
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling krun-arch-gen v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch_gen)
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch)
+   Compiling tracing v0.1.44
+   Compiling hashbrown v0.16.1
+   Compiling bincode v2.0.1
+   Compiling rand_chacha v0.9.0
+   Compiling tokio v1.50.0
+   Compiling async-trait v0.1.89
+   Compiling libloading v0.8.9
+   Compiling page_size v0.6.0
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
+   Compiling rand v0.9.2
+   Compiling lru v0.16.3
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/polly)
+   Compiling virtio-bindings v0.2.7
+   Compiling vm-fdt v0.3.0
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+   Compiling flate2 v1.1.9
+   Compiling krun-kernel v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/kernel)
+   Compiling linux-loader v0.13.2
+   Compiling vmm-sys-util v0.15.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.98s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_vmm-ca439622efe6fb04)
+   Doc-tests krun_vmm
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 workspace_disks -- --test-threads=1 --nocapture
+
+running 8 tests
+test virtio::block::device::workspace_fd_tests::workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen ... ok
+test workspace_disks::tests::workspace_disks_aggregate_pin_budget_has_distinct_ids_and_retains_pins_on_stop ... ok
+test workspace_disks::tests::workspace_disks_duplicate_cloexec_and_close_only_owned_descriptors ... ok
+test workspace_disks::tests::workspace_disks_partial_failure_alias_stdio_and_closed_fd_leave_no_extra_handles ... ok
+test workspace_disks::tests::workspace_disks_reject_directory_and_socket_without_mutating_callers ... ok
+test workspace_disks::tests::workspace_disks_strict_identity_capacity_mode_links_access_and_append ... ok
+test workspace_raw_storage::tests::workspace_disks_fixed_capacity_refuses_oob_overflow_and_drift_without_growth_or_partial_write ... ok
+test workspace_raw_storage::tests::workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.05s
+
+   Compiling nix v0.30.1
+   Compiling miniz_oxide v0.8.9
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/utils)
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch)
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/polly)
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
+   Compiling imago v0.2.3
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.60s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 runtime_port -- --test-threads=1 --nocapture
+
+running 28 tests
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_ack_remains_live_during_data_peer_backpressure ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_freeze_holds_pin_no_ack_or_phase_advance ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_control_rx_freeze_holds_entire_destination_until_fresh_copy_ack ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_four_queue_linux_handshake_copy_ack_and_data_gate ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_malformed_control_direction_span_length_and_state_fault ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_actual_stale_control_generation_never_acks_or_advances ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_fixture_trace_frozen_control_has_no_rows_until_actual_used_ack ... ok
+test virtio::console::runtime_port::protocol_queue_tests::runtime_port_requires_both_features_before_four_queue_activation ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_event_manager_notify_before_finished_reset_completion ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_queue_socketpair_duplex_owned_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_short_tx_has_no_replay_across_freeze_or_reset ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_worker_rx_wait_survives_freeze_then_acks_after_resume ... ok
+test virtio::console::runtime_port::tests::runtime_port_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack ... ok
+test virtio::console::runtime_port::tests::runtime_port_async_pending_reactivation_waits_old_owner_then_real_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_explicit_rx_owned_limit_report_limit_and_cross_region ... ok
+test virtio::console::runtime_port::tests::runtime_port_frozen_pending_rx_tx_keep_pins_and_no_guest_ack ... ok
+test virtio::console::runtime_port::tests::runtime_port_malformed_and_oversized_spans_reject_before_payload_io ... ok
+test virtio::console::runtime_port::tests::runtime_port_peer_eof_terminal_notifier_never_acks_guest ... ok
+test virtio::console::runtime_port::tests::runtime_port_reset_retires_but_holds_ownership_until_actual_thread_completion ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_all_later_phase_adversarial_messages_and_duplicate_refusal ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_bounded_adversarial_events_ids_values_lengths ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_exact_linux_handshake_and_close ... ok
+test virtio::console::runtime_port_control::tests::runtime_port_no_state_change_before_ack ... ok
+test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_trace_exact_fields_and_strict_shared_cap ... ok
+test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_trace_rejects_data_queues_and_bad_sizes_without_rows ... ok
+test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_nonready_fails_terminal_without_poison ... ok
+test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.13s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+{"kind":"runtime_control_used_ack","row":0,"queue":3,"id":4294967295,"event":0,"value":1,"usedAck":true}
+{"kind":"runtime_control_used_ack","row":1,"queue":2,"id":0,"event":1,"value":0,"usedAck":true}
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_stream -- --test-threads=1 --nocapture
+
+running 23 tests
+test reclaim_access::tests::cowork_stream_retirement_waits_only_for_fenced_copy_and_preserves_old_pins ... ok
+test stream_io::adversarial_tests::cowork_stream_factory_peer_mutation_cannot_change_private_io_with_sigpipe_default ...
+running 1 test
+test stream_io::adversarial_tests::cowork_stream_peer_mutation_sigpipe_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.00s
+
+ok
+test stream_io::adversarial_tests::cowork_stream_peer_mutation_sigpipe_child ... ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_eintr_keeps_absolute_deadline ...
+running 1 test
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.15s
+
+ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
+test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_zero_and_positive_bound ... ok
+test stream_io::tests::cowork_stream_factory_failure_closes_private_and_peer_before_publication ... ok
+test stream_io::tests::cowork_stream_factory_owned_dup_cloexec_and_closure ... ok
+test stream_io::tests::cowork_stream_io_bounds_reject_without_guest_or_payload_logging ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_event_manager_notify_before_finished_reset_completion ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_queue_socketpair_duplex_owned_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_short_tx_has_no_replay_across_freeze_or_reset ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_worker_rx_wait_survives_freeze_then_acks_after_resume ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_async_pending_reactivation_waits_old_owner_then_real_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_explicit_rx_owned_limit_report_limit_and_cross_region ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_frozen_pending_rx_tx_keep_pins_and_no_guest_ack ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_malformed_and_oversized_spans_reject_before_payload_io ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_peer_eof_terminal_notifier_never_acks_guest ... ok
+test virtio::console::cowork_stream::tests::cowork_stream_reset_retires_but_holds_ownership_until_actual_thread_completion ... ok
+test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_nonready_fails_terminal_without_poison ... ok
+test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.30s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_rng -- --test-threads=1 --nocapture
+
+running 1 test
+test virtio::rng::device::cowork_rng_tests::cowork_rng_bounded_allocation_valid_large_chain_and_invalid_huge_readonly_span ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 reclaim_access::tests -- --test-threads=1 --nocapture
+
+running 11 tests
+test reclaim_access::tests::cowork_stream_retirement_waits_only_for_fenced_copy_and_preserves_old_pins ... ok
+test reclaim_access::tests::drain_waits_for_short_copy_without_blocking_lease_drop ... ok
+test reclaim_access::tests::explicit_abort_keeps_gate_closed ... ok
+test reclaim_access::tests::freeze_denies_new_access_and_snapshots_pinned_io_with_zero_readers ... ok
+test reclaim_access::tests::frozen_mapping_and_stop_are_serialized_no_operations_after_stop ... ok
+test reclaim_access::tests::no_implicit_resume_after_partial_mutation_or_abandoned_freeze ... ok
+test reclaim_access::tests::pins_budget_and_overflow_are_checked_before_recording ... ok
+test reclaim_access::tests::resume_requires_explicit_complete_mapping_transaction ... ok
+test reclaim_access::tests::stopped_or_stale_generation_never_reenters_ram ... ok
+test reclaim_access::tests::timeout_stops_gate_and_preserves_outstanding_lease ... ok
+test reclaim_access::tests::waiting_completion_wakes_on_resume_and_stop ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.02s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_frq -- --test-threads=1 --nocapture
+
+running 6 tests
+test virtio::queue::cowork_frq_tests::cowork_frq_malformed_chain_never_acknowledged ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_nonready_nonzero_metadata_never_pops_or_acks ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_pending_count_and_whole_ring_spans_before_pop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_ring_intersection_is_returnable_valid_chain_for_noop ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_two_kicks_one_batch_second_has_no_invented_head ... ok
+test virtio::queue::cowork_frq_tests::cowork_frq_zero_length_payload_is_structurally_valid_for_noop ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 144 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_block -- --test-threads=1 --nocapture
+
+running 16 tests
+test virtio::block::cowork::tests::cowork_block_actual_capture_guest_appends_second_request_both_complete ... ok
+test virtio::block::cowork::tests::cowork_block_actual_epoll_reset_reactivate_reuses_drained_stopfd_and_completes_io ... ok
+test virtio::block::cowork::tests::cowork_block_actual_epoll_stop_during_io_drains_reusable_fd ... ok
+test virtio::block::cowork::tests::cowork_block_actual_queue_copies_then_io_has_no_guest_lease ... ok
+test virtio::block::cowork::tests::cowork_block_actual_worker_stalled_io_freezes_and_defers_completion ... ok
+test virtio::block::cowork::tests::cowork_block_actual_worker_stop_after_io_never_completes_guest ... ok
+test virtio::block::cowork::tests::cowork_block_frozen_completion_is_pinned_until_gate_reopens ... ok
+test virtio::block::cowork::tests::cowork_block_nonready_and_cyclic_queue_fail_before_disk_or_ack ... ok
+test virtio::block::cowork::tests::cowork_block_out_of_range_first_head_and_next_are_terminal_not_empty ... ok
+test virtio::block::cowork::tests::cowork_block_ring_pin_survives_empty_queue_and_completion ... ok
+test virtio::block::cowork::tests::cowork_block_stale_completion_has_no_copy_or_used_ack ... ok
+test virtio::block::cowork::tests::cowork_block_terminal_access_fault_wakes_quiet_event_manager ... ok
+test virtio::block::cowork::tests::cowork_block_unsupported_command_completes_unsupp_without_disk_io ... ok
+test virtio::block::cowork::tests::cowork_block_wrong_lease_device_cannot_parse_guest_ram ... ok
+test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_allows_forward_progress_and_valid_u16_wrap ... ok
+test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_rejects_regression_overrun_invalid_wrap_and_head_replacement ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.09s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+{"kind":"block_ring_pin","clockMicros":0,"row":0,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":153,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":219,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":223,"row":3,"request":1 }
+{"kind":"block_owned_io_end","clockMicros":226,"row":4,"request":1,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":229,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":26506,"row":6,"request":1,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":26624,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":26673,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":26676,"row":9,"request":2 }
+{"kind":"block_owned_io_end","clockMicros":26680,"row":10,"request":2,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":26682,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":52912,"row":12,"request":2,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":53003,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":53065,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":53069,"row":15,"request":3 }
+{"kind":"block_owned_io_end","clockMicros":53087,"row":16,"request":3,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":53090,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_ring_pin","clockMicros":53179,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":53230,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":53299,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":53344,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":53347,"row":22,"request":4 }
+{"kind":"block_owned_io_end","clockMicros":53371,"row":23,"request":4,"success":true,"dataBytes":512 }
+{"kind":"block_completion_deferred","clockMicros":53375,"row":24,"request":4 }
+{"kind":"block_used_ack","clockMicros":93431,"row":25,"request":4,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":93549,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":93604,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":93609,"row":28,"request":5 }
+{"kind":"block_owned_io_end","clockMicros":93630,"row":29,"request":5,"success":true,"dataBytes":512 }
+{"kind":"block_ring_pin","clockMicros":93709,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93794,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93818,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93892,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93924,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93988,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":94078,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":94153,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":94295,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":94380,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 block_bounce::tests -- --test-threads=1 --nocapture
+
+running 8 tests
+test block_bounce::tests::actual_owned_pipeline_performs_io_with_zero_memory_leases_and_pins_excluded ... ok
+test block_bounce::tests::completion_during_freeze_stays_pinned_and_is_deferred ... ok
+test block_bounce::tests::disk_error_has_no_partial_read_data_and_returns_error_status ... ok
+test block_bounce::tests::duplicate_completion_cannot_touch_unpinned_guest_ram ... ok
+test block_bounce::tests::get_id_uses_owned_metadata_then_completes_once ... ok
+test block_bounce::tests::malformed_size_and_sector_overflow_do_not_start_io ... ok
+test block_bounce::tests::stale_queue_or_device_generation_cannot_write_completion ... ok
+test block_bounce::tests::stop_blocks_completion_without_guest_access ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p libkrun --jobs 2 -- --test-threads=1 --nocapture
+
+running 32 tests
+test cowork_admission_tests::cowork_admission_actual_mapping_ack_gate_stopped_freeze_prevents_all_operations ... ok
+test cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected ... ignored, calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm ... ignored, calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start ... ok
+test cowork_admission_tests::cowork_admission_rejected_disks_never_invoke_actual_construction_callback ... ok
+test cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals ... ok
+test cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device ... ok
+test cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches ... ok
+test cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points ... ok
+test cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in ... ok
+test cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate ... ok
+test cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory ... ok
+test cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile ... ok
+test cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers ... ok
+test cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped ... ok
+test cowork_stream_api_tests::cowork_stream_public_caller_fd_setter_refuses_stdio_unconnected_named_and_unnamed ... ok
+test cowork_stream_api_tests::cowork_stream_public_factory_requires_opt_in_publishes_only_peer_and_refuses_duplicate ... ok
+test cowork_workspace_disks_tests::actual_block_builder::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volume_path ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_metadata_drift_refuses_start_without_permission_repair ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_missing_context_null_invalid_second_and_alias_do_not_publish_or_close_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_refuses_old_path_backed_and_hvc_configuration ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_rejects_pair_from_another_admission ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_requires_exact_owned_pair_order_and_provenance ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preparation_refuses_prebuilt_extra_or_retained_provenance_before_duplication ... ok
+test runtime_port_api_tests::runtime_port_existing_hvc_factory_excludes_generic_variant ... ok
+test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclusive_and_peer_owned ... ok
+test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
+test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
+
+test result: ok. 30 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling log v0.4.29
+   Compiling memchr v2.8.0
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/utils)
+   Compiling aho-corasick v1.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch)
+   Compiling regex-automata v0.4.14
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v0.2.7
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/polly)
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling regex v1.12.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling anstream v0.6.21
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+   Compiling env_filter v1.0.0
+   Compiling krun-kernel v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/kernel)
+   Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
+   Compiling jiff v0.2.23
+   Compiling env_logger v0.11.9
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.31s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun-fe8b317545a4d4ac)
+   Doc-tests krun
+
+$ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk,cowork-fixture-oracle -p libkrun --jobs 2 -- --test-threads=1 --nocapture
+
+running 32 tests
+test cowork_admission_tests::cowork_admission_actual_mapping_ack_gate_stopped_freeze_prevents_all_operations ... ok
+test cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected ... ignored, calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm ... ignored, calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start ... ok
+test cowork_admission_tests::cowork_admission_rejected_disks_never_invoke_actual_construction_callback ... ok
+test cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals ... ok
+test cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device ... ok
+test cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches ... ok
+test cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points ... ok
+test cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in ... ok
+test cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate ... ok
+test cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory ... ok
+test cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile ... ok
+test cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers ... ok
+test cowork_production_trace_tests::fixture_oracle_keeps_the_block_trace_compiled_in ... ok
+test cowork_stream_api_tests::cowork_stream_public_caller_fd_setter_refuses_stdio_unconnected_named_and_unnamed ... ok
+test cowork_stream_api_tests::cowork_stream_public_factory_requires_opt_in_publishes_only_peer_and_refuses_duplicate ... ok
+test cowork_workspace_disks_tests::actual_block_builder::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volume_path ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_metadata_drift_refuses_start_without_permission_repair ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_missing_context_null_invalid_second_and_alias_do_not_publish_or_close_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_refuses_old_path_backed_and_hvc_configuration ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_rejects_pair_from_another_admission ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_requires_exact_owned_pair_order_and_provenance ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preparation_refuses_prebuilt_extra_or_retained_provenance_before_duplication ... ok
+test runtime_port_api_tests::runtime_port_existing_hvc_factory_excludes_generic_variant ... ok
+test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclusive_and_peer_owned ... ok
+test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
+test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
+
+test result: ok. 30 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+   Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.71s
+     Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun-c527cb424e9d5497)
+   Doc-tests krun
+
+$ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p libkrun --jobs 2 -- --test-threads=1 --nocapture
+
+running 32 tests
+test cowork_admission_tests::cowork_admission_actual_mapping_ack_gate_stopped_freeze_prevents_all_operations ... ok
+test cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected ... ignored, calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_before_any_vm ... ignored, calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter
+test cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start ... ok
+test cowork_admission_tests::cowork_admission_rejected_disks_never_invoke_actual_construction_callback ... ok
+test cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals ... ok
+test cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device ... ok
+test cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches ... ok
+test cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points ... ok
+test cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in ... ok
+test cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate ... ok
+test cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory ... ok
+test cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile ... ok
+test cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers ... ok
+test cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped ... ok
+test cowork_stream_api_tests::cowork_stream_public_caller_fd_setter_refuses_stdio_unconnected_named_and_unnamed ... ok
+test cowork_stream_api_tests::cowork_stream_public_factory_requires_opt_in_publishes_only_peer_and_refuses_duplicate ... ok
+test cowork_workspace_disks_tests::actual_block_builder::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volume_path ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_metadata_drift_refuses_start_without_permission_repair ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_missing_context_null_invalid_second_and_alias_do_not_publish_or_close_callers ... ok
+test cowork_workspace_disks_tests::workspace_disks_api_refuses_old_path_backed_and_hvc_configuration ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_rejects_pair_from_another_admission ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_requires_exact_owned_pair_order_and_provenance ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence ... ok
+test cowork_workspace_disks_tests::workspace_disks_startup_preparation_refuses_prebuilt_extra_or_retained_provenance_before_duplication ... ok
+test runtime_port_api_tests::runtime_port_existing_hvc_factory_excludes_generic_variant ... ok
+test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclusive_and_peer_owned ... ok
+test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
+test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
+
+test result: ok. 30 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling libc v0.2.183
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.0
+   Compiling syn v2.0.117
+   Compiling memoffset v0.9.1
+   Compiling cfg_aliases v0.2.1
+   Compiling nix v0.30.1
+   Compiling thiserror v2.0.18
+   Compiling crossbeam-utils v0.8.21
+   Compiling log v0.4.29
+   Compiling bitflags v2.11.0
+   Compiling thiserror-impl v2.0.18
+   Compiling bitflags v1.3.2
+   Compiling vm-memory v0.17.1
+   Compiling crossbeam-channel v0.5.15
+   Compiling vmm-sys-util v0.14.0
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.47
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/utils)
+   Compiling semver v1.0.27
+   Compiling rustc_version v0.4.1
+   Compiling once_cell v1.21.4
+   Compiling adler2 v2.0.1
+   Compiling memchr v2.8.0
+   Compiling simd-adler32 v0.3.8
+   Compiling pin-project-lite v0.2.17
+   Compiling virtue v0.0.18
+   Compiling bincode_derive v2.0.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling miniz_oxide v0.8.9
+   Compiling aho-corasick v1.1.4
+   Compiling tracing-core v0.1.36
+   Compiling rand_core v0.9.5
+   Compiling imago v0.2.3
+   Compiling krun-smbios v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/smbios)
+   Compiling tracing-attributes v0.1.31
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling krun-arch-gen v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch_gen)
+   Compiling allocator-api2 v0.2.21
+   Compiling regex-syntax v0.8.10
+   Compiling unty v0.0.4
+   Compiling crc32fast v1.5.0
+   Compiling bincode v2.0.1
+   Compiling regex-automata v0.4.14
+   Compiling hashbrown v0.16.1
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch)
+   Compiling tracing v0.1.44
+   Compiling rand_chacha v0.9.0
+   Compiling tokio v1.50.0
+   Compiling async-trait v0.1.89
+   Compiling libloading v0.8.9
+   Compiling page_size v0.6.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v0.2.7
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
+   Compiling rand v0.9.2
+   Compiling lru v0.16.3
+   Compiling regex v1.12.3
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/polly)
+   Compiling anstyle v1.0.14
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling virtio-bindings v0.2.7
+   Compiling vm-fdt v0.3.0
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+   Compiling colorchoice v1.0.5
+   Compiling anstream v0.6.21
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+   Compiling flate2 v1.1.9
+   Compiling env_filter v1.0.0
+   Compiling krun-kernel v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/kernel)
+   Compiling linux-loader v0.13.2
+   Compiling vmm-sys-util v0.15.0
+   Compiling jiff v0.2.23
+   Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
+   Compiling env_logger v0.11.9
+    Finished `release` profile [optimized] target(s) in 44.18s
+     Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun-38a6f2387d9986fc)
+   Doc-tests krun
+
+$ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-vmm --jobs 2 -- --test-threads=1 --nocapture
+
+running 54 tests
+test builder::tests::test_error_messages ... ok
+test builder::tests::test_kernel_cmdline_err_to_startuvm_err ... ok
+test cowork_barrier::tests::exact_roster_and_epoch_before_any_mapping ... ok
+test cowork_barrier::tests::partial_failure_never_acknowledges_or_resumes ... ok
+test cowork_barrier::tests::stale_unknown_duplicate_acks_permanently_forbid_mutation ... ok
+test cowork_barrier::tests::stop_wins_over_every_pause_or_mapping_phase ... ok
+test cowork_barrier::tests::unknown_or_duplicate_roster_refused ... ok
+test cowork_control::tests::actual_boot_wait_parks_then_preserves_boot_arrival ... ok
+test cowork_control::tests::actual_handler_rejects_wrong_resume_epoch ... ok
+test cowork_control::tests::actual_step_stop_bypasses_queued_pause_ack ... ok
+test cowork_control::tests::actual_step_unlocks_mmio_before_pause_ack ... ok
+test cowork_control::tests::actual_wfe_deadline_captured_before_post_emulation_park_does_not_restart ... ok
+test cowork_control::tests::actual_wfe_deadline_is_not_restarted_after_pause ... ok
+test cowork_control::tests::actual_wfe_preserves_irq_received_while_parked ... ok
+test cowork_coordinator::tests::actual_transaction_limit_rejection_returns_heads_without_mapping ... ok
+test cowork_coordinator::tests::actual_transaction_malformed_frq_never_maps_acks_or_resumes ... ok
+test cowork_coordinator::tests::actual_transaction_partial_map_failure_stays_parked_without_ack ... ok
+test cowork_coordinator::tests::actual_transaction_planner_rejection_acks_noop_and_allows_resume ... ok
+test cowork_coordinator::tests::actual_transaction_two_kicks_one_batch_second_is_empty_no_ack ... ok
+test cowork_ops::tests::empty_plan_is_not_a_replacement ... ok
+test cowork_ops::tests::every_partial_hvf_or_mmap_failure_forbids_ack_resume ... ok
+test cowork_ops::tests::full_sequence_preserves_every_hva_and_delays_used_ack ... ok
+test cowork_ops::tests::malformed_report_or_ring_intersection_rejected_before_any_map_call ... ok
+test cowork_ops::tests::missing_stale_duplicate_cpu_means_zero_map_calls ... ok
+test cowork_ops::tests::stop_at_each_transition_prevents_more_operations_or_ack ... ok
+test cowork_ranges::tests::adjacent_regions_are_not_one_owned_span ... ok
+test cowork_ranges::tests::bounded_fixture_limit_and_descriptor_count ... ok
+test cowork_ranges::tests::dma_or_ring_exclusion_even_one_byte ... ok
+test cowork_ranges::tests::duplicate_or_overlapping_reports_rejected ... ok
+test cowork_ranges::tests::explicit_limit_can_narrow_admission_to_region_budget ... ok
+test cowork_ranges::tests::full_span_translation ... ok
+test cowork_ranges::tests::overflow_and_empty_inputs ... ok
+test cowork_ranges::tests::partial_host_pages_are_never_rounded ... ok
+test cowork_ranges::tests::registry_rejects_aliases_shared_memory_and_unaligned_hva ... ok
+test cowork_ranges::tests::valid_start_invalid_full_span ... ok
+test device_manager::hvf::mmio::tests::test_device_info ... ok
+test device_manager::hvf::mmio::tests::test_dummy_device ... ok
+test device_manager::hvf::mmio::tests::test_error_messages ... ok
+test device_manager::hvf::mmio::tests::test_register_too_many_devices ... ok
+test device_manager::hvf::mmio::tests::test_register_virtio_device ... ok
+test macos::vstate::tests::test_configure_vcpu ... ok
+test macos::vstate::tests::test_invalid_tls ... ok
+test macos::vstate::tests::test_set_mmio_bus ... ok
+test macos::vstate::tests::test_vcpu_tls ... ok
+test macos::vstate::tests::test_vm_memory_init ... ignored, creates a Hypervisor.framework VM (hv_vm_create); runs only at an owner-approved native gate
+test resources::tests::test_set_vm_config ... ok
+test resources::tests::test_set_vsock_device ... ok
+test resources::tests::test_vcpu_config ... ok
+test resources::tests::test_vm_config ... ok
+test vmm_config::block::workspace_disks_builder_tests::workspace_disks_partial_actual_block_construction_closes_all_new_handles_preserves_callers ... ok
+test vmm_config::machine_config::tests::test_display_cpu_features_template ... ok
+test vmm_config::machine_config::tests::test_display_vm_config_error ... ok
+test vmm_config::vsock::tests::test_error_messages ... ok
+test vmm_config::vsock::tests::test_vsock_insert ... ok
+
+test result: ok. 53 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling libc v0.2.183
+   Compiling cfg-if v1.0.4
+   Compiling memoffset v0.9.1
+   Compiling bitflags v2.11.0
+   Compiling thiserror v2.0.18
+   Compiling crossbeam-utils v0.8.21
+   Compiling nix v0.30.1
+   Compiling bitflags v1.3.2
+   Compiling vm-memory v0.17.1
+   Compiling vmm-sys-util v0.14.0
+   Compiling crossbeam-channel v0.5.15
+   Compiling log v0.4.29
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/utils)
+   Compiling zerocopy v0.8.47
+   Compiling getrandom v0.3.4
+   Compiling simd-adler32 v0.3.8
+   Compiling once_cell v1.21.4
+   Compiling adler2 v2.0.1
+   Compiling pin-project-lite v0.2.17
+   Compiling miniz_oxide v0.8.9
+   Compiling tracing-core v0.1.36
+   Compiling rand_core v0.9.5
+   Compiling krun-smbios v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/smbios)
+   Compiling krun-arch-gen v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch_gen)
+   Compiling equivalent v1.0.2
+   Compiling unty v0.0.4
+   Compiling allocator-api2 v0.2.21
+   Compiling ppv-lite86 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling rand_chacha v0.9.0
+   Compiling hashbrown v0.16.1
+   Compiling bincode v2.0.1
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch)
+   Compiling tracing v0.1.44
+   Compiling tokio v1.50.0
+   Compiling page_size v0.6.0
+   Compiling libloading v0.8.9
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
+   Compiling crc32fast v1.5.0
+   Compiling lru v0.16.3
+   Compiling rand v0.9.2
+   Compiling imago v0.2.3
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/polly)
+   Compiling virtio-bindings v0.2.7
+   Compiling vm-fdt v0.3.0
+   Compiling flate2 v1.1.9
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+   Compiling krun-kernel v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/kernel)
+   Compiling linux-loader v0.13.2
+   Compiling vmm-sys-util v0.15.0
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+    Finished `release` profile [optimized] target(s) in 20.24s
+     Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_vmm-57b944ed26940964)
+   Doc-tests krun_vmm
+
+$ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_block -- --test-threads=1 --nocapture
+
+running 16 tests
+test virtio::block::cowork::tests::cowork_block_actual_capture_guest_appends_second_request_both_complete ... ok
+test virtio::block::cowork::tests::cowork_block_actual_epoll_reset_reactivate_reuses_drained_stopfd_and_completes_io ... ok
+test virtio::block::cowork::tests::cowork_block_actual_epoll_stop_during_io_drains_reusable_fd ... ok
+test virtio::block::cowork::tests::cowork_block_actual_queue_copies_then_io_has_no_guest_lease ... ok
+test virtio::block::cowork::tests::cowork_block_actual_worker_stalled_io_freezes_and_defers_completion ... ok
+test virtio::block::cowork::tests::cowork_block_actual_worker_stop_after_io_never_completes_guest ... ok
+test virtio::block::cowork::tests::cowork_block_frozen_completion_is_pinned_until_gate_reopens ... ok
+test virtio::block::cowork::tests::cowork_block_nonready_and_cyclic_queue_fail_before_disk_or_ack ... ok
+test virtio::block::cowork::tests::cowork_block_out_of_range_first_head_and_next_are_terminal_not_empty ... ok
+test virtio::block::cowork::tests::cowork_block_ring_pin_survives_empty_queue_and_completion ... ok
+test virtio::block::cowork::tests::cowork_block_stale_completion_has_no_copy_or_used_ack ... ok
+test virtio::block::cowork::tests::cowork_block_terminal_access_fault_wakes_quiet_event_manager ... ok
+test virtio::block::cowork::tests::cowork_block_unsupported_command_completes_unsupp_without_disk_io ... ok
+test virtio::block::cowork::tests::cowork_block_wrong_lease_device_cannot_parse_guest_ram ... ok
+test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_allows_forward_progress_and_valid_u16_wrap ... ok
+test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_rejects_regression_overrun_invalid_wrap_and_head_replacement ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.09s
+
+   Compiling nix v0.30.1
+   Compiling miniz_oxide v0.8.9
+   Compiling krun-utils v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/utils)
+   Compiling krun-arch v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/arch)
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
+   Compiling krun-polly v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/polly)
+   Compiling imago v0.2.3
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+    Finished `release` profile [optimized] target(s) in 15.32s
+     Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)
+{"kind":"block_ring_pin","clockMicros":0,"row":0,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":198,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":277,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":284,"row":3,"request":1 }
+{"kind":"block_owned_io_end","clockMicros":291,"row":4,"request":1,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":296,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":26547,"row":6,"request":1,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":26673,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":26738,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":26746,"row":9,"request":2 }
+{"kind":"block_owned_io_end","clockMicros":26754,"row":10,"request":2,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":26760,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":53477,"row":12,"request":2,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":53742,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":53839,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":53848,"row":15,"request":3 }
+{"kind":"block_owned_io_end","clockMicros":53877,"row":16,"request":3,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":53884,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_ring_pin","clockMicros":54055,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":54090,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":54196,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":54248,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":54257,"row":22,"request":4 }
+{"kind":"block_owned_io_end","clockMicros":54293,"row":23,"request":4,"success":true,"dataBytes":512 }
+{"kind":"block_completion_deferred","clockMicros":54303,"row":24,"request":4 }
+{"kind":"block_used_ack","clockMicros":87595,"row":25,"request":4,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":87963,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":88136,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":88155,"row":28,"request":5 }
+{"kind":"block_owned_io_end","clockMicros":88194,"row":29,"request":5,"success":true,"dataBytes":512 }
+{"kind":"block_ring_pin","clockMicros":88475,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":88666,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":88712,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":88846,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":88891,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":89089,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":89247,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":89439,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":89822,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":89966,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+
+$ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 block_bounce::tests -- --test-threads=1 --nocapture
+
+running 8 tests
+test block_bounce::tests::actual_owned_pipeline_performs_io_with_zero_memory_leases_and_pins_excluded ... ok
+test block_bounce::tests::completion_during_freeze_stays_pinned_and_is_deferred ... ok
+test block_bounce::tests::disk_error_has_no_partial_read_data_and_returns_error_status ... ok
+test block_bounce::tests::duplicate_completion_cannot_touch_unpinned_guest_ram ... ok
+test block_bounce::tests::get_id_uses_owned_metadata_then_completes_once ... ok
+test block_bounce::tests::malformed_size_and_sector_overflow_do_not_start_io ... ok
+test block_bounce::tests::stale_queue_or_device_generation_cannot_write_completion ... ok
+test block_bounce::tests::stop_blocks_completion_without_guest_access ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)
+
+$ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 workspace_disks -- --test-threads=1 --nocapture
+
+running 8 tests
+test virtio::block::device::workspace_fd_tests::workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen ... ok
+test workspace_disks::tests::workspace_disks_aggregate_pin_budget_has_distinct_ids_and_retains_pins_on_stop ... ok
+test workspace_disks::tests::workspace_disks_duplicate_cloexec_and_close_only_owned_descriptors ... ok
+test workspace_disks::tests::workspace_disks_partial_failure_alias_stdio_and_closed_fd_leave_no_extra_handles ... ok
+test workspace_disks::tests::workspace_disks_reject_directory_and_socket_without_mutating_callers ... ok
+test workspace_disks::tests::workspace_disks_strict_identity_capacity_mode_links_access_and_append ... ok
+test workspace_raw_storage::tests::workspace_disks_fixed_capacity_refuses_oob_overflow_and_drift_without_growth_or_partial_write ... ok
+test workspace_raw_storage::tests::workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.03s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)

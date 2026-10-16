@@ -1,0 +1,272 @@
+{
+  "mutations": [
+    {
+      "id": "mem-ceiling-lifted",
+      "description": "production memory ceiling lifted to 2048 MiB in the production check AND the reviewed generic check",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "mem-ceiling-constant-only",
+      "description": "production memory ceiling constant raised to 2048 (reviewed generic check untouched)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "vcpu-ceiling-lifted",
+      "description": "production vCPU count lifted to 3 in the production check AND the reviewed generic check",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals",
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+        "cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches",
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+        "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile",
+        "cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "mem-floor-removed",
+      "description": "production memory floor dropped to 1 MiB",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "pair-rule-ignores-production",
+      "description": "workspace pair memory rule ignores the production range (768 only)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "fixture-pair-range-leak",
+      "description": "fixture workspace pair accepts the production memory range",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "shutdown-device-allowed",
+      "description": "production gate stops refusing the shutdown eventfd (PL061 GPIO)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "fixture-trace-allowed",
+      "description": "production gate stops refusing the runtime-port fixture trace",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "hvc-stream-allowed",
+      "description": "HVC bootstrap stream variant accepted: the runtime-port requirement removed from the production check AND the reviewed pair condition",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "enable-not-virgin-only",
+      "description": "production enable accepted after a fixture opt-in",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.2
+    },
+    {
+      "id": "fixture-enable-ignores-production",
+      "description": "fixture block opt-in accepted on a production context",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "runtime-port-profile-mismatch",
+      "description": "runtime-port factory serves either profile",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "pair-setter-profile-mismatch",
+      "description": "workspace pair setter serves either profile",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "trace-fixture-enable-ignores-production",
+      "description": "fixture runtime trace accepted on a production context",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "preflight-ignores-marker",
+      "description": "preflight succeeds for a context without the production marker",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 0.9
+    },
+    {
+      "id": "header-fixture-outside-ifdef",
+      "description": "a fixture declaration moved outside the oracle macro",
+      "file": "include/libkrun.h",
+      "expectedFailingTest": "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.0
+    },
+    {
+      "id": "header-limit-mismatch",
+      "description": "header states a different memory ceiling than the gate",
+      "file": "include/libkrun.h",
+      "expectedFailingTest": "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 0.8
+    },
+    {
+      "id": "pin-budget-changed",
+      "description": "pin count budget changed from 48 to 64",
+      "file": "src/devices/src/workspace_disks.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.6
+    },
+    {
+      "id": "device-attach-added",
+      "description": "a device attach site is added to build_microvm (as a comment, so it compiles)",
+      "file": "src/vmm/src/builder.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory",
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.6
+    },
+    {
+      "id": "block-trace-compiled-in",
+      "description": "fixture block trace (60,000-row fatal cap) compiled into production builds",
+      "file": "src/devices/src/block_trace.rs",
+      "expectedFailingTest": "cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped",
+      "observedFailingTests": [
+        "cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped"
+      ],
+      "compiled": true,
+      "killed": true,
+      "seconds": 1.9
+    }
+  ],
+  "pythonGuards": [
+    {
+      "id": "ignore-removed-vm-test",
+      "description": "the #[ignore] on the test that creates a Hypervisor.framework VM is removed",
+      "offenders": [
+        "src/vmm/src/macos/vstate.rs:661"
+      ],
+      "killed": true
+    },
+    {
+      "id": "ignore-removed-start-enter-test",
+      "description": "the #[ignore] on a test that calls krun_start_enter is removed",
+      "offenders": [
+        "src/libkrun/src/lib.rs:3354"
+      ],
+      "killed": true
+    }
+  ],
+  "allKilled": true
+}
