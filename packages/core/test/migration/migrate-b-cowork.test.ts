@@ -258,6 +258,12 @@ describe("resolvesIntoCoworkStorage", () => {
     expect(resolvesIntoCoworkStorage(home, `${home}/cowork/../sessions/x`)).toBe(false); // a plain real directory: the kernel and the lexical form agree
     expect(resolvesIntoCoworkStorage(home, `${home}/linked/../memory/x`)).toBe(false); // linked -> sessions/s1: lands in sessions/memory/x, not Cowork
     expect(resolvesIntoCoworkStorage(home, `${home}/sessions/./s1/../s1/a.jsonl`)).toBe(false);
+    // a relative path with `..` starts from the working directory, like the kernel
+    const cwd = process.cwd(); process.chdir(home);
+    try {
+      expect(resolvesIntoCoworkStorage(home, "innocent/../ws2/data.ext4")).toBe(true);
+      expect(resolvesIntoCoworkStorage(home, "sessions/../coworker/x")).toBe(false);
+    } finally { process.chdir(cwd); }
     expect(resolvesIntoCoworkStorage(home, join(tempDir(), "cowork", "x"))).toBe(false); // outside this home entirely
   });
 });
