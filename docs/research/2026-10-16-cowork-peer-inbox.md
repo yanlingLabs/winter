@@ -5,6 +5,11 @@ SQLite table, no schema change, no RPC and no protocol event. Cowork creation an
 refused. The ledger is a state machine over an injected `PeerInboxStore` port; the only implementation is an
 in-memory store used to prove the semantics.
 
+Both storage questions were decided by the owner on 2026-10-16 (see "Owner decisions, decided 2026-10-16"): a
+dedicated table at schema 17, and the body persisted only while owed. The SQLite store and its schema-17 migration
+are a follow-on slice that waits for PR #46 (schema 16) to land, because they touch hot files; this slice ships
+neither.
+
 This slice implements the receipt rules of the specification's "Same-Project SendMessage" section and the
 "Session messaging and creation boundaries" contract. It replaces nothing: `agent/session-messaging.ts` still
 does the host Code-to-Code delivery with its process-local, ten-minute dedupe, untouched.
@@ -133,16 +138,33 @@ hook, which a SQLite store supplies by throwing inside its transaction after the
 appends, identities, compare-and-set and caps over one state. A future SQLite store adds one line to its own test
 file; the ledger tests then run unchanged over it.
 
-## Owner decision 1: a new table, or reuse `cowork_operations` idempotency
+## Owner decisions, decided 2026-10-16
+
+The owner decided both storage questions on 2026-10-16. They replace the recommendations an earlier revision of this
+document carried. The reasoning that led to them is kept below.
+
+| | Decision (owner, 2026-10-16) |
+| --- | --- |
+| (a) Placement | A **dedicated table at schema 17**, not the `cowork_operations` log. |
+| (b) Retention | The body is **persisted only while owed**. It is deleted on delivery, on `sender_gone` and on discard (the ledger releases it at every terminal state, so cancel, a gone recipient and the host's unrecoverable-body exit release it too), and it is **kept out of backups**. **No extra encryption**, consistent with the 2026-10-12 ruling that Cowork private-storage encryption is deferred for the first version ([cowork-storage-security.md](../cowork-storage-security.md)). |
+
+**Sequencing.** The SQLite `PeerInboxStore`, its table and the schema-17 migration are a **follow-on slice after
+PR #46 (schema 16) lands**. They touch hot files (`cowork/schema.ts` and its `COWORK_TABLES`,
+`runtime-state/db.ts` and the downgrade ladder, the repository transaction), which #46 is also editing, so doing
+them now would collide. This slice stays source-only and unwired and ships no DDL. Nothing here changes either
+decision; the follow-on slice implements them.
+
+### (a) A dedicated table at schema 17
 
 Read of the current schema: `cowork_operations` is `UNIQUE(principal_id, method, scope, request_id)` with a
 `request_digest`, a workspace id, a status in `pending | applied | blocked | failed | superseded` and an
 immutable `result_json`. It is written only by `CoworkRepository.mutate`, which also requires
 `expectedRevision == configRevision` and publishes a `cowork_outbox` change to every conversation of the workspace.
-PR #46 takes the schema to 16, so a new table would be schema 17.
+PR #46 takes the schema to 16, so the new table is schema 17.
 
-Reuse looks attractive because the conflict rule matches (same key, different digest, `request_conflict`) and
-the status names map (`pending` = accepted, `applied` = delivered). It does not fit the rest:
+Reuse looked attractive because the conflict rule matches (same key, different digest, `request_conflict`) and
+the status names map (`pending` = accepted, `applied` = delivered). It does not fit the rest, which is why the
+decision is a dedicated table:
 
 1. No ordering key. FIFO per recipient needs a durable, gap-tolerant sequence that survives pruning
    (`cowork_outbox` has an `AUTOINCREMENT` sequence; `cowork_operations` has no sequence column and only the
@@ -161,53 +183,50 @@ the status names map (`pending` = accepted, `applied` = delivered). It does not 
 6. Message traffic would share a table and its backup/export surface with workspace configuration receipts,
    and `workspace.operation.get` would have to learn to hide message records.
 
-**Recommendation: a new table at schema 17**, one row per accepted send, with:
+Shape for the follow-on slice, one row per accepted send:
 
 - `UNIQUE(sender_session_id, sender_incarnation, send_id)` for the identity;
 - a recipient index over `(recipient_session_id, sequence)` with the sequence from a per-recipient counter
-  row (not `MAX(sequence)+1`, which reuses a number after a prune);
-- the columns of `PeerInboxRecord`;
-- the body in a separate table or file keyed by the handle, so it can be dropped without touching the receipt.
+  row (not `MAX(sequence)+1`, which reuses a number after a prune or a restart);
+- the columns of `PeerInboxRecord`, which hold a digest and a size, never the text;
+- the table lives in the Cowork repository transaction, so acceptance and the `owed` occupancy count commit with
+  the other Cowork state under `durableCoworkTransaction`'s fsync rules (the durability class on the port).
 
-What adopting the table drags in, which PR #46 establishes and this slice must not forget:
+What adopting the table drags in, which PR #46 establishes and the follow-on slice must not forget:
 
 - The table joins `COWORK_TABLES` in `cowork/schema.ts`. That list drives Migration B's `cowork_storage_present`
   refusal (a populated Cowork table in a legacy source refuses the copy) and the schema downgrade rule ("a v8..v16
   store may roll back only while every Cowork table is empty; populated authority must be retained"). A populated
   inbox is owed delivery and must be retained the same way, so the downgrade function and its type need the new
   version, and the migration ladder and `RUNTIME_STATE_SCHEMA_VERSION` move to 17.
-- Message bodies need a backup decision of their own. The runtime-state database is an ordinary backup target;
-  bodies are other agents' prompts, and the storage contract already excludes the private VM images from Time
-  Machine. If bodies live in that database they are backed up with it unless they are kept in an excluded file;
-  either way the exclusion, and whether a restored backup may replay an old owed message, must be decided with
-  the store (a restored database could redeliver a message the recipient already acknowledged).
+- Reuse the repository's idempotency idea (key plus versioned digest), not its table.
 
-The migration should land with the store that uses it, not before: this slice deliberately ships no DDL. Reuse
-the repository's idempotency idea (key plus versioned digest), not its table. The decision for the owner is
-also whether the table lives in the Cowork repository transaction (preferred: acceptance and the `owed` occupancy
-count then commit with other Cowork state, and `durableCoworkTransaction` fsync rules apply) or in a store of
-its own.
-
-## Owner decision 2: how the message text is persisted
+### (b) The body is persisted only while owed, deleted on delivery, `sender_gone` or discard, and kept out of backups
 
 The specification already requires owed delivery to be durable ("peer delivery survives a stopped recipient and
 daemon restart without creating a new identity", `cowork-spec.md` line 310, plus "Accepted means the daemon owes
-delivery"), and the sender does not retransmit, so the text has to exist durably while it is owed. Whether to
-persist it is therefore settled; what remains open is placement, encryption at rest, backup exclusion and cleanup.
-This slice keeps all four with the store and constrains only the shape:
+delivery"), and the sender does not retransmit, so the text has to exist durably while it is owed. The owner's
+decision fixes the remaining questions:
 
-- the record holds a digest and a size only;
-- the body goes through the port in the same atomic `append` and is addressed by an opaque store-issued handle;
-- the body is released in the same step that makes the record terminal, so terminal dedupe records hold no text;
-- reading the body back verifies the digest, so a damaged body parks the head rather than delivering wrong text;
-- `audit()` finds a leaked or orphaned body for cleanup;
-- the receipt returned to the sender carries no text, digest, handle or queue position.
-
-**Recommendation: persist the body only while the message is owed**, as above, with the 64 KiB cap and the byte
-budget, never in terminal records. Open for the owner at the store: whether the body sits in the same database as
-the record or in a separate protected file (the handle supports both), whether it is encrypted at rest, how it is
-excluded from backups (see decision 1) and what sweeps an orphan. The conversation transcript of the recipient
-will hold the text after delivery regardless.
+- **Only while owed.** The record holds a digest and a size only. The body goes through the port in the same atomic
+  `append` and is addressed by an opaque store-issued handle; it is released in the same step that makes the record
+  terminal (delivery, `sender_gone`, discard, cancel, a gone recipient, the host's unrecoverable-body exit), so
+  terminal dedupe records hold no text. Reading the body back verifies the digest, so a damaged body parks the head
+  rather than delivering wrong text, and `audit()` finds a leaked or orphaned body for cleanup. The receipt returned
+  to the sender carries no text, digest, handle or queue position.
+- **Kept out of backups.** The body must live somewhere that is not a backup target. The record table is part of
+  the runtime-state database and is backed up with it, so the body cannot sit in that database unless the database
+  itself is excluded; the follow-on slice therefore keeps bodies in a separately excluded store addressed by the
+  handle (the precedent is the sticky Time Machine exclusion the private VM images get, verified at creation and on
+  every open), and states how it verifies the exclusion. The port already allows this, because the handle is opaque.
+- **No extra encryption.** Bodies are plaintext at rest, like the rest of Cowork's first-version host data (shared
+  instructions, memory, outputs and host transcripts), and the 2026-10-12 deferral of private-storage encryption
+  applies. When an encrypted format arrives it is the store's concern; the port is unchanged.
+- **A consequence the follow-on slice must test.** Because the record is backed up and the body is not, a restore
+  can bring back an unresolved record whose body is gone. The ledger already fails closed there: `offer` parks that
+  head `blocked: recovery` (once), `audit()` reports it as `unresolvedWithoutBody`, and the host's `discard` exit
+  drops it. A restore also cannot redeliver an old owed message by text, because no text survives. The
+  conversation transcript of the recipient holds the text after delivery regardless.
 
 ## Other judgments for the reviewer
 
@@ -246,7 +265,8 @@ will hold the text after delivery regardless.
 
 Wake and restore of the recipient workspace, the SDK mailbox and steer/fold delivery into a running turn,
 guest caller transport, the runtime channel that authenticates sender and incarnation, `cowork_delivery_updated`
-events, transcript/output fences, a durable store, the schema migration and any RPC. The delivery owner will
+events, transcript/output fences, any RPC, and the SQLite store with its schema-17 migration and body store (a
+follow-on slice after PR #46 lands; see the owner decisions). The delivery owner will
 call `offer` once it holds a current epoch, hand the body to the recipient and relay the recipient's ack to
 `ack`.
 
