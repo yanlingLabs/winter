@@ -33,3 +33,15 @@ The installed SDK has no live sandbox-settings control, so `refreshForStorage` a
 - A pending or failed refresh blocks provisioning, without claiming third-party descendants were stopped.
 
 Historical persistent-Code-floor reports describe the superseded approach.
+
+## Storage lifecycle (records and guards only)
+
+None of this makes Cowork runnable; there is still no creation door. Sentences followed are quoted in the code and tests.
+
+- **Backup exclusion** is the raw-volume primitive's (`cowork/volumes.ts`, `volume-backup.ts`): a sticky `tmutil addexclusion` (never `-p`) on each image when it is created, re-verified on every claim and open; shared instructions, memory and outputs get none. `test/cowork/volume-backup-adapter.test.ts` pins the real adapter on disposable files.
+- **Image pins and export generations** (`cowork/images.ts`, `cowork/exports.ts`, `cowork/storage-lifecycle.ts`, runtime-state schema 16): trusted-controller classes with a mandatory authority port, no RPC. A pin records the base and runtime image digests and walks an update through `beginUpdate` then `confirmUpdate` or `abandonUpdate`, only while stopped and unowned, with a mandatory compatibility port; the live digests do not change until confirmed. An export generation is a recorded, manifest-bound descriptor of a stopped, ready, pinned workspace. `validateImport` judges a presented descriptor against canonical records and grants nothing. No bytes are copied, no snapshot is taken, and no restore runs.
+- **Migration B** never copies Cowork storage (`migration/cowork-exclusion.ts`): `cowork/**` is skipped, and a source holding any Cowork tree or populated Cowork table refuses with `cowork_storage_present` (the daemon's boot hook logs one skip line instead). Only the coordinated, quiescent migration the contracts describe could move it, and that does not exist yet.
+- **Migration C** never names Cowork storage: its moves are the fixed `SDK_COMPAT_LINKS`, `hostRuntimePredicate` keeps guest sessions out of runtime-state rewrites, a workspace that is not `stopped` or a volume that records an owner refuses it, and a manifest naming a `cowork/` path refuses resume, phase 2 and rollback. A rollback with populated Cowork records is refused by the schema step.
+- **Retention**: deleting the standalone conversation tombstones its binding and keeps the workspace, both volumes and every shared file; the reaper and cleaner reach only `SessionStore.deleteSession`. `test/cowork/storage-retention.test.ts` pins this and ratchets the destructive primitives allowed under `src/cowork`.
+- **Still open, with no concrete contract yet**: the export container and shared-file snapshot, the restore flow (re-recording device/inode after a restore, an approved empty replacement), the `workspace.archive`/`restore`/`delete` operations and `workspace.export.*` RPCs, and a Cowork-aware Migration B.
+
