@@ -215,6 +215,9 @@ test("prepare refuses a workspace that is not stopped, unowned, ready, pinned an
     refuses(() => f.exports.prepare(f.workspaceId, PROOF), state === "recovery-required" ? "recovery_required" : "export_not_ready");
   }
   f.set("UPDATE cowork_volumes SET filesystem_state='ready' WHERE workspace_id=?", f.workspaceId);
+  f.set("PRAGMA ignore_check_constraints=ON"); f.set("UPDATE cowork_volumes SET state='creating' WHERE workspace_id=? AND purpose='data'", f.workspaceId); f.set("PRAGMA ignore_check_constraints=OFF");
+  refuses(() => f.exports.prepare(f.workspaceId, PROOF), "export_not_ready"); // an image that is not fully allocated is not a checkpoint
+  f.set("PRAGMA ignore_check_constraints=ON"); f.set("UPDATE cowork_volumes SET state='allocated' WHERE workspace_id=?", f.workspaceId); f.set("PRAGMA ignore_check_constraints=OFF");
   f.set("PRAGMA ignore_check_constraints=ON"); f.set("UPDATE cowork_volumes SET format='future-encrypted-v2' WHERE purpose='data'"); f.set("PRAGMA ignore_check_constraints=OFF");
   refuses(() => f.exports.prepare(f.workspaceId, PROOF), "unknown_format");
   f.set("PRAGMA ignore_check_constraints=ON"); f.set("UPDATE cowork_volumes SET format='raw-ext4-v1' WHERE purpose='data'"); f.set("PRAGMA ignore_check_constraints=OFF");
@@ -291,6 +294,8 @@ test("a descriptor that is malformed, oversized, authority-bearing or of an unkn
   refuses(() => f.exports.validateImport("not json", PROOF), "manifest_invalid");
   refuses(() => f.exports.validateImport("[]", PROOF), "manifest_invalid");
   refuses(() => f.exports.validateImport(" ".repeat(EXPORT_MANIFEST_MAX_BYTES + 1), PROOF), "manifest_invalid");
+  refuses(() => f.exports.validateImport(e.json + " ".repeat(EXPORT_MANIFEST_MAX_BYTES), PROOF), "manifest_invalid"); // valid JSON, but past the cap
+  expect(f.exports.validateImport(e.json + "\n", PROOF).generation).toBe(1);
   refuses(() => f.exports.validateImport("{}", PROOF), "manifest_invalid");
   for (const edit of [
     (m: any) => { m.grants = [{ source: "x" }]; }, (m: any) => { m.policy = { defaultPolicy: "bypass" }; }, (m: any) => { m.workspace.trusted = true; },
@@ -322,6 +327,9 @@ test("a descriptor from another home, for an unknown or deleted workspace, or fo
   refuses(() => f.exports.validateImport(inFlight.manifestJson, PROOF), "generation_unknown");
   f.exports.fail(inFlight.exportId, PROOF);
   refuses(() => f.exports.validateImport(inFlight.manifestJson, PROOF), "generation_unknown");
+  f.set("UPDATE cowork_exports SET generation=9 WHERE export_id=?", e.exportId); // a recorded row that no longer agrees with its own descriptor
+  refuses(() => f.exports.validateImport(e.json, PROOF), "generation_unknown");
+  f.set("UPDATE cowork_exports SET generation=1 WHERE export_id=?", e.exportId);
   f.set("UPDATE cowork_workspaces SET state='deleted' WHERE workspace_id=?", f.workspaceId);
   refuses(() => f.exports.validateImport(e.json, PROOF), "authority_denied");
 });
