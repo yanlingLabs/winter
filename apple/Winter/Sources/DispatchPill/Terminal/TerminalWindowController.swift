@@ -10,6 +10,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     let run: CommandRun
     let window: PillChromeWindow
     var onClosed: (() -> Void)?
+    /// The window became key (opened, clicked, switched back to).
+    var onBecameKey: (() -> Void)?
     private let chrome = TerminalWindowChromeModel()
 
     static let defaultSize = NSSize(width: 780, height: 480)
@@ -97,6 +99,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     /// Back to the window (a click on it, Cmd-` …): the keyboard goes to the emulator again.
     func windowDidBecomeKey(_ notification: Notification) {
         focusTerminal()
+        onBecameKey?()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -188,10 +191,10 @@ struct TerminalWindowRootView: View {
     private var title: some View {
         VStack(spacing: 2) {
             HStack(spacing: 6) {
-                Text("$")
+                Text(run.isTerminal ? "›" : "$")
                     .font(Typography.labelMono(.semibold))
                     .foregroundStyle(Theme.commandPurple)
-                Text(run.command)
+                Text(run.isTerminal ? "Terminal — \(run.shellName)" : run.command)
                     .font(Typography.labelMono(.medium))
                     .foregroundStyle(Color.white.opacity(0.9))
                     .lineLimit(1)
@@ -328,6 +331,9 @@ private struct TerminalRunStateBadge: View {
             case .failedToStart:
                 Circle().fill(Color.red).frame(width: 7, height: 7)
                 Text("Couldn’t start")
+            case .interactive:
+                Image(systemName: "terminal").font(Typography.caption(.semibold))
+                Text("Terminal")
             case .typedByHand:
                 Image(systemName: "keyboard").font(Typography.caption(.semibold))
                 Text("Typed in")

@@ -97,6 +97,18 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(run.transcriptScope, .command, "input to the running line is not more typing in the shell")
     }
 
+    func testATerminalWithNoLineSendsItsSession() {
+        let environment = CommandLineEnvironment.fixed(pathDirectories: ["/usr/bin"], commandNames: [], homeDirectory: "/Users/u",
+                                                       fileSystem: ShellCommandLineTests.fileSystem)
+        let run = CommandRun(command: "", workingDirectory: "/Users/u/proj", environment: environment, launch: false)
+        XCTAssertTrue(run.isTerminal)
+        XCTAssertEqual(run.phase, .shell)
+        XCTAssertTrue(run.shellIsLive)
+        XCTAssertEqual(CommandPillStatus(run.commandOutcome), .handedOver, "neutral, with the live-shell caret")
+        run.feedForTesting(Array("% ls\r\nnotes.md\r\n% ".utf8))
+        XCTAssertEqual(run.transcriptMessage(), "This is from my terminal in ~/proj:\n```\n% ls\nnotes.md\n%\n```")
+    }
+
     func testAShellThatEndsBeforeTheMarkEndsTheLineToo() {
         let run = makeRun()
         run.feedForTesting(bytes(run.startMarkForTesting() + "bye\r\n"))
@@ -352,5 +364,78 @@ final class TerminalSessionIntegrationTests: XCTestCase {
         run.endShell()
         XCTAssertTrue(waitUntil(5) { run.outcome != .running }, "the shell went")
         XCTAssertTrue(waitUntil(5) { kill(pid, 0) != 0 }, "and the job that ignored SIGHUP went too")
+    }
+
+    // MARK: Autosuggestions in Winter's zsh terminals
+
+    private func plain(_ run: CommandRun) -> String {
+        // The session's tail as text (escapes stripped) — what the terminal showed since the line started.
+        run.sessionTextForTesting
+    }
+
+    private func linesEqual(_ run: CommandRun, _ text: String) -> Int {
+        plain(run).components(separatedBy: "\n").filter { $0 == text }.count
+    }
+
+    /// A zsh run of `line`, its line done and the prompt drawn.
+    private func zshRun(_ line: String) -> CommandRun {
+        let run = CommandRun(command: line, workingDirectory: home, environment: environment(shell: "/bin/zsh"))
+        XCTAssertTrue(waitUntil(15) { run.commandOutcome != .running }, "the line ran")
+        _ = waitUntil(1) { false }
+        return run
+    }
+
+    func testHistoryIsSuggestedDimAfterTheCursorAndRightArrowAcceptsIt() {
+        let run = zshRun("echo hello")
+        defer { run.endShell(); _ = waitUntil(5) { run.outcome != .running } }
+        run.typeForTesting("echo h")
+        XCTAssertTrue(waitUntil(5) { run.screenTailForTesting(rows: 1).hasSuffix("echo hello") },
+                      "POSTDISPLAY shows `ello` after `echo h`")
+        XCTAssertEqual(linesEqual(run, "hello"), 1)
+        run.typeForTesting("\u{1B}[C\r") // → accepts, Return runs it
+        XCTAssertTrue(waitUntil(5) { linesEqual(run, "hello") == 2 }, "→ accepted the suggestion: `echo hello` ran")
+    }
+
+    func testAPathOnScreenIsSuggestedWhenHistoryHasNone() throws {
+        try write("notes.txt", "path-ok\n")
+        let target = home + "/notes.txt"
+        let run = zshRun("true")
+        defer { run.endShell(); _ = waitUntil(5) { run.outcome != .running } }
+        run.writeOnScreenPaths(["/tmp/elsewhere.txt", target])
+        run.typeForTesting("cat " + String(target.dropLast(6)))
+        XCTAssertTrue(waitUntil(5) { run.screenTailForTesting(after: 2).hasSuffix("cat " + target) },
+                      "the rest of the on-screen path is suggested")
+        run.typeForTesting("\u{1B}[C\r")
+        XCTAssertTrue(waitUntil(5) { linesEqual(run, "path-ok") == 1 }, "→ accepted it: the file was read")
+    }
+
+    func testWinterStaysOffWhenTheUsersZshAutosuggestionsIsLoaded() throws {
+        try write(".zshrc", "typeset -ga ZSH_AUTOSUGGEST_STRATEGY=(history)\n")
+        let run = zshRun("echo hello")
+        defer { run.endShell(); _ = waitUntil(5) { run.outcome != .running } }
+        run.typeForTesting("echo h")
+        _ = waitUntil(1) { false }
+        XCTAssertTrue(run.screenTailForTesting(rows: 1).hasSuffix("echo h"), "no suggestion of Winter's")
+        run.typeForTesting("\u{1B}[C\r")
+        XCTAssertTrue(waitUntil(5) { linesEqual(run, "h") == 1 }, "→ was the user's own: `echo h` ran as typed")
+        XCTAssertEqual(linesEqual(run, "hello"), 1)
+    }
+
+    func testASuggestionCostsWellUnderAMillisecondOrTwo() {
+        let run = zshRun("true")
+        defer { run.endShell(); _ = waitUntil(5) { run.outcome != .running } }
+        run.writeOnScreenPaths((0..<30).map { "/tmp/winter-path-\($0)/file.txt" })
+        let probe = "zmodload zsh/datetime; for i in {1..3000}; do print -s \"cmd number $i\"; done; "
+            + "s=$EPOCHREALTIME; repeat 300 { __winter_as_suggestion 'echo h'; __winter_as_suggestion 'cat /tmp/winter-path-2' }; "
+            + "print -r -- \"as-us=$(( (EPOCHREALTIME - s) * 1000000 / 600 ))\""
+        run.typeForTesting(probe + "\r")
+        var micros: Double?
+        XCTAssertTrue(waitUntil(15) {
+            guard let line = plain(run).components(separatedBy: "\n").first(where: { $0.hasPrefix("as-us=") }) else { return false }
+            micros = Double(line.dropFirst("as-us=".count))
+            return micros != nil
+        })
+        print("winter autosuggest: \(micros ?? -1) µs per suggestion (3,000 history entries, 30 paths)")
+        XCTAssertLessThan(micros ?? .infinity, 3000, "per keystroke, with 3,000 history entries and 30 paths")
     }
 }

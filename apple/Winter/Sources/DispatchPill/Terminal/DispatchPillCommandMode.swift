@@ -29,6 +29,26 @@ struct CommandModeSuppression: Equatable {
     mutating func reset() { suppressedText = nil }
 }
 
+// MARK: - The ghost between verdicts (pure — `DispatchPillCommandModeTests`)
+
+/// PURE: the ghost to show for `text` when the last verdict was for `evaluatedText` with `ghost`. The same text:
+/// that ghost. The user typed on INTO it (the new characters are the ghost's next ones): the rest of it. The user
+/// deleted back (`text` is a prefix of `evaluatedText`): what was deleted, then the ghost — still the same
+/// completed line. Anything else: none until the next verdict.
+func commandGhostContinuation(evaluatedText: String, ghost: String?, text: String) -> String? {
+    guard let ghost, !ghost.isEmpty, !text.isEmpty else { return nil }
+    if text == evaluatedText { return ghost }
+    if text.hasPrefix(evaluatedText) {
+        let typed = text.dropFirst(evaluatedText.count)
+        guard ghost.hasPrefix(typed), ghost.count > typed.count else { return nil }
+        return String(ghost.dropFirst(typed.count))
+    }
+    if evaluatedText.hasPrefix(text) {
+        return String(evaluatedText.dropFirst(text.count)) + ghost
+    }
+    return nil
+}
+
 // MARK: - The live model the pill reads
 
 /// Command mode for the Dispatch pill's composer: whether the draft is a command right now, and the ghost
@@ -93,9 +113,11 @@ final class DispatchPillCommandMode: ObservableObject {
         return lastDisplayed
     }
 
-    /// The ghost text to show after the caret for `text`, or nil.
+    /// The ghost text to show after the caret for `text`, or nil — STABLE between verdicts: while the next one is
+    /// on its way the shown ghost stays, trimmed by what was typed into it (or grown by what was deleted), so a
+    /// recompute that lands with the same suggestion changes nothing on screen (`commandGhostContinuation`).
     func ghost(for text: String) -> String? {
-        text == evaluatedText ? ghost : nil
+        commandGhostContinuation(evaluatedText: evaluatedText, ghost: ghost, text: text)
     }
 
     /// Tab, with the caret at the end of `text` (`ComposerTextView.onTab`): Tab AGAIN with the text unchanged since

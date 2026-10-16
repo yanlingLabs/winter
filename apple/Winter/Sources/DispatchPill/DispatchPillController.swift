@@ -345,6 +345,9 @@ final class DispatchPillController: ObservableObject {
         // stale, and a read that brings different paths re-judges the draft so its ghost can show them.
         let onScreenPaths = self.onScreenPaths
         commandMode.onScreenPaths = { [onScreenPaths] in onScreenPaths.paths }
+        // A terminal's shell gets them too, for its autosuggestions: at its start, and afresh when its window is key.
+        commandRuns.currentOnScreenPaths = { [onScreenPaths] in onScreenPaths.paths }
+        commandRuns.readOnScreenPaths = { [onScreenPaths] deliver in onScreenPaths.readOnce(deliver) }
         commandMode.onScreenPathsWanted = { [onScreenPaths] in onScreenPaths.refreshIfStale() }
         commandMode.onCommandModeTurnedOn = { [onScreenPaths] in onScreenPaths.refresh() }
         onScreenPaths.onChange = { [weak self] in
@@ -718,6 +721,11 @@ final class DispatchPillController: ObservableObject {
             showCommandNotice("No permission mode called “\(dispatchPillShortened(argument, limit: 30))”")
         case .spawn:
             if let spawn = onSpawnCowork { spawn() } else { showCommandNotice(dispatchPillSpawnComingSoon) }
+        case .terminal:
+            // A plain shell — no line — where a command would run: the session's folder, else home.
+            commandRuns.startTerminal(workingDirectory: commandDirectory(), environment: commandMode.environment,
+                                      sessionId: currentSessionId?())
+            commandMode.reset()
         }
         if presentation != .compact { setPresentation(.compact) } else { retargetMain() }
     }

@@ -244,6 +244,7 @@ final class OnScreenPathStore {
     private var active = false
     private var generation = 0
     private var lastStarted = Date.distantPast
+    private var lastOnce = Date.distantPast
     private var inFlightSince: Date?
 
     init(frontmostProcess: @escaping @MainActor () -> pid_t?, read: @escaping @Sendable (pid_t) -> [String],
@@ -320,6 +321,20 @@ final class OnScreenPathStore {
                     self.set(found)
                 }
             }
+        }
+    }
+
+    /// One read now, whether or not the pill is up (a terminal window became key): the paths go to `deliver` on
+    /// the main thread, and nowhere else — they do not become the pill's. At most once a `minimumInterval`.
+    func readOnce(_ deliver: @escaping @MainActor ([String]) -> Void) {
+        let started = now()
+        guard started.timeIntervalSince(lastOnce) >= Self.minimumInterval else { return }
+        guard let pid = frontmostProcess(), pid != getpid() else { return }
+        lastOnce = started
+        let read = read
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = read(pid)
+            DispatchQueue.main.async { MainActor.assumeIsolated { deliver(found) } }
         }
     }
 
