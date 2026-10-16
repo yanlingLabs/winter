@@ -183,8 +183,8 @@ export class CoworkNativeHost {
       throw error instanceof CoworkNativeHostError ? error : new CoworkNativeHostError("start_failed", error instanceof Error ? error.name : "unknown", { cause: error });
     }
     run.phase = "running";
-    this.watch(run);
     this.hook("power-running");
+    this.watch(run);
     return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
   }
 
@@ -384,8 +384,9 @@ export class CoworkNativeHost {
       throw error;
     }
     const admission = run.admissionId === null ? null : this.deps.admission.get(run.admissionId);
-    this.deps.recovery.release(run.key, run.owner, volumes, admission, run.homeId, proof);
-    try { session.send({ t: "receipt_retire", confirmationId: proof.confirmationId }); } catch { /* the channel may be gone; the durable store retires it on the next recovery */ }
+    const { retired } = this.deps.recovery.release(run.key, run.owner, volumes, admission, run.homeId, proof);
+    // Only when nothing still needs it: a replay debt keeps the receipt, so the launcher must keep it too.
+    if (retired) { try { session.send({ t: "receipt_retire", confirmationId: proof.confirmationId }); } catch { /* the channel may be gone; the durable store retires it on the next recovery */ } }
     return { released: true, evidence: proof.kind };
   }
 }

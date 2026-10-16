@@ -274,3 +274,22 @@ test("a new boot that ended proves the old writer stopped, even after the proces
   expect(third.leaseEpoch).toBe(3);
   expect(h.volumes.records(h.workspaceId)[0]!.filesystemJournal!.plan.protocolVersion).toBe(3);
 });
+
+test("an orderly stop after an interrupted replay keeps the old writer's receipt, both in the store and on the launcher", async () => {
+  // incarnation 1 formats and stops; incarnation 2 replays, the guest faults, and the stop that follows is orderly
+  const h = createHarness();
+  await (await h.host.start(h.workspaceId)).stop();
+  h.restart({ behavior: { bootstrap: "fault", stop: "orderly" } });
+  await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "guest_fault" });
+  const volumes = h.volumes.records(h.workspaceId);
+  expect(volumes.every(v => v.owner === null && v.filesystemJournal?.replayDebt?.owner.leaseEpoch === 2)).toBe(true);
+  expect(h.records.get(h.workspaceId).power).toBe("stopped");
+  expect(h.receipts.size).toBe(1); // epoch 2's receipt: a debt still names that writer
+  expect(h.launcher.last.received.map(item => item.message.t)).not.toContain("receipt_retire");
+  // and the next incarnation can still prove that writer stopped, from the store alone, after a restart; confirming settles the debt
+  h.restart();
+  const third = await h.host.start(h.workspaceId);
+  expect(third.leaseEpoch).toBe(3);
+  expect(h.volumes.records(h.workspaceId)[0]!.filesystemJournal!.replayDebt).toBeUndefined();
+  expect(h.receipts.size).toBe(0);
+});

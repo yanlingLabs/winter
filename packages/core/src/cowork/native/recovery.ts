@@ -185,7 +185,7 @@ export class CoworkNativeRecovery {
   // ----------------------------------------------------------------------------------------------- the release flow
 
   /** Volumes, then admission, then power, then spend the proof. Public so a live `stop` uses exactly the same steps. */
-  release(key: CoworkPowerKey, owner: CoworkVolumeOwner | null, volumes: readonly CoworkVolumeRecord[], admission: AdmissionRecord | null, homeId: string, proof: CoworkNativeStopProof): void {
+  release(key: CoworkPowerKey, owner: CoworkVolumeOwner | null, volumes: readonly CoworkVolumeRecord[], admission: AdmissionRecord | null, homeId: string, proof: CoworkNativeStopProof): { readonly retired: boolean } {
     const state = stopProofState(proof);
     if (!state || state.workspaceId !== key.workspaceId || state.incarnationId !== key.incarnationId || state.leaseEpoch !== key.leaseEpoch) throw new CoworkNativeStopEvidenceError("wrong_binding");
     if (volumes.some(v => v.owner !== null)) {
@@ -204,9 +204,12 @@ export class CoworkNativeRecovery {
     }
     this.finishPower(key, mintReleaseToken({ proof, volumesNowFree: free }));
     this.deps.registry.consume(proof);
-    // A receipt is still needed while a replay debt names its owner: the successor must prove THAT writer stopped. It is retired by `settleDebt`.
-    if (!free.some(v => v.filesystemJournal?.replayDebt?.owner.incarnationId === key.incarnationId && v.filesystemJournal.replayDebt.owner.leaseEpoch === key.leaseEpoch)) this.deps.receipts?.retire({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch });
+    // A receipt is still needed while a replay debt names its owner: the successor must prove THAT writer stopped. It is retired by `settleDebt`,
+    // and the caller must not tell the launcher to forget it either (hence the result).
+    const owed = free.some(v => v.filesystemJournal?.replayDebt?.owner.incarnationId === key.incarnationId && v.filesystemJournal.replayDebt.owner.leaseEpoch === key.leaseEpoch);
+    if (!owed) this.deps.receipts?.retire({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch });
     this.checkpoint("receipt-retired");
+    return { retired: !owed };
   }
   /** `stopped` with a token minted from the current free volumes (or, without a proof, from the pre-claim rule). */
   private finishPower(key: CoworkPowerKey, token: ReturnType<typeof mintReleaseToken> | null): void {

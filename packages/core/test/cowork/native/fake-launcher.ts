@@ -39,7 +39,8 @@ export class FakeLauncher implements CoworkLauncherPort {
     return session;
   }
   get last(): FakeSession { return this.sessions[this.sessions.length - 1]!; }
-  killAll(): void { this.sessions.forEach(session => session.eof()); }
+  /** The daemon process died: nothing in it reacts, whatever the sessions were doing. */
+  killAll(): void { this.sessions.forEach(session => session.vanish()); }
 }
 
 export class FakeSession implements CoworkLauncherSession {
@@ -66,6 +67,8 @@ export class FakeSession implements CoworkLauncherSession {
   onMessage(handler: (message: CoworkNativeToDaemon) => void): () => void { this.handlers.push(handler); return () => { const at = this.handlers.indexOf(handler); if (at >= 0) this.handlers.splice(at, 1); }; }
   onClose(handler: () => void): () => void { this.closers.push(handler); return () => { const at = this.closers.indexOf(handler); if (at >= 0) this.closers.splice(at, 1); }; }
   close(): void { this.live = false; }
+  /** The launcher is gone and NOBODY is told: what a crash of the daemon process looks like from the launcher's side. */
+  vanish(): void { this.live = false; }
   /** The channel ends without a word (the launcher died). */
   eof(): void { if (!this.live) return; this.live = false; for (const closer of [...this.closers]) closer(); }
 
@@ -91,6 +94,8 @@ export class FakeSession implements CoworkLauncherSession {
       case "volumes": return this.onVolumes(wire, rights);
       case "mux_down": return this.onMux(wire.frame);
       case "stop": return this.onStop(wire);
+      // The launcher forgets a retained receipt when told to.
+      case "receipt_retire": { for (const [at, text] of this.owner.options.receipts) if (text.includes(`"confirmationId":"${wire.confirmationId}"`)) this.owner.options.receipts.delete(at); return; }
       default: return;
     }
   }
