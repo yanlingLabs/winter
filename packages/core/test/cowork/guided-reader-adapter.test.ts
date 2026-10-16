@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { CoworkAuthority } from "../../src/cowork/authority";
 import { createCoworkRuntimeContextHandler, type CoworkRuntimeContextRequest } from "../../src/cowork/current-context-callback";
-import { COWORK_SHARED_INSTRUCTION_VIEW } from "../../src/cowork/current-context-resolver";
+import type { CoworkContextRegistration } from "../../src/cowork/current-context";
+import { COWORK_SHARED_INSTRUCTION_VIEW, type CoworkInstructionReadRequest, type CoworkInstructionReadResult } from "../../src/cowork/current-context-resolver";
 import { coworkGuestSourceRoot } from "../../src/cowork/guest-paths";
 import { captureCoworkGuestOwner, COWORK_GUEST_OWNER_READER_LIMITS, CoworkGuestContextOwners, type CoworkGuestContextOwner, type CoworkGuestOwnerCapture,
   type CoworkGuestOwnerEvidence, type CoworkGuestOwnerEvidencePort, type CoworkGuestOwnerReaderPlan } from "../../src/cowork/guest-context-owner";
@@ -686,6 +687,9 @@ test("a forged capture cannot widen, deepen or redirect the view: workspace, sou
     ["mismatched workspaceId", forgedCapture(f, registration, { workspaceId: "ws_other" })], ["logical session with no binding", forgedCapture(f, registration, { sessionId: SECOND })],
     ["foreign source root", forgedCapture(f, registration, { source: { ...registration.admittedSources[0], root: `${root}-foreign` }, views: { ...view(`${root}-foreign/directory`), sourceRoot: `${root}-foreign` }, cwd: `${root}-foreign/directory` })],
     ["cwd widened in the view only", forgedCapture(f, registration, { views: view(root) })], ["cwd widened in the capture only", forgedCapture(f, registration, { cwd: root })],
+    // The canonical cwd is kept and only the ROOT is forged (both in the source and the view), so the cwd compare cannot be what refuses these.
+    ["widened root (all repositories)", forgedCapture(f, registration, { source: { ...registration.admittedSources[0], root: "/workspace/repos" }, views: { ...view(`${root}/directory`), sourceRoot: "/workspace/repos" } })],
+    ["narrowed root equal to the cwd", forgedCapture(f, registration, { source: { ...registration.admittedSources[0], root: `${root}/directory` }, views: { ...view(`${root}/directory`), sourceRoot: `${root}/directory` } })],
   ];
   // REAL rows that are not this conversation's: a second source in the same workspace, and a whole second workspace. Each
   // forgery is internally consistent and its root and cwd derive fine from the rows, so only the binding comparison refuses it.
@@ -713,6 +717,83 @@ test("the canonical view is derived for a conversation bound at the source root 
   const { owner } = f.ready(SECOND), registration = owner.registrationPort(SECOND_BACKEND)!;
   expect(() => createCoworkGuidedRuntimeContextHandler({ records: f.records, grants: f.grants, currentBootId: () => f.currentBoot(), registration: owner.registrationPort, frames: fakeSdk().port({}),
     capture: forgedCapture(f, registration, {}, `${f.root}/directory`) })).toThrow(REFUSED);
+});
+
+/** What the existing handler's reader would return: used to show the planner and resolver accept a registration, so that only the
+ * adapter's comparison with the capture can refuse it. */
+function existingReply(request: CoworkInstructionReadRequest): CoworkInstructionReadResult {
+  const block = (requestedPath: string, admittedPath: string, text: string, tier: "workspace" | "project") => ({ requestedPath, admittedPath, text, sha256: sha(text), tier });
+  const blocks = [block(request.scopes.shared.path, SHARED, "shared guidance", "workspace"), block(`${request.scopes.source.root}/WINTER.md`, `${request.scopes.source.root}/WINTER.md`, "source guidance", "project")];
+  return { request: structuredClone(request), tiers: "admitted-only", blocks, files: blocks.map(b => ({ ...b, depth: 0 })) };
+}
+/** Drive the per-call live-registration comparison ONLY through what the registration port returns after construction. The adapter is
+ * built with a static snapshot port; `rows` then changes the canonical rows (after construction) so that the planner accepts the
+ * tampered answer too. The existing handler is run over the same port to prove it: the capture comparison is the only thing left. */
+async function portDriven(name: string, f: Fixture, tamper: (registration: Record<string, any>) => void, rows: () => void) {
+  const { owner, capture } = f.ready(), base = structuredClone(owner.registrationPort(BACKEND)!) as Record<string, any>, sdk = fakeSdk(), preparation = {};
+  let tampering = false;
+  const port = (trusted: string): CoworkContextRegistration | undefined => { if (trusted !== BACKEND) return undefined; const copy = structuredClone(base); if (tampering) tamper(copy); return copy as CoworkContextRegistration; };
+  // Built ONCE, before any row changes: the construction-time checks see the original rows.
+  const guided = createCoworkGuidedRuntimeContextHandler({ records: f.records, grants: f.grants, currentBootId: () => f.currentBoot(), registration: port, capture, frames: sdk.port(preparation) });
+  const existing = createCoworkRuntimeContextHandler({ records: f.records, grants: f.grants, trustedQuerySessionId: BACKEND, currentRegistration: port, currentBootId: () => f.currentBoot(),
+    reader: { read: async request => existingReply(request) } });
+  const call = async (handler: typeof guided) => { const signal = new AbortController().signal; sdk.install(signal, preparation, () => serialize(frameObject(capture, f.root))); return handler(f.requestFor(), { signal, trustedQuerySessionId: BACKEND }); };
+  const step = async <T,>(label: string, run: () => Promise<T>): Promise<T> => { try { return await run(); } catch (error) { throw new Error(`${name}: the ${label} step refused (${(error as Error).message})`); } };
+  // Controls: the untouched static snapshot is a valid answer for both handlers.
+  expect(`${name}:${(await step("control", () => call(guided))).instructions.includes("shared guidance")}`).toBe(`${name}:true`);
+  expect(`${name}:${(await step("existing-control", () => call(existing))).instructions.includes("shared guidance")}`).toBe(`${name}:true`);
+  const calls = sdk.calls.length;
+  rows(); tampering = true;
+  // The planner and resolver of the EXISTING handler accept the tampered answer over the changed rows...
+  expect(`${name}:${(await step("existing-handler", () => call(existing))).instructions.includes("shared guidance")}`).toBe(`${name}:true`);
+  // ...and the adapter alone refuses it, before the SDK port is asked.
+  const outcome = await call(guided).then(() => "resolved", (error: Error) => error.message);
+  expect(`${name}:${outcome}:${sdk.calls.length - calls}`).toBe(`${name}:required_context_unavailable:0`);
+}
+const selectionOf = (repositoryId: string) => ({ kind: "githubRepository" as const, label: "fixture", access: "read-write" as const, detail: { repositoryId, authorityRef: "private-authority", initialRef: "main" } });
+const sourceEntry = (source: { sourceId: string; revision: number; access: string }, root: string) => ({ sourceId: source.sourceId, revision: source.revision, root, access: source.access });
+
+test("per-call live registration, driven through the port: the logical session id is compared with the capture", async () => {
+  const f = fixture(); f.conversation(SECOND, SECOND_BACKEND, "other");
+  // After construction the canonical rows hand the backend id to the sibling conversation; the port reports that sibling.
+  await portDriven("sessionId", f, registration => { registration.sessionId = SECOND; }, () => {
+    f.sql("UPDATE runtime_sessions SET backend_session_id=NULL WHERE winter_session_id=?", PARENT);
+    f.sql("UPDATE runtime_sessions SET backend_session_id=? WHERE winter_session_id=?", BACKEND, SECOND);
+  });
+});
+
+test("per-call live registration, driven through the port: the admitted source id is compared with the capture", async () => {
+  // The planner requires the bound source (the request's scope source id) in the single admitted entry, so the live entry's id and the
+  // request-scope id are two compares of the same fact: removing EITHER alone is an equivalent mutant; removing BOTH fails this test.
+  const f = fixture();
+  await portDriven("sourceId", f, registration => {
+    const second = f.records.sources(f.workspaceId).find(source => source.sourceId !== f.source.sourceId)!;
+    registration.admittedSources = [sourceEntry(second, f.root)];
+  }, () => {
+    // A second source with the SAME root, revision and access, so only its id differs; the conversation is rebound to it.
+    const second = f.records.addSource({ principalId: "fixture", requestId: "add-same-root", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, selectionOf("repo-one")).value;
+    expect(coworkGuestSourceRoot(second)).toBe(f.root); expect(second.revision).toBe(f.source.revision); expect(second.access).toBe(f.source.access);
+    f.records.acknowledgeSource(f.records.refreshEpoch(f.workspaceId, "incarnation", f.epoch.leaseEpoch), second.sourceId, second.revision, "ready");
+    f.sql("UPDATE cowork_conversations SET source_id=? WHERE session_id=?", second.sourceId, PARENT);
+  });
+});
+
+test("per-call live registration, driven through the port: a conversation moved to another workspace is refused", async () => {
+  const f = fixture();
+  // cowork_sources.source_id is a global primary key, so a different workspace id always arrives with a different source id and the
+  // source compares refuse it too: removing the workspace compare ALONE is an equivalent mutant; removing it together with both source
+  // id compares fails this test.
+  let moved: { workspaceId: string; source: { sourceId: string; revision: number; access: string }; leaseEpoch: number } | undefined;
+  await portDriven("workspaceId", f, registration => {
+    registration.workspaceId = moved!.workspaceId; registration.leaseEpoch = moved!.leaseEpoch; registration.admittedSources = [sourceEntry(moved!.source, f.root)];
+  }, () => {
+    const created = f.records.create({ principalId: "fixture", requestId: "create-moved" }, { ownership: "project", title: "moved", ceiling: caps, sources: [selectionOf("repo-one")] });
+    const source = f.records.sources(created.workspaceId)[0]!, epoch = f.records.beginIncarnation(created.workspaceId, "incarnation", 1);
+    expect(coworkGuestSourceRoot(source)).toBe(f.root);
+    f.records.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
+    f.sql("UPDATE cowork_conversations SET workspace_id=?, source_id=?, project_id=? WHERE session_id=?", created.workspaceId, source.sourceId, f.records.get(created.workspaceId).ownerId, PARENT);
+    moved = { workspaceId: created.workspaceId, source, leaseEpoch: epoch.leaseEpoch };
+  });
 });
 
 test("a capture whose cwd and view disagree with the canonical request is refused before the port", async () => {
