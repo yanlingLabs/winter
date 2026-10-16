@@ -92,6 +92,7 @@ export function nextCoworkScheduleTime(specText: string, timezone: string, from:
   throw new CoworkError("invalid_request");
 }
 
+/** The port's run reference is opaque and unpersisted; its shape is bounded (no control characters, no path syntax, <=128) so a future log or UI line can carry it safely. A violating ack is uncertain, not trusted. */
 const RUN_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 /** The port's acknowledgement, or undefined when it is not a well-formed receipt echoing exactly this claim. */
 function ackedRunRef(result: unknown, occurrenceId: string, token: string): string | undefined {

@@ -113,7 +113,15 @@ uncertain`; it never replays.
    `execution_unavailable` is still the "not blocked" sentinel, so with a port a
    dispatchable pending occurrence reads `execution_unavailable` too. `start` has
    no timeout here; a hung port leaves `dispatching` until `recover()`.
-7. **Anti-wiring pin location.** The pin is a new test in `schedules.test.ts`
+7. **`handled` and `uncertain` are unreachable in production, on purpose.** Nothing in
+   `src/` calls them, and without a port no receipt can be minted, so `handled`
+   always refuses. That is a delta from before, when the two-argument `handled` was
+   callable on any `dispatching` row (reachable only through raw SQL in tests).
+8. **The `service.ts` pin is deliberately exact.** The anti-wiring test pins the text
+   `new CoworkSchedules(records, host.grants, scheduleNow)`. Another open lane that
+   adds a constructor argument there will fail this test without any behavioral
+   regression; update the pinned text in that merge.
+9. **Anti-wiring pin location.** The pin is a new test in `schedules.test.ts`
    rather than an edit to the two existing pin tests, to avoid cross-lane conflicts.
 
 ## Tests and mutation checks
