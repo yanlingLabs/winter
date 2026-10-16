@@ -3,6 +3,7 @@ import { CoworkScheduleDefinition, type CoworkSchedule, type CoworkScheduleOccur
 import { parseSpec, type CronField } from "../routines/spec";
 import { CoworkAuthority, intersectCeilings, type CoworkGrantResolver } from "./authority";
 import type { CoworkRepository } from "./repository";
+import type { CoworkScheduleDispatchOutcome, CoworkScheduleDispatchPort, CoworkScheduleDispatchReceipt, CoworkScheduleDispatchInput } from "./schedule-dispatch";
 import { CoworkError, type CapabilityCeiling } from "./types";
 
 type Row = Record<string, any>;
@@ -91,11 +92,25 @@ export function nextCoworkScheduleTime(specText: string, timezone: string, from:
   throw new CoworkError("invalid_request");
 }
 
-/** Canonical host state only. No runtime session creation, guest cwd or Code runner dependency. */
+const RUN_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+/** The port's acknowledgement, or undefined when it is not a well-formed receipt echoing exactly this claim. */
+function ackedRunRef(result: unknown, occurrenceId: string, token: string): string | undefined {
+  if (!result || typeof result !== "object" || (result as { kind?: unknown }).kind !== "started") return undefined;
+  const receipt = (result as { receipt?: Record<string, unknown> }).receipt;
+  if (!receipt || typeof receipt !== "object" || receipt.occurrenceId !== occurrenceId || receipt.token !== token) return undefined;
+  return typeof receipt.runRef === "string" && RUN_REF.test(receipt.runRef) ? receipt.runRef : undefined;
+}
+
+/**
+ * Canonical host state only. No runtime session creation, guest cwd or Code runner dependency. Execution is
+ * reachable only through an injected CoworkScheduleDispatchPort; without one `beginDispatch` stays refused.
+ */
 export class CoworkSchedules {
   private closed = false;
   private readonly authority: CoworkAuthority;
-  constructor(readonly records: CoworkRepository, grants: CoworkGrantResolver, private readonly now = () => Date.now(), private readonly branch?: (workspaceId: string, sourceId: string) => string | undefined, private readonly calendarLimits?: CoworkCalendarLimits) {
+  /** In-memory proof, per instance and never persisted, that THIS process's port acknowledged a claim: the only thing `handled` accepts. */
+  private readonly receipts = new WeakMap<object, { occurrenceId: string; token: string }>();
+  constructor(readonly records: CoworkRepository, grants: CoworkGrantResolver, private readonly now = () => Date.now(), private readonly branch?: (workspaceId: string, sourceId: string) => string | undefined, private readonly calendarLimits?: CoworkCalendarLimits, private readonly port?: CoworkScheduleDispatchPort) {
     this.authority = new CoworkAuthority(records, grants);
   }
   private one(sql: string, ...values: any[]): Row | null { return this.records.rs.db.query(sql).get(...values) as Row | null; }
@@ -244,31 +259,100 @@ export class CoworkSchedules {
       return this.run("UPDATE cowork_schedule_occurrences SET state='claimed',claim_token=?,reason=NULL WHERE schedule_id=? AND occurrence_id=? AND state='pending'", token, scheduleId, occurrenceId).changes ? token : undefined;
     });
   }
-  /** No execution owner is admitted in this slice. A durable claim is not dispatch proof. */
-  beginDispatch(_occurrenceId: string, _token: string): never {
-    throw new CoworkError("unsupported_topology");
+  /** Return a claimed or dispatching occurrence to pending, folding any coalesced pending interval into it first. `reason` undefined leaves the stored reason alone. */
+  private release(row: Row, reason?: Reason): void {
+    const pending = this.one("SELECT * FROM cowork_schedule_occurrences WHERE schedule_id=? AND state='pending'", row.schedule_id);
+    if (pending) {
+      this.run("UPDATE cowork_schedule_occurrences SET latest_due_at=?,missed_count=? WHERE occurrence_id=?", pending.latest_due_at, row.missed_count + pending.missed_count + 1, row.occurrence_id);
+      this.run("DELETE FROM cowork_schedule_occurrences WHERE occurrence_id=?", pending.occurrence_id);
+    }
+    this.run("UPDATE cowork_schedule_occurrences SET state='pending',claim_token=NULL WHERE occurrence_id=?", row.occurrence_id);
+    if (reason) this.run("UPDATE cowork_schedule_occurrences SET reason=? WHERE occurrence_id=?", reason, row.occurrence_id);
   }
-  handled(occurrenceId: string, token: string): void {
+  private dispatching(occurrenceId: string, token: string): Row | null {
+    return this.one("SELECT * FROM cowork_schedule_occurrences WHERE occurrence_id=? AND state='dispatching' AND claim_token=?", occurrenceId, token);
+  }
+  private markUncertain(occurrenceId: string): void {
+    this.run("UPDATE cowork_schedule_occurrences SET state='uncertain',reason='recovery_required' WHERE occurrence_id=? AND state='dispatching'", occurrenceId);
+  }
+  /**
+   * claimed -> dispatching (durable, rechecked) -> port.start -> acknowledged. Without an injected port this
+   * refuses with `unsupported_topology` before any write, exactly as before. The synchronous part throws
+   * `request_conflict` for an unknown, reused or wrong-token claim; after it, nothing is held open across the
+   * port call and the returned promise settles to an outcome (it rejects only on a store failure, which leaves
+   * the row `dispatching` for `recover()` to mark uncertain). `dispatching` is committed BEFORE `start` runs,
+   * so a crash at any later point can only produce `uncertain`, never a replay.
+   */
+  beginDispatch(occurrenceId: string, token: string): Promise<CoworkScheduleDispatchOutcome> {
+    const port = this.port;
+    if (!port) throw new CoworkError("unsupported_topology");
+    const begun = this.tx((): { blocked: Reason } | { input: CoworkScheduleDispatchInput } => {
+      const row = this.one("SELECT * FROM cowork_schedule_occurrences WHERE occurrence_id=? AND state='claimed'", occurrenceId);
+      if (!row || row.claim_token !== token) throw new CoworkError("request_conflict");
+      const parent = this.one("SELECT * FROM cowork_schedules WHERE schedule_id=?", row.schedule_id);
+      if (!parent || parent.state !== "enabled") throw new CoworkError("request_conflict");
+      const refuse = (reason: Reason) => { this.release(row, reason); return { blocked: reason }; };
+      if (this.quarantined(row.schedule_id)) return refuse("invalid_schedule");
+      let value: CoworkSchedule;
+      try { value = schedule(parent); } catch { this.quarantine(parent); return refuse("invalid_schedule"); }
+      // A claim is not authority: archive, grants, policy, source and branch are re-decided at the instant of flip.
+      const reason = this.blockedReason(value);
+      if (reason !== "execution_unavailable") return refuse(reason);
+      const effective = this.effective(value.workspaceId, value.scheduleId);
+      if (!this.run("UPDATE cowork_schedule_occurrences SET state='dispatching',reason=NULL WHERE occurrence_id=? AND state='claimed'", occurrenceId).changes) throw new CoworkError("request_conflict");
+      return { input: Object.freeze({ schedule: value, occurrence: occurrence({ ...row, state: "dispatching", reason: null }), effective }) };
+    });
+    return "blocked" in begun ? Promise.resolve({ status: "blocked", reason: begun.blocked }) : this.launch(port, begun.input, token);
+  }
+  private async launch(port: CoworkScheduleDispatchPort, input: CoworkScheduleDispatchInput, token: string): Promise<CoworkScheduleDispatchOutcome> {
+    const occurrenceId = input.occurrence.occurrenceId;
+    let result: unknown;
+    try { result = await port.start(input, token); }
+    catch {
+      // A throw asserts nothing launched (see the port contract). Guarded on state AND token: a cancel() or
+      // recover() that already recorded recovery_required is never clobbered back to pending.
+      return this.tx((): CoworkScheduleDispatchOutcome => {
+        const row = this.dispatching(occurrenceId, token);
+        if (!row) return { status: "uncertain" };
+        this.release(row, "execution_unavailable");
+        return { status: "not_started" };
+      });
+    }
+    return this.tx((): CoworkScheduleDispatchOutcome => {
+      const row = this.dispatching(occurrenceId, token);
+      if (!row) return { status: "uncertain" }; // cancel()/recover() got there first and recorded it durably
+      const runRef = ackedRunRef(result, occurrenceId, token);
+      if (runRef === undefined) { this.markUncertain(occurrenceId); return { status: "uncertain" }; } // an ack that cannot be trusted may still have launched
+      const receipt: CoworkScheduleDispatchReceipt = Object.freeze({ occurrenceId, runRef });
+      this.receipts.set(receipt, { occurrenceId, token });
+      return { status: "started", receipt };
+    });
+  }
+  /** dispatching -> handled, only with the receipt this instance's port issued for exactly this claim. A one-shot is never handled without one. */
+  handled(occurrenceId: string, token: string, receipt: CoworkScheduleDispatchReceipt): void {
     this.tx(() => {
+      const proof = this.receipts.get(receipt);
+      if (!proof || proof.occurrenceId !== occurrenceId || proof.token !== token) throw new CoworkError("request_conflict");
       const row = this.one("SELECT * FROM cowork_schedule_occurrences WHERE occurrence_id=? AND state='dispatching' AND claim_token=?", occurrenceId, token);
       if (!row) throw new CoworkError("request_conflict");
       this.run("UPDATE cowork_schedule_occurrences SET state='handled',claim_token=NULL WHERE occurrence_id=?", occurrenceId);
       const parent = this.one("SELECT * FROM cowork_schedules WHERE schedule_id=?", row.schedule_id)!;
       if (schedule(parent).definition.timing.kind === "once" && parent.state === "enabled") this.run("UPDATE cowork_schedules SET state='handled',revision=revision+1 WHERE schedule_id=?", row.schedule_id);
     });
+    this.receipts.delete(receipt);
+  }
+  /** dispatching -> uncertain for the execution owner reporting that it can no longer vouch for the work. Needs the claim token, never a receipt, and is never replayed. */
+  uncertain(occurrenceId: string, token: string): void {
+    this.tx(() => {
+      if (!this.dispatching(occurrenceId, token)) throw new CoworkError("request_conflict");
+      this.markUncertain(occurrenceId);
+    });
   }
   /** Only call once after host ownership is established, never upon opening a second DB handle. */
   recover(): void {
     this.tx(() => {
       if (this.closed) return;
-      for (const row of this.all("SELECT * FROM cowork_schedule_occurrences WHERE state='claimed'")) {
-        const pending = this.one("SELECT * FROM cowork_schedule_occurrences WHERE schedule_id=? AND state='pending'", row.schedule_id);
-        if (pending) {
-          this.run("UPDATE cowork_schedule_occurrences SET latest_due_at=?,missed_count=? WHERE occurrence_id=?", pending.latest_due_at, row.missed_count + pending.missed_count + 1, row.occurrence_id);
-          this.run("DELETE FROM cowork_schedule_occurrences WHERE occurrence_id=?", pending.occurrence_id);
-        }
-        this.run("UPDATE cowork_schedule_occurrences SET state='pending',claim_token=NULL WHERE occurrence_id=?", row.occurrence_id);
-      }
+      for (const row of this.all("SELECT * FROM cowork_schedule_occurrences WHERE state='claimed'")) this.release(row);
       this.run("UPDATE cowork_schedule_occurrences SET state='uncertain',reason='recovery_required' WHERE state='dispatching'");
     });
   }

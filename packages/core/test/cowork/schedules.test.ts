@@ -1,15 +1,37 @@
 import { authorityFixtureSessions } from "./committed-sessions";
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkSchedules, nextCoworkScheduleTime } from "../../src/cowork/schedules";
+import type { CoworkScheduleDispatchInput, CoworkScheduleDispatchOutcome, CoworkScheduleDispatchPort, CoworkScheduleStartResult } from "../../src/cowork/schedule-dispatch";
 import type { CoworkScheduleDefinition } from "@yanlinglabs/winter-protocol";
 const homes: string[] = [], handles: RuntimeStateDb[] = [];
 const caps = { toolClasses: ["read", "write"], hostServices: [], connectors: [], network: "internet" as const };
 afterEach(() => { handles.splice(0).forEach(db => db.close()); homes.splice(0).forEach(home => rmSync(home, { recursive: true, force: true })); });
+type Fixture = ReturnType<typeof fixture>;
+type Start = (input: CoworkScheduleDispatchInput, token: string) => CoworkScheduleStartResult | Promise<CoworkScheduleStartResult>;
+const ack: Start = (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token, runRef: "run-1" } });
+const deferred = <T,>() => { let resolve!: (value: T) => void, reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+/** A counting fake port. It records what the DURABLE row looked like at the instant `start` ran, to prove dispatching is committed first and no transaction is open. */
+function fakePort(db: RuntimeStateDb, start: Start = ack) {
+  const calls: { token: string; inTransaction: boolean; state: string | undefined; claimToken: string | null | undefined; input: CoworkScheduleDispatchInput }[] = [];
+  const port: CoworkScheduleDispatchPort = { start(input, token) {
+    const row = db.db.query("SELECT state,claim_token FROM cowork_schedule_occurrences WHERE occurrence_id=?").get(input.occurrence.occurrenceId) as { state: string; claim_token: string | null } | null;
+    calls.push({ token, inTransaction: db.db.inTransaction, state: row?.state, claimToken: row?.claim_token, input }); return start(input, token);
+  } };
+  return { port, calls };
+}
+const forgedReceipt = (occurrenceId: string) => ({ occurrenceId, runRef: "forged" });
+const receiptOf = (out: CoworkScheduleDispatchOutcome) => { if (out.status !== "started") throw new Error(`expected started, got ${out.status}`); return out.receipt; };
+/** One due occurrence (recurring `every 1s` unless a definition is given), materialized at t=1000. */
+function due(f: Fixture, definition = f.definition) {
+  const a = f.create(definition); f.time(1000); f.schedules.tick();
+  return { a, row: f.schedules.status(a.workspaceId, a.scheduleId).occurrences[0]! };
+}
+const durable = (f: Fixture, occurrenceId: string) => f.db.db.query("SELECT state,reason,claim_token FROM cowork_schedule_occurrences WHERE occurrence_id=?").get(occurrenceId) as { state: string; reason: string | null; claim_token: string | null };
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "winter-schedules-")); homes.push(home);
   const db = openRuntimeStateDb(home); handles.push(db); const records = new CoworkRepository(db);
@@ -19,7 +41,10 @@ function fixture() {
   const schedules = new CoworkSchedules(records, grants, () => time, () => branch);
   const definition: CoworkScheduleDefinition = { target: { kind: "project", projectId: made.value.workspace.ownerId }, sourceId: made.value.sources[0]!.sourceId, prompt: "fixture work", timing: { kind: "recurring", spec: "every 1s" }, timezone: "UTC", savedCeiling: caps, policy: "auto", overlap: "one-active-one-pending" };
   const create = (input = definition, request = "schedule") => schedules.create("fixture", made.workspaceId, request, input);
-  return { home, db, records, schedules, grants, made, definition, create, time: (value: number) => { time = value; }, revoke: () => { revoked = true; }, branch: (value: string) => { branch = value; } };
+  // A scheduler over the same file with an injected dispatch port: on this handle, or on an independent second handle.
+  const open = (port?: CoworkScheduleDispatchPort, handle: RuntimeStateDb = db) => new CoworkSchedules(handle === db ? records : new CoworkRepository(handle), grants, () => time, () => branch, undefined, port);
+  const peer = (port?: CoworkScheduleDispatchPort) => { const second = openRuntimeStateDb(home); handles.push(second); return { db: second, schedules: open(port, second) }; };
+  return { home, db, records, schedules, grants, made, definition, create, open, peer, time: (value: number) => { time = value; }, revoke: () => { revoked = true; }, branch: (value: string) => { branch = value; } };
 }
 test("metadata acceptance is idempotent and rejects substituted content, foreign targets and escalations", () => {
   const f = fixture(), a = f.create(); expect(f.create()).toEqual(a);
@@ -45,17 +70,19 @@ test("restart recovers a pre-dispatch claim and never replays dispatched uncerta
   const db = openRuntimeStateDb(f.home); handles.push(db); const restored = new CoworkSchedules(new CoworkRepository(db), f.grants, () => 3000); restored.recover();
   let rows = restored.status(a.workspaceId, a.scheduleId).occurrences; expect(rows).toHaveLength(1); expect(rows[0]!.state).toBe("pending"); expect(rows[0]!.missedCount).toBe(2);
   const token = restored.claim(a.workspaceId, a.scheduleId, first.occurrenceId)!; expect(() => restored.beginDispatch(first.occurrenceId, token)).toThrow("unsupported_topology");
-  // Inject the future dispatch boundary to exercise crash recovery; no execution was performed.
-  db.db.run("UPDATE cowork_schedule_occurrences SET state='dispatching' WHERE occurrence_id=?", [first.occurrenceId]); restored.recover();
+  // The dispatch boundary now exists only behind an injected port: a port that never answers leaves `dispatching` durable.
+  const hung = fakePort(db, () => new Promise<CoworkScheduleStartResult>(() => {})); void f.open(hung.port, db).beginDispatch(first.occurrenceId, token);
+  expect(hung.calls).toHaveLength(1); expect(restored.status(a.workspaceId, a.scheduleId).occurrences[0]!.state).toBe("dispatching"); restored.recover();
   rows = restored.status(a.workspaceId, a.scheduleId).occurrences; expect(rows[0]!.state).toBe("uncertain"); expect(rows[0]!.reason).toBe("recovery_required"); expect(restored.claim(a.workspaceId, a.scheduleId, first.occurrenceId)).toBeUndefined();
 });
-test("one-shots remain pending after restart until a dispatched completion receipt", () => {
+test("one-shots remain pending after restart until a dispatched completion receipt", async () => {
   const f = fixture(), a = f.create({ ...f.definition, timing: { kind: "once", at: 1000 } }); f.time(5000); f.schedules.tick();
   const restored = new CoworkSchedules(f.records, f.grants, () => 10000); restored.recover(); restored.tick(); const row = restored.status(a.workspaceId, a.scheduleId).occurrences[0]!;
   expect(row.state).toBe("pending"); expect(row.reason).toBe("execution_unavailable"); expect(restored.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
-  const token = restored.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(() => restored.handled(row.occurrenceId, token)).toThrow("request_conflict");
+  const token = restored.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(() => restored.handled(row.occurrenceId, token, forgedReceipt(row.occurrenceId))).toThrow("request_conflict");
   expect(() => restored.beginDispatch(row.occurrenceId, token)).toThrow("unsupported_topology");
-  f.db.db.run("UPDATE cowork_schedule_occurrences SET state='dispatching' WHERE occurrence_id=?", [row.occurrenceId]); restored.handled(row.occurrenceId, token); expect(restored.get(a.workspaceId, a.scheduleId).state).toBe("handled");
+  const dispatched = f.open(fakePort(f.db).port), out = await dispatched.beginDispatch(row.occurrenceId, token);
+  expect(restored.get(a.workspaceId, a.scheduleId).state).toBe("enabled"); dispatched.handled(row.occurrenceId, token, receiptOf(out)); expect(restored.get(a.workspaceId, a.scheduleId).state).toBe("handled");
 });
 test("archive, grants, branch precondition and unavailable execution block without Code sessions", () => {
   const f = fixture(), a = f.create({ ...f.definition, branchPrecondition: "feature/example" }); f.time(1000); f.schedules.tick();
@@ -222,4 +249,192 @@ test("overflowed persisted interval is invalid data and cannot starve healthy wo
   f.time(5000); f.schedules.tick();
   expect(f.schedules.status(poison.workspaceId, poison.scheduleId).schedule.state).toBe("quarantined");
   expect(f.schedules.status(healthy.workspaceId, healthy.scheduleId).occurrences[0]!.missedCount).toBe(4);
+});
+
+// ------------------------------------------------------------------ dispatch boundary behind an injected port
+test("without a port beginDispatch refuses before any write, handled cannot be forged and the RPC literal stays unavailable", () => {
+  const f = fixture(), { a, row } = due(f), token = f.schedules.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  expect(() => f.schedules.beginDispatch(row.occurrenceId, token)).toThrow("unsupported_topology"); expect(() => f.schedules.beginDispatch("unknown", "garbage")).toThrow("unsupported_topology");
+  expect(durable(f, row.occurrenceId)).toEqual({ state: "claimed", reason: null, claim_token: token });
+  expect(() => f.schedules.handled(row.occurrenceId, token, forgedReceipt(row.occurrenceId))).toThrow("request_conflict"); expect(() => f.schedules.uncertain(row.occurrenceId, token)).toThrow("request_conflict");
+  expect(durable(f, row.occurrenceId).state).toBe("claimed"); expect(f.schedules.status(a.workspaceId, a.scheduleId).execution).toBe("unavailable");
+});
+test("dispatching is durable before the port runs, no transaction is open across it, and the ack alone does not mark anything handled", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  expect(durable(f, row.occurrenceId).state).toBe("claimed"); const out = await s.beginDispatch(row.occurrenceId, token);
+  expect(p.calls).toHaveLength(1); const call = p.calls[0]!;
+  expect(call).toMatchObject({ token, inTransaction: false, state: "dispatching", claimToken: token });
+  expect(call.input.occurrence).toMatchObject({ occurrenceId: row.occurrenceId, scheduleId: a.scheduleId, state: "dispatching", reason: null, dueAt: row.dueAt, latestDueAt: row.latestDueAt, missedCount: row.missedCount });
+  expect(call.input.schedule).toEqual(s.get(a.workspaceId, a.scheduleId)); expect(call.input.effective).toEqual(s.effective(a.workspaceId, a.scheduleId)); expect(call.input.schedule.definition.prompt).toBe("fixture work");
+  expect(out.status).toBe("started"); expect(durable(f, row.occurrenceId)).toEqual({ state: "dispatching", reason: null, claim_token: token });
+  // The claim slot stays held: a coalesced pending cannot be claimed while this one is active.
+  f.time(5000); s.tick(); const pending = s.status(a.workspaceId, a.scheduleId).occurrences.find(value => value.state === "pending")!; expect(s.claim(a.workspaceId, a.scheduleId, pending.occurrenceId)).toBeUndefined();
+  expect(s.status(a.workspaceId, a.scheduleId).execution).toBe("unavailable");
+  s.handled(row.occurrenceId, token, receiptOf(out)); expect(durable(f, row.occurrenceId)).toEqual({ state: "handled", reason: null, claim_token: null }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
+  expect(s.claim(a.workspaceId, a.scheduleId, pending.occurrenceId)).toBeString();
+});
+test("crash window after claim: recovery returns the claim, the dead token is refused and a fresh claim dispatches exactly once", async () => {
+  const f = fixture(), { a, row } = due(f), stale = f.schedules.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const p = fakePort(f.db), restarted = f.peer(p.port); restarted.schedules.recover(); expect(durable(f, row.occurrenceId)).toEqual({ state: "pending", reason: null, claim_token: null }); expect(p.calls).toHaveLength(0);
+  const fresh = restarted.schedules.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(fresh).not.toBe(stale);
+  expect(() => restarted.schedules.beginDispatch(row.occurrenceId, stale)).toThrow("request_conflict"); expect(p.calls).toHaveLength(0); expect(durable(f, row.occurrenceId).claim_token).toBe(fresh);
+  expect((await restarted.schedules.beginDispatch(row.occurrenceId, fresh)).status).toBe("started"); expect(p.calls).toHaveLength(1);
+});
+test("crash window after begin: the in-flight launch becomes uncertain on recovery, a late ack changes nothing and nothing is replayed", async () => {
+  const f = fixture(), gate = deferred<CoworkScheduleStartResult>(), hung = fakePort(f.db, () => gate.promise), s = f.open(hung.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const inFlight = s.beginDispatch(row.occurrenceId, token); expect(durable(f, row.occurrenceId).state).toBe("dispatching"); expect(hung.calls).toHaveLength(1);
+  const restarted = f.peer(fakePort(f.db).port); restarted.schedules.recover(); restarted.schedules.recover();
+  expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+  gate.resolve({ kind: "started", receipt: { occurrenceId: row.occurrenceId, token, runRef: "late" } }); expect(await inFlight).toEqual({ status: "uncertain" });
+  expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+  f.time(9000); restarted.schedules.tick(); s.tick(); expect(restarted.schedules.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined();
+  const pending = s.status(a.workspaceId, a.scheduleId).occurrences.find(value => value.state === "pending")!; expect(s.claim(a.workspaceId, a.scheduleId, pending.occurrenceId)).toBeUndefined();
+  expect(() => s.beginDispatch(row.occurrenceId, token)).toThrow("request_conflict"); expect(hung.calls).toHaveLength(1);
+});
+test("crash window after the port ack: the receipt cannot complete a recovered occurrence and a one-shot stays enabled", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const receipt = receiptOf(await s.beginDispatch(row.occurrenceId, token)); f.peer().schedules.recover();
+  expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+  expect(() => s.handled(row.occurrenceId, token, receipt)).toThrow("request_conflict");
+  expect(durable(f, row.occurrenceId).state).toBe("uncertain"); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled"); expect(p.calls).toHaveLength(1);
+  expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined(); expect(() => s.uncertain(row.occurrenceId, token)).toThrow("request_conflict");
+});
+test("a port throw (sync or async) asserts nothing launched: the occurrence returns to pending/execution_unavailable and a fresh claim may retry", async () => {
+  for (const failure of [() => { throw new Error("secret-bearing detail"); }, () => Promise.reject(new Error("secret-bearing detail"))] as Start[]) {
+    const f = fixture(); let attempts = 0;
+    const p = fakePort(f.db, (input, token) => (++attempts === 1 ? failure(input, token) : ack(input, token))), s = f.open(p.port), { a, row } = due(f), first = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+    const out = await s.beginDispatch(row.occurrenceId, first); expect(out).toEqual({ status: "not_started" }); expect(JSON.stringify(out)).not.toContain("secret");
+    expect(durable(f, row.occurrenceId)).toEqual({ state: "pending", reason: "execution_unavailable", claim_token: null }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
+    expect(() => s.beginDispatch(row.occurrenceId, first)).toThrow("request_conflict"); expect(p.calls).toHaveLength(1);
+    const second = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(second).not.toBe(first); expect((await s.beginDispatch(row.occurrenceId, second)).status).toBe("started"); expect(p.calls).toHaveLength(2);
+  }
+});
+test("a failed start folds a pending interval materialized meanwhile instead of colliding, and never clobbers a recorded cancellation", async () => {
+  const f = fixture(), gate = deferred<CoworkScheduleStartResult>(), p = fakePort(f.db, () => gate.promise), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const inFlight = s.beginDispatch(row.occurrenceId, token); f.time(5000); s.tick(); expect(s.status(a.workspaceId, a.scheduleId).occurrences).toHaveLength(2);
+  gate.reject(new Error("refused")); expect(await inFlight).toEqual({ status: "not_started" });
+  const rows = s.status(a.workspaceId, a.scheduleId).occurrences; expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ occurrenceId: row.occurrenceId, state: "pending", reason: "execution_unavailable", latestDueAt: 5000, missedCount: 4 });
+  // Second schedule: cancellation lands while the launch is in flight; neither a throw nor an ack may undo recovery_required.
+  for (const settle of [(g: ReturnType<typeof deferred<CoworkScheduleStartResult>>, occurrenceId: string, claim: string) => g.reject(new Error("late")), (g: ReturnType<typeof deferred<CoworkScheduleStartResult>>, occurrenceId: string, claim: string) => g.resolve({ kind: "started", receipt: { occurrenceId, token: claim, runRef: "late" } })]) {
+    const g = fixture(), gated = deferred<CoworkScheduleStartResult>(), q = fakePort(g.db, () => gated.promise), t = g.open(q.port), one = due(g), claim = t.claim(one.a.workspaceId, one.a.scheduleId, one.row.occurrenceId)!;
+    const pendingOutcome = t.beginDispatch(one.row.occurrenceId, claim); t.cancel(one.a.workspaceId, one.a.scheduleId, 1); expect(durable(g, one.row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+    settle(gated, one.row.occurrenceId, claim); expect(await pendingOutcome).toEqual({ status: "uncertain" }); expect(durable(g, one.row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+  }
+});
+test("an uncertain or untrustworthy port answer is uncertain, never pending, and never handles a one-shot", async () => {
+  const wrong: Start[] = [() => ({ kind: "uncertain" }), (input, token) => ({ kind: "started", receipt: { occurrenceId: "another", token, runRef: "r" } }), (input) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token: "other-token", runRef: "r" } }),
+    (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token, runRef: "../escape" } }), (input, token) => ({ kind: "started", receipt: { occurrenceId: input.occurrence.occurrenceId, token } as any }),
+    () => ({}) as any, () => undefined as any, () => ({ kind: "started" }) as any];
+  for (const answer of wrong) {
+    const f = fixture(), p = fakePort(f.db, answer), s = f.open(p.port), { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+    expect(await s.beginDispatch(row.occurrenceId, token)).toEqual({ status: "uncertain" });
+    expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" }); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled");
+    expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined(); expect(p.calls).toHaveLength(1);
+  }
+});
+test("two DB handles on one file yield exactly one dispatch", async () => {
+  const f = fixture(), counted = { calls: 0 }, count: Start = (input, token) => { counted.calls++; return ack(input, token); };
+  const a1 = fakePort(f.db, count), second = f.peer(); const b1 = fakePort(second.db, count), left = f.open(a1.port), right = second.schedules; const rightWithPort = f.open(b1.port, second.db);
+  const { a, row } = due(f); const token = left.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  expect(rightWithPort.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined(); expect(right.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined();
+  // Even holding the winner's token, the loser cannot start a second dispatch once the winner flipped the row.
+  const winner = left.beginDispatch(row.occurrenceId, token); expect(() => rightWithPort.beginDispatch(row.occurrenceId, token)).toThrow("request_conflict"); expect((await winner).status).toBe("started");
+  expect(() => rightWithPort.beginDispatch(row.occurrenceId, token)).toThrow("request_conflict"); expect(counted.calls).toBe(1);
+  // Reverse interleaving on a second occurrence of another schedule: the other handle begins first.
+  const g = fixture(), c = { calls: 0 }, once: Start = (input, tok) => { c.calls++; return ack(input, tok); }, o = g.peer(), x = g.open(fakePort(g.db, once).port), y = g.open(fakePort(o.db, once).port, o.db), two = due(g), t2 = x.claim(two.a.workspaceId, two.a.scheduleId, two.row.occurrenceId)!;
+  const first = y.beginDispatch(two.row.occurrenceId, t2); expect(() => x.beginDispatch(two.row.occurrenceId, t2)).toThrow("request_conflict"); await first; expect(c.calls).toBe(1);
+});
+test("a wrong, unknown or reused token is refused and leaves the claim untouched", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  expect(() => s.beginDispatch(row.occurrenceId, "wrong-token")).toThrow("request_conflict"); expect(() => s.beginDispatch(row.occurrenceId, "")).toThrow("request_conflict"); expect(() => s.beginDispatch("unknown-occurrence", token)).toThrow("request_conflict");
+  expect(durable(f, row.occurrenceId)).toEqual({ state: "claimed", reason: null, claim_token: token }); expect(p.calls).toHaveLength(0);
+  // A token from an earlier claim of the same occurrence is dead once the claim is released and taken again.
+  s.recover(); const fresh = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!; expect(fresh).not.toBe(token);
+  expect(() => s.beginDispatch(row.occurrenceId, token)).toThrow("request_conflict"); expect(durable(f, row.occurrenceId).claim_token).toBe(fresh); expect(p.calls).toHaveLength(0);
+  const out = await s.beginDispatch(row.occurrenceId, fresh); s.handled(row.occurrenceId, fresh, receiptOf(out));
+  expect(() => s.beginDispatch(row.occurrenceId, fresh)).toThrow("request_conflict"); expect(() => s.beginDispatch(row.occurrenceId, token)).toThrow("request_conflict");
+  expect(() => s.handled(row.occurrenceId, fresh, receiptOf(out))).toThrow("request_conflict"); expect(p.calls).toHaveLength(1);
+});
+test("blockedReason is re-run at begin: a claim does not outlive archive, revoked grants or source, branch drift, shutdown or a poisoned definition", async () => {
+  const blocked = async (name: string, change: (f: Fixture, a: { workspaceId: string; scheduleId: string }, s: CoworkSchedules) => void, reason: string, definition?: (f: Fixture) => CoworkScheduleDefinition) => {
+    const f = fixture(), p = fakePort(f.db), s = f.open(p.port), { a, row } = due(f, definition?.(f)), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+    change(f, a, s); const out = await s.beginDispatch(row.occurrenceId, token);
+    expect({ name, out } as unknown).toEqual({ name, out: { status: "blocked", reason } }); expect({ name, calls: p.calls.length }).toEqual({ name, calls: 0 });
+    expect({ name, ...durable(f, row.occurrenceId) }).toEqual({ name, state: "pending", reason, claim_token: null });
+    return { f, a, s, row, p };
+  };
+  await blocked("archived workspace", (f, a) => f.db.db.run("UPDATE cowork_workspaces SET state='archived' WHERE workspace_id=?", [a.workspaceId]), "archived");
+  await blocked("revoked grant", f => f.revoke(), "authority_denied");
+  await blocked("revoked source", (f, a) => f.records.removeSource({ principalId: "fixture", requestId: "revoke", expectedRevision: 1 }, a.workspaceId, f.definition.sourceId, true), "source_unavailable");
+  await blocked("shutdown", (_f, _a, s) => s.beginShutdown(), "shutdown");
+  const drift = await blocked("branch mismatch", f => f.branch("main"), "branch_mismatch", f => ({ ...f.definition, branchPrecondition: "feature/example" }));
+  await blocked("poisoned definition", (f, a) => f.db.db.run("UPDATE cowork_schedules SET definition_json='{poison' WHERE schedule_id=?", [a.scheduleId]), "invalid_schedule");
+  // The refusal is not terminal: once the world agrees again, a fresh claim dispatches.
+  drift.f.branch("feature/example"); const again = drift.s.claim(drift.a.workspaceId, drift.a.scheduleId, drift.row.occurrenceId)!; expect(again).toBeString();
+  expect((await drift.s.beginDispatch(drift.row.occurrenceId, again)).status).toBe("started"); expect(drift.p.calls).toHaveLength(1);
+});
+test("a blocked begin folds a pending interval materialized after the claim", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  f.time(5000); s.tick(); f.branch("main"); f.db.db.run("UPDATE cowork_workspaces SET state='archived' WHERE workspace_id=?", [a.workspaceId]);
+  expect(await s.beginDispatch(row.occurrenceId, token)).toEqual({ status: "blocked", reason: "archived" });
+  const rows = s.status(a.workspaceId, a.scheduleId).occurrences; expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ state: "pending", reason: "archived", latestDueAt: 5000, missedCount: 4 }); expect(p.calls).toHaveLength(0);
+});
+test("recover() turns dispatching into uncertain and never replays, while a pre-dispatch claim is merely returned", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), left = due(f), claimedToken = s.claim(left.a.workspaceId, left.a.scheduleId, left.row.occurrenceId)!;
+  const out = await s.beginDispatch(left.row.occurrenceId, claimedToken); receiptOf(out);
+  const owner = f.peer(fakePort(f.db).port); owner.schedules.recover(); owner.schedules.recover();
+  expect(durable(f, left.row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" }); expect(owner.schedules.claim(left.a.workspaceId, left.a.scheduleId, left.row.occurrenceId)).toBeUndefined();
+  f.time(20000); owner.schedules.tick(); owner.schedules.recover(); const pending = owner.schedules.status(left.a.workspaceId, left.a.scheduleId).occurrences.find(value => value.state === "pending")!;
+  expect(owner.schedules.claim(left.a.workspaceId, left.a.scheduleId, pending.occurrenceId)).toBeUndefined(); expect(durable(f, left.row.occurrenceId).state).toBe("uncertain"); expect(p.calls).toHaveLength(1);
+});
+test("a one-shot is never marked handled without the receipt its own port issued for its own claim", async () => {
+  const f = fixture(), p = fakePort(f.db), s = f.open(p.port), other = f.peer(fakePort(f.db).port).schedules, { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const out = await s.beginDispatch(row.occurrenceId, token), receipt = receiptOf(out); const dispatching = () => { expect(durable(f, row.occurrenceId).state).toBe("dispatching"); expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled"); };
+  expect(() => s.handled(row.occurrenceId, token, undefined as any)).toThrow("request_conflict"); dispatching();
+  expect(() => s.handled(row.occurrenceId, token, forgedReceipt(row.occurrenceId))).toThrow("request_conflict"); dispatching();
+  expect(() => s.handled(row.occurrenceId, token, { ...receipt })).toThrow("request_conflict"); dispatching();
+  expect(() => s.handled(row.occurrenceId, "wrong-token", receipt)).toThrow("request_conflict"); dispatching();
+  expect(() => s.handled("another-occurrence", token, receipt)).toThrow("request_conflict"); dispatching();
+  expect(() => other.handled(row.occurrenceId, token, receipt)).toThrow("request_conflict"); dispatching();
+  s.handled(row.occurrenceId, token, receipt); expect(durable(f, row.occurrenceId)).toEqual({ state: "handled", reason: null, claim_token: null }); expect(s.get(a.workspaceId, a.scheduleId)).toMatchObject({ state: "handled", revision: 2 });
+  expect(() => s.handled(row.occurrenceId, token, receipt)).toThrow("request_conflict");
+});
+test("the execution owner can report dispatching work uncertain, with the claim token only, once", async () => {
+  const f = fixture(), s = f.open(fakePort(f.db).port), { a, row } = due(f, { ...f.definition, timing: { kind: "once", at: 1000 } }), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  expect(() => s.uncertain(row.occurrenceId, token)).toThrow("request_conflict"); const receipt = receiptOf(await s.beginDispatch(row.occurrenceId, token));
+  expect(() => s.uncertain(row.occurrenceId, "wrong-token")).toThrow("request_conflict"); expect(durable(f, row.occurrenceId).state).toBe("dispatching");
+  s.uncertain(row.occurrenceId, token); expect(durable(f, row.occurrenceId)).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+  expect(() => s.handled(row.occurrenceId, token, receipt)).toThrow("request_conflict"); expect(() => s.uncertain(row.occurrenceId, token)).toThrow("request_conflict");
+  expect(s.get(a.workspaceId, a.scheduleId).state).toBe("enabled"); expect(s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)).toBeUndefined();
+});
+test("shutdown after dispatching still lets the in-flight dispatch settle but admits no new claim", async () => {
+  const f = fixture(), gate = deferred<CoworkScheduleStartResult>(), s = f.open(fakePort(f.db, () => gate.promise).port), { a, row } = due(f), token = s.claim(a.workspaceId, a.scheduleId, row.occurrenceId)!;
+  const inFlight = s.beginDispatch(row.occurrenceId, token); s.beginShutdown(); gate.resolve({ kind: "started", receipt: { occurrenceId: row.occurrenceId, token, runRef: "drain" } });
+  const receipt = receiptOf(await inFlight); s.handled(row.occurrenceId, token, receipt); expect(durable(f, row.occurrenceId).state).toBe("handled");
+  f.time(9000); s.tick(); const pending = s.status(a.workspaceId, a.scheduleId).occurrences.find(value => value.state === "pending"); expect(pending).toBeUndefined();
+});
+
+const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", "..", "..", ...parts);
+function sourceFiles(directory: string): string[] {
+  return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
+}
+test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has no implementation and the service still builds schedules without one", () => {
+  const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "schedule-dispatch.ts"), owner = join(packages, "core", "src", "cowork", "schedules.ts"), service = join(packages, "core", "src", "cowork", "service.ts");
+  expect(existsSync(module)).toBe(true);
+  const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
+  expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module); expect(sources).toContain(owner);
+  const needles = ["schedule-dispatch", "CoworkScheduleDispatchPort", "CoworkScheduleDispatchInput", "CoworkScheduleDispatchReceipt", "CoworkScheduleDispatchOutcome", "CoworkScheduleStartResult", "CoworkScheduleStartReceipt", "beginDispatch"];
+  for (const file of sources.filter(candidate => candidate !== module && candidate !== owner)) {
+    const text = readFileSync(file, "utf8");
+    for (const needle of needles) expect(`${file.slice(packages.length)}:${needle}:${text.includes(needle)}`).toBe(`${file.slice(packages.length)}:${needle}:false`);
+  }
+  // The one reference is erased at runtime: schedules.ts imports the port types with `import type`, and the module has no runtime code at all.
+  const own = readFileSync(owner, "utf8"), imports = own.split("\n").filter(line => line.includes("schedule-dispatch"));
+  expect(imports).toHaveLength(1); expect(imports[0]).toMatch(/^import type \{[^}]*\} from "\.\/schedule-dispatch";$/);
+  const types = readFileSync(module, "utf8"); expect(types).not.toMatch(/^(export\s+(const|let|var|function|class|enum|default|async)|import\s+(?!type\s))/m);
+  expect([...types.matchAll(/^import .* from "([^"]+)"/gm)].map(match => match[1]).sort()).toEqual(["./types", "@yanlinglabs/winter-protocol"]);
+  // No implementation of the port anywhere in src, and the service constructs CoworkSchedules with no dispatch argument.
+  for (const file of sources) expect(`${basename(file)}:${/implements\s+CoworkScheduleDispatchPort|:\s*CoworkScheduleDispatchPort\s*=/.test(readFileSync(file, "utf8"))}`).toBe(`${basename(file)}:false`);
+  expect(readFileSync(service, "utf8")).toContain("new CoworkSchedules(records, host.grants, scheduleNow)");
+  expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false); expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/schedule-dispatch|from "\.\/cowork/);
 });
