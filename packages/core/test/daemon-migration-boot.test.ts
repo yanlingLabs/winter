@@ -15,7 +15,7 @@
 // register as "the default" — it overrides `isDefaultWinterHome`'s `homedir()` call, so the real
 // home directory is never consulted, let alone touched, by anything below.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
@@ -208,6 +208,37 @@ describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () =
     // `winter migrate --from` advice, which would just hit that same non-pristine refusal.
     expect(migrationLines[0]).toContain(`mv ${home} ${home}.bak`);
     expect(migrationLines[0]).not.toContain("winter migrate --from");
+  });
+
+  test("(c2) Cowork storage in the legacy source is never auto-copied: boot continues, migrates nothing, and logs exactly one 'skipped' line (docs/cowork-execution-contracts.md, Migration B)", async () => {
+    const parent = tempParent();
+    const home = join(parent, ".winter");
+    const legacyHome = join(parent, "legacy");
+    seedLegacyHome(legacyHome, (root) => {
+      mkdirSync(join(root, "cowork", "workspaces", "ws_fixture", "shared"), { recursive: true });
+      writeFileSync(join(root, "cowork", "workspaces", "ws_fixture", "data.ext4"), "guest volume bytes");
+    });
+
+    const capture = captureConsoleError();
+    try {
+      daemon = await startDaemon({
+        home,
+        secrets: new FileSecretStore(join(parent, "secrets")),
+        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")), homedirOverride: () => parent },
+        agentProvider: null,
+      });
+    } finally {
+      capture.restore();
+    }
+
+    expect(readMigrationManifest(home)).toBeNull(); // nothing migrated
+    const migrationLines = capture.lines.filter((l) => l.startsWith("migration:"));
+    expect(migrationLines.length).toBe(1);
+    expect(migrationLines[0]).toContain("holds Cowork storage");
+    expect(migrationLines[0]).toContain("auto-migration skipped");
+    expect(migrationLines[0]).toContain(legacyHome);
+    expect(existsSync(join(home, "cowork", "workspaces", "ws_fixture", "data.ext4"))).toBe(false);
+    expect(existsSync(join(legacyHome, "cowork", "workspaces", "ws_fixture", "data.ext4"))).toBe(true); // the source is left alone
   });
 
   test("(d) fix wave C3 (P9c-17): a residual throw during Migration B becomes a typed migration_failed refusal, not a crash — and the manifest is left in-progress for --resume", async () => {

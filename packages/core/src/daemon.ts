@@ -9,6 +9,7 @@ import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./wi
 import { acquireLock, type Lock } from "./lock";
 import { keychainService, resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
+import { inspectCoworkSource } from "./migration/cowork-exclusion";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
@@ -544,7 +545,12 @@ export async function startDaemon(opts: {
       console.error(`migration: ${home} is not the default home for the ${profile} profile — auto-migration skipped; run \`winter migrate --from ${legacyHome}\` to migrate it by hand`);
     } else {
       const check = describeHomePristineness(home);
-      if (check.pristine) {
+      // Cowork storage in the legacy source is never auto-copied (`migration/cowork-exclusion.ts`): skip
+      // with one line, like a non-pristine home, rather than refusing to boot.
+      const coworkSource = check.pristine ? inspectCoworkSource(legacyHome) : undefined;
+      if (coworkSource?.present) {
+        console.error(`migration: a legacy home was found at ${legacyHome}, but it holds Cowork storage (${coworkSource.detail}) — auto-migration skipped; Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`);
+      } else if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
         // Fix wave C3 (P9c-17, Critical): most per-item failures are already absorbed inside
         // `runMigrationB` itself (a single Keychain item never aborts the run — see
