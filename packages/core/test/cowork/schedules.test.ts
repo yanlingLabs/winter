@@ -463,6 +463,32 @@ const parse = (file: string) => ts.createSourceFile(file, readFileSync(file, "ut
 type Wrapper = ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion | ts.SatisfiesExpression;
 const isWrapper = (node: ts.Node): node is Wrapper => ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node);
 const unwrap = (node: ts.Expression): ts.Expression => isWrapper(node) ? unwrap(node.expression) : node;
+/** Everything the AST scan refuses in one `src/` file. Exported to the snippet test below so each rule has a failing and a passing case. */
+function wiringProblems(tree: ts.SourceFile, name: string, portIndex: number): { problems: string[]; constructions: number } {
+  const problems: string[] = []; let constructions = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node)) {
+      const callee = unwrap(node.expression);
+      if (ts.isIdentifier(callee) && callee.text === "CoworkSchedules") {
+        constructions++; const args = node.arguments ?? [];
+        if (args.some(ts.isSpreadElement)) problems.push(`${name}: spread argument`);
+        if (args.length > portIndex) problems.push(`${name}: ${args.length} arguments reach the port position ${portIndex}`);
+      }
+    } else if (ts.isIdentifier(node) && node.text === "CoworkSchedules") {
+      let top: ts.Node = node; while (top.parent && isWrapper(top.parent)) top = top.parent;
+      const parent = top.parent, aliased = ts.isImportSpecifier(parent) && parent.propertyName?.text === "CoworkSchedules"; // `import { CoworkSchedules as X }` would hide later constructions
+      // `typeof CoworkSchedules` is a pure type-level use and cannot construct anything.
+      const allowed = !aliased && (ts.isImportSpecifier(parent) || ts.isTypeReferenceNode(parent) || ts.isTypeQueryNode(parent) || (ts.isNewExpression(parent) && parent.expression === top));
+      if (!allowed) problems.push(`${name}: CoworkSchedules used as ${ts.SyntaxKind[parent.kind]}`);
+    } else if (ts.isStringLiteralLike(node) && node.text === "CoworkSchedules") {
+      // `new (x as any)["CoworkSchedules"](...)` reaches the class by name without an identifier; only schedules.ts may spell the name as a string.
+      problems.push(`${name}: the string literal "CoworkSchedules"`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return { problems, constructions };
+}
 /*
  * Anti-wiring pin for the schedule dispatch port.
  *
@@ -503,25 +529,21 @@ test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has 
   expect(portIndex).toBeGreaterThan(2);
   const problems: string[] = []; let constructions = 0;
   for (const file of sources.filter(candidate => candidate !== module && candidate !== owner)) {
-    const tree = parse(file);
-    const visit = (node: ts.Node): void => {
-      if (ts.isNewExpression(node)) {
-        const callee = unwrap(node.expression);
-        if (ts.isIdentifier(callee) && callee.text === "CoworkSchedules") {
-          constructions++; const args = node.arguments ?? [];
-          if (args.some(ts.isSpreadElement)) problems.push(`${relative(file)}: spread argument`);
-          if (args.length > portIndex) problems.push(`${relative(file)}: ${args.length} arguments reach the port position ${portIndex}`);
-        }
-      } else if (ts.isIdentifier(node) && node.text === "CoworkSchedules") {
-        let top: ts.Node = node; while (top.parent && isWrapper(top.parent)) top = top.parent;
-        const parent = top.parent, aliased = ts.isImportSpecifier(parent) && parent.propertyName?.text === "CoworkSchedules"; // `import { CoworkSchedules as X }` would hide later constructions
-        const allowed = !aliased && (ts.isImportSpecifier(parent) || ts.isTypeReferenceNode(parent) || (ts.isNewExpression(parent) && parent.expression === top));
-        if (!allowed) problems.push(`${relative(file)}: CoworkSchedules used as ${ts.SyntaxKind[parent.kind]}`);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(tree);
+    const scanned = wiringProblems(parse(file), relative(file), portIndex); constructions += scanned.constructions; problems.push(...scanned.problems);
   }
   expect(problems).toEqual([]); expect(constructions).toBeGreaterThan(0);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false); expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/schedule-dispatch|from "\.\/cowork/);
+});
+test("anti-wiring scan: each rule has a passing and a failing case", () => {
+  const scan = (text: string) => wiringProblems(ts.createSourceFile("snippet.ts", text, ts.ScriptTarget.Latest, true), "snippet", 5);
+  const imported = 'import { CoworkSchedules } from "./schedules";\n';
+  // Passing: the production construction, an extra argument below the port position, and pure type-level uses.
+  for (const ok of ["new CoworkSchedules(a, b, c);", "new CoworkSchedules(a, b, c, d, e);", "type T = typeof CoworkSchedules;", "let x: typeof CoworkSchedules; let y: CoworkSchedules;", "const x = null as unknown as CoworkSchedules; new CoworkSchedules(a);", "// \"CoworkSchedules\" and 'CoworkSchedules' in a comment, and `CoworkSchedules`\nnew CoworkSchedules(a, b, c);"])
+    expect({ ok, problems: scan(imported + ok).problems }).toEqual({ ok, problems: [] });
+  expect(scan(imported + "new CoworkSchedules(a, b, c);").constructions).toBe(1);
+  // Failing: the port position filled, spreads, other ways to reach the class, and its name spelled as a string.
+  for (const bad of ["new CoworkSchedules(a, b, c, d, e, port);", "new CoworkSchedules(...args);", "new CoworkSchedules(a, ...rest);", "new (CoworkSchedules as any)(a, b, c, d, e, port);", "const A = CoworkSchedules; new A(a);", "class W extends CoworkSchedules {}",
+    "Reflect.construct(CoworkSchedules, []);", 'new (x as any)["CoworkSchedules"](a, b, c, d, e, port);', "new (x as any)['CoworkSchedules'](a);", "new (x as any)[`CoworkSchedules`](a);", 'const n = "CoworkSchedules";'])
+    expect({ bad, rejected: scan(imported + bad).problems.length > 0 }).toEqual({ bad, rejected: true });
+  expect(scan('import { CoworkSchedules as Hidden } from "./schedules"; new Hidden(a);').problems.length).toBeGreaterThan(0);
 });
