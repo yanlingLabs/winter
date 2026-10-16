@@ -19,7 +19,7 @@ The prompt is not enforcement. The spec is explicit that none of its acceptance 
 
 <!-- summary:begin -->
 - **36** allowlisted tools: **29** run in the guest and **7** are host brokers.
-- **16** of them are withheld by default until the host declares the readiness key they need.
+- **21** of them are withheld by default until the host declares the readiness key they need.
 - **15** tools and **7** capability servers are not offered.
 - **13** open decisions for the owner; **4** settled by the spec.
 <!-- summary:end -->
@@ -29,7 +29,7 @@ The prompt is not enforcement. The spec is explicit that none of its acceptance 
 The spec says to "avoid independently maintained copies of policy text: generate from the same host record". So each fact has exactly one generator, and this profile does not duplicate the others:
 
 - **The connected sources** (guest path, access, readiness), **the effective ceiling** and **the completion (push) default** come from `CoworkCurrentContextPlanner` ([current-context planner](cowork-current-context-planner.md)), from the canonical host records, on every call. This module generates none of them. The prompt only tells the model that the "Cowork current host context" block exists and is authoritative.
-- **Which tools an incarnation is offered** comes from one function, `coworkOfferedTools`. The prompt builder calls it, and the host must build its tool list from the same call. A test checks that the tools the prompt names are exactly the tools offered, across every combination of ownership, network, search, policy, ceiling class, readiness and withheld tools.
+- **Which tools an incarnation is offered** comes from one function, `coworkOfferedTools`. The prompt builder calls it, and the host must build its tool list from the same call. A test checks, across every combination of ownership, network, search, policy, ceiling class, readiness, withheld tools and Tool Search, that the prompt never names an un-offered tool and names each of its 12 always-named tools (`Agent`, `SendMessage`, `ListAgents`, `TaskStop`, the four schedule tools, `AskUserQuestion`, `WebFetch`, `Search`, `WebSearch`) if and only if it is offered. `ExitPlanMode`, `Workflow` and `ToolSearch` are checked by their own conditions.
 
 ## The prompt
 
@@ -50,7 +50,7 @@ A workspace title is displayed, never refused: it is normalised (NFC), runs of s
 
 ### The full text
 
-*Generated.* This is what the builder renders for a Project in `auto` policy with every readiness key declared, so it shows the finished prompt. With nothing declared the Scheduling section, the Workflow mention and the plan-mode `ExitPlanMode` mention disappear, and so does every other sentence that names a tool whose supporting piece is missing.
+*Generated.* This is what the builder renders for a Project in `auto` policy with every readiness key declared, so it shows the finished prompt. With nothing declared the opening line stops talking about reading files and running commands, the Scheduling section, the web paragraph, the Workflow mention and the plan-mode `ExitPlanMode` mention disappear, and so does every other sentence that names a tool whose supporting piece is missing.
 
 <!-- prompt-sample:begin -->
 ```text
@@ -80,7 +80,7 @@ Files under /workspace and the tools you install survive the workspace being sto
 
 # Guidance and memory
 The workspace's shared guidance, and the WINTER.md files that apply to the source and directory you are working in, are loaded for you, so you do not need to read them to follow them. Guidance shapes how you work and can narrow what you do. It cannot widen what you are allowed to do, turn a tool on, or approve anything. A source's hooks, plugins and tool servers stay off until the user trusts that source.
-You cannot edit the shared guidance with your file tools. If it should change, tell the user what to change; an edit needs their approval.
+You cannot edit the shared guidance yourself. If it should change, tell the user what to change; an edit needs their approval.
 /workspace/.winter/memory is shared by every conversation in this Project. It holds plain files for knowledge that should outlast this conversation. You choose how it is organised, and you agree with the other conversations who edits what. Everything in it can be read by every conversation in the workspace, so keep secrets out.
 
 # What needs approval
@@ -137,20 +137,22 @@ It does not mention Mac-side builds (the spec says not to claim that bridge exis
 
 ### Readiness: what fails closed
 
-A tool whose supporting piece does not exist is not offered unless the host declares the piece ready. The default is nothing declared.
+A tool whose supporting piece does not exist is not offered unless the host declares the piece ready. The default is nothing declared. The table lists exactly which tools fail closed. Every other row is offered by default, on the judgment that its host side already exists (peer-messaging authority, approval and question cards) or that it needs no host service (the task list, task output and stop, ToolSearch, the MCP bookkeeping tools, which also depend on an admitted server).
 
 *Generated.*
 
 <!-- readiness:begin -->
 | Readiness key | What must exist | Tools withheld until it is declared |
 | --- | --- | --- |
-| `guest-compartment` | the confined Linux tool compartment: the shell and the file helper (unsupported confinement refuses, never plain unsandboxed Bash) | `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `NotebookEdit`, `Monitor`, `Workflow`, `LSP` |
+| `guest-compartment` | the confined Linux tool compartment: the shell and the file helper (unsupported confinement refuses, never plain unsandboxed Bash) | `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `NotebookEdit`, `Monitor`, `Workflow`, `LSP`, `Skill` |
 | `guest-tool-families` | the guest tool families beyond Read, Edit, Write and Bash (Glob, Grep, NotebookEdit, Monitor), which the guest launch leaves unavailable | `Glob`, `Grep`, `NotebookEdit`, `Monitor` |
 | `linux-workflow` | Linux Workflow confinement | `Workflow` |
 | `guest-lsp` | a confined Linux guest language server | `LSP` |
 | `skill-surface` | a skill surface that omits the seeded Mac computer-use skill | `Skill` |
 | `plan-transition` | a host-staged plan-to-ask/auto transition that the guest runtime accepts as a policy change | `ExitPlanMode` |
 | `scheduler-bridge` | the guest Cron bridge to the host scheduler | `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup` |
+| `host-provider-transport` | the host provider transport: bounded provider turn requests run by the daemon with host-held credentials, for the main, subagent and auxiliary models and keyed search | `Agent`, `WebFetch`, `Search`, `advisor` |
+| `host-network-endpoint` | the host-owned network endpoint that authorizes each numeric destination for the guest | `WebFetch`, `WebSearch` |
 <!-- readiness:end -->
 
 ### The allowlist
@@ -169,9 +171,9 @@ A tool whose supporting piece does not exist is not offered unless the host decl
 | `NotebookEdit` | guest | read + write | none | A notebook tool; the contract names notebook tools among the file helpers. Gated like Edit. | [contracts: Authority and Linux execution boundary](cowork-execution-contracts.md#authority-and-linux-execution-boundary) | Needs `guest-compartment`, `guest-tool-families`. Decision D13. |
 | `Monitor` | guest | execute | none | A task-owned monitor counts as workspace occupancy, so it is a guest tool. It runs commands, so it is gated like Bash. | [spec: Activity, cold stop and recovery](cowork-spec.md#activity-cold-stop-and-recovery) | Needs `guest-compartment`, `guest-tool-families`. Decision D13. |
 | `Workflow` | guest | execute | not under plan | Linux Workflow execution; it still asks under auto and ordinary prompt policies and is denied under plan. | [contracts: Approval policies](cowork-execution-contracts.md#approval-policies)<br>[contracts: Guest router, file channel and immutable runtime](cowork-execution-contracts.md#guest-router-file-channel-and-immutable-runtime) | Needs `guest-compartment`, `linux-workflow`. Decision D13. |
-| `Agent` | guest | none | none | Subagents run inside the owning VM and inherit its access ceiling. | [spec: Accepted behavior](cowork-spec.md#accepted-behavior) |  |
+| `Agent` | guest | none | none | Subagents run inside the owning VM and inherit its access ceiling. Their model calls go through the host provider transport. | [spec: Accepted behavior](cowork-spec.md#accepted-behavior)<br>[contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways) | Needs `host-provider-transport`. |
 | `LSP` | guest | read | none | Language servers are Linux processes in the guest, resolving guest paths. | [contracts: Trust and extensions](cowork-execution-contracts.md#trust-and-extensions)<br>[contracts: Guest router, file channel and immutable runtime](cowork-execution-contracts.md#guest-router-file-channel-and-immutable-runtime) | Needs `guest-compartment`, `guest-lsp`. Decision D15. |
-| `Skill` | guest | none | none | Approved skill content is exposed as read-only resources; scripts run as tool code. The seeded Mac computer-use skill is omitted. | [contracts: Trust and extensions](cowork-execution-contracts.md#trust-and-extensions) | Needs `skill-surface`. |
+| `Skill` | guest | none | none | Approved skill content is exposed as read-only resources; scripts run as tool code in the compartment. The seeded Mac computer-use skill is omitted. | [contracts: Trust and extensions](cowork-execution-contracts.md#trust-and-extensions) | Needs `guest-compartment`, `skill-surface`. |
 | `ToolSearch` | guest | none | only when Tool Search is on and something is deferred | Loads deferred tool schemas. The runtime advertises it only when Tool Search is on and something is deferred. | `DISPATCH_BUILTIN_TOOLS` in `mode-options.ts` | Decision D2. |
 | `TaskCreate` | guest | none | none | The conversation's own to-do list; no file, host or network effect. | `KNOWN_RUNTIME_BUILTINS` in `mode-options.ts` | Decision D2. |
 | `TaskGet` | guest | none | none | Reads the conversation's own to-do list. | `KNOWN_RUNTIME_BUILTINS` in `mode-options.ts` | Decision D2. |
@@ -180,10 +182,10 @@ A tool whose supporting piece does not exist is not offered unless the host decl
 | `TaskOutput` | guest | none | none | Bounded read of a task's or subagent's output, without opening the SDK store. | [contracts: Authority and Linux execution boundary](cowork-execution-contracts.md#authority-and-linux-execution-boundary) | Decision D8. |
 | `TaskStop` | guest | none | none | Own tasks and descendants only. Membership in a Project never authorizes stopping a sibling conversation, and mayContactCoworkPeer already refuses the host-session leg. | [contracts: Session messaging and creation boundaries](cowork-execution-contracts.md#session-messaging-and-creation-boundaries)<br>`mayContactCoworkPeer` in [`messaging-authority.ts`](../packages/core/src/cowork/messaging-authority.ts) |  |
 | `ExitPlanMode` | guest | none | only under plan | Presents a finished plan for the user's approval from a plan-policy conversation. Approval widens the policy, so the host must stage the transition first. | [contracts: Approval policies](cowork-execution-contracts.md#approval-policies)<br>`setPolicy` in [`plan-bridge.ts`](../packages/core/src/runtime-sdk/plan-bridge.ts)<br>`stale_acknowledgment` in [`guest-runtime.ts`](../packages/core/src/cowork/guest-runtime.ts) | Needs `plan-transition`. Decision D3. |
-| `WebFetch` | guest | none | provider gateway; network policy | Fetch obeys the network policy; the page-digest model is a separate authorized provider route. | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways)<br>[contracts: Network and mounted-folder behavior](cowork-execution-contracts.md#network-and-mounted-folder-behavior) |  |
-| `Search` | guest | none | provider gateway; network policy; only while an Exa key is stored | Exa answer search, a separate authorized provider route. Offered only while an Exa key is stored, and not in a workspace with no network (D17). | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways) | Decision D10. |
-| `WebSearch` | guest | none | network policy; only while no Exa key is stored | The runtime's own web search over the policy-checked network. Offered only while no Exa key is stored. | [spec: Credentials, host access and revocation](cowork-spec.md#credentials-host-access-and-revocation) | Decision D10. |
-| `advisor` | guest | none | provider gateway | A reviewer-model consult; the contract lists advisor among the separately authorized provider routes. | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways) |  |
+| `WebFetch` | guest | none | provider gateway; network policy | Fetch obeys the network policy; the page-digest model is a separate authorized provider route. | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways)<br>[contracts: Network and mounted-folder behavior](cowork-execution-contracts.md#network-and-mounted-folder-behavior) | Needs `host-provider-transport`, `host-network-endpoint`. |
+| `Search` | guest | none | provider gateway; network policy; only while an Exa key is stored | Exa answer search, a separate authorized provider route. Offered only while an Exa key is stored, and not in a workspace with no network (D17). | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways) | Needs `host-provider-transport`. Decision D10. |
+| `WebSearch` | guest | none | network policy; only while no Exa key is stored | The runtime's own web search over the policy-checked network. Offered only while no Exa key is stored. | [spec: Credentials, host access and revocation](cowork-spec.md#credentials-host-access-and-revocation) | Needs `host-network-endpoint`. Decision D10. |
+| `advisor` | guest | none | provider gateway | A reviewer-model consult; the contract lists advisor among the separately authorized provider routes. | [contracts: Provider and Git gateways](cowork-execution-contracts.md#provider-and-git-gateways) | Needs `host-provider-transport`. |
 | `AskUserQuestion` | host | none | question and approval cards; not under dont-ask | Cards belong to the target conversation and are answered by an authorized user client. Denied under dont-ask, so it is not offered there. | [contracts: Approval policies](cowork-execution-contracts.md#approval-policies)<br>[protocol: RPC inventory and caller access](cowork-host-protocol.md#rpc-inventory-and-caller-access) |  |
 | `SendMessage` | host | none | message broker | Same-Project Cowork peers and own descendants only. Never a host Code, Dispatch or cross-workspace session. | [spec: Same-Project SendMessage](cowork-spec.md#same-project-sendmessage)<br>[contracts: Session messaging and creation boundaries](cowork-execution-contracts.md#session-messaging-and-creation-boundaries)<br>`mayContactCoworkPeer` in [`messaging-authority.ts`](../packages/core/src/cowork/messaging-authority.ts) |  |
 | `ListAgents` | host | none | message broker | Own descendants and same-Project peers only; no unrelated or host-session metadata. | [contracts: Session messaging and creation boundaries](cowork-execution-contracts.md#session-messaging-and-creation-boundaries) |  |
@@ -280,9 +282,9 @@ These are the decisions still open. Each gives the recommended answer first, and
 
 **Instead:** Leave them off until the spec names them.
 
-They touch no file, no host service and no network, and Chat and Dispatch both carry ToolSearch. Note that the runtime advertises ToolSearch only when Tool Search is on and something is deferred (an admitted MCP server, or CronList, which Code starts deferred), so `coworkOfferedTools` offers it only then. The spec's rule that unknown tool classes are not silently admitted is met by naming them here.
+They touch no file, no host service and no network, and Chat and Dispatch both carry ToolSearch. The runtime advertises ToolSearch only when Tool Search is on and something is deferred, so `coworkOfferedTools` offers it only then. Something is deferred when an MCP server is admitted, or when `CronList` is offered: the profile marks `CronList` deferred because Code starts it deferred (`deferToolsFor`). That is an assumption, and dropping the `deferred` flag on that row undoes it. The spec's rule that unknown tool classes are not silently admitted is met by naming them here.
 
-*Spec and code sources:* [contracts: Approval policies](cowork-execution-contracts.md#approval-policies); `DISPATCH_BUILTIN_TOOLS` in `mode-options.ts`
+*Spec and code sources:* [contracts: Approval policies](cowork-execution-contracts.md#approval-policies); `DISPATCH_BUILTIN_TOOLS` in `mode-options.ts`; `deferToolsFor` in `mode-options.ts`
 
 ### D3 — Plan-mode tools
 
@@ -465,7 +467,7 @@ This module is a draft of two inputs. Consuming it needs things that do not exis
 - the allowlist and the not-offered list do not overlap; the shell and file tools are allowlisted only as guest tools; and computer use, browser, Office, the Mac language server and plugin servers are not allowlisted at all;
 - the ceiling classes on Read, Edit, Write and Bash agree with the guest launch's own tool visibility;
 - every citation names a heading, a code symbol or a house export that exists;
-- the tools the prompt names are exactly the tools `coworkOfferedTools` offers, across the policy, network, search, ceiling, readiness and withheld-tool combinations;
+- the prompt never names a tool `coworkOfferedTools` does not offer, and names each of the 12 always-named tools if and only if it is offered, across the policy, network, search, ceiling, readiness, withheld-tool and Tool Search combinations;
 - hostile workspace titles cannot add a line or a section to the prompt, and ids and enums are refused when invalid;
 - nothing in `src/` imports the module, it generates no source list or push default, and its exports are pinned;
 - no home path, email address or personal name appears in the new files.

@@ -8,6 +8,7 @@ import {
   COWORK_TOOL_DENYLIST, COWORK_UNBUILT_CAPABILITY_SERVERS, coworkOfferedTools, coworkSystemPrompt,
   type CoworkPromptFacts, type CoworkReadinessKey,
 } from "../../src/cowork/session-profile";
+import { confinedToolVisibility } from "../../src/cowork/guest-runtime";
 import { CoworkError } from "../../src/cowork/types";
 import { KNOWN_RUNTIME_BUILTINS } from "../../src/runtime-sdk/mode-options";
 import { DOC_SAMPLE, docBlockProblems, readBlock, renderDocBlocks, syncDocBlocks } from "./session-profile-doc";
@@ -205,7 +206,7 @@ describe("allowlist and denylist", () => {
   });
 
   test("Skill is withheld until the seeded Mac computer-use skill is omitted", () => {
-    expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === "Skill")?.needs).toEqual(["skill-surface"]);
+    expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === "Skill")?.needs).toContain("skill-surface");
     expect(COWORK_READINESS["skill-surface"]).toContain("omits the seeded Mac computer-use skill");
   });
 });
@@ -270,8 +271,15 @@ describe("readiness", () => {
     for (const row of COWORK_TOOL_ALLOWLIST) for (const key of row.needs ?? []) { expect(Object.keys(COWORK_READINESS)).toContain(key); used.add(key); }
     expect([...used].sort()).toEqual(Object.keys(COWORK_READINESS).sort());
     expect(COWORK_TOOL_ALLOWLIST.filter((row) => row.needs !== undefined).map((row) => row.name).sort()).toEqual([
-      "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "ExitPlanMode", "Glob", "Grep", "LSP", "Monitor", "NotebookEdit", "Read", "ScheduleWakeup", "Skill", "Workflow", "Write",
+      "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "ExitPlanMode", "Glob", "Grep", "LSP", "Monitor", "NotebookEdit", "Read", "ScheduleWakeup", "Search", "Skill",
+      "WebFetch", "WebSearch", "Workflow", "Write", "advisor",
     ]);
+    // the rows that go through a host broker whose guest side exists today are offered by default; the provider and network ones are not
+    for (const name of ["Agent", "WebFetch", "Search", "WebSearch", "advisor"]) expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === name)?.needs?.length).toBeGreaterThan(0);
+    for (const name of ["SendMessage", "ListAgents", "AskUserQuestion", "TaskStop", "TaskOutput", "ToolSearch"]) expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === name)?.needs).toBeUndefined();
+    expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === "Agent")?.needs).toEqual(["host-provider-transport"]);
+    expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === "WebFetch")?.needs).toEqual(["host-provider-transport", "host-network-endpoint"]);
+    expect(COWORK_TOOL_ALLOWLIST.find((row) => row.name === "Skill")?.needs).toEqual(["guest-compartment", "skill-surface"]);
   });
 });
 
@@ -286,8 +294,9 @@ describe("tool exposure", () => {
     for (const policy of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
       expect(coworkOfferedTools({ approvalPolicy: policy, toolClasses: ALL_CLASSES, network: "internet" }).filter((name) => withNeeds.includes(name))).toEqual([]);
     }
-    expect(none).toContain("Agent");
-    expect(none).toContain("WebFetch");
+    expect(none).toContain("SendMessage");
+    expect(none).toContain("AskUserQuestion");
+    for (const name of ["Agent", "WebFetch", "Search", "WebSearch", "advisor", "Skill"]) expect(none).not.toContain(name);
     expect(offered({ readiness: [] })).toEqual(offered({ readiness: undefined }));
     expect(offered()).toContain("Bash");
     expect(offered()).toContain("CronCreate");
@@ -325,16 +334,11 @@ describe("tool exposure", () => {
     expect(offered()).toEqual(expect.arrayContaining(["WebFetch", "Search"]));
   });
 
-  test("the ceiling classes gate the file and shell tools, and agree with the guest launch's own visibility", () => {
-    const guestRuntime = read("packages/core/src/cowork/guest-runtime.ts");
-    const from = guestRuntime.indexOf("function confinedToolVisibility"), to = guestRuntime.indexOf("\n}\n", from) + 2;
-    expect(from).toBeGreaterThan(-1);
-    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(guestRuntime.slice(from, to));
-    const confined = new Function(`${js}\nreturn confinedToolVisibility;`)() as (classes: string[]) => string[];
+  test("the ceiling classes gate the file and shell tools, and agree with the guest launch's own visibility (the real function)", () => {
     const covered = ["Bash", "Edit", "Read", "Write"];
     for (let mask = 0; mask < 8; mask++) {
       const classes = ALL_CLASSES.filter((_name, bit) => mask & (1 << bit));
-      expect(offered({ toolClasses: classes }).filter((name) => covered.includes(name))).toEqual([...confined(classes)].sort());
+      expect(offered({ toolClasses: classes }).filter((name) => covered.includes(name))).toEqual([...confinedToolVisibility(classes)].sort());
     }
     expect(offered({ toolClasses: [] })).not.toContain("Read");
     expect(offered({ toolClasses: ["read"] })).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "LSP"]));
@@ -447,6 +451,20 @@ describe("prompt text", () => {
     expect(coworkSystemPrompt(facts())).toBe(text);
   });
 
+  test("the shell and file prose appears only when a shell or file tool is offered", () => {
+    const hands = ["reading and changing files, running commands", "Your shell, your file tools and your subagents all run inside it."];
+    for (const phrase of hands) expect(text).toContain(phrase);
+    for (const bare of [coworkSystemPrompt(facts({ readiness: undefined })), coworkSystemPrompt(facts({ toolClasses: [] })), coworkSystemPrompt(facts({ withheldTools: ["Bash", "Read", "Write", "Edit"] }))]) {
+      for (const phrase of hands) expect(bare).not.toContain(phrase);
+      expect(bare.split("\n")[0]).toBe("You are Winter in Cowork mode: you work for the user inside a private Linux workspace. You act, check what you did, and report plainly what worked and what did not.");
+      expect(bare).toContain("It is not the Mac. Whatever you run runs inside it.");
+      expect(bare).toContain("You cannot reach the Mac");
+    }
+    for (const toolClasses of [["execute"], ["read"], ["write"]]) expect(coworkSystemPrompt(facts({ toolClasses }))).toContain(hands[0]!);
+    expect(coworkSystemPrompt(facts({ readiness: ["guest-compartment"], toolClasses: ["execute"] }))).toContain(hands[1]!);
+    expect(coworkSystemPrompt(facts({ toolClasses: [] }))).not.toContain("with your file tools");
+  });
+
   test("with nothing declared ready the Scheduling section and the Workflow mention are absent", () => {
     const bare = coworkSystemPrompt(facts({ readiness: undefined }));
     expect(bare).not.toContain("# Scheduling");
@@ -508,7 +526,7 @@ describe("prompt text", () => {
     expect(keyed).toBe(text);
   });
 
-  test("the tools the prompt names are exactly the tools the host is offered, across the whole matrix", () => {
+  test("the prompt never names an un-offered tool, and names each of the 12 always-named tools iff offered, across the whole matrix", () => {
     const ALWAYS_NAMED = ["Agent", "SendMessage", "ListAgents", "TaskStop", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "AskUserQuestion", "WebFetch", "Search", "WebSearch"];
     const withheld: readonly (readonly string[])[] = [[], ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup"], ["SendMessage", "ListAgents", "TaskStop", "Agent"], ["CronList", "AskUserQuestion", "Search", "WebFetch"], ["CronCreate"]];
     let checked = 0;
@@ -526,6 +544,7 @@ describe("prompt text", () => {
           for (const name of withheldTools) expect(named).not.toContain(name);
           checked++;
         }
+    expect(ALWAYS_NAMED).toHaveLength(12);
     expect(checked).toBe(2 * 2 * 2 * 6 * 3 * 3 * 5 * 2);
     const denied = new Set(COWORK_TOOL_DENYLIST.map((row) => row.name));
     expect(namesIn(text).filter((name) => denied.has(name))).toEqual([]);
@@ -552,7 +571,7 @@ describe("prompt inputs cannot inject instructions", () => {
     ["ESC", "Docs\u001b[31mx"], ["DEL", "Docs\u007fx"], ["C1 CSI", "Docs\u009bx"], ["RLO", "Docs‮gpj.exe"], ["LRE", "Docs‪x"], ["RLI", "Docs⁧x"], ["LRI", "Docs⁦x"], ["PDI", "Docs⁩x"],
     ["LRM", "Docs‎x"], ["RLM", "Docs‏x"], ["ALM", "Docs؜x"], ["ZWSP", "Do​cs"], ["word joiner", "Do⁠cs"], ["BOM", "﻿Docs"], ["soft hyphen", "Do­cs"],
     ["Mongolian vowel separator", "Do᠎cs"], ["invisible times", "Do⁢cs"], ["interlinear", "Do￹cs"], ["tag characters", "Docs\u{E0049}\u{E0067}\u{E006E}"], ["cancel tag", "Docs\u{E007F}"],
-    ["musical format", "Docs\u{1D173}"], ["ZWJ alone", "‍"], ["ZWNJ alone", "‌"], ["ZWJ leading", "‍Docs"], ["ZWJ trailing", "Docs‍"], ["ZWNJ trailing", "Docs‌"],
+    ["musical format", "Docs\u{1D173}"], ["unassigned default-ignorable U+2065", "Do\u2065cs"], ["U+FFF0", "Do\uFFF0cs"], ["U+E0000", "Do\u{E0000}cs"], ["U+E0080", "Do\u{E0080}cs"], ["Mongolian FVS4 U+180F", "Do\u180Fcs"], ["ZWJ alone", "‍"], ["ZWNJ alone", "‌"], ["ZWJ leading", "‍Docs"], ["ZWJ trailing", "Docs‍"], ["ZWNJ trailing", "Docs‌"],
     ["ZWJ x120", "‍".repeat(120)], ["ZWJ ZWNJ run", "a‍‌b"], ["ZWJ before space", "Docs‍ x"], ["braille blank", "⠀"], ["braille blank inside", "Do⠀cs"],
     ["Hangul filler U+3164", "ㅤ"], ["halfwidth Hangul filler", "ﾠ"], ["Hangul choseong filler", "ᅟ"], ["Hangul jungseong filler", "ᅠ"], ["CGJ", "͏"], ["CGJ inside", "Do͏cs"],
     ["Khmer inherent vowel", "Do឴cs"], ["lone VS16", "️"], ["VS16 leading", "️Docs"], ["VS16 after space", "Do ️cs"], ["VS supplement", "\u{E0100}"], ["Mongolian FVS", "᠋"],
@@ -574,6 +593,7 @@ describe("prompt inputs cannot inject instructions", () => {
       expect([...quoted].length).toBeLessThanOrEqual(COWORK_PROMPT_LIMITS.maxTitleCharacters);
       expect(quoted).not.toMatch(SURVIVORS);
       expect(quoted.replace(/[\u200c\u200d]/g, "")).not.toMatch(/\p{Cf}/u);
+      expect(quoted.replace(/[\u200c\u200d]/g, "")).not.toMatch(/\p{Default_Ignorable_Code_Point}/u);
       for (const code of [0x034f, 0x115f, 0x1160, 0x17b4, 0x2800, 0x3164, 0xffa0, 0xfeff, 0x200b, 0x2060]) expect(quoted.includes(String.fromCodePoint(code))).toBe(false);
       expect(quoted).not.toMatch(/^[‌‍︀-️]|[‌‍]$/);
     } else expect(lineCount(rendered)).toBe(baseline - 1);
