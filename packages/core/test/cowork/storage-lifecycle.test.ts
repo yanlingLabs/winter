@@ -172,6 +172,10 @@ test("a pin survives closing and reopening the database, and a malformed pending
   expect(pins.get(f.workspaceId)).toMatchObject({ baseImageDigest: A, pendingUpdate: { next: digests(C, D) } });
   reopened.db.run("UPDATE cowork_workspace_images SET pending_update_json='{\"next\":{}}' WHERE workspace_id=?", [f.workspaceId]);
   refuses(() => pins.get(f.workspaceId), "recovery_required");
+  reopened.db.run("UPDATE cowork_workspace_images SET pending_update_json=? WHERE workspace_id=?", [JSON.stringify({ next: digests(C, D), startedAt: "t", extra: true }), f.workspaceId]);
+  refuses(() => pins.get(f.workspaceId), "recovery_required"); // a closed record: no unknown field is tolerated
+  reopened.db.run("UPDATE cowork_workspace_images SET pending_update_json=? WHERE workspace_id=?", [JSON.stringify({ next: digests(C, D), startedAt: "t" }), f.workspaceId]);
+  expect(pins.get(f.workspaceId)!.pendingUpdate).toEqual({ next: digests(C, D), startedAt: "t" });
 });
 
 // ── Export generations ───────────────────────────────────────────────────────────────────────────────
