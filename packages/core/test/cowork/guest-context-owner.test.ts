@@ -129,12 +129,25 @@ test("forged objects, clones and DTOs are refused by capture and by prepare", ()
     frozen({ ...launch, scope: { ...launch.scope, backendSessionId: "backend-other" } }), frozen({ ...launch, runtime: { ...launch.runtime, sessionId: "trusted-other" } }),
     frozen({ ...launch, runtime: { ...launch.runtime, cwd: `${f.root}/elsewhere` } }), frozen({ ...launch, source: { ...launch.source, revision: launch.source.revision + 1 } }),
     frozen({ ...launch, capabilities: { ...launch.capabilities, hostServices: ["git.publish", "extra.service"] } }),
-    frozen({ ...launch, scope: Object.defineProperty({ ...launch.scope }, "workspaceId", { get: () => f.workspaceId, enumerable: true }) })];
+    frozen({ ...launch, scope: Object.defineProperty({ ...launch.scope }, "workspaceId", { get: () => f.workspaceId, enumerable: true }) }),
+    frozen({ ...launch, protocolVersion: 2 }), frozen({ ...launch, runtime: { ...launch.runtime, executionPosture: "host" } }),
+    frozen({ ...launch, source: { ...launch.source, access: "read-only" } }), frozen({ ...launch, source: { ...launch.source, access: "admin" } })];
   for (const bad of forged) expect(code(() => captureCoworkGuestOwner(f.deps, bad as GuestRuntimeLaunch))).not.toBe("no-throw");
   expect(() => captureCoworkGuestOwner(f.deps, launch)).not.toThrow();
   for (const bad of [structuredClone(capture), JSON.parse(JSON.stringify(capture)), { ...capture }, Object.create(capture), null, undefined, "capture", 7, {}])
     expect(code(() => f.registry.prepare(bad as CoworkGuestOwnerCapture))).toBe("authority_denied");
   expect(f.fake.calls).toBe(0);
+});
+
+test("a launch naming another source of the same workspace is refused by the binding, not by the cwd", () => {
+  const f = fixture(), launch = f.launch();
+  const other = f.records.addSource({ principalId: "fixture", requestId: "add-second", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId,
+    { kind: "githubRepository", label: "second", access: "read-write", detail: { repositoryId: "repo-two", authorityRef: "private-authority", initialRef: "main" } }).value;
+  const otherRoot = coworkGuestSourceRoot(other);
+  const forged = Object.freeze({ ...launch, source: Object.freeze({ ...launch.source, sourceId: other.sourceId, revision: other.revision, access: other.access }),
+    runtime: Object.freeze({ ...launch.runtime, cwd: `${otherRoot}/directory` }) });
+  expect(otherRoot).not.toBe(f.root); expect(code(() => captureCoworkGuestOwner(f.deps, forged))).toBe("stale_acknowledgment");
+  expect(() => captureCoworkGuestOwner(f.deps, launch)).not.toThrow();
 });
 
 test("wrong parent or child: another logical session, a child row and a changed backend id cannot be captured", () => {
@@ -167,7 +180,9 @@ const drift: [string, (f: Fixture) => void][] = [
   ["backend id changed", f => f.sql("UPDATE runtime_sessions SET backend_session_id='backend-moved' WHERE winter_session_id=?", PARENT)],
   ["runtime row gone", f => { f.sql("PRAGMA foreign_keys=OFF"); f.sql("DELETE FROM runtime_sessions WHERE winter_session_id=?", PARENT); }],
   ["runtime state exited", f => { f.sessions.transition(PARENT, "exited"); }],
-  ["runtime state idle is still live", () => {}],
+  ["runtime state idle is still live", f => { f.sessions.transition(PARENT, "idle"); expect(f.sessions.get(PARENT)!.state).toBe("idle"); }],
+  ["runtime kind changed", f => f.sql("UPDATE runtime_sessions SET runtime_kind='claude-agent' WHERE winter_session_id=?", PARENT)],
+  ["binding names another workspace", f => { f.sql("PRAGMA foreign_keys=OFF"); f.sql("UPDATE cowork_conversations SET workspace_id='workspace_other' WHERE session_id=?", PARENT); }],
   ["runtime row becomes a child", f => { f.conversation("child-one", "backend-child", "child"); f.sql("UPDATE runtime_sessions SET parent_winter_session_id='child-one' WHERE winter_session_id=?", PARENT); }],
   ["binding archived", f => f.sql("UPDATE cowork_conversations SET state='archived' WHERE session_id=?", PARENT)],
   ["binding removed", f => { f.sql("PRAGMA foreign_keys=OFF"); f.sql("DELETE FROM cowork_conversations WHERE session_id=?", PARENT); }],
@@ -373,6 +388,24 @@ test("the owner is not serializable, exposes no register method and hides its ca
   expect(names.sort()).toEqual(["attachLifetime", "bindCorrelation", "close", "closeReason", "constructor", "constructor", "phase", "prepare", "registrationPort", "revoke", "stop", "toJSON"]);
   expect(owner.registrationPort).toBe(owner.registrationPort);
   expect(f.ready().registrationPort).not.toBe(owner.registrationPort);
+});
+
+test("final recheck: a held() that revokes its own owner makes the lookup unavailable", () => {
+  const f = fixture(); let owner!: CoworkGuestContextOwner;
+  owner = f.ready(PARENT, { held: () => { owner.revoke(); return true; } });
+  expect(owner.registrationPort(BACKEND)).toBeUndefined(); expect(owner.phase).toBe("revoked");
+});
+test("final recheck: an evidence call that supersedes its own owner makes the lookup unavailable", () => {
+  const f = fixture(), owner = f.ready(); let fired = false;
+  f.fake.override = evidence => { if (!fired) { fired = true; f.registry.prepare(f.capture()); } return evidence; };
+  expect(owner.registrationPort(BACKEND)).toBeUndefined(); expect(fired).toBe(true); expect(owner.phase).toBe("replaced");
+});
+test("final recheck: a boot dep that stops the registry makes the lookup unavailable", () => {
+  const f = fixture(); let armed = false, registry!: CoworkGuestContextOwners;
+  registry = new CoworkGuestContextOwners({ records: f.records, evidence: f.port, bootId: () => { if (armed) registry.stop(); return boot; } });
+  const owner = registry.prepare(captureCoworkGuestOwner(f.deps, f.launch())); owner.bindCorrelation({ version: 1, bindingId: BINDING }); owner.attachLifetime({ held: () => true });
+  expect(owner.registrationPort(BACKEND)).toBeDefined(); armed = true;
+  expect(owner.registrationPort(BACKEND)).toBeUndefined(); expect(owner.phase).toBe("open");
 });
 
 const unavailable: [string, (f: Fixture, owner: CoworkGuestContextOwner) => void][] = [

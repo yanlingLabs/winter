@@ -15,8 +15,8 @@ import { CoworkError, type CapabilityCeiling, type SourceAccess } from "./types"
  * construction stays refused. A slot test with a fake port proves slot logic; it never
  * proves issuer authenticity, kernel facts or native admission.
  *
- * Core's runtime-sdk pin predates the SDK's guided module, so no SDK guided type is
- * imported: the correlation, owner mirror and kernel record below are plain-data mirrors.
+ * Core's winter-agent-sdk pin (0.0.53) predates the SDK's guided module, so no SDK guided
+ * type is imported: the correlation, owner mirror and kernel record below are plain-data mirrors.
  */
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -60,7 +60,9 @@ export interface CoworkGuestOwnerEvidence {
 }
 /** ABSTRACT seam only: no implementation exists anywhere in src/ (an anti-wiring test pins that).
  * `evidence` is synchronous, is called at every lookup and must never be cached. It reports; it does
- * not authorize. A throw, a non-closed result or any mismatch makes the lookup return undefined. */
+ * not authorize. A throw, a non-closed result or any mismatch makes the lookup return undefined.
+ * It is called inside the planner's read transaction: an implementation must not touch the canonical
+ * database and must not write durably. */
 export interface CoworkGuestOwnerEvidencePort { evidence(capture: CoworkGuestOwnerCapture): CoworkGuestOwnerEvidence }
 
 export interface CoworkGuestOwnerDeps {

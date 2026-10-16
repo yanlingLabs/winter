@@ -10,7 +10,7 @@ import type { CoworkRepository } from "./repository";
 import { CoworkError } from "./types";
 import { durableCoworkTransaction } from "./durable-transaction";
 import { fullSyncInstructionFd } from "./instruction-fullsync";
-import { openInstructionAt, replaceInstructionAt } from "./instruction-fs";
+import { openInstructionAt, openTemporaryAt, replaceInstructionAt } from "./instruction-fs";
 
 type Identity = { device: string; inode: string; uid: number; mode: number };
 type Row = Record<string, any>;
@@ -219,6 +219,35 @@ export class CoworkInstructions {
     try { unlinkAt(tree.directory, name); }
     catch (error) { if (!(error instanceof FdError && error.code === "ENOENT")) throw error; }
   }
+  /** Restart recovery for an orphaned temp: the update died after its journal commit and before renameat, then a
+   * direct user save replaced WINTER.md, so the file matches neither recorded image while the recorded temp is still
+   * on disk. That temp is the host's own unapplied proposal. It is never replayed: the user's file stands and
+   * observe() absorbs it as a direct edit. The temp is removed only once it is proven to be exactly the file the
+   * journal recorded (vnode, single link, length and SHA-256). Anything else is unknown, stays in place, and the
+   * workspace keeps refusing with recovery_required. WINTER.md is neither opened for write nor renamed here, and the
+   * removal is a descriptor-relative unlink of a generated temporary name only. A crash after the unlink leaves
+   * "neither image and temp gone", which the superseded rule already handles. */
+  private discardVerifiedOrphan(tree: Tree, mutation: Row): void {
+    const name = mutation.temporary_name as string;
+    try {
+      this.assertTree(tree);
+      const fd = openTemporaryAt(tree.directory, name);
+      try {
+        const found = identity(fd, false);
+        if (found.uid !== process.geteuid?.() || found.mode !== 0o600 || !same(found, JSON.parse(mutation.file_identity_json))) fail();
+        const size = Number(fstatSync(fd, { bigint: true }).size);
+        if (size !== mutation.after_bytes) fail();
+        const bytes = Buffer.alloc(size + 1);
+        let length = 0;
+        while (length < bytes.length) { const count = readSync(fd, bytes, length, bytes.length - length, length); if (!count) break; length += count; }
+        if (length !== size || !same(found, identity(fd, false)) || digest(bytes.subarray(0, size)) !== mutation.after_digest) fail();
+      } finally { closeSync(fd); }
+      this.assertTree(tree);
+      this.discardTemporary(tree, name);
+      fullSyncInstructionFd(tree.directory);
+      this.checkpoint("orphan-temporary-removed");
+    } catch (error) { if (error instanceof CoworkError) throw error; return fail(); }
+  }
   private recover(workspaceId: string, tree: Tree, operationId: string): void {
     const mutation = this.one("SELECT * FROM cowork_instruction_mutations WHERE operation_id=? AND workspace_id=?", operationId, workspaceId) ?? fail();
     if (!/^instruction-[a-f0-9-]{36}\.tmp$/.test(mutation.temporary_name)) fail();
@@ -235,8 +264,8 @@ export class CoworkInstructions {
       if (!matchesAfter(confirmed)) fail();
       this.finish(workspaceId, tree, mutation, confirmed); return;
     }
-    const status = matchesBefore(actual) ? "failed" : this.temporaryGone(tree, mutation.temporary_name) ? "superseded" : undefined;
-    if (!status) fail();
+    let status: "failed" | "superseded" | undefined = matchesBefore(actual) ? "failed" : this.temporaryGone(tree, mutation.temporary_name) ? "superseded" : undefined;
+    if (!status) { this.discardVerifiedOrphan(tree, mutation); status = "superseded"; }
     try {
       durableCoworkTransaction(this.records.rs, () => {
         const current = this.owner(workspaceId), debt = this.one("SELECT * FROM cowork_instruction_mutations WHERE operation_id=?", operationId);
