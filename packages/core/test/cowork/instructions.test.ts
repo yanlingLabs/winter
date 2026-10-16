@@ -200,9 +200,10 @@ native("crash before rename then a user save: the verified orphan temp is remove
  }
 });
 native("crash before rename then a user save: a temp that is not the recorded file is never removed and recovery stays required", () => {
- for (const tamper of ["overwritten in place", "recreated with the same bytes", "extra hard link", "symlink", "directory"] as const) {
+ for (const tamper of ["overwritten in place", "same-length overwrite", "recreated with the same bytes", "extra hard link", "symlink", "directory"] as const) {
   const { f, temp } = crashBeforeRename(), outside = join(f.home, "outside-target"); writeFileSync(outside, "outside", { mode: 0o600 });
   if (tamper === "overwritten in place") writeFileSync(temp, "tampered!");
+  if (tamper === "same-length overwrite") writeFileSync(temp, "PROPOSAL");
   if (tamper === "recreated with the same bytes") { rmSync(temp); writeFileSync(temp, "proposal", { mode: 0o600 }); }
   if (tamper === "extra hard link") linkSync(temp, join(f.root, "alias"));
   if (tamper === "symlink") { rmSync(temp); symlinkSync(outside, temp); }
@@ -213,6 +214,7 @@ native("crash before rename then a user save: a temp that is not the recorded fi
   const kept = lstatSync(temp); expect(tamper === "symlink" ? kept.isSymbolicLink() : tamper === "directory" ? kept.isDirectory() : kept.isFile()).toBe(true);
   if (tamper === "extra hard link") expect(lstatSync(join(f.root, "alias")).ino).toBe(kept.ino);
   if (tamper === "overwritten in place") expect(readFileSync(temp, "utf8")).toBe("tampered!");
+  if (tamper === "same-length overwrite") expect(readFileSync(temp, "utf8")).toBe("PROPOSAL");
   expect(readFileSync(outside, "utf8")).toBe("outside"); expect(readFileSync(f.path, "utf8")).toBe("editor wins"); expect(statSync(f.path).ino).toBe(saved.ino);
   expect(f.db.db.query("SELECT status FROM cowork_operations WHERE request_id='change'").get()).toEqual({ status: "pending" }); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_mutations").get()).toEqual({ n: 1 });
   expect(count(f, "workspace_operation_changed")).toBe(0); expect(f.records.get(f.workspaceId).instructionRevision).toBe(1);
