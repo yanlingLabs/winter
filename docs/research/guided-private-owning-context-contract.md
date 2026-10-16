@@ -9,9 +9,9 @@ Slice A (the private owning slot, `packages/core/src/cowork/guest-context-owner.
 is source only. It adds no issuer, callback registration, profile, public export,
 barrel entry, daemon method or execution path. Its evidence port is an abstract
 interface with no implementation anywhere in `src/`, so production context
-construction stays refused. Slice B (the per-invocation reader adapter,
-`packages/core/src/cowork/guided-reader-adapter.ts`) is implemented in the stacked
-PR on top of this one and is equally source only; see "Slice B implementation notes".
+construction stays refused. Slice B (the per-invocation reader adapter) is
+implemented in `guided-reader-adapter.ts` and is equally source only; see
+"Slice B implementation notes".
 
 ## Existing mechanisms and missing issuer
 
@@ -202,19 +202,39 @@ the existing factory, resolver and mapper are byte-identical.
   data), because Slice A's anti-wiring pin forbids any `src/` importer of the slot. Every
   call re-checks the live registration against the capture field by field. The capture
   must carry a reader plan; without one construction is refused.
+- At construction the capture's workspace, source, root and cwd are re-derived from the
+  canonical rows (the conversation binding and source, computed as the capture function
+  computes them), so a capture-shaped object built from a registration port's output
+  cannot widen, deepen or redirect the view. What rows cannot supply stays taken from the
+  capture on trust: `readerRegistrationId` (presence-checked only) and `launchId`. So
+  activation must pass only the capture returned by `captureCoworkGuestOwner`, never a
+  rebuilt or cloned one.
 - The frame definition (keys, six-field inner owner, views, limits, version, 320 KiB bound)
   is a copy of the SDK's, with the SDK source paths in the module and a drift test that pins
   it against an independent literal (plus an opt-in test that reads the SDK source text).
 - Parser order: size, single line, UTF-8, raw nesting bound, `JSON.parse`, exact
-  re-serialization (the duplicate-key defense), no prototype-slot keys, exact key sets,
-  version, read id, owner/views/limits. Only `snapshot` reaches the mapper. The frame's read
-  id is the SDK's, never Core's canonical read id. It is single use per handler from the
-  first well-formed sighting, in a set bounded at the SDK's 4096, and fails closed when full.
+  re-serialization (the duplicate-key defense), no prototype-slot key and no ill-formed
+  string (an escaped lone surrogate survives the raw UTF-8 check and the round trip), exact
+  key sets, version, read id, owner/views/limits. Only `snapshot` reaches the mapper. The
+  frame's read id is the SDK's, never Core's canonical read id. It is single use per
+  handler from the first well-formed sighting, in a per-owner set bounded at 4096 (mirroring
+  the SDK's per-query read-id sets, not its process-global binding-id set), and fails closed
+  when full.
 - A late or aborted reply is dropped before any parsing. The resolver's derived signal only
   ends the wait; the SDK scope is closed by the SDK callback's own completion or abort.
 - The parser runs in Core here so the adapter is testable. F10's production placement (in
   the sandboxed host worker, not the credential daemon) is unchanged and still required
   before this adapter can activate.
+
+Merging `parseCoworkGuidedReaderFrame` into Core does not change F10. It is the testable
+seam only: at activation the value `readFrame` returns to Core must not be raw frame bytes.
+The byte-level steps (size, single line, UTF-8, raw nesting bound, `JSON.parse`, exact
+re-serialization, prototype-slot key walk) must run in the sandboxed host worker/helper, and
+Core then receives only the closed frame data (or only `frame.snapshot` plus the echoed
+owner/views/limits/read id as plain values). Otherwise the activating change relocates this
+parser there and removes the raw-byte entry point from Core. Until then
+`CoworkGuidedFramePort.readFrame` has no implementation and production context construction
+stays refused.
 
 ## Open SDK-side decision (F2)
 

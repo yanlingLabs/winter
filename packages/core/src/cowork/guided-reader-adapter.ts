@@ -1,6 +1,8 @@
 import type { CoworkContextRegistration, CoworkCurrentContextDeps } from "./current-context";
 import { createCoworkRuntimeContextHandler, type CoworkRuntimeContextHandler } from "./current-context-callback";
 import { COWORK_SHARED_INSTRUCTION_VIEW, type CoworkProtectedInstructionReader } from "./current-context-resolver";
+import { coworkGuestSourceRoot } from "./guest-paths";
+import { relativeCoworkPath, type CoworkRepository } from "./repository";
 import { mapStructuredCoworkInstructions } from "./structured-instruction-mapper";
 
 /*
@@ -41,7 +43,9 @@ export const COWORK_GUIDED_FRAME_LIMITS = Object.freeze({ maxFileBytes: 128 * 10
 export const COWORK_GUIDED_FRAME_MAX_BYTES = 320 * 1024;
 /** Real frames nest four deep (frame, snapshot, list, record); this leaves headroom, not room for attacks. */
 export const COWORK_GUIDED_FRAME_MAX_DEPTH = 6;
-/** The SDK bounds its own consumed set at 4096 per query. When full, every further frame is refused. */
+/** The SDK bounds its per-query read-id sets at 4096 (`instructionReadIds` in packages/sdk/src/query.ts, and `consumed`
+ * in packages/runtime/src/guest/linux-guided-reader-channel.ts). That is NOT the SDK's process-global `consumedBindings`,
+ * which holds binding ids. When Core's own per-owner set is full, every further frame is refused. */
 export const COWORK_GUIDED_READ_ID_CAPACITY = 4096;
 
 const SHARED_PATH = `${COWORK_SHARED_INSTRUCTION_VIEW}/WINTER.md` as const;
@@ -86,8 +90,9 @@ export interface CoworkGuidedFrameExpectation {
 
 const unavailable = (): never => { throw new Error("required_context_unavailable"); };
 
-/** Single-use read ids for ONE handler (one owner). Bounded: once full, every further id is refused. This is not a
- * cross-owner ledger; the SDK's process-local consumed set stays the replay authority for its own ids. */
+/** Single-use read ids for ONE handler (one owner). Bounded: once full, every further id is refused. This is Core's own
+ * per-owner replay set, not a cross-owner ledger. It mirrors the SDK's per-query read-id sets (`instructionReadIds`, and
+ * `consumed` in the reader channel); it is unrelated to the SDK's process-global `consumedBindings` (binding ids). */
 export class CoworkGuidedReadIdSet {
   readonly #seen = new Set<string>();
   readonly #capacity: number;
@@ -139,13 +144,17 @@ function nestsWithin(body: string, max: number): boolean {
   }
   return depth === 0 && !inString;
 }
-/** No own key that could be mistaken for a prototype slot, at any level. Depth is already bounded. */
-function cleanKeys(value: unknown): void {
+/** No own key that could be mistaken for a prototype slot and no ill-formed string (a lone surrogate that arrived as an
+ * escape, which the raw UTF-8 check cannot see and the re-serialization round trip preserves), at any level, keys
+ * included. Depth is already bounded. */
+function cleanData(value: unknown): void {
+  if (typeof value === "string") { if (!value.isWellFormed()) return unavailable(); return; }
   if (value === null || typeof value !== "object") return;
-  if (!Array.isArray(value) && DANGEROUS_KEYS.some(key => Object.hasOwn(value, key))) return unavailable();
-  for (const child of Object.values(value)) cleanKeys(child);
+  if (!Array.isArray(value) && (DANGEROUS_KEYS.some(key => Object.hasOwn(value, key)) || Object.keys(value).some(key => !key.isWellFormed()))) return unavailable();
+  for (const child of Object.values(value)) cleanData(child);
 }
 
+// F10: raw-byte parse in Core is the testable seam only; see contract doc F10.
 /** Strict parse of GUEST-CONTROLLED reader-frame bytes. Returns ONLY the snapshot; the owner, views, limits and
  * read id are checked here and never travel on. `claim` consumes a read id (false = reused or the set is full).
  * Throws Error("required_context_unavailable") for anything else. The snapshot's own semantics belong to the
@@ -161,7 +170,7 @@ export function parseCoworkGuidedReaderFrame(raw: unknown, expected: CoworkGuide
     // Exact re-serialization: JSON.parse keeps the LAST of duplicate keys, so a duplicate, whitespace, an
     // alternate escape or number spelling changes the text and is refused (the SDK applies the same rule).
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || JSON.stringify(parsed) !== body) return unavailable();
-    cleanKeys(parsed);
+    cleanData(parsed);
     const frame = closedKeys(parsed, COWORK_GUIDED_FRAME_KEYS);
     if (frame.version !== COWORK_GUIDED_FRAME_VERSION) return unavailable();
     const readId = frame.readId;
@@ -182,8 +191,20 @@ interface Captured {
   readonly source: Readonly<{ sourceId: string; revision: number; root: string; access: "read-only" | "read-write" }>;
   readonly expected: Omit<CoworkGuidedFrameExpectation, "canonicalReadId">;
 }
-/** Copy and validate the capture ONCE. Refuses a capture with no reader plan or one that disagrees with itself. */
-function captured(value: unknown): Captured {
+/** The conversation's canonical root and cwd, derived from the rows exactly as the Slice A capture derives them. */
+function canonicalView(records: CoworkRepository, workspaceId: string, sessionId: string, sourceId: string): { root: string; cwd: string } {
+  try {
+    const binding = records.binding(sessionId);
+    if (binding.workspaceId !== workspaceId || binding.sourceId !== sourceId) return unavailable();
+    const root = coworkGuestSourceRoot(records.source(workspaceId, sourceId)), relative = relativeCoworkPath(binding.relativeCwd);
+    return { root, cwd: `${root}${relative === "." ? "" : `/${relative}`}` };
+  } catch { return unavailable(); }
+}
+/** Copy and validate the capture ONCE. Refuses a capture with no reader plan, one that disagrees with itself, or one whose
+ * workspace, source, root and cwd are not what the canonical rows say for this conversation (a forged capture-shaped object
+ * cannot widen or deepen the view). `readerRegistrationId` and `launchId` cannot be re-derived from rows and are taken
+ * from the capture on trust: activation must pass only the capture the Slice A capture function returned. */
+function captured(value: unknown, records: CoworkRepository): Captured {
   const trusted = text(field(value, "trustedQuerySessionId")), backendSessionId = text(field(value, "backendSessionId"));
   const sessionId = text(field(value, "sessionId")), workspaceId = text(field(value, "workspaceId")), incarnationId = text(field(value, "incarnationId"));
   const bootId = field(value, "bootId"), backendGeneration = counter(field(value, "backendGeneration")), leaseEpoch = counter(field(value, "leaseEpoch"));
@@ -192,6 +213,8 @@ function captured(value: unknown): Captured {
   const source = Object.freeze({ sourceId: text(sourceData.sourceId), revision: counter(sourceData.revision), root: typeof sourceData.root === "string" ? sourceData.root : unavailable(),
     access: sourceData.access === "read-only" || sourceData.access === "read-write" ? sourceData.access : unavailable() });
   const cwd = field(value, "cwd");
+  const canonical = canonicalView(records, workspaceId, sessionId, source.sourceId);
+  if (canonical.root !== source.root || canonical.cwd !== cwd) return unavailable();
   // The reader plan is mandatory, and the registration id is only presence-checked: the frame carries no such field.
   if (typeof cwd !== "string" || typeof field(value, "readerRegistrationId") !== "string" || !ID.test(field(value, "readerRegistrationId") as string)) return unavailable();
   const views = closedKeys(field(value, "views"), COWORK_GUIDED_FRAME_VIEW_KEYS), limits = closedKeys(field(value, "limits"), Object.keys(COWORK_GUIDED_FRAME_LIMITS));
@@ -245,7 +268,7 @@ function guidedReader(shared: Shared, original: AbortSignal): CoworkProtectedIns
  * handler (and so its own resolver, planner and final guards) bound to its own original signal. The existing
  * handler's result is returned directly: nothing external runs after the resolver's final canonical guard. */
 export function createCoworkGuidedRuntimeContextHandler(deps: CoworkGuidedReaderDeps): CoworkRuntimeContextHandler {
-  const c = captured(deps.capture), registration = deps.registration, frames = deps.frames;
+  const c = captured(deps.capture, deps.records), registration = deps.registration, frames = deps.frames;
   if (typeof registration !== "function" || frames === null || typeof frames !== "object" || typeof frames.readFrame !== "function") return unavailable();
   const ids = new CoworkGuidedReadIdSet();
   const shared: Shared = { captured: c, registration, frames, claim: readId => ids.claim(readId) };

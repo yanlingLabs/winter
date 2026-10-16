@@ -72,7 +72,7 @@ function fixture() {
       transcriptHealth: "clean", compatibilityLevel: "full-filesystem", conformanceCorpusVersion: "fixture", versionProvenance: "legacy-unknown", capabilities: [],
       selection: { runtimeKind: "winter-agent", providerId: "fixture", modelRef: "fixture", family: "openai", authFamily: "api-key", sdkVersion: "fixture", reason: "test", decidedAt: "2026-10-16T00:00:00.000Z" } });
     sessions.transition(sessionId, "ready"); sessions.bumpGeneration(sessionId, { runtimeKind: "winter-agent", backendSessionId }); sessions.transition(sessionId, "running");
-    backends.set(sessionId, backendSessionId); cwds.set(sessionId, `${root}/${relativeCwd}`);
+    backends.set(sessionId, backendSessionId); cwds.set(sessionId, relativeCwd === "." ? root : `${root}/${relativeCwd}`);
   }
   conversation(PARENT, BACKEND, "directory");
   const grants = { folder() { return undefined; }, repository() { return { readable: true, writable: true, revoked: false }; } };
@@ -374,10 +374,14 @@ test("a read id is single use across overlapping invocations of one owner, and a
   const burned = nextId();
   await expect(h.call(() => h.text(frame => { frame.owner.generation += 1; }, burned))).rejects.toThrow(REFUSED);
   await expect(h.call(() => h.text(undefined, burned))).rejects.toThrow(REFUSED);
-  // Read ids are per owner/handler; they are not a cross-owner ledger.
+  // Read ids are per owner/handler, not a module-global or cross-owner ledger: ids owner A already consumed (one accepted,
+  // one burned by a refusal) are still fresh for owner B, and are single use for B in turn.
   f.conversation(SECOND, SECOND_BACKEND, "other");
-  const sibling = harness(f, SECOND), siblingId = nextId();
-  expect((await sibling.call(() => sibling.text(undefined, siblingId))).instructions).toContain("shared guidance");
+  const sibling = harness(f, SECOND);
+  expect((await sibling.call(() => sibling.text(undefined, shared))).instructions).toContain("shared guidance");
+  expect((await sibling.call(() => sibling.text(undefined, burned))).instructions).toContain("shared guidance");
+  await expect(sibling.call(() => sibling.text(undefined, shared))).rejects.toThrow(REFUSED);
+  await expect(sibling.call(() => sibling.text(undefined, burned))).rejects.toThrow(REFUSED);
 });
 
 test("the parser itself: the canonical read id may never be echoed, and a claim that fails refuses", () => {
@@ -430,6 +434,29 @@ test("a frame with a prototype-slot key anywhere is refused before its read id i
     expect(`${name}:${claims}`).toBe(`${name}:0`);
   }
   expect(Reflect.ownKeys(Object.prototype).length).toBe(before); expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+});
+
+test("an escaped lone surrogate is refused everywhere, before its read id is consumed; a real surrogate pair is plain text", async () => {
+  // The raw UTF-8 check cannot see an ESCAPED lone surrogate, and the re-serialization round trip preserves it.
+  const variants: [string, (text: string) => string][] = [
+    ["lone high surrogate in snapshot text", t => t.replace("shared guidance", "shared \\ud800 guidance")], ["lone low surrogate in snapshot text", t => t.replace("shared guidance", "shared \\udc00 guidance")],
+    ["high surrogate followed by a letter", t => t.replace("shared guidance", "shared \\ud800a guidance")], ["reversed pair", t => t.replace("shared guidance", "shared \\udc00\\ud800 guidance")],
+    ["owner string", t => t.replace('"logicalSessionId":"logical-parent"', '"logicalSessionId":"logical-parent\\ud800"')], ["views string", t => t.replace('"sharedRoot":"', '"sharedRoot":"\\ud800')],
+    ["block path in the snapshot", t => t.replace('"blocks":[{"requestedPath":"', '"blocks":[{"requestedPath":"\\ud800')], ["snapshot key", t => t.replace('"snapshot":{', '"snapshot":{"\\ud800":1,')],
+    ["nested record key", t => t.replace('"blocks":[{', '"blocks":[{"\\udc00":1,')],
+  ];
+  const { good, expected } = parserFixture();
+  for (const [name, change] of variants) {
+    const raw = change(good); expect(raw).not.toBe(good);
+    let claims = 0;
+    expect(() => parseCoworkGuidedReaderFrame(raw, expected(), () => { claims++; return true; })).toThrow(REFUSED);
+    expect(`${name}:${claims}`).toBe(`${name}:0`);
+  }
+  const f = fixture(), h = harness(f);
+  await allRefused(h, variants.map(([name, change]) => [name, change(h.text())] as [string, string]));
+  // A real surrogate pair (an emoji) is ordinary text and still resolves.
+  const frame = h.obj(value => { value.snapshot = snapshotOf(f.root, "emoji \u{1F600} guidance\n"); });
+  expect((await h.call(() => serialize(frame))).instructions).toContain("\u{1F600}");
 });
 
 test("the parser itself closes the snapshot's key set, so a drifted SDK snapshot is refused before the mapper", () => {
@@ -624,9 +651,8 @@ test("the capture is copied at construction: later edits to a plain copy change 
 test("every call re-checks the live registration against the capture, field by field", async () => {
   const changes: [string, (c: CoworkGuestOwnerCapture) => Record<string, unknown>][] = [
     ["generation", c => ({ backendGeneration: c.backendGeneration + 1 })], ["incarnation", () => ({ incarnationId: "incarnation-other" })], ["lease epoch", c => ({ leaseEpoch: c.leaseEpoch + 1 })],
-    ["boot", () => ({ bootId: otherBoot })], ["logical session", () => ({ sessionId: SECOND })], ["workspace", () => ({ workspaceId: "ws_other" })],
-    ["source revision", c => ({ source: { ...c.source, revision: c.source.revision + 1 } })], ["source id", c => ({ source: { ...c.source, sourceId: "src_other" } })],
-    ["source access", c => ({ source: { ...c.source, access: "read-only" } })],
+    ["boot", () => ({ bootId: otherBoot })],
+    ["source revision", c => ({ source: { ...c.source, revision: c.source.revision + 1 } })], ["source access", c => ({ source: { ...c.source, access: "read-only" } })],
   ];
   for (const [name, change] of changes) {
     const f = fixture(), { owner, capture } = f.ready(), sdk = fakeSdk(), preparation = {}, signal = new AbortController().signal;
@@ -638,13 +664,61 @@ test("every call re-checks the live registration against the capture, field by f
   }
 });
 
+/** Everything a registration port reveals, plus an invented reader plan: what a forger who never held the real capture can build. */
+function forgedCapture(f: Fixture, registration: { [key: string]: any }, change: Record<string, unknown> = {}, cwd = `${f.root}/directory`): CoworkGuidedReaderCapture {
+  const source = registration.admittedSources[0];
+  const forged = { workspaceId: registration.workspaceId, sessionId: registration.sessionId, backendSessionId: registration.backendSessionId, trustedQuerySessionId: registration.trustedQuerySessionId,
+    backendGeneration: registration.backendGeneration, bootId: registration.bootId, incarnationId: registration.incarnationId, leaseEpoch: registration.leaseEpoch,
+    source: { ...source }, cwd, readerRegistrationId: "invented-registration",
+    views: { sourceRoot: source.root, sourceCwd: cwd, sharedRoot: COWORK_SHARED_INSTRUCTION_VIEW, sharedPath: SHARED }, limits: { ...COWORK_GUEST_OWNER_READER_LIMITS }, ...change };
+  return forged as unknown as CoworkGuidedReaderCapture;
+}
+
+test("a forged capture cannot widen, deepen or redirect the view: workspace, source, root and cwd are re-derived from the canonical rows", () => {
+  const f = fixture(), { owner } = f.ready(), registration = owner.registrationPort(BACKEND)!, root = f.root, frames = fakeSdk().port({});
+  const build = (capture: CoworkGuidedReaderCapture) => () => createCoworkGuidedRuntimeContextHandler({ records: f.records, grants: f.grants, currentBootId: () => f.currentBoot(), registration: owner.registrationPort, capture, frames });
+  const view = (cwd: string) => ({ sourceRoot: root, sourceCwd: cwd, sharedRoot: COWORK_SHARED_INSTRUCTION_VIEW, sharedPath: SHARED });
+  const refused: [string, CoworkGuidedReaderCapture][] = [
+    ["widened cwd (the source root)", forgedCapture(f, registration, {}, root)], ["deeper cwd", forgedCapture(f, registration, {}, `${root}/directory/nested`)],
+    ["sibling cwd", forgedCapture(f, registration, {}, `${root}/other`)], ["traversal spelled cwd", forgedCapture(f, registration, {}, `${root}/directory/../other`)],
+    ["trailing slash cwd", forgedCapture(f, registration, {}, `${root}/directory/`)],
+    ["mismatched sourceId", forgedCapture(f, registration, { source: { ...registration.admittedSources[0], sourceId: "src_other" } })],
+    ["mismatched workspaceId", forgedCapture(f, registration, { workspaceId: "ws_other" })], ["logical session with no binding", forgedCapture(f, registration, { sessionId: SECOND })],
+    ["foreign source root", forgedCapture(f, registration, { source: { ...registration.admittedSources[0], root: `${root}-foreign` }, views: { ...view(`${root}-foreign/directory`), sourceRoot: `${root}-foreign` }, cwd: `${root}-foreign/directory` })],
+    ["cwd widened in the view only", forgedCapture(f, registration, { views: view(root) })], ["cwd widened in the capture only", forgedCapture(f, registration, { cwd: root })],
+  ];
+  // REAL rows that are not this conversation's: a second source in the same workspace, and a whole second workspace. Each
+  // forgery is internally consistent and its root and cwd derive fine from the rows, so only the binding comparison refuses it.
+  const selection = (suffix: string) => ({ kind: "githubRepository" as const, label: "fixture", access: "read-write" as const, detail: { repositoryId: `repo-${suffix}`, authorityRef: `private-authority-${suffix}`, initialRef: "main" } });
+  const other = f.records.addSource({ principalId: "fixture", requestId: "add-two", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, selection("two")).value;
+  const otherRoot = coworkGuestSourceRoot(other), otherSource = { sourceId: other.sourceId, revision: other.revision, root: otherRoot, access: other.access };
+  refused.push(["a real but unbound source in the same workspace", forgedCapture(f, registration, { source: otherSource, views: { ...view(`${otherRoot}/directory`), sourceRoot: otherRoot } }, `${otherRoot}/directory`)]);
+  const second = f.records.create({ principalId: "fixture", requestId: "create-two" }, { ownership: "project", title: "second", ceiling: caps, sources: [selection("three")] }), secondSource = f.records.sources(second.workspaceId)[0]!;
+  const secondRoot = coworkGuestSourceRoot(secondSource);
+  refused.push(["a real source of another workspace", forgedCapture(f, registration, { workspaceId: second.workspaceId, source: { sourceId: secondSource.sourceId, revision: secondSource.revision, root: secondRoot, access: secondSource.access },
+    views: { ...view(`${secondRoot}/directory`), sourceRoot: secondRoot } }, `${secondRoot}/directory`)]);
+  const wrong: string[] = [];
+  for (const [name, capture] of refused) { try { build(capture)(); wrong.push(`${name}: ACCEPTED`); } catch (error) { if (!REFUSED.test((error as Error).message)) wrong.push(`${name}: ${(error as Error).message}`); } }
+  expect(wrong).toEqual([]);
+  // Control: the same forgery with the canonical cwd is accepted. What cannot be re-derived from rows (the reader
+  // registration id) is taken from the capture on trust, so activation must pass only the real captured object.
+  expect(build(forgedCapture(f, registration))).not.toThrow();
+});
+
+test("the canonical view is derived for a conversation bound at the source root as well", async () => {
+  const f = fixture(); f.conversation(SECOND, SECOND_BACKEND, ".");
+  const h = harness(f, SECOND);
+  expect(h.capture.cwd).toBe(f.root); expect(h.request.cwd).toBe(f.root);
+  expect((await h.call(() => h.text())).instructions).toContain("shared guidance");
+  const { owner } = f.ready(SECOND), registration = owner.registrationPort(SECOND_BACKEND)!;
+  expect(() => createCoworkGuidedRuntimeContextHandler({ records: f.records, grants: f.grants, currentBootId: () => f.currentBoot(), registration: owner.registrationPort, frames: fakeSdk().port({}),
+    capture: forgedCapture(f, registration, {}, `${f.root}/directory`) })).toThrow(REFUSED);
+});
+
 test("a capture whose cwd and view disagree with the canonical request is refused before the port", async () => {
-  const f = fixture(), { owner, capture } = f.ready(), sdk = fakeSdk(), preparation = {}, signal = new AbortController().signal;
-  const cwd = `${f.root}/directory/nested`, views = { ...capture.views!, sourceCwd: cwd };
-  sdk.install(signal, preparation, () => serialize(frameObject(capture, f.root)));
-  const handler = createCoworkGuidedRuntimeContextHandler({ records: f.records, grants: f.grants, currentBootId: () => f.currentBoot(), registration: owner.registrationPort, frames: sdk.port(preparation),
-    capture: { ...capture, cwd, views } as unknown as CoworkGuidedReaderCapture });
-  await expect(handler(f.requestFor(), { signal, trustedQuerySessionId: BACKEND })).rejects.toThrow(REFUSED); expect(sdk.calls.length).toBe(0);
+  // A request from a guest whose cwd moved below the captured view: the planner would allow it, the adapter does not.
+  const f = fixture(), h = harness(f), signal = new AbortController().signal; h.sdk.install(signal, h.preparation, () => h.text());
+  await expect(h.handler({ ...h.request, cwd: `${f.root}/directory/nested` }, h.options(signal))).rejects.toThrow(REFUSED); expect(h.sdk.calls.length).toBe(0);
 });
 
 // ---------------------------------------------------------------- drift guard and anti-wiring
@@ -672,6 +746,7 @@ test("drift guard: the copied frame definition equals the pinned SDK literal", (
 test.skipIf(!process.env.WINTER_AGENT_SDK_SOURCE_DIR)("drift guard (opt-in): the copied constants match the SDK source text", () => {
   const sdk = process.env.WINTER_AGENT_SDK_SOURCE_DIR!;
   const protocol = readFileSync(join(sdk, "packages/runtime/src/guest/linux-guided-reader-protocol.ts"), "utf8"), bridge = readFileSync(join(sdk, "packages/sdk/src/guided-reader-protocol.ts"), "utf8");
+  const query = readFileSync(join(sdk, "packages/sdk/src/query.ts"), "utf8"), channel = readFileSync(join(sdk, "packages/runtime/src/guest/linux-guided-reader-channel.ts"), "utf8");
   const list = (source: string, anchor: string) => { const at = source.indexOf(anchor); expect(at).toBeGreaterThan(-1); const open = source.indexOf("[", at), close = source.indexOf("]", open); return [...source.slice(open, close).matchAll(/"([^"]+)"/g)].map(m => m[1]!); };
   expect(list(protocol, "closedLinuxGuidedData(inner,")).toEqual([...COWORK_GUIDED_FRAME_KEYS]);
   expect(list(protocol, "const ownerKeys =").filter(key => key !== "workspaceId")).toEqual([...COWORK_GUIDED_FRAME_OWNER_KEYS]);
@@ -682,6 +757,10 @@ test.skipIf(!process.env.WINTER_AGENT_SDK_SOURCE_DIR)("drift guard (opt-in): the
   expect(protocol).toContain("Buffer.byteLength(data.frame, \"utf8\") > 320 * 1024");
   expect(protocol).toContain("`${JSON.stringify(inner)}\\n` !== data.frame");
   expect(bridge).toContain("GUIDED_READER_FRAME_BYTES = 1024 * 1024");
+  // The 4096 bound mirrors the SDK's PER-QUERY read-id sets, not its process-global binding-id set.
+  expect(COWORK_GUIDED_READ_ID_CAPACITY).toBe(4096);
+  expect(query).toContain("const instructionReadIds = new Set<string>();"); expect(query).toContain("instructionReadIds.size >= 4096");
+  expect(channel).toContain("consumed = new Set<string>()"); expect(channel).toContain("consumed.size >= 4096");
 });
 
 const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", "..", "..", ...parts);
@@ -702,8 +781,8 @@ test("anti-wiring: no src file imports the adapter, it has no barrel export, the
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/guided-reader-adapter|from "\.\/cowork/);
   const own = readFileSync(module, "utf8");
   expect(own).not.toMatch(/implements\s+CoworkGuidedFramePort|:\s*CoworkGuidedFramePort\s*=\s*\{|class\s+\w+[^{]*CoworkGuidedFramePort|readFrame\s*\([^)]*\)\s*(:[^{\n]*)?\{/);
-  // Only the four existing, reviewed modules are imported; neither the SDK nor the Slice A slot (whose own anti-wiring pin forbids src importers).
+  // Only these six existing, reviewed modules are imported; neither the SDK nor the Slice A slot (whose own anti-wiring pin forbids src importers).
   const imports = [...own.matchAll(/from "([^"]+)"/g)].map(match => match[1]!).sort();
-  expect(imports).toEqual(["./current-context", "./current-context-callback", "./current-context-resolver", "./structured-instruction-mapper"]);
+  expect(imports).toEqual(["./current-context", "./current-context-callback", "./current-context-resolver", "./guest-paths", "./repository", "./structured-instruction-mapper"]);
   for (const forbidden of ["guest-context-owner", "CoworkGuestContextOwner", "CoworkGuestOwnerCapture", "CoworkGuestOwnerEvidencePort", "captureCoworkGuestOwner", "@yanlinglabs", "homeIdentity"]) expect(own.includes(forbidden)).toBe(false);
 });
