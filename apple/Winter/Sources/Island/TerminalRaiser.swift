@@ -70,29 +70,29 @@ enum TerminalRaiser {
         return nil
     }
 
-    /// Raises the terminal holding `tty` (main thread: it activates an app).
-    @MainActor
-    static func raise(tty: String) -> Outcome {
-        let processes = TerminalSnapshotReader.processTable()
-        let app = ancestors(ofTTY: tty, processes: processes).lazy
-            .compactMap { NSRunningApplication(processIdentifier: $0) }
-            .first { $0.activationPolicy == .regular }
-        guard let app else { return .notFound }
-        var outcome = Outcome.appOnly
-        if AXIsProcessTrusted() {
+    /// Raises the terminal holding `tty`: the process table and the windows are read, and the raise/press actions
+    /// sent, OFF the main thread (as the routing's reads are); only the app's activation happens on it.
+    static func raise(tty: String) async -> Outcome {
+        let found = await Task.detached(priority: .userInitiated) { () -> (pid: Int32, outcome: Outcome)? in
+            let processes = TerminalSnapshotReader.processTable()
+            let app = ancestors(ofTTY: tty, processes: processes).lazy
+                .compactMap { NSRunningApplication(processIdentifier: $0) }
+                .first { $0.activationPolicy == .regular }
+            guard let app else { return nil }
+            guard AXIsProcessTrusted() else { return (app.processIdentifier, .appOnly) }
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(axApp, 0.2)
             let windows = Self.windows(axApp)
             let candidates = windows.map { TerminalWindowCandidate(title: $0.title, tabTitles: $0.tabs.map(\.title)) }
-            if let (i, j) = pick(tty: tty, appPid: app.processIdentifier, bundleId: app.bundleIdentifier, processes: processes,
-                                 windows: candidates) {
-                if let j { AXUIElementPerformAction(windows[i].tabs[j].element, kAXPressAction as CFString) }
-                AXUIElementPerformAction(windows[i].element, kAXRaiseAction as CFString)
-                outcome = .raised
-            }
-        }
-        app.activate()
-        return outcome
+            guard let (i, j) = pick(tty: tty, appPid: app.processIdentifier, bundleId: app.bundleIdentifier,
+                                    processes: processes, windows: candidates) else { return (app.processIdentifier, .appOnly) }
+            if let j { AXUIElementPerformAction(windows[i].tabs[j].element, kAXPressAction as CFString) }
+            AXUIElementPerformAction(windows[i].element, kAXRaiseAction as CFString)
+            return (app.processIdentifier, .raised)
+        }.value
+        guard let found else { return .notFound }
+        await MainActor.run { _ = NSRunningApplication(processIdentifier: found.pid)?.activate() }
+        return found.outcome
     }
 
     private struct AXWindow {

@@ -164,7 +164,8 @@ final class IslandController {
         let tabs = tabModels
         openRefresh = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                await tabs.refresh(tab: self?.store.tabs.selected?.id)
+                guard let id = self?.store.tabs.selected?.id else { return }
+                await tabs.refresh(tab: id)
                 try? await Task.sleep(for: Self.openRefreshInterval)
             }
         }

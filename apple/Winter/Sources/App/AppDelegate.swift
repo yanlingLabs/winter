@@ -1268,16 +1268,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Moves the user's view to where an island Sessions row's session is.
-    private func showIslandSessionTarget(_ target: IslandSessionTarget, title: (String) -> String?) {
+    private func showIslandSessionTarget(_ target: IslandSessionTarget, title: @escaping (String) -> String?) {
         switch target {
         case .appWindow(let sid):
             summonAppWindow(navigatingTo: .session(sid))
         case .detachedWindow(let sid):
             if let window = detachedWindows.first(where: { $0.sessionId == sid }) { window.bringToFront() }
             else { openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter") }
+        case .dispatch:
+            summonAppWindow(navigatingTo: .mode(.dispatch))
         case .terminal(let tty, let sid):
-            if TerminalRaiser.raise(tty: tty) == .notFound {
-                openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
+            Task { @MainActor [weak self] in
+                if await TerminalRaiser.raise(tty: tty) == .notFound {
+                    self?.openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")
+                }
             }
         case .openDetached(let sid):
             openSessionInNewDetachedWindow(sid, title: title(sid) ?? "Winter")

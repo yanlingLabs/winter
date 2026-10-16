@@ -51,6 +51,12 @@ final class IslandSessionsTests: XCTestCase {
         XCTAssertEqual(IslandSessionsBuilder.target(of: "p", hosts: [phone], windows: windows), .openDetached(sessionId: "p"),
                        "a phone is not on this Mac: the session opens in a detached window")
         XCTAssertEqual(IslandSessionsBuilder.target(of: "n", hosts: [], windows: windows), .openDetached(sessionId: "n"))
+        // The Dispatch session is the pill's: Winter's Dispatch view, never a second (detached) window on it.
+        XCTAssertEqual(IslandSessionsBuilder.target(of: "disp", hosts: [app], windows: windows, isDispatch: true),
+                       .dispatch(sessionId: "disp"))
+        XCTAssertEqual(IslandSessionsBuilder.host(of: "disp", hosts: [app], windows: windows, isDispatch: true), .dispatchPill)
+        XCTAssertEqual(IslandSessionsBuilder.target(of: "d", hosts: [], windows: windows, isDispatch: true),
+                       .detachedWindow(sessionId: "d"), "a detached window showing it still wins")
     }
 
     func testRunningDispatchChildrenStayAboveThePillAndFinishedOrIdleOnesAreListed() {
@@ -85,6 +91,7 @@ final class IslandSessionsTests: XCTestCase {
         XCTAssertEqual(rows.map(\.sessionId), ["ask", "w2", "w1", "bg", "chat"],
                        "an idle session open nowhere is not listed; archived never is")
         XCTAssertEqual(rows.first { $0.sessionId == "ask" }?.mode, "Dispatch")
+        XCTAssertEqual(rows.first { $0.sessionId == "ask" }?.host, .dispatchPill)
         XCTAssertEqual(rows.first { $0.sessionId == "chat" }?.mode, "Chat")
         XCTAssertEqual(rows.first { $0.sessionId == "chat" }?.host, .detachedWindow)
         XCTAssertEqual(rows.first { $0.sessionId == "bg" }?.title, "Untitled code")

@@ -44,6 +44,8 @@ enum IslandSessionHostKind: Equatable {
     case detachedWindow
     /// A terminal (the CLI/TUI), by its tty.
     case terminal(tty: String)
+    /// The Dispatch session: the Dispatch pill holds it.
+    case dispatchPill
     case phone
     case nowhere
 
@@ -52,6 +54,7 @@ enum IslandSessionHostKind: Equatable {
         case .winterWindow: return "Winter window"
         case .detachedWindow: return "Detached window"
         case .terminal(let tty): return "Terminal · \(TerminalWindowMatcher.deviceName(tty))"
+        case .dispatchPill: return "Dispatch pill"
         case .phone: return "Phone"
         case .nowhere: return "Not open"
         }
@@ -62,6 +65,7 @@ enum IslandSessionHostKind: Equatable {
         case .winterWindow: return "macwindow"
         case .detachedWindow: return "macwindow.on.rectangle"
         case .terminal: return "terminal"
+        case .dispatchPill: return "capsule"
         case .phone: return "iphone"
         case .nowhere: return "circle.dashed"
         }
@@ -71,6 +75,7 @@ enum IslandSessionHostKind: Equatable {
 struct IslandSessionRow: Identifiable, Equatable {
     let sessionId: String
     let title: String
+    /// The mode as the row says it ("Code", "Chat", "Dispatch", "Dispatch task").
     let mode: String
     let state: IslandSessionLiveState
     let host: IslandSessionHostKind
@@ -90,6 +95,8 @@ enum IslandSessionTarget: Equatable {
     case appWindow(sessionId: String)
     case detachedWindow(sessionId: String)
     case terminal(tty: String, sessionId: String)
+    /// The Dispatch session: Winter's Dispatch view (the pill already holds it).
+    case dispatch(sessionId: String)
     /// Nowhere: open a detached window on it.
     case openDetached(sessionId: String)
 }
@@ -120,11 +127,13 @@ enum IslandSessionsBuilder {
         return .idle
     }
 
-    /// PURE: where the session is. The app's own windows first (they are certain), then a terminal client with a tty,
-    /// then a phone.
-    static func host(of sessionId: String, hosts: [IslandHost], windows: IslandWindowFacts) -> IslandSessionHostKind {
+    /// PURE: where the session is. The app's own windows first (they are certain), then the Dispatch pill for the
+    /// Dispatch session, a terminal client with a tty, then a phone.
+    static func host(of sessionId: String, hosts: [IslandHost], windows: IslandWindowFacts,
+                     isDispatch: Bool = false) -> IslandSessionHostKind {
         if windows.detachedSessionIds.contains(sessionId) { return .detachedWindow }
         if windows.appWindowSessionId == sessionId { return .winterWindow }
+        if isDispatch { return .dispatchPill }
         if let tty = terminalTTY(hosts) { return .terminal(tty: tty) }
         if hosts.contains(where: { $0.role == "remote" }) { return .phone }
         return .nowhere
@@ -136,9 +145,11 @@ enum IslandSessionsBuilder {
     }
 
     /// PURE: what a click on the row does.
-    static func target(of sessionId: String, hosts: [IslandHost], windows: IslandWindowFacts) -> IslandSessionTarget {
+    static func target(of sessionId: String, hosts: [IslandHost], windows: IslandWindowFacts,
+                       isDispatch: Bool = false) -> IslandSessionTarget {
         if windows.detachedSessionIds.contains(sessionId) { return .detachedWindow(sessionId: sessionId) }
         if windows.appWindowSessionId == sessionId { return .appWindow(sessionId: sessionId) }
+        if isDispatch { return .dispatch(sessionId: sessionId) }
         if let tty = terminalTTY(hosts) { return .terminal(tty: tty, sessionId: sessionId) }
         return .openDetached(sessionId: sessionId)
     }
@@ -162,7 +173,7 @@ enum IslandSessionsBuilder {
             if row.archived == true || row.activity == "archived" { continue }
             if isRunningDispatchChild(row, childStatuses: childStatuses) { continue }
             let state = state(of: row, waiting: waiting, childStatuses: childStatuses)
-            let host = host(of: row.sessionId, hosts: hosts[row.sessionId] ?? [], windows: windows)
+            let host = host(of: row.sessionId, hosts: hosts[row.sessionId] ?? [], windows: windows, isDispatch: row.mode == "dispatch")
             let live = state != .idle || host != .nowhere || row.activity == "active" || row.activity == "background"
                 || childStatuses[row.sessionId] != nil
             guard live else { continue }
@@ -218,7 +229,8 @@ final class IslandSessionsModel: ObservableObject {
     func setHostsForTesting(_ hosts: [String: [IslandHost]]) { self.hosts = hosts }
 
     func open(_ row: IslandSessionRow) {
-        perform(IslandSessionsBuilder.target(of: row.sessionId, hosts: hosts[row.sessionId] ?? [], windows: windows()))
+        perform(IslandSessionsBuilder.target(of: row.sessionId, hosts: hosts[row.sessionId] ?? [], windows: windows(),
+                                             isDispatch: row.mode == "Dispatch"))
     }
 }
 
