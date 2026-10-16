@@ -484,6 +484,38 @@ final class IdleShellTests: XCTestCase {
         XCTAssertTrue(hungUp(), "ended as End ends it: the session hung up")
     }
 
+    func testAnAutoEndedRunVanishesFromThePillsAndIsFreed() throws {
+        let shim = (NSTemporaryDirectory() as NSString).appendingPathComponent("winter-shell-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: shim, withIntermediateDirectories: false)
+        weak var weakRun: CommandRun?
+        do {
+            let run = makeRun()
+            run.adoptShimForTesting(shim)
+            run.feedForTesting(Array("% ls\r\nnotes.md\r\n% ".utf8))
+            weakRun = run
+        }
+        var changes: [[UUID]] = []
+        let watch = store.$runs.dropFirst().sink { changes.append($0.map(\.id)) }
+        check(at: 0)
+        check(at: 60)
+        watch.cancel()
+        XCTAssertTrue(hungUp(), "the shell was ended")
+        XCTAssertTrue(store.runs.isEmpty, "its pill left the row")
+        XCTAssertEqual(changes.count, 1, "in ONE change — the row re-flows in one motion, no finished pill first")
+        XCTAssertNil(weakRun, "the run itself is let go: its output and process state with it")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shim), "its shim folder is deleted")
+        XCTAssertFalse(store.idleTimerRunningForTesting, "nothing left to watch")
+    }
+
+    func testARunThatEndsAnyOtherWayStaysFinished() {
+        let run = makeRun()
+        run.finishForTesting(waitStatus: 0) // `exit` typed in its window
+        check(at: 0)
+        check(at: 120)
+        XCTAssertEqual(store.runs.map(\.id), [run.id], "it stays, finished and dismissible")
+        XCTAssertFalse(run.endedForIdle)
+    }
+
     func testAnOpenWindowKeepsItAlive() {
         let run = makeRun()
         store.openWindow(run.id)
