@@ -6,9 +6,9 @@
 // their records, or records (including the home identity) duplicated into a second home. Nothing here
 // writes to the source home: the runtime-state database is inspected through a private temporary copy.
 import { Database } from "bun:sqlite";
-import { copyFileSync, lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { COWORK_TABLES } from "../cowork/schema";
 
 /** Home-relative root of every Cowork backing, control and shared-file tree. */
@@ -17,6 +17,23 @@ export const COWORK_HOME_ROOT = "cowork";
 /** `rel` is slash-separated and relative to a home. The root itself and everything beneath it. */
 export function isCoworkStorageRel(rel: string): boolean {
   return rel === COWORK_HOME_ROOT || rel.startsWith(`${COWORK_HOME_ROOT}/`);
+}
+
+/** Where does `p` really live? A lexical `cowork/` prefix check is bypassed by a symlinked parent
+ * (`home/innocent` -> `home/cowork/workspaces/ws`) and, on a case-insensitive volume, by a different
+ * spelling (`home/COWORK/...`). This resolves the deepest existing ancestor through the filesystem (the path
+ * itself may not exist yet) and compares the first segment under the resolved home, case-insensitively. It
+ * is deliberately over-inclusive on a case-sensitive volume (a `Cowork/` directory counts): a guard that
+ * refuses or keeps is the safe direction. Keep `isCoworkStorageRel` as the cheap first check. */
+export function resolvesIntoCoworkStorage(home: string, p: string): boolean {
+  const resolve = (q: string): string => {
+    const tail: string[] = []; let cur = q;
+    for (;;) {
+      try { return join(realpathSync.native(cur), ...tail.reverse()); }
+      catch { const up = dirname(cur); if (up === cur) return q; tail.push(basename(cur)); cur = up; }
+    }
+  };
+  return relative(resolve(home), resolve(p)).split(sep)[0]?.toLowerCase() === COWORK_HOME_ROOT;
 }
 
 export type CoworkSourceFinding =
@@ -43,7 +60,7 @@ function inspectTree(home: string): CoworkSourceFinding {
 
 /** A readonly connection cannot open a WAL database that has no sidecars, and opening one in place
  * could create sidecars in the source. Inspect a private copy (main file plus any WAL/SHM) instead. */
-function inspectAuthority(home: string): CoworkSourceFinding {
+function inspectAuthority(home: string, removeScratch: (path: string) => void): CoworkSourceFinding {
   const source = join(home, "runtimes", "runtime-state.db");
   try {
     if (!lstatSync(source).isFile()) return { present: true, kind: "uninspectable", detail: "runtimes/runtime-state.db is not a regular file" };
@@ -70,12 +87,14 @@ function inspectAuthority(home: string): CoworkSourceFinding {
     return { present: true, kind: "uninspectable", detail: `runtimes/runtime-state.db could not be inspected (${errno(error)})` };
   } finally {
     try { db?.close(); } catch { /* the copy is discarded below */ }
-    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+    // The finding is already decided; a cleanup failure must never turn it into a throw (the boot hook calls this).
+    if (scratch !== undefined) { try { removeScratch(scratch); } catch { /* a temp directory is left behind, nothing more */ } }
   }
 }
 
-/** Fail closed: a tree, a populated Cowork table, or anything that cannot be inspected is "present". */
-export function inspectCoworkSource(home: string): CoworkSourceFinding {
+/** Fail closed: a tree, a populated Cowork table, or anything that cannot be inspected is "present".
+ * `io.removeScratch` is a test seam for the temp-copy cleanup; production always removes the directory. */
+export function inspectCoworkSource(home: string, io: { removeScratch?: (path: string) => void } = {}): CoworkSourceFinding {
   const tree = inspectTree(home);
-  return tree.present ? tree : inspectAuthority(home);
+  return tree.present ? tree : inspectAuthority(home, io.removeScratch ?? ((path) => rmSync(path, { recursive: true, force: true })));
 }

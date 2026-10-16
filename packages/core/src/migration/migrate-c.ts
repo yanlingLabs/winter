@@ -49,7 +49,7 @@ import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
 import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
 import { settingsSplitMarkerPath, splitSettingsToSdk } from "./settings-split";
 import { legacyPluginDirNames } from "../plugins/convert-legacy";
-import { isCoworkStorageRel } from "./cowork-exclusion";
+import { isCoworkStorageRel, resolvesIntoCoworkStorage } from "./cowork-exclusion";
 
 export type MigrationCStep = "preflight" | "reconcile-official-roots" | "move-dirs" | "copy-files"
   | "split-settings" | "convert-plugins" | "runtime-state" | "rekey-transcripts" | "archive" | "done";
@@ -340,7 +340,9 @@ export function coworkManifestProblem(m: MigrationCManifest): string | undefined
     ...(m.rekeyed ?? []).flatMap((e) => [e.from, e.to].flatMap((key) => [join("sdk", "projects", key), ...e.entries.map((name) => join("sdk", "projects", key, name))])),
   ];
   const outside = (p: string): boolean => { const r = rel(p); return r === ".." || r.startsWith("../"); };
-  const cowork = named.find((p) => typeof p === "string" && isCoworkStorageRel(rel(p)));
+  // Lexical first, then through the filesystem: relative paths are joined to the recorded home, so a symlinked parent
+  // (`innocent` -> `cowork/workspaces/ws`) or a case-different spelling (`COWORK/...`) is still Cowork storage.
+  const cowork = named.find((p) => typeof p === "string" && (isCoworkStorageRel(rel(p)) || resolvesIntoCoworkStorage(m.home, isAbsolute(p) ? p : join(m.home, p))));
   if (cowork !== undefined) return `its manifest names Cowork storage (${cowork}); a migration never moves, copies or removes it`;
   const escaped = named.find((p) => typeof p === "string" && outside(p));
   return escaped === undefined ? undefined : `its manifest names a path outside the home (${escaped})`;

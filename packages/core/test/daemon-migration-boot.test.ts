@@ -241,6 +241,35 @@ describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () =
     expect(existsSync(join(legacyHome, "cowork", "workspaces", "ws_fixture", "data.ext4"))).toBe(true); // the source is left alone
   });
 
+  test("(c3) a legacy runtime-state database that cannot be inspected is skipped with a line that says so, never reported as Cowork storage", async () => {
+    const parent = tempParent();
+    const home = join(parent, ".winter");
+    const legacyHome = join(parent, "legacy");
+    seedLegacyHome(legacyHome, (root) => {
+      mkdirSync(join(root, "runtimes"), { recursive: true });
+      writeFileSync(join(root, "runtimes", "runtime-state.db"), "not a sqlite database");
+    });
+
+    const capture = captureConsoleError();
+    try {
+      daemon = await startDaemon({
+        home,
+        secrets: new FileSecretStore(join(parent, "secrets")),
+        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")), homedirOverride: () => parent },
+        agentProvider: null,
+      });
+    } finally {
+      capture.restore();
+    }
+
+    expect(readMigrationManifest(home)).toBeNull();
+    const migrationLines = capture.lines.filter((l) => l.startsWith("migration:"));
+    expect(migrationLines.length).toBe(1);
+    expect(migrationLines[0]).toContain("could not be checked for Cowork storage");
+    expect(migrationLines[0]).toContain("auto-migration skipped");
+    expect(migrationLines[0]).not.toContain("holds Cowork storage");
+  });
+
   test("(d) fix wave C3 (P9c-17): a residual throw during Migration B becomes a typed migration_failed refusal, not a crash — and the manifest is left in-progress for --resume", async () => {
     const parent = tempParent();
     const home = join(parent, ".winter"); // resolves as default under homedirOverride, below

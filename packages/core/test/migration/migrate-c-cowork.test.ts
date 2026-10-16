@@ -6,7 +6,7 @@
 // Each guard has its own test so that removing it alone fails a test (mutation checked in the PR).
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { MigrationCRefused, coworkManifestProblem, finishMigrationC, migrationCManifestPath, migrationCPreflightProblem, migrationCState, rollbackMigrationC, runMigrationC, type MigrationCManifest } from "../../src/migration/migrate-c";
@@ -187,6 +187,47 @@ describe("manifest-driven paths: a resumed or rolled-back run never moves Cowork
       rekeyed: [{ sessionId: "s", backendId: "b", from: "-Users-x-app", to: "-private-tmp-app", entries: ["b", "b.jsonl"], outcome: "moved" as const }] })).toBeUndefined();
     expect(coworkManifestProblem({ ...base, moved: [{ from: "coworker", to: "sdk/coworker" }] })).toBeUndefined();
   });
+  // A lexical `cowork/` prefix check was bypassed by a symlinked parent and, on a case-insensitive volume, by `COWORK/`.
+  const linked = (home: string) => symlinkSync(join(home, "cowork", "workspaces", WORKSPACE_DIR), join(home, "innocent"));
+  test("coworkManifestProblem judges where paths really live: a symlinked parent or a COWORK/ spelling is Cowork storage in every field; lookalikes are not", () => {
+    const home = oldLayoutHome(); coworkTree(home); linked(home);
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true }); symlinkSync(join(home, "cowork", "workspaces", WORKSPACE_DIR), join(home, "sdk", "projects", "-evil"));
+    const m = { ...base, home, archiveDir: join(home, "migration", "c-t") }, via = "innocent/data.ext4";
+    for (const bad of [
+      { moved: [{ from: via, to: "sdk/x" }] }, { moved: [{ from: "projects", to: "innocent/y" }] }, { displaced: [{ from: via, to: "migration/y" }] },
+      { moving: { from: "skills", to: "innocent/z" } }, { links: ["innocent"] }, { copied: [via] }, { archived: [{ from: "runtimes/claude-config", to: via }] },
+      { archiveDir: join(home, "innocent", "archive") }, { backups: { ...base.backups, settings: join(home, "innocent", "settings.json.bak") } },
+      { reconciled: [{ root: join(home, "innocent"), outcome: "clean" as const }] },
+      { rekeyed: [{ sessionId: "s", backendId: "b", from: "-raw", to: "-evil", entries: [], outcome: "moved" as const }] },
+      { moved: [{ from: "COWORK/workspaces/ws_fixture/data.ext4", to: "sdk/x" }] }, { copied: ["Cowork/x"] }, { links: ["COWORK"] },
+      { archiveDir: join(home, "COWORK", "archive") },
+    ]) expect(coworkManifestProblem({ ...m, ...bad } as MigrationCManifest)).toContain("Cowork storage");
+    mkdirSync(join(home, "memory", "cowork"), { recursive: true }); mkdirSync(join(home, "coworker"), { recursive: true });
+    for (const ok of ["sessions/x", "coworker/x", "memory/cowork/notes.md", "sdk/cowork", "cowork.txt", "skills", "sdk/skills"]) {
+      expect(coworkManifestProblem({ ...m, moved: [{ from: ok, to: "sdk/elsewhere" }], links: [ok], copied: [ok] } as MigrationCManifest)).toBeUndefined();
+    }
+  });
+  const behindLink = (extra: Partial<MigrationCManifest> = {}) => (h: string): Partial<MigrationCManifest> => {
+    linked(h);
+    return { moved: [{ from: "skills", to: "sdk/skills" }, { from: "innocent/data.ext4", to: "sdk/stolen" }], ...extra };
+  };
+  const spelled = { moved: [{ from: "skills", to: "sdk/skills" }, { from: "COWORK/workspaces/ws_fixture/data.ext4", to: "sdk/stolen" }] };
+  for (const [name, patch] of [["a symlinked parent", behindLink()], ["a COWORK/ spelling", spelled], ["an archive directory behind a symlink", (h: string) => { linked(h); return { archiveDir: join(h, "innocent", "archive") }; }]] as const) {
+    test(`resume, phase 2 and rollback all refuse a manifest that reaches Cowork storage through ${name}; nothing moves`, async () => {
+      const resume = await tamper(patch, "in-progress");
+      const r1 = await refusal(() => runMigrationC(resume.home, deps({ reconcile: async () => "clean" })));
+      expect(r1.code).toBe("sdk_home_half_migrated"); expect(r1.message).toContain("Cowork storage");
+      expect(snapshot(resume.home)).toEqual(resume.whole);
+      const phase2 = await tamper(patch, "phase1-complete");
+      expect((await refusal(() => finishMigrationC(phase2.home, { log: () => {}, reconcile: async () => "clean" }))).code).toBe("sdk_home_half_migrated");
+      expect(snapshot(phase2.home)).toEqual(phase2.whole);
+      const back = await tamper(patch, "complete");
+      const r3 = await refusal(() => rollbackMigrationC(back.home, { log: () => {} }));
+      expect(r3.code).toBe("sdk_home_migration_refused"); expect(r3.message).toContain("nothing was restored");
+      expect(snapshot(back.home)).toEqual(back.whole);
+      expect(readFileSync(join(back.home, "cowork", "workspaces", WORKSPACE_DIR, "data.ext4"), "utf8")).toBe("bytes of data.ext4");
+    });
+  }
   const tamper = async (patch: Partial<MigrationCManifest> | ((home: string) => Partial<MigrationCManifest>), status: MigrationCManifest["status"]) => {
     const home = oldLayoutHome({ official: true }); coworkTree(home);
     await runMigrationC(home, deps()); // phase 1 complete; phase 2 pending

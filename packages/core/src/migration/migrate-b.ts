@@ -38,7 +38,7 @@ import {
 } from "./manifest";
 import { rekeySettings } from "./rekey-settings";
 import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
-import { inspectCoworkSource, isCoworkStorageRel } from "./cowork-exclusion";
+import { inspectCoworkSource, isCoworkStorageRel, resolvesIntoCoworkStorage } from "./cowork-exclusion";
 
 export { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
 export { readMigrationManifest, manifestFileState, manifestPath } from "./manifest";
@@ -275,7 +275,9 @@ function refuseCoworkSource(legacyHome: string): void {
   if (!finding.present) return;
   throw new MigrationRefused(
     "cowork_storage_present",
-    `${legacyHome} holds Cowork storage (${finding.detail}); migration never copies Cowork workspaces, images, shared files or authority records, so nothing was copied — Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`,
+    finding.kind === "uninspectable"
+      ? `${legacyHome} could not be checked for Cowork storage (${finding.detail}); nothing was copied — repair or move aside the unreadable entry, then retry`
+      : `${legacyHome} holds Cowork storage (${finding.detail}); migration never copies Cowork workspaces, images, shared files or authority records, so nothing was copied — Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`,
   );
 }
 
@@ -283,7 +285,9 @@ function refuseCoworkSource(legacyHome: string): void {
 function assertNoCoworkEntries(plan: MigrationPlan): void {
   for (const entry of plan.entries) {
     if (entry.status === "skipped") continue;
-    if (isCoworkStorageRel(relative(plan.legacyHome, entry.src)) || isCoworkStorageRel(relative(plan.home, entry.dest))) {
+    // Lexical first, then through the filesystem: a symlinked parent or a different case spelling still lands in Cowork storage.
+    if (isCoworkStorageRel(relative(plan.legacyHome, entry.src)) || isCoworkStorageRel(relative(plan.home, entry.dest))
+      || resolvesIntoCoworkStorage(plan.legacyHome, entry.src) || resolvesIntoCoworkStorage(plan.home, entry.dest)) {
       throw new MigrationRefused("cowork_storage_present", `migration plan includes a Cowork storage path (${entry.status}); refusing before anything is written`);
     }
   }
@@ -525,7 +529,7 @@ export async function rollbackMigrationB(home: string, deps: { log: (line: strin
   for (const entry of manifest.entries) {
     if (entry.status !== "copied" && entry.status !== "rekeyed" && entry.status !== "rebuilt") continue;
     // Never unlink Cowork storage, even if a hand-edited manifest lists it as migrated.
-    if (isCoworkStorageRel(relative(home, entry.dest))) {
+    if (isCoworkStorageRel(relative(home, entry.dest)) || resolvesIntoCoworkStorage(home, entry.dest)) {
       deps.log(`rollback: kept ${entry.dest} (Cowork storage is never removed by a migration rollback)`);
       continue;
     }

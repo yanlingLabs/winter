@@ -5,12 +5,12 @@
 // Each guard has its own test so removing it alone fails a test (mutation checked in the PR).
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { classifyLegacyEntry, MigrationRefused, planMigrationB, readMigrationManifest, resumeMigrationB, rollbackMigrationB, runMigrationB, type MigrationDeps, type MigrationPlan } from "../../src/migration/migrate-b";
-import { inspectCoworkSource, isCoworkStorageRel } from "../../src/migration/cowork-exclusion";
-import { manifestPath, writeManifestAtomic } from "../../src/migration/manifest";
+import { inspectCoworkSource, isCoworkStorageRel, resolvesIntoCoworkStorage } from "../../src/migration/cowork-exclusion";
+import { manifestPath, writeManifestAtomic, type MigrationFileEntry, type MigrationManifest } from "../../src/migration/manifest";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
@@ -213,5 +213,149 @@ describe("rollback never removes Cowork storage", () => {
     expect(logs.some(line => line.includes("Cowork storage is never removed"))).toBe(true);
     // Ordinary migrated files were removed as before.
     expect(existsSync(join(home, "memory", "_global", "x.md"))).toBe(false);
+  });
+});
+
+// ── Paths are judged by where they REALLY live ───────────────────────────────────────────────────────
+// A lexical `cowork/` prefix check was bypassed by a symlinked parent (`innocent` -> `cowork/workspaces/ws`)
+// and, on a case-insensitive volume, by `COWORK/...`. A `rebuilt` entry has no hash gate at all.
+const IMAGE_BYTES = "guest volume bytes";
+const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
+const entry = (dest: string, status: MigrationFileEntry["status"], content = IMAGE_BYTES): MigrationFileEntry =>
+  ({ src: join(dest, "..", "src-unused"), dest, sha256: status === "rebuilt" ? "" : sha(content), bytes: content.length, status });
+function manifestOf(home: string, entries: MigrationFileEntry[]): void {
+  writeManifestAtomic(home, { schemaVersion: 1, startedAt: "t", legacyHome: join(home, "legacy-unused"), home, profile: "dev", status: "complete", entries, keychain: [] } satisfies MigrationManifest);
+}
+/** A destination that really holds an image under `cowork/`, reachable through an innocent-looking symlinked parent. */
+function destinationWithImage() {
+  const home = realpathSync(tempDir());
+  const workspace = join(home, "cowork", "workspaces", WORKSPACE), image = join(workspace, "data.ext4");
+  write(image, IMAGE_BYTES);
+  symlinkSync(workspace, join(home, "innocent"));
+  return { home, image, viaLink: join(home, "innocent", "data.ext4") };
+}
+
+describe("resolvesIntoCoworkStorage", () => {
+  test("follows symlinked parents, ignores case, handles paths that do not exist yet, and leaves ordinary paths alone", () => {
+    const { home, image, viaLink } = destinationWithImage();
+    expect(resolvesIntoCoworkStorage(home, image)).toBe(true);
+    expect(resolvesIntoCoworkStorage(home, viaLink)).toBe(true);
+    expect(resolvesIntoCoworkStorage(home, join(home, "innocent", "not-yet", "new.ext4"))).toBe(true); // deepest existing ancestor resolves into Cowork
+    expect(resolvesIntoCoworkStorage(home, join(home, "COWORK", "workspaces", "w", "data.ext4"))).toBe(true); // spelling alone
+    expect(resolvesIntoCoworkStorage(home, join(home, "Cowork"))).toBe(true);
+    expect(resolvesIntoCoworkStorage("/home-that-does-not-exist", "/home-that-does-not-exist/cowork/x")).toBe(true);
+    for (const rel of ["sessions/s1/a.jsonl", "coworker/x", "cowork.txt", "memory/cowork/notes.md", "sdk/cowork"]) expect(resolvesIntoCoworkStorage(home, join(home, rel))).toBe(false);
+    expect(resolvesIntoCoworkStorage(home, join(tempDir(), "cowork", "x"))).toBe(false); // outside this home entirely
+  });
+});
+
+describe("rollback keeps Cowork storage reached through a symlinked parent or another spelling", () => {
+  for (const status of ["copied", "rebuilt"] as const) {
+    test(`a ${status} entry whose destination goes through a symlinked parent is kept (rebuilt has no hash gate)`, async () => {
+      const { home, image, viaLink } = destinationWithImage();
+      manifestOf(home, [entry(viaLink, status)]);
+      const logs: string[] = [];
+      await rollbackMigrationB(home, { log: line => logs.push(line) });
+      expect(readFileSync(image, "utf8")).toBe(IMAGE_BYTES);
+      expect(logs.some(line => line.includes("Cowork storage is never removed"))).toBe(true);
+    });
+    test(`a ${status} entry spelled COWORK/ is kept`, async () => {
+      const home = realpathSync(tempDir()), image = join(home, "COWORK", "workspaces", WORKSPACE, "data.ext4");
+      write(image, IMAGE_BYTES); // the on-disk name is COWORK on any volume, so the lexical `cowork/` check cannot see it
+      manifestOf(home, [entry(image, status)]);
+      await rollbackMigrationB(home, { log: () => {} });
+      expect(readFileSync(image, "utf8")).toBe(IMAGE_BYTES);
+    });
+    test(`a ${status} entry spelled COWORK/ over a directory stored as cowork/ is kept (case-insensitive volumes)`, async () => {
+      const { home, image } = destinationWithImage();
+      const alias = join(home, "COWORK", "workspaces", WORKSPACE, "data.ext4");
+      if (!existsSync(alias)) return; // a case-sensitive volume has no such alias; the previous test covers the spelling
+      manifestOf(home, [entry(alias, status)]);
+      await rollbackMigrationB(home, { log: () => {} });
+      expect(readFileSync(image, "utf8")).toBe(IMAGE_BYTES);
+    });
+  }
+  test("ordinary migrated files — including lookalikes and a symlinked parent that is not Cowork — are still removed", async () => {
+    const home = realpathSync(tempDir());
+    write(join(home, "sessions", "s1", "a.jsonl"), "session"); write(join(home, "coworker", "x"), "lookalike"); write(join(home, "memory", "cowork", "notes.md"), "notes");
+    symlinkSync(join(home, "sessions", "s1"), join(home, "linked"));
+    write(join(home, "sessions", "s1", "b.jsonl"), "via link");
+    manifestOf(home, [entry(join(home, "sessions", "s1", "a.jsonl"), "copied", "session"), entry(join(home, "coworker", "x"), "copied", "lookalike"),
+      entry(join(home, "memory", "cowork", "notes.md"), "copied", "notes"), entry(join(home, "linked", "b.jsonl"), "copied", "via link")]);
+    await rollbackMigrationB(home, { log: () => {} });
+    for (const rel of ["sessions/s1/a.jsonl", "coworker/x", "memory/cowork/notes.md", "sessions/s1/b.jsonl"]) expect(existsSync(join(home, rel))).toBe(false);
+  });
+});
+
+describe("the executor refuses plans that reach Cowork storage through a symlink or another spelling", () => {
+  for (const status of ["copied", "rekeyed", "rebuilt"] as const) {
+    test(`a ${status} destination through a symlinked parent of the destination home is refused before anything is written`, async () => {
+      const source = tempDir(); seedSource(source);
+      const { home, image, viaLink } = destinationWithImage();
+      const before = snapshot(home);
+      const plan = await planMigrationB({ legacyHome: source, home: tempDir(), profile: "dev" });
+      plan.home = home; plan.entries = [{ src: join(source, "settings.json"), dest: viaLink, status }];
+      expect((await refusalOf(() => runMigrationB(plan, deps()))).code).toBe("cowork_storage_present");
+      expect(readFileSync(image, "utf8")).toBe(IMAGE_BYTES);
+      expect(snapshot(home)).toEqual(before);
+    });
+    test(`a ${status} source through a symlinked parent of the legacy home is refused`, async () => {
+      const home = tempDir(), legacy = realpathSync(tempDir()); seedSource(legacy);
+      const plan = await planMigrationB({ legacyHome: legacy, home, profile: "dev" });
+      // `cowork` arrives later in the source (a hand-built plan, or storage created after planning)
+      const workspace = join(legacy, "cowork", "workspaces", WORKSPACE); write(join(workspace, "data.ext4"), IMAGE_BYTES);
+      symlinkSync(workspace, join(legacy, "innocent"));
+      plan.entries = [{ src: join(legacy, "innocent", "data.ext4"), dest: join(home, "x.ext4"), status }];
+      expect((await refusalOf(() => runMigrationB(plan, deps()))).code).toBe("cowork_storage_present");
+      expect(existsSync(join(home, "x.ext4"))).toBe(false);
+    });
+    test(`a ${status} destination spelled COWORK/ is refused`, async () => {
+      const source = tempDir(), home = realpathSync(tempDir()); seedSource(source);
+      const plan = await planMigrationB({ legacyHome: source, home, profile: "dev" });
+      plan.entries = [{ src: join(source, "settings.json"), dest: join(home, "COWORK", "workspaces", WORKSPACE, "data.ext4"), status }];
+      expect((await refusalOf(() => runMigrationB(plan, deps()))).code).toBe("cowork_storage_present");
+      expect(readdirSync(home)).toEqual([]);
+    });
+  }
+  test("ordinary entries, lookalike names included, still migrate", async () => {
+    const source = tempDir(), home = tempDir(); seedSource(source); write(join(source, "coworker", "x"), "lookalike"); write(join(source, "memory", "cowork", "notes.md"), "notes");
+    const manifest = await runMigrationB(await planMigrationB({ legacyHome: source, home, profile: "dev" }), deps());
+    expect(manifest.status).toBe("complete");
+    for (const rel of ["coworker/x", "memory/cowork/notes.md", "sessions/s1/a.jsonl"]) expect(readFileSync(join(home, rel), "utf8").length).toBeGreaterThan(0);
+  });
+});
+
+describe("inspection cleanup", () => {
+  test("a temp-copy cleanup failure never turns the finding into a throw (the boot hook calls this)", () => {
+    const source = tempDir(); seedSource(source); seedRuntimeState(source, true, true);
+    const scratch: string[] = [];
+    const finding = inspectCoworkSource(source, { removeScratch: path => { scratch.push(path); throw new Error("EBUSY"); } });
+    expect(finding).toMatchObject({ present: true, kind: "authority-records" });
+    expect(scratch).toHaveLength(1);
+    rmSync(scratch[0]!, { recursive: true, force: true });
+    const clean = tempDir(); seedSource(clean); seedRuntimeState(clean, false, true);
+    expect(inspectCoworkSource(clean, { removeScratch: () => { throw new Error("EBUSY"); } })).toEqual({ present: false });
+    rmSync(scratch[0] ?? clean, { recursive: true, force: true });
+  });
+  test("by default the private copy is removed (a private TMPDIR is left empty)", () => {
+    const source = tempDir(), scratchRoot = realpathSync(tempDir()); seedSource(source); seedRuntimeState(source, true, true);
+    const previous = process.env.TMPDIR; process.env.TMPDIR = scratchRoot;
+    try { expect(inspectCoworkSource(source)).toMatchObject({ present: true, kind: "authority-records" }); }
+    finally { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; }
+    expect(readdirSync(scratchRoot)).toEqual([]);
+  });
+
+describe("an unreadable legacy entry is not reported as Cowork storage", () => {
+  test("the refusal says it could not be checked, and still refuses", async () => {
+    const source = tempDir(), home = tempDir(); seedSource(source); write(join(source, "runtimes", "runtime-state.db"), "not a sqlite database");
+    const refusal = await refusalOf(() => planMigrationB({ legacyHome: source, home, profile: "dev" }));
+    expect(refusal.code).toBe("cowork_storage_present");
+    expect(refusal.message).toContain("could not be checked for Cowork storage");
+    expect(refusal.message).not.toContain("holds Cowork storage");
+  });
+  test("a real Cowork tree still reads as holding Cowork storage", async () => {
+    const source = tempDir(), home = tempDir(); seedSource(source); seedCoworkTree(source);
+    const refusal = await refusalOf(() => planMigrationB({ legacyHome: source, home, profile: "dev" }));
+    expect(refusal.message).toContain("holds Cowork storage");
   });
 });

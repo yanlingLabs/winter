@@ -549,7 +549,9 @@ export async function startDaemon(opts: {
       // with one line, like a non-pristine home, rather than refusing to boot.
       const coworkSource = check.pristine ? inspectCoworkSource(legacyHome) : undefined;
       if (coworkSource?.present) {
-        console.error(`migration: a legacy home was found at ${legacyHome}, but it holds Cowork storage (${coworkSource.detail}) — auto-migration skipped; Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`);
+        console.error(coworkSource.kind === "uninspectable"
+          ? `migration: a legacy home was found at ${legacyHome}, but it could not be checked for Cowork storage (${coworkSource.detail}) — auto-migration skipped; repair or move aside the unreadable entry, then restart to migrate`
+          : `migration: a legacy home was found at ${legacyHome}, but it holds Cowork storage (${coworkSource.detail}) — auto-migration skipped; Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`);
       } else if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
         // Fix wave C3 (P9c-17, Critical): most per-item failures are already absorbed inside
