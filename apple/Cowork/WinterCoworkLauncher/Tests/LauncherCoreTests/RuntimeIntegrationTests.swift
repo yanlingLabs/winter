@@ -269,6 +269,18 @@ final class RuntimeIntegrationTests: XCTestCase {
         XCTAssertEqual(b.reason, .workerKilled)
     }
 
+    func testADescriptorAttachedToAFrameOnL3IsAViolationAndIsClosed() throws {
+        let rig = try RuntimeRig(mode: "l3rights")
+        XCTAssertTrue(rig.hello())
+        let (pid, _) = try XCTUnwrap(rig.begin())
+        let baseline = openDescriptorCount()
+        XCTAssertTrue(try rig.attach(try DiskPair()))
+        XCTAssertEqual(rig.daemon.nextFault(), .worker_channel_lost)
+        let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
+        XCTAssertEqual(b.reason, .workerKilled); XCTAssertTrue(rig.processGone(pid))
+        XCTAssertFalse(rig.daemon.sees(timeout: 0.2) { if case .muxUp = $0 { true } else { false } }, "nothing from that stream is relayed")
+        _ = baseline
+    }
     func testAGarbageDatagramFromTheWorkerKillsIt() throws {
         let rig = try RuntimeRig(mode: "garbage")
         XCTAssertTrue(rig.hello())

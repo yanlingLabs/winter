@@ -22,6 +22,7 @@ import LauncherNative
  *   fault              reports fault sandbox_failed and exits 79
  *   rejectvolumes      reports fault bad_volumes when the disks arrive
  *   noaccept           receives the disks and says nothing
+ *   l3rights           sends a mux frame on L3 with a descriptor attached
  *   garbage            sends a datagram that is not an envelope
  *   rightsback         sends a valid status with a descriptor attached
  *   badseq             sends a status with a sequence gap
@@ -110,6 +111,11 @@ var counters = FlushCounters()
         sendStatus(.vmRunning); booted = true
         if mode == "exitnodrain" { exit(0) }
         sendStatus(.guestHello)
+        if mode == "l3rights" {
+            // A frame on L3 that drags a descriptor along: a hostile worker's way to push a file into the launcher's table.
+            _ = Sock.send(l3, MuxFormat.frame(.bootstrap, seq: 1, payload: [1])[...], rights: [Int32(open("/dev/null", O_RDONLY))])
+            return
+        }
         sendFrame(.runtime, Array("fds:\(openDescriptors().map(String.init).joined(separator: ","))".utf8))
     case .drain(_, let nonce, _, _):
         if mode == "ignoredrain" { return }
