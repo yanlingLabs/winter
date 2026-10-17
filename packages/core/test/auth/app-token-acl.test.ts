@@ -149,7 +149,7 @@ describe.skipIf(!darwin)("the Keychain FFI and the app-token migration (throwawa
     expect(aclOf("harness-token")).not.toContain(CALCULATOR);
     expect(readGenericPassword(kc, SERVICE, "harness-token")).toBe("h-1");
     clean();
-  });
+  }, 30_000); // five `security`/ACL round-trips on a throwaway keychain: 5-12 s on a loaded machine, past bun's 5 s default
 
   test("a partition gap (the creator is not the app's team) is logged at the migration and never re-runs it", () => {
     clean();
