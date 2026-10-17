@@ -375,7 +375,8 @@ class Hygiene(unittest.TestCase):
                 yield path
 
     def test_no_home_or_builder_path_or_name_in_anything_committed_here(self):
-        tokens = [t.decode() for t in lib.builder_tokens()]
+        # A CI account ("runner") is a generic word that legitimately appears in code; the check is for a person's name.
+        tokens = [t.decode() for t in lib.builder_tokens() if t.decode().lower() not in {'runner', 'runneradmin', 'ubuntu', 'github', 'root', 'admin'}]
         scanned = 0
         for path in self.files():
             text = path.read_bytes().decode('utf-8', 'replace')
