@@ -196,7 +196,7 @@ test("drift guard: the pinned literals", () => {
     controlLineBytes: 16384, muxLineBytes: 1572864, depth: { launcher: 4, receipt: 3, control: 1, bootstrap: 8 }, headerBytes: 16,
     muxPayloadBytes: { control: 4096, bootstrap: 262144, runtime: 1048576, provider: 0 }, receiptBytes: 8192, tokenChars: 63, vcpus: 2, minMemoryMiB: 768, maxMemoryMiB: 1024,
     drainBudgetMs: 30000, drainBudgetCeilingMs: 120000, volumeRights: 2,
-    libkrunExitWatchdogMs: 20000, launcherKillMarginMs: 5000, hostStopMarginMs: 10000, conversationsBytes: 20480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096, runtimePrefixBytes: 4, runtimeConversations: 16 });
+    libkrunExitWatchdogMs: 20000, launcherKillMarginMs: 5000, hostStopMarginMs: 10000, conversationsBytes: 20480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096, runtimePrefixBytes: 4, runtimeConversations: 16, runtimeInFlightBytes: 1048576 });
   expect({ ...COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES }).toEqual({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
   // The runtime ceiling is the existing guest runtime transport frame, not a number invented here.
   const runtime = readFileSync(join(import.meta.dir, "..", "..", "..", "src", "cowork", "guest-runtime.ts"), "utf8");
@@ -238,7 +238,7 @@ test("the contract document names every production symbol, every message type an
   for (const cls of COWORK_NATIVE_MUX_CLASSES) expect(doc).toContain(cls);
 });
 test("the vector files are exactly the six the contract names, and nothing else lives beside them", () => {
-  expect(readdirSync(vectorsDir).sort()).toEqual(["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"]);
+  expect(readdirSync(vectorsDir).sort()).toEqual(["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-flow.json", "runtime-image.json", "stop-receipts.json"]);
   for (const name of readdirSync(vectorsDir)) expect(basename(name).endsWith(".json")).toBe(true);
   expect(existsSync(join(vectorsDir, "launcher-lines.json"))).toBe(true);
 });
@@ -421,4 +421,25 @@ test("bootstrap order: conversations only after mounted, a second set is second_
   // The parser alone cannot see a second set: each copy is a valid frame.
   const set = Buffer.from(mux.positive.find(entry => entry.name === "bootstrap-down-conversations-guided")!.hex, "hex");
   expect(parseCoworkNativeMuxFrame(set, "down").class).toBe("bootstrap");
+});
+
+interface FlowVectors { limitBytes: number; cases: { name: string; steps: { stream: "in" | "out" | "err"; bytes: number; end?: boolean }[]; refusedAt: number | null }[] }
+const flows = vector<FlowVectors>("runtime-flow.json");
+test("runtime IN flow control: at most 1 MiB of IN bytes in flight with no OUT or ERR byte since; the guest's 4 MiB ring is never approached", () => {
+  expect(flows.limitBytes).toBe(COWORK_NATIVE_LIMITS.runtimeInFlightBytes);
+  expect(COWORK_NATIVE_LIMITS.runtimeInFlightBytes).toBeLessThan(4 * 1024 * 1024 / 2);
+  for (const entry of flows.cases) {
+    const streams = new CoworkNativeRuntimeStreams(1);
+    let refusedAt: number | null = null;
+    for (const [index, step] of entry.steps.entries()) {
+      const failed = code(() => streams.accept({ class: "runtime", seq: index + 1, conversation: 0, stream: step.stream, end: step.end === true, payload: new Uint8Array(step.bytes) }));
+      if (failed !== "accepted" && refusedAt === null) { expect(failed).toBe("oversize"); refusedAt = index; break; }
+    }
+    expect(`${entry.name}:${refusedAt}`).toBe(`${entry.name}:${entry.refusedAt}`);
+  }
+  expect(flows.cases.some(entry => entry.refusedAt !== null) && flows.cases.some(entry => entry.refusedAt === null)).toBe(true);
+});
+test("a conversation's uids and gid stay below nobody (65534) and 65535, and the shared gid is no member's uid", () => {
+  const names = mux.negative.map(entry => entry.name);
+  expect(names).toEqual(expect.arrayContaining(["conversations-uid-nobody-65534", "conversations-uid-65535", "conversations-gid-nobody", "conversations-gid-equals-a-tool-uid"]));
 });

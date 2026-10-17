@@ -260,7 +260,7 @@ so the conversation set is the only message with a cap of its own.
 | --- | --- |
 | `logicalSessionId` | the supervisor's id: `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}` |
 | `authority` | `workspaceId, sessionId` (the backend session), `incarnationId, leaseEpoch` (1 to 2^32-1), `configRevision, grantRevision, policyRevision` |
-| `runtimeUid`, `toolUid`, `workspaceGid` | 1000 to 65535; every `runtimeUid` and `toolUid` of the set distinct, and no `workspaceGid` equal to any `runtimeUid` (the supervisor's own rules) |
+| `runtimeUid`, `toolUid`, `workspaceGid` | 1000 to **65533** (65534 is `nobody` and 65535 the invalid id; nothing requires them); every `runtimeUid` and `toolUid` of the set distinct, and no `workspaceGid` equal to any `runtimeUid` (the supervisor's own rule) **or any `toolUid`** (a group id equal to a uid is that user's private group). `workspaceGid` need NOT equal a uid: PID 1 gives each runtime and tool process the primary gid equal to its own uid (the supervisor does not check that, so the contract does not carry it), and `workspaceGid` is the one extra, shared group. |
 | `policy` | `auto plan ask accept-edits dont-ask bypass` |
 | `roots` | 1 to 16 of `id, guestPath, source, readOnly`; ids and views distinct, no view inside another; `guestPath` is one of `/workspace/folders/<name>[/...]`, `/workspace/repos/<name>[/...]`, `/workspace/.winter/memory`, `/workspace/.winter/scratch/<logicalSessionId>`, `/workspace/outputs/<logicalSessionId>`; `source` is a canonical absolute path under `/workspace/` (no `.`, `..` or empty component, at most 1024 bytes) |
 | `runtime` | `null`, or `model` (1 to 256 characters), `timeoutMs` (1 to 600000), `toolClasses` (a subset of `read write execute`, in that order), `provider`, `guided` (`null`, or `bindingId` a version 4 UUID and `generation` 1 or more) |
@@ -294,6 +294,8 @@ frames without reading them, change nothing.
 A conversation's three streams are the supervisor's `RuntimeDuplexPorts` input, stdout and stderr (ERR is carried, not dropped). IN travels only down; OUT and ERR only up (anything else is `bad_direction`). An empty data section
 is valid only with the end flag. After a stream's end nothing more may arrive on it, and a conversation index outside the delivered set is refused (`CoworkNativeRuntimeStreams` is that state). Data is
 limited by the payload bound, 1 MiB minus 4 bytes; a sender uses chunks of at most 256 KiB (the host's own chunk limit). Frames of this class are delivered only after `runtime_ready`.
+
+**Runtime IN flow control (normative, host side).** The guest relay's IN ring is 4 MiB and an overflow stops the whole guest, so the contract bounds the host: the runtime IN payload bytes sent with no OUT or ERR byte received since stay **at or below 1 MiB** (`COWORK_NATIVE_LIMITS.runtimeInFlightBytes`, 1,048,576, a quarter of the ring). Any OUT or ERR frame proves the guest is reading and clears the count. Host-query is request/response, so this needs no credit frame: one request (at most 1 MiB, in chunks of at most 256 KiB) is in flight and its first output byte acknowledges it; a longer request is not possible in N2. `CoworkNativeRuntimeStreams` applies the same rule to both ends (the sender must not send a frame that would exceed it, the receiver refuses it as `oversize`), and `runtime-flow.json` pins the cases. A credit or window frame stays a later option if streaming requests larger than 1 MiB are ever needed.
 
 ## 7. Stop evidence
 

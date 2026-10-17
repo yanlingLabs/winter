@@ -65,6 +65,8 @@ export const COWORK_NATIVE_LIMITS = Object.freeze({
   conversationsBytes: 20_480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096,
   /** A runtime payload starts with this many bytes of stream header (section 6.2); the rest is stream data. */
   runtimePrefixBytes: 4, runtimeConversations: 16,
+  /** Host-side bound on runtime IN bytes sent with no OUT or ERR byte received since: the guest relay's IN ring is 4 MiB and an overflow stops the whole guest, so the host stays at a quarter of it. */
+  runtimeInFlightBytes: 1_048_576,
 });
 /** Launcher kill deadline for a drain with this budget: the guest may spend all of `budgetMs`, the VMM exit path needs up to
  * `libkrunExitWatchdogMs` after that, and the launcher must not kill before that watchdog can have fired. */
@@ -322,7 +324,7 @@ export type CoworkNativeMuxFrame =
 /**
  * The conversation set the guest's tool supervisor is started with. Source of every per-conversation field and rule: the agent SDK's
  * `packages/runtime/src/guest/linux-supervisor.py` at main 093fb3ea (`ToolService.__init__` and `_configure_runtime`). The wire carries what the HOST
- * decides or knows: authority, uids and gid (the supervisor only demands that they are distinct and in 1000 to 65535), policy, roots, and the
+ * decides or knows: authority, uids and gid (the supervisor demands that they are distinct and in its range; the contract keeps them in 1000 to 65533, below `nobody`), policy, roots, and the
  * runtime's public provider metadata. PID 1 adds what only the guest knows and splices the result into its trusted config: `guestBootId`, the
  * artifact pins, the control and environment directories, and per conversation `storeDirectory` = `/workspace/.winter/conversations/<logicalSessionId>`
  * and `runhomeDirectory` = `/run/winter/conversations/<logicalSessionId>` (created root-side, owned by `runtimeUid`, mode 0700). Nothing secret is
@@ -359,7 +361,8 @@ const SDK_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ASCII_TEXT = /^[\x20-\x7e]*$/;
 const sdkId: Validator<string> = value => typeof value === "string" && SDK_ID.test(value) ? value : fail();
-const unixId: Validator<number> = uint(1000, 65535);
+/** 1000 to 65533: 65534 (nobody) and 65535 (the invalid id) are never assigned. */
+const unixId: Validator<number> = uint(1000, 65533);
 /** A canonical absolute guest path: no `.`, `..` or empty component, printable ASCII, at most 1024 bytes. */
 const guestPath: Validator<string> = value => {
   if (typeof value !== "string" || value.length > 1024 || !ASCII_TEXT.test(value) || !value.startsWith("/")) return fail();
@@ -459,7 +462,7 @@ function checkConversationsMessage(message: Record<string, unknown>): void {
   if (profile !== null && items.length !== 1) return fail();
   if (new Set(items.map(item => item.logicalSessionId)).size !== items.length || new Set(items.map(item => item.authority.sessionId)).size !== items.length) return fail();
   const uids = items.flatMap(item => [item.runtimeUid, item.toolUid]);
-  if (new Set(uids).size !== uids.length || items.some(item => items.some(other => other.runtimeUid === item.workspaceGid))) return fail();
+  if (new Set(uids).size !== uids.length || items.some(item => items.some(other => other.runtimeUid === item.workspaceGid || other.toolUid === item.workspaceGid))) return fail();
   if (new Set(items.filter(item => item.runtime).map(item => (item.runtime!.provider.scope as Record<string, unknown>).bootId)).size > 1) return fail();
 }
 /** What a sender fixes before it sends, and a receiver compares against the plan and `hello` it holds. A set that does not match is never sent and never started. */
@@ -613,6 +616,7 @@ export class CoworkNativeMuxSequence {
 /** Per-stream state of the runtime class, one instance per link end: a conversation outside the delivered set, and any byte or second end after a stream's end, are refused. */
 export class CoworkNativeRuntimeStreams {
   private readonly ended = new Set<string>();
+  private inFlight = 0;
   constructor(private readonly conversations: number) {
     // N2 (D10): the runtime class serves exactly one host-query conversation, index 0.
     if (conversations !== 1) fail("bad_field");
@@ -621,8 +625,12 @@ export class CoworkNativeRuntimeStreams {
     if (frame.class !== "runtime") return fail("bad_field");
     const key = `${frame.conversation}:${frame.stream}`;
     if (frame.conversation >= this.conversations || this.ended.has(key)) return fail("bad_field");
+    // Flow control (host side, normative): IN bytes the guest has not answered stay at or below runtimeInFlightBytes. Any OUT or ERR frame shows the guest is reading and clears the count.
+    if (frame.stream === "in") { if (this.inFlight + frame.payload.length > COWORK_NATIVE_LIMITS.runtimeInFlightBytes) return fail("oversize"); this.inFlight += frame.payload.length; } else this.inFlight = 0;
     if (frame.end) this.ended.add(key);
   }
+  /** What a sender may still put on IN before it must wait for the guest to answer. */
+  get inFlightBudget(): number { return COWORK_NATIVE_LIMITS.runtimeInFlightBytes - this.inFlight; }
 }
 
 // ------------------------------------------------------------------------------------------------ launcher envelopes (L2)
