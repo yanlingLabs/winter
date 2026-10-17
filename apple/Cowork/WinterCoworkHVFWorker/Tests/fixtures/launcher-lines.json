@@ -1,0 +1,519 @@
+{
+  "version": 1,
+  "note": "Each `line` is one NDJSON line including its trailing newline. `rights` is how many SCM_RIGHTS descriptors arrived with it. Keys are in schema order; the line must re-serialize byte for byte.",
+  "positive": [
+    {
+      "name": "hello",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"hello\",\"launcherInstanceId\":\"launcher-88888888\",\"hostBootId\":\"0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B\",\"parentVerified\":true}\n",
+      "t": "hello"
+    },
+    {
+      "name": "begin",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "t": "begin"
+    },
+    {
+      "name": "begun",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begun\",\"id\":\"req-0001\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"workerPid\":4242,\"workerStartToken\":\"start-4242\"}\n",
+      "t": "begun"
+    },
+    {
+      "name": "volumes-two-descriptors",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "t": "volumes"
+    },
+    {
+      "name": "volumes-accepted",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"volumes_accepted\",\"id\":\"req-0002\"}\n",
+      "t": "volumes_accepted"
+    },
+    {
+      "name": "refused",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"refused\",\"id\":\"req-0002\",\"code\":\"volumes_rejected\"}\n",
+      "t": "refused"
+    },
+    {
+      "name": "worker-state",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"vm_running\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "mux-down-bootstrap-plan",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"V01YMQEBAAABAAAAbgYAAHsidiI6MSwidCI6InBsYW4iLCJvcGVyYXRpb25JZCI6ImZpbGVzeXN0ZW1fNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1Iiwibm9uY2UiOiIwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZiIsInBsYW4iOnsiY2hlY2tNb2RlIjoibm9ybWFsIiwiZXh0NEZlYXR1cmVzIjpbIjY0Yml0IiwiZGlyX2luZGV4IiwiZGlyX25saW5rIiwiZXh0ZW50IiwiZXh0cmFfaXNpemUiLCJmaWxldHlwZSIsImZsZXhfYmciLCJoYXNfam91cm5hbCIsImh1Z2VfZmlsZSIsImxhcmdlX2ZpbGUiLCJtZXRhZGF0YV9jc3VtIiwic3BhcnNlX3N1cGVyIl0sImhvbWVJZCI6ImhvbWVfOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0aW9uSWQiOiJmaWxlc3lzdGVtXzU1NTU1NTU1LTU1NTUtNDU1NS04NTU1LTU1NTU1NTU1NTU1NSIsIm93bmVyIjp7ImNvbnRyb2xsZXJJbnN0YW5jZUlkIjoiY3RsLTBiMGIwYjBiLTBiMGItNGIwYi04YjBiLTBiMGIwYjBiMGIwYi1hMWIyYzNkNCIsImluY2FybmF0aW9uSWQiOiJpbmMtMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwibGVhc2VFcG9jaCI6MywicnVudGltZUltYWdlRGlnZXN0IjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsIndvcmtlckluc3RhbmNlSWQiOiJ3cmstNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0In0sInByaW9yUmVwbGF5IjpudWxsLCJwcm90b2NvbFZlcnNpb24iOjMsInJlcXVpcmVkTW91bnRPcHRpb25zIjpbIm5vaW5pdF9pdGFibGUiXSwidmlyZ2luWmVyb1Byb3ZlbmFuY2UiOiJuZXctc3BhcnNlLWNyZWF0aW9uIiwidm9sdW1lcyI6W3siYWN0aW9uIjoiZm9ybWF0LW5ldyIsImNhcGFjaXR5Qnl0ZXMiOjE3MTc5ODY5MTg0LCJjcmVhdGlvbklkIjoiY3JlYXRpb25fYWFhYWFhYWEiLCJleHBlY3RlZEZpbGVzeXN0ZW1VVUlEIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1IiwiZmlsZXN5c3RlbUJsb2NrQnl0ZXMiOjQwOTYsImlkZW50aXR5Ijp7ImRldmljZSI6IjE2Nzc3MjM0IiwiaW5vZGUiOiI5MDA3MTk5MjU0NzQwOTkzIiwibW9kZSI6Mzg0LCJ1aWQiOjUwMX0sInB1cnBvc2UiOiJkYXRhIiwicmVhZHlPcGVyYXRpb25JZCI6bnVsbCwic2VjdG9yQnl0ZXMiOjUxMiwidm9sdW1lSWQiOiJ2b2x1bWVfYmJiYmJiYmIifSx7ImFjdGlvbiI6ImZvcm1hdC1uZXciLCJjYXBhY2l0eUJ5dGVzIjo4NTg5OTM0NTkyLCJjcmVhdGlvbklkIjoiY3JlYXRpb25fY2NjY2NjY2MiLCJleHBlY3RlZEZpbGVzeXN0ZW1VVUlEIjoiNjY2NjY2NjYtNzc3Ny00ODg4LTg5OTktYWFhYWFhYWFhYWFhIiwiZmlsZXN5c3RlbUJsb2NrQnl0ZXMiOjQwOTYsImlkZW50aXR5Ijp7ImRldmljZSI6IjE2Nzc3MjM0IiwiaW5vZGUiOiIxODQ0Njc0NDA3MzcwOTU1MTYxNSIsIm1vZGUiOjM4NCwidWlkIjo1MDF9LCJwdXJwb3NlIjoiZW52aXJvbm1lbnQiLCJyZWFkeU9wZXJhdGlvbklkIjpudWxsLCJzZWN0b3JCeXRlcyI6NTEyLCJ2b2x1bWVJZCI6InZvbHVtZV9kZGRkZGRkZCJ9XSwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2VfMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIn19\"}\n",
+      "t": "mux_down"
+    },
+    {
+      "name": "mux-up-bootstrap-receipt",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_up\",\"frame\":\"V01YMQEBAAACAAAAhAkAAHsidiI6MSwidCI6InJlY2VpcHQiLCJvcGVyYXRpb25JZCI6ImZpbGVzeXN0ZW1fNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1Iiwibm9uY2UiOiIwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZiIsInJlY2VpcHQiOnsiY2hlY2tNb2RlIjoibm9ybWFsIiwiZXh0NEZlYXR1cmVzIjpbIjY0Yml0IiwiZGlyX2luZGV4IiwiZGlyX25saW5rIiwiZXh0ZW50IiwiZXh0cmFfaXNpemUiLCJmaWxldHlwZSIsImZsZXhfYmciLCJoYXNfam91cm5hbCIsImh1Z2VfZmlsZSIsImxhcmdlX2ZpbGUiLCJtZXRhZGF0YV9jc3VtIiwic3BhcnNlX3N1cGVyIl0sImhvbWVJZCI6ImhvbWVfOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0aW9uSWQiOiJmaWxlc3lzdGVtXzU1NTU1NTU1LTU1NTUtNDU1NS04NTU1LTU1NTU1NTU1NTU1NSIsIm93bmVyIjp7ImNvbnRyb2xsZXJJbnN0YW5jZUlkIjoiY3RsLTBiMGIwYjBiLTBiMGItNGIwYi04YjBiLTBiMGIwYjBiMGIwYi1hMWIyYzNkNCIsImluY2FybmF0aW9uSWQiOiJpbmMtMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwibGVhc2VFcG9jaCI6MywicnVudGltZUltYWdlRGlnZXN0IjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsIndvcmtlckluc3RhbmNlSWQiOiJ3cmstNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0In0sInByaW9yUmVwbGF5IjpudWxsLCJwcm90b2NvbFZlcnNpb24iOjMsInJlcXVpcmVkTW91bnRPcHRpb25zIjpbIm5vaW5pdF9pdGFibGUiXSwidmlyZ2luWmVyb1Byb3ZlbmFuY2UiOiJuZXctc3BhcnNlLWNyZWF0aW9uIiwidm9sdW1lcyI6W3siYWN0aW9uIjoiZm9ybWF0LW5ldyIsImNhcGFjaXR5Qnl0ZXMiOjE3MTc5ODY5MTg0LCJjaGVja2VkIjp0cnVlLCJjcmVhdGlvbklkIjoiY3JlYXRpb25fYWFhYWFhYWEiLCJleHBlY3RlZEZpbGVzeXN0ZW1VVUlEIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1IiwiZmlsZXN5c3RlbUJsb2NrQnl0ZXMiOjQwOTYsImZpbGVzeXN0ZW1GZWF0dXJlcyI6WyI2NGJpdCIsImRpcl9pbmRleCIsImRpcl9ubGluayIsImV4dGVudCIsImV4dHJhX2lzaXplIiwiZmlsZXR5cGUiLCJmbGV4X2JnIiwiaGFzX2pvdXJuYWwiLCJodWdlX2ZpbGUiLCJsYXJnZV9maWxlIiwibWV0YWRhdGFfY3N1bSIsInNwYXJzZV9zdXBlciJdLCJmaWxlc3lzdGVtVHlwZSI6ImV4dDQiLCJmaWxlc3lzdGVtVVVJRCI6IjExMTExMTExLTIyMjItNDMzMy04NDQ0LTU1NTU1NTU1NTU1NSIsImZsdXNoQ29uZmlybWVkIjp0cnVlLCJmdWxsUmVhZE9ubHlDaGVjayI6ZmFsc2UsImlkZW50aXR5Ijp7ImRldmljZSI6IjE2Nzc3MjM0IiwiaW5vZGUiOiI5MDA3MTk5MjU0NzQwOTkzIiwibW9kZSI6Mzg0LCJ1aWQiOjUwMX0sImpvdXJuYWxSZXBsYXkiOiJub25lIiwiam91cm5hbFJlcGxheWVkIjpmYWxzZSwicHVycG9zZSI6ImRhdGEiLCJyZWFkeU9wZXJhdGlvbklkIjpudWxsLCJzZWN0b3JCeXRlcyI6NTEyLCJ0cmFuc2llbnRGaWxlc3lzdGVtRmVhdHVyZXMiOltdLCJ2b2x1bWVJZCI6InZvbHVtZV9iYmJiYmJiYiJ9LHsiYWN0aW9uIjoiZm9ybWF0LW5ldyIsImNhcGFjaXR5Qnl0ZXMiOjg1ODk5MzQ1OTIsImNoZWNrZWQiOnRydWUsImNyZWF0aW9uSWQiOiJjcmVhdGlvbl9jY2NjY2NjYyIsImV4cGVjdGVkRmlsZXN5c3RlbVVVSUQiOiI2NjY2NjY2Ni03Nzc3LTQ4ODgtODk5OS1hYWFhYWFhYWFhYWEiLCJmaWxlc3lzdGVtQmxvY2tCeXRlcyI6NDA5NiwiZmlsZXN5c3RlbUZlYXR1cmVzIjpbIjY0Yml0IiwiZGlyX2luZGV4IiwiZGlyX25saW5rIiwiZXh0ZW50IiwiZXh0cmFfaXNpemUiLCJmaWxldHlwZSIsImZsZXhfYmciLCJoYXNfam91cm5hbCIsImh1Z2VfZmlsZSIsImxhcmdlX2ZpbGUiLCJtZXRhZGF0YV9jc3VtIiwic3BhcnNlX3N1cGVyIl0sImZpbGVzeXN0ZW1UeXBlIjoiZXh0NCIsImZpbGVzeXN0ZW1VVUlEIjoiNjY2NjY2NjYtNzc3Ny00ODg4LTg5OTktYWFhYWFhYWFhYWFhIiwiZmx1c2hDb25maXJtZWQiOnRydWUsImZ1bGxSZWFkT25seUNoZWNrIjpmYWxzZSwiaWRlbnRpdHkiOnsiZGV2aWNlIjoiMTY3NzcyMzQiLCJpbm9kZSI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwibW9kZSI6Mzg0LCJ1aWQiOjUwMX0sImpvdXJuYWxSZXBsYXkiOiJub25lIiwiam91cm5hbFJlcGxheWVkIjpmYWxzZSwicHVycG9zZSI6ImVudmlyb25tZW50IiwicmVhZHlPcGVyYXRpb25JZCI6bnVsbCwic2VjdG9yQnl0ZXMiOjUxMiwidHJhbnNpZW50RmlsZXN5c3RlbUZlYXR1cmVzIjpbXSwidm9sdW1lSWQiOiJ2b2x1bWVfZGRkZGRkZGQifV0sIndvcmtzcGFjZUlkIjoid29ya3NwYWNlXzExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSJ9fQ==\"}\n",
+      "t": "mux_up"
+    },
+    {
+      "name": "mux-down-runtime",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"V01YMQECAAABAAAAEAAAAHsidHlwZSI6InVzZXIifQo=\"}\n",
+      "t": "mux_down"
+    },
+    {
+      "name": "mux-up-runtime",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_up\",\"frame\":\"V01YMQECAAABAAAABwAAAGjDqWxsbwo=\"}\n",
+      "t": "mux_up"
+    },
+    {
+      "name": "stop",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stop\",\"id\":\"req-0003\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\",\"reason\":\"user\",\"budgetMs\":30000}\n",
+      "t": "stop"
+    },
+    {
+      "name": "stopped-orderly",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stopped\",\"id\":\"req-0003\",\"receipt\":{\"v\":1,\"class\":\"A\",\"confirmationId\":\"confirm-77777777\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\",\"origin\":\"host-stop\",\"launcherInstanceId\":\"launcher-88888888\",\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"hostBootId\":\"0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B\",\"guest\":{\"drain\":\"acked\",\"powerOff\":\"observed\"},\"worker\":{\"pid\":4242,\"startToken\":\"start-4242\",\"exit\":\"code\",\"status\":0,\"reaped\":true},\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"capacityBytes\":17179869184,\"attached\":true,\"flushRequested\":41,\"flushCompleted\":41,\"finalFlush\":\"completed\"},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"capacityBytes\":8589934592,\"attached\":true,\"flushRequested\":7,\"flushCompleted\":7,\"finalFlush\":\"completed\"}],\"issuedAtMs\":1760000000000}}\n",
+      "t": "stopped"
+    },
+    {
+      "name": "stopped-owner-loss-no-request",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stopped\",\"id\":null,\"receipt\":{\"v\":1,\"class\":\"A\",\"confirmationId\":\"confirm-77777777\",\"stopNonce\":\"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5\",\"origin\":\"owner-loss-drain\",\"launcherInstanceId\":\"launcher-88888888\",\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"hostBootId\":\"0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B\",\"guest\":{\"drain\":\"acked\",\"powerOff\":\"observed\"},\"worker\":{\"pid\":4242,\"startToken\":\"start-4242\",\"exit\":\"code\",\"status\":0,\"reaped\":true},\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"capacityBytes\":17179869184,\"attached\":true,\"flushRequested\":41,\"flushCompleted\":41,\"finalFlush\":\"completed\"},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"capacityBytes\":8589934592,\"attached\":true,\"flushRequested\":7,\"flushCompleted\":7,\"finalFlush\":\"completed\"}],\"issuedAtMs\":1760000000000}}\n",
+      "t": "stopped"
+    },
+    {
+      "name": "uncertain",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"uncertain\",\"receipt\":{\"v\":1,\"class\":\"B\",\"launcherInstanceId\":\"launcher-88888888\",\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"reason\":\"drain-timeout\",\"worker\":{\"pid\":4242,\"startToken\":\"start-4242\",\"exit\":\"signal\",\"status\":9},\"attachedVolumes\":true,\"issuedAtMs\":1760000000000}}\n",
+      "t": "uncertain"
+    },
+    {
+      "name": "receipt-retire",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"receipt_retire\",\"confirmationId\":\"confirm-77777777\"}\n",
+      "t": "receipt_retire"
+    },
+    {
+      "name": "ping",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"ping\",\"id\":\"ping-1\"}\n",
+      "t": "ping"
+    },
+    {
+      "name": "pong",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"pong\",\"id\":\"ping-1\"}\n",
+      "t": "pong"
+    },
+    {
+      "name": "channel-fault",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"fault\",\"code\":\"protocol_violation\"}\n",
+      "t": "fault"
+    }
+  ],
+  "negative": [
+    {
+      "name": "no-newline",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}",
+      "error": "malformed"
+    },
+    {
+      "name": "crlf",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\r\n",
+      "error": "malformed"
+    },
+    {
+      "name": "two-lines-in-one",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "whitespace-after-colon",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\": \"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "reordered-keys",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"t\":\"begin\",\"v\":1,\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "duplicate-key",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "extra-key",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768,\"x\":1}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "missing-key",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "version-two",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":2,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "version"
+    },
+    {
+      "name": "unknown-type",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"detonate\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "unknown_type"
+    },
+    {
+      "name": "daemon-only-type-on-to-daemon",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_direction"
+    },
+    {
+      "name": "launcher-only-type-on-to-launcher",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"hello\",\"launcherInstanceId\":\"launcher-88888888\",\"hostBootId\":\"0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B\",\"parentVerified\":true}\n",
+      "error": "bad_direction"
+    },
+    {
+      "name": "id-too-long",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "id-bad-character",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req.0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "epoch-zero",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "epoch-float",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3.0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "epoch-exponent",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3e0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "vcpus-four",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":4,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "memory-under-floor",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":767}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "memory-far-under-floor",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":256}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "begin-without-home",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "begin-home-too-long",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "begin-home-after-scope",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768,\"homeId\":\"home_99999999-9999-4999-8999-999999999999\"}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "bom-line",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "﻿{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "memory-over-gate",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":2048}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "digest-uppercase",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "escaped-spelling",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"\\u0062egin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "lone-surrogate-escape",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"\\ud800\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "proto-key",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"__proto__\":1,\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "too-deep",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"ping\",\"id\":{\"a\":{\"b\":{\"c\":{\"d\":1}}}}}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "volumes-no-descriptors",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_rights"
+    },
+    {
+      "name": "volumes-one-descriptor",
+      "direction": "to-launcher",
+      "rights": 1,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_rights"
+    },
+    {
+      "name": "volumes-three-descriptors",
+      "direction": "to-launcher",
+      "rights": 3,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_rights"
+    },
+    {
+      "name": "begin-with-descriptors",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_rights"
+    },
+    {
+      "name": "hello-with-descriptor",
+      "direction": "to-daemon",
+      "rights": 1,
+      "line": "{\"v\":1,\"t\":\"hello\",\"launcherInstanceId\":\"launcher-88888888\",\"hostBootId\":\"0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B\",\"parentVerified\":true}\n",
+      "error": "bad_rights"
+    },
+    {
+      "name": "volumes-purposes-swapped",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "volumes-same-file",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "volumes-inode-over-u64",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551616\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "volumes-inode-number-not-string",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":9007199254740992,\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "volumes-mode-0644",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":420,\"capacityBytes\":17179869184},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "volumes-unaligned-capacity",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869185},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"uid\":501,\"mode\":384,\"capacityBytes\":8589934592}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "volumes-one-entry",
+      "direction": "to-launcher",
+      "rights": 2,
+      "line": "{\"v\":1,\"t\":\"volumes\",\"id\":\"req-0002\",\"scopeDigest\":\"2115073d01c8f2d222390a925f25e81df3542264495011292f7b94abac6a6412\",\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"uid\":501,\"mode\":384,\"capacityBytes\":17179869184}]}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "stop-budget-over-ceiling",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stop\",\"id\":\"req-0003\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\",\"reason\":\"user\",\"budgetMs\":120001}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "stop-reason-unknown",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stop\",\"id\":\"req-0003\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\",\"reason\":\"whim\",\"budgetMs\":30000}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "stopped-with-uncertain-receipt",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stopped\",\"id\":\"req-0003\",\"receipt\":{\"v\":1,\"class\":\"B\",\"launcherInstanceId\":\"launcher-88888888\",\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"reason\":\"daemon-lost\",\"worker\":{\"pid\":4242,\"startToken\":\"start-4242\",\"exit\":\"signal\",\"status\":9},\"attachedVolumes\":true,\"issuedAtMs\":1760000000000}}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "uncertain-with-orderly-receipt",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"uncertain\",\"receipt\":{\"v\":1,\"class\":\"A\",\"confirmationId\":\"confirm-77777777\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\",\"origin\":\"host-stop\",\"launcherInstanceId\":\"launcher-88888888\",\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"hostBootId\":\"0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B\",\"guest\":{\"drain\":\"acked\",\"powerOff\":\"observed\"},\"worker\":{\"pid\":4242,\"startToken\":\"start-4242\",\"exit\":\"code\",\"status\":0,\"reaped\":true},\"volumes\":[{\"purpose\":\"data\",\"device\":\"16777234\",\"inode\":\"9007199254740993\",\"capacityBytes\":17179869184,\"attached\":true,\"flushRequested\":41,\"flushCompleted\":41,\"finalFlush\":\"completed\"},{\"purpose\":\"environment\",\"device\":\"16777234\",\"inode\":\"18446744073709551615\",\"capacityBytes\":8589934592,\"attached\":true,\"flushRequested\":7,\"flushCompleted\":7,\"finalFlush\":\"completed\"}],\"issuedAtMs\":1760000000000}}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "stopped-without-receipt",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"stopped\",\"id\":null}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "mux-padding-stripped",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"V01YMQECAAABAAAAEAAAAHsidHlwZSI6InVzZXIifQo\"}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "mux-not-base64",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"@@@@\"}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "mux-empty-frame",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"\"}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "mux-carries-control-class",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"V01YMQEAAAADAAAAGAAAAHsidiI6MSwidCI6InBpbmciLCJuIjo3fQ==\"}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "mux-carries-provider-class",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"V01YMQEDAAABAAAAAAAAAA==\"}\n",
+      "error": "reserved_class"
+    },
+    {
+      "name": "mux-down-line-carrying-up-only-bootstrap-type",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"mux_down\",\"frame\":\"V01YMQEBAAACAAAAhAkAAHsidiI6MSwidCI6InJlY2VpcHQiLCJvcGVyYXRpb25JZCI6ImZpbGVzeXN0ZW1fNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1Iiwibm9uY2UiOiIwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZiIsInJlY2VpcHQiOnsiY2hlY2tNb2RlIjoibm9ybWFsIiwiZXh0NEZlYXR1cmVzIjpbIjY0Yml0IiwiZGlyX2luZGV4IiwiZGlyX25saW5rIiwiZXh0ZW50IiwiZXh0cmFfaXNpemUiLCJmaWxldHlwZSIsImZsZXhfYmciLCJoYXNfam91cm5hbCIsImh1Z2VfZmlsZSIsImxhcmdlX2ZpbGUiLCJtZXRhZGF0YV9jc3VtIiwic3BhcnNlX3N1cGVyIl0sImhvbWVJZCI6ImhvbWVfOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0aW9uSWQiOiJmaWxlc3lzdGVtXzU1NTU1NTU1LTU1NTUtNDU1NS04NTU1LTU1NTU1NTU1NTU1NSIsIm93bmVyIjp7ImNvbnRyb2xsZXJJbnN0YW5jZUlkIjoiY3RsLTBiMGIwYjBiLTBiMGItNGIwYi04YjBiLTBiMGIwYjBiMGIwYi1hMWIyYzNkNCIsImluY2FybmF0aW9uSWQiOiJpbmMtMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwibGVhc2VFcG9jaCI6MywicnVudGltZUltYWdlRGlnZXN0IjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsIndvcmtlckluc3RhbmNlSWQiOiJ3cmstNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0In0sInByaW9yUmVwbGF5IjpudWxsLCJwcm90b2NvbFZlcnNpb24iOjMsInJlcXVpcmVkTW91bnRPcHRpb25zIjpbIm5vaW5pdF9pdGFibGUiXSwidmlyZ2luWmVyb1Byb3ZlbmFuY2UiOiJuZXctc3BhcnNlLWNyZWF0aW9uIiwidm9sdW1lcyI6W3siYWN0aW9uIjoiZm9ybWF0LW5ldyIsImNhcGFjaXR5Qnl0ZXMiOjE3MTc5ODY5MTg0LCJjaGVja2VkIjp0cnVlLCJjcmVhdGlvbklkIjoiY3JlYXRpb25fYWFhYWFhYWEiLCJleHBlY3RlZEZpbGVzeXN0ZW1VVUlEIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1IiwiZmlsZXN5c3RlbUJsb2NrQnl0ZXMiOjQwOTYsImZpbGVzeXN0ZW1GZWF0dXJlcyI6WyI2NGJpdCIsImRpcl9pbmRleCIsImRpcl9ubGluayIsImV4dGVudCIsImV4dHJhX2lzaXplIiwiZmlsZXR5cGUiLCJmbGV4X2JnIiwiaGFzX2pvdXJuYWwiLCJodWdlX2ZpbGUiLCJsYXJnZV9maWxlIiwibWV0YWRhdGFfY3N1bSIsInNwYXJzZV9zdXBlciJdLCJmaWxlc3lzdGVtVHlwZSI6ImV4dDQiLCJmaWxlc3lzdGVtVVVJRCI6IjExMTExMTExLTIyMjItNDMzMy04NDQ0LTU1NTU1NTU1NTU1NSIsImZsdXNoQ29uZmlybWVkIjp0cnVlLCJmdWxsUmVhZE9ubHlDaGVjayI6ZmFsc2UsImlkZW50aXR5Ijp7ImRldmljZSI6IjE2Nzc3MjM0IiwiaW5vZGUiOiI5MDA3MTk5MjU0NzQwOTkzIiwibW9kZSI6Mzg0LCJ1aWQiOjUwMX0sImpvdXJuYWxSZXBsYXkiOiJub25lIiwiam91cm5hbFJlcGxheWVkIjpmYWxzZSwicHVycG9zZSI6ImRhdGEiLCJyZWFkeU9wZXJhdGlvbklkIjpudWxsLCJzZWN0b3JCeXRlcyI6NTEyLCJ0cmFuc2llbnRGaWxlc3lzdGVtRmVhdHVyZXMiOltdLCJ2b2x1bWVJZCI6InZvbHVtZV9iYmJiYmJiYiJ9LHsiYWN0aW9uIjoiZm9ybWF0LW5ldyIsImNhcGFjaXR5Qnl0ZXMiOjg1ODk5MzQ1OTIsImNoZWNrZWQiOnRydWUsImNyZWF0aW9uSWQiOiJjcmVhdGlvbl9jY2NjY2NjYyIsImV4cGVjdGVkRmlsZXN5c3RlbVVVSUQiOiI2NjY2NjY2Ni03Nzc3LTQ4ODgtODk5OS1hYWFhYWFhYWFhYWEiLCJmaWxlc3lzdGVtQmxvY2tCeXRlcyI6NDA5NiwiZmlsZXN5c3RlbUZlYXR1cmVzIjpbIjY0Yml0IiwiZGlyX2luZGV4IiwiZGlyX25saW5rIiwiZXh0ZW50IiwiZXh0cmFfaXNpemUiLCJmaWxldHlwZSIsImZsZXhfYmciLCJoYXNfam91cm5hbCIsImh1Z2VfZmlsZSIsImxhcmdlX2ZpbGUiLCJtZXRhZGF0YV9jc3VtIiwic3BhcnNlX3N1cGVyIl0sImZpbGVzeXN0ZW1UeXBlIjoiZXh0NCIsImZpbGVzeXN0ZW1VVUlEIjoiNjY2NjY2NjYtNzc3Ny00ODg4LTg5OTktYWFhYWFhYWFhYWFhIiwiZmx1c2hDb25maXJtZWQiOnRydWUsImZ1bGxSZWFkT25seUNoZWNrIjpmYWxzZSwiaWRlbnRpdHkiOnsiZGV2aWNlIjoiMTY3NzcyMzQiLCJpbm9kZSI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1IiwibW9kZSI6Mzg0LCJ1aWQiOjUwMX0sImpvdXJuYWxSZXBsYXkiOiJub25lIiwiam91cm5hbFJlcGxheWVkIjpmYWxzZSwicHVycG9zZSI6ImVudmlyb25tZW50IiwicmVhZHlPcGVyYXRpb25JZCI6bnVsbCwic2VjdG9yQnl0ZXMiOjUxMiwidHJhbnNpZW50RmlsZXN5c3RlbUZlYXR1cmVzIjpbXSwidm9sdW1lSWQiOiJ2b2x1bWVfZGRkZGRkZGQifV0sIndvcmtzcGFjZUlkIjoid29ya3NwYWNlXzExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSJ9fQ==\"}\n",
+      "error": "unknown_type"
+    },
+    {
+      "name": "control-line-over-limit",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"ping\",\"id\":\"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\"}\n",
+      "error": "oversize"
+    }
+  ]
+}

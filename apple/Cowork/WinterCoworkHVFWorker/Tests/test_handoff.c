@@ -71,6 +71,48 @@ static void channel_admission(void) {
     CHECK(connect(named[0], (struct sockaddr *)&names[1], sizeof names[1]) == 0);
     CHECK(connect(named[1], (struct sockaddr *)&names[0], sizeof names[0]) == 0);
     CHECK(cw_channel_admit(named[1], SOCK_DGRAM) == -1);
+    /* An UNNAMED local end whose PEER is named is refused too: the peer check stands on its own. */
+    {
+        char peer_directory[] = "/tmp/cw-handoff-peer-XXXXXX";
+        CHECK(mkdtemp(peer_directory) != NULL);
+        struct sockaddr_un server_name;
+        memset(&server_name, 0, sizeof server_name);
+        server_name.sun_family = AF_UNIX;
+        CHECK(snprintf(server_name.sun_path, sizeof server_name.sun_path, "%s/s", peer_directory) < (int)sizeof server_name.sun_path);
+        int server = socket(AF_UNIX, SOCK_DGRAM, 0), client = socket(AF_UNIX, SOCK_DGRAM, 0);
+        CHECK(server >= 3 && client >= 3);
+        CHECK(bind(server, (struct sockaddr *)&server_name, sizeof server_name) == 0);
+        CHECK(connect(client, (struct sockaddr *)&server_name, sizeof server_name) == 0);
+        CHECK(fcntl(client, F_SETFD, FD_CLOEXEC) == 0);
+        CHECK(cw_channel_admit(client, SOCK_DGRAM) == -1);
+        close(client); close(server);
+        unlink(server_name.sun_path);
+        rmdir(peer_directory);
+    }
+    /* A NAMED local end with an UNNAMED peer is refused too (an accepted stream socket reports the listener's path as its own). */
+    {
+        char listen_directory[] = "/tmp/cw-handoff-local-XXXXXX";
+        CHECK(mkdtemp(listen_directory) != NULL);
+        struct sockaddr_un listen_name;
+        memset(&listen_name, 0, sizeof listen_name);
+        listen_name.sun_family = AF_UNIX;
+        CHECK(snprintf(listen_name.sun_path, sizeof listen_name.sun_path, "%s/l", listen_directory) < (int)sizeof listen_name.sun_path);
+        int listener = socket(AF_UNIX, SOCK_STREAM, 0), client = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(listener >= 3 && client >= 3);
+        CHECK(bind(listener, (struct sockaddr *)&listen_name, sizeof listen_name) == 0 && listen(listener, 1) == 0);
+        CHECK(connect(client, (struct sockaddr *)&listen_name, sizeof listen_name) == 0);
+        int accepted = accept(listener, NULL, NULL);
+        CHECK(accepted >= 3 && fcntl(accepted, F_SETFD, FD_CLOEXEC) == 0);
+        struct sockaddr_un local, peer;
+        socklen_t local_length = sizeof local, peer_length = sizeof peer;
+        memset(&local, 0, sizeof local); memset(&peer, 0, sizeof peer);
+        CHECK(getsockname(accepted, (struct sockaddr *)&local, &local_length) == 0 && local_length > offsetof(struct sockaddr_un, sun_path) + 1);
+        CHECK(getpeername(accepted, (struct sockaddr *)&peer, &peer_length) == 0 && peer.sun_path[0] == 0);
+        CHECK(cw_channel_admit(accepted, SOCK_STREAM) == -1);
+        close(accepted); close(client); close(listener);
+        unlink(listen_name.sun_path);
+        rmdir(listen_directory);
+    }
     /* Refusing the channel reads nothing: the datagram is still queued. */
     CHECK(send(named[0], "q", 1, 0) == 1);
     int unread = 0;
@@ -130,7 +172,7 @@ static int exercise(void) {
         send_with_fds(sockets[0], big, sizeof big, fd, 2);
         cw_inbound in;
         CHECK(cw_env_recv(sockets[1], &in, 1000) == CW_RECV_REFUSED);
-        CHECK(in.fd_count == 0 && cw_test_open_descriptors() == before);
+        CHECK(in.fd_count == 0 && in.refused_fds == 2 && cw_test_open_descriptors() == before); /* refused, and it says it carried two descriptors */
     }
     /* Waiting: not yet (TIMEOUT), not at all (AGAIN). */
     cw_inbound in;
@@ -201,6 +243,7 @@ static int stream_exercise(void) {
  * control buffer; with 256 slots it is simply the wrong number of descriptors. Both end silently with exit 79, and the reason
  * says which one it was, so a mapping that sent CTRUNC down the ordinary-fault path would be caught here. */
 static int intake_fake_sandbox(void *context) { (void)context; return 0; }
+static int intake_fake_check(void *context, const cw_scope *scope, const char **reason) { (void)context; (void)scope; (void)reason; return CW_SCOPE_OK; }
 static int intake_exercise(void) {
     cw_test_failures = 0;
     const cw_env_vector *scope = NULL, *volumes = NULL;
@@ -213,7 +256,7 @@ static int intake_exercise(void) {
     int fd = open("/dev/null", O_RDWR);
     send_with_fds(pair[0], scope->bytes, scope->length, fd, 0);
     send_with_fds(pair[0], volumes->bytes, volumes->length, fd, 20);
-    cw_intake_config config = { intake_fake_sandbox, NULL, 1000, 1000, geteuid(), { 2, 768, 1024 } };
+    cw_intake_config config = { intake_fake_sandbox, intake_fake_check, NULL, 1000, 1000, geteuid(), { 2, 768, 1024 } };
     cw_intake_result result;
     int before = cw_test_open_descriptors();
     cw_intake_run(&config, pair[1], &result);

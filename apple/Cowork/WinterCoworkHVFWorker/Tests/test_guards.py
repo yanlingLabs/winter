@@ -29,10 +29,12 @@ ANTI_WIRING_NEEDLES = ("WinterCoworkHVFWorker", "winter-cowork-worker", "WorkerN
 ALLOWED_KRUN = {
     "krun_init_log", "krun_create_ctx", "krun_set_vm_config", "krun_disable_implicit_vsock", "krun_set_env", "krun_disable_implicit_console",
     "krun_add_serial_console_default", "krun_set_kernel", "krun_start_enter",
-    "krun_cowork_enable_production_profile", "krun_cowork_set_workspace_disks", "krun_cowork_create_runtime_port", "krun_cowork_validate_production_profile",
-    "krun_cowork_enable_profile_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_create_mux_stream_v1", "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1",
+    "krun_cowork_enable_profile_v1", "krun_cowork_create_runtime_port_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_validate_profile_v1",
+    "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1",
 }
-S4_NAMES = ("krun_cowork_enable_production_profile", "krun_cowork_set_workspace_disks", "krun_cowork_create_runtime_port", "krun_cowork_validate_production_profile")
+# S4's pre-v1 names and the contract's earlier mux-stream name: the archive exports none of them any more, so no source may call them.
+OLD_NAMES = ("krun_cowork_enable_production_profile", "krun_cowork_set_workspace_disks", "krun_cowork_create_runtime_port", "krun_cowork_validate_production_profile",
+             "krun_cowork_create_mux_stream_v1")
 # COWORK_LIBKRUN_FORBIDDEN_SYMBOLS of the contract, and the fixture entry points that have no production equivalent.
 FORBIDDEN_KRUN = ("krun_get_shutdown_eventfd", "krun_add_vsock", "krun_add_vsock_port", "krun_add_vsock_port2", "krun_add_virtiofs", "krun_add_virtiofs2", "krun_add_virtiofs3",
                   "krun_add_virtiofs4", "krun_set_port_map", "krun_set_gpu_options", "krun_set_gpu_options2", "krun_add_display", "krun_add_input_device", "krun_add_input_device_fd",
@@ -97,11 +99,25 @@ class MainOrder(unittest.TestCase):
     def test_the_sandbox_is_installed_before_the_first_read(self):
         main = function_body(code(SOURCES / "WorkspaceWorker.c"), "int main(int argc")
         self.assertLess(main.index("cw_intake_run("), main.index("configure_vm("), "intake must precede the VM")
-        self.assertLess(main.index("cw_channel_admit("), main.index("cw_intake_run("))
+        self.assertLess(main.index("cw_prepare_descriptors("), main.index("resolve_artifacts("), "stray descriptors are closed before anything else is done")
         self.assertLess(main.index("resolve_artifacts("), main.index("cw_intake_run("), "artifact paths are resolved before the sandbox: they cannot be after it")
         step = function_body(code(SOURCES / "WorkspaceWorker.c"), "static int install_sandbox_step")
         self.assertLess(step.index("cw_sandbox_install("), step.index("cw_sandbox_probe("))
         self.assertLess(step.index("cw_sandbox_probe("), step.index("CW_STATUS_SANDBOXED"), "'sandboxed' is reported only after the sandbox and its probes")
+
+    def test_a_launcher_that_is_already_gone_ends_the_worker_before_anything_is_held(self):
+        main = function_body(code(SOURCES / "WorkspaceWorker.c"), "int main(int argc")
+        self.assertIn("const pid_t launcher_pid = getppid();", main)
+        self.assertRegex(main, r"if \(launcher_pid == 1\) \{[^}]*return CW_EXIT_OK;")
+        self.assertLess(main.index("launcher_pid == 1"), main.index("cw_intake_run("))
+        self.assertLess(main.index("launcher_pid == 1"), main.index("resolve_artifacts("))
+        self.assertIn("launcher_pid, &env)", main, "the same pid reaches the relay's watchdog")
+
+    def test_the_flush_counters_are_asked_for_with_their_size(self):
+        abi = code(SOURCES / "CoworkAbi.h")
+        reader = function_body(abi, "static inline int32_t cw_read_flush_counters(")
+        self.assertLess(reader.index("memset(out, 0, sizeof *out);"), reader.index("out->size = (uint32_t)sizeof *out;"))
+        self.assertLess(reader.index("out->size ="), reader.index("krun_cowork_get_flush_counters_v1(out)"))
 
     def test_intake_installs_the_sandbox_before_it_reads(self):
         body = function_body(code(SOURCES / "AdmittedVolumes.c"), "void cw_intake_run(")
@@ -171,24 +187,34 @@ class ForbiddenApis(unittest.TestCase):
         self.assertTrue("fork()" in code(SOURCES / "Sandbox.c"))
 
     def test_libkrun_references_are_the_reviewed_inventory(self):
-        not_functions = {"krun_check", "krun_cowork_volume_identity", "krun_cowork_volume_identity_v1", "krun_cowork_flush_counters_v1"}
+        not_functions = {"krun_check", "krun_cowork_volume_identity", "krun_cowork_volume_identity_v1", "krun_cowork_flush_counters_v1", "krun_cowork_exit_hook_v1",
+                         "krun_cowork_flush_device_v1"}
         for path in source_files():
             text = code(path)
             for name in FORBIDDEN_KRUN:
                 self.assertNotRegex(text, rf"\b{name}\b", f"{path.name}: {name} is not admitted")
             used = set(re.findall(r"\bkrun_[a-z0-9_]+\b", text)) - not_functions
             self.assertLessEqual(used, ALLOWED_KRUN, f"{path.name}: {sorted(used - ALLOWED_KRUN)}")
-            if path.name != "CoworkAbi.h":
-                for name in S4_NAMES:
-                    self.assertIsNone(re.search(rf"\b{name}\b", text), f"{path.name}: S4's names appear only in CoworkAbi.h, the one rename point")
+            for name in OLD_NAMES:
+                self.assertIsNone(re.search(rf"\b{name}\b", text), f"{path.name}: {name} is not exported by the pinned archive")
+            self.assertNotRegex(text, r"\bkrun_cowork_get_pin_counters_v1\b", f"{path.name}: the pin counters are read by gate G4, never by the worker")
 
-    def test_the_vm_refuses_to_start_without_flush_evidence(self):
+    def test_the_vm_start_order_and_the_mandatory_preflight(self):
         worker = code(SOURCES / "WorkspaceWorker.c")
         configure = function_body(worker, "static int configure_vm(")
-        self.assertIn("krun_cowork_set_exit_hook_v1(", configure)
+        order = ["krun_create_ctx(", "krun_cowork_enable_profile_v1(", "krun_cowork_create_runtime_port_v1(", "krun_cowork_set_workspace_disks_v1(",
+                 "krun_cowork_set_exit_hook_v1(", "krun_cowork_validate_profile_v1("]
+        positions = [configure.index(name) for name in order]
+        self.assertEqual(positions, sorted(positions), "port before disks, exit hook before the preflight, preflight last")
+        self.assertRegex(configure, r"krun_check\(krun_cowork_validate_profile_v1\(")
         self.assertRegex(configure, r"krun_check\(krun_cowork_set_exit_hook_v1\(")
+        self.assertLess(configure.index("krun_cowork_validate_profile_v1("), configure.index("return 0;", configure.index("krun_cowork_validate_profile_v1(")))
+        self.assertNotIn("krun_start_enter", configure)
         abi = code(SOURCES / "CoworkAbi.h")
-        self.assertEqual(abi.count("return -ENOSYS;"), 2, "both missing symbols are inline refusals, never an atexit() stand-in")
+        self.assertRegex(abi, r"#define CW_ABI_FLUSH_EVIDENCE 1\b")
+        self.assertIn("CW_ASSERT_EXIT_HOOK_SIGNATURE(exit_hook)", worker)
+        self.assertIn("_Generic(&(function), krun_cowork_exit_hook_v1: 1, default: 0)", abi)
+        self.assertNotIn("ENOSYS", abi + worker, "no stand-in for a missing symbol: the archive has them all")
         self.assertFalse("atexit" in abi + worker)
 
     def test_the_hard_receive_rule(self):
@@ -196,12 +222,13 @@ class ForbiddenApis(unittest.TestCase):
             if path.suffix != ".c":
                 continue
             text = code(path)
-            for needle in (r"\brecv\s*\(", r"\brecvfrom\s*\(", r"\breadv\s*\(", r"\bpread\s*\("):
+            regular_file = path.name == "RuntimeImage.c" # hashes two O_NOFOLLOW regular-file descriptors; it never touches a socket
+            for needle in (r"\brecv\s*\(", r"\brecvfrom\s*\(", r"\breadv\s*\(") + (() if regular_file else (r"\bpread\s*\(",)):
                 self.assertNotRegex(text, needle, f"{path.name}: sockets are read with recvmsg and a control buffer only")
-            if path.name != "WorkspaceWorker.c":
+            if path.name not in ("WorkspaceWorker.c", "RuntimeImage.c"):
                 self.assertNotRegex(text, r"\bread\s*\(", f"{path.name}: plain read() installs rights on macOS")
         worker = code(SOURCES / "WorkspaceWorker.c")
-        self.assertEqual(re.findall(r"\bread\s*\(([^,]*),", worker), ["console_read_fd"], "the only plain read() is the console PIPE")
+        self.assertEqual(re.findall(r"\bread\s*\(([^,]*),", worker), ["source[i]"], "the only plain read() is the console PIPE pair")
         for name in ("Envelope.c", "Mux.c"):
             text = code(SOURCES / name)
             self.assertEqual(len(re.findall(r"\brecvmsg\s*\(", text)), len(re.findall(r"MSG_CTRUNC", text)), f"{name}: every recvmsg judges MSG_CTRUNC")
@@ -230,7 +257,12 @@ class ForbiddenApis(unittest.TestCase):
         self.assertTrue("CW_STOP_REPORT_ACKED" in relay)
         self.assertEqual(relay.count("CW_STATUS_GUEST_HALTED"), 1)
         # guest_halted comes from the exit hook only
-        self.assertTrue("cw_relay_guest_halted" in code(SOURCES / "WorkspaceWorker.c"))
+        self.assertTrue("cw_relay_vmm_exit(" in code(SOURCES / "WorkspaceWorker.c"))
+        self.assertEqual(code(SOURCES / "WorkspaceWorker.c").count("cw_relay_vmm_exit("), 1)
+        self.assertEqual(relay.count("cw_exit_report_halted("), 2, "the definition and the one use in cw_relay_vmm_exit")
+        # only the library's OFF may be "off"
+        abi = code(SOURCES / "CoworkAbi.h")
+        self.assertIn("out->reason_off = reason == (uint32_t)KRUN_COWORK_EXIT_OFF;", abi)
 
 
 class Package(unittest.TestCase):
@@ -239,11 +271,11 @@ class Package(unittest.TestCase):
 
     def test_the_fixtures_are_the_pinned_s1_vectors(self):
         pins = json.loads((TESTS / "fixtures" / "PINS.json").read_text())
-        self.assertEqual(sorted(pins["files"]), ["envelopes.json", "mux-frames.json"])
+        self.assertEqual(sorted(pins["files"]), ["envelopes.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"])
+        self.assertEqual(pins["source"]["head"], "a7160f9fe35ca731be170ff205a77bc2ff16d28a")
         for name, expected in pins["files"].items():
             self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
-        self.assertEqual(pins["source"]["head"], "eeb7618f9d016284bfd5eae37e4a1df9af3791df")
-        self.assertEqual(len(pins["relayBlind"]["vectors"]), 5)
+        self.assertEqual(len(pins["relayBlind"]["vectors"]), 6)
 
     def test_every_test_source_is_run_and_none_touches_the_sandbox_or_a_vm(self):
         build = (PACKAGE / "build.py").read_text()
@@ -251,20 +283,13 @@ class Package(unittest.TestCase):
         self.assertEqual(run, {p.stem for p in TESTS.glob("test_*.c")}, "build.py runs exactly the C tests that exist")
         for path in TESTS.glob("test_*.c"):
             text = code(path)
-            for needle in ("krun_", "hv_vm", "hv_vcpu", "Hypervisor", "cw_sandbox_install", "cw_sandbox_probe", "execv", "posix_spawn", "system(", "popen(", "dlopen("):
+            self.assertIsNone(re.search(r"\bkrun_\w+\s*\(", text), f"{path.name}: no libkrun call (types and constants of the header are fine)")
+            for needle in ("hv_vm", "hv_vcpu", "Hypervisor", "cw_sandbox_install", "cw_sandbox_probe", "execv", "posix_spawn", "system(", "popen(", "dlopen("):
                 self.assertFalse(needle in text, f"{path.name}: {needle}")
             if path.name != "test_sandbox_profile.c":
                 self.assertFalse("sandbox_init" in text, f"{path.name}")
         profile = code(TESTS / "test_sandbox_profile.c")
         self.assertEqual(profile.count("_exit(99)"), 3, "the profile test replaces all three SPI entry points with poisoned stubs")
-        # The contract-name stub refuses everything: every definition in it returns -ENOSYS, and it names no Hypervisor call.
-        stub = code(TESTS / "stubs" / "krun_contract_stub.c")
-        self.assertFalse("hv_" in stub)
-        definitions = re.findall(r"^int32_t (krun_\w+)\([^;{]*\)\s*\{([^}]*)\}", stub, re.M)
-        self.assertGreaterEqual(len(definitions), 14)
-        for name, body in definitions:
-            self.assertTrue("return -ENOSYS;" in body, name)
-
     def test_the_build_is_offline_and_isolated(self):
         build = (PACKAGE / "build.py").read_text()
         for needle in ("import urllib", "import socket", "http.client", "import requests", "import ssl", "pip install", "curl ", "wget ", "git clone", "cargo build", "npm install"):

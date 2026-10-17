@@ -87,6 +87,12 @@ static void violation(cw_relay *r, uint64_t now) {
 /* The launcher stopped speaking the contract on L2. The only trustworthy answer is to stop, orderly and bounded. */
 static void launcher_fault(cw_relay *r, uint64_t now);
 
+static bool parent_gone(const cw_relay *r) {
+    /* pid 1 is launchd: a parent recorded as 1 means the launcher was already gone when the worker started, and a changed parent means it
+     * went away since. Neither is evidence of anything but "start the worker's own bounded drain". */
+    return r->parent == 1 || r->env.parent_pid(r->env.context) != r->parent;
+}
+
 static void owner_lost(cw_relay *r, uint64_t now) {
     if (r->stop.phase == CW_PH_RUNNING) {
         uint8_t nonce[16];
@@ -121,7 +127,7 @@ static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {
         finish(r, CW_EXIT_OK);
         break;
     case CW_STOP_CONFLICT:
-        (void)cw_l2_send_fault(r->out, CW_FAULT_INTERNAL); /* the contract has no code for a second drain; the first one stands */
+        (void)cw_l2_send_fault(r->out, CW_FAULT_SECOND_DRAIN); /* defensive: read_l2 answers a second DRAIN before it gets here */
         break;
     case CW_STOP_REPORT_ACKED:
         (void)cw_l2_send_status(r->out, CW_STATUS_DRAIN_ACKED, NULL, NULL);
@@ -148,6 +154,7 @@ static void read_l2(cw_relay *r, uint64_t now) {
         if (rc == CW_RECV_AGAIN) return;
         if (rc == CW_RECV_GONE) { r->l2_gone = true; owner_lost(r, now); return; }
         if (rc == CW_RECV_CTRUNC) { finish(r, CW_EXIT_RIGHTS); return; }
+        if (rc == CW_RECV_REFUSED && in.refused_fds > 0) { finish(r, CW_EXIT_RIGHTS); return; } /* a refused datagram that carried a descriptor: the same silent exit */
         if (rc != CW_RECV_OK) { launcher_fault(r, now); return; }
         /* After intake no descriptor is ever expected: close what came and end, silently. */
         if (in.fd_count != 0) { cw_inbound_close_fds(&in); finish(r, CW_EXIT_RIGHTS); return; }
@@ -157,6 +164,11 @@ static void read_l2(cw_relay *r, uint64_t now) {
             return;
         }
         r->env_next_seq++;
+        /* A second DRAIN (or any DRAIN while a stop, including the worker's own owner-loss one, is already running) is answered and
+         * IGNORED: the first nonce and budget stand, and a later one can neither replace nor extend them. */
+        bool stopping = r->stop.phase == CW_PH_DRAINING || r->stop.phase == CW_PH_ACKED || r->stop.phase == CW_PH_HALTING;
+        if (r->drain_seen || stopping) { (void)cw_l2_send_fault(r->out, CW_FAULT_SECOND_DRAIN); r->drain_seen = true; continue; }
+        r->drain_seen = true;
         apply(r, cw_stop_request(&r->stop, now, envelope.u.drain.stop_nonce, envelope.u.drain.budget_ms, envelope.u.drain.origin), now);
     }
 }
@@ -300,18 +312,30 @@ int cw_relay_step(cw_relay *r, int max_wait_ms) {
     read_l3(r, now);
     read_l4(r, now);
     pump_out(r, now);
-    if (getppid() != r->parent && !r->done) owner_lost(r, now);
+    if (!r->done && parent_gone(r)) owner_lost(r, now);
     apply(r, cw_stop_tick(&r->stop, now), now);
     int done = r->done ? 1 : 0;
     pthread_mutex_unlock(&r->lock);
     return done;
 }
 
-void cw_relay_guest_halted(cw_relay *r, int guest_halted, const uint64_t requested[2], const uint64_t completed[2]) {
+bool cw_exit_report_halted(const cw_exit_report *report) {
+    if (!report->reason_off || !report->counters_valid) return false;
+    for (int disk = 0; disk < 2; disk++) {
+        if (report->final_attempted[disk] != 1 || report->final_completed[disk] != 1) return false;
+        if (report->completed[disk] < report->requested[disk]) return false; /* an unfinished flush: the final flush is uncertain, never Class A */
+    }
+    return true;
+}
+
+void cw_relay_vmm_exit(cw_relay *r, const cw_exit_report *report) {
     pthread_mutex_lock(&r->lock);
     cw_stop_halted(&r->stop);
     pthread_mutex_unlock(&r->lock);
-    if (guest_halted) {
+    static const uint64_t zero[2] = { 0, 0 };
+    const uint64_t *requested = report->counters_valid ? report->requested : zero;
+    const uint64_t *completed = report->counters_valid ? report->completed : zero;
+    if (cw_exit_report_halted(report)) {
         (void)cw_l2_send_status(r->out, CW_STATUS_GUEST_HALTED, requested, completed);
     } else {
         (void)cw_l2_send_fault(r->out, CW_FAULT_VM_FAILED);

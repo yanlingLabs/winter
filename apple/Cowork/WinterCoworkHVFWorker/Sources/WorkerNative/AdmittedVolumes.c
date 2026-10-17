@@ -2,8 +2,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -34,14 +36,24 @@ int cw_channel_admit(int fd, int socket_type) {
 }
 
 void cw_close_stray_fds(int keep_a, int keep_b) {
+    /* The real limit: no descriptor can exist at or above it. getdtablesize() is the per-process maximum; RLIMIT_NOFILE is consulted too in case
+     * it was raised above it. There is no fixed cap: a cap is a number somebody could exceed. */
     int limit = getdtablesize();
-    if (limit > 65536) limit = 65536;
+    struct rlimit nofile;
+    if (getrlimit(RLIMIT_NOFILE, &nofile) == 0 && nofile.rlim_cur != RLIM_INFINITY && nofile.rlim_cur > (rlim_t)limit)
+        limit = nofile.rlim_cur > (rlim_t)INT_MAX ? INT_MAX : (int)nofile.rlim_cur;
     for (int fd = 3; fd < limit; fd++) if (fd != keep_a && fd != keep_b) (void)close(fd);
     for (int fd = 0; fd <= 2; fd++) {
         if (fcntl(fd, F_GETFD) >= 0) continue;
         int null = open("/dev/null", fd == 0 ? O_RDONLY : O_WRONLY);
         if (null >= 0 && null != fd) { (void)dup2(null, fd); (void)close(null); }
     }
+}
+
+int cw_prepare_descriptors(int l2, int l3) {
+    cw_close_stray_fds(l2, l3);
+    if (fcntl(l2, F_SETFD, FD_CLOEXEC) != 0 || fcntl(l3, F_SETFD, FD_CLOEXEC) != 0) { errno = EINVAL; return -1; }
+    return cw_channel_admit(l2, SOCK_DGRAM) == 0 && cw_channel_admit(l3, SOCK_STREAM) == 0 ? 0 : -1;
 }
 
 /* ---- one volume ---------------------------------------------------------------------------------------------------------- */
@@ -114,6 +126,7 @@ static int next_datagram(int channel, int wait_ms, uint32_t timeout_fault, int t
         if (rc == CW_RECV_CTRUNC) silent(r, "truncated control buffer");
         else if (rc == CW_RECV_GONE) { r->outcome = CW_INTAKE_OWNER_GONE; r->exit_code = CW_EXIT_OK; r->reason = "launcher closed L2"; }
         else if (rc == CW_RECV_TIMEOUT) fail(r, timeout_fault, timeout_exit, "intake timed out");
+        else if (in->refused_fds > 0) silent(r, "descriptor with a refused datagram");
         else fail(r, timeout_fault, timeout_fault == CW_FAULT_BAD_SCOPE ? CW_EXIT_BAD_SCOPE : CW_EXIT_BAD_VOLUMES, "unreadable datagram");
         return 0;
     }
@@ -143,20 +156,17 @@ void cw_intake_run(const cw_intake_config *config, int channel, cw_intake_result
         fail(r, CW_FAULT_BAD_SCOPE, CW_EXIT_BAD_SCOPE, "outside the production gate");
         return;
     }
+    int image_rc = config->check_scope(config->context, &r->scope, &r->reason);
+    if (image_rc == CW_SCOPE_REFUSED) { fail(r, CW_FAULT_BAD_SCOPE, CW_EXIT_BAD_SCOPE, r->reason != NULL ? r->reason : "scope refused"); return; }
+    if (image_rc != CW_SCOPE_OK) { fail(r, CW_FAULT_INTERNAL, CW_EXIT_INTERNAL, r->reason != NULL ? r->reason : "scope could not be checked"); return; }
+    r->reason = NULL;
     r->scope_accepted = true;
 
     /* 3. VOLUMES (sequence 2, exactly two descriptors). */
     if (!next_datagram(channel, config->volumes_wait_ms, CW_FAULT_BAD_VOLUMES, CW_EXIT_INTAKE_TIMEOUT, &in, r)) return;
     rc = cw_env_parse(in.bytes, in.length, in.fd_count, CW_ENV_TO_WORKER, &envelope);
-    if (rc == CW_E_BAD_RIGHTS) {
-        /* VOLUMES with no descriptor at all is a launcher mistake and nothing unexpected arrived: say so. Any other count, or a
-         * descriptor on any other kind, is "an fd nobody asked for": close everything, acknowledge nothing, exit 79. */
-        bool none_at_all = in.fd_count == 0 && in.length > 5 && in.bytes[5] == CW_ENV_VOLUMES;
-        cw_inbound_close_fds(&in);
-        if (none_at_all) fail(r, CW_FAULT_BAD_VOLUMES, CW_EXIT_BAD_VOLUMES, "volumes without descriptors");
-        else silent(r, "descriptor count");
-        return;
-    }
+    /* Any descriptor count other than exactly two on VOLUMES (and none anywhere else), zero included, is the same terminal silent exit. */
+    if (rc == CW_E_BAD_RIGHTS) { cw_inbound_close_fds(&in); silent(r, "descriptor count"); return; }
     if (rc != CW_OK) { cw_inbound_close_fds(&in); fail(r, CW_FAULT_BAD_VOLUMES, CW_EXIT_BAD_VOLUMES, "volumes envelope refused"); return; }
     if (envelope.seq != 2) { cw_inbound_close_fds(&in); fail(r, CW_FAULT_BAD_VOLUMES, CW_EXIT_BAD_VOLUMES, "volumes sequence"); return; }
     if (envelope.kind == CW_ENV_DRAIN) { r->outcome = CW_INTAKE_STOP_BEFORE_VM; r->drain = envelope.u.drain; r->reason = "drain before volumes"; return; }

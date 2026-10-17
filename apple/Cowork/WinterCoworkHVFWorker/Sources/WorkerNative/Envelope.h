@@ -28,10 +28,11 @@ enum {
     CW_STATUS_DRAINING = 5, CW_STATUS_DRAIN_ACKED = 6, CW_STATUS_GUEST_HALTED = 7, CW_STATUS_EXITING = 8
 };
 /* FAULT codes (wire values). TRUNCATED_RIGHTS has no sender: the contract says a truncated control buffer exits at once
- * without acknowledging, so the worker leaves it unsaid and exits 79. */
+ * without acknowledging, so the worker leaves it unsaid and exits 79. SECOND_DRAIN answers a second DRAIN envelope; the first one's nonce and
+ * budget stand. */
 enum {
     CW_FAULT_BAD_SCOPE = 1, CW_FAULT_BAD_VOLUMES = 2, CW_FAULT_SANDBOX_FAILED = 3, CW_FAULT_VM_FAILED = 4,
-    CW_FAULT_MUX_VIOLATION = 5, CW_FAULT_TRUNCATED_RIGHTS = 6, CW_FAULT_INTERNAL = 7
+    CW_FAULT_MUX_VIOLATION = 5, CW_FAULT_TRUNCATED_RIGHTS = 6, CW_FAULT_INTERNAL = 7, CW_FAULT_SECOND_DRAIN = 8
 };
 
 typedef struct {
@@ -104,14 +105,19 @@ typedef struct {
     size_t length;
     int fds[CW_FD_CAPACITY];
     size_t fd_count;
+    /* Descriptors that arrived with a datagram this receiver then REFUSED and closed (CW_RECV_REFUSED): the intake needs to know whether
+     * "refused" also meant "carried a descriptor nobody asked for", because that is the silent exit 79, not an ordinary fault. */
+    size_t refused_fds;
 } cw_inbound;
 
 enum { CW_RECV_OK = 0, CW_RECV_REFUSED = -1, CW_RECV_CTRUNC = -2, CW_RECV_TIMEOUT = -3, CW_RECV_GONE = -4, CW_RECV_AGAIN = -5 };
 
 /* Receive one datagram. `timeout_ms` < 0 does not wait (MSG_DONTWAIT only), 0 or more polls first.
  *   CW_RECV_OK       length bytes in `in->bytes`; `in->fds` holds the descriptors that came with it, all CLOEXEC and >= 3.
- *   CW_RECV_REFUSED  a malformed control message or an oversized datagram; every descriptor was closed.
- *   CW_RECV_CTRUNC   the control buffer was truncated; every visible descriptor was closed; the caller MUST _exit(79).
+ *   CW_RECV_REFUSED  a malformed control message or an oversized datagram; every descriptor was closed (in->refused_fds says how many).
+ *   CW_RECV_CTRUNC   the control buffer was truncated (the flag, or a header whose length runs past the buffer: macOS leaves cmsg_len at the
+ *                    SENDER's length and has installed ALL the descriptors, including ones it could not show); every visible descriptor was
+ *                    closed; the caller MUST _exit(79).
  *   CW_RECV_GONE     the peer closed (ECONNRESET is one-shot on macOS datagram pairs; the caller must latch it).
  * The caller owns in->fds on CW_RECV_OK. */
 int cw_env_recv(int channel, cw_inbound *in, int timeout_ms);

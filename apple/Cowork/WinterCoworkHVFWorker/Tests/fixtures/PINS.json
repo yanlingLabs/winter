@@ -1,26 +1,31 @@
 {
-  "note": "Golden vectors copied byte for byte from the N2 S1 contract. The Python generator refuses to run if either file's SHA-256 differs. They are the cross-language oracle: S1's TypeScript tests are the source, this package carries its own drift test and never the other way round.",
+  "note": "Golden vectors copied byte for byte from the N2 S1 contract. The Python generator and the guards refuse to run if any file's SHA-256 differs. They are the cross-language oracle: S1's TypeScript tests are the source, this package carries its own drift test and never the other way round. Only envelopes, mux-frames and runtime-image are the worker's layers; launcher-lines (L1) and stop-receipts (the launcher's) are carried so a drift in ANY of the five is caught at the pin.",
   "source": {
     "repository": "yanlingLabs/winter",
     "pullRequest": 56,
     "branch": "cowork/n2-host-adapter",
-    "head": "eeb7618f9d016284bfd5eae37e4a1df9af3791df",
+    "head": "a7160f9fe35ca731be170ff205a77bc2ff16d28a",
     "contractCommits": [
       "d216c9d936958c260a3f4cf0dac29f07014f0f6a",
       "40ec9f2a0a8a5f4e8a751e7ac594f0e7e3e60d1d",
-      "7fca49f7a0a7955cd185ac5788c0fab8be536369"
+      "7fca49f7a0a7955cd185ac5788c0fab8be536369",
+      "abb2f361a698b2f2df4b771a0c565c6dc7fafadd"
     ],
-    "lastCommitTouchingTheseFiles": "d216c9d936958c260a3f4cf0dac29f07014f0f6a",
+    "lastCommitTouchingTheseFiles": "abb2f361a698b2f2df4b771a0c565c6dc7fafadd",
     "directory": "packages/core/test/cowork/native/vectors"
   },
   "files": {
-    "envelopes.json": "36d2b7470d25a8f56acf255f0afbd0f90d152cce55ab96ed1e80ca85c4382bef",
-    "mux-frames.json": "e2fa1d5406a437f27aeae0b4a6b2a0bf461ea3a9b6b4d2e5e807221dbbd21fde"
+    "envelopes.json": "242f28d5eff58826329ce1149a0122fde73540c0535d6e36bc2f3ddabe2d2966",
+    "launcher-lines.json": "607c53cde64fd5c9b2dfe56af4780b37a2fd98b733b912f38bfddb8728a67e8d",
+    "mux-frames.json": "99adf927b78c63b955b797dad9a40e4cb1588066ac1d751e4a2dc9e71b728831",
+    "runtime-image.json": "2929af10fe5593a748b4f9d8c1506f2a1393c62b6e4fe4ffc0dba429f4496858",
+    "stop-receipts.json": "c7bf4dce5f388ddf90c0fb2af15d28df0b0ed2b3bbf6b21d5b2d105f376de093"
   },
-  "notCopied": {
-    "launcher-lines.json": "L1 (daemon and launcher) NDJSON: not the worker's layer",
-    "stop-receipts.json": "Class A and B receipts are minted by the launcher: not the worker's layer"
-  },
+  "usedByTheWorkerTests": [
+    "envelopes.json",
+    "mux-frames.json",
+    "runtime-image.json"
+  ],
   "relayBlind": {
     "note": "The contract says bootstrap and runtime payloads are relayed blind by the launcher and the worker. These mux negatives are refused by the TypeScript parser (daemon side) for their PAYLOAD and are therefore deliberately PASSED THROUGH by the worker, which checks headers only for those classes. The C test asserts exactly this.",
     "vectors": [
@@ -28,7 +33,8 @@
       "plan-unsorted-nested-keys",
       "hello-wrong-serial",
       "bootstrap-invalid-utf8",
-      "plan-travelling-up"
+      "plan-travelling-up",
+      "bom-mux-bootstrap"
     ]
   }
 }

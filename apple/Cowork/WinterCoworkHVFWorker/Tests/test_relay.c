@@ -11,6 +11,7 @@
 typedef struct {
     int l2[2], l3[2], l4[2]; /* [0] the test's end (launcher / guest), [1] the relay's */
     uint64_t now;
+    pid_t fake_parent;       /* what getppid() would say */
 } rig_t;
 
 static rig_t rig;
@@ -19,9 +20,24 @@ static cw_l2_out l2_out;
 
 static uint64_t fake_now(void *context) { return ((rig_t *)context)->now; }
 static void fake_random(void *context, uint8_t *out, size_t length) { (void)context; memset(out, 0x5a, length); }
+static pid_t fake_parent_pid(void *context) { return ((rig_t *)context)->fake_parent; }
+
+/* What the VMM exit hook reports after a clean power-off with both volumes flushed. */
+static cw_exit_report good_report(void) {
+    cw_exit_report r;
+    memset(&r, 0, sizeof r);
+    r.reason_off = true;
+    r.counters_valid = true;
+    r.requested[0] = 41; r.requested[1] = 7;
+    r.completed[0] = 41; r.completed[1] = 7;
+    r.final_attempted[0] = r.final_attempted[1] = 1;
+    r.final_completed[0] = r.final_completed[1] = 1;
+    return r;
+}
 
 static void rig_up(pid_t parent, uint32_t env_next_seq) {
     memset(&rig, 0, sizeof rig);
+    rig.fake_parent = parent;
     CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, rig.l2) == 0);
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, rig.l3) == 0);
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, rig.l4) == 0);
@@ -30,7 +46,7 @@ static void rig_up(pid_t parent, uint32_t env_next_seq) {
     fcntl(rig.l3[0], F_SETFL, fcntl(rig.l3[0], F_GETFL) | O_NONBLOCK);
     fcntl(rig.l4[0], F_SETFL, fcntl(rig.l4[0], F_GETFL) | O_NONBLOCK);
     cw_l2_out_init(&l2_out, rig.l2[1]);
-    cw_relay_env env = { fake_now, fake_random, &rig };
+    cw_relay_env env = { fake_now, fake_random, fake_parent_pid, &rig };
     cw_relay_init(&relay, rig.l2[1], rig.l3[1], rig.l4[1], &l2_out, env_next_seq, parent, &env);
     cw_relay_vm_started(&relay);
 }
@@ -283,8 +299,8 @@ static void orderly_drain(void) {
     for (int i = 0; i < 5; i++) (void)cw_relay_step(&relay, 0);
     CHECK(collect_l2(events, 8) == 0 && !relay.quarantined);
     /* Power-off: the VMM exit hook reports the flush counters. */
-    uint64_t requested[2] = { 41, 7 }, completed[2] = { 41, 7 };
-    cw_relay_guest_halted(&relay, 1, requested, completed);
+    cw_exit_report report = good_report();
+    cw_relay_vmm_exit(&relay, &report);
     count = collect_l2(events, 8);
     CHECK(count == 2 && events[0].kind == CW_ENV_STATUS && events[0].value == CW_STATUS_GUEST_HALTED && events[1].value == CW_STATUS_EXITING);
     CHECK(events[0].requested[0] == 41 && events[0].requested[1] == 7 && events[0].completed[0] == 41 && events[0].completed[1] == 7);
@@ -294,19 +310,71 @@ static void orderly_drain(void) {
     rig_down();
 }
 
-static void halt_without_ack_and_a_failed_vm(void) {
-    rig_up(getppid(), 3);
-    uint64_t zero[2] = { 0, 0 };
-    cw_relay_guest_halted(&relay, 1, zero, zero); /* the guest powered off on its own: reported, never as an acknowledged drain */
+static void exit_reports(void) {
     l2_event events[8];
-    size_t count = collect_l2(events, 8);
-    CHECK(count == 2 && events[0].value == CW_STATUS_GUEST_HALTED && !has(events, count, CW_ENV_STATUS, CW_STATUS_DRAIN_ACKED));
-    rig_down();
+    size_t count;
+    /* A guest that powered off on its own, with both volumes flushed: reported as halted, never as an acknowledged drain. */
     rig_up(getppid(), 3);
-    cw_relay_guest_halted(&relay, 0, zero, zero); /* the VMM exited without a halt */
+    cw_exit_report report = good_report();
+    cw_relay_vmm_exit(&relay, &report);
+    count = collect_l2(events, 8);
+    CHECK(count == 2 && events[0].value == CW_STATUS_GUEST_HALTED && events[1].value == CW_STATUS_EXITING && !has(events, count, CW_ENV_STATUS, CW_STATUS_DRAIN_ACKED));
+    CHECK(events[0].requested[0] == 41 && events[0].completed[1] == 7);
+    rig_down();
+    /* Every exit that is not a power-off - reset, vcpu error, terminal fault, an unknown reason: reason_off is false - is NOT a halt. */
+    rig_up(getppid(), 3);
+    report = good_report();
+    report.reason_off = false;
+    cw_relay_vmm_exit(&relay, &report);
     count = collect_l2(events, 8);
     CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+    CHECK(events[1].value == CW_STATUS_EXITING && relay.stop.phase == CW_PH_HALTED);
     rig_down();
+    /* Counters that could not be read: no claim, and the EXITING status carries zeros rather than invented numbers. */
+    rig_up(getppid(), 3);
+    report = good_report();
+    report.counters_valid = false;
+    cw_relay_vmm_exit(&relay, &report);
+    count = collect_l2(events, 8);
+    CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+    CHECK(events[1].requested[0] == 0 && events[1].completed[0] == 0);
+    rig_down();
+    /* The final flush of either volume not attempted, or not completed, withholds the claim. */
+    for (int disk = 0; disk < 2; disk++) {
+        for (int which = 0; which < 2; which++) {
+            rig_up(getppid(), 3);
+            report = good_report();
+            if (which == 0) report.final_attempted[disk] = 0; else report.final_completed[disk] = 0;
+            cw_relay_vmm_exit(&relay, &report);
+            count = collect_l2(events, 8);
+            CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+            rig_down();
+        }
+    }
+    /* completed < requested after a stop is an uncertain final flush: no guest_halted, a vm_failed fault, and the real counters still shown on exiting. */
+    rig_up(getppid(), 3);
+    report = good_report();
+    report.completed[0] = 40;
+    cw_relay_vmm_exit(&relay, &report);
+    count = collect_l2(events, 8);
+    CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+    CHECK(events[1].value == CW_STATUS_EXITING && events[1].requested[0] == 41 && events[1].completed[0] == 40);
+    rig_down();
+    /* completed above requested is not an unfinished flush */
+    rig_up(getppid(), 3);
+    report = good_report();
+    report.completed[1] = 8;
+    cw_relay_vmm_exit(&relay, &report);
+    count = collect_l2(events, 8);
+    CHECK(count == 2 && events[0].value == CW_STATUS_GUEST_HALTED);
+    rig_down();
+    /* the hook never observed (the process ended some other way): the relay itself reports no halt and no clean exit */
+    rig_up(getppid(), 3);
+    count = collect_l2(events, 8);
+    CHECK(count == 0 && !relay.done);
+    rig_down();
+    CHECK(cw_exit_report_halted(&(cw_exit_report){ .reason_off = true, .counters_valid = true, .final_attempted = { 1, 1 }, .final_completed = { 1, 1 } }));
+    CHECK(!cw_exit_report_halted(&(cw_exit_report){ .reason_off = true, .counters_valid = false, .final_attempted = { 1, 1 }, .final_completed = { 1, 1 } }));
 }
 
 static void wrong_acknowledgement(void) {
@@ -325,20 +393,61 @@ static void wrong_acknowledgement(void) {
     rig_down();
 }
 
-static void repeated_and_conflicting_drains(void) {
+static void second_drain(void) {
+    /* The first DRAIN stands. ANY later one - the same stop again, another nonce, a longer budget, another origin - is answered with FAULT
+     * second_drain (code 8) and ignored: it can neither replace the first one's nonce and budget nor extend its deadline. */
+    const struct { uint8_t nonce; uint32_t budget; uint32_t origin; const char *what; } later[] = {
+        { 0x0f, 30000, CW_ORIGIN_HOST_STOP, "the same stop again" }, { 0x33, 30000, CW_ORIGIN_HOST_STOP, "another nonce" },
+        { 0x0f, 120000, CW_ORIGIN_HOST_STOP, "the same nonce with a longer budget" }, { 0x33, 1000, CW_ORIGIN_OWNER_LOSS, "another nonce, budget and origin" } };
+    for (size_t i = 0; i < sizeof later / sizeof later[0]; i++) {
+        rig_up(getppid(), 3);
+        rig.now = 5000;
+        send_drain_envelope(3, 0x0f, 30000, CW_ORIGIN_HOST_STOP);
+        for (int k = 0; k < 5; k++) (void)cw_relay_step(&relay, 0);
+        l2_event events[8];
+        size_t count = collect_l2(events, 8);
+        CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_DRAINING));
+        uint64_t first_deadline = relay.stop.deadline_ms;
+        rig.now = 9000;
+        send_drain_envelope(4, later[i].nonce, later[i].budget, later[i].origin);
+        for (int k = 0; k < 5; k++) (void)cw_relay_step(&relay, 0);
+        count = collect_l2(events, 8);
+        if (!(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_SECOND_DRAIN))) fprintf(stderr, "no second_drain for: %s\n", later[i].what);
+        CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_SECOND_DRAIN) && events[0].value == 8);
+        CHECK(relay.stop.nonce[0] == 0x0f && relay.stop.origin == CW_ORIGIN_HOST_STOP && relay.stop.budget_ms == 30000 && !relay.done);
+        CHECK(relay.stop.deadline_ms == first_deadline); /* not replaced, not extended */
+        CHECK(relay.control_down_seq == 1);              /* exactly one drain frame went toward the guest */
+        CHECK(!relay.quarantined);
+        /* A third one is answered too. */
+        send_drain_envelope(5, 0x44, 1, CW_ORIGIN_HOST_STOP);
+        for (int k = 0; k < 5; k++) (void)cw_relay_step(&relay, 0);
+        count = collect_l2(events, 8);
+        CHECK(count == 1 && events[0].value == CW_FAULT_SECOND_DRAIN && seq_increases(events, count));
+        /* The deadline that stands is the FIRST one's: the later budget did not move it. */
+        rig.now = first_deadline;
+        CHECK(pump(3) == 1 && relay.exit_code == CW_EXIT_DRAIN_TIMEOUT);
+        rig_down();
+    }
+    /* A launcher DRAIN while the WORKER's own owner-loss drain is running is a second drain as well: the worker's nonce stands. */
     rig_up(getppid(), 3);
-    send_drain_envelope(3, 0x0f, 30000, CW_ORIGIN_HOST_STOP);
-    send_drain_envelope(4, 0x0f, 30000, CW_ORIGIN_HOST_STOP); /* the same stop again: harmless */
-    for (int i = 0; i < 5; i++) (void)cw_relay_step(&relay, 0);
+    rig.fake_parent = 99999; /* the parent changed: the worker starts its own drain */
+    for (int k = 0; k < 5; k++) (void)cw_relay_step(&relay, 0);
+    CHECK(relay.stop.phase == CW_PH_DRAINING && relay.stop.origin == CW_ORIGIN_OWNER_LOSS && relay.stop.nonce[0] == 0x5a);
     l2_event events[8];
+    (void)collect_l2(events, 8);
+    send_drain_envelope(3, 0x0f, 30000, CW_ORIGIN_HOST_STOP);
+    for (int k = 0; k < 5; k++) (void)cw_relay_step(&relay, 0);
     size_t count = collect_l2(events, 8);
-    CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_DRAINING));
-    send_drain_envelope(5, 0x33, 1000, CW_ORIGIN_OWNER_LOSS); /* a different stop: the contract has no code, so internal; the first stands */
-    for (int i = 0; i < 5; i++) (void)cw_relay_step(&relay, 0);
-    count = collect_l2(events, 8);
-    CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_INTERNAL));
-    CHECK(relay.stop.nonce[0] == 0x0f && relay.stop.origin == CW_ORIGIN_HOST_STOP && !relay.done);
-    CHECK(relay.control_down_seq == 1); /* exactly one drain frame went toward the guest */
+    CHECK(count == 1 && events[0].value == CW_FAULT_SECOND_DRAIN && relay.stop.nonce[0] == 0x5a && relay.control_down_seq == 1);
+    rig_down();
+    /* A first DRAIN after the guest already powered off by itself is still a FIRST drain (no second_drain), and starts nothing. */
+    rig_up(getppid(), 3);
+    cw_exit_report report = good_report();
+    cw_relay_vmm_exit(&relay, &report);
+    (void)collect_l2(events, 8);
+    send_drain_envelope(3, 0x0f, 30000, CW_ORIGIN_HOST_STOP);
+    for (int k = 0; k < 5; k++) (void)cw_relay_step(&relay, 0);
+    CHECK(collect_l2(events, 8) == 0 && relay.control_down_seq == 0);
     rig_down();
 }
 
@@ -373,9 +482,10 @@ static void a_bad_launcher_envelope_starts_an_owner_loss_drain(void) {
 }
 
 static void owner_loss(void) {
-    const char *names[] = { "L2 closed", "L3 closed", "parent changed" };
-    for (int mode = 0; mode < 3; mode++) {
-        rig_up(mode == 2 ? 1 : getppid(), 3); /* a different parent pid */
+    const char *names[] = { "L2 closed", "L3 closed", "parent changed", "parent already gone at start" };
+    for (int mode = 0; mode < 4; mode++) {
+        rig_up(mode == 3 ? 1 : 4242, 3);      /* mode 3: the relay was told its parent is pid 1 (launchd): the launcher was gone before the worker began */
+        if (mode == 2) rig.fake_parent = 4243; /* mode 2: it was 4242 and is now somebody else */
         if (mode == 0) { close(rig.l2[0]); rig.l2[0] = -1; }
         if (mode == 1) { close(rig.l3[0]); rig.l3[0] = -1; }
         for (int k = 0; k < 10; k++) (void)cw_relay_step(&relay, 0);
@@ -393,11 +503,16 @@ static void owner_loss(void) {
         guest_control(2, "halting", 0x5a);
         for (int k = 0; k < 10; k++) (void)cw_relay_step(&relay, 0);
         CHECK(relay.stop.phase == CW_PH_HALTING && !relay.quarantined);
-        uint64_t zero[2] = { 0, 0 };
-        cw_relay_guest_halted(&relay, 1, zero, zero);
+        cw_exit_report report = good_report();
+        cw_relay_vmm_exit(&relay, &report);
         CHECK(relay.stop.phase == CW_PH_HALTED);
         rig_down();
     }
+    /* Control: a parent that is where it was is not an owner loss, however long the worker idles. */
+    rig_up(4242, 3);
+    rig.now = 1u << 30;
+    CHECK(pump(10) == 0 && relay.stop.phase == CW_PH_RUNNING && relay.control_count == 0 && !relay.l2_gone);
+    rig_down();
 }
 
 static void deadlines(void) {
@@ -427,8 +542,8 @@ static void deadlines(void) {
     rig.now = 0;
     send_drain_envelope(3, 0x0f, 1000, CW_ORIGIN_HOST_STOP);
     CHECK(pump(5) == 0);
-    uint64_t zero[2] = { 0, 0 };
-    cw_relay_guest_halted(&relay, 1, zero, zero);
+    cw_exit_report report = good_report();
+    cw_relay_vmm_exit(&relay, &report);
     rig.now = 1000000;
     CHECK(pump(5) == 0);
     rig_down();
@@ -492,6 +607,31 @@ static void descriptors_after_intake(void) {
     CHECK(collect_l2(events, 4) == 0); /* and nothing was acknowledged */
     close(victim);
     rig_down();
+    /* The uniform rule: a datagram the receiver REFUSES (here, longer than any envelope) that carried a descriptor is the same silent exit; the
+     * same oversized datagram without a descriptor is an ordinary launcher fault (fault internal, then the owner-loss drain). */
+    for (int with_fd = 0; with_fd <= 1; with_fd++) {
+        rig_up(getppid(), 3);
+        victim = open("/dev/null", O_RDONLY);
+        uint8_t big[CW_ENV_MAX_BYTES + 200];
+        memset(big, 0x41, sizeof big);
+        struct iovec big_io = { big, sizeof big };
+        memset(&message, 0, sizeof message);
+        message.msg_iov = &big_io; message.msg_iovlen = 1;
+        if (with_fd) { message.msg_control = rights.bytes; message.msg_controllen = sizeof rights.bytes; }
+        CHECK(sendmsg(rig.l2[0], &message, 0) == (ssize_t)sizeof big);
+        before = cw_test_open_descriptors();
+        if (with_fd) {
+            CHECK(pump(5) == 1 && relay.exit_code == CW_EXIT_RIGHTS);
+            CHECK(collect_l2(events, 4) == 0);
+        } else {
+            CHECK(pump(5) == 0);
+            size_t count = collect_l2(events, 4);
+            CHECK(has(events, count, CW_ENV_FAULT, CW_FAULT_INTERNAL) && relay.l2_gone);
+        }
+        CHECK(cw_test_open_descriptors() == before);
+        close(victim);
+        rig_down();
+    }
 }
 
 static void pings(void) {
@@ -563,9 +703,9 @@ int main(void) {
     a_violation_ends_the_stream_not_the_vm();
     descriptor_on_a_mux_stream();
     orderly_drain();
-    halt_without_ack_and_a_failed_vm();
+    exit_reports();
     wrong_acknowledgement();
-    repeated_and_conflicting_drains();
+    second_drain();
     a_bad_launcher_envelope_starts_an_owner_loss_drain();
     owner_loss();
     deadlines();

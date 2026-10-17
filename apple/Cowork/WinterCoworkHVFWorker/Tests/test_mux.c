@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 
 static void golden_vectors(void) {
-    CHECK(MUX_VECTOR_COUNT == 40); /* 15 positive + 25 negative in the pinned file */
+    CHECK(MUX_VECTOR_COUNT == 42); /* 15 positive + 27 negative in the pinned file */
     unsigned blind_seen = 0;
     for (size_t i = 0; i < MUX_VECTOR_COUNT; i++) {
         const cw_mux_vector *v = &mux_vectors[i];
@@ -41,7 +41,7 @@ static void golden_vectors(void) {
             CHECK_STR(cw_error_name(rc), v->error);
         }
     }
-    CHECK(blind_seen == 5);
+    CHECK(blind_seen == 6); /* plan-protocol-2, plan-unsorted-nested-keys, hello-wrong-serial, bootstrap-invalid-utf8, plan-travelling-up, bom-mux-bootstrap */
 }
 
 static int control_error(const char *text, cw_mux_dir direction) {
@@ -67,6 +67,13 @@ static void control_grammar(void) {
     snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain\",\"stopNonce\":\"%s\",\"budgetMs\":-1,\"origin\":\"host-stop\"}", nonce);
     CHECK(control_error(text, CW_MUX_DOWN) == CW_E_MALFORMED);
     snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain\",\"stopNonce\":\"%s\",\"budgetMs\":1,\"origin\":\"host\"}", nonce);
+    CHECK(control_error(text, CW_MUX_DOWN) == CW_E_BAD_FIELD);
+    /* the origin is matched whole: a prefix of "owner-loss" and a longer word are other words */
+    snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain\",\"stopNonce\":\"%s\",\"budgetMs\":1,\"origin\":\"owner\"}", nonce);
+    CHECK(control_error(text, CW_MUX_DOWN) == CW_E_BAD_FIELD);
+    snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain\",\"stopNonce\":\"%s\",\"budgetMs\":1,\"origin\":\"owner-lossy\"}", nonce);
+    CHECK(control_error(text, CW_MUX_DOWN) == CW_E_BAD_FIELD);
+    snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain\",\"stopNonce\":\"%s\",\"budgetMs\":1,\"origin\":\"host-stopx\"}", nonce);
     CHECK(control_error(text, CW_MUX_DOWN) == CW_E_BAD_FIELD);
     snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain\",\"stopNonce\":\"%s\",\"budgetMs\":1}", nonce);
     CHECK(control_error(text, CW_MUX_DOWN) == CW_E_BAD_FIELD); /* a key is missing */

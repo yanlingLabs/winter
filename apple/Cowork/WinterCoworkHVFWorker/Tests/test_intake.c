@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -31,7 +32,10 @@ static void make_volume(volume *v, const char *name, uint64_t size) {
 static void drop_volume(volume *v) { if (v->fd >= 0) close(v->fd); unlink(v->path); v->fd = -1; }
 
 /* ---- the fake sandbox hook ---------------------------------------------------------------------------------------------- */
-typedef struct { int channel; int result; int calls; int unread_at_hook; } hook;
+typedef struct {
+    int channel; int result; int calls; int unread_at_hook;
+    int image_result; const char *image_reason; int image_calls; int unread_at_image; uint32_t image_memory;
+} hook;
 static int fake_sandbox(void *opaque) {
     hook *h = opaque;
     h->calls++;
@@ -41,6 +45,18 @@ static int fake_sandbox(void *opaque) {
     if (getsockopt(h->channel, SOL_SOCKET, SO_NREAD, &unread, &size) != 0) unread = -1;
     h->unread_at_hook = unread;
     return h->result;
+}
+/* The scope check (the runtime image digest) is a callback too: record what it saw and when. */
+static int fake_check_scope(void *opaque, const cw_scope *scope, const char **reason) {
+    hook *h = opaque;
+    h->image_calls++;
+    h->image_memory = scope->memory_mib;
+    int unread = 0;
+    socklen_t size = sizeof unread;
+    if (getsockopt(h->channel, SOL_SOCKET, SO_NREAD, &unread, &size) != 0) unread = -1;
+    h->unread_at_image = unread;
+    *reason = h->image_reason;
+    return h->image_result;
 }
 static int queued(int channel) {
     int unread = 0;
@@ -118,14 +134,14 @@ static void send_datagram(int channel, const uint8_t *bytes, size_t length, cons
 }
 
 static cw_intake_config config_for(hook *h) {
-    cw_intake_config c = { fake_sandbox, h, 500, 500, geteuid(), { 2, 768, 1024 } };
+    cw_intake_config c = { fake_sandbox, fake_check_scope, h, 500, 500, geteuid(), { 2, 768, 1024 } };
     return c;
 }
 
 typedef struct { int pair[2]; hook h; volume data, environment; } rig;
 static void rig_open(rig *r, const char *tag) {
     CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, r->pair) == 0);
-    r->h = (hook){ r->pair[1], 0, 0, -2 };
+    r->h = (hook){ r->pair[1], 0, 0, -2, CW_SCOPE_OK, NULL, 0, -2, 0 };
     char name[64];
     snprintf(name, sizeof name, "%s-data", tag);
     make_volume(&r->data, name, 16ull << 20);
@@ -206,11 +222,12 @@ static void sandbox_first(void) {
 }
 
 static void gate_and_scope(void) {
+    /* The parser's floor is 768 now too, so every value below it is refused as a malformed SCOPE and the gate never sees it. */
     const struct { uint32_t memory; int ok; } cases[] = { { 255, 0 }, { 256, 0 }, { 512, 0 }, { 767, 0 }, { 768, 1 }, { 900, 1 }, { 1024, 1 }, { 1025, 0 } };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         rig r;
         rig_open(&r, "gate");
-        if (cases[i].memory >= 256 && cases[i].memory <= 1024) send_scope_and_volumes(&r, cases[i].memory);
+        if (cases[i].memory >= 768 && cases[i].memory <= 1024) send_scope_and_volumes(&r, cases[i].memory);
         else { /* the S1 parser refuses these itself: patch the byte range in by hand */
             uint8_t bytes[CW_ENV_MAX_BYTES];
             size_t length = scope_bytes(bytes, 1, 768);
@@ -253,6 +270,48 @@ static void gate_is_independent_of_the_parser(void) {
         }
         rig_close(&r);
     }
+}
+
+static void runtime_image_check(void) {
+    /* REFUSED is bad_scope and exit 71; UNAVAILABLE is internal and exit 78; both leave the VOLUMES datagram unread, both after the gate. */
+    const struct { int result; uint32_t fault; int exit_code; const char *reason; } cases[] = {
+        { CW_SCOPE_REFUSED, CW_FAULT_BAD_SCOPE, CW_EXIT_BAD_SCOPE, "runtime image digest mismatch" },
+        { CW_SCOPE_UNAVAILABLE, CW_FAULT_INTERNAL, CW_EXIT_INTERNAL, "kernel is not a readable regular file" } };
+    for (size_t i = 0; i < 2; i++) {
+        rig r;
+        rig_open(&r, "image");
+        send_scope_and_volumes(&r, 768);
+        r.h.image_result = cases[i].result;
+        r.h.image_reason = cases[i].reason;
+        cw_intake_config config = config_for(&r.h);
+        cw_intake_result result;
+        int before = cw_test_open_descriptors();
+        cw_intake_run(&config, r.pair[1], &result);
+        CHECK(result.outcome == CW_INTAKE_FAULT && result.fault == cases[i].fault && result.exit_code == cases[i].exit_code);
+        CHECK_STR(result.reason, cases[i].reason);
+        CHECK(!result.scope_accepted && !result.volumes_accepted);
+        CHECK(r.h.image_calls == 1 && r.h.image_memory == 768);
+        CHECK(r.h.unread_at_image == (int)(CW_ENV_HEADER + CW_ENV_VOLUMES_BYTES)); /* the VOLUMES datagram, with its descriptors, is still queued */
+        CHECK(cw_test_open_descriptors() == before);
+        rig_close(&r);
+    }
+    /* The check is not asked about a SCOPE the gate already refused, and a passing check is called exactly once. */
+    rig r;
+    rig_open(&r, "image-gate");
+    send_scope_and_volumes(&r, 768);
+    cw_intake_config config = config_for(&r.h);
+    config.gate.min_memory_mib = 800;
+    cw_intake_result result;
+    cw_intake_run(&config, r.pair[1], &result);
+    CHECK(result.outcome == CW_INTAKE_FAULT && r.h.image_calls == 0);
+    rig_close(&r);
+    rig_open(&r, "image-ok");
+    send_scope_and_volumes(&r, 768);
+    config = config_for(&r.h);
+    cw_intake_run(&config, r.pair[1], &result);
+    CHECK(result.outcome == CW_INTAKE_OK && r.h.image_calls == 1 && result.reason == NULL);
+    if (result.outcome == CW_INTAKE_OK) { close(result.fds[0]); close(result.fds[1]); }
+    rig_close(&r);
 }
 
 static void scope_refusals(void) {
@@ -298,7 +357,7 @@ static void unexpected_descriptors(void) {
         CHECK(cw_test_open_descriptors() == before);
         rig_close(&r);
     }
-    /* VOLUMES with 1, 3 descriptors: closed, silent. With none: a bad_volumes fault, nothing unexpected arrived. */
+    /* VOLUMES with 1, 3 descriptors or NONE: the same terminal silent exit (the rights policy is uniform). */
     const int counts[] = { 1, 3, 0 };
     for (size_t i = 0; i < 3; i++) {
         rig r;
@@ -314,11 +373,48 @@ static void unexpected_descriptors(void) {
         cw_intake_config config = config_for(&r.h);
         cw_intake_result result;
         cw_intake_run(&config, r.pair[1], &result);
-        if (counts[i] == 0) CHECK(result.outcome == CW_INTAKE_FAULT && result.fault == CW_FAULT_BAD_VOLUMES);
-        else CHECK(result.outcome == CW_INTAKE_SILENT_EXIT && result.exit_code == CW_EXIT_RIGHTS);
+        CHECK(result.outcome == CW_INTAKE_SILENT_EXIT && result.exit_code == CW_EXIT_RIGHTS);
         CHECK(cw_test_open_descriptors() == before);
         CHECK(result.fds[0] == -1 && result.fds[1] == -1);
         rig_close(&r);
+    }
+    /* A DRAIN with descriptors is no different. */
+    {
+        rig r;
+        rig_open(&r, "drain-fds");
+        uint8_t bytes[CW_ENV_MAX_BYTES];
+        size_t length = drain_bytes(bytes, 1);
+        int fds[1] = { r.data.fd };
+        send_datagram(r.pair[0], bytes, length, fds, 1);
+        cw_intake_config config = config_for(&r.h);
+        cw_intake_result result;
+        cw_intake_run(&config, r.pair[1], &result);
+        CHECK(result.outcome == CW_INTAKE_SILENT_EXIT && result.exit_code == CW_EXIT_RIGHTS);
+        rig_close(&r);
+    }
+}
+
+static void refused_datagrams(void) {
+    /* A datagram this receiver refuses (here: longer than any envelope) is an ordinary fault - unless it carried a descriptor, which is the
+     * silent exit like every other unexpected descriptor. */
+    for (int stage = 1; stage <= 2; stage++) {
+        for (int with_fd = 0; with_fd <= 1; with_fd++) {
+            rig r;
+            rig_open(&r, "refused");
+            uint8_t bytes[CW_ENV_MAX_BYTES + 200];
+            memset(bytes, 0x41, sizeof bytes);
+            if (stage == 2) { uint8_t scope[CW_ENV_MAX_BYTES]; size_t n = scope_bytes(scope, 1, 768); send_datagram(r.pair[0], scope, n, NULL, 0); }
+            int fds[1] = { r.data.fd };
+            send_datagram(r.pair[0], bytes, sizeof bytes, with_fd ? fds : NULL, with_fd);
+            int before = cw_test_open_descriptors();
+            cw_intake_config config = config_for(&r.h);
+            cw_intake_result result;
+            cw_intake_run(&config, r.pair[1], &result);
+            if (with_fd) CHECK(result.outcome == CW_INTAKE_SILENT_EXIT && result.exit_code == CW_EXIT_RIGHTS);
+            else CHECK(result.outcome == CW_INTAKE_FAULT && result.fault == (stage == 1 ? CW_FAULT_BAD_SCOPE : CW_FAULT_BAD_VOLUMES));
+            CHECK(cw_test_open_descriptors() == before);
+            rig_close(&r);
+        }
     }
 }
 
@@ -484,18 +580,61 @@ static int stray_child(void) {
     return cw_test_failures != 0 ? 1 : 0;
 }
 
+/* ---- descriptor hygiene (each in a child: it closes everything it was not given) ---- */
+static int inherited[4]; /* l2 end, l3 end (the child's), and their peers (the parent keeps those open) */
+
+static int prepare_child(int swap) {
+    cw_test_failures = 0;
+    struct rlimit limit = { 20000, 20000 };
+    (void)setrlimit(RLIMIT_NOFILE, &limit);
+    int base = open("/dev/null", O_RDONLY);
+    int strays[3] = { base, dup2(base, 200), fcntl(base, F_DUPFD, 15000) }; /* one low, one in the hundreds, one far above any fixed small cap */
+    CHECK(strays[0] >= 3 && strays[1] == 200 && strays[2] >= 15000);
+    close(STDIN_FILENO);
+    int l2 = swap ? inherited[1] : inherited[0], l3 = swap ? inherited[0] : inherited[1];
+    int rc = cw_prepare_descriptors(l2, l3);
+    if (swap) { CHECK(rc == -1); return cw_test_failures != 0 ? 1 : 0; }
+    CHECK(rc == 0);
+    for (int i = 0; i < 3; i++) CHECK(fcntl(strays[i], F_GETFD) < 0);        /* every stray is closed, however high */
+    CHECK(fcntl(inherited[2], F_GETFD) < 0 && fcntl(inherited[3], F_GETFD) < 0); /* so are the peers' copies in THIS process (the parent keeps its own) */
+    CHECK(fcntl(l2, F_GETFD) >= 0 && fcntl(l3, F_GETFD) >= 0);                /* the two inherited ends survive (the keep list covers both) */
+    CHECK((fcntl(l2, F_GETFD) & FD_CLOEXEC) && (fcntl(l3, F_GETFD) & FD_CLOEXEC)); /* CLOEXEC restored */
+    CHECK(fcntl(0, F_GETFD) >= 0 && fcntl(1, F_GETFD) >= 0 && fcntl(2, F_GETFD) >= 0);
+    return cw_test_failures != 0 ? 1 : 0;
+}
+static int prepare_ok_child(void) { return prepare_child(0); }
+static int prepare_swapped_child(void) { return prepare_child(1); }
+
+static void descriptor_hygiene(void) {
+    int l2[2], l3[2];
+    CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, l2) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, l3) == 0);
+    inherited[0] = l2[1]; inherited[1] = l3[1]; inherited[2] = l2[0]; inherited[3] = l3[0]; /* no CLOEXEC: as the launcher leaves them */
+    int (*bodies[2])(void) = { prepare_ok_child, prepare_swapped_child };
+    for (int i = 0; i < 2; i++) {
+        fflush(NULL);
+        pid_t child = fork();
+        if (child == 0) _exit(bodies[i]());
+        int status = 0;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    close(l2[0]); close(l2[1]); close(l3[0]); close(l3[1]);
+}
+
 int main(void) {
     make_directory();
     happy_path();
     sandbox_first();
     gate_and_scope();
     gate_is_independent_of_the_parser();
+    runtime_image_check();
     scope_refusals();
     unexpected_descriptors();
+    refused_datagrams();
     volumes_refusals();
     drain_before_vm();
     waiting_and_gone();
     volume_admit_unit();
+    descriptor_hygiene();
     fflush(NULL);
     pid_t child = fork();
     if (child == 0) _exit(stray_child());

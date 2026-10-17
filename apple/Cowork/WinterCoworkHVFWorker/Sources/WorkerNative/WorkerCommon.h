@@ -61,7 +61,7 @@ enum { CW_ORIGIN_HOST_STOP = 1, CW_ORIGIN_OWNER_LOSS = 2 };
 
 /* Limits copied from COWORK_NATIVE_LIMITS. */
 #define CW_VCPUS 2u
-#define CW_SCOPE_MIN_MEMORY_MIB 256u  /* what the S1 parser accepts; the production gate is narrower, see CoworkAbi.h */
+#define CW_SCOPE_MIN_MEMORY_MIB 768u  /* the contract's floor since the controller's ruling; also the library gate's (CoworkAbi.h pins them equal) */
 #define CW_SCOPE_MAX_MEMORY_MIB 1024u
 #define CW_DRAIN_BUDGET_CEILING_MS 120000u
 #define CW_DRAIN_BUDGET_OWNER_LOSS_MS 30000u

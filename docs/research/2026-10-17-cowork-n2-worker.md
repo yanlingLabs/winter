@@ -1,12 +1,12 @@
 # Cowork N2 slice S3: the production C worker
 
-Status: source, build and VM-free tests. 2026-10-17. **No worker and no VM was run.** `winter-cowork-worker` (and a link-check binary built against a stub) was compiled, linked, ad-hoc signed inside a scratch directory and inspected with `codesign`, `otool`, `nm` and `strings`. It was never executed. The test binaries were executed: they use in-process socketpairs, temp files and a poisoned stand-in for the sandbox SPI. No `sandbox_init*` call, no Hypervisor.framework call, no `krun_start_enter`, no `pmset` and no signing identity were used anywhere.
+Status: source, build and VM-free tests. 2026-10-17. **No worker and no VM was run.** `winter-cowork-worker` was compiled, linked, ad-hoc signed inside a scratch directory and inspected with `codesign`, `otool`, `nm` and `strings`. It was never executed. The test binaries were executed: they use in-process socketpairs, temp files and a poisoned stand-in for the sandbox SPI. No `sandbox_init*` call, no Hypervisor.framework call, no `krun_start_enter`, no `pmset` and no signing identity were used anywhere.
 
 Every gate G0 to G6 needs a review of the exact commit and the owner's approval first. **G0 (`--sandbox-check`) is the first run this code can safely get, and nothing here has asked for it.**
 
 Package: `apple/Cowork/WinterCoworkHVFWorker/`. Nothing outside it and this document refers to it (pinned, see "Anti-wiring").
 
-The contract is S1's (`docs/cowork-native-worker.md`, `packages/core/src/cowork/native/protocol.ts` and the golden vectors on `cowork/n2-host-adapter`, PR #56, head `eeb7618f`). Where the contract is silent this document says so and picks the narrowest behaviour; it does not diverge from the contract anywhere.
+The contract is S1's (`docs/cowork-native-worker.md`, `packages/core/src/cowork/native/protocol.ts` and the golden vectors on `cowork/n2-host-adapter`, PR #56, head `a7160f9f`, contract commit `abb2f361`). The five vector files are pinned by SHA-256 in `Tests/fixtures/PINS.json`; a newer contract commit means re-copying them. Where the contract is silent this document says so and picks the narrowest behaviour; it does not diverge from the contract anywhere.
 
 ## 1. What is in the package
 
@@ -20,13 +20,15 @@ The contract is S1's (`docs/cowork-native-worker.md`, `packages/core/src/cowork/
 | `Sources/WorkerNative/AdmittedVolumes.{h,c}` | Channel admission, the sandbox-first intake of SCOPE and VOLUMES, descriptor checks against the identity records, the advisory lock. |
 | `Sources/WorkerNative/ConsoleRing.{h,c}` | Bounded console capture: a 64 KiB ring, redaction of host virtual addresses, ASCII-only output. |
 | `Sources/WorkerNative/Sandbox.{h,c}` | The Seatbelt profile text and the two functions that install it and prove its denials. |
-| `Sources/WorkerNative/CoworkAbi.h` | The ONE file that maps the contract's libkrun names to what the linked archive exports. |
+| `Sources/WorkerNative/Rights.{h,c}` | The bounded collector of `SCM_RIGHTS` descriptors both receivers use (section 4). |
+| `Sources/WorkerNative/RuntimeImage.{h,c}` | `runtimeImageDigest` recomputed from the two guest artifacts, opened `O_NOFOLLOW` (section 4). |
+| `Sources/WorkerNative/CoworkAbi.h` | The ONE file that knows the libkrun production ABI as the linked header declares it, with the exit-reason and flush-counter translation. |
 | `Sources/WorkerNative/WorkerCommon.h` | Descriptor numbers, exit codes, limits. |
 | `worker.entitlements` | Exactly `com.apple.security.hypervisor`. |
 | `pins.json`, `build.py` | The pinned libkrun inputs; the offline build, test and inspection driver. |
-| `Tests/*.c`, `Tests/test_guards.py` | Ten strict-C test binaries and the Python source guards. |
-| `Tests/fixtures/` | S1's `envelopes.json` and `mux-frames.json`, byte for byte, pinned by SHA-256 with the source commit. |
-| `Tests/stubs/krun_contract_stub.c` | A stub of the libkrun surface with the CONTRACT's names, for a link check only. |
+| `Tests/*.c`, `Tests/test_guards.py` | Strict-C test binaries and the Python source guards. |
+| `Tests/fixtures/` | S1's five vector files (`envelopes`, `mux-frames`, `runtime-image`, `launcher-lines`, `stop-receipts`), byte for byte, pinned by SHA-256 with the source commit. |
+| `Tests/abi/` | Four tiny sources: one exit hook with the library's type (must compile), three with another signature (must be refused). |
 
 ## 2. What changed from the fixture worker
 
@@ -34,10 +36,10 @@ Starting point: `workspace_fixture_worker.c`, `workspace_fd_handoff.{h,c}` and `
 
 | Removed | How |
 | --- | --- |
-| The fixed argv layout | `argc` must be 1, or 2 with `--sandbox-check`. Nothing else is read from the caller. A guard pins `argv[1]` as the only use. |
+| The fixed argv layout | `argc` must be 1, or 2 with `--sandbox-check`. The contract says argv is exactly `[path]`; `--sandbox-check` is outside it on purpose: it is a G0-only mode that the launcher never passes, and a launcher that did would only get a worker that exits before any VM. Nothing else is read from the caller. A guard pins `argv[1]` as the only use. |
 | `alarm(120)` | Gone. A long-lived guest is not timed; only a stop, an owner loss or a violation arms a deadline (section 6). A guard refuses `alarm(`. |
 | The 2 vCPU / 768 MiB constants | `vcpus` and `memoryMiB` come from SCOPE and are validated against the library's production gate (section 4). A guard refuses a literal `768`. |
-| The `file-write*` allow on the two disk literals | Gone (the disks arrive as descriptors). The profile now allows no write of any kind; a test pins the exact allow list. |
+| The `file-write*` allow on the two disk literals | Not carried over. **That it was vestigial is an unverified premise** (the fixture's allow may be what lets `fstat`, `pread` or `pwrite` on the received descriptors work under deny-default; Seatbelt checks file operations against the vnode's path, not only at `open`). The profile has no path rule for the disks and allows no write of any kind; a test pins the exact allow list. See section 8 and the G0 I/O variant. |
 | The fixture opt-ins and trace | `krun_enable_cowork_block_fixture_reclaim`, `krun_enable_cowork_runtime_port_fixture_trace`, the bootstrap stream: none is referenced. `build.py` lists every `krun_*` the worker references and refuses any outside the reviewed list; with `-Wl,-dead_strip` the final binary defines exactly 13 libkrun entry points, all referenced. |
 | The sampler pipe | Gone. |
 
@@ -66,11 +68,14 @@ Order inside the worker: close every other descriptor and refill 0 to 2 with `/d
 
 ## 4. Intake
 
-* The S1 parser accepts 256 to 1024 MiB. libkrun's production gate refuses below 768. The worker validates SCOPE against the **library's** constants (`KRUN_COWORK_PRODUCTION_*`, through `CoworkAbi.h`), so 512 MiB faults `bad_scope` at intake rather than `vm_failed` later. Tests prove the gate against a narrower gate than the parser, so it is not shadowed by the parser's own caps.
+* The S1 parser and the library gate now agree: 768 to 1024 MiB, 2 vCPUs. The floor is in the parser too (`CW_SCOPE_MIN_MEMORY_MIB`), and `_Static_assert`s in `CoworkAbi.h` tie the parser's bounds to the library's `KRUN_COWORK_PRODUCTION_*`. SCOPE is also validated against the library's constants separately, and a test proves that second check is not shadowed by the parser (it runs against a narrower gate).
 * `volumes.scopeDigest` must equal the SHA-256 of the SCOPE payload exactly as received (CommonCrypto `CC_SHA256`, part of libSystem).
-* Each received descriptor is checked against its identity record with the same list libkrun's own setter applies, so a refusal is `bad_volumes` at intake: regular file, one link, owned by the effective user and by the record's uid, mode exactly 0600 (all of 07777), `O_RDWR` and not `O_APPEND`, the recorded device, inode and size. `st_dev` is read **sign-extended** (`(uint64_t)(int64_t)st_dev`), as the daemon (libuv) and libkrun (Rust `st_dev as u64`) read it. Both descriptors or neither.
-* Then `flock(LOCK_EX | LOCK_NB)` on both: an extra guard, **never** release evidence. It is `flock`, not `fcntl(F_SETLK)`: a POSIX lock is dropped by any close of the file in the process, whereas a `flock` belongs to the open file description, which libkrun's duplicates keep alive after the worker closes its own copies. A test shows a duplicate's close does not release it and that only the last close of the description does.
-* Rights policy: any descriptor with a non-VOLUMES envelope, a VOLUMES with one, three or more descriptors, a truncated control buffer: close, no acknowledgement, exit 79. VOLUMES with **no** descriptor at all is a launcher mistake and nothing unexpected arrived: `fault bad_volumes`. This is stricter than contract section 5 on the parse side (the parser itself returns `bad_rights`, matching the vectors) and is the brief's rule.
+* **`runtimeImageDigest` is recomputed**: `SHA-256( SHA-256(kernel) || SHA-256(initramfs.cpio) )`, each inner digest the raw 32 bytes, from descriptors opened `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, regular files only, read with `pread` in 1 MiB pieces, refused above 4 GiB, and refused when the size or mtime changes while it is read. S1's golden vectors (`runtime-image.json`) pin the construction. A mismatch is `fault bad_scope`, exit 71, before VOLUMES is read. **Hash-then-load window (reported, not closed):** libkrun opens the same paths itself later (`krun_set_kernel` stats the initramfs path, `krun_start_enter` reads both), so the digest proves what was on disk when it was hashed, not what libkrun loads. The files sit in the signed bundle next to the worker and the sandbox gives the process read access only, but the window exists. **Proposal for G0:** if libkrun accepts `/dev/fd/N` paths, hand it the hashed descriptors (rewound) with `(allow file-read* (subpath "/dev/fd"))` in the profile; that would close it. Not enabled here.
+* Each received descriptor is checked against its identity record with the same list libkrun's own setter applies, so a refusal is `bad_volumes` at intake: regular file, one link, owned by the effective user and by the record's uid, mode exactly 0600 (all of 07777), `O_RDWR` and not `O_APPEND`, the recorded device, inode and size. `st_dev` is read **sign-extended**, as the daemon (libuv) and libkrun (Rust `st_dev as u64`) read it. Both descriptors or neither.
+* Then `flock(LOCK_EX | LOCK_NB)` on both: an extra guard, **never** release evidence. It is `flock`, not `fcntl(F_SETLK)`: a POSIX lock is dropped by any close of the file in the process, whereas a `flock` belongs to the open file description, which libkrun's duplicates keep alive. A test shows a duplicate's close does not release it.
+* **Receiving descriptors (`Rights.c`).** macOS leaves `cmsg_len` at the SENDER's length when the control buffer was too small, and installs every descriptor anyway. A walk that trusts `cmsg_len` reads past the buffer and `close()`s whatever it finds (the #58 review measured 20 sent into a 16-slot buffer: `cmsg_len` 92 against a 76-byte buffer). Both receivers (`Envelope.c`, `Mux.c`) therefore call one collector that bounds every header by `msg_control + msg_controllen`, never reads outside, stores at most the capacity and closes the rest, and reports a header that claims more than the buffer holds as TRUNCATED. `MSG_CTRUNC` or a truncated header is terminal. The two checks overlap on macOS, so each survives alone as a mutant and the pair is killed (section 11); the descriptors the kernel installed but could not show cannot be closed by anyone, which is why truncation ends the process.
+* **Rights policy, exactly.** SILENT `_exit(79)` (nothing is acknowledged): a truncated control buffer on L2, L3 or L4; a descriptor on SCOPE or on any envelope after intake; a descriptor on a datagram that was refused for another reason; a VOLUMES with any count but two, zero included; a descriptor on a mux stream (L3 or L4) is NOT silent: it is closed and is a mux violation (section 5). FAULT with an acknowledgement: everything that carries no descriptor problem (a bad SCOPE, a bad VOLUMES body, an identity or lock failure). The parser itself still returns `bad_rights` for a wrong descriptor count, matching the vectors; the worker maps that to the silent exit. This is stricter than contract section 5 and is the brief's rule.
+* **Stray descriptors**: everything at or above 3 except L2 and L3 is closed up to `max(getdtablesize(), RLIMIT_NOFILE soft limit)`; there is no fixed cap. Descriptors 0 to 2 are refilled from `/dev/null` if closed.
 * A DRAIN envelope that arrives before the VM exists (sequence 1 or 2) ends the worker cleanly: nothing was started and no disk was held. An L2 close before the VM exists is the same.
 
 ## 5. The mux
@@ -86,17 +91,18 @@ Header, per-class ceilings (control 4 KiB, bootstrap 256 KiB, runtime 1 MiB), th
 
 `OwnedStop` is a pure machine. Two things start a stop: a DRAIN envelope from the launcher (`host-stop`, or the launcher's own `owner-loss`), and the worker's own owner-loss path.
 
-* DRAIN: the worker queues a control `drain {stopNonce, budgetMs, origin}` toward the guest and reports `draining`. The guest must answer `drain_ack` with **that** nonce (reported as `drain_acked`) and then `halting` with that nonce; any other order, nonce or an unsolicited message is a violation. A second DRAIN with the same nonce is ignored; with a different nonce the first stands and the worker reports `fault internal` (the contract has no code for it).
-* Power-off: the VMM exit hook reports `guest_halted` with the flush counters, then `exiting`. A guest that powers off without acknowledging is reported as halted and nothing more; the launcher decides what that means.
-* **Owner loss** (L2 closed, L3 closed, or the parent pid changed): the worker starts its own drain (`origin owner-loss`, 30 s, a nonce it mints with `arc4random_buf`). L2 or L3 EOF is detected by `recvmsg`; macOS reports a closed datagram peer as `ECONNRESET` exactly once, so the worker latches it (measured: poll shows `POLLIN` but not `POLLHUP`, one `ECONNRESET`, then `EAGAIN`).
+* DRAIN: the worker queues a control `drain {stopNonce, budgetMs, origin}` toward the guest and reports `draining`. The guest must answer `drain_ack` with **that** nonce (reported as `drain_acked`) and then `halting` with that nonce; any other order, nonce or an unsolicited message is a violation. A second DRAIN (any nonce, including while the worker's own owner-loss drain is running) is answered with `fault second_drain` (code 8) and **ignored**: the first nonce and budget stand and a later one can neither replace nor extend them. A test sends a second DRAIN with a larger budget and checks the deadline did not move.
+* Power-off: the VMM exit hook (`void (*)(void *user, uint32_t reason)`; the reason is compared only through the header's named constant `KRUN_COWORK_EXIT_OFF`) reports `guest_halted` with the flush counters, then `exiting`. **`guest_halted` is withheld (a `fault vm_failed` plus the real counters on `exiting`) whenever the final flush is uncertain**: reason NONE, reset, vcpu error, terminal fault or unknown; no counters (or counters of another size or device count); the final flush not both attempted and completed on both volumes; `completed < requested` on either volume. **"libkrun exited 0 and the hook never ran"** (a hung observer after a clean off) and **a crash signal** (default disposition, no hook) produce no hook observation at all: the worker says nothing and the launcher, which sees only the process exit, must treat it as uncertain; a test pins that a relay with no exit report claims nothing.
+* **Owner loss** (L2 closed, L3 closed, the parent pid changed, **or the parent was already gone when the worker started**, `getppid() == 1`; in that last case `main` exits 0 before any disk is held and the relay also treats a recorded parent of 1 as lost): the worker starts its own drain (`origin owner-loss`, 30 s, a nonce it mints with `arc4random_buf`). L2 or L3 EOF is detected by `recvmsg`; macOS reports a closed datagram peer as `ECONNRESET` exactly once, so the worker latches it (measured: poll shows `POLLIN` but not `POLLHUP`, one `ECONNRESET`, then `EAGAIN`).
 * **Deadline**: budget plus 5 s grace without a power-off: exit 75. The launcher kills at the budget; the worker's own deadline only matters when the launcher is gone. An idle healthy guest is never timed. The clock is `CLOCK_UPTIME_RAW`, which does not count host sleep (a sleep/wake question for G3, not decided here).
+* **Quarantine ack limit.** After a mux violation neither L3 nor L4 is read, so the guest's `drain_ack` and `halting` are never seen: a drain delivered during quarantine can end only by a power-off (the exit hook) or the deadline, no `drain_acked` is ever reported for it, and a quarantined stop is never a Class A candidate through the acknowledgement path.
 * A malformed, out-of-sequence or unexpected post-intake envelope from the launcher (the contract has no code for it): `fault internal`, L2 is no longer read, and the worker starts the same owner-loss drain.
 
 None of this is release evidence. Process exit, EOF and a closed descriptor are cleanup.
 
 ## 7. Console capture
 
-libkrun's stderr (including the fixture-era `eprintln!` reclaim rows, which S4's review item 7 says carry host virtual addresses in `reclaim_unmap` rows) and the PL011 output go into one pipe. A reader thread keeps a 64 KiB ring. Every line is redacted before it is stored: the integer after `"hva":` (decimal, hex, quoted, spaced) becomes `0`. Output is printable ASCII only. A line longer than 2 KiB is cut and the rest dropped to the newline. The reader never blocks on anything but its own read, because a stalled reader would stall the VMM thread that is printing into the pipe, and `eprintln!` panics when stderr cannot be written. The ring is written out (bounded, pipe-atomic pieces, each only after `poll` says there is room, at most 1 s) to a saved copy of the launcher's stderr **only on an abnormal exit**, because guest console text can carry user content. Worker diagnostics are fixed strings; nothing from an envelope, a path or the guest goes through them.
+libkrun's stderr (including the fixture-era `eprintln!` reclaim rows, which S4's review item 7 says carry host virtual addresses in `reclaim_unmap` rows) and the PL011 output go into one pipe. A reader thread keeps a 64 KiB ring. Every line is redacted before it is stored: the integer after `"hva":` (decimal, hex, quoted, spaced) becomes `0`. Output is printable ASCII only. A line longer than 2 KiB is cut and the rest dropped to the newline. The reader never blocks on anything but its own read, because a stalled reader would stall the VMM thread that is printing into the pipe, and `eprintln!` panics when stderr cannot be written. The ring is written out (bounded, pipe-atomic pieces, each only after `poll` says there is room, at most 1 s) to a saved copy of the launcher's stderr **only on an abnormal exit**. The libkrun log tail is bounded, redacted and ASCII; the guest's console is written only if the guest never reached its hello (nothing of the workspace can have been mounted yet), at most 16 KiB of the tail, redacted the same way, and is dropped otherwise because it can carry user content. Worker diagnostics are fixed strings; nothing from an envelope, a path or the guest goes through them.
 
 ## 8. The sandbox profile
 
@@ -108,33 +114,30 @@ libkrun's stderr (including the fixture-era `eprintln!` reclaim rows, which S4's
 (allow file-read* (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))
 ```
 
-The fixture's profile minus the vestigial write allow, with the worker's whole directory replaced by the guest-artifact directory (`<worker directory>/cowork-guest/`, holding `kernel` and `initramfs.cpio`). `sandbox_init_with_parameters` is Apple SPI, tested only on macOS 26.6.1 and only by the fixture. A test pins the text (no write, no network, no mach, no `file-lock`, balanced, no baked path) and the test binary replaces the three SPI entry points with stubs that `_exit(99)`. D5 (keep Seatbelt SPI) follows the plan's recommendation; nothing else about it was decided here.
+The fixture's profile minus the write allow (see the open question below), with the worker's whole directory replaced by the guest-artifact directory (`<worker directory>/cowork-guest/`, holding `kernel` and `initramfs.cpio`). `sandbox_init_with_parameters` is Apple SPI, tested only on macOS 26.6.1 and only by the fixture. A test pins the text (no write, no network, no mach, no `file-lock`, balanced, no baked path) and the test binary replaces the three SPI entry points with stubs that `_exit(99)`. D5 (keep Seatbelt SPI) follows the plan's recommendation; nothing else about it was decided here.
+
+**Open question (not run).** The brief called the fixture's `file-write*` on the two disk literals vestigial; that is unverified. Seatbelt can check `fstat`, `pread` and `pwrite` on an inherited descriptor against the vnode's path, and the received disks are opened by the daemon, outside the sandbox. The profile therefore carries no path rule for the disks and the question stays open in this note and the PR body. **G0 I/O variant (to add to the gate plan; do not run):** under the installed profile, on a throwaway image created for the gate, `fstat` the descriptor, `pread` one block and `pwrite` the same one byte with the same value back, and record whether each succeeds. If the write is denied, the profile needs a narrow rule and S2/S7 need to know before any disk is used.
 
 **`file-lock` is deliberately not allowed.** Whether `flock` needs it under deny-default is unverified (plan risk 8) and no system sandbox profile on this machine mentions the operation either way, so a blind allow would widen the profile on no evidence. A lock failure is `bad_volumes`; **the lock is the first named G0 item.** G0 should also show: the profile compiles with its `GUESTDIR` parameter, `recvmsg` on the inherited sockets works, `arc4random_buf` and `/dev/urandom` work, and thread creation works.
 
-## 9. The libkrun ABI, and what S4 does not have
+## 9. The libkrun ABI
 
-`CoworkAbi.h` maps the contract's names to the archive's. `build.py` reads `nm` on the archive and sets the mapping; nothing is decided at run time.
+S4's library (PR #55, patch queue 0004 to 0023, head `3a8f24d2`) exports the contract's `_v1` names, so no mapping remains. `CoworkAbi.h` is the one file that knows the header as linked, and `pins.json` records where the header differs from the contract text (`abi.differences`); the build stops if the header changes. Call order: `krun_create_ctx`, the non-device setters, `krun_cowork_enable_profile_v1`, `krun_cowork_create_runtime_port_v1` (before the disks), `krun_cowork_set_workspace_disks_v1`, `krun_cowork_set_exit_hook_v1`, **`krun_cowork_validate_profile_v1` as the mandatory last preflight** (a non-zero result starts no VM), `krun_start_enter`. A guard pins this order.
 
-| Contract (S1) | Implemented (S4, PR #55) |
-| --- | --- |
-| `krun_cowork_enable_profile_v1` | `krun_cowork_enable_production_profile` |
-| `krun_cowork_set_workspace_disks_v1` | `krun_cowork_set_workspace_disks` |
-| `krun_cowork_create_mux_stream_v1` | `krun_cowork_create_runtime_port` |
-| `krun_cowork_get_flush_counters_v1` | **none** |
-| `krun_cowork_set_exit_hook_v1` | **none** |
-| (none) | `krun_cowork_validate_production_profile` (optional preflight, used) |
+| | Contract text (a7160f9f) | Library header, followed by the worker |
+| --- | --- | --- |
+| exit hook | `void (*)(void *user, int32_t reason)`; off=0 reset=1 vcpu-error=2 terminal-fault=3 | `krun_cowork_exit_hook_v1`: `void (*)(void *user_data, uint32_t reason)`; NONE=0 OFF=1 RESET=2 VCPU_ERROR=3 TERMINAL_FAULT=4 |
+| `get_flush_counters_v1` | `(uint32_t ctx_id, {4 x u64} *out)` | `(struct krun_cowork_flush_counters_v1 *out)`: `{size, device_count, device[2]{requested, completed, final_sync_attempted, final_sync_completed}}`, process-global, carries the FINAL flush |
+| pin counters | absent | `krun_cowork_get_pin_counters_v1`: read by gate G4, never called by the worker |
 
-**The last two are missing from S4's archive.** Without them the Class A receipt cannot be produced (`guest_halted` with counters). In that configuration `CoworkAbi.h` makes both inline refusals returning `-ENOSYS`, and `configure_vm` **refuses to start a VM**: a VM whose orderly stop can never be receipted must not run. There is no `atexit()` stand-in. **S4 must add the pair or the contract must change.**
-
-The contract-name configuration is link-checked against a stub archive that carries all five `_v1` names (`Tests/stubs/krun_contract_stub.c`; every function returns `-ENOSYS`; it is never run), so the rename S4 will make is shown to be the one-file change this header says it is.
+The coordinator is aligning the contract to the library's values. The worker uses only the header's symbolic constants, never a number, so the shifted values cannot swap off and reset; only `KRUN_COWORK_EXIT_OFF` may lead to `guest_halted`. A hook with any other signature is refused at compile time twice (`_Generic` in `CW_ASSERT_EXIT_HOOK_SIGNATURE` and the call itself under `-Werror`); `build.py` compiles one correct and three wrong hooks and requires 1 success and 3 refusals (C has no link-time type, so "refuse to link" is "refuse to compile"). `CW_ABI_FLUSH_EVIDENCE` is on; there is no fallback.
 
 ## 10. Build and static checks
 
 `python3 -I build.py all --out <dir outside the repo> --libkrun-include <S4 include dir> --libkrun-archive <S4 stripped archive>`.
 
 * `/usr/bin/clang -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wundef -Wcast-qual -Werror`, `-ffile-prefix-map` and `-fdebug-prefix-map` for the repository, the output directory and the home directory, `-Wl,-dead_strip`, `strip -x`. Links `-framework Hypervisor -liconv -lSystem -lc -lm` and the archive, nothing else. No network, a cleaned environment for every child, `python3 -I`.
-* **The libkrun inputs are S4's prebuilt, not rebuilt here.** The stripped production archive (`f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38`) and its composed header (`af65994a309fedc9918e6197b27271ee85d3b4eb957ec5a40503b85c10e8e7b5`) came from S4's `out/` (PR #55, commit `2221528b`). S4 records building the archive twice at different absolute paths and getting a bit-identical result; its hash matches that record. `build.py` refuses to build unless both hashes match `pins.json`. The header is a build input and is not vendored (D7, where the patches live, is open).
+* **The libkrun inputs are S4's prebuilt, not rebuilt here.** The stripped production archive `d9d06a17c6f3c5cc48933b7eb540baf23fec75a07159b7b11c4c4891b848c825` (S4 commit `3a8f24d2`, patch queue 0004 to 0023; its raw archive is `3d7739a7...`) was taken from S4's `out/`; S4's committed evidence records that archive hash, built twice at different absolute paths with identical results. S4's evidence records no header hash, so the header hash in `pins.json` (`6b4d0408...`) is DERIVED, not self-attested: `build.py verify-header` applies the `include/libkrun.h` hunks of S4's committed patch queue (each patch file pinned by SHA-256) to the pristine upstream v1.19.6 header, and the result is also byte-identical to the header in S4's build output. `build.py` refuses to build unless both hashes match. The header is a build input and is not vendored (D7 is open).
 * Linking the **stripped** archive matters: the raw one carries the Rust project's own CI Xcode path in its debug stabs.
 * Ad-hoc signed inside the scratch directory, `--options runtime`, identifier `com.winter.cowork.worker`:
 
@@ -154,30 +157,34 @@ $ otool -L winter-cowork-worker.signed
 ```
 
 * Entitlements are exactly `com.apple.security.hypervisor`; no `allow-jit`, no `disable-library-validation`, no debugger entitlement, no `com.apple.vm.networking`. Only platform dylibs. `strings` over 6.7 k strings finds no builder path, no home directory and no user name (the crate paths appear as `/cargo-home/...`, `/libkrun/...`). Binary size about 3.1 MB.
-* The final binary defines **13** libkrun entry points (the 66 upstream exports are otherwise dead-stripped): `krun_init_log`, `krun_create_ctx`, `krun_set_vm_config`, `krun_disable_implicit_vsock`, `krun_set_env`, `krun_disable_implicit_console`, `krun_add_serial_console_default`, `krun_set_kernel`, `krun_start_enter`, `krun_cowork_enable_production_profile`, `krun_cowork_set_workspace_disks`, `krun_cowork_create_runtime_port`, `krun_cowork_validate_production_profile`. `krun_add_vsock*`, `krun_add_virtiofs*`, the GPU, display, input and port-map calls, and `krun_get_shutdown_eventfd` are not in the binary. This is correct by construction and has never been exercised at run time.
+* The final binary defines **15** libkrun entry points, all referenced by the worker: `krun_init_log`, `krun_create_ctx`, `krun_set_vm_config`, `krun_disable_implicit_vsock`, `krun_set_env`, `krun_disable_implicit_console`, `krun_add_serial_console_default`, `krun_set_kernel`, `krun_start_enter`, `krun_cowork_enable_profile_v1`, `krun_cowork_create_runtime_port_v1`, `krun_cowork_set_workspace_disks_v1`, `krun_cowork_validate_profile_v1`, `krun_cowork_get_flush_counters_v1`, `krun_cowork_set_exit_hook_v1`. **Not exported** (so not callable from anything the worker defines): `krun_add_vsock*`, `krun_add_virtiofs*`, the GPU, display, input and port-map calls, `krun_get_shutdown_eventfd`. **Present but unreachable behind S4's gate:** the archive still contains the vsock, virtiofs and GPU code as Rust code and its libSystem imports; the production profile refuses to enable those devices and the worker has no way to ask for them. This replaces the earlier wording "no vsock/virtiofs/GPU in the binary", which was too strong.
+* **Imported by the archive's code, not called by the worker's own source** (`nm -u`, 12): `accept`, `bind`, `connect`, `dlopen`, `dlsym`, `execve`, `fork`, `listen`, `sendto`, `setgid`, `setuid`, `socket`. The worker's own source calls `fork` and `exec` only in the sandbox denial probe (a guard pins that). The sandbox denies network, fork and exec in any case.
 
 ## 11. Tests
 
-Ten strict-C binaries, **12,922 checks**, and 21 Python source guards. In-process socketpairs, temp files and fakes only.
+13 strict-C binaries, **13,618 checks** (the 16-slot builds counted; the AddressSanitizer + UndefinedBehaviorSanitizer rerun executes the same 13,618 again), and 23 Python source guards. In-process socketpairs, temp files and fakes only. `build.py asan` builds every binary, the 16-slot ones included, with `-fsanitize=address,undefined`; all pass.
 
 | Binary | Checks | What it pins |
 | --- | --- | --- |
-| `test_envelope` | 204 | All 34 S1 envelope vectors decoded and re-encoded byte for byte; every field boundary; the SCOPE digest against the vector's SHA-256; the outbound sender. |
-| `test_mux` | 10,981 | All 40 S1 mux vectors (the five relay-blind ones asserted to pass through); the control grammar; ceilings; sequence; the stream reader byte by byte and with a 1 MiB frame. |
+| `test_envelope` | 225 | S1's envelope vectors decoded and re-encoded byte for byte; every field boundary; the SCOPE digest; the outbound sender; fault code 8. |
+| `test_mux` | 10,987 | S1's mux vectors (the six relay-blind ones asserted to pass through); the control grammar including whole-word origins; ceilings; sequence; the stream reader. |
 | `test_stop` | 51 | The OwnedStop machine under a fake clock. |
 | `test_ring` | 21 | Redaction under any chunking, ring bound and accounting, long lines. |
-| `test_intake` | 563 | Sandbox hook ordering, gate, every volume check, lock, descriptor leaks, timeouts. |
-| `test_handoff[256]`, `[16]` | 42, 42 | The fixture harness extended (see below). |
-| `test_relay[256]`, `[16]` | 358, 364 | The pump, control termination, drain, owner loss, quarantine, deadlines, backpressure. The 16 build also sends 20 descriptors on L2 and L3 after intake. |
+| `test_rights` | 89 | The bounded collector on synthetic buffers: wrong level or type, payload not a multiple of an int, over capacity (stored, closed, counted), a header longer than the buffer, degenerate lengths, many headers. |
+| `test_runtime_image` | 103 | S1's image vectors; hashing across chunk boundaries; `O_NOFOLLOW`; a file that shrinks, is touched, grows, or grows with its mtime put back during the read; the size cap (inclusive); the verify step. |
+| `test_intake` | 665 | Sandbox hook ordering, gate, digest check, every volume check, lock, descriptor leaks, stray-descriptor hygiene, timeouts. |
+| `test_handoff[256]`, `[16]` | 58, 58 | The fixture harness extended: named local or peer sockets refused (both directions), the real unnamed pair admitted, and the truncation case. |
+| `test_relay[256]`, `[16]` | 513, 519 | The pump, control termination, drain and `second_drain`, owner loss including a parent already gone, quarantine, deadlines, backpressure, exit reports (`reason == OFF` only, uncertain cases, no hook observed). |
 | `test_sandbox_profile` | 296 | The profile as text; the SPI is poisoned. |
+| `test_abi` | 33 | The translation from the library's exit reason and flush counters to the worker's record, and the halted decision, against the real header with no library. |
 
 **The 16-descriptor measurement.** The handoff harness is built with capacities 256 and 16. With 16, the 20-descriptor datagram is `MSG_CTRUNC`: 16 are visible and closed, the open-descriptor count in the process **still rose from 6 to 8**, i.e. the kernel installed descriptors nobody can see. That is the evidence for the HARD rule (a plain `read` or `recv` installs rights, and truncation cannot be recovered from) and for why the truncation exit is terminal.
 
-**Mutation.** `Tests/` mutants live in a scratch driver (not in the tree): each edit is applied to a throwaway copy of the committed package, the named test is run, and a failing check (not a compile error) is required. 201 source mutants, 3 build-level mutants and 2 controls:
+**Mutation.** Mutants live in a scratch driver (not in the tree): each edit is applied to a throwaway copy of the package, the named test is run, and a failing check is required (a compile error is retried with warnings non-fatal so it cannot count as a kill). The set is the predecessor's 201, the reviewer's 62 (13 of them moved because the code they edited was restructured; their replacements are the `N-` mutants on `Rights.c`, `Relay.c`, `CoworkAbi.h`) and the new guards (rights collector, digest, `second_drain`, parent already gone, uncertain flush, ABI translation, call order, hook signature): 279 source mutants in the final set.
 
-* **189 of 201 killed.** All 22 guard mutants (order of `main`, sandbox-after-read, `alarm`, `argv` layout, `getenv`, fixture symbols, a vsock call, S4 names outside the shim, a plain `recv`, a `fork` outside the probe, a network import in `build.py`, a home path, an extra entitlement, a broken fixture pin, a test calling the sandbox) are killed.
-* **12 survive, each explained.** `E01` (magic), `E07` (length), `X13` (leading zero), `X19` (trailing byte): each is refused twice, by its explicit check and by the final re-encode compare, so removing one alone survives; the paired mutants `E01+E34`, `E03+E34`, `E07+E34`, `X13+X20`, `X15+X20`, `X19+X20` (the check together with the compare) are all killed. `E34` and `X20` (the compares alone) are the second guards. `E09` is shadowed by the token check that follows (`E11` is killed). `E23` is equivalent (the 256 GiB ceiling already refuses everything above 2^53). `E42` is unreachable (a larger descriptor set is `MSG_CTRUNC` first). `X14` is redundant (the object-end check gives the same code). `A37` is an unreachable defence (`open` returns the standard slot being refilled). `R04` is shadowed (a refused parse zeroes the control, which OwnedStop refuses as well).
-* Build-level: an extra entitlement, an extra non-platform dylib and a builder path in the binary each make `build.py inspect` fail; the same path with the prefix map in force is clean, which shows the map is what protects the build.
+* **259 of 279 killed**, including every guard mutant (the order of `main`, port before disks, preflight last, the hook signature, a flush-evidence flag turned off, a pin-counter call, a plain `recv`/`pread` on a socket, `fork` outside the probe, a launcher-gone check removed, the counter `size` removed, and the earlier fixture/alarm/argv/getenv ones) and every one of the reviewer's survivors I19, I23, I24, I25, I25b, I31 and I33 to I35 (their replacements), plus X06, which the reviewer found surviving.
+* **20 survive, each explained.** Double-guarded, with the paired mutant (both guards removed) killed: `E01`, `E07`, `E34`, `X13`, `X19`, `X20` (explicit check plus the re-encode compare) and `N-E37a/b/c`, `N-X25a/b` (the `MSG_CTRUNC` flag and the collector's truncated report overlap on macOS; `N-E37ab` and `N-X25ab` remove both and are killed). Shadowed or equivalent: `E09` (the token check refuses the empty name too), `E23` (the 256 GiB ceiling already refuses it), `X14` (the object-end check gives the same code), `R04` (a refused parse zeroes the control, which OwnedStop refuses), `N-RT08` (`CMSG_NXTHDR` already keeps the next header inside the buffer), `N-R16c` (the stop machine answers the same `second_drain` fault), `N-I34b` (the soft limit exceeds `getdtablesize()` only when raised at run time). Never executed by design: `Q01` and `Q02`, the sandbox probe logic, which needs the sandbox installed and is the content of G0. The earlier note's survivor `E42` is retired: it was reported as "unreachable (a larger descriptor set is `MSG_CTRUNC` first)", which was wrong on macOS (the kernel installs all descriptors and reports the sender's length, which is what the out-of-bounds read was); the capacity overflow is now `N-RT03/04/05`, all killed.
+* Build-level: an extra entitlement, an extra non-platform dylib and a builder path in the binary each make `build.py inspect` fail; the unmutated control and the same path with the prefix map in force pass.
 
 ## 12. Anti-wiring
 
@@ -185,20 +192,28 @@ Ten strict-C binaries, **12,922 checks**, and 21 Python source guards. In-proces
 
 ## 13. REVIEW NEEDED
 
-1. **S4 exports 3 of the contract's 5 symbols.** `get_flush_counters_v1` and `set_exit_hook_v1` have no target, so the worker refuses to start a VM. S4 must add them or the contract must change. (Section 9.)
-2. **Names.** The rename is the one file `CoworkAbi.h`; `build.py` detects which set the archive exports.
-3. **Memory floor.** S1's parser 256 to 1024 MiB; S4's gate 768 to 1024. The worker faults `bad_scope` below 768. One of them should move.
-4. **Not in the contract, chosen narrowly here:** fd 3 is L2 and fd 4 is L3; the guest artifacts live at `<worker directory>/cowork-guest/{kernel,initramfs.cpio}`; the exit codes (70 to 79); the intake timeouts (10 s for SCOPE, 120 s for VOLUMES); `fault internal` for a second DRAIN or a bad post-intake envelope, followed by an owner-loss drain; the worker's stderr is the launcher's own and is used only for fixed diagnostics and the abnormal-exit console tail. S2 must install exactly this, or the contract should name it.
-5. **`runtimeImageDigest` is parsed and shape-checked but not verified.** The contract does not say what it digests, so the worker cannot compare it with the kernel and initramfs it boots, and it does not pretend to. S7 binds the image pins; until then the worker trusts the signed directory next to it.
-6. **Rights policy** is stricter than contract section 5 (section 4 above).
-7. **`flock` under deny-default is unverified.** First G0 item.
-8. **`-Wl,-dead_strip` on a Rust staticlib** is how rustc itself links on macOS, but this binary has never run.
-9. **Console path.** The reclaim hot path now prints into a pipe the reader thread must drain; a stalled reader would stall the VMM. Whether `krun_add_serial_console_default` takes ownership of the descriptor it is given is unverified.
-10. **Quarantine and owner-loss timings** (30 s and 30 s plus 5 s) and the choice that a mux violation ends the stream but not the VM are judgment calls.
-11. **Sleep and wake.** The deadlines use `CLOCK_UPTIME_RAW`.
-12. **The 16-descriptor measurement** above, and the S4 archive being consumed prebuilt rather than rebuilt.
-13. **CI proves nothing about this package.** `ci.yml` runs the TypeScript workspaces; this PR changes none. Every result in this document is local.
-14. **D5** follows the plan; nothing else was decided.
+1. **The `file-write*` premise** (section 8): the profile has no path rule for the disks, and whether `fstat`, `pread` and `pwrite` on the received descriptors work under it is unverified. G0 I/O variant to be added to the gate plan.
+2. **The hook and counter shapes differ from the contract text** (section 9). The worker follows the linked header; the coordinator is aligning the contract. Re-pin when the next contract commit lands.
+3. **Hash-then-load window** (section 4): libkrun reopens the artifacts by path. `/dev/fd/N` proposal for G0.
+4. **Not in the contract, chosen narrowly:** fd 3 is L2 and fd 4 is L3; the guest artifacts live at `<worker directory>/cowork-guest/{kernel,initramfs.cpio}`; the exit codes (70 to 79); the intake timeouts (10 s for SCOPE, 120 s for VOLUMES); `fault internal` for a bad post-intake envelope, followed by an owner-loss drain; stderr is used only for fixed diagnostics and the bounded abnormal-exit tails. S2 must install exactly this, or the contract should name it.
+5. **Rights policy** is stricter than contract section 5 (section 4 lists exactly which cases are silent).
+6. **`flock` under deny-default is unverified.** First G0 item.
+7. **`-Wl,-dead_strip` on a Rust staticlib** is how rustc links on macOS, but this binary has never run.
+8. **Console path.** The reclaim hot path prints into a pipe the reader thread must drain; whether `krun_add_serial_console_default` takes ownership of the descriptor it is given is unverified.
+9. **Quarantine and owner-loss timings** (30 s, and 30 s plus 5 s), the quarantine ack limit and the choice that a mux violation ends the stream but not the VM are judgment calls.
+10. **Sleep and wake.** The deadlines use `CLOCK_UPTIME_RAW`.
+11. **The libkrun archive is S4's prebuilt, not rebuilt here**, and its header hash is derived, not attested by S4.
+12. **CI proves nothing about this package.** `ci.yml` runs the TypeScript workspaces; this PR changes none.
+13. **D5** follows the plan.
+
+### What the contract must still pin (for S1)
+
+* **Hook mapping**: the reason enum and the `uint32_t` hook type, as the library has them (NONE=0, OFF=1, RESET=2, VCPU_ERROR=3, TERMINAL_FAULT=4), and that only OFF may be a Class A candidate.
+* **Digest race**: that `runtimeImageDigest` proves the bytes at hash time only, and who closes the window (`/dev/fd/N` paths or a copy owned by the worker).
+* **Counters are valid only in `guest_halted`/`exiting`**, and what the launcher does when `completed < requested`, when libkrun exits 0 with no hook, and on a crash signal (all uncertain, never Class A).
+* **Bounded launcher stderr**: the worker's diagnostics and abnormal-exit tails are fixed or redacted text of bounded size; the launcher must bound what it keeps.
+* **Call order**: runtime port before disks, exit hook before the mandatory validate, validate last.
+* The descriptor numbers, the guest-artifact path, and the exit codes (item 4 above).
 
 ## 14. Not done
 

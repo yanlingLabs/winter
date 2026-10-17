@@ -5,8 +5,14 @@
  * and takes an advisory flock on both as an EXTRA guard. The lock is not release evidence: nothing in the contract treats a
  * lock, a closed descriptor, an exited process or an EOF as proof that a disk is free.
  *
- * Fail-closed intake kept from the admitted fixture (workspace_fd_handoff.h): a truncated control buffer, or any descriptor
- * the worker did not ask for, ends the process with exit 79, silently, after closing everything it can see.
+ * Fail-closed intake kept from the admitted fixture (workspace_fd_handoff.h). THE RIGHTS POLICY, uniform and complete:
+ *
+ *   silent exit 79 (nothing acknowledged on L2, everything visible closed)    ANY descriptor that is not exactly the two the VOLUMES
+ *       envelope was meant to carry: a truncated control buffer; a descriptor with SCOPE or DRAIN; VOLUMES with one, three or more, OR NONE;
+ *       a datagram this receiver refused (malformed control message, too long) that nevertheless carried a descriptor.
+ *   fault + exit 71/72     everything else that is wrong with a datagram: unreadable, malformed, wrong sequence, wrong kind, a bad value.
+ *
+ * The same rule applies after intake (Relay.c): a descriptor on L2, L3 or L4 is exit 79 / a violation, never an acknowledgement.
  */
 #ifndef WINTER_COWORK_WORKER_ADMITTED_VOLUMES_H
 #define WINTER_COWORK_WORKER_ADMITTED_VOLUMES_H
@@ -21,9 +27,15 @@
  * the descriptor survives exec; the worker restores it before any intake). Returns 0, or -1 with errno EINVAL. */
 int cw_channel_admit(int fd, int socket_type);
 
-/* Close every descriptor >= 3 that is not `keep_a` or `keep_b`, and make sure 0, 1 and 2 are open (any closed one is pointed at
- * /dev/null) so a received descriptor can never land in a standard slot. */
+/* Close every descriptor >= 3 that is not `keep_a` or `keep_b`, up to the process's real descriptor limit (getdtablesize() and
+ * RLIMIT_NOFILE, whichever is larger; no fixed cap), and make sure 0, 1 and 2 are open (any closed one is pointed at /dev/null) so a
+ * received descriptor can never land in a standard slot. */
 void cw_close_stray_fds(int keep_a, int keep_b);
+
+/* The worker's descriptor hygiene as one testable step: close everything else, restore FD_CLOEXEC on the two inherited ends (the
+ * launcher clears it so they survive exec), and admit them as the unnamed L2 datagram socket and the unnamed L3 stream socket.
+ * Returns 0, or -1 when they are not exactly that. */
+int cw_prepare_descriptors(int l2, int l3);
 
 /* ---- one volume ---------------------------------------------------------------------------------------------------------- */
 
@@ -59,8 +71,13 @@ typedef struct {
     uint32_t max_memory_mib;
 } cw_gate; /* the libkrun production gate: 2 vCPU, 768..1024 MiB; narrower than the S1 parser's 256..1024 */
 
+enum { CW_SCOPE_OK = 0, CW_SCOPE_REFUSED = 1, CW_SCOPE_UNAVAILABLE = 2 };
+
 typedef struct {
     int (*install_sandbox)(void *context); /* installs the sandbox and proves its denials; 0 on success */
+    /* Judges an accepted SCOPE against what only the worker can see (the runtime image digest). CW_SCOPE_REFUSED is `bad_scope` / exit 71;
+     * CW_SCOPE_UNAVAILABLE (the artifacts could not be read at all) is `internal` / exit 78. `reason` is fixed text. Never NULL. */
+    int (*check_scope)(void *context, const cw_scope *scope, const char **reason);
     void *context;
     int scope_wait_ms;
     int volumes_wait_ms;

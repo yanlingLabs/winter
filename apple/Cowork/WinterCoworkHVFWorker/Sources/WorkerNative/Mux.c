@@ -1,6 +1,7 @@
 #include "Mux.h"
 
 #include "Envelope.h"
+#include "Rights.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -322,21 +323,14 @@ int cw_mux_reader_pump(cw_mux_reader *reader, int fd) {
         if (errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE) return -CW_E_EOF;
         return -CW_E_IO;
     }
-    /* A descriptor on a mux stream is never asked for. Close every one that is visible; truncation is fatal. */
-    bool rights = false;
-    for (struct cmsghdr *header = CMSG_FIRSTHDR(&message); header != NULL; header = CMSG_NXTHDR(&message, header)) {
-        rights = true;
-        if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS && header->cmsg_len >= CMSG_LEN(0)) {
-            size_t payload = header->cmsg_len - CMSG_LEN(0);
-            for (size_t i = 0; i < payload / sizeof(int); i++) {
-                int fd_received;
-                memcpy(&fd_received, (unsigned char *)CMSG_DATA(header) + i * sizeof fd_received, sizeof fd_received);
-                close(fd_received);
-            }
-        }
-    }
-    if (message.msg_flags & MSG_CTRUNC) return -CW_E_CTRUNC;
-    if (rights) return -CW_E_BAD_RIGHTS;
+    /* A descriptor on a mux stream is never asked for. Truncation is fatal and is judged BEFORE any header is believed; whatever is
+     * visible is closed. The collector is bounded by the control buffer (macOS leaves cmsg_len at the sender's length). */
+    int stray[CW_FD_CAPACITY];
+    cw_rights_result rights;
+    cw_rights_collect(&message, stray, CW_FD_CAPACITY, &rights);
+    for (size_t i = 0; i < rights.count; i++) (void)close(stray[i]);
+    if ((message.msg_flags & MSG_CTRUNC) || rights.truncated) return -CW_E_CTRUNC;
+    if (rights.count > 0 || rights.closed > 0 || rights.malformed) return -CW_E_BAD_RIGHTS;
     if (received == 0) return -CW_E_EOF;
     return cw_mux_reader_commit(reader, (size_t)received);
 }

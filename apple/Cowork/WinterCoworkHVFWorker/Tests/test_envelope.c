@@ -46,7 +46,7 @@ static int mutated64(const char *vector, size_t offset, uint64_t value) {
 #define H CW_ENV_HEADER
 
 static void golden_vectors(void) {
-    CHECK(ENV_VECTOR_COUNT == 34); /* 7 positive + 27 negative in the pinned file */
+    CHECK(ENV_VECTOR_COUNT == 38); /* 8 positive + 30 negative in the pinned file */
     for (size_t i = 0; i < ENV_VECTOR_COUNT; i++) {
         const cw_env_vector *v = &env_vectors[i];
         cw_envelope e;
@@ -64,6 +64,13 @@ static void golden_vectors(void) {
             CHECK_STR(cw_error_name(rc), v->error);
         }
     }
+}
+
+static void second_drain_vector(void) {
+    const cw_env_vector *v = find("fault-second-drain");
+    cw_envelope e;
+    CHECK(v != NULL && cw_env_parse(v->bytes, v->length, 0, CW_ENV_TO_LAUNCHER, &e) == CW_OK);
+    CHECK(e.kind == CW_ENV_FAULT && e.u.fault == CW_FAULT_SECOND_DRAIN && e.u.fault == 8);
 }
 
 static void scope_digest_and_values(void) {
@@ -100,8 +107,12 @@ static void scope_digest_and_values(void) {
 
 static void scope_boundaries(void) {
     const size_t p = H;
+    /* The floor is 768 in the PARSER too (the contract's ruling, equal to the library gate's): 256 to 767 are no longer a valid SCOPE. */
     CHECK(mutated32("scope", p + 364, 255) == CW_E_BAD_FIELD);
-    CHECK(mutated32("scope", p + 364, 256) == CW_OK);
+    CHECK(mutated32("scope", p + 364, 256) == CW_E_BAD_FIELD);
+    CHECK(mutated32("scope", p + 364, 512) == CW_E_BAD_FIELD);
+    CHECK(mutated32("scope", p + 364, 767) == CW_E_BAD_FIELD);
+    CHECK(mutated32("scope", p + 364, 768) == CW_OK);
     CHECK(mutated32("scope", p + 364, 1024) == CW_OK);
     CHECK(mutated32("scope", p + 364, 1025) == CW_E_BAD_FIELD);
     CHECK(mutated32("scope", p + 360, 1) == CW_E_BAD_FIELD);
@@ -173,9 +184,9 @@ static void other_payloads(void) {
     CHECK(mutated64("status-guest-halted-with-flush", p + 8, (1ull << 53) - 1) == CW_OK);
     CHECK(mutated64("status-guest-halted-with-flush", p + 8, 1ull << 53) == CW_E_BAD_FIELD);
     CHECK(mutated64("status-guest-halted-with-flush", p + 32, 1ull << 53) == CW_E_BAD_FIELD);
-    for (uint32_t code = 0; code <= 8; code++) {
+    for (uint32_t code = 0; code <= 9; code++) { /* 8 is second_drain */
         int rc = mutated32("fault-truncated-rights", p + 0, code);
-        CHECK(rc == (code >= 1 && code <= 7 ? CW_OK : CW_E_BAD_FIELD));
+        CHECK(rc == (code >= 1 && code <= 8 ? CW_OK : CW_E_BAD_FIELD));
     }
     CHECK(mutated32("fault-truncated-rights", p + 4, 1) == CW_E_BAD_FIELD);
 }
@@ -246,8 +257,10 @@ static void encoder_refusals(void) {
     e.seq = 1;
     e.u.fault = 0;
     CHECK(cw_env_encode(&e, out, sizeof out) == 0);
-    e.u.fault = 8;
+    e.u.fault = 9;
     CHECK(cw_env_encode(&e, out, sizeof out) == 0);
+    e.u.fault = CW_FAULT_SECOND_DRAIN;
+    CHECK(cw_env_encode(&e, out, sizeof out) == CW_ENV_HEADER + CW_ENV_FAULT_BYTES);
     e.u.fault = CW_FAULT_INTERNAL;
     CHECK(cw_env_encode(&e, out, sizeof out) == CW_ENV_HEADER + CW_ENV_FAULT_BYTES);
 }
@@ -260,18 +273,21 @@ static void outbound_sender(void) {
     uint64_t requested[2] = { 7, 9 }, completed[2] = { 7, 8 };
     CHECK(cw_l2_send_status(&out, CW_STATUS_SANDBOXED, NULL, NULL) == 0);
     CHECK(cw_l2_send_fault(&out, CW_FAULT_MUX_VIOLATION) == 0);
+    CHECK(cw_l2_send_fault(&out, CW_FAULT_SECOND_DRAIN) == 0);
     CHECK(cw_l2_send_status(&out, CW_STATUS_GUEST_HALTED, requested, completed) == 0);
     uint64_t too_big[2] = { 1ull << 53, 0 };
     CHECK(cw_l2_send_status(&out, CW_STATUS_EXITING, too_big, NULL) == -1); /* refused; no datagram, no sequence number spent */
     CHECK(cw_l2_send_status(&out, CW_STATUS_EXITING, NULL, NULL) == 0);
     unsigned expected_seq = 1;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         cw_inbound in;
         CHECK(cw_env_recv(pair[1], &in, 0) == CW_RECV_OK);
         cw_envelope e;
         CHECK(cw_env_parse(in.bytes, in.length, in.fd_count, CW_ENV_TO_LAUNCHER, &e) == CW_OK);
         CHECK(e.seq == expected_seq++); /* one counter, from 1, +1 per datagram */
-        if (i == 2) CHECK(e.u.status.state == CW_STATUS_GUEST_HALTED && e.u.status.requested[1] == 9 && e.u.status.completed[1] == 8);
+        if (i == 1) CHECK(e.u.fault == CW_FAULT_MUX_VIOLATION);
+        if (i == 2) CHECK(e.u.fault == CW_FAULT_SECOND_DRAIN);
+        if (i == 3) CHECK(e.u.status.state == CW_STATUS_GUEST_HALTED && e.u.status.requested[1] == 9 && e.u.status.completed[1] == 8);
     }
     cw_inbound none;
     CHECK(cw_env_recv(pair[1], &none, -1) == CW_RECV_AGAIN);
@@ -283,6 +299,7 @@ static void outbound_sender(void) {
 
 int main(void) {
     golden_vectors();
+    second_drain_vector();
     scope_digest_and_values();
     scope_boundaries();
     volumes_boundaries();

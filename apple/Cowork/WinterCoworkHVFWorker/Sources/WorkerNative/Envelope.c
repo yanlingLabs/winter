@@ -1,5 +1,7 @@
 #include "Envelope.h"
 
+#include "Rights.h"
+
 #include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -194,7 +196,7 @@ static bool encode_status(const cw_status *s, uint8_t *p) {
     return true;
 }
 
-static bool fault_ok(uint32_t code) { return code >= CW_FAULT_BAD_SCOPE && code <= CW_FAULT_INTERNAL; }
+static bool fault_ok(uint32_t code) { return code >= CW_FAULT_BAD_SCOPE && code <= CW_FAULT_SECOND_DRAIN; }
 
 static size_t payload_length(cw_env_kind kind) {
     switch (kind) {
@@ -282,6 +284,7 @@ void cw_inbound_close_fds(cw_inbound *in) {
 int cw_env_recv(int channel, cw_inbound *in, int timeout_ms) {
     in->length = 0;
     in->fd_count = 0;
+    in->refused_fds = 0;
     if (timeout_ms >= 0) {
         struct pollfd wait = { .fd = channel, .events = POLLIN, .revents = 0 };
         int ready = poll(&wait, 1, timeout_ms);
@@ -304,26 +307,24 @@ int cw_env_recv(int channel, cw_inbound *in, int timeout_ms) {
         if (errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE) return CW_RECV_GONE;
         return CW_RECV_REFUSED;
     }
-    bool bad = false;
-    for (struct cmsghdr *header = CMSG_FIRSTHDR(&message); header != NULL; header = CMSG_NXTHDR(&message, header)) {
-        if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS || header->cmsg_len < CMSG_LEN(0)) { bad = true; continue; }
-        size_t payload = header->cmsg_len - CMSG_LEN(0);
-        if (payload % sizeof(int) != 0) bad = true;
-        for (size_t i = 0; i < payload / sizeof(int); i++) {
-            int fd;
-            memcpy(&fd, (unsigned char *)CMSG_DATA(header) + i * sizeof fd, sizeof fd);
-            if (in->fd_count < CW_FD_CAPACITY) in->fds[in->fd_count++] = fd; else { close(fd); bad = true; }
-        }
-    }
-    /* On macOS a truncated control buffer can leave descriptors installed that nobody can see. Close what is visible and let
-     * the caller exit: nothing may be acknowledged, and process exit is descriptor cleanup, never a release. */
-    if (message.msg_flags & MSG_CTRUNC) { cw_inbound_close_fds(in); return CW_RECV_CTRUNC; }
+    /* The headers are walked only through the bounded collector: macOS leaves cmsg_len at the sender's length when the buffer was too small. */
+    cw_rights_result rights;
+    cw_rights_collect(&message, in->fds, CW_FD_CAPACITY, &rights);
+    in->fd_count = rights.count;
+    /* On macOS a truncated control buffer has installed descriptors that nobody can see. Close what is visible and let the caller exit:
+     * nothing may be acknowledged, and process exit is descriptor cleanup, never a release. */
+    if ((message.msg_flags & MSG_CTRUNC) || rights.truncated) { cw_inbound_close_fds(in); return CW_RECV_CTRUNC; }
+    bool bad = rights.malformed;
     if (message.msg_flags & MSG_TRUNC) bad = true;
     for (size_t i = 0; i < in->fd_count; i++) {
         int flags = fcntl(in->fds[i], F_GETFD);
         if (in->fds[i] < 3 || flags < 0 || fcntl(in->fds[i], F_SETFD, flags | FD_CLOEXEC) < 0) bad = true;
     }
-    if (bad) { cw_inbound_close_fds(in); return CW_RECV_REFUSED; }
+    if (bad) {
+        in->refused_fds = in->fd_count + rights.closed;
+        cw_inbound_close_fds(in);
+        return CW_RECV_REFUSED;
+    }
     in->length = (size_t)received;
     return CW_RECV_OK;
 }
