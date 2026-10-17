@@ -175,5 +175,51 @@ failed pseudo-filesystem mount; the unchecked `halting` flush. Documented rather
   and `e2fsck` (the CI job); on a Mac it is skipped, not passed.
 * `tests/test_native.py`, `test_relay.py`, `test_init_modules.py`, `test_hygiene.py`, `test_boot.c`: every vector through the C codec at every chunk size, the relay as a real process against a socketpair standing in for the port, discovery against fake sysfs trees,
   the superblock, skeleton and config modules, and the whole boot/drain state machine against a recording fake (order of calls, flags and options, every guard). Built with the address and undefined-behaviour sanitizers.
+* The Linux CI job runs all of it without a skip (including the real-e2fsprogs oracle and the relay test that needs Linux sockets) and passes; the first Linux runs found three problems that macOS cannot show (the glibc `makedev` header, the 128 KiB single-argument limit, LeakSanitizer being on by default), all fixed in the tests.
 * Not exercisable offline, and therefore **not verified**: `init_linux.c` itself (it compiles for aarch64-musl with `-Wall -Wextra -Werror` and is reviewed, never run), `mount(2)`/`umount2`/`reboot`/`signalfd`, virtio-console semantics, sysfs attribute availability,
   devtmpfs timing, the replay mount, the SDK supervisor accepting the config, and the kernel. One relay test (`a_halting_the_host_could_not_take...`) needs Linux socket semantics and is skipped on macOS.
+
+## 9. Mutation checks
+
+Every guard in the new code was removed or inverted one at a time in a scratch copy (`382` mutations), and the owning suite was run against each. A mutation counts as killed only when that suite fails; a guard whose removal
+made the suite hang (three did, in the scan and channel code) was given a watchdog so that it fails instead.
+
+| Area | Mutations | Killed | Equivalent | Survived |
+|---|---:|---:|---:|---:|
+| `bootstrap/guest_bootstrap.py` | 134 | 128 | 6 | 0 |
+| `common/wmx.c` (frame and control parser) | 27 | 25 | 2 | 0 |
+| `common/ctl.c` (internal link) | 5 | 5 | 0 | 0 |
+| `relay/relay.c` | 30 | 27 | 1 | 2 |
+| `init/boot.c` (boot and drain state machine) | 52 | 52 | 0 | 0 |
+| `init/mounts.c`, `ext4sb.c`, `discover.c`, `skeleton.c`, `trusted_config.c` | 96 | 92 | 4 | 0 |
+| `init/init_linux.c` (source hygiene pins) | 2 | 2 | 0 | 0 |
+| `image.py`, `verify.py`, kernel pins | 36 | 36 | 0 | 0 |
+| **Total** | **382** | **367** | **13** | **2** |
+
+Nine of the killed mutations were killed by a different test than the one the harness predicted; they are still failures of the suite.
+
+The mutation round found real gaps, all closed with tests: a directory (also 0555) accepted as `/init` when its bytes hashed to the pinned digest; the per-member digest of `verify.py` was untested because the only tampered
+member was the init, which the startup rule also pins; the trusted-config buffer check was never exercised with a buffer that is too small; and the three guards above that hung the suite.
+
+The 13 **equivalent** mutations (the changed program behaves identically on every input the code can receive, so no test can tell them apart):
+
+* `wmx-ctl-ascii`, `wmx-ctl-float`: first-pass rejections in the control parser (control bytes, `.` `e` `E` `+`) that the strict grammar behind them refuses anyway.
+* `relay-ack-needs-drain`: the nonce comparison already fails when no drain is in progress, because the stored drain nonce is empty.
+* `skel-verify`: the `fstat` re-read after `fchown`+`fchmod` can only differ on a filesystem that silently ignores mode bits; a test double would have to make `fchmod` lie.
+* `cfg-size-max`: the 60,000-byte ceiling is unreachable (the base is capped at 8 KiB and the conversation set at 48 KiB); the capacity check beside it is covered by a test.
+* `cfg-create-mode`: the file is created `0400` and then `fchmod`ed to `0400`; the mode at creation only closes a window that no test can observe.
+* `disc-third`: a third virtio disk is refused anyway by the serial rules (a duplicate or an unknown serial).
+* `py-msg-duplicates`, `py-msg-canonical`, `py-msg-utf8`: the first-pass JSON checks are repeated by the canonical re-encoding comparison and the ASCII check that follow.
+* `py-plan-size`: every free field of a valid plan is an id of at most 128 characters, so no valid plan reaches 16 KiB (a real one is 1.7 KiB).
+* `py-probe-features`, `py-probe-dupes`: implied by the later comparisons of the live feature list with the plan and with the superblock.
+
+The 2 **survivors** are `relay-halting-flush-check` and `relay-halting-flush-flag`. The only test that distinguishes them (a host that cannot take the final `halting` frame) needs Linux socket semantics (`shutdown(SHUT_RD)`
+makes the peer's writes fail only there) and is skipped on macOS. It runs and passes in the Linux CI job; the two mutations themselves were not run on Linux, so that claim rests on reading the test, not on a kill.
+
+## 10. The SDK half (Part 2) and `previousBootTermination`
+
+Part 2 is a separate pull request on the agent SDK and starts only after the controller confirms that agent-sdk #28 is in SDK main (it is as of `093fb3ea`). It gives `linux-supervisor.py` an optional
+`--runtime-ports-fds IN,OUT,ERR` beside `--trusted-config-fd`, builds the `RuntimeDuplexPorts` for the one host-query conversation from those three descriptors, and keeps every existing admission check.
+
+`previousBootTermination` stays **null** and PID 1 does not provide it. A cold resume is out of scope (decision D10), and only the host can establish how the previous boot ended. A marker on the guest's own disk would be
+written by the party being judged, so it is forgeable by the guest. The one fact the guest can observe, a set `needs_recovery` flag in the superblock, is evidence against an orderly stop and says nothing in favour of one.

@@ -8,7 +8,9 @@ import copy
 import hashlib
 import json
 import os
+import contextlib
 import shutil
+import signal
 import stat
 import struct
 import sys
@@ -22,6 +24,20 @@ import guest_bootstrap as gb
 HERE = Path(__file__).resolve().parent
 VECTORS = HERE.parent / "vectors"
 REPO = HERE.parents[3]
+
+
+@contextlib.contextmanager
+def deadline(seconds):
+    """A guard that is removed must fail the test, not hang the suite: the code under test loops or blocks forever without it."""
+    def expired(_signal, _frame):
+        raise AssertionError(f"still running after {seconds} s: the guard under test did not stop the loop")
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def load_vectors():
@@ -575,7 +591,7 @@ class VirginScanTests(TempDirTest):
         path, disk = self.image("v.img", 4 * MIB + 4096)
         gb.all_zero(disk.fd, 4 * MIB + 4096, 10**12)
         os.pwrite(disk.fd, b"\x01", 4 * MIB + 4095)
-        with self.assertRaises(gb.Refused) as caught:
+        with deadline(30), self.assertRaises(gb.Refused) as caught:
             gb.all_zero(disk.fd, 4 * MIB + 4096, 10**12)
         self.assertEqual(caught.exception.reason, "not_virgin")
 
@@ -588,7 +604,7 @@ class VirginScanTests(TempDirTest):
 
     def test_a_short_read_is_not_a_clean_scan(self):
         _, disk = self.image("v.img", 4 * MIB)
-        with self.assertRaises(gb.Refused) as caught:
+        with deadline(30), self.assertRaises(gb.Refused) as caught:
             gb.all_zero(disk.fd, 8 * MIB, 10**12)  # the file is shorter than the claimed capacity
         self.assertEqual(caught.exception.reason, "not_virgin")
 
@@ -1345,7 +1361,7 @@ class ChannelTests(unittest.TestCase):
         read_fd, write_fd = os.pipe()
         try:
             os.write(write_fd, b"B\x00\x00\x00" + struct.pack("<I", gb.CTL_MAX_PAYLOAD + 1))
-            with self.assertRaises(gb.Refused):
+            with deadline(30), self.assertRaises(gb.Refused):  # the write end stays open: a missing ceiling would wait for the bytes
                 gb.PipeChannel(read_fd, -1).receive()
         finally:
             os.close(read_fd)
