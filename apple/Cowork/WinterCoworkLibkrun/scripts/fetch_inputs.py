@@ -80,10 +80,15 @@ def fetch_crates(source):
 
 
 def main():
-    argparse.ArgumentParser(description=__doc__.split('\n')[0]).parse_args()
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser.add_argument('--source-only', action='store_true', help='fetch and verify only the pinned libkrun source (any host; no toolchain, no crates)')
+    args = parser.parse_args()
+    OUT.mkdir(exist_ok=True)
+    if args.source_only:
+        fetch_libkrun()
+        return
     if os.uname().sysname != 'Darwin' or os.uname().machine != 'arm64':
         raise RuntimeError('Apple Silicon macOS required')
-    OUT.mkdir(exist_ok=True)
     source = fetch_libkrun()
     fetch_toolchain()
     print(fetch_crates(source))

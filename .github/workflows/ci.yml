@@ -370,3 +370,61 @@ jobs:
 
       - name: verify:runtimes
         run: bun run verify:runtimes
+
+  # The libkrun production-profile patch queue (apple/Cowork/WinterCoworkLibkrun): fetch the pinned upstream source archive
+  # (SHA-256 checked BEFORE it is extracted; the tree is data, nothing from inside it is run), compose the queue offline and
+  # assert the pinned composed hash, then run the pure-Python guard tests including the composition test. No cargo, no
+  # toolchain download, no archive build: that stays a local hash-pinned step (D7).
+  # This workflow has no `paths` filters, so the scope check is the first step: the job always runs and reports a status
+  # (success when the change is out of scope), so it can become a required check without ever being "skipped".
+  libkrun-queue:
+    name: libkrun patch queue
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Is this change in scope?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          run=true
+          case "$EVENT" in
+            pull_request) from="$BASE" ;;
+            push) from="$BEFORE" ;;
+            *) from="" ;;
+          esac
+          if [ -n "$from" ] && [ "$from" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$from^{commit}" 2>/dev/null; then
+            if git diff --name-only "$from" HEAD | grep -Eq '^(apple/Cowork/WinterCoworkLibkrun/|\.github/workflows/ci\.yml$)'; then run=true; else run=false; fi
+          fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          echo "libkrun queue checks in scope: ${run}"
+
+      - name: Fetch the pinned upstream source (SHA-256 verified before extraction)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: apple/Cowork/WinterCoworkLibkrun
+        run: python3 -I -B scripts/fetch_inputs.py --source-only
+
+      - name: Compose the queue offline and assert the composed hash
+        if: steps.scope.outputs.run == 'true'
+        working-directory: apple/Cowork/WinterCoworkLibkrun
+        run: |
+          python3 -I -B scripts/prepare_queue.py > "$RUNNER_TEMP/prepare.json"
+          python3 -I -B -c "
+          import json
+          d = json.load(open('$RUNNER_TEMP/prepare.json'))
+          assert d['fullSourceDiffSha256'] == '3826aa68ee08b23ed046f8ec5a8df7f6271969747364dd63b0bd12f27013ec01', d
+          print('composed hash ok', d['fullSourceDiffSha256'])"
+
+      - name: Guard tests (including the composition test)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: apple/Cowork/WinterCoworkLibkrun
+        run: python3 -I -B tests/test_queue_guards.py
