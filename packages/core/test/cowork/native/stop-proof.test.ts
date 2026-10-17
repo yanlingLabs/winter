@@ -58,7 +58,7 @@ describe("a Class A receipt becomes a release proof only if every binding holds"
       ["controller", { controllerInstanceId: "ctl-boot-one-00000000" }, "wrong_binding"], ["worker", { workerInstanceId: "wrk-x" }, "wrong_binding"], ["digest", { runtimeImageDigest: "e".repeat(64) }, "wrong_binding"],
       ["home", { homeId: "home-x" }, "wrong_binding"], ["boot", { hostBootId: "boot-two" }, "wrong_binding"], ["admission", { admissionId: "adm-x" }, "wrong_binding"],
       ["nonce", { stopNonce: "ee".repeat(16) }, "nonce_mismatch"], ["origin", { origin: "owner-loss-drain" }, "nonce_mismatch"],
-      ["acked-without-power-off", { guest: { drain: "acked", powerOff: "not-booted" } }, "not_orderly"], ["flush gap", { volumes: [{ ...c.receipt.volumes[0], flushCompleted: 1 }, c.receipt.volumes[1]] } as never, "not_orderly"],
+      ["acked-without-power-off", { guest: { drain: "acked", halting: "observed", powerOff: "not-booted" } }, "not_orderly"], ["flush gap", { volumes: [{ ...c.receipt.volumes[0], flushCompleted: 1 }, c.receipt.volumes[1]] } as never, "not_orderly"],
     ];
     for (const [name, over, expected] of cases) expect(`${name}:${code(() => mint(c, over))}`).toBe(`${name}:${expected}`);
     const file = (i: number, over: object) => ({ volumes: [i === 0 ? { ...c.receipt.volumes[0], ...over } : c.receipt.volumes[0], i === 1 ? { ...c.receipt.volumes[1], ...over } : c.receipt.volumes[1]] }) as never;
@@ -189,8 +189,8 @@ describe("the mint trusts nothing it did not just validate", () => {
   });
   test("a live receipt may not know less than the daemon saw", async () => {
     const c = await running(), none = { volumesAccepted: false, vmRunning: false, guestHello: false };
-    const neverAttached = c.h.launcher.last.stagedOrderly(NONCE, { guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: [0, 1].map(i => ({ purpose: i ? "environment" : "data", device: "0", inode: "0", capacityBytes: 0, attached: false, flushRequested: 0, flushCompleted: 0, finalFlush: "not-attached" })) as never });
-    const attachedNeverBooted = c.h.launcher.last.stagedOrderly(NONCE, { guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: c.receipt.volumes.map(v => ({ ...v, flushRequested: 0, flushCompleted: 0 })) as never });
+    const neverAttached = c.h.launcher.last.stagedOrderly(NONCE, { guest: { drain: "not-booted", halting: "not-booted", powerOff: "not-booted" }, volumes: [0, 1].map(i => ({ purpose: i ? "environment" : "data", device: "0", inode: "0", capacityBytes: 0, attached: false, flushRequested: 0, flushCompleted: 0, finalFlush: "not-attached" })) as never });
+    const attachedNeverBooted = c.h.launcher.last.stagedOrderly(NONCE, { guest: { drain: "not-booted", halting: "not-booted", powerOff: "not-booted" }, volumes: c.receipt.volumes.map(v => ({ ...v, flushRequested: 0, flushCompleted: 0 })) as never });
     const volumesFree = c.volumes.map(v => ({ ...v, owner: null }));
     const attempt = (receipt: CoworkNativeOrderlyReceipt, observed: typeof none, volumesReleased: boolean) => code(() => mint(c, receipt, { source: liveSource(c, observed), ...(volumesReleased ? { volumes: volumesFree, volumesReleased: true } : {}) }));
     // nothing observed: both honest "nothing happened" receipts are fine

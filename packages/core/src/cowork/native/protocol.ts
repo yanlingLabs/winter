@@ -57,7 +57,20 @@ export const COWORK_NATIVE_LIMITS = Object.freeze({
   /** Documented graceful budget (execution contracts, "Daemon lifetime"); an explicit stop may ask for less, never more than the ceiling. */
   drainBudgetMs: 30_000, drainBudgetCeilingMs: 120_000,
   volumeRights: 2,
+  /** The layered stop timeline (section 5.4), every figure measured from the moment the worker receives the DRAIN envelope:
+   * G = DRAIN.budgetMs, the GUEST's budget; X = the libkrun exit sequence after the power-off, bounded by its own watchdog; the launcher kills at
+   * G + X + margin; the host waits a further margin. A figure may never be smaller than the one before it. */
+  libkrunExitWatchdogMs: 20_000, launcherKillMarginMs: 5_000, hostStopMarginMs: 10_000,
+  /** The `conversations` message: its whole JSON text, at most this many conversations and roots, and one conversation's provider metadata. */
+  conversationsBytes: 20_480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096,
+  /** A runtime payload starts with this many bytes of stream header (section 6.2); the rest is stream data. */
+  runtimePrefixBytes: 4, runtimeConversations: 16,
 });
+/** Launcher kill deadline for a drain with this budget: the guest may spend all of `budgetMs`, the VMM exit path needs up to
+ * `libkrunExitWatchdogMs` after that, and the launcher must not kill before that watchdog can have fired. */
+export const coworkNativeLauncherKillMs = (budgetMs: number): number => budgetMs + COWORK_NATIVE_LIMITS.libkrunExitWatchdogMs + COWORK_NATIVE_LIMITS.launcherKillMarginMs;
+/** How long the daemon waits for the verdict of a stop: after the launcher's own kill deadline, never before it. */
+export const coworkNativeHostStopWaitMs = (budgetMs: number): number => coworkNativeLauncherKillMs(budgetMs) + COWORK_NATIVE_LIMITS.hostStopMarginMs;
 
 // ------------------------------------------------------------------------------------------------ shared validators
 
@@ -152,9 +165,11 @@ const sortedObject: Validator<Record<string, unknown>> = value => isPlain(value)
 
 export const COWORK_NATIVE_REFUSAL_CODES = Object.freeze(["bad_request", "busy", "not_begun", "worker_spawn_failed", "code_identity_mismatch", "sandbox_failed", "volumes_rejected", "internal"] as const);
 export const COWORK_NATIVE_CHANNEL_FAULTS = Object.freeze(["parent_unverified", "protocol_violation", "worker_channel_lost", "internal"] as const);
-export const COWORK_NATIVE_WORKER_STATES = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "exited"] as const);
+export const COWORK_NATIVE_WORKER_STATES = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "exited", "halting", "guest_fault"] as const);
 export const COWORK_NATIVE_STOP_REASONS = Object.freeze(["user", "shutdown", "restart", "update", "failed-start"] as const);
-export const COWORK_NATIVE_BOOTSTRAP_FAULTS = Object.freeze(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal"] as const);
+export const COWORK_NATIVE_BOOTSTRAP_FAULTS = Object.freeze(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations"] as const);
+/** Control-up `fault` codes (guest to worker): the guest says it is failing. The worker reflects it as the L2 status `guest_fault`; after one, no Class A can exist. */
+export const COWORK_NATIVE_GUEST_FAULTS = Object.freeze(["unmount_failed", "supervisor_lost", "protocol_violation", "internal"] as const);
 /** Class B reasons. None of them can ever release anything. */
 export const COWORK_NATIVE_UNCERTAIN_REASONS = Object.freeze(["daemon-lost", "drain-timeout", "worker-killed", "worker-crashed", "guest-fault", "flush-uncertain", "channel-eof", "launcher-fault"] as const);
 export const COWORK_NATIVE_STOP_ORIGINS = Object.freeze(["host-stop", "owner-loss-drain"] as const);
@@ -199,7 +214,7 @@ export interface CoworkNativeOrderlyReceipt {
   readonly v: 1; readonly class: "A"; readonly confirmationId: string; readonly stopNonce: string; readonly origin: typeof COWORK_NATIVE_STOP_ORIGINS[number];
   readonly launcherInstanceId: string; readonly admissionId: string; readonly homeId: string; readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number;
   readonly controllerInstanceId: string; readonly workerInstanceId: string; readonly runtimeImageDigest: string; readonly hostBootId: string;
-  readonly guest: Readonly<{ drain: "acked" | "not-booted"; powerOff: "observed" | "not-booted" }>;
+  readonly guest: Readonly<{ drain: "acked" | "not-booted"; halting: "observed" | "not-booted"; powerOff: "observed" | "not-booted" }>;
   readonly worker: Readonly<{ pid: number; startToken: string; exit: "code"; status: 0; reaped: true }>;
   readonly volumes: readonly [OrderlyVolume, OrderlyVolume];
   readonly issuedAtMs: number;
@@ -215,7 +230,7 @@ const orderlyVolumeSpec = (purpose: CoworkNativeVolumePurpose): Spec => [["purpo
 const ORDERLY_SPEC: Spec = [["v", literal(1)], ["class", literal("A")], ["confirmationId", token], ["stopNonce", nonce], ["origin", oneOf(COWORK_NATIVE_STOP_ORIGINS)], ["launcherInstanceId", label],
   ["admissionId", token], ["homeId", token], ["workspaceId", token], ["incarnationId", token], ["leaseEpoch", epochOf], ["controllerInstanceId", token], ["workerInstanceId", token],
   ["runtimeImageDigest", digest], ["hostBootId", label],
-  ["guest", recordOf([["drain", oneOf(["acked", "not-booted"] as const)], ["powerOff", oneOf(["observed", "not-booted"] as const)]])],
+  ["guest", recordOf([["drain", oneOf(["acked", "not-booted"] as const)], ["halting", oneOf(["observed", "not-booted"] as const)], ["powerOff", oneOf(["observed", "not-booted"] as const)]])],
   ["worker", recordOf([["pid", uint(1, 0x7fff_ffff)], ["startToken", label], ["exit", literal("code")], ["status", literal(0)], ["reaped", literal(true)]])],
   ["volumes", value => {
     if (!Array.isArray(value) || value.length !== 2) return fail();
@@ -246,7 +261,8 @@ export function classAInvariantsHold(receipt: CoworkNativeOrderlyReceipt): boole
   // The worker exited by itself with status 0 and the launcher reaped it: the only exit a Class A may describe.
   if (receipt.worker?.exit !== "code" || receipt.worker.status !== 0 || receipt.worker.reaped !== true) return false;
   const booted = receipt.guest.drain === "acked";
-  if (booted !== (receipt.guest.powerOff === "observed")) return false;
+  // drain_ack, `halting` and the power-off stand or fall together: a power-off with no `halting` is a guest that could not prove its filesystems unmounted clean.
+  if (booted !== (receipt.guest.halting === "observed") || booted !== (receipt.guest.powerOff === "observed")) return false;
   const [data, environment] = receipt.volumes;
   if (data.attached !== environment.attached) return false;
   return receipt.volumes.every(v => v.attached
@@ -281,18 +297,176 @@ export type CoworkNativeControlMessage =
   | { readonly t: "ping"; readonly n: number }
   | { readonly t: "drain_ack"; readonly stopNonce: string }
   | { readonly t: "halting"; readonly stopNonce: string }
-  | { readonly t: "pong"; readonly n: number };
+  | { readonly t: "pong"; readonly n: number }
+  | { readonly t: "fault"; readonly code: typeof COWORK_NATIVE_GUEST_FAULTS[number]; readonly stopNonce: string | null };
 export type CoworkNativeBootstrapMessage =
   | { readonly t: "hello"; readonly guestBootId: string; readonly dataSerial: typeof COWORK_NATIVE_DATA_SERIAL; readonly environmentSerial: typeof COWORK_NATIVE_ENVIRONMENT_SERIAL }
   | { readonly t: "plan"; readonly operationId: string; readonly nonce: string; readonly plan: Record<string, unknown> }
   | { readonly t: "receipt"; readonly operationId: string; readonly nonce: string; readonly receipt: Record<string, unknown> }
   | { readonly t: "fault"; readonly operationId: string; readonly nonce: string; readonly code: typeof COWORK_NATIVE_BOOTSTRAP_FAULTS[number] }
   | { readonly t: "ready"; readonly operationId: string; readonly nonce: string }
-  | { readonly t: "mounted"; readonly operationId: string; readonly nonce: string };
+  | { readonly t: "mounted"; readonly operationId: string; readonly nonce: string }
+  | { readonly t: "conversations"; readonly operationId: string; readonly nonce: string; readonly incarnationId: string; readonly profile: CoworkNativeRuntimeProfile | null; readonly conversations: readonly CoworkNativeConversation[] }
+  | { readonly t: "runtime_ready"; readonly operationId: string; readonly nonce: string; readonly conversations: number };
+/** The three byte streams of one conversation's `RuntimeDuplexPorts`: `in` = IN (host to guest), `out` = OUT and `err` = ERR (guest to host). */
+export const COWORK_NATIVE_RUNTIME_STREAMS = Object.freeze(["in", "out", "err"] as const);
+export type CoworkNativeRuntimeStream = typeof COWORK_NATIVE_RUNTIME_STREAMS[number];
 export type CoworkNativeMuxFrame =
   | { readonly class: "control"; readonly seq: number; readonly message: CoworkNativeControlMessage }
   | { readonly class: "bootstrap"; readonly seq: number; readonly message: CoworkNativeBootstrapMessage }
-  | { readonly class: "runtime"; readonly seq: number; readonly payload: Uint8Array };
+  /** `conversation` indexes the delivered `conversations` list; `payload` is the stream data only (the 4 byte prefix is not part of it). */
+  | { readonly class: "runtime"; readonly seq: number; readonly conversation: number; readonly stream: CoworkNativeRuntimeStream; readonly end: boolean; readonly payload: Uint8Array };
+
+// ------------------------------------------------------------------------------------------------ conversation set (bootstrap, host to guest)
+
+/**
+ * The conversation set the guest's tool supervisor is started with. Source of every per-conversation field and rule: the agent SDK's
+ * `packages/runtime/src/guest/linux-supervisor.py` at main 093fb3ea (`ToolService.__init__` and `_configure_runtime`). The wire carries what the HOST
+ * decides or knows: authority, uids and gid (the supervisor only demands that they are distinct and in 1000 to 65535), policy, roots, and the
+ * runtime's public provider metadata. PID 1 adds what only the guest knows and splices the result into its trusted config: `guestBootId`, the
+ * artifact pins, the control and environment directories, and per conversation `storeDirectory` = `/workspace/.winter/conversations/<logicalSessionId>`
+ * and `runhomeDirectory` = `/run/winter/conversations/<logicalSessionId>` (created root-side, owned by `runtimeUid`, mode 0700). Nothing secret is
+ * carried: no key of the provider metadata may name a credential, a URL or a header (the supervisor refuses it too).
+ *
+ * Sent at most once per incarnation, after `mounted`, bound to the plan's operationId and nonce and to the incarnation. A guest answers with
+ * `runtime_ready` (the supervisor reached ready, runtime frames are delivered now) or a bootstrap `fault`. A second set is refused with the fault
+ * `second_conversations` and changes nothing.
+ */
+export const COWORK_NATIVE_POLICIES = Object.freeze(["auto", "plan", "ask", "accept-edits", "dont-ask", "bypass"] as const);
+export const COWORK_NATIVE_RUNTIME_PROFILES = Object.freeze(["host-query-v1", "host-query-guided-v1"] as const);
+export const COWORK_NATIVE_TOOL_CLASSES = Object.freeze(["read", "write", "execute"] as const);
+export type CoworkNativeRuntimeProfile = typeof COWORK_NATIVE_RUNTIME_PROFILES[number];
+export interface CoworkNativeConversationAuthority {
+  readonly workspaceId: string; readonly sessionId: string; readonly incarnationId: string; readonly leaseEpoch: number;
+  readonly configRevision: number; readonly grantRevision: number; readonly policyRevision: number;
+}
+export interface CoworkNativeConversationRoot { readonly id: string; readonly guestPath: string; readonly source: string; readonly readOnly: boolean }
+export interface CoworkNativeConversationRuntime {
+  readonly model: string; readonly timeoutMs: number; readonly toolClasses: readonly typeof COWORK_NATIVE_TOOL_CLASSES[number][];
+  /** Public provider metadata only, `{scope, selection}`, recursively sorted keys. */
+  readonly provider: Readonly<Record<string, unknown>>;
+  /** Present exactly when the profile is `host-query-guided-v1`: the SDK's `requiredRuntimeContext.bindingId` and the backend generation. */
+  readonly guided: Readonly<{ bindingId: string; generation: number }> | null;
+}
+export interface CoworkNativeConversation {
+  readonly logicalSessionId: string; readonly authority: CoworkNativeConversationAuthority;
+  readonly runtimeUid: number; readonly toolUid: number; readonly workspaceGid: number;
+  readonly policy: typeof COWORK_NATIVE_POLICIES[number]; readonly roots: readonly CoworkNativeConversationRoot[];
+  readonly runtime: CoworkNativeConversationRuntime | null;
+}
+
+const SDK_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const ASCII_TEXT = /^[\x20-\x7e]*$/;
+const sdkId: Validator<string> = value => typeof value === "string" && SDK_ID.test(value) ? value : fail();
+const unixId: Validator<number> = uint(1000, 65535);
+/** A canonical absolute guest path: no `.`, `..` or empty component, printable ASCII, at most 1024 bytes. */
+const guestPath: Validator<string> = value => {
+  if (typeof value !== "string" || value.length > 1024 || !ASCII_TEXT.test(value) || !value.startsWith("/")) return fail();
+  return value.slice(1).split("/").some(part => part === "" || part === "." || part === "..") ? fail() : value;
+};
+const workspacePath: Validator<string> = value => { const path = guestPath(value) as string; return path.startsWith("/workspace/") ? path : fail(); };
+const AUTHORITY_SPEC: Spec = [["workspaceId", sdkId], ["sessionId", sdkId], ["incarnationId", sdkId], ["leaseEpoch", epochOf], ["configRevision", uint()], ["grantRevision", uint()], ["policyRevision", uint()]];
+const ROOT_SPEC: Spec = [["id", sdkId], ["guestPath", workspacePath], ["source", workspacePath], ["readOnly", bool]];
+/** The supervisor's allowed views: folders and repos (at least one component below), the memory root, and this conversation's scratch and outputs. */
+function allowedView(path: string, sessionId: string): boolean {
+  const parts = path.slice(1).split("/");
+  if (parts[0] !== "workspace") return false;
+  return (parts.length >= 3 && (parts[1] === "folders" || parts[1] === "repos"))
+    || (parts.length === 3 && parts[1] === ".winter" && parts[2] === "memory")
+    || (parts.length === 4 && parts[1] === ".winter" && parts[2] === "scratch" && parts[3] === sessionId)
+    || (parts.length === 3 && parts[1] === "outputs" && parts[2] === sessionId);
+}
+const rootsOf: Validator<readonly CoworkNativeConversationRoot[]> = value => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > COWORK_NATIVE_LIMITS.rootsPerConversation) return fail();
+  const roots = value.map(root => record(root, ROOT_SPEC) as unknown as CoworkNativeConversationRoot);
+  const views = roots.map(root => root.guestPath);
+  // The supervisor refuses repeated ids and views, and a view nested inside another.
+  if (new Set(roots.map(root => root.id)).size !== roots.length || new Set(views).size !== views.length) return fail();
+  if (views.some(a => views.some(b => a !== b && b.startsWith(`${a}/`)))) return fail();
+  return Object.freeze(roots.map(root => Object.freeze(root)));
+};
+const PRIVATE_WORDS = ["authref", "url", "header", "secret", "token", "credential"];
+/** The supervisor's `public_metadata`: strings, integers, booleans and null, nested in lists and objects, and no key that names a credential. */
+function publicMetadata(node: unknown, depth: number): void {
+  if (depth > 6) return fail();
+  if (node === null || typeof node === "string" || typeof node === "boolean") return;
+  if (typeof node === "number") { if (!Number.isSafeInteger(node)) return fail(); return; }
+  if (Array.isArray(node)) { for (const child of node) publicMetadata(child, depth + 1); return; }
+  if (!isPlain(node)) return fail();
+  for (const [key, child] of Object.entries(node)) {
+    if (PRIVATE_WORDS.some(word => key.toLowerCase().includes(word))) return fail();
+    publicMetadata(child, depth + 1);
+  }
+}
+const SCOPE_KEYS = ["accountRevision", "backendSessionId", "bootId", "grantRevision", "homeId", "incarnationId", "leaseEpoch", "modelRevision", "sessionId", "taskId", "workspaceId"];
+const SELECTION_REQUIRED = ["capabilities", "family", "modelKey", "protocol", "providerId", "providerModelId"];
+const SELECTION_ALLOWED = [...SELECTION_REQUIRED, "continuationDomain"].sort();
+const providerOf: Validator<Record<string, unknown>> = value => {
+  const provider = sortedObject(value);
+  if (Buffer.byteLength(JSON.stringify(provider), "utf8") > COWORK_NATIVE_LIMITS.providerBytes) return fail("oversize");
+  publicMetadata(provider, 0);
+  if (Object.keys(provider).join() !== "scope,selection" || !isPlain(provider.scope) || !isPlain(provider.selection)) return fail();
+  const scope = provider.scope, selection = provider.selection;
+  if (Object.keys(scope).join() !== SCOPE_KEYS.join()) return fail();
+  for (const key of ["backendSessionId", "homeId", "incarnationId", "sessionId", "taskId", "workspaceId"]) sdkId(scope[key]);
+  for (const key of ["accountRevision", "grantRevision", "leaseEpoch", "modelRevision"]) uint()(scope[key]);
+  guestBoot(scope.bootId);
+  const keys = Object.keys(selection);
+  if (!SELECTION_REQUIRED.every(key => keys.includes(key)) || keys.some(key => !SELECTION_ALLOWED.includes(key))) return fail();
+  return provider;
+};
+const toolClassesOf: Validator<readonly typeof COWORK_NATIVE_TOOL_CLASSES[number][]> = value => {
+  if (!Array.isArray(value) || value.length > COWORK_NATIVE_TOOL_CLASSES.length) return fail();
+  // Canonical order, which also refuses repeats.
+  const indexes = value.map(entry => { const index = COWORK_NATIVE_TOOL_CLASSES.indexOf(oneOf(COWORK_NATIVE_TOOL_CLASSES)(entry) as never); return index; });
+  if (indexes.some((index, at) => at > 0 && index <= indexes[at - 1]!)) return fail();
+  return Object.freeze([...value]) as never;
+};
+const GUIDED_SPEC: Spec = [["bindingId", value => typeof value === "string" && UUID4.test(value) ? value : fail()], ["generation", uint(1, Number.MAX_SAFE_INTEGER)]];
+const RUNTIME_SPEC: Spec = [["model", value => typeof value === "string" && value.length >= 1 && value.length <= 256 && ASCII_TEXT.test(value) ? value : fail()], ["timeoutMs", uint(1, 600_000)],
+  ["toolClasses", toolClassesOf], ["provider", providerOf], ["guided", nullable(recordOf(GUIDED_SPEC))]];
+const CONVERSATION_SPEC: Spec = [["logicalSessionId", sdkId], ["authority", recordOf(AUTHORITY_SPEC)], ["runtimeUid", unixId], ["toolUid", unixId], ["workspaceGid", unixId],
+  ["policy", oneOf(COWORK_NATIVE_POLICIES)], ["roots", rootsOf], ["runtime", nullable(recordOf(RUNTIME_SPEC))]];
+/** One conversation: the field rules plus the rules that tie its fields to each other (the supervisor's own checks, mirrored). */
+const conversationOf: Validator<CoworkNativeConversation> = value => {
+  const item = record(value, CONVERSATION_SPEC) as unknown as CoworkNativeConversation;
+  if (!item.roots.every(root => allowedView(root.guestPath, item.logicalSessionId))) return fail();
+  const runtime = item.runtime;
+  if (runtime !== null) {
+    // `host_query_config`: a host-query conversation sees folders, repos and outputs only (never the `.winter` tree), and plan is read-only.
+    if (item.roots.some(root => root.guestPath === "/workspace/.winter" || root.guestPath.startsWith("/workspace/.winter/") || (item.policy === "plan" && !root.readOnly))) return fail();
+    const scope = runtime.provider.scope as Record<string, unknown>, selection = runtime.provider.selection as Record<string, unknown>;
+    // `_configure_runtime`: the provider scope must be this conversation's own, and the selected model the one that runs.
+    if (scope.workspaceId !== item.authority.workspaceId || scope.sessionId !== item.logicalSessionId || scope.backendSessionId !== item.authority.sessionId
+      || scope.incarnationId !== item.authority.incarnationId || scope.leaseEpoch !== item.authority.leaseEpoch || scope.grantRevision !== item.authority.grantRevision || selection.modelKey !== runtime.model) return fail();
+  }
+  return Object.freeze(item);
+};
+const conversationsOf: Validator<readonly CoworkNativeConversation[]> = value => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > COWORK_NATIVE_LIMITS.conversationItems) return fail();
+  return Object.freeze(value.map(conversationOf));
+};
+/** The rules across the whole set and against the message's own fields. */
+function checkConversationsMessage(message: Record<string, unknown>): void {
+  const profile = message.profile as CoworkNativeRuntimeProfile | null, items = message.conversations as readonly CoworkNativeConversation[], first = items[0]!.authority;
+  for (const item of items) {
+    const authority = item.authority;
+    if (authority.workspaceId !== first.workspaceId || authority.leaseEpoch !== first.leaseEpoch || authority.incarnationId !== message.incarnationId) return fail();
+    if ((profile === null) !== (item.runtime === null) || (item.runtime !== null && (item.runtime.guided !== null) !== (profile === "host-query-guided-v1"))) return fail();
+  }
+  if (new Set(items.map(item => item.logicalSessionId)).size !== items.length || new Set(items.map(item => item.authority.sessionId)).size !== items.length) return fail();
+  const uids = items.flatMap(item => [item.runtimeUid, item.toolUid]);
+  if (new Set(uids).size !== uids.length || items.some(item => items.some(other => other.runtimeUid === item.workspaceGid))) return fail();
+  if (new Set(items.filter(item => item.runtime).map(item => (item.runtime!.provider.scope as Record<string, unknown>).bootId)).size > 1) return fail();
+}
+/** What a sender fixes before it sends, and a receiver compares against the plan and `hello` it holds. A set that does not match is never sent and never started. */
+export interface CoworkNativeConversationsBinding { readonly operationId: string; readonly nonce: string; readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly guestBootId: string }
+export function coworkNativeConversationsAreBound(message: Extract<CoworkNativeBootstrapMessage, { t: "conversations" }>, expected: CoworkNativeConversationsBinding): boolean {
+  return message.operationId === expected.operationId && message.nonce === expected.nonce && message.incarnationId === expected.incarnationId
+    && message.conversations.every(item => item.authority.workspaceId === expected.workspaceId && item.authority.incarnationId === expected.incarnationId && item.authority.leaseEpoch === expected.leaseEpoch
+      && (item.runtime === null || (item.runtime.provider.scope as Record<string, unknown>).bootId === expected.guestBootId));
+}
 
 const MESSAGE_BASE: Spec = [["v", literal(1)]];
 const operation: Spec = [["operationId", token], ["nonce", nonce]];
@@ -310,36 +484,72 @@ const CONTROL_SPECS: Record<CoworkNativeMuxDirection, Record<string, Spec>> = {
     drain_ack: [["t", literal("drain_ack")], ["stopNonce", nonce]],
     halting: [["t", literal("halting")], ["stopNonce", nonce]],
     pong: [["t", literal("pong")], ["n", uint(0, 0xffff_ffff)]],
+    fault: [["t", literal("fault")], ["code", oneOf(COWORK_NATIVE_GUEST_FAULTS)], ["stopNonce", nullable(nonce)]],
   },
 };
 const BOOTSTRAP_SPECS: Record<CoworkNativeMuxDirection, Record<string, Spec>> = {
   down: {
     plan: [["t", literal("plan")], ...operation, ["plan", planBody]],
     ready: [["t", literal("ready")], ...operation],
+    conversations: [["t", literal("conversations")], ...operation, ["incarnationId", token], ["profile", nullable(oneOf(COWORK_NATIVE_RUNTIME_PROFILES))], ["conversations", conversationsOf]],
   },
   up: {
     hello: [["t", literal("hello")], ["guestBootId", guestBoot], ["dataSerial", literal(COWORK_NATIVE_DATA_SERIAL)], ["environmentSerial", literal(COWORK_NATIVE_ENVIRONMENT_SERIAL)]],
     receipt: [["t", literal("receipt")], ...operation, ["receipt", sortedObject]],
     fault: [["t", literal("fault")], ...operation, ["code", oneOf(COWORK_NATIVE_BOOTSTRAP_FAULTS)]],
     mounted: [["t", literal("mounted")], ...operation],
+    runtime_ready: [["t", literal("runtime_ready")], ...operation, ["conversations", uint(1, COWORK_NATIVE_LIMITS.conversationItems)]],
   },
 };
+/** Cross-field rules of one message type, run after its fields validated; and a tighter size cap than the class ceiling. */
+const MESSAGE_CHECKS: Record<string, (message: Record<string, unknown>) => void> = { conversations: checkConversationsMessage };
+const MESSAGE_CAPS: Record<string, number> = { conversations: COWORK_NATIVE_LIMITS.conversationsBytes };
 function jsonPayload(bytes: Uint8Array, specs: Record<string, Spec>, maxBytes: number, depth: number): Record<string, unknown> {
   if (bytes.length > maxBytes) return fail("oversize");
   let text: string;
   // ignoreBOM keeps a leading U+FEFF in the text (the default silently strips it), so a byte order mark is a malformed payload, never accepted.
   try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { return fail("malformed"); }
+  // Control and bootstrap payloads are printable ASCII (the guest's helper refuses anything else); a string with other characters cannot be sent.
+  if (!ASCII_TEXT.test(text)) return fail("malformed");
   const { parsed } = strictLine(`${text}\n`, maxBytes + 1, depth);
   const type = Object.hasOwn(parsed, "t") ? parsed.t : undefined;
   const spec = typeof type === "string" && Object.hasOwn(specs, type) ? specs[type]! : undefined;
   if (!spec) return fail("unknown_type");
+  if (bytes.length > (MESSAGE_CAPS[type as string] ?? maxBytes)) return fail("oversize");
   const typed = record(parsed, [...MESSAGE_BASE, ...spec]);
+  MESSAGE_CHECKS[type as string]?.(typed);
   if (JSON.stringify(typed) !== text) return fail("malformed");
   delete typed.v;
   return typed;
 }
 const writeAscii = (view: Uint8Array, offset: number, text: string, width: number) => { view.fill(0, offset, offset + width); view.set(Buffer.from(text, "ascii"), offset); };
 
+/** A runtime payload is a 4 byte stream prefix and then the stream's bytes (section 6.2). The prefix lives in the payload, not the header, so every relay
+ * that forwards frames without reading them (launcher, worker) needs no change and the header's flags stay zero.
+ *   0  1  conversation   index into the delivered `conversations` list, 0 to 15
+ *   1  1  stream         1 = IN (host to guest), 2 = OUT (guest to host), 3 = ERR (guest to host); 0 is never valid
+ *   2  1  flags          bit 0 = end of this stream after these bytes; every other bit zero
+ *   3  1  reserved       zero
+ * An empty data section is valid only with the end flag. */
+function runtimeFrame(seq: number, payload: Uint8Array, direction: CoworkNativeMuxDirection): CoworkNativeMuxFrame {
+  if (payload.length < COWORK_NATIVE_LIMITS.runtimePrefixBytes) return fail("malformed");
+  const conversation = payload[0]!, stream = COWORK_NATIVE_RUNTIME_STREAMS[payload[1]! - 1], flags = payload[2]!;
+  if (conversation >= COWORK_NATIVE_LIMITS.runtimeConversations || stream === undefined || flags > 1 || payload[3] !== 0) return fail("bad_field");
+  if ((stream === "in") !== (direction === "down")) return fail("bad_direction");
+  const data = payload.slice(COWORK_NATIVE_LIMITS.runtimePrefixBytes), end = flags === 1;
+  if (data.length === 0 && !end) return fail("bad_field");
+  return Object.freeze({ class: "runtime" as const, seq, conversation, stream, end, payload: data });
+}
+function runtimePayload(frame: Extract<CoworkNativeMuxFrame, { class: "runtime" }>, direction: CoworkNativeMuxDirection): Uint8Array {
+  const stream = COWORK_NATIVE_RUNTIME_STREAMS.indexOf(frame.stream) + 1;
+  if (!Number.isInteger(frame.conversation) || frame.conversation < 0 || frame.conversation >= COWORK_NATIVE_LIMITS.runtimeConversations || stream < 1 || typeof frame.end !== "boolean" || !(frame.payload instanceof Uint8Array)) return fail("bad_field");
+  if ((frame.stream === "in") !== (direction === "down")) return fail("bad_direction");
+  if (frame.payload.length === 0 && !frame.end) return fail("bad_field");
+  const out = new Uint8Array(COWORK_NATIVE_LIMITS.runtimePrefixBytes + frame.payload.length);
+  out[0] = frame.conversation; out[1] = stream; out[2] = frame.end ? 1 : 0;
+  out.set(frame.payload, COWORK_NATIVE_LIMITS.runtimePrefixBytes);
+  return out;
+}
 /** A mux frame is a 16 byte little-endian header plus the payload.
  *   0  4  magic "WMX1"      4  1  version = 1      5  1  class       6  2  flags = 0
  *   8  4  seq               12 4  payload length
@@ -357,7 +567,7 @@ export function parseCoworkNativeMuxFrame(bytes: Uint8Array, direction: CoworkNa
   if (length > COWORK_NATIVE_LIMITS.muxPayloadBytes[cls]) return fail("oversize");
   if (bytes.length !== COWORK_NATIVE_LIMITS.headerBytes + length) return fail("malformed");
   const payload = bytes.slice(COWORK_NATIVE_LIMITS.headerBytes);
-  if (cls === "runtime") return Object.freeze({ class: "runtime", seq, payload });
+  if (cls === "runtime") return runtimeFrame(seq, payload, direction);
   const specs = cls === "control" ? CONTROL_SPECS[direction] : BOOTSTRAP_SPECS[direction], max = COWORK_NATIVE_LIMITS.muxPayloadBytes[cls];
   const message = Object.freeze(jsonPayload(payload, specs, max, cls === "control" ? COWORK_NATIVE_LIMITS.depth.control : COWORK_NATIVE_LIMITS.depth.bootstrap)) as unknown;
   return Object.freeze(cls === "control" ? { class: "control", seq, message: message as CoworkNativeControlMessage } : { class: "bootstrap", seq, message: message as CoworkNativeBootstrapMessage });
@@ -367,13 +577,17 @@ export function serializeCoworkNativeMuxFrame(frame: CoworkNativeMuxFrame, direc
   const cls = frame.class;
   if ((cls as string) === "provider" || !COWORK_NATIVE_MUX_CLASSES.includes(cls)) return fail("reserved_class");
   let payload: Uint8Array;
-  if (frame.class === "runtime") payload = frame.payload;
+  if (frame.class === "runtime") payload = runtimePayload(frame, direction);
   else {
     const specs = frame.class === "control" ? CONTROL_SPECS[direction] : BOOTSTRAP_SPECS[direction], type = (frame.message as { t: string }).t;
     const spec = Object.hasOwn(specs, type) ? specs[type]! : undefined;
     if (!spec) return fail("unknown_type");
     const typed = record({ v: 1, ...frame.message }, [...MESSAGE_BASE, ...spec]);
-    payload = Buffer.from(JSON.stringify(typed), "utf8");
+    MESSAGE_CHECKS[type]?.(typed);
+    const text = JSON.stringify(typed);
+    if (!ASCII_TEXT.test(text)) return fail("malformed");
+    payload = Buffer.from(text, "utf8");
+    if (payload.length > (MESSAGE_CAPS[type] ?? Infinity)) return fail("oversize");
   }
   if (payload.length > COWORK_NATIVE_LIMITS.muxPayloadBytes[cls]) return fail("oversize");
   const out = new Uint8Array(COWORK_NATIVE_LIMITS.headerBytes + payload.length), view = new DataView(out.buffer);
@@ -393,6 +607,20 @@ export class CoworkNativeMuxSequence {
   }
 }
 
+/** Per-stream state of the runtime class, one instance per link end: a conversation outside the delivered set, and any byte or second end after a stream's end, are refused. */
+export class CoworkNativeRuntimeStreams {
+  private readonly ended = new Set<string>();
+  constructor(private readonly conversations: number) {
+    if (!Number.isInteger(conversations) || conversations < 1 || conversations > COWORK_NATIVE_LIMITS.runtimeConversations) fail("bad_field");
+  }
+  accept(frame: CoworkNativeMuxFrame): void {
+    if (frame.class !== "runtime") return fail("bad_field");
+    const key = `${frame.conversation}:${frame.stream}`;
+    if (frame.conversation >= this.conversations || this.ended.has(key)) return fail("bad_field");
+    if (frame.end) this.ended.add(key);
+  }
+}
+
 // ------------------------------------------------------------------------------------------------ launcher envelopes (L2)
 
 /** Fixed-layout, little-endian, one datagram each. Header (16): "WEV1", u8 version = 1, u8 kind, u16 flags = 0, u32 seq, u32 payload length.
@@ -405,7 +633,7 @@ export class CoworkNativeMuxSequence {
 export const COWORK_NATIVE_ENVELOPE_MAGIC = "WEV1";
 export const COWORK_NATIVE_ENVELOPE_KINDS = Object.freeze(["scope", "volumes", "drain", "status", "fault"] as const);
 export const COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES = Object.freeze({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
-export const COWORK_NATIVE_WORKER_STATUS = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "guest_halted", "exiting"] as const);
+export const COWORK_NATIVE_WORKER_STATUS = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "guest_halted", "exiting", "halting", "guest_fault"] as const);
 export const COWORK_NATIVE_WORKER_FAULTS = Object.freeze(["bad_scope", "bad_volumes", "sandbox_failed", "vm_failed", "mux_violation", "truncated_rights", "internal", "second_drain"] as const);
 export interface CoworkNativeFlushCounters { readonly requested: number; readonly completed: number }
 export type CoworkNativeEnvelope =
@@ -639,6 +867,47 @@ export function coworkNativeRuntimeImageDigest(kernelSha256: string, initramfsSh
   return createHash("sha256").update(Buffer.concat([Buffer.from(kernelSha256, "hex"), Buffer.from(initramfsSha256, "hex")])).digest("hex");
 }
 
+// ------------------------------------------------------------------------------------------------ guest stop verdict
+
+export type CoworkNativeWorkerStatusState = typeof COWORK_NATIVE_WORKER_STATUS[number];
+export type CoworkNativeLibkrunExitReason = keyof typeof COWORK_LIBKRUN_EXIT_REASONS;
+/** One disk's counters as `krun_cowork_get_flush_counters_v1` returns them (S4's struct), camel-cased. */
+export interface CoworkNativeFlushDevice { readonly requested: number; readonly completed: number; readonly finalSyncAttempted: number; readonly finalSyncCompleted: number }
+/** Both disks, `[0]` winter-data and `[1]` winter-environment; `null` = the worker could not read them. */
+export type CoworkNativeLibkrunFlushCounters = readonly [CoworkNativeFlushDevice, CoworkNativeFlushDevice];
+/** A final-flush failure does NOT change libkrun's exit status, so the counters are the only evidence: every guest flush completed (`completed >= requested`, none lost) and the final sync was attempted and completed on both disks. */
+export function coworkNativeFlushesComplete(counters: CoworkNativeLibkrunFlushCounters | null): boolean {
+  return counters !== null && counters.length === 2 && counters.every(device => device.completed >= device.requested && device.finalSyncAttempted === 1 && device.finalSyncCompleted === 1);
+}
+export type CoworkNativeGuestStopVerdict =
+  | { readonly guest: "orderly" }
+  | { readonly guest: "not-booted" }
+  | { readonly guest: "uncertain"; readonly reason: "guest-fault" | "flush-uncertain" | "drain-timeout" };
+/**
+ * The ONE place that says when the guest's part of a stop is orderly (section 7). Input: the worker's L2 status states in the order the launcher received
+ * them, and the reason the libkrun exit hook reported (`null` when the hook never ran: the exit watchdog skipped it, or the process died).
+ *
+ *   not-booted   no `vm_running` was ever reported: the guest wrote nothing.
+ *   orderly      `vm_running`, `draining`, `drain_acked`, `halting` and `guest_halted` in that order, the exit reason `off`, and no `guest_fault`.
+ *   uncertain    everything else, and never a Class A: a `guest_fault` at any time; a power-off without `halting` (the guest could not prove its filesystems
+ *                unmounted clean) or without an acknowledged drain; any exit reason but `off`; a drain that never reached `drain_acked` (`drain-timeout`);
+ *                no `guest_halted` after `halting` (the exit path ended before the final flush was reported: `flush-uncertain`).
+ *
+ * A worker exit with status 0 proves none of this: the libkrun exit watchdog ends the process with the same status when it fires.
+ */
+export function coworkNativeGuestStopVerdict(input: { readonly states: readonly CoworkNativeWorkerStatusState[]; readonly exitReason: CoworkNativeLibkrunExitReason | null; readonly counters: CoworkNativeLibkrunFlushCounters | null }): CoworkNativeGuestStopVerdict {
+  const { states, exitReason } = input, at = (state: CoworkNativeWorkerStatusState): number => states.indexOf(state);
+  if (at("vm_running") < 0) return { guest: "not-booted" };
+  if (at("guest_fault") >= 0) return { guest: "uncertain", reason: "guest-fault" };
+  const draining = at("draining"), acked = at("drain_acked"), halting = at("halting"), halted = at("guest_halted");
+  if (acked < 0 || draining < 0 || acked < draining) return halted >= 0 ? { guest: "uncertain", reason: "guest-fault" } : { guest: "uncertain", reason: "drain-timeout" };
+  if (halting < 0 || halting < acked) return { guest: "uncertain", reason: "guest-fault" };
+  if (halted < 0 || halted < halting) return { guest: "uncertain", reason: "flush-uncertain" };
+  if (!coworkNativeFlushesComplete(input.counters)) return { guest: "uncertain", reason: "flush-uncertain" };
+  if (exitReason !== "off") return { guest: "uncertain", reason: exitReason === "terminal-fault" || exitReason === null ? "flush-uncertain" : "guest-fault" };
+  return { guest: "orderly" };
+}
+
 // ------------------------------------------------------------------------------------------------ libkrun production ABI
 
 /**
@@ -656,11 +925,15 @@ export function coworkNativeRuntimeImageDigest(kernelSha256: string, initramfsSh
 export interface CoworkLibkrunProductionSymbol { readonly name: string; readonly signature: string; readonly replaces: string | null }
 export const COWORK_LIBKRUN_PRODUCTION_STRUCTS = Object.freeze([
   "struct krun_cowork_volume_identity { uint64_t device; uint64_t inode; uint64_t capacity_bytes; uint32_t uid; uint32_t mode; }",
-  "struct krun_cowork_flush_counters_v1 { uint64_t data_requested; uint64_t data_completed; uint64_t environment_requested; uint64_t environment_completed; }",
-  "enum krun_cowork_exit_reason { KRUN_COWORK_EXIT_OFF = 0, KRUN_COWORK_EXIT_RESET = 1, KRUN_COWORK_EXIT_VCPU_ERROR = 2, KRUN_COWORK_EXIT_TERMINAL_FAULT = 3 }",
+  "struct krun_cowork_flush_device_v1 { uint64_t requested; uint64_t completed; uint64_t final_sync_attempted; uint64_t final_sync_completed; }",
+  "struct krun_cowork_flush_counters_v1 { uint32_t size; uint32_t device_count; struct krun_cowork_flush_device_v1 device[2]; }",
+  "struct krun_cowork_pin_counters_v1 { uint32_t size; uint32_t reserved; uint64_t max_pins; uint64_t max_pinned_bytes; uint64_t high_water_pins; uint64_t high_water_bytes; uint64_t budget_refusals; }",
+  "#define KRUN_COWORK_EXIT_NONE 0, KRUN_COWORK_EXIT_OFF 1, KRUN_COWORK_EXIT_RESET 2, KRUN_COWORK_EXIT_VCPU_ERROR 3, KRUN_COWORK_EXIT_TERMINAL_FAULT 4",
+  "typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason)",
 ] as const);
-/** Why the VMM is leaving, as the exit hook reports it. Only `off` (a guest power-off) can ever belong to a Class A receipt. */
-export const COWORK_LIBKRUN_EXIT_REASONS = Object.freeze({ off: 0, reset: 1, "vcpu-error": 2, "terminal-fault": 3 } as const);
+/** Why the VMM is leaving, as the exit hook reports it (S4's header). `none` is the unknown default and is never delivered in practice; zero is NOT a power-off.
+ * Only `off` can ever belong to a Class A receipt. The parameter is an ENUM, not a boolean: `reason != 0` and `reason == OFF` are different tests. */
+export const COWORK_LIBKRUN_EXIT_REASONS = Object.freeze({ none: 0, off: 1, reset: 2, "vcpu-error": 3, "terminal-fault": 4 } as const);
 export const COWORK_LIBKRUN_PRODUCTION_ABI: readonly CoworkLibkrunProductionSymbol[] = Object.freeze([
   Object.freeze({ name: "krun_cowork_enable_profile_v1", replaces: "krun_enable_cowork_block_fixture_reclaim",
     signature: "int32_t krun_cowork_enable_profile_v1(uint32_t ctx_id)" }),
@@ -671,10 +944,15 @@ export const COWORK_LIBKRUN_PRODUCTION_ABI: readonly CoworkLibkrunProductionSymb
   Object.freeze({ name: "krun_cowork_validate_profile_v1", replaces: null,
     signature: "int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id)" }),
   Object.freeze({ name: "krun_cowork_get_flush_counters_v1", replaces: null,
-    signature: "int32_t krun_cowork_get_flush_counters_v1(uint32_t ctx_id, struct krun_cowork_flush_counters_v1 *out)" }),
+    signature: "int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_flush_counters_v1 *out)" }),
   Object.freeze({ name: "krun_cowork_set_exit_hook_v1", replaces: null,
-    signature: "int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t reason), void *user)" }),
+    signature: "int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data)" }),
+  /** OPTIONAL diagnostics (G4 reads the pin high-water mark with it). It feeds no receipt, no verdict and no decision of the worker, launcher or daemon. */
+  Object.freeze({ name: "krun_cowork_get_pin_counters_v1", replaces: null,
+    signature: "int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out)" }),
 ]);
+/** The symbols the worker must have to start a VM at all. Everything else in the list is optional diagnostics. */
+export const COWORK_LIBKRUN_OPTIONAL_SYMBOLS = Object.freeze(["krun_cowork_get_pin_counters_v1"] as const);
 /** Fixture entry points that get NO production equivalent. The single mux stream replaces the separate bootstrap and runtime ports; the control ACK trace is a fixture measurement. */
 export const COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS = Object.freeze(["krun_enable_cowork_runtime_port_fixture_trace", "krun_create_cowork_bootstrap_stream", "krun_set_cowork_bootstrap_stream"] as const);
 /** Never admitted into the production device inventory. */

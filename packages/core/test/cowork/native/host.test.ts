@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { statSync } from "node:fs";
-import { CoworkNativeHost, CoworkNativeHostError } from "../../../src/cowork/native/host";
+import { CoworkNativeHost, CoworkNativeHostError, COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS } from "../../../src/cowork/native/host";
+import { COWORK_NATIVE_LIMITS, coworkNativeHostStopWaitMs } from "../../../src/cowork/native/protocol";
 import { cleanupHarnesses, createHarness, IMAGE_DIGEST, START_PHASES } from "./harness";
 
 afterEach(() => { cleanupHarnesses(); });
@@ -316,10 +317,28 @@ test("a running workspace's launcher chatter is not kept: only terminal verdicts
   for (let n = 0; n < 500; n++) {
     session.push({ t: "pong", id: `ping-${n % 9}` });
     session.push({ t: "worker_state", state: "vm_running" });
-    session.push({ t: "mux_up", frame: { class: "runtime", seq: n + 1, payload: new Uint8Array(8) } });
+    session.push({ t: "mux_up", frame: { class: "runtime", seq: n + 1, conversation: 0, stream: "out", end: false, payload: new Uint8Array(8) } });
   }
   await Bun.sleep(10);
   expect(h.host.queuedLauncherMessages(h.workspaceId)).toBe(0);
   expect(h.records.get(h.workspaceId).power).toBe("running"); // chatter is not a verdict
   expect(await running.stop()).toEqual({ released: true, evidence: "orderly-receipt" });
+});
+
+test("a worker that reported guest_fault makes the otherwise perfect orderly receipt not orderly: the workspace stays uncertain", async () => {
+  const h = createHarness(), running = await h.host.start(h.workspaceId);
+  h.launcher.last.push({ t: "worker_state", state: "guest_fault" });
+  await Bun.sleep(10);
+  const outcome = await running.stop();
+  expect(outcome.released).toBe(false);
+  expect(h.records.get(h.workspaceId).power).not.toBe("stopped");
+});
+
+test("the host waits for the stop verdict through the VMM exit allowance: an answer after the guest budget but inside the launcher's kill deadline still releases", async () => {
+  const h = createHarness({ behavior: { stop: "late-orderly" }, timeouts: { drainBudgetMs: 50, stopGraceMs: 50, exitAllowanceMs: 1_000 } });
+  const running = await h.host.start(h.workspaceId);
+  expect(await running.stop()).toEqual({ released: true, evidence: "orderly-receipt" });
+});
+test("the host's default wait for a stop is the contract's H: budget, plus the exit watchdog and the launcher's margin, plus the daemon's margin", () => {
+  expect(COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS.drainBudgetMs + COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS.exitAllowanceMs + COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS.stopGraceMs).toBe(coworkNativeHostStopWaitMs(COWORK_NATIVE_LIMITS.drainBudgetMs));
 });

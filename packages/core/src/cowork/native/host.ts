@@ -4,7 +4,7 @@ import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumeRequest, CoworkVolumes } from "../volumes";
 import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-filesystem";
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
-import { CoworkNativeMuxSequence, COWORK_NATIVE_LIMITS, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
+import { CoworkNativeMuxSequence, COWORK_NATIVE_LIMITS, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
 import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
 import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeObserved, type CoworkNativeStopRegistry } from "./stop-proof";
@@ -52,8 +52,8 @@ export interface CoworkLauncherPort { spawn(request: { readonly workspaceId: str
  * of the pinned runtime image; a missing or malformed pin refuses. */
 export interface CoworkNativeImagePins { runtimeImageDigest(workspaceId: string): string }
 
-export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; readonly drainBudgetMs: number }
-const DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: 10_000, drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
+export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; /** The VMM exit allowance after the guest budget (libkrun's exit watchdog plus the launcher's margin): the launcher kills no sooner. */ readonly exitAllowanceMs: number; readonly drainBudgetMs: number }
+export const COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: COWORK_NATIVE_LIMITS.hostStopMarginMs, exitAllowanceMs: coworkNativeLauncherKillMs(0), drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
 
 export interface CoworkNativeHostDeps {
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly authority: CoworkNativeAuthority;
@@ -88,7 +88,7 @@ interface Run {
   admissionId: string | null; session: CoworkLauncherSession | null; binding: CoworkNativeChannelBinding | null; inbox: SessionInbox | null;
   phase: RunPhase; unsubscribe: (() => void)[]; downSeq: number; upSeq: CoworkNativeMuxSequence;
   /** What this process saw happen on the channel: a stop receipt cannot say less. */
-  observed: { volumesAccepted: boolean; vmRunning: boolean; guestHello: boolean };
+  observed: { volumesAccepted: boolean; vmRunning: boolean; guestHello: boolean; guestFault: boolean };
   stopHeartbeat: (() => void) | null;
 }
 
@@ -147,7 +147,7 @@ export class CoworkNativeHost {
   private readonly uncertainHandlers: ((event: CoworkNativeUncertainEvent) => void)[] = [];
   private readonly now: () => number;
   constructor(private readonly deps: CoworkNativeHostDeps) {
-    this.timeouts = { ...DEFAULT_TIMEOUTS, ...deps.timeouts };
+    this.timeouts = { ...COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS, ...deps.timeouts };
     this.now = deps.now ?? Date.now;
   }
   private hook(phase: string): void { try { this.deps.checkpoint?.(phase); } catch (error) { throw isCrash(error) ? error : new CoworkNativeSimulatedCrash(phase); } }
@@ -194,7 +194,7 @@ export class CoworkNativeHost {
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
     const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
-      observed: { volumesAccepted: false, vmRunning: false, guestHello: false }, stopHeartbeat: null };
+      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null };
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
     try {
@@ -234,6 +234,7 @@ export class CoworkNativeHost {
     run.inbox = new SessionInbox(session);
     run.unsubscribe.push(session.onMessage(message => {
       if (message.t === "worker_state" && message.state === "vm_running") run.observed.vmRunning = true;
+      else if (message.t === "worker_state" && message.state === "guest_fault") run.observed.guestFault = true;
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "hello") run.observed.guestHello = true;
     }));
     const binding = authority.adopt(session, { workspaceId, homeId: run.homeId, admissionId: reserved.admissionId, owner });
@@ -440,7 +441,7 @@ export class CoworkNativeHost {
     try { session.send({ t: "stop", id, stopNonce, reason, budgetMs: this.timeouts.drainBudgetMs }); } catch { return { released: false, reason: "launcher channel closed before the stop request" }; }
     let verdict: CoworkNativeToDaemon;
     try {
-      verdict = await inbox.expect(message => (message.t === "stopped" && message.id === id) || message.t === "uncertain" || message.t === "fault" ? message : undefined, this.timeouts.drainBudgetMs + this.timeouts.stopGraceMs, "stop verdict");
+      verdict = await inbox.expect(message => (message.t === "stopped" && message.id === id) || message.t === "uncertain" || message.t === "fault" ? message : undefined, this.timeouts.drainBudgetMs + this.timeouts.exitAllowanceMs + this.timeouts.stopGraceMs, "stop verdict");
     } catch (error) {
       if (isCrash(error)) throw error;
       return { released: false, reason: error instanceof CoworkNativeHostError ? `no orderly stop receipt (${error.code})` : "no orderly stop receipt" };

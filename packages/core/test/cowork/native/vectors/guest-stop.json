@@ -1,0 +1,662 @@
+{
+  "version": 1,
+  "note": "`states` are the worker's L2 status states in the order the launcher received them; `exitReason` is what the libkrun exit hook reported (null = the hook never ran). `verdict` is the only thing a launcher may conclude about the guest's part of a stop: only `orderly` can lead to a Class A receipt, and it needs vm_running, draining, drain_acked, halting and guest_halted in that order, no guest_fault, and reason off. A worker exit with status 0 proves nothing by itself.",
+  "exitReasons": {
+    "none": 0,
+    "off": 1,
+    "reset": 2,
+    "vcpu-error": 3,
+    "terminal-fault": 4
+  },
+  "cases": [
+    {
+      "name": "orderly",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "orderly"
+      }
+    },
+    {
+      "name": "never-booted",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "draining",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "not-booted"
+      }
+    },
+    {
+      "name": "bare-power-off-without-halting",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "bare-power-off-without-drain-ack",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "power-off-with-nothing-before-it",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "halting-before-the-drain-ack",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "halting",
+        "drain_acked",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "guest-fault-then-everything-else",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "guest_fault",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "guest-fault-alone",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "guest_fault",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "drain-never-acknowledged",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "drain-timeout"
+      }
+    },
+    {
+      "name": "halting-then-no-power-off-report",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "exit-hook-skipped-by-the-watchdog",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "reset-instead-of-off",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "reset",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "vcpu-error",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "vcpu-error",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "terminal-fault",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "terminal-fault",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "reason-none",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "none",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "no-reason-delivered",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "flush-requested-never-completed",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 2,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "final-sync-failed-exit-status-unchanged",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 0
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "final-sync-never-attempted",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 0,
+          "finalSyncCompleted": 0
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "counters-unreadable",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": null,
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "exit-zero-without-hook-after-clean-power-off",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "exiting"
+      ],
+      "exitReason": null,
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    }
+  ]
+}

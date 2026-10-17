@@ -24,7 +24,7 @@ export interface FakeBehavior {
   bootstrap?: "ok" | "fault" | "silent" | "wrong-nonce" | "wrong-operation" | "tampered-receipt" | "duplicate-receipt" | "runtime-frame";
   mounted?: "ok" | "silent";
   /** What the launcher does when asked to stop. */
-  stop?: "orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault" | "other-request-id" | "other-launcher" | "denies-attach" | "denies-boot";
+  stop?: "orderly" | "late-orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault" | "other-request-id" | "other-launcher" | "denies-attach" | "denies-boot";
   /** Hello with another boot id. */
   helloBoot?: string;
 }
@@ -144,7 +144,7 @@ export class FakeSession implements CoworkLauncherSession {
       switch (this.behavior.bootstrap) {
         case "silent": return;
         case "fault": return this.muxUp({ t: "fault", operationId: message.operationId, nonce: message.nonce, code: "format_failed" });
-        case "runtime-frame": return this.deliver({ t: "mux_up", frame: { class: "runtime", seq: 1, payload: new Uint8Array([1]) } });
+        case "runtime-frame": return this.deliver({ t: "mux_up", frame: { class: "runtime", seq: 1, conversation: 0, stream: "out", end: false, payload: new Uint8Array([1]) } });
       }
       const receipt = receiptFor(message.plan);
       if (this.behavior.bootstrap === "tampered-receipt") (receipt.volumes as { filesystemUUID: string }[])[0]!.filesystemUUID = "00000000-0000-4000-8000-000000000000";
@@ -167,7 +167,7 @@ export class FakeSession implements CoworkLauncherSession {
     }) as unknown as CoworkNativeOrderlyReceipt["volumes"];
     return { v: 1, class: "A", confirmationId: `confirm-fake${this.confirmCounter}`, stopNonce, origin: "host-stop", launcherInstanceId: this.launcherInstanceId, admissionId: scope.admissionId, homeId: this.owner.options.homeId,
       workspaceId: scope.workspaceId, incarnationId: scope.incarnationId, leaseEpoch: scope.leaseEpoch, controllerInstanceId: scope.controllerInstanceId, workerInstanceId: scope.workerInstanceId, runtimeImageDigest: scope.runtimeImageDigest,
-      hostBootId: this.hostBootId, guest: attached && booted ? { drain: "acked", powerOff: "observed" } : { drain: "not-booted", powerOff: "not-booted" },
+      hostBootId: this.hostBootId, guest: attached && booted ? { drain: "acked", halting: "observed", powerOff: "observed" } : { drain: "not-booted", halting: "not-booted", powerOff: "not-booted" },
       worker: { pid: 4242, startToken: "start-4242", exit: "code", status: 0, reaped: true }, volumes, issuedAtMs: 1_760_000_000_000, ...overrides };
   }
   private uncertain(reason: CoworkNativeUncertainReceipt["reason"]): CoworkNativeUncertainReceipt {
@@ -185,17 +185,18 @@ export class FakeSession implements CoworkLauncherSession {
     if (!this.scope) return this.deliver({ t: "refused", id: message.id, code: "not_begun" });
     switch (this.behavior.stop ?? "orderly") {
       case "silent": return;
+      case "late-orderly": { const id = message.id, nonce = message.stopNonce; setTimeout(() => { if (this.scope) this.emitOrderly(id, this.orderly({}, nonce)); }, 300); return; }
       case "other-request-id": return this.emitOrderly("req-someone-else", this.orderly({}, message.stopNonce), false);
       case "other-launcher": return this.emitOrderly(message.id, this.orderly({ launcherInstanceId: "launcher-impostor" }, message.stopNonce), false);
       // Internally consistent receipts that say less than the daemon saw: the volumes were never accepted / the VM never ran.
-      case "denies-attach": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: [this.unattached(0), this.unattached(1)] }, message.stopNonce), false);
-      case "denies-boot": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: this.orderly({}, message.stopNonce).volumes.map(v => ({ ...v, flushRequested: 0, flushCompleted: 0 })) as never }, message.stopNonce), false);
+      case "denies-attach": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "not-booted", halting: "not-booted", powerOff: "not-booted" }, volumes: [this.unattached(0), this.unattached(1)] }, message.stopNonce), false);
+      case "denies-boot": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "not-booted", halting: "not-booted", powerOff: "not-booted" }, volumes: this.orderly({}, message.stopNonce).volumes.map(v => ({ ...v, flushRequested: 0, flushCompleted: 0 })) as never }, message.stopNonce), false);
       case "eof": return queueMicrotask(() => this.eof());
       case "fault": return this.deliver({ t: "fault", code: "worker_channel_lost" });
       case "uncertain": return this.deliver({ t: "uncertain", receipt: this.uncertain("drain-timeout") });
       // A launcher that answers with a nonce nobody issued is lying on the live channel; it keeps no durable copy of that lie.
       case "wrong-nonce": return this.emitOrderly(message.id, this.orderly({}, "bb".repeat(16)), false);
-      case "bad-invariants": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "acked", powerOff: "not-booted" } }, message.stopNonce));
+      case "bad-invariants": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "acked", halting: "observed", powerOff: "not-booted" } }, message.stopNonce));
       case "other-incarnation": return this.emitOrderly(message.id, this.orderly({ incarnationId: "inc-an-older-one" }, message.stopNonce));
       case "wrong-volume": return this.emitOrderly(message.id, this.orderlyWithWrongVolume(message.stopNonce));
       default:

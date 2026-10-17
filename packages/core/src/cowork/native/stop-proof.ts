@@ -134,7 +134,7 @@ export class CoworkNativeStopRegistry {
 const sha = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 24);
 
 /** What the daemon saw on the channel before the stop: a receipt cannot know LESS than the daemon observed. */
-export interface CoworkNativeObserved { readonly volumesAccepted: boolean; readonly vmRunning: boolean; readonly guestHello: boolean }
+export interface CoworkNativeObserved { readonly volumesAccepted: boolean; readonly vmRunning: boolean; readonly guestHello: boolean; /** The worker reported `guest_fault`: after one, no Class A can exist for the run. */ readonly guestFault?: boolean }
 /** The admission record, reduced to what a receipt must agree with. */
 export interface CoworkNativeAdmissionView { readonly admissionId: string; readonly owner: { readonly bootId: string } }
 export interface OrderlyEvidenceInput {
@@ -180,6 +180,7 @@ export function mintOrderlyStopProof(input: OrderlyEvidenceInput): CoworkNativeS
     if (receipt.origin !== "host-stop" || receipt.stopNonce !== stopNonce) return refuse("nonce_mismatch");
     // `unattached` means the worker never accepted the descriptors and `not-booted` that it never reported a running VM. A daemon that saw
     // either happen cannot accept a receipt that says it did not.
+    if (observed.guestFault === true) return refuse("not_orderly");
     if ((observed.volumesAccepted && receipt.volumes.some(v => !v.attached)) || ((observed.vmRunning || observed.guestHello) && receipt.guest.drain === "not-booted")) return refuse("not_orderly");
   }
   if (input.registry.wasSpent(receipt.confirmationId, receipt.stopNonce)) return refuse("replayed");

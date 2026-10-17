@@ -1,6 +1,6 @@
 # Cowork native worker: wire contract and host adapter
 
-Status: contract, N2 slice S1, 2026-10-16. SOURCE ONLY. Nothing in this document or in `packages/core/src/cowork/native/`
+Status: contract, N2 slice S1, 2026-10-16 (round 3, 2026-10-17: conversation-set delivery, runtime streams, guest faults, `halting`, the layered stop timeline). SOURCE ONLY. Nothing in this document or in `packages/core/src/cowork/native/`
 is wired into the daemon, no VM was started to produce it, and every live gate (G0 to G6) still needs a review of the exact
 commit and the owner's approval. The executable twin of this document is
 [`protocol.ts`](../packages/core/src/cowork/native/protocol.ts); the golden vectors in
@@ -44,7 +44,7 @@ Control-class frames terminate at the worker. They never cross L3 or L1: the dae
 
 ## 3. Common wire rules
 
-* JSON texts are UTF-8, exactly one line, last byte `\n`, no whitespace, integers only, `null` only where a table says so.
+* JSON texts are UTF-8, exactly one line, last byte `\n`, no whitespace, integers only, `null` only where a table says so. Control and bootstrap payloads (the mux classes, section 6) are printable ASCII only: a character outside 0x20 to 0x7e makes the payload malformed, and the guest's helper refuses it too.
 * Keys appear in EXACTLY the order of the tables below (`v`, then `t`, then the table order). A parser builds the typed value and
   re-serializes it; the result must equal the input byte for byte. That one comparison refuses duplicate keys, reordered keys,
   alternate escapes, alternate number spellings, and trailing data. Every positive vector exercises the order; the negative
@@ -57,7 +57,7 @@ Control-class frames terminate at the worker. They never cross L3 or L1: the dae
   tokens additionally allow `.` and `:`. A digest is 64 lowercase hex characters, a stop nonce 32 lowercase hex characters
   (16 random bytes).
 * `device` and `inode` are decimal strings, because they are `u64` and JSON numbers are not. Capacities are JSON integers.
-* Limits: control line 16 KiB; mux carrier line 1,572,864 bytes; mux payload control 4 KiB, bootstrap 256 KiB, runtime 1 MiB
+* Limits: control line 16 KiB; mux carrier line 1,572,864 bytes; mux payload control 4 KiB, bootstrap 256 KiB (the `conversations` message at most 20 KiB), runtime 1 MiB (the 4 byte stream prefix included)
   (the existing guest runtime transport frame); one stop receipt 8 KiB; nesting depth 4 on L1.
 
 ## 4. L1: daemon and launcher (NDJSON)
@@ -73,7 +73,7 @@ launcher-bound side is refused as `bad_direction`.
 | `begun` | `id`, `workerInstanceId`, `workerPid`, `workerStartToken` | worker spawned suspended, executed image validated, SCOPE delivered, sandbox installed. PID and token are diagnostics only. |
 | `volumes_accepted` | `id` | the worker received two descriptors after its sandbox and validated them against the SCOPE |
 | `refused` | `id`, `code` | one of `bad_request busy not_begun worker_spawn_failed code_identity_mismatch sandbox_failed volumes_rejected internal` |
-| `worker_state` | `state` | informational: `sandboxed volumes_accepted vm_running guest_hello draining drain_acked exited`. Never evidence. |
+| `worker_state` | `state` | informational: `sandboxed volumes_accepted vm_running guest_hello draining drain_acked exited halting guest_fault`. `halting` and `guest_fault` mirror the L2 statuses of section 5 (the guest said it is halting; the guest said it is failing). Never evidence of a release; a daemon that has seen `guest_fault` refuses an orderly receipt for that run (section 7). |
 | `mux_up` | `frame` | one bootstrap or runtime mux frame, base64 of the whole frame |
 | `stopped` | `id` (or `null`), `receipt` | a Class A receipt (section 7). `id` is the `stop` request it answers, `null` for an owner-loss drain. |
 | `uncertain` | `receipt` | a Class B receipt (section 7) |
@@ -139,7 +139,10 @@ Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned b
   fixture's 72 byte pair record (commit `9a588735`), which had no scope binding.
 * `drain` payload: `stopNonce` 16 raw bytes, `u32 budgetMs`, `u32 origin` (1 `host-stop`, 2 `owner-loss`), `u32 reserved`.
 * `status` payload: `u32 state` (1 `sandboxed`, 2 `volumes_accepted`, 3 `vm_running`, 4 `guest_hello`, 5 `draining`, 6 `drain_acked`,
-  7 `guest_halted`, 8 `exiting`), `u32 reserved`, then `u64 requested, u64 completed` flush counters for data and environment.
+  7 `guest_halted`, 8 `exiting`, 9 `halting`, 10 `guest_fault`), `u32 reserved`, then `u64 requested, u64 completed` flush counters for data and environment.
+  `halting` is reported when the guest's control-up `halting` arrives AFTER its `drain_ack` and carries the drain's nonce; `guest_fault` when a control-up `fault` arrives (section 6).
+  `guest_halted` comes from the libkrun exit hook and from nowhere else (section 8); the worker reports it ONLY when the hook's reason is `off` and both attached disks
+  show `final_sync_completed = 1`. Otherwise it reports `exiting` alone, and the launcher must not issue a Class A.
 * `fault` payload: `u32 code` (1 `bad_scope`, 2 `bad_volumes`, 3 `sandbox_failed`, 4 `vm_failed`, 5 `mux_violation`,
   6 `truncated_rights`, 7 `internal`, 8 `second_drain`), `u32 reserved`. A second DRAIN envelope is answered with FAULT `second_drain` and
   otherwise ignored: the first DRAIN's nonce and budget stand, and a later one can neither replace nor extend them.
@@ -152,11 +155,26 @@ Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned b
 * The guest boot artifacts are `<directory of the worker executable>/cowork-guest/kernel` and `.../cowork-guest/initramfs.cpio`.
 * Exit codes: `0` ok, `2` usage, `70` sandbox, `71` bad scope, `72` bad volumes, `73` VM failed, `74` mux quarantine, `75` drain timeout,
   `76` intake timeout, `78` internal, `79` rights (a truncated or unexpected descriptor: terminal and silent). `77` is libkrun's own fatal
-  stop and is never used by the worker. Only `0` can accompany a Class A receipt.
+  stop and is never used by the worker. Only `0` can accompany a Class A receipt, and `0` alone proves nothing: libkrun's exit watchdog ends the process with the
+  same status after skipping the hook, so a Class A also needs the hook-originated `guest_halted` status with its counters (section 7).
 * `runtimeImageDigest` covers the guest boot artifacts and nothing else: the SHA-256 (lowercase hex) of the 64 bytes
   `SHA-256(kernel) || SHA-256(initramfs.cpio)`, each part the RAW 32 byte digest of that file. The data and environment disks are not
   covered. The daemon never hashes files: it learns the value from the image-pin port, and a launcher or worker that recomputes it and
   finds another value refuses the scope (`code_identity_mismatch` for the launcher, exit `71` for the worker). Pinned by `runtime-image.json`.
+
+### The stop timeline (layered)
+
+Every figure is measured from the moment the worker receives the DRAIN envelope. A figure may never be smaller than the one before it; `COWORK_NATIVE_LIMITS`
+and the two functions beside it in `protocol.ts` hold the numbers, and a test pins their order.
+
+| Layer | Name | Value | Meaning |
+| --- | --- | --- | --- |
+| G | guest budget | `budgetMs` of the DRAIN (default 30 s, at most 120 s) | the guest powers off within it; PID 1 spends it on the supervisor, the helper, the unmounts and the final `halting`. The worker exits `75` (`drain_timeout`) at G if the guest has not powered off. |
+| X | VMM exit path | up to 20 s after the power-off | libkrun's `cowork_exit` runs every exit observer (both disks' final flush) and then the exit hook; a watchdog thread ends the process after 20 s with the same status and skips what is left, the hook included. |
+| K | launcher kill | G + 20 s + 5 s | the launcher kills only the handle of the worker it owns, never before X's watchdog could have fired. A worker that is still alive at K is Class B. |
+| H | daemon wait | K + 10 s | how long the daemon waits for the verdict of one `stop`. A wait that ends sooner leaves the workspace `uncertain` and the launcher's retained receipt for boot reconcile. |
+
+For the default budget: G 30 s, K 55 s, H 65 s. The launcher's owner-loss drain follows the same table.
 
 The worker keeps the fixture's fail-closed intake: it admits only an unnamed inherited `SOCK_DGRAM` control socket, installs its
 sandbox BEFORE it reads anything, accepts exactly one rights item with exactly two descriptors, and on a truncated control buffer
@@ -183,19 +201,79 @@ Control and bootstrap payloads are the JSON object WITHOUT a trailing newline, k
 | control, up | `drain_ack` | `stopNonce` |
 | control, up | `halting` | `stopNonce` |
 | control, up | `pong` | `n` |
+| control, up | `fault` | `code` (`unmount_failed supervisor_lost protocol_violation internal`), `stopNonce` (the drain it belongs to, or `null`) |
 | bootstrap, up | `hello` | `guestBootId`, `dataSerial` (`winter-data`), `environmentSerial` (`winter-environment`) |
 | bootstrap, down | `plan` | `operationId`, `nonce`, `plan` (a protocol 3 `VolumeFilesystemPlan`, sorted keys) |
 | bootstrap, up | `receipt` | `operationId`, `nonce`, `receipt` (a `VolumeFilesystemReceipt`, sorted keys) |
-| bootstrap, up | `fault` | `operationId`, `nonce`, `code` (`bad_plan probe_failed format_failed replay_failed mount_failed internal`) |
+| bootstrap, up | `fault` | `operationId`, `nonce`, `code` (`bad_plan probe_failed format_failed replay_failed mount_failed internal bad_conversations supervisor_failed second_conversations`) |
 | bootstrap, down | `ready` | `operationId`, `nonce` |
 | bootstrap, up | `mounted` | `operationId`, `nonce` |
+| bootstrap, down | `conversations` | `operationId`, `nonce`, `incarnationId`, `profile`, `conversations` (section 6.1) |
+| bootstrap, up | `runtime_ready` | `operationId`, `nonce`, `conversations` (how many the supervisor now serves, 1 to 16) |
 
 On L1 a mux frame travels as `{"v":1,"t":"mux_down","frame":"<base64>"}` or `mux_up`: the base64 is canonical (re-encoding must
 reproduce it) and the frame inside must itself be exact. A carrier holds a bootstrap or runtime frame only.
 
+The control-up `fault` terminates at the worker like every control frame: the guest is failing (`unmount_failed` an unmount did not complete clean, `supervisor_lost` the tool
+supervisor died after it was ready, `protocol_violation` the guest refused something the host sent, `internal`). The worker reports it as the L2 status `guest_fault` (state 10)
+and from then on treats any `halting` as a violation: **after a `fault`, no Class A can exist for that run.** The guest powers off afterwards; the host never has to read the code.
+The bootstrap `fault` is different: it answers one bootstrap exchange (a plan, or the conversation set) and reaches the daemon, which treats the start as failed. After either fault the
+guest stays up and waits for `drain`.
+
 The `nonce` of a bootstrap exchange is 16 fresh random bytes chosen by the host per plan. A receipt that does not echo the
 operation and nonce of the plan in flight is not that plan's receipt. The mux payload bound for `runtime` is the existing
-`GUEST_RUNTIME_TRANSPORT_LIMITS.frameBytes`.
+`GUEST_RUNTIME_TRANSPORT_LIMITS.frameBytes`, the 4 byte stream prefix of section 6.2 included.
+
+### 6.1 The conversation set (bootstrap, host to guest)
+
+The guest's tool supervisor (`packages/runtime/src/guest/linux-supervisor.py` of the agent SDK, main `093fb3ea`) refuses an empty conversation set, so PID 1 starts it
+only when a set has been delivered. The set is one bootstrap-class message, **sent at most once per incarnation**, after `mounted` (hence after `ready`), echoing the
+plan's `operationId` and `nonce` and naming the incarnation. The guest answers `runtime_ready` (the trusted config is written, the supervisor reached ready, runtime frames are
+delivered now) or a bootstrap `fault`: `bad_conversations` (the set does not match the plan the guest holds, or the supervisor refused it), `supervisor_failed` (it did not
+reach ready), `second_conversations` (a second set arrived: it is ignored and the first stands, as a second DRAIN is). **The set is fixed for the incarnation in N2**; it
+cannot be re-sent, extended or replaced while the guest runs. A host that wants another conversation stops the workspace and starts the next incarnation.
+
+`profile` is `null` (tools only: every conversation has `runtime: null`), `host-query-v1` or `host-query-guided-v1` (every conversation has a `runtime`; `guided` is non-null
+exactly for the guided profile). The `fresh` profile is not carried: it has no duplex transport. The message holds at most 16 conversations and is at most 20 KiB.
+
+| Conversation key | Value |
+| --- | --- |
+| `logicalSessionId` | the supervisor's id: `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}` |
+| `authority` | `workspaceId, sessionId` (the backend session), `incarnationId, leaseEpoch` (1 to 2^32-1), `configRevision, grantRevision, policyRevision` |
+| `runtimeUid`, `toolUid`, `workspaceGid` | 1000 to 65535; every `runtimeUid` and `toolUid` of the set distinct, and no `workspaceGid` equal to any `runtimeUid` (the supervisor's own rules) |
+| `policy` | `auto plan ask accept-edits dont-ask bypass` |
+| `roots` | 1 to 16 of `id, guestPath, source, readOnly`; ids and views distinct, no view inside another; `guestPath` is one of `/workspace/folders/<name>[/...]`, `/workspace/repos/<name>[/...]`, `/workspace/.winter/memory`, `/workspace/.winter/scratch/<logicalSessionId>`, `/workspace/outputs/<logicalSessionId>`; `source` is a canonical absolute path under `/workspace/` (no `.`, `..` or empty component, at most 1024 bytes) |
+| `runtime` | `null`, or `model` (1 to 256 characters), `timeoutMs` (1 to 600000), `toolClasses` (a subset of `read write execute`, in that order), `provider`, `guided` (`null`, or `bindingId` a version 4 UUID and `generation` 1 or more) |
+
+`provider` is public metadata only: `{scope, selection}` with recursively sorted keys, at most 4 KiB. `scope` has exactly `accountRevision backendSessionId bootId grantRevision homeId
+incarnationId leaseEpoch modelRevision sessionId taskId workspaceId`; `selection` has `capabilities family modelKey protocol providerId providerModelId` and optionally
+`continuationDomain`. Its `workspaceId`, `sessionId` (= `logicalSessionId`), `backendSessionId` (= `authority.sessionId`), `incarnationId`, `leaseEpoch` and `grantRevision` equal the conversation's, its `modelKey` equals
+`model`, and `bootId` is the guest's live boot id from its `hello` (the same in every conversation). No key at any depth may contain `authref`, `url`, `header`, `secret`, `token` or `credential` (any case).
+A host-query conversation sees folders, repos and outputs only (never the `.winter` tree), and under `plan` every root is read-only.
+
+The wire carries what the host decides or knows. **PID 1 adds what only the guest knows** and splices the result into its trusted config: `guestBootId`, the artifact pins, the control
+and environment directories, and per conversation `storeDirectory` = `/workspace/.winter/conversations/<logicalSessionId>` and `runhomeDirectory` = `/run/winter/conversations/<logicalSessionId>`
+(created root-side, owned by `runtimeUid`, mode 0700). The uids and the gid are the host's pick inside the supervisor's range; the supervisor remains the admission authority and re-checks
+all of it (this message is a shape and consistency check, not an admission).
+
+Binding: the sender refuses to send, and the guest to start, unless `operationId` and `nonce` are the plan's, `incarnationId` is the incarnation, every `authority.{workspaceId, incarnationId, leaseEpoch}`
+is the scope's, and the providers' `bootId` is the guest's `hello`. `coworkNativeConversationsAreBound` is that comparison.
+
+### 6.2 Runtime streams
+
+A runtime-class payload is a 4 byte prefix and then the stream's bytes. The prefix is in the PAYLOAD, not the header: the header's flags stay zero and the launcher and worker, which relay runtime
+frames without reading them, change nothing.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 1 | `conversation`: index into the delivered `conversations` list, 0 to 15 |
+| 1 | 1 | `stream`: 1 = IN (host to guest), 2 = OUT (guest to host), 3 = ERR (guest to host); 0 and 4 or more are refused |
+| 2 | 1 | flags: bit 0 = this is the end of that stream after these bytes; every other bit zero |
+| 3 | 1 | reserved, zero |
+
+A conversation's three streams are the supervisor's `RuntimeDuplexPorts` input, stdout and stderr. IN travels only down; OUT and ERR only up (anything else is `bad_direction`). An empty data section
+is valid only with the end flag. After a stream's end nothing more may arrive on it, and a conversation index outside the delivered set is refused (`CoworkNativeRuntimeStreams` is that state). Data is
+limited by the payload bound, 1 MiB minus 4 bytes; a sender uses chunks of at most 256 KiB (the host's own chunk limit). Frames of this class are delivered only after `runtime_ready`.
 
 ## 7. Stop evidence
 
@@ -203,19 +281,27 @@ Two classes, kept apart by type. Both are single canonical JSON lines (the exact
 and `uncertain`).
 
 **Class A, orderly**: keys `v, class("A"), confirmationId, stopNonce, origin(host-stop | owner-loss-drain), launcherInstanceId, admissionId,
-homeId, workspaceId, incarnationId, leaseEpoch, controllerInstanceId, workerInstanceId, runtimeImageDigest, hostBootId, guest{drain,powerOff},
+homeId, workspaceId, incarnationId, leaseEpoch, controllerInstanceId, workerInstanceId, runtimeImageDigest, hostBootId, guest{drain,halting,powerOff},
 worker{pid,startToken,exit("code"),status(0),reaped(true)}, volumes[2]{purpose,device,inode,capacityBytes,attached,flushRequested,flushCompleted,finalFlush},
 issuedAtMs`. The chain it attests: the guest halted through a `drain` frame and a power-off, libkrun exited, the launcher's
 `waitpid` confirmed the exit of the process it owns, and the worker's flush receipt shows every requested flush completed and a
 final flush after power-off. It is valid only when all of these hold (`classAInvariantsHold`): the worker exited by itself with code 0 and
 was reaped (`exit = code`, `status = 0`, `reaped = true`; the libkrun exit hook reported reason `off`, never `reset`, `vcpu-error` or
-`terminal-fault`); `guest.drain = acked` exactly when `guest.powerOff = observed`; both volumes attached or neither; an attached entry has `finalFlush = completed`, `flushRequested = flushCompleted`,
+`terminal-fault`); `guest.drain = acked`, `guest.halting = observed` and `guest.powerOff = observed` stand or fall together (all three, or `not-booted` for all three); both volumes attached or neither; an attached entry has `finalFlush = completed`, `flushRequested = flushCompleted`,
 a non-zero `capacityBytes`, and zero counters when the guest never booted (it wrote nothing); an unattached entry has `finalFlush = not-attached`,
 both counters zero, and `device`, `inode` and `capacityBytes` all `0` (the launcher cannot name a file it never received). An attached entry names
 the exact file the daemon sent. **`not-booted` means "the worker never sent a `vm_running` status"**, and `unattached` means "the worker never
 accepted the two descriptors". A daemon that observed either event (`worker_state vm_running`, `volumes_accepted`, or the guest `hello`) refuses
 a live receipt that says the opposite (`not_orderly`): the receipt cannot know less than the daemon saw. A launcher that cannot state
-all of this emits Class B instead. `stopNonce` is the daemon's nonce from `stop` (`origin = host-stop`) or a launcher-minted one
+all of this emits Class B instead.
+
+**`halting` and the guest's part of a stop (round 3).** `guest.drain = acked` means the guest's control-up `drain_ack` AND `halting` both arrived, in that order, carrying the drain's nonce;
+`guest.halting = observed` is the second of them on its own, so a receipt cannot claim an acknowledgement it did not see. **A bare power-off is Class B**: a guest that powers off without
+`halting` could not prove its filesystems unmounted clean (S5: any failed step, a dirty superblock, a mount that would not go) and is `guest-fault`; so is a `guest_fault` status at any time
+(after one, no Class A can exist for the run), a power-off after `drain_ack` but before `halting`, a power-off with no `drain_ack`, and an exit reason of `reset` or `vcpu-error`. A drain that never
+reached `drain_ack` is `drain-timeout`. A worker that exited without reporting `guest_halted` (the exit watchdog skipped the hook), a `terminal-fault` or `none` reason are `flush-uncertain`. The one
+decision procedure is `coworkNativeGuestStopVerdict` in `protocol.ts` and the vectors in `guest-stop.json`; S2 and S3 carry their own drift test against them. **A worker exit with status 0 proves
+none of it.** A daemon that has seen `worker_state guest_fault` refuses an orderly receipt for that run (`not_orderly`) as it refuses one that knows less than it saw. `stopNonce` is the daemon's nonce from `stop` (`origin = host-stop`) or a launcher-minted one
 (`origin = owner-loss-drain`). The launcher writes the receipt to its durable store and fsyncs BEFORE sending it, and keeps it until
 the daemon sends `receipt_retire`.
 
@@ -241,15 +327,19 @@ S4 exports them. The fixture names stay behind a cfg in S4 as a regression oracl
 
 ```c
 struct krun_cowork_volume_identity { uint64_t device; uint64_t inode; uint64_t capacity_bytes; uint32_t uid; uint32_t mode; }
-struct krun_cowork_flush_counters_v1 { uint64_t data_requested; uint64_t data_completed; uint64_t environment_requested; uint64_t environment_completed; }
-enum krun_cowork_exit_reason { KRUN_COWORK_EXIT_OFF = 0, KRUN_COWORK_EXIT_RESET = 1, KRUN_COWORK_EXIT_VCPU_ERROR = 2, KRUN_COWORK_EXIT_TERMINAL_FAULT = 3 }
+struct krun_cowork_flush_device_v1 { uint64_t requested; uint64_t completed; uint64_t final_sync_attempted; uint64_t final_sync_completed; }
+struct krun_cowork_flush_counters_v1 { uint32_t size; uint32_t device_count; struct krun_cowork_flush_device_v1 device[2]; }
+struct krun_cowork_pin_counters_v1 { uint32_t size; uint32_t reserved; uint64_t max_pins; uint64_t max_pinned_bytes; uint64_t high_water_pins; uint64_t high_water_bytes; uint64_t budget_refusals; }
+#define KRUN_COWORK_EXIT_NONE 0, KRUN_COWORK_EXIT_OFF 1, KRUN_COWORK_EXIT_RESET 2, KRUN_COWORK_EXIT_VCPU_ERROR 3, KRUN_COWORK_EXIT_TERMINAL_FAULT 4
+typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason)
 
 int32_t krun_cowork_enable_profile_v1(uint32_t ctx_id)
 int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id, int32_t data_fd, const struct krun_cowork_volume_identity *data, int32_t environment_fd, const struct krun_cowork_volume_identity *environment)
 int32_t krun_cowork_create_runtime_port_v1(uint32_t ctx_id)
 int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id)
-int32_t krun_cowork_get_flush_counters_v1(uint32_t ctx_id, struct krun_cowork_flush_counters_v1 *out)
-int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t reason), void *user)
+int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_flush_counters_v1 *out)
+int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data)
+int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out)
 ```
 
 | New symbol | Replaces | Notes |
@@ -258,8 +348,18 @@ int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, i
 | `krun_cowork_set_workspace_disks_v1` | `krun_set_cowork_workspace_disks` | same atomic two-disk intake: 16 MiB to 256 GiB, 4096-aligned, same-inode aliases refused |
 | `krun_cowork_create_runtime_port_v1` | `krun_create_cowork_runtime_stream` | ONE generic virtio-console port, a BYTE stream; the caller owns only the returned opposite peer. The mux framing (section 6) sits above libkrun's byte port, in the worker, so no libkrun symbol is named after a mux |
 | `krun_cowork_validate_profile_v1` | none | MANDATORY preflight: the side-effect-free application of the admission `krun_start_enter` applies. The worker calls it after all configuration and before `krun_start_enter`, and starts no VM on a non-zero result |
-| `krun_cowork_get_flush_counters_v1` | none | the counters behind the receipt |
-| `krun_cowork_set_exit_hook_v1` | none | called on the VMM exit path after the block devices' final flush and before the process exits, with the reason the VMM is leaving: `off` (a guest power-off), `reset`, `vcpu-error` or `terminal-fault`. Only `off` can lead to a Class A receipt |
+| `krun_cowork_get_flush_counters_v1` | none | the counters behind the receipt. Process-global (the context leaves the library's table when the VM starts; one VM runs per process), so it takes no context: `size` in and out, `device_count` 2, `device[0]` = `winter-data`, `device[1]` = `winter-environment`. A disk's `finalFlush` is `completed` only when its `final_sync_attempted` and `final_sync_completed` are both 1 |
+| `krun_cowork_set_exit_hook_v1` | none | called once, on the exiting thread, after every other exit observer (the final flush of both disks included) and immediately before the process exits. It must not block and must not call any `krun_*` function except the counter getters. The reason is an ENUM (S4's header): `NONE` 0 is the unknown default and means "the hook never ran or no reason was recorded": it is never delivered in practice, never a power-off and never Class A (a zero-initialised or never-set reason must not read as orderly), and the type is `uint32_t`; `OFF` 1 a guest power-off; `RESET` 2; `VCPU_ERROR` 3; `TERMINAL_FAULT` 4. **A hook that tests `reason != 0` instead of `reason == OFF` treats every reason as orderly; only `OFF` can lead to a Class A receipt.** Hard crashes (a fatal signal) exit without observers or the hook |
+| `krun_cowork_get_pin_counters_v1` | none | **optional diagnostics** (G4 reads the pin high-water mark with it). Process-global, `size` in and out. It feeds no receipt, no verdict and no decision of the worker, the launcher or the daemon, and a worker built without it still starts |
+
+The exit path is bounded: every way a started VM ends goes through `cowork_exit`, which runs the observers once and then `_exit`s, and a watchdog thread ends the process with the same status after
+**20 s**, skipping whatever is left, the hook included. That 20 s is layer X of the stop timeline (section 5): the launcher's kill (G + 25 s) is later than any moment the watchdog can fire, and
+a guest that stopped cleanly (`off` or `reset`) exits with status 0 even if a late fault fires, which is why the exit code proves nothing about the receipt.
+
+**A final-flush failure does not change libkrun's exit status.** The worker therefore reads `krun_cowork_get_flush_counters_v1` after the exit sequence (it stays readable after the hook) and the verdict
+(`coworkNativeGuestStopVerdict`, with its `counters` input) is `uncertain` / `flush-uncertain`, never Class A, when any disk shows `completed < requested`, a `final_sync_attempted` or `final_sync_completed`
+other than 1, or the counters could not be read. "Exit status 0 and no hook observed" (the 20 s watchdog fired after a clean power-off with a hung observer) is the same verdict: the worker reports `exiting`, never
+`guest_halted`. **Contract invariant:** the guest's drain budget (default 30 s) is above the exit watchdog (20 s), and the launcher's kill (budget + 20 s + 5 s) is above both; `protocol.test.ts` pins the order.
 
 Retired with no production equivalent: `krun_enable_cowork_runtime_port_fixture_trace`, `krun_create_cowork_bootstrap_stream`,
 `krun_set_cowork_bootstrap_stream`. **Not admitted: `krun_get_shutdown_eventfd`** (the PL061 GPIO shutdown device). The device
@@ -271,15 +371,15 @@ virtiofs, no GPU, no input device. Stop is a `drain` control frame, then a guest
 Start: `beginIncarnation` (stopped to starting, epoch + 1); admission `reserve`; spawn the launcher; `hello`; `begin`; `begun`;
 `claim` (owner persisted BEFORE any descriptor exists); `prepareFilesystems` (intent committed); `open` data and environment;
 `volumes` line with the two descriptors; `volumes_accepted`; close the daemon's copies (closing is not release); guest `hello`;
-`plan` with a fresh nonce; guest `receipt`; `confirmFilesystems` with a sealed receipt proof; `ready`; guest `mounted`; power
-`running`, admission `running`.
+`plan` with a fresh nonce; guest `receipt`; `confirmFilesystems` with a sealed receipt proof; `ready`; guest `mounted`; when the incarnation has conversations: `conversations` (once, bound to the plan's operation and nonce), the guest starts the
+supervisor and answers `runtime_ready` (or a bootstrap `fault`), then runtime frames flow; power `running`, admission `running`.
 
-Stop: `stop` with a fresh nonce; DRAIN envelope; `drain` control frame; guest `drain_ack`, `halting`, power-off; exit hook; worker
-`status guest_halted` with counters; worker exit 0; Class A receipt; `stopped`; the daemon verifies it, calls `volumes.release`, then
+Stop: `stop` with a fresh nonce; DRAIN envelope; `drain` control frame; guest `drain_ack`, then `halting` (only after every filesystem is unmounted and verified clean), power-off; exit hook; worker
+`status guest_halted` with counters (only for reason `off` and a completed final sync on every attached disk); worker exit 0; Class A receipt; `stopped`; the daemon verifies it, calls `volumes.release`, then
 admission `release`, then moves power to `stopped`, then `receipt_retire`.
 
 Owner loss (the daemon vanished): the launcher sees EOF on L1, sends a DRAIN envelope with `origin = owner-loss` and its own nonce,
-waits at most the 30 second budget, then kills ONLY the handle of the worker it owns (never a recorded PID) and writes Class B; if the
+waits at most the stop timeline's kill deadline (section 5: the 30 second budget plus the 25 second exit allowance), then kills ONLY the handle of the worker it owns (never a recorded PID) and writes Class B; if the
 drain completed it writes a Class A with `origin = owner-loss-drain`. Either way the receipt is durable. The next daemon decides.
 
 ## 10. What is deliberately not decided here
@@ -289,6 +389,9 @@ drain completed it writes a Class A with `origin = owner-loss-drain`. Either way
 * The `allocate` action of `CoworkVolumeAuthority` is refused by the native authority: provisioning is not on the launch path.
 * Authentication of a retained receipt that is read back from the launcher's durable store is the launcher slice's design (S2). The
   adapter accepts such a receipt only through a port that must attest it; file presence alone is never proof.
+* Whether the host's `running` waits for `runtime_ready`: the contract defines the signal and the host adapter does not send the conversation set yet (REVIEW NEEDED; a host decision).
+* A conversation set is fixed for the incarnation. Re-sending, adding or replacing conversations while the guest runs is not in N2.
+* The `fresh` runtime profile is not carried by the conversation set (no duplex transport for it).
 * Sleep and wake have NO L1 line in this version (controller ruling): the launcher records power events and sends nothing. Free-space admission and the guest side are other slices.
 
 ## 11. The host adapter

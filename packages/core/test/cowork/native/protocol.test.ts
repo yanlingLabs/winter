@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
-  CoworkNativeMuxSequence, CoworkNativeProtocolError, COWORK_LIBKRUN_EXIT_REASONS, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_NATIVE_WORKER_EXIT_CODES, COWORK_NATIVE_WORKER_FAULTS, COWORK_NATIVE_WORKER_LAYOUT, coworkNativeRuntimeImageDigest, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
-  COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES, COWORK_NATIVE_LIMITS, COWORK_NATIVE_MUX_CLASSES, classAInvariantsHold, coworkNativeScopeDigest, parseCoworkNativeEnvelope, parseCoworkNativeLauncherLine,
+  CoworkNativeMuxSequence, CoworkNativeProtocolError, CoworkNativeRuntimeStreams, coworkNativeConversationsAreBound, coworkNativeGuestStopVerdict, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, COWORK_LIBKRUN_OPTIONAL_SYMBOLS, COWORK_LIBKRUN_EXIT_REASONS, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_NATIVE_WORKER_EXIT_CODES, COWORK_NATIVE_WORKER_FAULTS, COWORK_NATIVE_WORKER_LAYOUT, coworkNativeRuntimeImageDigest, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
+  COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES, COWORK_NATIVE_BOOTSTRAP_FAULTS, COWORK_NATIVE_GUEST_FAULTS, COWORK_NATIVE_WORKER_STATES, COWORK_NATIVE_WORKER_STATUS, COWORK_NATIVE_LIMITS, COWORK_NATIVE_MUX_CLASSES, classAInvariantsHold, coworkNativeScopeDigest, parseCoworkNativeEnvelope, parseCoworkNativeLauncherLine,
   parseCoworkNativeMuxFrame, parseCoworkNativeStopReceipt, serializeCoworkNativeEnvelope, serializeCoworkNativeLauncherLine, serializeCoworkNativeMuxFrame, serializeCoworkNativeStopReceipt,
-  type CoworkNativeEnvelope, type CoworkNativeLauncherDirection, type CoworkNativeMuxDirection, type CoworkNativeOrderlyReceipt, type CoworkNativeProtocolFailure,
+  type CoworkNativeEnvelope, type CoworkNativeLibkrunExitReason, type CoworkNativeLibkrunFlushCounters, type CoworkNativeFlushDevice, type CoworkNativeWorkerStatusState, type CoworkNativeLauncherDirection, type CoworkNativeMuxDirection, type CoworkNativeOrderlyReceipt, type CoworkNativeProtocolFailure,
 } from "../../../src/cowork/native/protocol";
 
 // The vectors are the cross-language oracle. Everything below reads them from disk; nothing here re-derives an expected
@@ -91,15 +91,40 @@ test("mux sequence numbers are strictly +1 per class and direction, from 1", () 
   expect(code(() => new CoworkNativeMuxSequence().accept(frame("runtime", 2), "up"))).toBe("bad_sequence");
   sequence.accept(frame("runtime", 3), "up"); // a refused frame did not advance the counter
 });
-test("a runtime payload is opaque bytes up to exactly the transport frame; one byte more is oversize", () => {
-  const limit = COWORK_NATIVE_LIMITS.muxPayloadBytes.runtime;
-  const frame = serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, payload: new Uint8Array(limit).fill(0x41) }, "up");
+test("a runtime payload is a 4 byte stream prefix and then opaque bytes, up to exactly the transport frame; one byte more is oversize", () => {
+  const limit = COWORK_NATIVE_LIMITS.muxPayloadBytes.runtime, data = limit - COWORK_NATIVE_LIMITS.runtimePrefixBytes;
+  const frame = serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 0, stream: "out", end: false, payload: new Uint8Array(data).fill(0x41) }, "up");
   expect(frame.length).toBe(16 + limit);
-  expect(parseCoworkNativeMuxFrame(frame, "up").class).toBe("runtime");
-  expect(code(() => serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, payload: new Uint8Array(limit + 1) }, "up"))).toBe("oversize");
+  expect(parseCoworkNativeMuxFrame(frame, "up")).toMatchObject({ class: "runtime", conversation: 0, stream: "out", end: false });
+  expect(code(() => serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 0, stream: "out", end: false, payload: new Uint8Array(data + 1) }, "up"))).toBe("oversize");
+});
+test("the stream prefix is four fixed bytes in the payload: conversation, stream (1 IN, 2 OUT, 3 ERR), flags, reserved", () => {
+  const wire = (conversation: number, stream: "in" | "out" | "err", end: boolean, direction: "up" | "down") => hex(serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation, stream, end, payload: new Uint8Array([0x41]) }, direction)).slice(32);
+  expect(wire(0, "in", false, "down")).toBe("00010000" + "41");
+  expect(wire(5, "out", true, "up")).toBe("05020100" + "41");
+  expect(wire(15, "err", false, "up")).toBe("0f030000" + "41");
+  expect(hex(serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 3, stream: "out", end: true, payload: new Uint8Array(0) }, "up")).slice(32)).toBe("03020100");
+  // The header's own flags stay zero: nothing about the stream lives there.
+  expect(hex(serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 0, stream: "in", end: false, payload: new Uint8Array([1]) }, "down")).slice(12, 16)).toBe("0000");
+  for (const bad of [{ conversation: 16 }, { conversation: -1 }, { conversation: 1.5 }, { stream: "stdout" }, { end: 1 }, { payload: new Uint8Array(0) }]) {
+    expect(code(() => serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 0, stream: "out", end: false, payload: new Uint8Array([1]), ...bad } as never, "up"))).toBe("bad_field");
+  }
+  expect(code(() => serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 0, stream: "in", end: false, payload: new Uint8Array([1]) }, "up"))).toBe("bad_direction");
+  expect(code(() => serializeCoworkNativeMuxFrame({ class: "runtime", seq: 1, conversation: 0, stream: "err", end: false, payload: new Uint8Array([1]) }, "down"))).toBe("bad_direction");
+});
+test("the runtime stream tracker refuses a conversation outside the delivered set and anything after a stream's end", () => {
+  const frame = (conversation: number, stream: "in" | "out" | "err", end = false) => ({ class: "runtime" as const, seq: 1, conversation, stream, end, payload: new Uint8Array([1]) });
+  const streams = new CoworkNativeRuntimeStreams(2);
+  streams.accept(frame(0, "out")); streams.accept(frame(1, "err")); streams.accept(frame(0, "out", true));
+  expect(code(() => streams.accept(frame(0, "out")))).toBe("bad_field"); // data after the end
+  expect(code(() => streams.accept(frame(0, "out", true)))).toBe("bad_field"); // a second end
+  streams.accept(frame(0, "err")); // another stream of the same conversation is independent
+  expect(code(() => streams.accept(frame(2, "out")))).toBe("bad_field"); // not in the delivered set
+  expect(code(() => streams.accept({ class: "bootstrap", seq: 1, message: { t: "mounted", operationId: "x", nonce: "0f".repeat(16) } } as never))).toBe("bad_field");
+  for (const count of [0, 17, 1.5]) expect(code(() => new CoworkNativeRuntimeStreams(count))).toBe("bad_field");
 });
 test("the largest legal mux frame fits the largest legal carrier line", () => {
-  const frame = { class: "runtime" as const, seq: 1, payload: new Uint8Array(COWORK_NATIVE_LIMITS.muxPayloadBytes.runtime).fill(0xff) };
+  const frame = { class: "runtime" as const, seq: 1, conversation: 0, stream: "in" as const, end: false, payload: new Uint8Array(COWORK_NATIVE_LIMITS.muxPayloadBytes.runtime - COWORK_NATIVE_LIMITS.runtimePrefixBytes).fill(0xff) };
   const line = serializeCoworkNativeLauncherLine({ t: "mux_down", frame }, "to-launcher");
   expect(Buffer.byteLength(line)).toBeLessThanOrEqual(COWORK_NATIVE_LIMITS.muxLineBytes);
   expect(parseCoworkNativeLauncherLine(line, "to-launcher").t).toBe("mux_down");
@@ -170,7 +195,8 @@ test("drift guard: the pinned literals", () => {
   expect({ ...COWORK_NATIVE_LIMITS, depth: { ...COWORK_NATIVE_LIMITS.depth }, muxPayloadBytes: { ...COWORK_NATIVE_LIMITS.muxPayloadBytes } }).toEqual({
     controlLineBytes: 16384, muxLineBytes: 1572864, depth: { launcher: 4, receipt: 3, control: 1, bootstrap: 8 }, headerBytes: 16,
     muxPayloadBytes: { control: 4096, bootstrap: 262144, runtime: 1048576, provider: 0 }, receiptBytes: 8192, tokenChars: 63, vcpus: 2, minMemoryMiB: 768, maxMemoryMiB: 1024,
-    drainBudgetMs: 30000, drainBudgetCeilingMs: 120000, volumeRights: 2 });
+    drainBudgetMs: 30000, drainBudgetCeilingMs: 120000, volumeRights: 2,
+    libkrunExitWatchdogMs: 20000, launcherKillMarginMs: 5000, hostStopMarginMs: 10000, conversationsBytes: 20480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096, runtimePrefixBytes: 4, runtimeConversations: 16 });
   expect({ ...COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES }).toEqual({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
   // The runtime ceiling is the existing guest runtime transport frame, not a number invented here.
   const runtime = readFileSync(join(import.meta.dir, "..", "..", "..", "src", "cowork", "guest-runtime.ts"), "utf8");
@@ -178,19 +204,25 @@ test("drift guard: the pinned literals", () => {
 });
 test("the production libkrun ABI replaces the fixture names and admits no new device", () => {
   const names = COWORK_LIBKRUN_PRODUCTION_ABI.map(symbol => symbol.name);
-  expect(names).toEqual(["krun_cowork_enable_profile_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_create_runtime_port_v1", "krun_cowork_validate_profile_v1", "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1"]);
+  expect(names).toEqual(["krun_cowork_enable_profile_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_create_runtime_port_v1", "krun_cowork_validate_profile_v1", "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1", "krun_cowork_get_pin_counters_v1"]);
   expect(new Set(names).size).toBe(names.length);
   for (const symbol of COWORK_LIBKRUN_PRODUCTION_ABI) {
     expect(symbol.name).not.toMatch(/fixture/);
     expect(symbol.signature).toContain(`${symbol.name}(`);
     expect(symbol.signature).not.toMatch(/fixture/);
-    expect(symbol.signature).toMatch(/^(int32_t) krun_cowork_[a-z0-9_]+_v1\(uint32_t ctx_id/);
+    // Per-context entry points take the context; the counter getters are process-global (the context leaves the library's table when the VM starts).
+    expect(symbol.signature).toMatch(/get_(flush|pin)_counters_v1\(/.test(symbol.signature) ? /^int32_t krun_cowork_get_(flush|pin)_counters_v1\(struct krun_cowork_(flush|pin)_counters_v1 \*out\)$/ : /^int32_t krun_cowork_[a-z0-9_]+_v1\(uint32_t ctx_id/);
   }
+  // The pin counters are optional diagnostics: nothing may depend on them, and nothing in a receipt or a verdict reads them.
+  expect([...COWORK_LIBKRUN_OPTIONAL_SYMBOLS]).toEqual(["krun_cowork_get_pin_counters_v1"]);
+  expect(readFileSync(join(import.meta.dir, "..", "..", "..", "src", "cowork", "native", "protocol.ts"), "utf8").match(/krun_cowork_get_pin_counters_v1/g)!.length).toBeGreaterThanOrEqual(2);
   expect(COWORK_LIBKRUN_PRODUCTION_ABI.filter(symbol => symbol.replaces !== null).map(symbol => symbol.replaces)).toEqual(["krun_enable_cowork_block_fixture_reclaim", "krun_set_cowork_workspace_disks", "krun_create_cowork_runtime_stream"]);
   expect(COWORK_LIBKRUN_PRODUCTION_STRUCTS.every(declaration => !/fixture/.test(declaration))).toBe(true);
   // The volume identity struct keeps its name (controller ruling); the other two are the new ones.
-  expect(COWORK_LIBKRUN_PRODUCTION_STRUCTS.map(declaration => declaration.split(" {")[0])).toEqual(["struct krun_cowork_volume_identity", "struct krun_cowork_flush_counters_v1", "enum krun_cowork_exit_reason"]);
-  expect({ ...COWORK_LIBKRUN_EXIT_REASONS }).toEqual({ off: 0, reset: 1, "vcpu-error": 2, "terminal-fault": 3 });
+  expect(COWORK_LIBKRUN_PRODUCTION_STRUCTS.map(declaration => declaration.split(" {")[0])).toEqual(["struct krun_cowork_volume_identity", "struct krun_cowork_flush_device_v1", "struct krun_cowork_flush_counters_v1", "struct krun_cowork_pin_counters_v1",
+    "#define KRUN_COWORK_EXIT_NONE 0, KRUN_COWORK_EXIT_OFF 1, KRUN_COWORK_EXIT_RESET 2, KRUN_COWORK_EXIT_VCPU_ERROR 3, KRUN_COWORK_EXIT_TERMINAL_FAULT 4", "typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason)"]);
+  // S4's header: zero is the UNKNOWN default, not a power-off; a hook that tests `reason != 0` instead of `reason == OFF` would treat every reason as orderly.
+  expect({ ...COWORK_LIBKRUN_EXIT_REASONS }).toEqual({ none: 0, off: 1, reset: 2, "vcpu-error": 3, "terminal-fault": 4 });
   // Mux framing is ABOVE libkrun's byte port: no production symbol is named after a mux.
   expect(names.some(name => /mux/.test(name))).toBe(false);
   // Retired and forbidden entry points: never re-exported under a production name.
@@ -205,8 +237,8 @@ test("the contract document names every production symbol, every message type an
   for (const type of new Set(lines.positive.map(entry => entry.t))) expect(`${type}:${doc.includes(`\`${type}\``)}`).toBe(`${type}:true`);
   for (const cls of COWORK_NATIVE_MUX_CLASSES) expect(doc).toContain(cls);
 });
-test("the vector files are exactly the five the contract names, and nothing else lives beside them", () => {
-  expect(readdirSync(vectorsDir).sort()).toEqual(["envelopes.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"]);
+test("the vector files are exactly the six the contract names, and nothing else lives beside them", () => {
+  expect(readdirSync(vectorsDir).sort()).toEqual(["envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"]);
   for (const name of readdirSync(vectorsDir)) expect(basename(name).endsWith(".json")).toBe(true);
   expect(existsSync(join(vectorsDir, "launcher-lines.json"))).toBe(true);
 });
@@ -242,4 +274,96 @@ test("a byte order mark is never skipped: not on an L1 line, not in a mux payloa
   expect(mux.negative.map(entry => entry.name)).toEqual(expect.arrayContaining(["bom-mux", "bom-mux-bootstrap"]));
   const ping = lines.positive.find(entry => entry.name === "ping")!;
   expect(code(() => parseCoworkNativeLauncherLine(`\ufeff${ping.line}`, "to-launcher"))).toBe("malformed");
+});
+
+// ---------------------------------------------------------------- round 3: conversation set, runtime streams, guest faults, halting, timing
+
+const conversationVector = (name: string) => bytes(mux.positive.find(entry => entry.name === name)!.hex);
+test("the conversation set parses to its typed form, binds to the plan it follows, and refuses every other binding", () => {
+  const frame = parseCoworkNativeMuxFrame(conversationVector("bootstrap-down-conversations-guided"), "down");
+  if (frame.class !== "bootstrap" || frame.message.t !== "conversations") throw new Error("shape");
+  const message = frame.message, authority = message.conversations[0]!.authority, bootId = (message.conversations[0]!.runtime!.provider.scope as { bootId: string }).bootId;
+  const expected = { operationId: message.operationId, nonce: message.nonce, workspaceId: authority.workspaceId, incarnationId: authority.incarnationId, leaseEpoch: authority.leaseEpoch, guestBootId: bootId };
+  expect(coworkNativeConversationsAreBound(message, expected)).toBe(true);
+  for (const wrong of [{ operationId: "other" }, { nonce: "ee".repeat(16) }, { workspaceId: "other" }, { incarnationId: "other" }, { leaseEpoch: authority.leaseEpoch + 1 }, { guestBootId: "77777777-7777-4777-8777-777777777777" }])
+    expect(`${Object.keys(wrong)[0]}:${coworkNativeConversationsAreBound(message, { ...expected, ...wrong })}`).toBe(`${Object.keys(wrong)[0]}:false`);
+  // A tools-only set has no runtime, hence no provider scope to compare a boot id with.
+  const toolsOnly = parseCoworkNativeMuxFrame(conversationVector("bootstrap-down-conversations-tools-only"), "down");
+  if (toolsOnly.class !== "bootstrap" || toolsOnly.message.t !== "conversations") throw new Error("shape");
+  expect(toolsOnly.message.profile).toBeNull();
+  expect(toolsOnly.message.conversations.map(item => item.runtime)).toEqual([null, null]);
+  expect(coworkNativeConversationsAreBound(toolsOnly.message, { ...expected, guestBootId: "77777777-7777-4777-8777-777777777777" })).toBe(true);
+  expect(Object.isFrozen(message) && Object.isFrozen(message.conversations)).toBe(true);
+});
+test("the conversation message is bounded below the bootstrap class ceiling, and its text is printable ASCII", () => {
+  expect(COWORK_NATIVE_LIMITS.conversationsBytes).toBeLessThan(COWORK_NATIVE_LIMITS.muxPayloadBytes.bootstrap);
+  expect(COWORK_NATIVE_LIMITS.conversationsBytes).toBe(20_480); // the guest relay's payload cap as built
+  for (const entry of mux.positive.filter(item => item.class === "bootstrap" || item.class === "control")) expect(Buffer.from(entry.hex, "hex").subarray(16).every(byte => byte >= 0x20 && byte <= 0x7e)).toBe(true);
+  expect(mux.negative.map(entry => entry.name)).toEqual(expect.arrayContaining(["conversations-over-the-message-cap", "conversations-non-ascii-model", "conversations-provider-over-4k"]));
+});
+test("every conversation negative is covered by a vector, and the set rules are each exercised", () => {
+  const names = mux.negative.map(entry => entry.name).filter(name => name.startsWith("conversations-"));
+  expect(names.length).toBeGreaterThanOrEqual(55);
+  for (const rule of ["empty-list", "seventeen-items", "duplicate-logical-session", "duplicate-backend-session", "uid-reused-across-items", "gid-equals-a-runtime-uid", "root-dotdot", "root-views-nested", "host-query-sees-the-winter-tree", "host-query-plan-writable",
+    "provider-credential-key", "provider-scope-other-session", "provider-model-differs", "boot-ids-differ-across-items", "guided-profile-without-binding", "tool-classes-unordered"])
+    expect(names.some(name => name.includes(rule))).toBe(true);
+});
+test("the new bootstrap faults, the guest fault and the new worker states are appended, never renumbered", () => {
+  expect([...COWORK_NATIVE_WORKER_STATUS]).toEqual(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "guest_halted", "exiting", "halting", "guest_fault"]);
+  expect([...COWORK_NATIVE_BOOTSTRAP_FAULTS]).toEqual(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations"]);
+  expect([...COWORK_NATIVE_WORKER_STATES]).toEqual(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "exited", "halting", "guest_fault"]);
+  expect([...COWORK_NATIVE_GUEST_FAULTS]).toEqual(["unmount_failed", "supervisor_lost", "protocol_violation", "internal"]);
+  for (const [name, state] of [["status-halting", 9], ["status-guest-fault", 10]] as const) expect(Buffer.from(envelopes.positive.find(entry => entry.name === name)!.hex, "hex").readUInt32LE(16)).toBe(state);
+});
+test("the control-up fault carries a closed code and the drain it belongs to, or null", () => {
+  const inDrain = parseCoworkNativeMuxFrame(conversationVector("control-up-fault-during-drain"), "up"), outside = parseCoworkNativeMuxFrame(conversationVector("control-up-fault-outside-drain"), "up");
+  expect(inDrain).toMatchObject({ class: "control", message: { t: "fault", code: "unmount_failed", stopNonce: "0f".repeat(16) } });
+  expect(outside).toMatchObject({ class: "control", message: { t: "fault", code: "supervisor_lost", stopNonce: null } });
+  expect(code(() => parseCoworkNativeMuxFrame(conversationVector("control-up-fault-during-drain"), "down"))).toBe("unknown_type"); // it only travels up
+});
+
+const GOOD_COUNTERS: CoworkNativeLibkrunFlushCounters = [{ requested: 3, completed: 3, finalSyncAttempted: 1, finalSyncCompleted: 1 }, { requested: 1, completed: 1, finalSyncAttempted: 1, finalSyncCompleted: 1 }];
+interface StopVectors { exitReasons: Record<string, number>; cases: { name: string; states: CoworkNativeWorkerStatusState[]; exitReason: CoworkNativeLibkrunExitReason | null; counters: CoworkNativeLibkrunFlushCounters | null; verdict: ReturnType<typeof coworkNativeGuestStopVerdict> }[] }
+const stops = vector<StopVectors>("guest-stop.json");
+test("the guest stop verdict matches every vector, and only the full ordered sequence with reason off is orderly", () => {
+  expect(stops.cases.length).toBeGreaterThanOrEqual(21);
+  for (const entry of stops.cases) expect(`${entry.name}:${JSON.stringify(coworkNativeGuestStopVerdict({ states: entry.states, exitReason: entry.exitReason, counters: entry.counters }))}`).toBe(`${entry.name}:${JSON.stringify(entry.verdict)}`);
+  expect(stops.cases.filter(entry => entry.verdict.guest === "orderly").map(entry => entry.name)).toEqual(["orderly"]);
+  expect({ ...stops.exitReasons }).toEqual({ ...COWORK_LIBKRUN_EXIT_REASONS });
+});
+test("a power-off with no `halting` is uncertain whatever else the guest said, and never reaches a Class A", () => {
+  const bare = stops.cases.find(entry => entry.name === "bare-power-off-without-halting")!;
+  expect(bare.states).toContain("drain_acked");
+  expect(bare.states).toContain("guest_halted");
+  expect(bare.states).not.toContain("halting");
+  expect(coworkNativeGuestStopVerdict({ states: bare.states, exitReason: "off", counters: GOOD_COUNTERS })).toEqual({ guest: "uncertain", reason: "guest-fault" });
+  // The receipt form of the same rule: acked + powered off without `halting` parses and is not orderly evidence.
+  expect(receipts.parsesButNotOrderly.map(entry => entry.name)).toEqual(expect.arrayContaining(["acked-and-powered-off-but-never-halting", "halting-and-powered-off-without-drain-ack"]));
+});
+test("a guest fault at any point, even before an otherwise perfect sequence, makes the stop uncertain", () => {
+  const states = ["vm_running", "guest_hello", "draining", "drain_acked", "halting", "guest_halted", "exiting"] as CoworkNativeWorkerStatusState[];
+  for (let at = 0; at <= states.length; at++) expect(coworkNativeGuestStopVerdict({ states: [...states.slice(0, at), "guest_fault", ...states.slice(at)], exitReason: "off", counters: GOOD_COUNTERS })).toEqual({ guest: "uncertain", reason: "guest-fault" });
+  expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters: GOOD_COUNTERS })).toEqual({ guest: "orderly" });
+});
+test("the stop timeline is layered: the exit watchdog fires before the launcher kills, and the daemon waits longer than both", () => {
+  const limits = COWORK_NATIVE_LIMITS;
+  expect(limits.libkrunExitWatchdogMs).toBe(20_000); // S4's cowork_exit OBSERVER_BUDGET
+  for (const budget of [0, 1_000, limits.drainBudgetMs, limits.drainBudgetCeilingMs]) {
+    // The guest may spend all of `budget`; the VMM exit path then needs up to the watchdog; the launcher kills only after the watchdog has fired.
+    expect(coworkNativeLauncherKillMs(budget)).toBeGreaterThan(budget + limits.libkrunExitWatchdogMs);
+    expect(coworkNativeHostStopWaitMs(budget)).toBeGreaterThan(coworkNativeLauncherKillMs(budget));
+  }
+  expect(coworkNativeLauncherKillMs(30_000)).toBe(55_000);
+  expect(coworkNativeLauncherKillMs(0)).toBe(25_000);
+  expect(limits.drainBudgetMs).toBeGreaterThan(limits.libkrunExitWatchdogMs); // the default drain budget stays above S4's exit watchdog
+  expect(coworkNativeHostStopWaitMs(30_000)).toBe(65_000);
+});
+
+test("a flush that was requested and never completed, a failed or missing final sync, or unread counters make the stop uncertain even with exit reason off", () => {
+  const states = stops.cases.find(entry => entry.name === "orderly")!.states;
+  const bad = (patch: Partial<CoworkNativeFlushDevice>): CoworkNativeLibkrunFlushCounters => [{ ...GOOD_COUNTERS[0], ...patch }, GOOD_COUNTERS[1]];
+  for (const counters of [bad({ completed: 2 }), bad({ finalSyncCompleted: 0 }), bad({ finalSyncAttempted: 0, finalSyncCompleted: 0 }), null]) expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
+  expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters: bad({ finalSyncAttempted: 0 }) })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
+  expect(coworkNativeGuestStopVerdict({ states: states.filter(state => state !== "guest_halted"), exitReason: "off", counters: GOOD_COUNTERS })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
+  expect(stops.cases.filter(entry => entry.verdict.guest === "orderly").length).toBe(1);
 });

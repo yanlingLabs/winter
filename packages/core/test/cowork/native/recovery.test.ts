@@ -151,7 +151,7 @@ describe("evidence is the only way out", () => {
       session.stagedOrderly(nonce, { admissionId: "adm-other" }),
       session.stagedOrderly(nonce, { hostBootId: "boot-two" }),
       session.stagedOrderly(nonce, { runtimeImageDigest: "e".repeat(64) }),
-      session.stagedOrderly(nonce, { guest: { drain: "acked", powerOff: "not-booted" } }),
+      session.stagedOrderly(nonce, { guest: { drain: "acked", halting: "observed", powerOff: "not-booted" } }),
       { ...session.stagedOrderly(nonce), volumes: [{ ...session.stagedOrderly(nonce).volumes[0], inode: "999" }, session.stagedOrderly(nonce).volumes[1]] },
     ] as ReturnType<typeof session.stagedOrderly>[];
     h.restart();
