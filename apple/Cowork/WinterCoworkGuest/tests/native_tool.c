@@ -27,6 +27,22 @@ static uint8_t *from_hex(const char *text, size_t *length) {
     *length = n / 2;
     return out;
 }
+/* A hex argument is the text itself, or "@-" to read it from stdin: Linux limits one argument to 128 KiB, and the oversize cases are bigger. */
+static uint8_t *from_hex_arg(const char *arg, size_t *length) {
+    if (strcmp(arg, "@-") != 0) return from_hex(arg, length);
+    size_t cap = 1 << 20, used = 0;
+    char *text = malloc(cap + 1);
+    size_t got;
+    while ((got = fread(text + used, 1, cap - used, stdin)) > 0) {
+        used += got;
+        if (used == cap) { cap *= 2; text = realloc(text, cap + 1); }
+    }
+    while (used && (text[used - 1] == '\n' || text[used - 1] == '\r')) used--;
+    text[used] = 0;
+    uint8_t *out = from_hex(text, length);
+    free(text);
+    return out;
+}
 static void print_hex(const uint8_t *data, size_t length) {
     for (size_t i = 0; i < length; i++) printf("%02x", data[i]);
 }
@@ -86,7 +102,7 @@ static int cmd_stream(int argc, char **argv) {
     if (argc != 5) return 2;
     size_t chunk = (size_t)strtoul(argv[2], NULL, 10), length = 0;
     enum wmx_direction dir = strcmp(argv[3], "up") == 0 ? WMX_UP : WMX_DOWN;
-    uint8_t *bytes = from_hex(argv[4], &length);
+    uint8_t *bytes = from_hex_arg(argv[4], &length);
     if (!bytes) return 2;
     static uint8_t payload[WMX_MAX_RUNTIME + 16];
     struct wmx_rx rx;
@@ -152,7 +168,7 @@ static int cmd_encode(int argc, char **argv) {
 static int cmd_ctl(int argc, char **argv) {
     if (argc == 5 && strcmp(argv[2], "encode") == 0) {
         size_t length = 0;
-        uint8_t *payload = from_hex(argv[4], &length);
+        uint8_t *payload = from_hex_arg(argv[4], &length);
         if (!payload) return 2;
         uint8_t out[CTL_HEADER_BYTES + CTL_MAX_PAYLOAD + 8];
         size_t n = ctl_encode(out, sizeof out, (uint8_t)argv[3][0], payload, length);
@@ -162,7 +178,7 @@ static int cmd_ctl(int argc, char **argv) {
     }
     if (argc != 6 || strcmp(argv[2], "feed") != 0) return 2;
     size_t chunk = (size_t)strtoul(argv[3], NULL, 10), length = 0;
-    uint8_t *bytes = from_hex(argv[5], &length);
+    uint8_t *bytes = from_hex_arg(argv[5], &length);
     if (!bytes) return 2;
     static uint8_t payload[CTL_MAX_PAYLOAD];
     struct ctl_reader reader;
@@ -200,7 +216,7 @@ static int cmd_control(int argc, char **argv) {
 static int cmd_frame(int argc, char **argv) {
     if (argc != 5) return 2;
     size_t length = 0;
-    uint8_t *payload = from_hex(argv[4], &length);
+    uint8_t *payload = from_hex_arg(argv[4], &length);
     if (!payload) return 2;
     static uint8_t frame[WMX_MAX_RUNTIME + 64];
     size_t n = wmx_build_frame(frame, sizeof frame, (unsigned)strtoul(argv[2], NULL, 10), (uint32_t)strtoul(argv[3], NULL, 10), payload, length);

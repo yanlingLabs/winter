@@ -155,8 +155,8 @@ class NativeCodecTests(unittest.TestCase):
         self.assertTrue(self.run_tool("frame", "2", "9", "")[0].startswith("574d583101020000" + "09000000" + "00000000"))
         for cls, seq, payload in ((3, 1, ""), (3, 1, "7b7d"), (4, 1, ""), (255, 1, ""), (0, 0, ""), (0, 1, "00" * 4097), (1, 1, "00" * 262145)):
             with self.subTest(cls=cls, seq=seq, size=len(payload) // 2):
-                self.assertEqual(self.run_tool("frame", str(cls), str(seq), payload), ["refused"])
-        self.assertNotEqual(self.run_tool("frame", "1", "1", "00" * 262144), ["refused"])
+                self.assertEqual(self.run_tool("frame", str(cls), str(seq), "@-", stdin=payload), ["refused"])
+        self.assertNotEqual(self.run_tool("frame", "1", "1", "@-", stdin="00" * 262144), ["refused"])
 
     def test_control_text_corner_cases(self):
         n = '{"v":1,"t":"ping","n":%s}'
@@ -221,7 +221,7 @@ class NativeCodecTests(unittest.TestCase):
         self.assertEqual(self.run_tool("ctl", "feed", "1", "P", "5000000001000000"), ["END"])             # truncated payload: no message
 
     def test_ctl_encode_refuses_oversize(self):
-        self.assertEqual(self.run_tool("ctl", "encode", "U", "00" * 65537), ["refused"])
+        self.assertEqual(self.run_tool("ctl", "encode", "U", "@-", stdin="00" * 65537), ["refused"])
 
 
 def NEGATIVE_HEX(name):

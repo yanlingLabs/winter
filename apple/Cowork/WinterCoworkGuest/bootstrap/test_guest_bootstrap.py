@@ -899,9 +899,9 @@ class ReviewFixTests(TempDirTest):
 
 class DescriptorChecksTests(TempDirTest):
     def test_block_identity(self):
-        gb.check_block_identity(stat.S_IFBLK | 0o600, os.makedev(254, 16), 254, 16)
-        for mode, rdev in ((stat.S_IFREG | 0o600, os.makedev(254, 16)), (stat.S_IFCHR | 0o600, os.makedev(254, 16)), (stat.S_IFDIR | 0o700, 0),
-                           (stat.S_IFBLK | 0o600, os.makedev(254, 17)), (stat.S_IFBLK | 0o600, os.makedev(253, 16))):
+        gb.check_block_identity(stat.S_IFBLK | 0o600, os.makedev(100, 16), 100, 16)
+        for mode, rdev in ((stat.S_IFREG | 0o600, os.makedev(100, 16)), (stat.S_IFCHR | 0o600, os.makedev(100, 16)), (stat.S_IFDIR | 0o700, 0),
+                           (stat.S_IFBLK | 0o600, os.makedev(100, 17)), (stat.S_IFBLK | 0o600, os.makedev(99, 16))):
             with self.subTest(mode=oct(mode), rdev=rdev):
                 with self.assertRaises(gb.Refused) as caught:
                     gb.check_block_identity(mode, rdev, 254, 16)

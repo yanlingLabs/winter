@@ -16,8 +16,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#ifndef __linux__
-#include <sys/types.h>
+#ifdef __linux__
+#include <sys/sysmacros.h>  /* makedev lives here on glibc and musl; on macOS it is in <sys/types.h> */
 #endif
 
 struct fake_entry { char path[512]; char kind; unsigned major, minor; };
