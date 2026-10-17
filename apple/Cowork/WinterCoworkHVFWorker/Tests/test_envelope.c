@@ -46,7 +46,7 @@ static int mutated64(const char *vector, size_t offset, uint64_t value) {
 #define H CW_ENV_HEADER
 
 static void golden_vectors(void) {
-    CHECK(ENV_VECTOR_COUNT == 40); /* 10 positive + 30 negative in the pinned file */
+    CHECK(ENV_VECTOR_COUNT == 58); /* 28 positive + 30 negative in the pinned file */
     for (size_t i = 0; i < ENV_VECTOR_COUNT; i++) {
         const cw_env_vector *v = &env_vectors[i];
         cw_envelope e;
@@ -265,6 +265,25 @@ static void encoder_refusals(void) {
     CHECK(cw_env_encode(&e, out, sizeof out) == CW_ENV_HEADER + CW_ENV_FAULT_BYTES);
 }
 
+/* The bounded sender never waits, even on a BLOCKING socket: with the buffer full, one attempt returns -1 at once. */
+static void bounded_sender_does_not_block(void) {
+    int pair[2];
+    CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) == 0);                   /* blocking, no O_NONBLOCK on purpose */
+    int small = 4096;
+    (void)setsockopt(pair[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+    cw_l2_out out;
+    cw_l2_out_init(&out, pair[0]);
+    int sent = 0;
+    while (sent < 100000 && cw_l2_send_status_once(&out, CW_STATUS_GUEST_HELLO, NULL, NULL) == 0) sent++;
+    CHECK(sent > 0 && sent < 100000);                                       /* returned -1 instead of hanging */
+    uint32_t seq = out.seq;
+    CHECK(cw_l2_send_status_once(&out, CW_STATUS_EXITING, NULL, NULL) == -1 && out.seq == seq);
+    CHECK(pthread_mutex_lock(&out.lock) == 0);
+    CHECK(cw_l2_send_status_once(&out, CW_STATUS_EXITING, NULL, NULL) == -1);   /* a busy lock is not waited for */
+    CHECK(pthread_mutex_unlock(&out.lock) == 0);
+    close(pair[0]); close(pair[1]);
+}
+
 static void outbound_sender(void) {
     int pair[2];
     CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) == 0);
@@ -312,6 +331,7 @@ int main(void) {
     other_payloads();
     header_rules();
     encoder_refusals();
+    bounded_sender_does_not_block();
     outbound_sender();
     return cw_test_finish("test_envelope");
 }

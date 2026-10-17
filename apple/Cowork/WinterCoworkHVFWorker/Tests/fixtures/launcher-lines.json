@@ -162,6 +162,69 @@
       "rights": 0,
       "line": "{\"v\":1,\"t\":\"fault\",\"code\":\"protocol_violation\"}\n",
       "t": "fault"
+    },
+    {
+      "name": "worker-state-code-sandboxed",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"sandboxed\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-volumes-accepted",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"volumes_accepted\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-vm-running",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"vm_running\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-guest-hello",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"guest_hello\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-draining",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"draining\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-drain-acked",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"drain_acked\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-exited",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"exited\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-halting",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"halting\"}\n",
+      "t": "worker_state"
+    },
+    {
+      "name": "worker-state-code-guest-fault",
+      "direction": "to-daemon",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"worker_state\",\"state\":\"guest_fault\"}\n",
+      "t": "worker_state"
     }
   ],
   "negative": [

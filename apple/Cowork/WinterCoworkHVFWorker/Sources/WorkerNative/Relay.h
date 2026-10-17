@@ -30,6 +30,7 @@
 #include "Mux.h"
 #include "OwnedStop.h"
 
+#include <stdatomic.h>
 #include <sys/types.h>
 
 #define CW_RELAY_CTL_SLOTS 4u
@@ -70,6 +71,9 @@ typedef struct {
     cw_stop stop;
     uint32_t env_next_seq;
     bool l2_gone, l3_gone, l4_gone, saw_hello, quarantined, done, drain_seen;
+    /* Read by the VMM exit hook WITHOUT the relay lock (the hook must not block): set before the status for the event is even attempted, so a
+     * `guest_fault` or `mux_violation` status that could not be sent (L2 full) still withholds `guest_halted`. They never go back to false. */
+    atomic_bool guest_fault_seen, quarantine_seen;
     int exit_code;
     uint64_t frames_down, frames_up;
 } cw_relay;
@@ -90,6 +94,8 @@ typedef struct {
     uint64_t completed[2];    /* ... whose flush and sync returned success */
     uint64_t final_attempted[2];
     uint64_t final_completed[2];
+    bool guest_faulted;       /* the relay accepted a control-up `fault` (reported or not): no Class A can exist for the run */
+    bool mux_quarantined;     /* the mux stream had a violation: the drain handshake cannot be trusted, so no Class A either */
 } cw_exit_report;
 
 /* True when the worker may say `guest_halted`: a guest power-off (reason off), counters read, and the final flush of BOTH volumes both

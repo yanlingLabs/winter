@@ -132,6 +132,13 @@ class MainOrder(unittest.TestCase):
         self.assertIn("pthread_mutex_trylock(&r->lock)", exit_body)
         self.assertNotRegex(exit_body, r"pthread_mutex_lock\(")
         self.assertIn("report->completed[disk] != report->requested[disk]", relay, "completed above requested is withheld too")
+        halted_gate = function_body(relay, "bool cw_exit_report_halted(")
+        self.assertIn("report->guest_faulted || report->mux_quarantined", halted_gate, "an accepted fault or a quarantine withholds guest_halted")
+        self.assertIn("atomic_load(&r->guest_fault_seen)", exit_body)
+        self.assertIn("atomic_load(&r->quarantine_seen)", exit_body)
+        self.assertIn("atomic_store(&r->guest_fault_seen, true)", function_body(relay, "static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {"))
+        self.assertIn("atomic_store(&r->quarantine_seen, true)", function_body(relay, "static void violation("))
+        self.assertLess(function_body(relay, "static void violation(").index("atomic_store"), function_body(relay, "static void violation(").index("cw_l2_send_fault"), "the flag is set before the status is attempted")
         self.assertIn("CW_STATUS_HALTING", function_body(relay, "static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {"))
         self.assertIn("CW_STATUS_GUEST_FAULT", function_body(relay, "static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {"))
         mux = code(SOURCES / "Mux.c")
@@ -296,13 +303,13 @@ class Package(unittest.TestCase):
 
     def test_the_fixtures_are_the_pinned_s1_vectors(self):
         pins = json.loads((TESTS / "fixtures" / "PINS.json").read_text())
-        self.assertEqual(sorted(pins["files"]), ["envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"])
-        self.assertEqual(pins["source"]["head"], "86a0629f70935d6392442f5f2fc0672de1d5ec19")
+        self.assertEqual(sorted(pins["files"]), ["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-flow.json", "runtime-image.json", "stop-receipts.json"])
+        self.assertEqual(pins["source"]["head"], "6c1f04e807df3a10579d6f14a15e39652bd1c7a6")
         for name, expected in pins["files"].items():
             self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
         self.assertEqual(pins["source"]["lastCommitTouchingTheseFiles"], pins["source"]["head"])
         self.assertEqual(len(pins["relayBlind"]["vectors"]), len(set(pins["relayBlind"]["vectors"])))
-        self.assertEqual(len(pins["relayBlind"]["vectors"]), 80)
+        self.assertEqual(len(pins["relayBlind"]["vectors"]), 84)
         self.assertFalse([name for name in pins["relayBlind"]["vectors"] if name.startswith("control-")], "control frames are the worker's own: none of them is passed through")
 
     def test_every_test_source_is_run_and_none_touches_the_sandbox_or_a_vm(self):

@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 
 static void golden_vectors(void) {
-    CHECK(MUX_VECTOR_COUNT == 131); /* 26 positive + 105 negative in the pinned file */
+    CHECK(MUX_VECTOR_COUNT == 145); /* 36 positive + 109 negative in the pinned file */
     unsigned blind_seen = 0;
     for (size_t i = 0; i < MUX_VECTOR_COUNT; i++) {
         const cw_mux_vector *v = &mux_vectors[i];

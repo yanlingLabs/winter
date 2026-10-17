@@ -79,7 +79,7 @@ def main() -> None:
     stop_rows = []
     for case in stop["cases"]:
         counters = case["counters"]
-        if counters is None:
+        if counters is None or len(counters) != 2:   # unreadable, or a device count other than 2: the worker's translation refuses both
             counter_text, valid = "{ { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }", 0
         else:
             valid = 1

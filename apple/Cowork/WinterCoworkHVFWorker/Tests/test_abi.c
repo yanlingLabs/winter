@@ -88,7 +88,7 @@ static void limits(void) {
 static void stop_vectors_drift(void) {
     CHECK(stop_reason_none == KRUN_COWORK_EXIT_NONE && stop_reason_off == KRUN_COWORK_EXIT_OFF && stop_reason_reset == KRUN_COWORK_EXIT_RESET
           && stop_reason_vcpu_error == KRUN_COWORK_EXIT_VCPU_ERROR && stop_reason_terminal_fault == KRUN_COWORK_EXIT_TERMINAL_FAULT);
-    CHECK(STOP_VECTOR_COUNT == 23);
+    CHECK(STOP_VECTOR_COUNT == 29);
     unsigned orderly = 0, withheld = 0;
     for (size_t i = 0; i < STOP_VECTOR_COUNT; i++) {
         const cw_stop_vector *v = &stop_vectors[i];
@@ -108,7 +108,8 @@ static void stop_vectors_drift(void) {
         /* the cases that are not orderly because of the exit hook alone */
         if (strcmp(v->name, "reset-instead-of-off") == 0 || strcmp(v->name, "vcpu-error") == 0 || strcmp(v->name, "terminal-fault") == 0 || strcmp(v->name, "reason-none") == 0
             || strcmp(v->name, "no-reason-delivered") == 0 || strcmp(v->name, "flush-requested-never-completed") == 0 || strcmp(v->name, "final-sync-failed-exit-status-unchanged") == 0
-            || strcmp(v->name, "final-sync-never-attempted") == 0 || strcmp(v->name, "counters-unreadable") == 0)
+            || strcmp(v->name, "final-sync-never-attempted") == 0 || strcmp(v->name, "counters-unreadable") == 0
+            || strcmp(v->name, "flush-completed-above-requested") == 0 || strncmp(v->name, "counters-array-of-", 18) == 0)
             CHECK(!halted);
     }
     /* The two round 3 final vectors: the WORKER may send guest_halted after a mux quarantine or with no drain_ack (the hook knows nothing of either); it is the

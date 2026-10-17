@@ -34,6 +34,8 @@ void cw_relay_init(cw_relay *r, int l2, int l3, int l4, cw_l2_out *out, uint32_t
     cw_mux_reader_reset(&r->down_reader);
     cw_mux_reader_reset(&r->up_reader);
     cw_stop_init(&r->stop);
+    atomic_init(&r->guest_fault_seen, false);
+    atomic_init(&r->quarantine_seen, false);
     prepare_socket(l2);
     prepare_socket(l3);
     prepare_socket(l4);
@@ -80,6 +82,7 @@ static void finish(cw_relay *r, int exit_code) {
 static void violation(cw_relay *r, uint64_t now) {
     if (r->quarantined) return;
     r->quarantined = true;
+    atomic_store(&r->quarantine_seen, true);   /* before the status below: a lost status must not reopen the way to guest_halted */
     (void)cw_l2_send_fault(r->out, CW_FAULT_MUX_VIOLATION);
     cw_stop_quarantine(&r->stop, now);
 }
@@ -136,6 +139,7 @@ static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {
         (void)cw_l2_send_status(r->out, CW_STATUS_HALTING, NULL, NULL);
         break;
     case CW_STOP_REPORT_FAULT:
+        atomic_store(&r->guest_fault_seen, true);   /* before the send: L2 may be full */
         (void)cw_l2_send_status(r->out, CW_STATUS_GUEST_FAULT, NULL, NULL);
         break;
     case CW_STOP_VIOLATION:
@@ -326,6 +330,7 @@ int cw_relay_step(cw_relay *r, int max_wait_ms) {
 }
 
 bool cw_exit_report_halted(const cw_exit_report *report) {
+    if (report->guest_faulted || report->mux_quarantined) return false;   /* the launcher's verdict refuses these too; the worker does not claim a halt it cannot stand behind */
     if (!report->reason_off || !report->counters_valid) return false;
     for (int disk = 0; disk < 2; disk++) {
         if (report->final_attempted[disk] != 1 || report->final_completed[disk] != 1) return false;
@@ -334,7 +339,11 @@ bool cw_exit_report_halted(const cw_exit_report *report) {
     return true;
 }
 
-void cw_relay_vmm_exit(cw_relay *r, const cw_exit_report *report) {
+void cw_relay_vmm_exit(cw_relay *r, const cw_exit_report *reported) {
+    cw_exit_report copy = *reported;
+    copy.guest_faulted = copy.guest_faulted || atomic_load(&r->guest_fault_seen);
+    copy.mux_quarantined = copy.mux_quarantined || atomic_load(&r->quarantine_seen);
+    const cw_exit_report *report = &copy;
     /* This runs on libkrun's exit path, whose header says the hook must not block: the relay lock is only TRIED (the process is about to end, so
      * a phase update that loses the race changes nothing) and each status gets ONE non-blocking attempt, no retry loop. A lost `guest_halted`
      * is only Class B; a hook that waited for a launcher that is not reading would hold libkrun's exit path for seconds. */

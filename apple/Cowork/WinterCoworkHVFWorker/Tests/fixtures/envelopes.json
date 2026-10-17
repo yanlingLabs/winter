@@ -95,6 +95,150 @@
       "hex": "574556310105000004000000080000000800000000000000",
       "kind": "fault",
       "seq": 4
+    },
+    {
+      "name": "status-code-1-sandboxed",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000001000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-2-volumes-accepted",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000002000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-3-vm-running",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000003000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-4-guest-hello",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000004000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-5-draining",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000005000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-6-drain-acked",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000006000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-7-guest-halted",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000007000000000000002900000000000000290000000000000007000000000000000700000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-8-exiting",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000008000000000000002900000000000000290000000000000007000000000000000700000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-9-halting",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "5745563101040000050000002800000009000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "status-code-10-guest-fault",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310104000005000000280000000a000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "status",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-1-bad-scope",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000100000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-2-bad-volumes",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000200000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-3-sandbox-failed",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000300000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-4-vm-failed",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000400000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-5-mux-violation",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000500000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-6-truncated-rights",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000600000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-7-internal",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000700000000000000",
+      "kind": "fault",
+      "seq": 5
+    },
+    {
+      "name": "fault-code-8-second-drain",
+      "direction": "to-launcher",
+      "rights": 0,
+      "hex": "574556310105000005000000080000000800000000000000",
+      "kind": "fault",
+      "seq": 5
     }
   ],
   "negative": [

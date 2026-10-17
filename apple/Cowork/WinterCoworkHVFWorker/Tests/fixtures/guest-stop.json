@@ -567,6 +567,200 @@
       }
     },
     {
+      "name": "draining-before-vm-running",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "draining",
+        "vm_running",
+        "guest_hello",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "guest-halted-before-halting",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "guest_halted",
+        "halting",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "drain-acked-before-draining",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "drain_acked",
+        "draining",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "counters-array-of-one",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "counters-array-of-three",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
+      "name": "flush-completed-above-requested",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "drain_acked",
+        "halting",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 4,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "flush-uncertain"
+      }
+    },
+    {
       "name": "flush-requested-never-completed",
       "states": [
         "sandboxed",
