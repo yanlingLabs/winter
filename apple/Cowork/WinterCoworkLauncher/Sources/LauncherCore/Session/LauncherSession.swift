@@ -433,8 +433,7 @@ public final class LauncherSession {
         ports.disarm(.exitProbe)
         // Whatever the worker said before it ended is still queued: read it all before judging the exit. (What it says can end the
         // session right here, hence the second look at the phase.)
-        ports.drainWorkerInputs()
-        guard phase != .finished else { return }
+        ports.drainWorkerInputs()   // what it says can end the session right here; `commit` refuses a finished one
         let refusal: RefusalCode? = phase == .starting ? .sandbox_failed : nil
         commit(exit: exit, killSent: false, killReason: nil, refusal: refusal, stopId: drainRequestId)
     }

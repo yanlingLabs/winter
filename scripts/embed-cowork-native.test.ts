@@ -8,7 +8,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  COWORK_LAUNCHER_PACKAGE, COWORK_NATIVE, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE_TEAM, COWORK_TEST_BUILD_CONDITION, COWORK_TEST_HOOK_MARKER, COWORK_WORKER_ENTITLEMENT,
+  COWORK_LAUNCHER_PACKAGE, COWORK_NATIVE, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE_TEAM, COWORK_TEST_BUILD_CONDITION, COWORK_TEST_HOOK_MARKER, COWORK_TEST_PIN_MARKER, COWORK_WORKER_ENTITLEMENT,
   checkSignedNative, coworkRequirement, coworkSignArgs, entitlementKeys, launcherBuildArgs, linkedLibraries, nonPlatformLibraries, type SignedNativeFacts,
 } from "./cowork-native-lib";
 
@@ -156,6 +156,16 @@ describe("embed-cowork-native.sh (the Cowork native pair's build phase, standalo
     }
   });
 
+  test("refuses a binary that carries the launcher's test pin text, in either member", () => {
+    for (const member of ["launcher", "worker"] as const) {
+      const r = rig();
+      appendFileSync(r[member], `x${COWORK_TEST_PIN_MARKER}00"`);
+      const out = embed(r);
+      expect(out.status).toBe(1);
+      expect(out.stderr).toContain(`${COWORK_NATIVE[member].name} contains test hooks`);
+    }
+  });
+
   test("refuses a binary that names the builder's repository", () => {
     const r = rig();
     appendFileSync(r.launcher, `${REPO}/apple/Cowork/WinterCoworkLauncher/Sources/main.swift`);
@@ -228,6 +238,7 @@ describe("cowork-native-lib", () => {
     expect(bad("launcher", { otoolL: `${good("launcher").otoolL}\t/opt/homebrew/lib/libkrun.dylib (compatibility version 1.0.0)\n` }).join("|")).toContain("/opt/homebrew/lib/libkrun.dylib");
     expect(bad("launcher", { otoolL: `${good("launcher").otoolL}\t@rpath/libfoo.dylib (compatibility version 1.0.0)\n` }).join("|")).toContain("@rpath/libfoo.dylib");
     expect(bad("launcher", { executable: Buffer.from(`xx--${COWORK_TEST_HOOK_MARKER}PARENT_CDHASH`) }).join("|")).toContain("contains test hooks");
+    expect(bad("launcher", { executable: Buffer.from(`xx${COWORK_TEST_PIN_MARKER}ab"`) }).join("|")).toContain("contains test hooks");
   });
   test("an ad-hoc test signature is checked without a team", () => {
     const adhoc = { ...good("launcher"), codesignDvv: "Identifier=com.winter.cowork.launcher\nCodeDirectory v=20500 flags=0x10002(adhoc,runtime) hashes=1+2\nTeamIdentifier=not set\n" };
@@ -265,6 +276,9 @@ describe("the pair stays unwired and agrees with the Swift launcher", () => {
     }
     expect(script).toContain(COWORK_NATIVE_TEAM);
     expect(swift).toContain(COWORK_NATIVE_TEAM);
+    // The dev launcher's identity is read by the launcher from its own signature; the lib and the Swift agree on it, and the shipped daemon is winter-core.
+    expect(swift).toContain(`"${COWORK_NATIVE.launcher.devIdentifier}"`);
+    expect(swift).toContain('"winter-core"');
     expect(script).toContain(`"${COWORK_TEST_HOOK_MARKER}"`);
     expect(script).toContain(COWORK_WORKER_ENTITLEMENT);
     expect(read("apple", "Cowork", "WinterCoworkLauncher", "Sources", "LauncherCore", "Launcher", "LauncherArguments.swift")).toContain(COWORK_TEST_BUILD_CONDITION);

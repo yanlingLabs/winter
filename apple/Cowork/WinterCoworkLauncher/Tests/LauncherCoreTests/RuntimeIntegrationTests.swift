@@ -147,7 +147,9 @@ final class RuntimeIntegrationTests: XCTestCase {
         let rig = try RuntimeRig()
         XCTAssertTrue(rig.hello())
         // A descriptor WITHOUT close-on-exec, open in the launcher's process across the spawn: only POSIX_SPAWN_CLOEXEC_DEFAULT keeps it from the worker.
-        let stray = open("/dev/null", O_RDONLY); XCTAssertEqual(lc_has_cloexec(stray), 0); defer { close(stray) }
+        // (Placed high with F_DUPFD: a low number would be overwritten by the worker's own descriptors 3 and 4 and prove nothing.)
+        let low = open("/dev/null", O_RDONLY), stray = fcntl(low, F_DUPFD, 60); close(low)
+        XCTAssertGreaterThanOrEqual(stray, 60); XCTAssertEqual(lc_has_cloexec(stray), 0); defer { close(stray) }
         let (pid, token) = try XCTUnwrap(rig.begin())
         XCTAssertNotNil(rig.daemon.next { if case .workerState(.sandboxed) = $0 { true } else { nil } })
 
@@ -327,6 +329,21 @@ final class RuntimeIntegrationTests: XCTestCase {
         rig.daemon.send(.stop(id: "req-stop", stopNonce: Fixture.nonce, reason: .user, budgetMs: 10_000))
         let receipt = try XCTUnwrap(rig.daemon.next { if case .stopped(_, let r) = $0 { r } else { nil } })
         XCTAssertTrue(receipt.invariantsHold)
+    }
+    func testAWorkerThatIsSlowButAlwaysProgressingSurvivesEveryStallWindow() throws {
+        // 2 MiB at 64 KiB per 50 ms is well over a second; the stall window is 250 ms, so the stall timer fires several times, and each time
+        // the worker has accepted bytes since the last one: it is re-armed, never acted on.
+        let rig = try RuntimeRig(mode: "trickle", relayLimits: (soft: 64 << 10, hard: 32 << 20, stallMs: 250))
+        XCTAssertTrue(rig.hello()); let (pid, _) = try XCTUnwrap(rig.begin()); XCTAssertTrue(try rig.attach(try DiskPair()))
+        let payload = [UInt8](repeating: 0x63, count: 1_048_576)
+        for seq in 1...2 { XCTAssertTrue(rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.runtime, seq: UInt32(seq), payload: payload)), timeout: 30), "frame \(seq)") }
+        XCTAssertTrue(rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.bootstrap, seq: 1, payload: Array("done".utf8)))))
+        let report = try XCTUnwrap(rig.daemon.next(timeout: 30) { (line: LineToDaemon) -> String? in
+            if case .muxUp(let f) = line, f[5] == MuxClass.runtime.rawValue, f.count > 21, String(decoding: f[16..<21], as: UTF8.self) == "sunk:" { return String(decoding: f[16...], as: UTF8.self) }
+            return nil
+        })
+        XCTAssertEqual(report, "sunk:\(2 * 1_048_576 + 4):3")
+        XCTAssertEqual(kill(Int32(pid), 0), 0, "a worker that keeps accepting bytes is never killed for being slow")
     }
     func testAWorkerThatNeverDrainsL3IsKilledOnlyAfterTheStallWindowNotWhenTheBacklogFirstFills() throws {
         let rig = try RuntimeRig(mode: "stalll3", relayLimits: (soft: 64 << 10, hard: 32 << 20, stallMs: 1_500))

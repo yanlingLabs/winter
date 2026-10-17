@@ -14,7 +14,9 @@ import { signedFacts } from "./dev-daemon-lib";
 export const COWORK_NATIVE_TEAM = "37N77U9RSZ";
 
 export const COWORK_NATIVE = {
-  launcher: { identifier: "com.winter.cowork.launcher", name: "winter-cowork-launcher" },
+  /** `devIdentifier` is what the owner's dev flow signs the launcher as: the launcher reads which daemon it serves from ITS OWN signing
+   *  identifier (no argument can switch it), so a dev launcher is a launcher signed with this one. */
+  launcher: { identifier: "com.winter.cowork.launcher", devIdentifier: "com.winter.cowork.launcher.dev", name: "winter-cowork-launcher" },
   worker: { identifier: "com.winter.cowork.worker", name: "winter-cowork-worker" },
 } as const;
 export type CoworkNativeRole = keyof typeof COWORK_NATIVE;
@@ -30,6 +32,8 @@ export const COWORK_WORKER_ENTITLEMENT = "com.apple.security.hypervisor";
 export const COWORK_TEST_BUILD_CONDITION = "WINTER_COWORK_TEST_BUILD";
 /** Every test hook's argument name starts with this. A normal or release binary must contain none of it. */
 export const COWORK_TEST_HOOK_MARKER = "WINTER_COWORK_TEST_";
+/** The launcher's test pin builds a `cdhash H"…"` requirement; that text exists in the binary only under the test condition too. */
+export const COWORK_TEST_PIN_MARKER = 'cdhash H"';
 
 /** The Swift package of the launcher, relative to the repository root. */
 export const COWORK_LAUNCHER_PACKAGE = join("apple", "Cowork", "WinterCoworkLauncher");
@@ -111,6 +115,8 @@ export function checkSignedNative(role: CoworkNativeRole, teamId: string | undef
   }
   const foreign = nonPlatformLibraries(linkedLibraries(facts.otoolL));
   if (foreign.length > 0) failures.push(`${want.name}: links non-platform libraries (${foreign.join(", ")})`);
-  if (Buffer.from(facts.executable).includes(COWORK_TEST_HOOK_MARKER)) failures.push(`${want.name}: contains test hooks (${COWORK_TEST_HOOK_MARKER}…) — they compile only under ${COWORK_TEST_BUILD_CONDITION}`);
+  for (const marker of [COWORK_TEST_HOOK_MARKER, COWORK_TEST_PIN_MARKER]) {
+    if (Buffer.from(facts.executable).includes(marker)) failures.push(`${want.name}: contains test hooks (${marker}…) — they compile only under ${COWORK_TEST_BUILD_CONDITION}`);
+  }
   return failures;
 }

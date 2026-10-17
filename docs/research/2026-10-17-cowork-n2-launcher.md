@@ -26,48 +26,85 @@ Ported by reading, never by editing: `CleanStopAuthority` (`OrderlyStopAuthority
 `EventQueue` (`OutboundQueue`, terminal headroom) and `DeviceOperationGate` (`RelayGate`) from `WinterCoworkVM`; `OwnedChild.swift`,
 `native.c` (`kb_channel`, `spawn_suspended`, the injectable `wait_locked`) and `FixedFixtureImage` from the key broker.
 
+## Contract pin and what changed in the fix round
+
+Pinned to S1's final contract: `cowork/n2-host-adapter` at `a7160f9f` (contract commit `abb2f361`). Vectors are five files (`envelopes`,
+`launcher-lines`, `mux-frames`, `stop-receipts`, `runtime-image`) with SHA-256 pins in `PINS.json`. If S1 lands more contract-only commits
+(conversation-set delivery, runtime stream ids) the pins move again.
+
+- `homeId` is on `begin` (after `id`) and is its ONLY source; there is no `--home-id`. It is stamped into every receipt; it does not travel on L2.
+- Memory floor 768 MiB; WorkerFault code 8 `second_drain`.
+- The daemon's shipped signing identifier is `winter-core` (`apple/ComputerUse/PROTOCOL.md` section 2.2); dev stays `com.winter.core.dev`.
+
+## New security logic (REVIEW NEEDED): `runtimeImageDigest`
+
+`GuestArtifacts.swift` recomputes SHA-256(SHA-256(kernel) || SHA-256(initramfs.cpio)) over `<worker dir>/cowork-guest/{kernel,initramfs.cpio}`
+and refuses the scope with `code_identity_mismatch` before anything is spawned. The directory and both files are opened with `O_NOFOLLOW`,
+must be regular, singly linked and not group/other writable, and are hashed from the descriptors.
+
+Remaining window: libkrun opens the same files BY PATH inside the worker, after this hash. A same-user process able to replace `kernel` in that
+gap wins the race. Proposal to close it (a contract change, S3/S4): the launcher keeps the two verified descriptors open and passes them down,
+the worker hands libkrun `/dev/fd/N` paths, and libkrun reads only those. Not built here.
+
 ## Where the contract is silent (REVIEW NEEDED)
 
-1. **`homeId` is not on L1.** Every Class A receipt carries it and `stop-proof.ts` refuses a mismatch, but `begin` has no such field (S1's
-   fake launcher takes it as a constructor option). The launcher takes `--home-id` at spawn. S1 should add it to `begin` or bless the argument.
-2. **Worker descriptor layout.** Section 5 says "an unnamed inherited datagram control socket" without a number. Chosen: 3 = L2, 4 = L3, argv =
-   `[path]`, environment `LC_ALL=C LANG=C`. S3 must match (the fixture passed the number in argv).
-3. **Sleep and wake have no L1 line** (section 10: "other slices"). The observer records `will_sleep` / `did_wake` in a bounded ledger behind
-   `PowerReporting` and sends nothing. Proposed line, daemon-bound: `{"v":1,"t":"power","event":"will_sleep"|"did_wake"}`.
-4. **The daemon's signing identifier.** The brief names `com.winter.core`; the Computer Use helper (`HelperIdentity.swift`,
-   `scripts/computer-helper-lib.ts`) records that the SHIPPED daemon carries `winter-core` (signed without `--identifier`) and that changing it
-   would change every Keychain access list. Implemented as briefed, one constant. If the helper is right, the launcher refuses the real daemon.
-5. **The worker's identifier** `com.winter.cowork.worker` comes from the plan (section 4), not the contract. S3 confirms.
-6. **Boot id.** `hello.hostBootId` and every receipt's `hostBootId` are `kern.bootsessionuuid` verbatim (uppercase UUID). The daemon's
-   `CoworkNativeHostBoot.bootId()` (S6/S7) must return the same text, byte for byte.
-7. **Descriptor attribution on L1.** Descriptors belong to the line that starts at the first byte of the chunk they arrived with, and only at a
-   line boundary; anywhere else (or on any line but `volumes`, or a count other than two) is a violation: close them all, one
-   `fault protocol_violation`, then owner-loss handling. Later lines coalesced into the same chunk are fine.
-8. **Refusal codes the contract leaves open.** READY timeout and a worker fault `sandbox_failed` map to `sandbox_failed`; a changed pinned file or
-   a failed SecCode to `code_identity_mismatch`; a digest mismatch, any descriptor that does not name the stated file, a worker `bad_volumes`
-   or an unacknowledged transfer to `volumes_rejected`. After a refused `begin` for a worker that WAS spawned the launcher also sends the
-   Class B `uncertain`, so the host's `failStart` wait ends at once (S1's inbox serves queued terminal messages first).
-9. **A worker killed before it held a descriptor cannot be Class A**, because the receipt requires `exit:"code"`, `status:0`. The host then ends
-   such a failed start `uncertain` even though nothing was ever attached. Conservative, and S1's call whether Class A may ever say `signal`.
-10. **Retained receipt attestation** (below).
+1. **Worker descriptor layout.** Section 5 says "an unnamed inherited datagram control socket" without a number. Chosen: 3 = L2, 4 = L3, argv =
+   `[path]`, environment `LC_ALL=C LANG=C`. S3 must match.
+2. **Sleep and wake have no L1 line.** The observer records `will_sleep` / `did_wake` in a bounded ledger behind `PowerReporting` and sends
+   nothing. Proposed line, daemon-bound: `{"v":1,"t":"power","event":"will_sleep"|"did_wake"}`.
+3. **The worker's identifier** `com.winter.cowork.worker` comes from the plan (section 4), not the contract. S3 confirms.
+4. **Boot id.** `hostBootId` is `kern.bootsessionuuid` verbatim; the daemon's `bootId()` must return the same text byte for byte.
+5. **Descriptor attribution on L1.** Descriptors belong to the line that starts at the first byte of the chunk they arrived with, only at a
+   line boundary, only on `volumes`, exactly two. Anything else is a violation: close them all, one `fault protocol_violation`, owner-loss handling.
+6. **Refusal codes the contract leaves open.** READY timeout and worker fault `sandbox_failed` map to `sandbox_failed`; a changed pinned file, a
+   failed SecCode or a runtime image mismatch to `code_identity_mismatch`; a digest mismatch, a descriptor that does not name the stated file, a
+   worker `bad_volumes` or an unacknowledged transfer to `volumes_rejected`. After a refused `begin` for a spawned worker the launcher also sends
+   Class B `uncertain`, so the host's `failStart` wait ends at once.
+7. **A worker killed before it held a descriptor cannot be Class A** (the receipt requires `exit:"code"`, `status:0`). Conservative; S1's call
+   whether Class A may ever say `signal`.
+8. **Worker stdout and stderr go to /dev/null.** Deliberate: the launcher never reads worker output, and a worker log would be an unreviewed
+   channel out of the sandbox. Diagnostics travel as typed `fault` frames only. If the owner wants worker logs, it needs a contract line.
+9. **S7 must never hand its L1 end to another process.** `LOCAL_PEERTOKEN` reports the LAST process that touched the peer socket, so a daemon that
+   passes its end on (fork without exec, helper) changes the identity the launcher authenticates. The launcher also demands that the token's pid
+   equal `getppid()`.
+10. **Profile selection is not an argument.** The launcher reads which daemon it serves from its OWN code signature (identifier
+    `com.winter.cowork.launcher.dev` selects `com.winter.core.dev`; anything else, including unsigned, is production and fails closed). A true
+    compile-time switch would need a second build of the binary; the signed identifier is already enforced by the production requirement the
+    daemon places on the launcher, so nothing argument-selectable remains.
+11. **`DEVELOPMENT_TEAM` versus the compiled team.** `apple/Winter/project.yml` builds with `DEVELOPMENT_TEAM: 37N77U9RSZ` while the launcher
+    compiles `certificate leaf[subject.OU] = "37N77U9RSZ"` into its requirements. They agree today; they are two copies of one fact, pinned
+    equal by `scripts/embed-cowork-native.test.ts`. A team change must move both, and the embed gate checks the recorded requirement.
+12. **Exit judging.** A single `WNOHANG` probe at the process-exit event returned 0 in 0.3 to 0.65 percent of exits. A "still running" answer now
+    retries on a bounded 10 ms timer (`exitProbeAttempts`), and a coarse 1 s backstop probe runs while a worker exists and re-arms itself, so no
+    exit goes unjudged.
+13. **Back-pressure.** The outbound L1 queue pauses L3 reads at a 4 MiB soft limit and resumes below it; only the hard cap (soft limit plus
+    1 MiB terminal reserve) still kills, so a slow daemon no longer costs a healthy worker.
+14. **Retained receipt attestation** (below).
 
 ## The retained-receipt path (D1) and a storage proposal
 
 `DurableReceiptStore` is the protocol; `DirectoryReceiptStore` is a file-backed implementation (one `<workspaceId>.<incarnationId>.<epoch>.receipt`
-per scope, exactly the receipt line, 0600, directory 0700 and owned by the user, write-once, no symlinks, refuses any `.winter*` component);
-the in-memory double lives in the tests. The launcher refuses to start without a store; the directory is created (mode 0700) at start, and no file exists until a verdict does.
+per scope, exactly the receipt line, 0600, directory 0700 and owned by the user, write-once, `st_nlink == 1`, no symlinks). It refuses a location
+with a `.winter*` component, judged case-insensitively on the REAL path of the open directory (`fcntl(F_GETPATH)` follows every symlink, so a
+symlinked ancestor or `.WINTER-x` is caught). The in-memory double lives in the tests.
 
 Proposed production directory: a user-level directory OUTSIDE the Winter home that survives a home wipe, named per `homeId`, created by the
-daemon with mode 0700 and passed as `--receipt-dir` (for example under the user's Application Support, in a `Winter Cowork` folder).
+daemon with mode 0700 and passed as `--receipt-dir`.
 
-Attestation is the open problem, and the file alone is not it: any process of the same user can write such a file. What the file format
-supports today: the daemon-side port can require that name, content, scope, `homeId`, owner tuple and boot id all agree. Stronger options, in
-rising cost: (a) additionally require the guard probes S1 already has for owner recovery (process absent, images unlocked) before a RETAINED
-Class A may release, because `mintOrderlyStopProof` does not require them today for `source: retained`; (b) a MAC over the line whose key is
-held in the Keychain with an access list naming the launcher's requirement (forbidden in this slice, so needs an explicit ruling); (c) the next
-daemon asks a freshly spawned, SecCode-verified launcher to read its own store, which needs new L1 lines (a contract change). Recommendation:
-(a) now, (c) when the contract is next revised. Residual: a same-user process that forges a retained Class A can release a disk whose VM is still
-running (data risk, not secrecy).
+**Mandatory guard probes.** For `source: retained`, S1's two live guard probes, process absent and images unlocked, are REQUIRED before the
+daemon releases anything. A retained Class A without both is not proof. S1 implements the mint side; this launcher only writes the file.
+
+**Authenticity.** A file the same user can write is not authentic: any same-user process can forge a retained Class A, and the probes above
+are what stands between a forgery and a release. A MAC over the line, with a key held in the Keychain under an access list naming the launcher,
+would raise the bar, but Keychain use is forbidden in this slice, so it is an OPEN ITEM that needs an owner ruling. Option (c), asking a freshly
+spawned, SecCode-verified launcher to read its own store, needs new L1 lines (a contract change). Recommendation: the probes now, (c) at the next
+contract revision.
+
+**Retire gap.** After an owner-loss exit nothing can retire the file over L1 (the socket is gone), and Class B files are never retired. Proposal
+(S1/S7, daemon side, no contract line needed): the next daemon, after it has accepted a retained receipt AND the two probes pass AND the disks are
+released, deletes the file by its exact scope name, and sweeps Class B files of a scope once a later Class A for the same workspace is accepted or
+the owner chooses Recover. Until then the files are inert write-once records; a stale file cannot release a newer incarnation because the name and
+content carry the scope and epoch.
 
 ## Evidence
 

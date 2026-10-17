@@ -462,6 +462,8 @@ final class SessionTests: XCTestCase {
         var config = Fixture.config(); config.exitProbeAttempts = 3
         let h = SessionHarness(config: config); try h.bringUp()
         h.ports.process.probeResult = .running
+        h.fire(.backstop)   // a backstop probe that finds the worker running starts no retries of its own (no exit event was seen)
+        XCTAssertNil(h.ports.armed[.exitProbe], "no short retry is started by a backstop probe")
         h.session.workerProcessEnded()
         for _ in 0..<3 { h.fire(.exitProbe) }
         XCTAssertNil(h.ports.armed[.exitProbe], "after the bound the short retries stop")

@@ -24,6 +24,7 @@ import LauncherNative
  *   noaccept           receives the disks and says nothing
  *   l3rights           sends a mux frame on L3 with a descriptor attached
  *   sink               like ok, but consumes L3 SLOWLY and counts it (a bootstrap frame "done" is answered with a runtime frame "sunk:<bytes>:<frames>")
+ *   trickle            like sink, but consumes L3 very slowly (50 ms per read): always progressing, never stalled
  *   stalll3            like ok, but never reads L3 again once the guest is "up"
  *   garbage            sends a datagram that is not an envelope
  *   rightsback         sends a valid status with a descriptor attached
@@ -143,7 +144,7 @@ var sunkBytes = 0, sunkFrames = 0
     guard let frames = try? l3Reader.feed(bytes) else { fail(79) }
     for (header, frame) in frames {
         let payload = Array(frame[WireLimits.headerBytes...])
-        if mode == "sink" {
+        if mode == "sink" || mode == "trickle" {
             sunkBytes += payload.count; sunkFrames += 1
             if header.muxClass == .bootstrap && payload == Array("done".utf8) { sendFrame(.runtime, Array("sunk:\(sunkBytes):\(sunkFrames)".utf8)) }
             continue
@@ -170,7 +171,7 @@ while true {
     if ready.contains(l3.raw) {
         loop3: while true {
             switch Sock.receive(l3, capacity: 65536) {
-            case .data(let bytes, _): if mode == "controlframe" { fail(79) } else { handleStream(bytes); if mode == "sink" { usleep(2000) } }
+            case .data(let bytes, _): if mode == "controlframe" { fail(79) } else { handleStream(bytes); if mode == "sink" { usleep(2000) } else if mode == "trickle" { usleep(50_000) } }
             case .wouldBlock: break loop3
             case .endOfStream: exit(0)
             case .failed: fail(78)

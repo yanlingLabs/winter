@@ -9,8 +9,8 @@
 #   Winter.app/Contents/Helpers/WinterCowork/winter-cowork-worker     C + libkrun, exactly one entitlement: com.apple.security.hypervisor
 #
 # What this does, Release only (a Debug Winter.app embeds neither; the owner's dev flow signs a dev pair separately):
-#   1. Refuse an input that is not what ships: a missing file; a binary that contains a test hook (WINTER_COWORK_TEST_…, which the
-#      launcher compiles in only under -DWINTER_COWORK_TEST_BUILD); a binary that links anything but platform dylibs (/usr/lib,
+#   1. Refuse an input that is not what ships: a missing file; a binary that contains a test hook (WINTER_COWORK_TEST_…, or a
+#      `cdhash H"` pin, which the launcher compiles in only under -DWINTER_COWORK_TEST_BUILD); a binary that links anything but platform dylibs (/usr/lib,
 #      /System/Library); a binary that names the builder's repository or home (the release name scan would reject it anyway); a
 #      worker entitlements file that is not exactly the hypervisor key set to true.
 #   2. ditto both into Contents/Helpers/WinterCowork (the old directory is removed first, so nothing lingers).
@@ -57,8 +57,8 @@ check_input() { # $1 = path, $2 = name
   local path="$1" name="$2"
   [ -f "${path}" ] || fail "the built ${name} is not at ${path} — run the Cowork native build first"
   file "${path}" | grep -q "Mach-O" || fail "${name} (${path}) is not a Mach-O executable"
-  if LC_ALL=C grep -aq "${TEST_MARKER}" "${path}"; then
-    fail "${name} contains test hooks (${TEST_MARKER}…): they compile in only under -DWINTER_COWORK_TEST_BUILD and must never ship"
+  if LC_ALL=C grep -aq "${TEST_MARKER}" "${path}" || LC_ALL=C grep -aqF 'cdhash H"' "${path}"; then
+    fail "${name} contains test hooks (${TEST_MARKER}… or a cdhash pin): they compile in only under -DWINTER_COWORK_TEST_BUILD and must never ship"
   fi
   local foreign
   foreign="$(otool -L "${path}" | tail -n +2 | awk '{print $1}' | grep -v -e '^/usr/lib/' -e '^/System/Library/' || true)"
