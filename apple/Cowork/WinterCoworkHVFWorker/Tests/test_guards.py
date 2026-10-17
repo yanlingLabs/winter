@@ -282,7 +282,7 @@ class Package(unittest.TestCase):
         for path in list(PACKAGE.rglob("*")) + ([document] if document.exists() else []):
             if path.is_file() and path.suffix in (".c", ".h", ".py", ".json", ".md", ".entitlements"):
                 text = path.read_text()
-                for needle in ("/Us" + "ers/", "/ho" + "me/", "@" + "gmail", "kar" + "im", "Kar" + "im", "Norma" + " v2"):
+                for needle in ("/Us" + "ers/", "/ho" + "me/", "@" + "gmail", "kar" + "im", "Kar" + "im", "Nor" + "ma" + " v2"):
                     self.assertFalse(needle in text, f"{path.relative_to(REPO)}: {needle}")
 
 
