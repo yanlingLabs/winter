@@ -32,7 +32,7 @@ public struct OrderlyVolume: Equatable, Sendable {
     static func unattached(_ purpose: VolumePurpose) -> OrderlyVolume {
         OrderlyVolume(purpose: purpose, device: "0", inode: "0", capacityBytes: 0, attached: false, flushRequested: 0, flushCompleted: 0, finalFlush: .notAttached)
     }
-    static func read(_ value: JSONValue, purpose: VolumePurpose) throws -> OrderlyVolume {
+    static func decode(_ value: JSONValue, purpose: VolumePurpose) throws -> OrderlyVolume {
         let f = try Fields(try V.object(value), keys: keys)
         try V.literal(f["purpose"], purpose.rawValue)
         let size: UInt64
@@ -79,7 +79,7 @@ public struct OrderlyReceipt: Equatable, Sendable {
     static let keys = ["v", "class", "confirmationId", "stopNonce", "origin", "launcherInstanceId", "admissionId", "homeId", "workspaceId", "incarnationId", "leaseEpoch",
                        "controllerInstanceId", "workerInstanceId", "runtimeImageDigest", "hostBootId", "guest", "worker", "volumes", "issuedAtMs"]
 
-    static func read(_ value: JSONValue) throws -> OrderlyReceipt {
+    static func decode(_ value: JSONValue) throws -> OrderlyReceipt {
         let f = try Fields(try V.object(value), keys: keys)
         try V.literal(f["v"], 1); try V.literal(f["class"], "A")
         let guest = try Fields(try V.object(f["guest"]), keys: ["drain", "powerOff"])
@@ -94,7 +94,7 @@ public struct OrderlyReceipt: Equatable, Sendable {
             workerInstanceId: try V.token(f["workerInstanceId"]), runtimeImageDigest: try V.digest(f["runtimeImageDigest"]), hostBootId: try V.label(f["hostBootId"]),
             guestDrain: GuestDrain(rawValue: try V.oneOf(guest["drain"], ["acked", "not-booted"]))!, guestPowerOff: GuestPowerOff(rawValue: try V.oneOf(guest["powerOff"], ["observed", "not-booted"]))!,
             workerPid: Int(try V.uint(worker["pid"], 1, 0x7fff_ffff)), workerStartToken: try V.label(worker["startToken"]),
-            volumes: [try OrderlyVolume.read(items[0], purpose: .data), try OrderlyVolume.read(items[1], purpose: .environment)], issuedAtMs: UInt64(try V.uint(f["issuedAtMs"])))
+            volumes: [try OrderlyVolume.decode(items[0], purpose: .data), try OrderlyVolume.decode(items[1], purpose: .environment)], issuedAtMs: UInt64(try V.uint(f["issuedAtMs"])))
     }
     func write(_ w: inout JSONWriter) {
         w.beginObject(); w.key("v"); w.integer(1); w.key("class"); w.string("A"); w.key("confirmationId"); w.string(confirmationId); w.key("stopNonce"); w.string(stopNonce)
@@ -146,7 +146,7 @@ public struct UncertainReceipt: Equatable, Sendable {
     }
     static let keys = ["v", "class", "launcherInstanceId", "admissionId", "workspaceId", "incarnationId", "leaseEpoch", "workerInstanceId", "reason", "worker", "attachedVolumes", "issuedAtMs"]
 
-    static func read(_ value: JSONValue) throws -> UncertainReceipt {
+    static func decode(_ value: JSONValue) throws -> UncertainReceipt {
         let f = try Fields(try V.object(value), keys: keys)
         try V.literal(f["v"], 1); try V.literal(f["class"], "B")
         let worker = try Fields(try V.object(f["worker"]), keys: ["pid", "startToken", "exit", "status"])
@@ -187,8 +187,8 @@ public enum StopReceipt: Equatable, Sendable {
         let (_, members) = try strictLine(raw, maxBytes: WireLimits.receiptBytes, depth: WireLimits.receiptDepth)
         let typed: StopReceipt
         switch members.first(where: { $0.key == "class" })?.value {
-        case .string("A")?: typed = .orderly(try OrderlyReceipt.read(.object(members)))
-        case .string("B")?: typed = .uncertain(try UncertainReceipt.read(.object(members)))
+        case .string("A")?: typed = .orderly(try OrderlyReceipt.decode(.object(members)))
+        case .string("B")?: typed = .uncertain(try UncertainReceipt.decode(.object(members)))
         default: throw WireFailure.unknown_type
         }
         guard try typed.serialize() == raw else { throw WireFailure.malformed }

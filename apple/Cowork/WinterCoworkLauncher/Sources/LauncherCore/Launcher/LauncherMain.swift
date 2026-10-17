@@ -18,7 +18,7 @@ public enum LauncherMain {
 
     public static func run(arguments: [String]) -> Int32 {
         let parsed: LauncherArguments
-        do { parsed = try LauncherArguments.parse(arguments) } catch { FileHandle.standardError.write(Data("winter-cowork-launcher: \(error)\n".utf8)); return ExitCode.usage }
+        do { parsed = try LauncherArguments.parse(arguments) } catch { fputs("winter-cowork-launcher: \(error)\n", stderr); return ExitCode.usage }
         signal(SIGPIPE, SIG_IGN)
 
         // L1: descriptor 3, an unnamed stream socketpair. Anything else is not what the daemon would have handed us.

@@ -68,7 +68,7 @@ public struct Scope: Equatable, Sendable {
     static let keys = ["workspaceId", "incarnationId", "leaseEpoch", "admissionId", "controllerInstanceId", "workerInstanceId", "runtimeImageDigest", "vcpus", "memoryMiB"]
 
     /// Reads the nine scope members out of `fields` (which may hold more members: `begin` also carries `id`).
-    static func read(_ fields: Fields) throws -> Scope {
+    static func decode(_ fields: Fields) throws -> Scope {
         try V.literal(fields["vcpus"], Int64(WireLimits.vcpus))
         return Scope(workspaceId: try V.token(fields["workspaceId"]), incarnationId: try V.token(fields["incarnationId"]), leaseEpoch: try V.epoch(fields["leaseEpoch"]),
                      admissionId: try V.token(fields["admissionId"]), controllerInstanceId: try V.token(fields["controllerInstanceId"]),
@@ -102,7 +102,7 @@ public struct VolumeIdentity: Equatable, Sendable {
     }
     static let keys = ["purpose", "device", "inode", "uid", "mode", "capacityBytes"]
 
-    static func read(_ value: JSONValue, purpose: VolumePurpose) throws -> VolumeIdentity {
+    static func decode(_ value: JSONValue, purpose: VolumePurpose) throws -> VolumeIdentity {
         let f = try Fields(try V.object(value), keys: keys)
         try V.literal(f["purpose"], purpose.rawValue); try V.literal(f["mode"], Int64(requiredMode))
         return VolumeIdentity(purpose: purpose, device: try V.decimal64(f["device"]), inode: try V.decimal64(f["inode"]), uid: UInt32(try V.uint(f["uid"], 0, 0xffff_ffff)),
@@ -122,7 +122,7 @@ public struct VolumeIdentity: Equatable, Sendable {
     static func readPair(_ value: JSONValue) throws -> [VolumeIdentity] {
         let items = try V.array(value)
         guard items.count == 2 else { throw WireFailure.bad_field }
-        let pair = [try read(items[0], purpose: .data), try read(items[1], purpose: .environment)]
+        let pair = [try decode(items[0], purpose: .data), try decode(items[1], purpose: .environment)]
         try requireDistinctFiles(pair)
         return pair
     }

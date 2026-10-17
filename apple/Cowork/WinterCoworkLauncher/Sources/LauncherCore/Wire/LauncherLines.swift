@@ -63,7 +63,7 @@ public enum LauncherLineCodec {
         let f = try Fields(members, keys: ["v", "t"] + toLauncherKeys[type]!)
         let typed: LineToLauncher
         switch type {
-        case "begin": typed = .begin(id: try V.token(f["id"]), scope: try Scope.read(f))
+        case "begin": typed = .begin(id: try V.token(f["id"]), scope: try Scope.decode(f))
         case "volumes": typed = .volumes(id: try V.token(f["id"]), scopeDigest: try V.digest(f["scopeDigest"]), volumes: try VolumeIdentity.readPair(f["volumes"]))
         case "mux_down": typed = .muxDown(frame: try muxField(f["frame"]))
         case "stop":
@@ -94,8 +94,8 @@ public enum LauncherLineCodec {
         case "stopped":
             let id: String?
             if case .null = f["id"] { id = nil } else { id = try V.token(f["id"]) }
-            typed = .stopped(id: id, receipt: try OrderlyReceipt.read(f["receipt"]))
-        case "uncertain": typed = .uncertain(receipt: try UncertainReceipt.read(f["receipt"]))
+            typed = .stopped(id: id, receipt: try OrderlyReceipt.decode(f["receipt"]))
+        case "uncertain": typed = .uncertain(receipt: try UncertainReceipt.decode(f["receipt"]))
         case "pong": typed = .pong(id: try V.token(f["id"]))
         default: typed = .fault(ChannelFault(rawValue: try V.oneOf(f["code"], ChannelFault.allCases.map(\.rawValue)))!)
         }
