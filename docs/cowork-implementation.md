@@ -257,6 +257,8 @@ and cleanup proof all remain false.
 
 Related reader PRs merged on the SDK `main` branches on 2026-10-16: agent SDK #26 (reader compartment and native dependency probe, `c2c793dc`), #25 (guided reader owner composition, `6a6425a1`) and #19 (source-only isolated Linux instruction reader role, `f6d88d9a`), and runtime SDK #17 (reader packet, dependency probe and single-run hosted harness, `29eede4b`). Confined-guest query startup still refuses unless a native Linux session admission is presented; none exists yet.
 
+**Draft prompt and tool allowlist (unwired).** The Cowork session prompt text and the concrete tool allowlist are drafted as data in `packages/core/src/cowork/session-profile.ts`. Nothing imports it, and an anti-wiring test pins that. The owner document, [Cowork session prompt and tool allowlist](cowork-prompt-and-tools.md), gives the prompt in full, the allowlist and not-offered tables with their spec citations, the readiness keys that keep unbuilt tools withheld, and the decisions. All decisions are settled: four by the spec and thirteen by the owner on 2026-10-16, who approved the recommended answer to each. Its generated blocks are compared with the code cell for cell by a test. The per-turn source list, effective-ceiling line and completion default are not generated there: `CoworkCurrentContextPlanner` owns them. This does not close the follow-up item: that stays open until the profile is wired.
+
 ## Completion evidence still required
 
 The immediate integration target is a developer-only real guest turn through the
