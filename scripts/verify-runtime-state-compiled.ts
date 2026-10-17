@@ -222,7 +222,7 @@ async function main(): Promise<void> {
       // Bun >= 1.4 moved bun:ffi from TinyCC (trampolines in non-MAP_JIT memory) to JSC's own FFI, so allow-jit alone
       // no longer kills it (measured on 1.4.2 with SIP on: 1.3.14 SIGKILLs, 1.4.2 runs). The failure a 1.4 binary can
       // still show is a build signed WITHOUT the JIT entitlement: JSC runs JIT-less and `dlopen` throws "bun:ffi
-      // requires the JIT" (exit 1, a TypeError, not a kill, so SIP does not matter). This leg signs the probe with no
+      // requires the JIT" (exit 1, a TypeError, not a kill; still only with SIP on). This leg signs the probe with no
       // entitlements and requires exactly that, so the gate can still see bun:ffi failing. dlopen throws before any
       // Keychain call is reached.
       const noneBinary = join(signedDir, "winter-core-no-entitlements");
@@ -231,12 +231,16 @@ async function main(): Promise<void> {
       const noneSign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", noneBinary], { encoding: "utf8" });
       const none = noneSign.status === 0 ? spawnSync(noneBinary, ["__keychain-ffi-probe"], { encoding: "utf8", env: ffiEnv, timeout: 30_000 }) : undefined;
       const noneOut = `${none?.stdout ?? ""}${none?.stderr ?? ""}`;
-      if (none === undefined || none.status === 0 || !noneOut.includes("bun:ffi requires the JIT")) {
+      if (sipOff && none !== undefined && none.status === 0) {
+        // The hardened runtime's JIT enforcement is relaxed with SIP off (GitHub's macOS runners: this binary ran, exit 0),
+        // so, like the 1.3.x kill, the failure cannot be seen there; it runs wherever SIP is on.
+        log(`--- Step 3c: (skip) NEGATIVE leg: System Integrity Protection is off here, so a binary signed with no entitlements still gets the JIT; it runs where SIP is on ---`);
+      } else if (none === undefined || none.status === 0 || !noneOut.includes("bun:ffi requires the JIT")) {
         rmSync(tmpHome, { recursive: true, force: true });
         rmSync(signedDir, { recursive: true, force: true });
         fail(`NEGATIVE leg (Bun ${Bun.version}): winter-core signed with NO entitlements was expected to exit non-zero with "bun:ffi requires the JIT" and did not (${none === undefined ? "codesign failed" : `exit ${none.status ?? none.signal}`}: ${noneOut.trim().slice(0, 200)}) — this check can no longer see bun:ffi failing`);
       }
-      log(`--- Step 3c: allow-jit alone runs bun:ffi on Bun ${Bun.version} (no kill to see); signed with NO entitlements it fails as expected ("bun:ffi requires the JIT", exit ${none.status}) ---`);
+      else log(`--- Step 3c: allow-jit alone runs bun:ffi on Bun ${Bun.version} (no kill to see); signed with NO entitlements it fails as expected ("bun:ffi requires the JIT", exit ${none.status}) ---`);
     } else if (neg === undefined || neg.status === 0) {
       rmSync(tmpHome, { recursive: true, force: true });
       rmSync(signedDir, { recursive: true, force: true });
