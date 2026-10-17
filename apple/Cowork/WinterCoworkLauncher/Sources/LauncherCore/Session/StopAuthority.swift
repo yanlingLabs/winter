@@ -16,7 +16,10 @@ public struct DrainRecord: Equatable, Sendable {
 public struct WorkerEvidence: Equatable, Sendable {
     /// Every status the worker reported (envelope kind 4), in a set: the order is checked as it arrives.
     public var statuses: Set<WorkerStatus> = []
+    /// The same statuses in the order they ARRIVED (a repeat is kept): the guest's part of a stop is judged by the order (`GuestStop`).
+    public private(set) var order: [WorkerStatus] = []
     public var lastStatus: WorkerStatus?
+    public mutating func record(_ state: WorkerStatus) { statuses.insert(state); order.append(state); lastStatus = state }
     /// The flush counters of the LAST `guest_halted` or `exiting` status.
     public var finalCounters: CounterPair?
     /// The latest counters of any status, for the monotonic check.
@@ -95,9 +98,14 @@ public enum OrderlyStopAuthority {
         if let identities = e.attachedVolumes {
             let purposes: [VolumePurpose] = [.data, .environment]
             if booted {
-                // The guest halted through a drain ack and a power-off, and the exit hook then reported every requested flush completed.
-                guard e.statuses.contains(.drainAcked), e.statuses.contains(.guestHalted), let final = e.finalCounters,
-                      final.data.requested == final.data.completed, final.environment.requested == final.environment.completed else { return uncertain(.flushUncertain) }
+                // The guest drained, unmounted and said `halting`, powered off, and the exit hook then reported every requested flush completed:
+                // the ONE verdict is `GuestStop` (the contract's `coworkNativeGuestStopVerdict`). A power-off without `halting` is never orderly.
+                switch GuestStop.observed(states: e.order, counters: e.finalCounters) {
+                case .orderly: break
+                case .notBooted: return uncertain(.guestFault)
+                case .uncertain(let reason): return uncertain(reason)
+                }
+                guard let final = e.finalCounters, final.data.requested == final.data.completed, final.environment.requested == final.environment.completed else { return uncertain(.flushUncertain) }
                 let counters = [final.data, final.environment]
                 volumes = zip(identities, zip(purposes, counters)).map { identity, pair in
                     OrderlyVolume(purpose: pair.0, device: identity.device, inode: identity.inode, capacityBytes: identity.capacityBytes, attached: true,
@@ -125,7 +133,7 @@ public enum OrderlyStopAuthority {
             confirmationId: confirmationId(), stopNonce: drain.nonce, origin: drain.origin, launcherInstanceId: c.launcherInstanceId, admissionId: c.scope.admissionId, homeId: c.homeId,
             workspaceId: c.scope.workspaceId, incarnationId: c.scope.incarnationId, leaseEpoch: c.scope.leaseEpoch, controllerInstanceId: c.scope.controllerInstanceId,
             workerInstanceId: c.scope.workerInstanceId, runtimeImageDigest: c.scope.runtimeImageDigest, hostBootId: c.hostBootId,
-            guestDrain: booted ? .acked : .notBooted, guestPowerOff: booted ? .observed : .notBooted, workerPid: Int(c.workerPid), workerStartToken: c.workerStartToken,
+            guestDrain: booted ? .acked : .notBooted, guestHalting: booted ? .observed : .notBooted, guestPowerOff: booted ? .observed : .notBooted, workerPid: Int(c.workerPid), workerStartToken: c.workerStartToken,
             volumes: volumes, issuedAtMs: issuedAtMs)
         // Defence in depth: a receipt that does not satisfy the contract's own invariants is not orderly evidence, whatever built it.
         return receipt.invariantsHold ? .orderly(receipt) : uncertain(.flushUncertain)

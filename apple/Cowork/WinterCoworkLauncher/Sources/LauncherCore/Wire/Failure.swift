@@ -34,5 +34,13 @@ public enum WireLimits {
     public static let drainBudgetMs = 30_000
     public static let drainBudgetCeilingMs = 120_000
     public static let volumeRights = 2
+    /// The layered stop timeline (docs/cowork-native-worker.md, section 5, "The stop timeline"), every figure from the moment the worker is
+    /// handed the DRAIN: G = the DRAIN's `budgetMs` (the guest's budget); X = libkrun's exit watchdog; the launcher kills at G + X + margin;
+    /// the daemon waits a further margin. A figure is never smaller than the one before it.
+    public static let libkrunExitWatchdogMs = 20_000
+    public static let launcherKillMarginMs = 5_000
+    public static let hostStopMarginMs = 10_000
+    public static func launcherKillMs(budgetMs: Int) -> Int { budgetMs + libkrunExitWatchdogMs + launcherKillMarginMs }
+    public static func hostStopWaitMs(budgetMs: Int) -> Int { launcherKillMs(budgetMs: budgetMs) + hostStopMarginMs }
     public static let maxSafeInteger: Int64 = 9_007_199_254_740_991
 }

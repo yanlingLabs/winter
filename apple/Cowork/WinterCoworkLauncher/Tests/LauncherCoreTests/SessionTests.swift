@@ -259,7 +259,8 @@ final class SessionTests: XCTestCase {
     func testHostStopSendsDrainWithTheDaemonsNonceAndArmsItsBudget() throws {
         let h = harness(); try h.bringUp(); h.stop(nonce: Fixture.nonce, budget: 20_000)
         guard case .drain(_, let nonce, let budget, let origin)? = h.ports.datagrams.last else { return XCTFail() }
-        XCTAssertEqual(nonce, Fixture.nonce); XCTAssertEqual(budget, 20_000); XCTAssertEqual(origin, .hostStop); XCTAssertEqual(h.ports.armed[.drain], 20_000)
+        XCTAssertEqual(nonce, Fixture.nonce); XCTAssertEqual(budget, 20_000); XCTAssertEqual(origin, .hostStop); XCTAssertEqual(h.ports.armed[.drain], WireLimits.launcherKillMs(budgetMs: 20_000), "the kill is the guest budget plus the exit watchdog plus the margin: 45 s")
+        XCTAssertEqual(h.ports.armed[.drain], 45_000)
         XCTAssertEqual(h.session.phase, .draining)
     }
     func testAnOrderlyStopMintsClassAIsDurableBeforeItIsSentAndIsRetiredOnRequest() throws {
@@ -334,7 +335,7 @@ final class SessionTests: XCTestCase {
     func testOwnerLossStartsAThirtySecondDrainWithTheLaunchersOwnNonce() throws {
         let h = harness(); try h.bringUp(); h.session.daemonChannelClosed()
         guard case .drain(_, let nonce, let budget, let origin)? = h.ports.datagrams.last else { return XCTFail() }
-        XCTAssertEqual(origin, .ownerLoss); XCTAssertEqual(budget, 30_000); XCTAssertEqual(h.ports.armed[.drain], 30_000)
+        XCTAssertEqual(origin, .ownerLoss); XCTAssertEqual(budget, 30_000); XCTAssertEqual(h.ports.armed[.drain], 55_000, "the guest has 30 s, the launcher kills at 55 s")
         XCTAssertEqual(nonce.count, 32); XCTAssertNotEqual(nonce, Fixture.nonce)
         XCTAssertEqual(h.ports.process.killCalls, 0, "nothing is killed while the drain budget lasts")
         XCTAssertFalse(h.ports.finished)
@@ -363,15 +364,15 @@ final class SessionTests: XCTestCase {
         try volumesLine(h, try DiskPair()); XCTAssertEqual(h.ports.armed[.volumes], 10_000)
         h.session.daemonChannelClosed()
         XCTAssertNil(h.ports.armed[.volumes], "the transfer timer no longer applies")
-        XCTAssertEqual(h.ports.armed[.drain], 30_000)
+        XCTAssertEqual(h.ports.armed[.drain], 55_000)
         h.session.timerFired(.drain)
         XCTAssertEqual(h.ports.uncertain.map(\.reason), [.drainTimeout]); XCTAssertTrue(h.ports.uncertain[0].attachedVolumes)
     }
     func testOwnerLossDuringAHostStopCapsALongerBudgetAtThirtySecondsAndKeepsAShorterOne() throws {
         let long = harness(); try long.bringUp(); long.stop(budget: 120_000); long.session.daemonChannelClosed()
-        XCTAssertEqual(long.ports.armed[.drain], 30_000)
+        XCTAssertEqual(long.ports.armed[.drain], 55_000, "capped at the owner-loss timeline: 30 s + 25 s")
         let short = harness(); try short.bringUp(); short.stop(budget: 5_000); short.clockBox.value += 1_000; short.session.daemonChannelClosed()
-        XCTAssertEqual(short.ports.armed[.drain], 5_000, "owner loss only ever shortens the drain")
+        XCTAssertEqual(short.ports.armed[.drain], 30_000, "owner loss only ever shortens the drain: 5 s + 25 s stays")
         XCTAssertEqual(short.ports.datagrams.filter { if case .drain = $0 { true } else { false } }.count, 1, "the drain already under way is not restarted")
     }
     func testOwnerLossAfterTheVerdictEnds() throws {
@@ -505,6 +506,70 @@ final class SessionTests: XCTestCase {
     func testWorkerStatesAreForwardedAsInformationOnly() throws {
         let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt()
         let states = h.ports.lines.compactMap { if case .workerState(let s) = $0 { s } else { nil } }
-        XCTAssertEqual(states, [.sandboxed, .volumes_accepted, .vm_running, .guest_hello, .draining, .drain_acked])
+        XCTAssertEqual(states, [.sandboxed, .volumes_accepted, .vm_running, .guest_hello, .draining, .drain_acked, .halting])
+    }
+
+    // MARK: round 3: `halting`, `guest_fault` and the layered stop timeline
+
+    func testHaltingAndGuestFaultAreForwardedAndNeedAVM() throws {
+        let h = harness(); try h.bringUp(); h.status(.guestFault)
+        let names: [WorkerStateName] = h.ports.lines.compactMap { if case .workerState(let s) = $0 { s } else { nil } }
+        XCTAssertEqual(names.last, .guest_fault)
+        for state in [WorkerStatus.halting, .guestFault] {
+            let early = harness(); try early.bringUp(vm: false); early.status(state)
+            XCTAssertEqual(early.ports.process.killCalls, 1, "\(state) without a VM is a violation"); XCTAssertTrue(early.ports.lines.contains(.fault(.worker_channel_lost)))
+        }
+    }
+    func testAnOrderlyClassACarriesHaltingObservedBetweenTheDrainAckAndThePowerOff() throws {
+        let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt(); h.workerExits(.code(0))
+        let receipt = try XCTUnwrap(h.ports.stopped.first)
+        XCTAssertEqual(receipt.guestDrain, .acked); XCTAssertEqual(receipt.guestHalting, .observed); XCTAssertEqual(receipt.guestPowerOff, .observed)
+        XCTAssertTrue(String(decoding: try StopReceipt.orderly(receipt).serialize(), as: UTF8.self).contains("\"guest\":{\"drain\":\"acked\",\"halting\":\"observed\",\"powerOff\":\"observed\"}"))
+    }
+    func testAPowerOffWithoutHaltingIsClassBEvenAfterAnAcknowledgedDrainAndExitZero() throws {
+        let h = harness(); try h.bringUp(); h.stop(); let flushed = FlushCounters(requested: 1, completed: 1)
+        h.status(.draining, data: flushed); h.status(.drainAcked, data: flushed); h.status(.guestHalted, data: flushed); h.status(.exiting, data: flushed); h.workerExits(.code(0))
+        XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.guestFault])
+    }
+    func testAGuestFaultAtAnyTimeRulesOutClassAForTheRun() throws {
+        let h = harness(); try h.bringUp(); h.status(.guestFault); h.stop(); h.cleanHalt(); h.workerExits(.code(0))
+        XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.guestFault])
+    }
+    func testHaltingBeforeTheDrainAckIsClassBAndIsNotAReasonToKillTheWorker() throws {
+        let h = harness(); try h.bringUp(); h.stop(); let flushed = FlushCounters(requested: 1, completed: 1)
+        h.status(.draining, data: flushed); h.status(.halting, data: flushed); h.status(.drainAcked, data: flushed); h.status(.guestHalted, data: flushed); h.status(.exiting, data: flushed)
+        XCTAssertEqual(h.ports.process.killCalls, 0); h.workerExits(.code(0))
+        XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.guestFault])
+    }
+    func testAHaltingThatIsNeverFollowedByThePowerOffReportIsFlushUncertain() throws {
+        let h = harness(); try h.bringUp(); h.stop(); let flushed = FlushCounters(requested: 1, completed: 1)
+        h.status(.draining, data: flushed); h.status(.drainAcked, data: flushed); h.status(.halting, data: flushed); h.status(.exiting, data: flushed); h.workerExits(.code(0))
+        XCTAssertEqual(h.ports.uncertain.map(\.reason), [.flushUncertain], "the exit watchdog skipped the hook: exit 0 proves nothing")
+    }
+    func testAGuestHaltedAfterAMuxQuarantineOrWithoutADrainAckIsClassBGuestFault() throws {
+        let flushed = FlushCounters(requested: 1, completed: 1)
+        // Mux quarantine: the worker exits 74 and still reports the hook's power-off; no drain was ever acknowledged.
+        let quarantine = harness(); try quarantine.bringUp(); quarantine.status(.guestHalted, data: flushed); quarantine.status(.exiting, data: flushed); quarantine.workerExits(.code(74))
+        XCTAssertTrue(quarantine.ports.stopped.isEmpty); XCTAssertEqual(quarantine.ports.uncertain.map(\.reason), [.workerCrashed])
+        // The same report followed by a clean exit 0 (a drain was asked for, was never acknowledged, and the guest still "halted").
+        let noAck = harness(); try noAck.bringUp(); noAck.stop(); noAck.status(.draining, data: flushed); noAck.status(.guestHalted, data: flushed); noAck.status(.exiting, data: flushed); noAck.workerExits(.code(0))
+        XCTAssertTrue(noAck.ports.stopped.isEmpty); XCTAssertEqual(noAck.ports.uncertain.map(\.reason), [.guestFault])
+        // …and with no drain asked for at all, exit 0 is a crash that returned 0.
+        let unasked = harness(); try unasked.bringUp(); unasked.status(.guestHalted, data: flushed); unasked.status(.exiting, data: flushed); unasked.workerExits(.code(0))
+        XCTAssertTrue(unasked.ports.stopped.isEmpty); XCTAssertEqual(unasked.ports.uncertain.map(\.reason), [.workerCrashed])
+    }
+    func testTheExitingCountersAreInformationalAndNeverReplaceThoseOfGuestHalted() throws {
+        let h = harness(); try h.bringUp(); h.stop()
+        let halted = FlushCounters(requested: 1, completed: 1), later = FlushCounters(requested: 2, completed: 2)
+        h.status(.draining, data: halted); h.status(.drainAcked, data: halted); h.status(.halting, data: halted); h.status(.guestHalted, data: halted); h.status(.exiting, data: later); h.workerExits(.code(0))
+        let receipt = try XCTUnwrap(h.ports.stopped.first)
+        XCTAssertEqual(receipt.volumes[0].flushRequested, 1, "the receipt reports the counters that came with guest_halted")
+    }
+    func testTheKillDeadlineIsTheGuestBudgetPlusTwentyFiveSecondsByDefault() throws {
+        XCTAssertEqual(Fixture.config().exitAllowanceMs, 25_000)
+        let h = harness(); try h.bringUp(); h.stop(budget: 30_000)
+        XCTAssertEqual(h.ports.armed[.drain], 55_000)
+        h.session.timerFired(.drain)
+        XCTAssertEqual(h.ports.process.killCalls, 1); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.drainTimeout])
     }
 }

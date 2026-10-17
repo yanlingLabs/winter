@@ -9,6 +9,9 @@ public struct SessionConfig: Sendable {
     public var volumesTimeoutMs = 10_000
     /// The owner-loss drain budget (docs: "the documented budget is 30000").
     public var ownerLossBudgetMs = WireLimits.drainBudgetMs
+    /// Added to a drain's budget to get the launcher's kill deadline: libkrun's exit watchdog (20 s) plus the margin (5 s). Tests that run a
+    /// FakeWorker (which has no exit path to wait for) shorten it; production never does.
+    public var exitAllowanceMs = WireLimits.libkrunExitWatchdogMs + WireLimits.launcherKillMarginMs
     /// A worker that declared a fault gets this long to exit by itself before it is killed.
     public var faultGraceMs = 5_000
     /// When the kernel says the worker exited but the child is not yet waitable: probe again every `exitProbeIntervalMs`, at most
@@ -134,9 +137,10 @@ public final class LauncherSession {
         case .draining:
             // An explicit stop is already draining, possibly with a longer budget. Owner loss caps what is left of it.
             let remaining = drainDeadlineMs - deps.monotonicMs()
-            if remaining > Int64(config.ownerLossBudgetMs) {
-                drainDeadlineMs = deps.monotonicMs() + Int64(config.ownerLossBudgetMs)
-                ports.arm(.drain, afterMs: config.ownerLossBudgetMs)
+            let killMs = config.ownerLossBudgetMs + config.exitAllowanceMs
+            if remaining > Int64(killMs) {
+                drainDeadlineMs = deps.monotonicMs() + Int64(killMs)
+                ports.arm(.drain, afterMs: killMs)
             }
         case .finished: ports.finish()
         }
@@ -295,11 +299,11 @@ public final class LauncherSession {
         switch state {
         case .sandboxed:
             guard phase == .starting, !evidence.statuses.contains(.sandboxed) else { workerProtocolViolation("sandboxed out of order"); return }
-            evidence.statuses.insert(state); evidence.lastStatus = state
+            evidence.record(state)
             workerReady(); return
         case .volumesAccepted:
             guard awaitingVolumesAck else { workerProtocolViolation("volumes_accepted out of order"); return }
-            evidence.statuses.insert(state); evidence.lastStatus = state
+            evidence.record(state)
             volumesAccepted(); return
         case .vmRunning:
             guard attached, phase == .attached || phase == .draining else { workerProtocolViolation("vm_running before the disks"); return }
@@ -316,10 +320,20 @@ public final class LauncherSession {
         case .guestHalted:
             guard evidence.statuses.contains(.vmRunning) else { workerProtocolViolation("guest_halted without a VM"); return }
             evidence.finalCounters = evidence.latestCounters
+        case .halting:
+            // The guest says it is halting (every filesystem unmounted clean). The ORDER is the verdict's business (`GuestStop`): a `halting`
+            // before the drain ack is recorded and judged `guest-fault`, not a reason to kill a worker that only relays what the guest said.
+            guard evidence.statuses.contains(.vmRunning) else { workerProtocolViolation("halting without a VM"); return }
+            ports.sendToDaemon(.workerState(.halting))
+        case .guestFault:
+            guard evidence.statuses.contains(.vmRunning) else { workerProtocolViolation("guest_fault without a VM"); return }
+            ports.sendToDaemon(.workerState(.guest_fault))
         case .exiting:
-            evidence.finalCounters = evidence.latestCounters
+            // The counters of `exiting` are meaningful ONLY alongside `guest_halted` (contract, section 7): in every other stop they are informational
+            // and never feed a Class A. (They still count for the monotonic check above and for a never-booted stop's "nothing was flushed".)
+            break
         }
-        evidence.statuses.insert(state); evidence.lastStatus = state
+        evidence.record(state)
     }
 
     private func handleWorkerFault(_ code: WorkerFault) {
@@ -381,8 +395,10 @@ public final class LauncherSession {
         // Only a DRAIN the worker was actually handed is evidence that a drain was requested.
         guard sendEnvelope({ .drain(seq: $0, stopNonce: nonce, budgetMs: budgetMs, origin: origin) }) else { killAndCommit(reason: .launcherFault, refusal: nil); return }
         evidence.drain = DrainRecord(nonce: nonce, origin: origin == .hostStop ? .hostStop : .ownerLossDrain)
-        drainDeadlineMs = deps.monotonicMs() + Int64(budgetMs)
-        ports.arm(.drain, afterMs: budgetMs)
+        // The guest has `budgetMs` (G). The launcher's kill is later than anything libkrun's own exit watchdog could still do (G + 20 s + 5 s).
+        let killMs = budgetMs + config.exitAllowanceMs
+        drainDeadlineMs = deps.monotonicMs() + Int64(killMs)
+        ports.arm(.drain, afterMs: killMs)
     }
 
     public func timerFired(_ timer: SessionTimer) {

@@ -12,12 +12,14 @@ import LauncherNative
  *
  *   ok                 sandboxed; accepts the disks (fstat against the VOLUMES record, writes a marker through descriptor 0 of the pair);
  *                      vm_running, guest_hello; sends a runtime frame naming its open descriptors; echoes every frame it is sent;
- *                      on DRAIN: draining, drain_acked, guest_halted (flushes 1/1), exiting, exit 0
+ *                      on DRAIN: draining, drain_acked, halting, guest_halted (flushes 1/1), exiting, exit 0
  *   silent             never reports READY
  *   ignoredrain        like ok, but never answers DRAIN (the launcher must kill it through the owned handle)
  *   crash              like ok, but _exit(79) once the disks are accepted
  *   exitnodrain        like ok, but exits 0 by itself right after vm_running, without being asked
  *   badflush           like ok, but guest_halted reports requested 2 / completed 1
+ *   nohalting          like ok, but powers off without ever saying `halting` (a bare power-off: Class B)
+ *   guestfault         like ok, but reports guest_fault right after guest_hello
  *   nohalt             like ok, but never reports guest_halted
  *   fault              reports fault sandbox_failed and exits 79
  *   rejectvolumes      reports fault bad_volumes when the disks arrive
@@ -114,6 +116,7 @@ var counters = FlushCounters()
         sendStatus(.vmRunning); booted = true
         if mode == "exitnodrain" { exit(0) }
         sendStatus(.guestHello)
+        if mode == "guestfault" { sendStatus(.guestFault) }
         if mode == "l3rights" {
             // A frame on L3 that drags a descriptor along: a hostile worker's way to push a file into the launcher's table.
             _ = Sock.send(l3, MuxFormat.frame(.bootstrap, seq: 1, payload: [1])[...], rights: [Int32(open("/dev/null", O_RDONLY))])
@@ -124,7 +127,7 @@ var counters = FlushCounters()
         if mode == "ignoredrain" { return }
         _ = nonce
         sendStatus(.draining)
-        if booted { sendStatus(.drainAcked) }
+        if booted { sendStatus(.drainAcked); if mode != "nohalting" { sendStatus(.halting) } }
         if accepted {
             // "Power off": close the disks. The final flush is reported by the exit hook, i.e. by the guest_halted status.
             volumeFDs.forEach { $0.close() }

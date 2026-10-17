@@ -19,7 +19,7 @@ final class GoldenVectorTests: XCTestCase {
         XCTAssertEqual(pins["sourceBranch"] as? String, "cowork/n2-host-adapter")
         XCTAssertEqual((pins["lastCommitTouchingVectors"] as? String)?.count, 40)
         let hashes = try XCTUnwrap(pins["sha256"] as? [String: String])
-        XCTAssertEqual(Set(hashes.keys), ["envelopes.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"])
+        XCTAssertEqual(Set(hashes.keys), ["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-flow.json", "runtime-image.json", "stop-receipts.json"])
         for (name, expected) in hashes {
             let actual = SHA256.hash(data: try Data(contentsOf: vectorURL(name))).map { String(format: "%02x", $0) }.joined()
             XCTAssertEqual(actual, expected, "\(name) differs from the S1 copy it is pinned to")
@@ -31,7 +31,7 @@ final class GoldenVectorTests: XCTestCase {
     func testEnvelopeVectorsByteForByte() throws {
         let document = try loadVector("envelopes.json")
         let positives = try XCTUnwrap(document["positive"] as? [[String: Any]])
-        XCTAssertEqual(positives.count, 8)
+        XCTAssertEqual(positives.count, 28)
         for vector in positives {
             let name = vector["name"] as! String
             let raw = bytes(fromHex: vector["hex"] as! String)
@@ -68,7 +68,7 @@ final class GoldenVectorTests: XCTestCase {
     func testLauncherLineVectorsByteForByte() throws {
         let document = try loadVector("launcher-lines.json")
         let positives = try XCTUnwrap(document["positive"] as? [[String: Any]])
-        XCTAssertEqual(positives.count, 19)
+        XCTAssertEqual(positives.count, 32)
         var seen = Set<String>()
         for vector in positives {
             let name = vector["name"] as! String, line = Array((vector["line"] as! String).utf8), rights = vector["rights"] as! Int
@@ -118,7 +118,7 @@ final class GoldenVectorTests: XCTestCase {
     func testMuxFrameVectorsHeaderLevel() throws {
         let document = try loadVector("mux-frames.json")
         let positives = try XCTUnwrap(document["positive"] as? [[String: Any]])
-        XCTAssertEqual(positives.count, 15)
+        XCTAssertEqual(positives.count, 36)
         for vector in positives {
             let name = vector["name"] as! String, raw = bytes(fromHex: vector["hex"] as! String)
             let header = try MuxFormat.parseFrame(raw)
@@ -127,20 +127,41 @@ final class GoldenVectorTests: XCTestCase {
             XCTAssertEqual(MuxFormat.frame(header.muxClass, seq: header.seq, payload: Array(raw[WireLimits.headerBytes...])), raw, "\(name): frame encoder and decoder must agree byte for byte")
         }
         let negatives = try XCTUnwrap(document["negative"] as? [[String: Any]])
-        XCTAssertEqual(negatives.count, 27)
+        XCTAssertEqual(negatives.count, 109)
         var headerLevel = 0, payloadLevel: [String] = []
         for vector in negatives {
             let name = vector["name"] as! String
             let got = failure { _ = try MuxFormat.parseFrame(bytes(fromHex: vector["hex"] as! String)) }
             if let got { XCTAssertEqual(got, vector["error"] as? String, name); headerLevel += 1 } else { payloadLevel.append(name) }
         }
-        XCTAssertEqual(headerLevel + payloadLevel.count, 27)
+        XCTAssertEqual(headerLevel + payloadLevel.count, 109)
         // The split is part of the contract between the relay and its endpoints: pin it so a drift in either direction is visible.
         XCTAssertEqual(payloadLevel.sorted(), Self.expectedPayloadLevelMux.sorted(), "these are refused by the endpoints, not by the relay")
     }
     static let expectedPayloadLevelMux: [String] = [
-        "bom-mux", "bom-mux-bootstrap", "bootstrap-invalid-utf8", "control-duplicate-key", "control-extra-key", "control-float-number", "control-not-json", "control-reordered-keys", "control-unknown-type",
-        "control-whitespace", "drain-travelling-up", "hello-wrong-serial", "plan-protocol-2", "plan-travelling-up", "plan-unsorted-nested-keys",
+    "bom-mux", "bom-mux-bootstrap", "bootstrap-fault-unknown-code", "bootstrap-invalid-utf8", "control-duplicate-key", "control-extra-key",
+    "control-fault-missing-nonce-key", "control-fault-travelling-down", "control-fault-unknown-code", "control-fault-uppercase-nonce", "control-float-number",
+    "control-not-json", "control-reordered-keys", "control-unknown-type", "control-whitespace", "conversations-binding-not-uuid4",
+    "conversations-boot-ids-differ-across-items", "conversations-duplicate-backend-session", "conversations-duplicate-logical-session", "conversations-empty-list",
+    "conversations-extra-key-in-item", "conversations-generation-zero", "conversations-gid-equals-a-runtime-uid", "conversations-gid-equals-a-tool-uid",
+    "conversations-gid-nobody", "conversations-guided-profile-without-binding", "conversations-host-query-plan-writable", "conversations-host-query-sees-the-winter-tree",
+    "conversations-id-too-long", "conversations-mixed-lease-epoch", "conversations-mixed-workspace", "conversations-no-roots", "conversations-non-ascii-model",
+    "conversations-over-the-message-cap", "conversations-plain-profile-with-binding", "conversations-policy-unknown", "conversations-profile-null-but-runtime-present",
+    "conversations-profile-present-but-runtime-absent", "conversations-provider-boot-id-not-a-uuid", "conversations-provider-credential-key",
+    "conversations-provider-model-differs", "conversations-provider-over-4k", "conversations-provider-scope-key-missing", "conversations-provider-scope-other-backend",
+    "conversations-provider-scope-other-epoch", "conversations-provider-scope-other-grant", "conversations-provider-scope-other-session",
+    "conversations-provider-selection-extra-key", "conversations-provider-selection-key-missing", "conversations-provider-unsorted-keys",
+    "conversations-provider-url-key", "conversations-root-dotdot", "conversations-root-empty-component", "conversations-root-folders-without-name",
+    "conversations-root-ids-repeat", "conversations-root-outputs-of-another-session", "conversations-root-relative", "conversations-root-source-outside-workspace",
+    "conversations-root-view-not-allowed", "conversations-root-views-nested", "conversations-runtime-uid-equals-tool-uid", "conversations-seventeen-items",
+    "conversations-timeout-fraction", "conversations-timeout-over-ten-minutes", "conversations-timeout-zero", "conversations-tool-class-unknown",
+    "conversations-tool-classes-repeat", "conversations-tool-classes-unordered", "conversations-travelling-up", "conversations-two-host-query-conversations",
+    "conversations-uid-65535", "conversations-uid-above-65535", "conversations-uid-and-gid-as-strings", "conversations-uid-below-1000", "conversations-uid-nobody-65534",
+    "conversations-uid-reused-across-items", "conversations-unknown-profile", "conversations-wrong-incarnation-in-item", "conversations-wrong-incarnation-in-message",
+    "drain-travelling-up", "hello-wrong-serial", "plan-protocol-2", "plan-travelling-up", "plan-unsorted-nested-keys", "runtime-conversation-sixteen",
+    "runtime-empty-without-end", "runtime-flags-two", "runtime-prefix-too-short", "runtime-ready-seventeen-conversations", "runtime-ready-travelling-down",
+    "runtime-ready-zero-conversations", "runtime-reserved-nonzero", "runtime-stderr-travelling-down", "runtime-stdin-travelling-up", "runtime-stdout-travelling-down",
+    "runtime-stream-four", "runtime-stream-zero",
     ]
 
     // MARK: the runtime image digest (the launcher recomputes it)
@@ -173,7 +194,7 @@ final class GoldenVectorTests: XCTestCase {
             }
         }
         let notOrderly = try XCTUnwrap(document["parsesButNotOrderly"] as? [[String: Any]])
-        XCTAssertEqual(notOrderly.count, 9)
+        XCTAssertEqual(notOrderly.count, 12)
         for vector in notOrderly {
             let name = vector["name"] as! String, text = Array((vector["text"] as! String).utf8)
             guard case .orderly(let receipt) = try StopReceipt.parse(text) else { return XCTFail("\(name) is a Class A text") }
@@ -186,5 +207,104 @@ final class GoldenVectorTests: XCTestCase {
             let name = vector["name"] as! String
             XCTAssertEqual(failure { _ = try StopReceipt.parse(Array((vector["text"] as! String).utf8)) }, vector["error"] as? String, name)
         }
+    }
+
+    // MARK: the guest's part of a stop (guest-stop.json)
+
+    private static let statusNames: [String: WorkerStatus] = ["sandboxed": .sandboxed, "volumes_accepted": .volumesAccepted, "vm_running": .vmRunning, "guest_hello": .guestHello, "draining": .draining,
+        "drain_acked": .drainAcked, "halting": .halting, "guest_halted": .guestHalted, "guest_fault": .guestFault, "exiting": .exiting]
+    private func guestStopCases() throws -> [(name: String, states: [WorkerStatus], reason: LibkrunExitReason?, counters: [FlushDevice]?, verdict: GuestStopVerdict)] {
+        let document = try loadVector("guest-stop.json")
+        let reasons = try XCTUnwrap(document["exitReasons"] as? [String: Int])
+        XCTAssertEqual(reasons, ["none": 0, "off": 1, "reset": 2, "vcpu-error": 3, "terminal-fault": 4], "libkrun's exit reasons, as uint32_t")
+        return try XCTUnwrap(document["cases"] as? [[String: Any]]).map { vector in
+            let states = (vector["states"] as! [String]).map { Self.statusNames[$0]! }
+            let reason = (vector["exitReason"] as? String).map { LibkrunExitReason(rawValue: $0)! }
+            let counters = (vector["counters"] as? [[String: Int]])?.map { FlushDevice(requested: UInt64($0["requested"]!), completed: UInt64($0["completed"]!), finalSyncAttempted: UInt64($0["finalSyncAttempted"]!), finalSyncCompleted: UInt64($0["finalSyncCompleted"]!)) }
+            let v = vector["verdict"] as! [String: String]
+            let verdict: GuestStopVerdict = v["guest"] == "orderly" ? .orderly : v["guest"] == "not-booted" ? .notBooted : .uncertain(UncertainReason(rawValue: v["reason"]!)!)
+            return (vector["name"] as! String, states, reason, counters, verdict)
+        }
+    }
+    func testGuestStopVerdictAgreesWithEveryVectorExactly() throws {
+        let cases = try guestStopCases()
+        XCTAssertEqual(cases.count, 29)
+        XCTAssertTrue(cases.contains { $0.name == "guest-halted-after-mux-quarantine" && $0.verdict == .uncertain(.guestFault) })
+        XCTAssertTrue(cases.contains { $0.name == "guest-halted-without-drain-ack" && $0.verdict == .uncertain(.guestFault) })
+        for c in cases { XCTAssertEqual(GuestStop.verdict(states: c.states, exitReason: c.reason, counters: c.counters), c.verdict, c.name) }
+        XCTAssertEqual(cases.filter { $0.verdict == .orderly }.map(\.name), ["orderly"], "exactly one vector is orderly")
+    }
+    /// What the LAUNCHER sees: no exit reason and no final-sync flags, only the statuses. The worker reports `guest_halted` only for reason `off` with both
+    /// final syncs completed, so a vector where it would not have reported it is replayed without that status. The class (orderly, not booted, uncertain)
+    /// must be the vector's; only a reason code may differ.
+    /// Orders the vectors do not exercise, decided by the contract's function: the drain ack before the drain, and the power-off report before `halting`.
+    func testStatusOrdersTheVectorsDoNotCoverStillCannotBeOrderly() {
+        let full = [FlushDevice(requested: 3, completed: 3, finalSyncAttempted: 1, finalSyncCompleted: 1), FlushDevice(requested: 3, completed: 3, finalSyncAttempted: 1, finalSyncCompleted: 1)]
+        XCTAssertEqual(GuestStop.verdict(states: [.vmRunning, .drainAcked, .draining, .halting, .guestHalted], exitReason: .off, counters: full), .uncertain(.guestFault))
+        XCTAssertEqual(GuestStop.verdict(states: [.vmRunning, .draining, .drainAcked, .guestHalted, .halting], exitReason: .off, counters: full), .uncertain(.flushUncertain))
+        XCTAssertEqual(GuestStop.verdict(states: [.vmRunning, .draining, .drainAcked, .halting, .guestHalted], exitReason: .off, counters: full), .orderly)
+        // The stricter rules of contract round 3b: the VM runs before it drains; the flush counts are EQUAL (more completed than requested is an invented flush); exactly two disks.
+        XCTAssertEqual(GuestStop.verdict(states: [.draining, .vmRunning, .drainAcked, .halting, .guestHalted], exitReason: .off, counters: full), .uncertain(.guestFault))
+        var invented = full; invented[0].completed = 4
+        XCTAssertEqual(GuestStop.verdict(states: [.vmRunning, .draining, .drainAcked, .halting, .guestHalted], exitReason: .off, counters: invented), .uncertain(.flushUncertain))
+        XCTAssertEqual(GuestStop.verdict(states: [.vmRunning, .draining, .drainAcked, .halting, .guestHalted], exitReason: .off, counters: [full[0]]), .uncertain(.flushUncertain))
+        XCTAssertEqual(GuestStop.verdict(states: [.vmRunning, .draining, .drainAcked, .halting, .guestHalted], exitReason: .off, counters: full + [full[0]]), .uncertain(.flushUncertain))
+    }
+    func testWhatTheLauncherCanSeeReachesTheSameClassAsEveryVector() throws {
+        for c in try guestStopCases() {
+            var states = c.states
+            if c.reason != .off || !GuestStop.flushesComplete(c.counters) { states.removeAll { $0 == .guestHalted } }
+            let pair = c.counters.flatMap { $0.count == 2 ? $0 : nil }.map { CounterPair(data: FlushCounters(requested: $0[0].requested, completed: $0[0].completed), environment: FlushCounters(requested: $0[1].requested, completed: $0[1].completed)) }
+            let observed = GuestStop.observed(states: states, counters: pair)
+            switch (observed, c.verdict) {
+            case (.orderly, .orderly), (.notBooted, .notBooted), (.uncertain, .uncertain): break
+            default: XCTFail("\(c.name): the launcher concluded \(observed), the vector says \(c.verdict)")
+            }
+        }
+    }
+    func testTheStopTimelineValuesAndOrder() {
+        XCTAssertEqual(WireLimits.libkrunExitWatchdogMs, 20_000); XCTAssertEqual(WireLimits.launcherKillMarginMs, 5_000); XCTAssertEqual(WireLimits.hostStopMarginMs, 10_000)
+        XCTAssertEqual(WireLimits.launcherKillMs(budgetMs: 30_000), 55_000); XCTAssertEqual(WireLimits.hostStopWaitMs(budgetMs: 30_000), 65_000)
+        for budget in [0, 1_000, 30_000, WireLimits.drainBudgetCeilingMs] {
+            XCTAssertGreaterThan(WireLimits.launcherKillMs(budgetMs: budget), budget + WireLimits.libkrunExitWatchdogMs, "the kill is later than anything the exit watchdog could still do")
+            XCTAssertGreaterThan(WireLimits.hostStopWaitMs(budgetMs: budget), WireLimits.launcherKillMs(budgetMs: budget))
+        }
+    }
+
+    // MARK: what the relay does NOT decide: bootstrap order and the runtime IN bound
+
+    /// `bootstrap-order.json` and `runtime-flow.json` are rules for the ENDPOINTS (the host sender and the guest). The launcher relays L3 blind: it checks a frame's header
+    /// (class, ceiling, length, per-class sequence) and nothing inside it, so it carries every transcript, mis-ordered ones included. Pinned so that a launcher that
+    /// started to judge order or flow (a second, divergent oracle) would fail here.
+    func testTheRelayCarriesEveryBootstrapTranscriptAndEveryRuntimeFlowStepWithoutJudgingThem() throws {
+        let order = try XCTUnwrap(try loadVector("bootstrap-order.json")["cases"] as? [[String: Any]])
+        XCTAssertEqual(order.count, 16)
+        var misordered = 0
+        for transcript in order {
+            if ((transcript["result"] as! [String: Any])["ok"] as? Bool) == false { misordered += 1 }
+            for (index, event) in (transcript["events"] as! [[String: Any]]).enumerated() {
+                let frame = MuxFormat.frame(.bootstrap, seq: UInt32(index + 1), payload: Array("{\"v\":1,\"t\":\"\(event["t"] as! String)\"}\n".utf8))
+                XCTAssertEqual(try MuxFormat.parseRelayable(frame).muxClass, .bootstrap, "\(transcript["name"] as! String) / \(event["t"] as! String)")
+            }
+        }
+        XCTAssertGreaterThanOrEqual(misordered, 8, "the transcripts include orders the relay must still carry")
+        let flow = try loadVector("runtime-flow.json")
+        XCTAssertEqual(flow["limitBytes"] as? Int, 1_048_576)
+        let cases = try XCTUnwrap(flow["cases"] as? [[String: Any]])
+        XCTAssertEqual(cases.count, 8)
+        var refused = 0
+        for c in cases {
+            if c["refusedAt"] as? Int != nil { refused += 1 }
+            for (index, step) in (c["steps"] as! [[String: Any]]).enumerated() {
+                let stream: UInt8 = ["in": 1, "out": 2, "err": 3][step["stream"] as! String]!
+                let data = step["bytes"] as! Int
+                let payload = [0, stream, 0, 0] + [UInt8](repeating: 0x61, count: data)
+                let frame = MuxFormat.frame(.runtime, seq: UInt32(index + 1), payload: payload)
+                // The relay's only bound is the class ceiling, prefix included (a sender chunks at 256 KiB); the 1 MiB IN flow bound is not its business.
+                if payload.count <= MuxClass.runtime.payloadCeiling { XCTAssertEqual(try MuxFormat.parseRelayable(frame).muxClass, .runtime, c["name"] as! String) }
+                else { XCTAssertThrowsError(try MuxFormat.parseRelayable(frame), "a payload over the class ceiling is refused by the header check") }
+            }
+        }
+        XCTAssertGreaterThanOrEqual(refused, 4)
     }
 }

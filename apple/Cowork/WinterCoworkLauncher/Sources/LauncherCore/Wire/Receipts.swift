@@ -11,6 +11,7 @@ import Foundation
 
 public enum FinalFlush: String, Sendable { case completed, notAttached = "not-attached" }
 public enum GuestDrain: String, Sendable { case acked, notBooted = "not-booted" }
+public enum GuestHalting: String, Sendable { case observed, notBooted = "not-booted" }
 public enum GuestPowerOff: String, Sendable { case observed, notBooted = "not-booted" }
 public enum UncertainExit: String, Sendable { case code, signal, unknown }
 
@@ -63,6 +64,7 @@ public struct OrderlyReceipt: Equatable, Sendable {
     public var runtimeImageDigest: String
     public var hostBootId: String
     public var guestDrain: GuestDrain
+    public var guestHalting: GuestHalting
     public var guestPowerOff: GuestPowerOff
     public var workerPid: Int
     public var workerStartToken: String
@@ -70,11 +72,11 @@ public struct OrderlyReceipt: Equatable, Sendable {
     public var issuedAtMs: UInt64
     public init(confirmationId: String, stopNonce: String, origin: StopOrigin, launcherInstanceId: String, admissionId: String, homeId: String, workspaceId: String,
                 incarnationId: String, leaseEpoch: Int, controllerInstanceId: String, workerInstanceId: String, runtimeImageDigest: String, hostBootId: String,
-                guestDrain: GuestDrain, guestPowerOff: GuestPowerOff, workerPid: Int, workerStartToken: String, volumes: [OrderlyVolume], issuedAtMs: UInt64) {
+                guestDrain: GuestDrain, guestHalting: GuestHalting, guestPowerOff: GuestPowerOff, workerPid: Int, workerStartToken: String, volumes: [OrderlyVolume], issuedAtMs: UInt64) {
         self.confirmationId = confirmationId; self.stopNonce = stopNonce; self.origin = origin; self.launcherInstanceId = launcherInstanceId; self.admissionId = admissionId
         self.homeId = homeId; self.workspaceId = workspaceId; self.incarnationId = incarnationId; self.leaseEpoch = leaseEpoch; self.controllerInstanceId = controllerInstanceId
         self.workerInstanceId = workerInstanceId; self.runtimeImageDigest = runtimeImageDigest; self.hostBootId = hostBootId; self.guestDrain = guestDrain
-        self.guestPowerOff = guestPowerOff; self.workerPid = workerPid; self.workerStartToken = workerStartToken; self.volumes = volumes; self.issuedAtMs = issuedAtMs
+        self.guestHalting = guestHalting; self.guestPowerOff = guestPowerOff; self.workerPid = workerPid; self.workerStartToken = workerStartToken; self.volumes = volumes; self.issuedAtMs = issuedAtMs
     }
     static let keys = ["v", "class", "confirmationId", "stopNonce", "origin", "launcherInstanceId", "admissionId", "homeId", "workspaceId", "incarnationId", "leaseEpoch",
                        "controllerInstanceId", "workerInstanceId", "runtimeImageDigest", "hostBootId", "guest", "worker", "volumes", "issuedAtMs"]
@@ -82,7 +84,7 @@ public struct OrderlyReceipt: Equatable, Sendable {
     static func decode(_ value: JSONValue) throws -> OrderlyReceipt {
         let f = try Fields(try V.object(value), keys: keys)
         try V.literal(f["v"], 1); try V.literal(f["class"], "A")
-        let guest = try Fields(try V.object(f["guest"]), keys: ["drain", "powerOff"])
+        let guest = try Fields(try V.object(f["guest"]), keys: ["drain", "halting", "powerOff"])
         let worker = try Fields(try V.object(f["worker"]), keys: ["pid", "startToken", "exit", "status", "reaped"])
         try V.literal(worker["exit"], "code"); try V.literal(worker["status"], 0); try V.literal(worker["reaped"], true)
         let items = try V.array(f["volumes"])
@@ -92,7 +94,7 @@ public struct OrderlyReceipt: Equatable, Sendable {
             launcherInstanceId: try V.label(f["launcherInstanceId"]), admissionId: try V.token(f["admissionId"]), homeId: try V.token(f["homeId"]), workspaceId: try V.token(f["workspaceId"]),
             incarnationId: try V.token(f["incarnationId"]), leaseEpoch: try V.epoch(f["leaseEpoch"]), controllerInstanceId: try V.token(f["controllerInstanceId"]),
             workerInstanceId: try V.token(f["workerInstanceId"]), runtimeImageDigest: try V.digest(f["runtimeImageDigest"]), hostBootId: try V.label(f["hostBootId"]),
-            guestDrain: GuestDrain(rawValue: try V.oneOf(guest["drain"], ["acked", "not-booted"]))!, guestPowerOff: GuestPowerOff(rawValue: try V.oneOf(guest["powerOff"], ["observed", "not-booted"]))!,
+            guestDrain: GuestDrain(rawValue: try V.oneOf(guest["drain"], ["acked", "not-booted"]))!, guestHalting: GuestHalting(rawValue: try V.oneOf(guest["halting"], ["observed", "not-booted"]))!, guestPowerOff: GuestPowerOff(rawValue: try V.oneOf(guest["powerOff"], ["observed", "not-booted"]))!,
             workerPid: Int(try V.uint(worker["pid"], 1, 0x7fff_ffff)), workerStartToken: try V.label(worker["startToken"]),
             volumes: [try OrderlyVolume.decode(items[0], purpose: .data), try OrderlyVolume.decode(items[1], purpose: .environment)], issuedAtMs: UInt64(try V.uint(f["issuedAtMs"])))
     }
@@ -102,7 +104,7 @@ public struct OrderlyReceipt: Equatable, Sendable {
         w.key("homeId"); w.string(homeId); w.key("workspaceId"); w.string(workspaceId); w.key("incarnationId"); w.string(incarnationId); w.key("leaseEpoch"); w.integer(leaseEpoch)
         w.key("controllerInstanceId"); w.string(controllerInstanceId); w.key("workerInstanceId"); w.string(workerInstanceId); w.key("runtimeImageDigest"); w.string(runtimeImageDigest)
         w.key("hostBootId"); w.string(hostBootId)
-        w.key("guest"); w.beginObject(); w.key("drain"); w.string(guestDrain.rawValue); w.key("powerOff"); w.string(guestPowerOff.rawValue); w.endObject()
+        w.key("guest"); w.beginObject(); w.key("drain"); w.string(guestDrain.rawValue); w.key("halting"); w.string(guestHalting.rawValue); w.key("powerOff"); w.string(guestPowerOff.rawValue); w.endObject()
         w.key("worker"); w.beginObject(); w.key("pid"); w.integer(workerPid); w.key("startToken"); w.string(workerStartToken); w.key("exit"); w.string("code")
         w.key("status"); w.integer(0); w.key("reaped"); w.bool(true); w.endObject()
         w.key("volumes"); w.beginArray(); volumes.forEach { $0.write(&w) }; w.endArray()
@@ -113,7 +115,8 @@ public struct OrderlyReceipt: Equatable, Sendable {
     /// launcher that cannot state all of these emits Class B instead.
     public var invariantsHold: Bool {
         let booted = guestDrain == .acked
-        if booted != (guestPowerOff == .observed) { return false }
+        // drain_ack, `halting` and the power-off stand or fall together: a power-off with no `halting` is a guest that could not prove its filesystems unmounted clean.
+        if booted != (guestHalting == .observed) || booted != (guestPowerOff == .observed) { return false }
         guard volumes.count == 2, volumes[0].attached == volumes[1].attached else { return false }
         return volumes.allSatisfy { v in
             v.attached

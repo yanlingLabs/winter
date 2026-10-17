@@ -252,9 +252,9 @@ final class SessionHarness {
         return disks
     }
     func stop(id: String = "req-stop", nonce: String = Fixture.nonce, budget: Int = 30_000) { send(.stop(id: id, stopNonce: nonce, reason: .user, budgetMs: budget)) }
-    /// A clean guest halt: draining, ack, halted (flushes 1/1), exiting.
+    /// A clean guest halt: draining, ack, halting, halted (flushes 1/1), exiting.
     func cleanHalt(flushed: FlushCounters = FlushCounters(requested: 1, completed: 1)) {
-        status(.draining, data: flushed); status(.drainAcked, data: flushed); status(.guestHalted, data: flushed); status(.exiting, data: flushed)
+        status(.draining, data: flushed); status(.drainAcked, data: flushed); status(.halting, data: flushed); status(.guestHalted, data: flushed); status(.exiting, data: flushed)
     }
 }
 

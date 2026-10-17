@@ -10,7 +10,7 @@ public enum ChannelFault: String, CaseIterable, Sendable {
 }
 /// Informational only. Never evidence.
 public enum WorkerStateName: String, CaseIterable, Sendable {
-    case sandboxed, volumes_accepted, vm_running, guest_hello, draining, drain_acked, exited
+    case sandboxed, volumes_accepted, vm_running, guest_hello, draining, drain_acked, exited, halting, guest_fault
 }
 public enum StopReason: String, CaseIterable, Sendable {
     case user, shutdown, restart, update
@@ -40,7 +40,7 @@ public enum VolumePurpose: String, CaseIterable, Sendable { case data, environme
 
 /// The numbering is the wire's (`u32 state`, minus nothing: 1 is `sandboxed`).
 public enum WorkerStatus: Int, CaseIterable, Sendable {
-    case sandboxed = 1, volumesAccepted, vmRunning, guestHello, draining, drainAcked, guestHalted, exiting
+    case sandboxed = 1, volumesAccepted, vmRunning, guestHello, draining, drainAcked, guestHalted, exiting, halting, guestFault
 }
 public enum WorkerFault: Int, CaseIterable, Sendable {
     case badScope = 1, badVolumes, sandboxFailed, vmFailed, muxViolation, truncatedRights, `internal`, secondDrain

@@ -196,7 +196,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     }
 
     func testAnUnresponsiveWorkerIsKilledAtTheOwnerLossBudgetAndLeavesClassB() throws {
-        let rig = try RuntimeRig(mode: "ignoredrain") { $0.ownerLossBudgetMs = 400 }
+        let rig = try RuntimeRig(mode: "ignoredrain") { $0.ownerLossBudgetMs = 400; $0.exitAllowanceMs = 0 }
         XCTAssertTrue(rig.hello())
         let (pid, _) = try XCTUnwrap(rig.begin())
         XCTAssertTrue(try rig.attach(try DiskPair()))
@@ -211,7 +211,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     }
 
     func testAHostStopBudgetThatRunsOutKillsTheWorkerAndTheDaemonIsToldClassB() throws {
-        let rig = try RuntimeRig(mode: "ignoredrain")
+        let rig = try RuntimeRig(mode: "ignoredrain") { $0.exitAllowanceMs = 0 }
         XCTAssertTrue(rig.hello())
         let (pid, _) = try XCTUnwrap(rig.begin())
         XCTAssertTrue(try rig.attach(try DiskPair()))
@@ -412,6 +412,27 @@ final class RuntimeIntegrationTests: XCTestCase {
         rig.daemon.send(.stop(id: "req-stop", stopNonce: Fixture.nonce, reason: .user, budgetMs: 10_000))
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .flushUncertain)
+    }
+
+    func testAPowerOffWithoutHaltingIsClassBEvenThoughTheWorkerExitedZero() throws {
+        let rig = try RuntimeRig(mode: "nohalting")
+        XCTAssertTrue(rig.hello())
+        _ = try XCTUnwrap(rig.begin())
+        XCTAssertTrue(try rig.attach(try DiskPair()))
+        rig.daemon.send(.stop(id: "req-stop", stopNonce: Fixture.nonce, reason: .user, budgetMs: 10_000))
+        let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
+        XCTAssertEqual(b.reason, .guestFault); XCTAssertEqual(b.workerExit, .code); XCTAssertEqual(b.workerStatus, 0)
+        XCTAssertFalse(rig.daemon.sees(timeout: 0.2) { if case .stopped = $0 { true } else { false } }, "never a Class A")
+    }
+    func testAGuestFaultIsForwardedAndTheRunCanNeverBeClassA() throws {
+        let rig = try RuntimeRig(mode: "guestfault")
+        XCTAssertTrue(rig.hello())
+        _ = try XCTUnwrap(rig.begin())
+        XCTAssertTrue(try rig.attach(try DiskPair()))
+        XCTAssertNotNil(rig.daemon.next { if case .workerState(.guest_fault) = $0 { true } else { nil } })
+        rig.daemon.send(.stop(id: "req-stop", stopNonce: Fixture.nonce, reason: .user, budgetMs: 10_000))
+        let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
+        XCTAssertEqual(b.reason, .guestFault)
     }
 
     func testPingAndAStopBeforeBeginAreAnsweredWithoutAWorker() throws {

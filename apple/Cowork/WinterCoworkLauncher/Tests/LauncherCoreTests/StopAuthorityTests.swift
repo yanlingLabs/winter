@@ -7,14 +7,15 @@ final class StopAuthorityTests: XCTestCase {
     private let pair = [VolumeIdentity(purpose: .data, device: "16777234", inode: "111", uid: 501, capacityBytes: 16 << 20), VolumeIdentity(purpose: .environment, device: "16777234", inode: "222", uid: 501, capacityBytes: 16 << 20)]
     private let one = FlushCounters(requested: 1, completed: 1)
 
-    private func evidence(attached: Bool = true, booted: Bool = true, drain: Bool = true, acked: Bool = true, halted: Bool = true, counters: CounterPair? = nil, sent: Bool? = nil) -> WorkerEvidence {
+    private func evidence(attached: Bool = true, booted: Bool = true, drain: Bool = true, acked: Bool = true, halting: Bool = true, halted: Bool = true, counters: CounterPair? = nil, sent: Bool? = nil) -> WorkerEvidence {
         var e = WorkerEvidence()
         e.volumesSent = sent ?? attached
-        if attached { e.attachedVolumes = pair; e.statuses.insert(.volumesAccepted) }
-        if booted { e.statuses.formUnion([.vmRunning, .guestHello]) }
-        if drain { e.drain = DrainRecord(nonce: Fixture.nonce, origin: .hostStop) }
-        if acked { e.statuses.insert(.drainAcked) }
-        if halted { e.statuses.insert(.guestHalted); e.finalCounters = counters ?? CounterPair(data: one, environment: FlushCounters()) }
+        if attached { e.attachedVolumes = pair; e.record(.volumesAccepted) }
+        if booted { e.record(.vmRunning); e.record(.guestHello) }
+        if drain { e.drain = DrainRecord(nonce: Fixture.nonce, origin: .hostStop); if booted { e.record(.draining) } }
+        if acked { e.record(.drainAcked) }
+        if halting { e.record(.halting) }
+        if halted { e.record(.guestHalted); e.finalCounters = counters ?? CounterPair(data: one, environment: FlushCounters()) }
         return e
     }
     private func decide(_ e: WorkerEvidence, exit: WorkerExit = .code(0), killSent: Bool = false, killReason: UncertainReason? = nil, demote: UncertainReason? = nil) -> StopReceipt {
@@ -31,7 +32,7 @@ final class StopAuthorityTests: XCTestCase {
         XCTAssertEqual(r.confirmationId, "confirm-test"); XCTAssertEqual(r.stopNonce, Fixture.nonce); XCTAssertEqual(r.origin, .hostStop)
         XCTAssertEqual(r.homeId, Fixture.homeId); XCTAssertEqual(r.hostBootId, Fixture.bootId); XCTAssertEqual(r.launcherInstanceId, Fixture.launcherInstanceId)
         XCTAssertEqual([r.workspaceId, r.incarnationId, r.admissionId, r.controllerInstanceId, r.workerInstanceId, r.runtimeImageDigest], [Fixture.scope.workspaceId, Fixture.scope.incarnationId, Fixture.scope.admissionId, Fixture.scope.controllerInstanceId, Fixture.scope.workerInstanceId, Fixture.scope.runtimeImageDigest])
-        XCTAssertEqual(r.leaseEpoch, 3); XCTAssertEqual(r.workerPid, 4242); XCTAssertEqual(r.guestDrain, .acked); XCTAssertEqual(r.guestPowerOff, .observed)
+        XCTAssertEqual(r.leaseEpoch, 3); XCTAssertEqual(r.workerPid, 4242); XCTAssertEqual(r.guestDrain, .acked); XCTAssertEqual(r.guestHalting, .observed); XCTAssertEqual(r.guestPowerOff, .observed)
         XCTAssertEqual(r.volumes.map(\.inode), ["111", "222"], "an attached entry names the exact file the daemon sent")
         XCTAssertEqual(r.volumes[0].flushRequested, 1); XCTAssertEqual(r.volumes[0].flushCompleted, 1); XCTAssertTrue(r.volumes.allSatisfy { $0.finalFlush == .completed && $0.attached })
         XCTAssertEqual(try StopReceipt.parse(StopReceipt.orderly(r).serialize()), .orderly(r), "and it survives its own wire format")
@@ -39,7 +40,7 @@ final class StopAuthorityTests: XCTestCase {
     func testAnUnattachedNeverBootedStopIsClassAWithZerosThatNameNothing() throws {
         guard case .orderly(let r) = decide(evidence(attached: false, booted: false, acked: false, halted: false)) else { return XCTFail() }
         XCTAssertTrue(r.invariantsHold)
-        XCTAssertEqual(r.guestDrain, .notBooted); XCTAssertEqual(r.guestPowerOff, .notBooted)
+        XCTAssertEqual(r.guestDrain, .notBooted); XCTAssertEqual(r.guestHalting, .notBooted); XCTAssertEqual(r.guestPowerOff, .notBooted)
         XCTAssertEqual(r.volumes, [.unattached(.data), .unattached(.environment)])
     }
     func testAttachedButNeverBootedWroteNothingAndIsClassA() throws {
@@ -65,8 +66,9 @@ final class StopAuthorityTests: XCTestCase {
         // asked for
         XCTAssertEqual(reason(decide(evidence(drain: false))), .workerCrashed, "exit 0 that nobody asked for is a crash that returned 0")
         // flushed
-        XCTAssertEqual(reason(decide(evidence(acked: false))), .flushUncertain, "booted but never acknowledged the drain")
+        XCTAssertEqual(reason(decide(evidence(acked: false, halting: false, halted: false))), .drainTimeout, "booted but never acknowledged the drain")
         XCTAssertEqual(reason(decide(evidence(halted: false))), .flushUncertain, "booted but never reported power-off and the final flush")
+        XCTAssertEqual(reason(decide(evidence(halting: false))), .guestFault, "a bare power-off: the guest never said halting, so it could not prove its filesystems clean")
         XCTAssertEqual(reason(decide(evidence(counters: CounterPair(data: FlushCounters(requested: 2, completed: 1), environment: FlushCounters())))), .flushUncertain, "a requested flush that did not complete")
         XCTAssertEqual(reason(decide(evidence(counters: CounterPair(data: one, environment: FlushCounters(requested: 1, completed: 0))))), .flushUncertain)
         XCTAssertEqual(reason(decide(evidence(booted: false, acked: false, halted: true, counters: CounterPair(data: one, environment: FlushCounters())))), .flushUncertain, "flushes without a VM")
@@ -88,7 +90,7 @@ final class StopAuthorityTests: XCTestCase {
     }
     func testBootedMeansTheWorkerSentVMRunningAndNothingElseImpliesIt() {
         var e = WorkerEvidence(); XCTAssertFalse(e.booted)
-        for status in [WorkerStatus.sandboxed, .volumesAccepted, .guestHello, .draining, .drainAcked, .guestHalted, .exiting] { e.statuses = [status]; XCTAssertFalse(e.booted, "\(status)") }
+        for status in [WorkerStatus.sandboxed, .volumesAccepted, .guestHello, .draining, .drainAcked, .halting, .guestFault, .guestHalted, .exiting] { e.statuses = [status]; XCTAssertFalse(e.booted, "\(status)") }
         e.statuses = [.vmRunning]; XCTAssertTrue(e.booted)
     }
     func testClassBCarriesWhatTheLauncherSawAndNothingThatCouldReleaseAnything() throws {

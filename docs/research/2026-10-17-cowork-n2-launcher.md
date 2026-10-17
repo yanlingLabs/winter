@@ -3,7 +3,7 @@
 Status: SOURCE ONLY, 2026-10-17. Branch `cowork/n2-launcher`, based on `cowork/output-integration`. Nothing here is wired: no daemon,
 `project.yml` or `release.ts` reference the launcher, the embed script or the lib (a test pins that). No VM, no Hypervisor.framework call,
 no libkrun, no sandbox call, no `pmset`, no app launch, no Keychain, nothing under `~/.winter*`, no Developer ID. The contract is S1's
-(`docs/cowork-native-worker.md` plus `protocol.ts` and the vectors on `cowork/n2-host-adapter`, vectors last changed in `7fca49f7a`).
+(`docs/cowork-native-worker.md` plus `protocol.ts` and the vectors on `cowork/n2-host-adapter`, vectors last changed in `6c1f04e80`).
 
 ## What it is
 
@@ -26,15 +26,42 @@ Ported by reading, never by editing: `CleanStopAuthority` (`OrderlyStopAuthority
 `EventQueue` (`OutboundQueue`, terminal headroom) and `DeviceOperationGate` (`RelayGate`) from `WinterCoworkVM`; `OwnedChild.swift`,
 `native.c` (`kb_channel`, `spawn_suspended`, the injectable `wait_locked`) and `FixedFixtureImage` from the key broker.
 
-## Contract pin and what changed in the fix round
+## Contract pin and what changed in the fix rounds
 
-Pinned to S1's final contract: `cowork/n2-host-adapter` at `a7160f9f` (contract commit `abb2f361`). Vectors are five files (`envelopes`,
-`launcher-lines`, `mux-frames`, `stop-receipts`, `runtime-image`) with SHA-256 pins in `PINS.json`. If S1 lands more contract-only commits
-(conversation-set delivery, runtime stream ids) the pins move again.
+Pinned to S1's contract round 3: `cowork/n2-host-adapter` at `6c1f04e807df3a10579d6f14a15e39652bd1c7a6` (the vectors' last commit is that SHA too; earlier contract
+commits were `abb2f361`, `1313040a5` and `86a0629f`). Vectors are eight files (`envelopes`, `launcher-lines`, `mux-frames`, `stop-receipts`, `runtime-image`, `guest-stop`, `bootstrap-order`, `runtime-flow`)
+with SHA-256 pins in `PINS.json`, which also records the contract document's own SHA-256 at that head.
 
-- `homeId` is on `begin` (after `id`) and is its ONLY source; there is no `--home-id`. It is stamped into every receipt; it does not travel on L2.
-- Memory floor 768 MiB; WorkerFault code 8 `second_drain`.
-- The daemon's shipped signing identifier is `winter-core` (`apple/ComputerUse/PROTOCOL.md` section 2.2); dev stays `com.winter.core.dev`.
+Earlier in this round: `homeId` is on `begin` (after `id`) and is its ONLY source (no `--home-id`); memory floor 768 MiB; WorkerFault code 8 `second_drain`;
+the shipped daemon's signing identifier is `winter-core` (`apple/ComputerUse/PROTOCOL.md` section 2.2), dev stays `com.winter.core.dev`.
+
+### Contract round 3 (final pin), as it reaches the launcher
+
+- **L2 STATUS** has `halting` (9) and `guest_fault` (10). Both need a VM (`vm_running` first, else a worker violation: kill, Class B) and are forwarded as
+  `worker_state` lines (`halting`, `guest_fault`, informational only). The order of arrival is kept (`WorkerEvidence.order`); a set is no longer enough.
+- **A power-off without `halting` is Class B.** The launcher's one decision procedure is `GuestStop.verdict`, a port of `coworkNativeGuestStopVerdict`; every case of
+  `guest-stop.json` (29) runs through it unchanged. Orderly needs `vm_running`, `draining`, `drain_acked`, `halting`, `guest_halted` in that order, no `guest_fault`,
+  reason `off` and complete flushes (exactly two disks, `completed == requested`, both final syncs done). A `guest_halted` after a mux quarantine or without a `drain_ack` is
+  `guest-fault`. The `exiting` counters are informational and never feed a receipt; only those of `guest_halted` do. A `halting` before the drain ack, a `guest_fault` at any time, and a bare power-off are `guest-fault`; a drain never acknowledged
+  is `drain-timeout`; no power-off report after `halting` is `flush-uncertain`.
+- **What the launcher cannot see.** It sees statuses, not libkrun's exit reason or the final-sync flags. The worker reports `guest_halted` only for reason `off` with a
+  completed final sync on both disks, so `GuestStop.observed` feeds the function `off` and complete syncs exactly when `guest_halted` arrived. A test replays every vector
+  that way: the CLASS (orderly, not booted, uncertain) always equals the vector's. Only a reason code can differ (a `reset` or `vcpu-error` exit is `flush-uncertain`
+  here, `guest-fault` in the vector), and neither is ever Class A. S3 owns the other half of the drift test.
+- **Receipt:** `guest` is `{drain, halting, powerOff}`; all three are `acked` / `observed` / `observed` or all `not-booted` (`invariantsHold`).
+- **Layered stop timeline**, every figure from the moment the worker is handed the DRAIN: guest budget G (the DRAIN's `budgetMs`, default 30 s), libkrun exit watchdog
+  X = 20 s, launcher kill K = G + 20 s + 5 s (55 s by default), daemon wait H = K + 10 s (65 s). The launcher's drain timer is K, for a host stop and for owner loss
+  alike (the owner-loss cap on a longer host stop is the owner-loss K). `WireLimits.launcherKillMs` / `hostStopWaitMs` are the contract's two functions; a test pins
+  their values and order. `SessionConfig.exitAllowanceMs` (25 s) exists only so FakeWorker tests, which have no VMM exit path to wait for, can shorten it.
+- **Bootstrap order and the runtime IN bound** (`bootstrap-order.json`, `runtime-flow.json`) are rules of the endpoints (host sender, guest). The launcher relays L3 blind
+  and judges neither: it carries every transcript and flow step whose frame passes the header check, and a test pins that. `conversations` and `runtime_ready` are
+  ordinary bootstrap frames to it (bootstrap ceiling 256 KiB; the set is at most 20 KiB). `unixId` 1000 to 65533 is likewise payload content it never reads.
+- **Control-up `fault`** terminates at the worker (control frames never cross L3); the launcher sees it as `guest_fault`.
+- **Runtime payloads** carry a 4-byte prefix `{conversation, stream, end flag, 0}`. The launcher relays L3 blind and cuts frames by the 16-byte header and the class
+  ceiling only (runtime payload ceiling 1 MiB, unchanged and prefix included), so nothing in it depends on the prefix, the one-conversation limit or the
+  conversation-set message. The 78 new payload-level mux negatives are accepted by the header check by design; their names are pinned in the vector test.
+- **libkrun exit reasons** (`NONE=0 … TERMINAL_FAULT=4`, `uint32_t`) and S4's flush-counter struct are the worker's and S4's; the launcher only models the reason names
+  for the verdict function.
 
 ## New security logic (REVIEW NEEDED): `runtimeImageDigest`
 
@@ -112,9 +139,9 @@ Commands (all from the repository root; scratch paths of your choice):
 
 ```
 swift build --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build
-swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build                         # 161 tests
-swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build-test -Xswiftc -DWINTER_COWORK_TEST_BUILD   # 165 tests
-bun test scripts/embed-cowork-native.test.ts                                                                         # 20 tests
+swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build                         # 210 tests
+swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build-test -Xswiftc -DWINTER_COWORK_TEST_BUILD   # 215 tests
+bun test scripts/embed-cowork-native.test.ts                                                                         # 21 tests
 ```
 
 The flagged run adds the tests that need the compile-time test pin: the real `winter-cowork-launcher` binary as a child of the test host, its
@@ -123,8 +150,8 @@ Class A, retire, exit 0), loss of the daemon, and SIGTERM. In a normal build the
 refused, the binary contains no `WINTER_COWORK_TEST_` byte, and the production requirement refuses the test host as a parent. No test starts a VM
 or touches HVF; the only child is `FakeWorker`.
 
-Golden vectors: S1's four files are copied (not edited) under `Tests/LauncherCoreTests/Vectors/`, pinned by SHA-256 in `PINS.json` with the S1
-commit. Every positive vector round-trips byte for byte through this encoder and decoder (19 lines, 7 envelopes, 15 mux frames, 8 receipts), and
+Golden vectors: S1's eight files are copied (not edited) under `Tests/LauncherCoreTests/Vectors/`, pinned by SHA-256 in `PINS.json` with the S1
+commit. Every positive vector round-trips byte for byte through this encoder and decoder (32 lines, 28 envelopes, 36 mux frames, 8 receipts, 2 runtime image digests, 29 guest-stop cases), and
 every negative one fails with the contract's own code. The launcher relays blind, so 13 mux-frame negatives and 1 launcher-line negative that only a
 payload parser can refuse are accepted by its header check on purpose; their names are pinned in the test.
 
@@ -135,8 +162,8 @@ key; `codesign --verify --strict` passes; `otool -L` lists only `/usr/lib/...` a
 CoreFoundation, libSystem, and the `/usr/lib/swift` runtime). A first release build carried the builder's absolute source paths in the linker's
 debug map and the embed gate refused it by name; `-Xswiftc -gnone -Xlinker -S -Xlinker -x` (now in `launcherBuildArgs`) removes them.
 
-Mutation checks (the catalogue and runners are in the author's scratch, not committed): 78 mutations, each applied to the source, run against
-the named tests and reverted. 75 are killed (71 in Swift and C, and all 7 on `embed-cowork-native.sh`: marker check, foreign-dylib check, entitlements
+Mutation checks (the catalogue and runners are in the author's scratch, not committed): 139 mutations (131 in Swift and C, 8 on `embed-cowork-native.sh`), each applied to the source, run against
+the named tests and reverted. 134 are killed (126 in Swift and C, and all 8 on `embed-cowork-native.sh`: marker check, foreign-dylib check, entitlements
 set, signing order, `--deep`, the non-Release skip, the recorded-requirement check). Areas: parent authentication (requirement skipped, pid unchecked, unnamed-pair unchecked, token
 failure accepted, dev or wrong-team requirement), worker image (check before resume, check after READY, executed cdhash, pinned digest, requirement
 ignored), natives (probe before kill, kill after a confirmed exit, sole-reaper policy, suspended spawn, `CLOEXEC_DEFAULT`, colliding child
@@ -148,7 +175,7 @@ disks, scope before validation, one `begin`), stop authority (flush, exit status
 transfer, invariants), receipt store (write-once, directory mode, `.winter*`, symlinks, name against content), power (veto, assertion), runtime
 (ECONNRESET, SIGTERM) and the test pin (present in a normal build).
 
-Three mutations survive on their own BY DESIGN, each because a second, independent guard covers the same case: a non-canonical base64 carrier
+Five mutations survive on their own BY DESIGN (the three below, plus two defence-in-depth checks: the receipt store's second location vetting after the parent was already vetted and the name checked, and the guest artifact `S_IFREG` test next to the size, link-count and writability tests), each because a second, independent guard covers the same case: a non-canonical base64 carrier
 (the line's final re-serialization compare also refuses it, and removing THAT compare is a killed mutation, so the pair is covered but the base64
 check alone cannot be isolated), a second `begin` (the phase check and the reservation both refuse it; both dropped is killed), and a flush
 shortfall (the stop authority's counter check and the receipt's own `invariantsHold` both produce `flush-uncertain`; both dropped is killed). The first pass also found one real gap (a stray descriptor without
