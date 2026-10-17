@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
     /// follows (`AppModel.session`), through its own adapter.
     private(set) var pillController: DispatchPillController?
+    /// The Winter island at the camera housing (`docs/claude/island.md`); nil under unit tests and without a token.
+    private(set) var islandController: IslandController?
     /// The background watchdog for a stalled main thread (never constructed under unit tests).
     private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
@@ -483,6 +485,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pill.onSetPolicy = { [weak model] policy in
             await model?.setSessionPolicy(policy) ?? false
         }
+        // A command typed into the pill runs in the bound session's working directory when it has one (a
+        // dispatch session usually does not — then the pill falls back to the home folder).
+        // "Add to transcript" sends to the session the command was RUN from — that session's own send, never the
+        // focused one; a run that recorded none goes through the pill's own send (`onSubmit`, below). Only a
+        // session a failed send proved deleted (re-listed, and not there) disables the button — never one merely
+        // missing from the directory, which is refreshed only now and then.
+        pill.commandRuns.onSendToTranscript = { [weak self] sessionId, text in
+            guard let client = self?.appModel?.client else { return false }
+            return (try? await client.send(sessionId: sessionId, text: text)) != nil
+        }
+        pill.commandRuns.sessionIsGone = { [weak model] sessionId in
+            guard let model, await model.directory.refreshReportingSuccess() else { return false }
+            return !model.directory.rows.contains { $0.sessionId == sessionId }
+        }
+        pill.commandWorkingDirectory = { [weak model] in
+            guard let model, let sid = model.focusedSessionId,
+                  let row = model.directory.rows.first(where: { $0.sessionId == sid }) else { return nil }
+            return row.cwd ?? row.dirs?.first?.path
+        }
         pill.onSubmit = { [weak self] text in
             guard let model = self?.appModel else { return false }
             let ok = await model.sendOrSteer(text)
@@ -862,6 +883,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// ComputerV2 Phase 4 (lane H3) — **a headless tab shown in the panel** (the browser link's `headless.show`): Winter's
+    /// own window comes to the session and its panel is revealed, where the presentation is drawn (`ShellPanel` shows
+    /// the store's newest presentation for the session it shows). Only Winter's window — nothing of another app's.
+    /// Like `presentBrowserTab`, the reveal hook is registered when the shell's root view first appears, so on the
+    /// app's first summon it runs one main-queue turn later.
+    func presentHeadlessTab(sessionId: String) {
+        summonAppWindow(navigatingTo: .session(sessionId))
+        guard let host = appWindow?.host else { return }
+        if let reveal = host.onRevealPanel {
+            reveal()
+        } else {
+            DispatchQueue.main.async { [weak host] in host?.onRevealPanel?() }
+        }
+    }
+
     func openOutputFileFromPanel(sessionId: String, path: String) {
         summonAppWindow(navigatingTo: .session(sessionId))
         appWindow?.host?.showOutputFile(URL(fileURLWithPath: path))
@@ -1125,6 +1161,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             armSummon()
         }
         #endif
+    }
+
+    /// The Winter island (`docs/claude/island.md`): every pending approval, question and view request across sessions,
+    /// at the camera housing. It rides the main feed's connection — that hello advertises the island, so the daemon
+    /// shows the desktop-switch prompt here rather than in the Computer Use helper — and never attaches to a session.
+    private func startIsland(model: AppModel, pill: DispatchPillController) {
+        model.clientCapabilities = [WinterClient.capabilityIsland]
+        let client = model.client
+        let store = IslandStore()
+        store.fetch = { try await client.islandPending() }
+        store.responder = .live(client)
+        store.onShown = { ids in Task { try? await client.islandShown(ids: ids) } }
+        let island = IslandController(store: store)
+        island.focusSources = IslandFocusSources(
+            dispatchPillVisible: { [weak pill] in pill?.isVisible ?? false },
+            dispatchSessionIds: { [weak model] in
+                Set(model?.directory.rows.filter { $0.mode == "dispatch" }.map(\.sessionId) ?? [])
+                    .union(model?.focusedSessionId.map { [$0] } ?? [])
+            },
+            keyOrMainWindowSessionIds: { [weak self] in
+                guard let self else { return [] }
+                var ids = Set<String>()
+                if let app = self.appWindow, app.isKeyOrMain, let sid = app.host?.attachedSessionId { ids.insert(sid) }
+                for window in self.detachedWindows where window.isKeyOrMain { ids.insert(window.sessionId) }
+                return ids
+            })
+        islandController = island
+        island.start()
+        // Asked for BEFORE the connect, so no `island.changed` is missed; each one asks the daemon again.
+        let changes = client.notifications(method: WinterClient.islandChangedNotification)
+        Task { @MainActor [weak store] in
+            for await _ in changes { await store?.refresh() }
+        }
+        // Every (re)connect re-reads the whole set (cards raised while the app was away included).
+        let previous = model.onClientConnected
+        model.onClientConnected = { [weak store] in
+            previous?()
+            Task { await store?.refresh() }
+        }
+        // The Dispatch pill showing or hiding moves Dispatch's cards between it and the island.
+        pill.$isVisible
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak island] _ in island?.focusChanged() }
+            .store(in: &cancellables)
     }
 
     /// Everything after activation policy. Split out so tests can drive it without
@@ -1439,9 +1520,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The dispatch pill: the 4-finger tap / hotkey / menu summon's surface (the `TriggerHub`
         // sink below). Construction has no side effects — no ordering, no monitors — so every
         // `boot()` under test builds one harmlessly.
-        let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings)
+        // Command mode reads the user's own login shell — never under unit tests (`.inert`: nothing is a
+        // command), so no test ever runs the developer's shell or its profile.
+        let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings,
+                                          commandEnvironment: Self.isRunningUnitTests ? .inert : .live(),
+                                          onScreenPaths: Self.isRunningUnitTests ? .inert : .live())
         pillController = pill
         wireDispatchPill(pill, model: model)
+        if !Self.isRunningUnitTests && !tokenMissing { startIsland(model: model, pill: pill) }
 
         // Task 6 (2e-iii): the morph window's width-responsive sidebars. `onSelect` refocuses the
         // orb's own follow-focus feed in place (`focusSession`); `onNewSession` creates+focuses a
@@ -1764,6 +1850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             browserLink = BrowserLink.start(home: AppProfile.winterHome, keychainService: AppProfile.keychainService)
             browserLink?.host.onPresent = { [weak self] sessionId, tabId in self?.presentBrowserTab(sessionId: sessionId, tabId: tabId) }
+            browserLink?.host.headless?.onShow = { [weak self] sessionId in self?.presentHeadlessTab(sessionId: sessionId) }
         }
         // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
         // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and

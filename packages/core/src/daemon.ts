@@ -125,6 +125,8 @@ import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
+import { IslandRegistry } from "./island/registry";
+import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
 import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
 import type { BackendRegistry } from "./computer-use/browser/transport";
@@ -232,6 +234,9 @@ export interface RunningDaemon {
   /** Dispatch's children tracker (`agent/dispatch-children.ts`) — the SAME instance the `sessions`
    *  capability server's `session_spawn` and every driver's turn-settled hook reach. */
   dispatchChildren: DispatchChildren | undefined;
+  /** ComputerV2 wake triggers (2026-10-12): the registry — the SAME instance the service arms through and the
+   *  `computerUse.wakes.cancel` RPC reaches (a test reads its counts off this, never a mirror). */
+  wakes: WakeRegistry;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -1143,7 +1148,7 @@ export async function startDaemon(opts: {
    */
   const agentProvider = opts.agentProvider ?? null;
   // The daemon's ONE quota ledger — the router's, so a per-provider instance reports into the same
-  // place `daemon.status`/`sync.config` read. An inert manager only for a boot with no router at all.
+  // place the `quota.state` RPC reads. An inert manager only for a boot with no router at all.
   const quota: QuotaManager = internalRouter?.quota ?? new QuotaManager();
 
   // Fix wave (pre-merge review, finding 4b): the ONE `RebindableProvider.refresh` retry lever,
@@ -1263,7 +1268,34 @@ export async function startDaemon(opts: {
   // (cheap: nothing connects or spawns until a script runs); the capability is built per session only while
   // computer use is on. `interrupt` reaches `winterDrivers` late (the helper's Esc), as the capability
   // closures below do.
+  // The Winter island (`docs/claude/island.md`): every card still pending in any session, for Winter.app's surface at
+  // the camera housing (`island.pending`). Pending-ness is the brokers'; the payload is the request event, seen here.
+  const islandRegistry = new IslandRegistry({
+    pending: {
+      approval: (sid, callId) => approvalBroker.pendingMeta(sid, callId) !== undefined,
+      question: (sid, callId) => questions.isPending(sid, callId),
+      elicitation: (sid, id) => elicitationBroker.urlFor(sid, id) !== undefined,
+    },
+    facts: (sid) => {
+      try {
+        const meta = store.meta(sid);
+        const title = store.getTitle(sid);
+        return {
+          ...(meta.mode === undefined ? {} : { mode: meta.mode }),
+          ...(meta.origin === undefined ? {} : { origin: meta.origin }),
+          ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }),
+          ...(title === null ? {} : { title }),
+        };
+      } catch { return undefined; }
+    },
+    hosts: (sid) => hub.attachedHarnesses(sid).map((h) => ({
+      clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
+    })),
+  });
+  hub.addObserver((event) => islandRegistry.observe(event));
+
   const computerUseRuntime = createComputerUseRuntime({
+    island: islandRegistry,
     home: winterHome,
     profile,
     settings: () => settings,
@@ -1290,6 +1322,11 @@ export async function startDaemon(opts: {
       })];
     },
     turnRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
+    // Wake triggers (2026-10-12): a wake goes in through the session's own driver (late-bound, like `interrupt`), and a
+    // Dispatch child's wake turn is followed when its trigger was armed in a followed turn.
+    sessions: () => ({ get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) }),
+    followedNow: (sid) => dispatchChildren?.followingTurn(sid) ?? false,
+    followWake: (sid, text) => dispatchChildren?.expectWake(sid, text),
     ...(opts.computerUse === undefined ? {} : { inject: opts.computerUse }),
     log: (line) => console.error(line),
   });
@@ -2157,6 +2194,9 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`dispatch-children: ${line}`),
   });
   dispatchChildren.start();
+  // Wake triggers (2026-10-12): what the last daemon left armed ends `restart`, and each session is woken once —
+  // after the driver table and Dispatch's follower exist (the sweep resumes sessions).
+  computerUseRuntime.wakes.start();
   // (ListSessions' edited-files index needs no boot step here: the store's `recoverAll` pass indexes every
   // log as the store opens — the one-time backfill and the crash catch-up alike.)
   // SendMessage between sessions: resolve an `s_…` id, resume a finished session through its own driver,
@@ -2999,7 +3039,8 @@ export async function startDaemon(opts: {
     // ComputerV2 (2026-10-08): Settings → Computer Use's local-only RPCs.
     computerUse: computerUseRuntime.control,
     browserLink: computerUseRuntime.browserLink,
-    onSessionArchived: (sid) => computerUseRuntime.browsers.sessionArchived(sid),
+    // The session's wake triggers end before its agent tabs close (`ComputerUseRuntime.sessionArchived`).
+    onSessionArchived: (sid) => computerUseRuntime.sessionArchived(sid),
     // A client's `session.interrupt` is the user's stop (the Mac's stop button, a terminal's Esc, the phone).
     onUserInterrupt: (sid) => dispatchChildren?.noteStop(sid, { kind: "user" }),
     connectorPermissions,
@@ -3021,6 +3062,7 @@ export async function startDaemon(opts: {
     // restart, even on a no-provider daemon where the facade itself was never built.
     hooks: hookRegistry,
     questions: questions ?? undefined,
+    island: islandRegistry,
     tasks: undefined,
     // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
     // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`
@@ -3126,6 +3168,7 @@ export async function startDaemon(opts: {
     buildSessionCapabilities,
     winter: winterDrivers,
     dispatchChildren,
+    wakes: computerUseRuntime.wakes,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,
@@ -3144,6 +3187,7 @@ export async function startDaemon(opts: {
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
+      computerUseRuntime.wakes.beginShutdown(); // no wake resumes a session either: its trigger stays in wakes.json for the next boot
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
       coworkEvents?.stop();

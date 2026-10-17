@@ -90,10 +90,14 @@ extension CUCore {
                                        self?.keyPlace(target: tpid, user: user, space: space0, since: startedAt,
                                                       startWasTheirs: startWasTheirs) ?? user
                                    })
+        // A key of the user's the reroute lets through into the target is work in it (typing: the same chord filter as the
+        // session tap's) — marked by the reroute's own decision (round 17).
+        reroute.onPassThrough = passThroughWorkMarker(tpid)
         guard reroute.begin() else {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — no keyboard reroute tap")
             return nil
         }
+        activeKeyReroute = reroute
         let space = space0
         let undo: () -> Void
         var refusal: CUError?
@@ -221,6 +225,19 @@ extension CUCore {
         }
         CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): begun, the keyboard reroute on")
         return blip
+    }
+
+    /// What a reroute does with a key of the user's it let through into the target `tpid`: typing there is work in it.
+    func passThroughWorkMarker(_ tpid: pid_t) -> (CGEvent) -> Void {
+        { [weak self] e in
+            // (The user's own key only — a hardware event, as the session tap reads it: never a synthetic key another
+            // process posted, nor one of the helper's — round 17b, the review of round 17.)
+            guard let self, e.type == .keyDown,
+                  CUHardwareInput.classify(type: e.type, sourcePid: e.getIntegerValueField(.eventSourceUnixProcessID),
+                                           userData: e.getIntegerValueField(.eventSourceUserData)) == .action,
+                  Self.isTypingKey(flags: e.flags, keycode: e.getIntegerValueField(.keyboardEventKeycode)) else { return }
+            self.userInteracted(tpid)
+        }
     }
 
     enum BlipOutcome { case pressed(String?), stillDisabled, unavailable }

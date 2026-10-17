@@ -91,6 +91,7 @@ final class TypographyTests: XCTestCase {
         // NSFont pipeline tokens
         "fieldCodeLabelNS": .nsFont(Typography.fieldCodeLabelNS),
         "fieldCodeBlockNS": .nsFont(Typography.fieldCodeBlockNS),
+        "terminalNS": .nsFont(Typography.terminalNS),
         "fieldInlineCodeNS": .derived,
         "fieldUserMessage": .derived,
         "fieldAssistantMessage": .derived,
@@ -141,6 +142,7 @@ final class TypographyTests: XCTestCase {
     private static let nsFontMeanings: [String: NSFont] = [
         "fieldCodeLabelNS": sansMeaningNS(11, .medium),
         "fieldCodeBlockNS": .monospacedSystemFont(ofSize: 13, weight: .regular),
+        "terminalNS": .monospacedSystemFont(ofSize: 13, weight: .regular),
         "shortcutKeyNS": sansMeaningNS(11),
         "panelTabLabelNS": sansMeaningNS(12),
     ]

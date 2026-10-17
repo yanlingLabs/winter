@@ -91,8 +91,9 @@ final class CEFRuntimeTests: XCTestCase {
 
         for suffix in Self.helperSuffixes {
             let name = "Winter Helper\(suffix)"
-            let macOS = Bundle.main.bundleURL
-                .appendingPathComponent("Contents/Frameworks/\(name).app/Contents/MacOS", isDirectory: true)
+            let chromium = try XCTUnwrap(WinterChromium.location(appBundle: Bundle.main.bundleURL))
+            let macOS = chromium.frameworks
+                .appendingPathComponent("\(name).app/Contents/MacOS", isDirectory: true)
             let candidates = [
                 macOS.appendingPathComponent("\(name).debug.dylib"),  // Debug
                 macOS.appendingPathComponent(name),                   // Release (and the Debug stub)

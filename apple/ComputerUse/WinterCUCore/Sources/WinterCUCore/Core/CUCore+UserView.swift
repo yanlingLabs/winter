@@ -46,7 +46,8 @@ extension CUCore {
         let seq = t.beginAct()
         // Held in front for this script, or inside a desktop visit (the user agreed to either): the app being in
         // front is no view moved.
-        if holdsForeground(t) || isVisiting(t) { t.consentedForeground = true }
+        // (Inside a visit only once it has arrived, and only for the visit's own app — review of round 13, MEDIUM #3.)
+        if holdsForeground(t) || insideArrivedVisit(t) { t.consentedForeground = true }
         let before = userView()
         let startedAt = clock.nowSeconds()
         t.actStart = (before.front, before.space, startedAt)
@@ -628,7 +629,8 @@ extension CUCore {
     /// set off, delivered after the blip's hand-back re-marked it), changes nothing.
     func appActivated(pid: pid_t) {
         // The user's work in another app is over (I6 outlasts the guard; this ends it between scripts).
-        guardianLock.withLock { guardianCore.otherAppActivated(pid) }
+        let front = sys.frontmostPid(), now = clock.nowSeconds()
+        guardianLock.withLock { guardianCore.otherAppActivated(pid, front: front, now: now) }
         guard sys.frontmostPid() == pid else { return }
         noteStranded(pid, false)
     }

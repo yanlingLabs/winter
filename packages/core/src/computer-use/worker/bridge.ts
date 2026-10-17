@@ -35,6 +35,8 @@ export type WorkerToHost =
 export const APP_PRIMITIVES = [
   "state", "find", "screenshot", "click", "setValue", "type", "paste", "key", "scroll", "drag", "select",
   "action", "menu", "hover", "requestForeground", "windows", "useWindow", "waitFor", "waitForIdle", "applescript", "scriptingDictionary",
+  // Wake triggers (2026-10-12): on every target, app and tab alike (`computer-use/wakes/`).
+  "wakeWhen",
 ] as const;
 export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "screen.screenshot", "screen.windows", "screen.appAt", "timeLeft"] as const;
 /** App adapters (Phase 2): `app.extras.<name>(…)`, `app.dict.<name>(…)`, `app.help(…)` — `adapters/`. */
@@ -45,10 +47,15 @@ export const TAB_PRIMITIVES = ["state", "find", "screenshot", "click", "setValue
   // Phase 3
   "console", "network", "networkBody", "inspect", "html", "assets", "dialog", "answerDialog", "viewport", "mute", "download", "waitForUser",
   // Phase 4: a site's own tools (WebMCP)
-  "tools", "callTool"] as const;
+  "tools", "callTool",
+  // Wake triggers (2026-10-12): shared with apps (so never tab-only)
+  "wakeWhen"] as const;
 export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab", "browsers.windows", "browsers.group", "browsers.history", "browsers.bookmarks",
   // Phase 4
   "browsers.read"] as const;
+/** Wake triggers (2026-10-12): the `wakes` global — the session's armed triggers, and cancelling one by id (a `Wake`
+ *  handle's own `cancel()` is the same call). */
+export const WAKE_PRIMITIVES = ["wakes.list", "wakes.cancel"] as const;
 /** Saved scripts (Phase 4): `scripts.save(name, fn)` and the bridge call a saved script makes as it starts. */
 export const SCRIPT_PRIMITIVES = ["scripts.save", "scripts.run"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];
@@ -63,6 +70,8 @@ export interface AppHandle { targetId: string; name: string; bundleId: string; e
 /** The handle a bound browser tab crosses the bridge as; the worker wraps it in a `Tab`. `id` is the model-visible
  *  tab id ("winter:…", "chrome:…"), `targetId` the engine's own (`bt_…`). */
 export interface TabHandle { kind: "tab"; targetId: string; id: string; browser: string }
+/** What `wakeWhen` answers once armed; the worker wraps it in a `Wake` (`{ id, cancel() }`). */
+export interface WakeHandle { id: string; expiresAt: number }
 /** An opaque image handle: the bytes stay in the daemon. */
 export interface ImageHandle { image: string; width: number; height: number }
 

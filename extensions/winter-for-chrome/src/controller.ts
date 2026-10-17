@@ -24,7 +24,10 @@
 //    The active tab, the user's own tabs, a page with no input since it loaded, and a subframe's navigation go to the
 //    browser unchanged.
 //  - Stop is the toolbar button: while any tab is driven, a click on it stops Winter there.
-import type { ChromeApi, ChromeTab, Clock, DebuggerTarget, GroupColor } from "./chrome-api";
+//  - (1.2.0) A wake trigger's watch holds NO debugger (`watches.ts`): the page watcher runs in the extension's own
+//    isolated world, and the input and navigations this extension's debugger sends a tab are stamped, so Winter never
+//    takes them for the user's.
+import type { ChromeApi, ChromeTab, Clock, DebuggerTarget, GroupColor, MessageSender } from "./chrome-api";
 import { GROUP_COLORS, realClock } from "./chrome-api";
 import { AgentBook, groupTitle } from "./groups";
 import { Library, LibraryRefusal, type OptionalPermission } from "./library";
@@ -32,6 +35,7 @@ import { isAllowedEvent, strippedParams, TabGuard } from "./guard";
 import { drawOverlay, WAITING_LABEL } from "./overlay";
 import type { ErrorCode, WireTab } from "./protocol";
 import { attachRefusal, openable } from "./urls";
+import { WatchBook, WatchRefusal } from "./watches";
 
 /** A typed refusal: the daemon reads `code` as a TransportErrorCode. */
 export class ExtensionError extends Error {
@@ -119,6 +123,8 @@ export class ExtensionController {
   private readonly waiting = new Set<number>();
   /** History, bookmarks and page-made downloads — under the user's optional permissions. */
   private readonly library: Library;
+  /** 1.2.0: wake triggers' watches (no debugger). */
+  private readonly watches: WatchBook;
 
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
     this.book = new AgentBook(chrome);
@@ -130,7 +136,16 @@ export class ExtensionController {
       clock: this.clock,
       ...(opts.log === undefined ? {} : { log: opts.log }),
     });
+    this.watches = new WatchBook(chrome, { notify: (method, params) => this.opts.notify(method, params), clock: this.clock, ...(opts.log === undefined ? {} : { log: opts.log }) });
   }
+
+  /** A watcher's runtime message (`winter.wake.event` / `winter.wake.alive`); false when it is not one. */
+  watchMessage(message: unknown, sender: MessageSender, sendResponse: (r: unknown) => void): boolean {
+    return this.watches.onMessage(message, sender, sendResponse);
+  }
+
+  /** How many wake watches the extension keeps (tests, status). */
+  watchCount(): number { return this.watches.count(); }
 
   /** The optional permissions Winter asked for and the user has not granted (the popup's question). */
   neededPermissions(): OptionalPermission[] {
@@ -157,6 +172,7 @@ export class ExtensionController {
     this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.dropGroup(group.id); });
     this.chrome.action.onClicked.addListener(() => this.stopDriven());
     this.library.start();
+    this.watches.start();
 
     // storage.session holds the "alive" mark for this browser session AND this version of the extension. Present: the
     // worker merely restarted. Absent: the browser started, or the extension was installed or updated — onStartup /
@@ -229,6 +245,15 @@ export class ExtensionController {
         return {};
       }
       case "downloads.release": await this.library.release(params.id); return {};
+      case "watch.arm": {
+        const tabId = this.tabId(params);
+        const tab = await this.getTab(tabId);
+        try { return await this.watches.arm(tabId, tab.url ?? tab.pendingUrl, params.spec); } catch (err) {
+          if (err instanceof WatchRefusal) throw new ExtensionError("not_allowed", err.message, { reason: err.reason });
+          throw err;
+        }
+      }
+      case "watch.cancel": await this.watches.cancel(this.tabId(params), params.watchId); return {};
       default: throw new UnknownMethod(method);
     }
   }
@@ -237,6 +262,8 @@ export class ExtensionController {
    *  download is waited for. */
   async releaseAll(): Promise<void> {
     this.library.disarmAll("the link to Winter dropped");
+    // No one waits on a watch any more: every watcher leaves its page.
+    await this.watches.releaseAll();
     // Nobody waits on a handed-over tab any more: its pill and the toolbar's "!" go.
     for (const tabId of [...this.waiting]) this.endWait(tabId);
     for (const tabId of [...this.attached.keys()]) await this.detach(tabId);
@@ -579,7 +606,19 @@ export class ExtensionController {
     return a;
   }
 
+  /** `cdp.send`. Input and navigations are stamped (`WatchBook.own`): a wake trigger never takes them for the user's. */
   private async send(tabId: number, params: Record<string, unknown>): Promise<unknown> {
+    const method = params.method;
+    const stamp = typeof method === "string" && (method.startsWith("Input.") || LEAVING_METHODS.has(method));
+    if (stamp) this.watches.inputStart(tabId);
+    try {
+      return await this.sendNow(tabId, params);
+    } finally {
+      if (stamp) this.watches.inputEnd(tabId);
+    }
+  }
+
+  private async sendNow(tabId: number, params: Record<string, unknown>): Promise<unknown> {
     const a = this.attachedOrGone(tabId);
     const method = params.method;
     if (typeof method !== "string") throw new ExtensionError("not_allowed", "cdp.send needs a method");
@@ -696,6 +735,8 @@ export class ExtensionController {
     const sessionId = this.book.sessionOfTab(oldId);
     await this.book.dropTab(oldId);
     if (sessionId !== undefined) await this.book.addTab(newId, sessionId);
+    // A wake trigger's watches follow the tab (they are re-injected into its new document).
+    this.watches.moveTab(oldId, newId);
     this.forgetAttached(oldId, a);
     try { await this.chrome.debugger.detach({ tabId: oldId }); } catch { /* went with the old tab */ }
     this.gone(oldId, "closed");
@@ -882,6 +923,7 @@ export class ExtensionController {
       if (a.overlay) this.drivenChanged();
     }
     void this.book.dropTab(tabId);
+    this.watches.dropTab(tabId);
     this.mayPrompt.delete(tabId);
     if (this.waiting.delete(tabId)) this.waitingChanged();
     this.library.disarm(tabId, "the tab was closed");

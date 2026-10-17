@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
-import { BrowserEngine } from "../../src/computer-use/browser/engine";
+import { BrowserEngine, type BrowserEngineDeps } from "../../src/computer-use/browser/engine";
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
 import type { TabRunScope } from "../../src/computer-use/browser/tab-scope";
 import { DiffBases } from "../../src/computer-use/diff-base";
@@ -30,6 +30,10 @@ export interface HarnessOpts {
   /** Give these fakes the native download members before the engine starts (link protocol 2 / the extension's
    *  downloads feature). */
   nativeDownloads?: Array<"winter" | "chrome">;
+  /** Phase 4: also register a fake `headless` backend (Winter's headless browser). */
+  headless?: boolean;
+  /** More engine deps (Phase 4's headless hooks). */
+  engineDeps?: Partial<BrowserEngineDeps>;
   /** Phase 4: `computerUse.webmcp` as each primitive reads it (default on). */
   webMcp?: () => boolean;
 }
@@ -46,6 +50,10 @@ export function harness(o: HarnessOpts = {}) {
   if (o.nativeDownloads?.includes("chrome") === true) chrome.withNativeDownloads();
   const winterReg = registry.register(winter, { family: "winter", name: "Winter (built-in)", instanceKey: "winter" });
   const chromeReg = registry.register(chrome, { family: "chrome", name: "Google Chrome", bundleId: "com.google.Chrome", instanceKey: "chrome-instance-1" });
+  const headless = new FakeCdpTransport("headless", "headless");
+  // The headless pool's own surface: the fake must not lend the engine a capability the pool's path never uses.
+  delete (headless as { setMuted?: unknown }).setMuted;
+  if (o.headless === true) registry.register(headless, { family: "headless", name: "Winter (headless)", instanceKey: "headless" });
   const panel = new Map<string, Array<{ tabId: string; url?: string; title?: string }>>();
   const closedWinter: Array<{ sessionId: string; tabId: string }> = [];
   let nextPanel = 1;
@@ -91,6 +99,7 @@ export function harness(o: HarnessOpts = {}) {
     installed: (b) => (o.installed ?? []).includes(b),
     persistentlyAllowed: (sid, b) => policy.persistentlyAllowed(sid, b),
     stopScript: (sessionId, reason) => stops.push({ sessionId, reason }),
+    ...o.engineDeps,
   });
   const locks = new TargetLocks();
   const diffBases = new DiffBases();
@@ -141,5 +150,5 @@ export function harness(o: HarnessOpts = {}) {
     const text = (): string => builder.build().content.map((c) => (c.type === "text" ? c.text : "[image]")).join("");
     return { scope, builder, end, text, metric, sites, browsers, grants, abort, downloads: () => downloads, handoffs: () => handoffs, siteTools: () => siteTools };
   };
-  return { engine, registry, winter, chrome, winterReg, chromeReg, panel, closedWinter, cards, approvals, run, locks, diffBases, home, cwd, tmp, facts, stops, policy };
+  return { engine, registry, winter, chrome, headless, winterReg, chromeReg, panel, closedWinter, cards, approvals, run, locks, diffBases, home, cwd, tmp, facts, stops, policy };
 }

@@ -67,6 +67,8 @@ export interface ChromePort {
 export interface MessageSender {
   id?: string;
   tab?: ChromeTab;
+  /** The frame a content script's message came from (0: the tab's top frame). */
+  frameId?: number;
 }
 
 /** `chrome.downloads.DownloadItem`, as far as Winter for Chrome reads it. */
@@ -132,6 +134,8 @@ export interface ChromeApi {
     onRemoved: ChromeEvent<(tabId: number) => void>;
     /** The user (never Winter) made a tab the active one of its window. */
     onActivated: ChromeEvent<(info: { tabId: number; windowId: number }) => void>;
+    /** A tab's URL (any navigation, a same-document one too), loading state or title changed (the `tabs` permission). */
+    onUpdated: ChromeEvent<(tabId: number, info: { url?: string; status?: string; title?: string }) => void>;
   };
   tabGroups: {
     get(groupId: number): Promise<ChromeTabGroup>;
@@ -152,8 +156,9 @@ export interface ChromeApi {
     onDetach: ChromeEvent<(source: DebuggerTarget, reason: string) => void>;
   };
   scripting: {
-    /** Always `world: "ISOLATED"` — the extension's own content-script world, never the page's. */
-    executeScript(i: { target: { tabId: number }; world: "ISOLATED"; func: (arg: never) => void; args: [unknown] }): Promise<unknown>;
+    /** Always `world: "ISOLATED"` — the extension's own content-script world, never the page's — and the tab's top frame
+     *  only. Answers `[{ result }]`: what the function returned. */
+    executeScript(i: { target: { tabId: number }; world: "ISOLATED"; func: (arg: never) => unknown; args: [unknown] }): Promise<unknown>;
   };
   storage: {
     /** `chrome.storage.local`: kept across browser restarts (the instance id). */

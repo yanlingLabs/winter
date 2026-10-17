@@ -149,6 +149,8 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     var windowForTesting: NSWindow? { window }
 
     var isVisible: Bool { window.isVisible }
+    /// The Winter island's routing: this window is key or main (a card of the session it shows is then in front).
+    var isKeyOrMain: Bool { window.isKeyWindow || window.isMainWindow }
 
     /// Last reading from `windowDidChangeOcclusionState`. Starts `true`: a window that has never
     /// been shown reports `.visible` off, and the FIRST real notification arrives after the first

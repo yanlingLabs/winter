@@ -190,6 +190,18 @@ enum Theme {
     /// `diffAddedWash`.
     static let diffRemovedWash = Color("DiffRemovedWash")
 
+    // MARK: - Color: the Dispatch pill's command mode and its terminal
+
+    /// A line the Dispatch pill will RUN rather than send (its command mode): the composer's text, the
+    /// terminal cursor of a running command pill, the `$` in a terminal window's title. A violet, so it never
+    /// reads as the `/` menu's blue or the brand's ice blue. Light `#7C3AED` / dark `#BF8CFF` — the pill is dark
+    /// whatever the system says, so the dark half is the one on screen (`docs/brand.md` § 3.9).
+    static let commandPurple = Color("CommandPurple")
+
+    /// The terminal's sixteen ANSI colours (`TerminalStyle.ansiColorNames`) are catalog tokens too, read as
+    /// `NSColor`s by name and handed to the emulator — the same value in both appearances, since the terminal
+    /// window is always dark (`docs/brand.md` § 3.9).
+
     // The six per-kind panel-tab tints (diff-tabs Task 12 → editor-product Task 2) were retired
     // 2026-09-17: panel tabs are neutral chrome now, like ChatGPT's (`ShellChromeButtonStyle`).
 
@@ -251,5 +263,11 @@ enum Theme {
         // diff-tabs — the diff pair: two foreground roles, two row washes. FINAL and measured
         // (Task 10); `docs/brand.md` § 3.6 publishes every ratio.
         "DiffRemoved", "DiffAdded", "DiffAddedWash", "DiffRemovedWash",
+        // The Dispatch pill's command mode, and its terminal's ANSI palette (`docs/brand.md` § 3.9).
+        "CommandPurple",
+        "TerminalBlack", "TerminalRed", "TerminalGreen", "TerminalYellow",
+        "TerminalBlue", "TerminalMagenta", "TerminalCyan", "TerminalWhite",
+        "TerminalBrightBlack", "TerminalBrightRed", "TerminalBrightGreen", "TerminalBrightYellow",
+        "TerminalBrightBlue", "TerminalBrightMagenta", "TerminalBrightCyan", "TerminalBrightWhite",
     ]
 }

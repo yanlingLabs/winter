@@ -77,7 +77,7 @@ final class AppModel: ObservableObject {
         let feedClient = feed.client
         directory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId, wakesArmed: $0.wakesArmed)
             }
         })
         // FINAL-REVIEW FIX (M1): cold-window bootstrap — session.list on construction, not only on
@@ -130,7 +130,12 @@ final class AppModel: ObservableObject {
         return AppModel(makeTransport: { UnixSocketTransport(path: path) }, token: token)
     }
 
+    /// What this app's main connection advertises in its hello (`hello.capabilities`) — the Winter island's flag. Set
+    /// before `start()`; every reconnect re-sends it (`WinterClient.clientCapabilities`).
+    var clientCapabilities: [String] = []
+
     func start() async {
+        if !clientCapabilities.isEmpty { await client.setClientCapabilities(clientCapabilities) }
         await feed.start()
     }
 

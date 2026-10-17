@@ -113,6 +113,23 @@ final class FocusTargetTests: XCTestCase {
         XCTAssertTrue(keys.flatMap { k in state.map { CFEqual(k, $0) } } ?? false)
     }
 
+    /// Round 13's dogfood item 10: a field of a long page scrolled below the window, and a combo box (a Material
+    /// select) anywhere, are no hidden input; a stand-in parked sideways off the window still is.
+    func testAFieldScrolledOutOfViewOrAComboBoxIsNoHiddenInput() {
+        world(boundIsKey: true)
+        let below = fakeElement(94_020), combo = fakeElement(94_021), parked = fakeElement(94_022)
+        ax.add(below, role: kAXTextFieldRole, frame: CGRect(x: 100, y: 1400, width: 300, height: 24),
+               extra: [kAXParentAttribute: web, kAXValueAttribute: "", "AXEditableAncestor": below])
+        ax.add(combo, role: kAXComboBoxRole, frame: CGRect(x: 100, y: 1500, width: 300, height: 24),
+               extra: [kAXParentAttribute: web])
+        ax.add(parked, role: kAXTextAreaRole, frame: CGRect(x: -9999, y: 100, width: 40, height: 40),
+               extra: [kAXParentAttribute: web, kAXValueAttribute: "", "AXEditableAncestor": parked])
+        XCTAssertNil(core.hiddenInputWords(below, target), "scrolled out of view: an ordinary field")
+        XCTAssertNil(core.hiddenInputWords(combo, target), "a combo box is a control")
+        XCTAssertNotNil(core.hiddenInputWords(parked, target), "parked sideways: the stand-in")
+        XCTAssertNotNil(core.hiddenInputWords(hidden, target), "zero-size: the stand-in")
+    }
+
     func testAHiddenZeroSizeInputIsNamedAsThePagesInputOnAnySite() async throws {
         world(boundIsKey: false, pageFocus: hidden)
         ax.focus(pid: pid, on: otherField)
@@ -203,7 +220,11 @@ final class FocusTargetTests: XCTestCase {
         ax.focus(pid: pid, on: address)
         let r = try await act(.type(CUTypeAction(text: "query")))
         XCTAssertEqual(r.input, "[\(ref(address))] search field \"smart search field\"")
-        // `into` names the field: no guard, whatever the shape (the model chose it).
+        // `into` names the field: no guard, whatever the shape (the model chose it). The paste lands (an unshown one is
+        // Uncertain since round 13).
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(address, [kAXValueAttribute: "a\nb"]) }
+        }
         _ = try await act(.type(CUTypeAction(text: "a\nb", into: ref(address))))
     }
 

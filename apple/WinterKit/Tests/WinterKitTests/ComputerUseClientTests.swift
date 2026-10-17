@@ -261,6 +261,41 @@ final class ComputerUseClientTests: XCTestCase {
         XCTAssertEqual(r4["params"] as? [String: Bool], ["headlessEnabled": false, "webmcp": true])
     }
 
+    // MARK: - wake triggers (2026-10-12)
+
+    func testWakesSettingStatusAndCancel() async throws {
+        let (client, t) = try await connected()
+        let live = LiveComputerUseClient(client: client)
+        // `computerUse.setSettings { wakes }` alone.
+        let (r1, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
+            try await live.setSettings(ComputerUseSettingsPatch(wakes: false))
+        }
+        XCTAssertEqual(r1["params"] as? [String: Bool], ["wakes": false])
+        XCTAssertFalse(ComputerUseSettingsPatch(wakes: true).isEmpty)
+        // `computerUse.status` carries `wakes`; an older daemon's answer has none.
+        let base = #"{"enabled":true,"legacyComputer":false,"mirror":true,"privateEventPath":true,"helper":{"installed":true,"running":false}"#
+        let (_, on) = try await roundTrip(t, sentIndex: 2, result: base + #","wakes":true}"#) { try await live.status() }
+        XCTAssertEqual(on.wakes, true)
+        let (_, older) = try await roundTrip(t, sentIndex: 3, result: base + "}") { try await live.status() }
+        XCTAssertNil(older.wakes)
+        XCTAssertEqual(older.applying(ComputerUseSettingsPatch(wakes: false)).wakes, false)
+        // `cancelWake` over the ComputerUseClient door.
+        let (r4, cancelled) = try await roundTrip(t, sentIndex: 4, result: #"{"ok":true,"cancelled":true}"#) {
+            try await live.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        }
+        XCTAssertEqual(r4["method"] as? String, "computerUse.wakes.cancel")
+        XCTAssertEqual(r4["params"] as? [String: String], ["sessionId": "s_1", "wakeId": "wk_1a2b3c4d5e6f"])
+        XCTAssertTrue(cancelled)
+        do {
+            _ = try await roundTrip(t, sentIndex: 5, result: #"{"ok":false}"#) {
+                try await live.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+            }
+            XCTFail("ok:false must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "computerUse.wakes.cancel returned ok:false")
+        }
+    }
+
     func testApplyingAPatchReplacesOnlyItsKeys() {
         let status = ComputerUseStatus(enabled: true, legacyComputer: true, mirror: true, privateEventPath: true,
                                        helper: ComputerUseHelperStatus(installed: true, running: false))

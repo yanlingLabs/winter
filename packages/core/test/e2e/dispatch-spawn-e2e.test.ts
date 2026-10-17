@@ -27,6 +27,7 @@ import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
+import { guardHeadlessNotifications, type NotificationGuard } from "../helpers/headless-notifications";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
 class TestClient {
@@ -96,13 +97,33 @@ async function reapStrays(home: string): Promise<void> {
   for (let n = 0; n < 100 && list().length > 0; n++) await Bun.sleep(20);
 }
 
+/**
+ * A child's completion WAKES the coordinator a macrotask later (`dispatch-children`'s flush: ensure the coordinator's
+ * driver, send it a `<child_update>`). A test that then ENDS the coordinator's driver must let that wake -- and the turn it
+ * starts -- finish first: an `end()` that lands on the wake's still-OPENING driver refuses every send joined to it
+ * (`session_replaced`), and the driver table hands the SAME driver back, so the next test's `session.send` cannot recover.
+ */
+async function awaitCoordinatorWoken(h: { dispatchId: string; log(sid: string): SessionEvent[] }, children: string[]): Promise<void> {
+  const woken = await until(() => {
+    const wakes = h.log(h.dispatchId).filter((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake") as Array<{ text: string; seq: number }>;
+    if (!children.every((c) => wakes.some((w) => w.text.includes(`session: ${c}`)))) return undefined;
+    return wakes.filter((w) => children.some((c) => w.text.includes(`session: ${c}`))).at(-1);
+  }, 30_000, "the wake message for the finished child(ren)");
+  await until(() => h.log(h.dispatchId).some((e) => e.type === "turn_completed" && e.seq > woken.seq) || undefined, 30_000, "the coordinator's wake turn");
+}
+
 type ToolResult = { content: Array<{ type: string; text: string }>; isError: boolean };
 type ChildUpdate = Extract<SessionEvent, { type: "child_update" }>;
 
 function harnessFor(settings: (home: string) => Record<string, unknown>) {
   const s = {
     home: "", work: "", daemon: undefined as RunningDaemon | undefined, client: undefined as unknown as TestClient, dispatchId: "",
+    // The daemon's headless-notification fallback is caught, not run: a finished child with nobody attached to the
+    // coordinator would otherwise post a REAL macOS notification (`osascript`) from every test run.
+    notifications: undefined as unknown as NotificationGuard,
     async boot(): Promise<void> {
+      s.notifications?.restore();
+      s.notifications = guardHeadlessNotifications();
       s.home = mkdtempSync(join(tmpdir(), "winter-dispatch-spawn-e2e-"));
       s.work = join(s.home, "work");
       mkdirSync(s.work);
@@ -121,6 +142,7 @@ function harnessFor(settings: (home: string) => Record<string, unknown>) {
       const stopping = s.daemon?.stop();
       s.daemon = undefined;
       await stopping;
+      s.notifications?.restore();
       // BACKSTOP only: the daemon no longer spawns into a stop (`beginShutdown`, `spawnRefusal`, an end
       // mid-open -- `spawn-during-stop-e2e.test.ts` drives that race). Should a child still outlive the
       // daemon, every child's command line carries its config, whose cwd is under this home -- so any
@@ -227,6 +249,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
       const call = [...h.log(h.dispatchId)].reverse().find((e) => e.type === "tool_call") as { name: string };
       expect(call.name).toBe("session_spawn");
       await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 30_000, "the model-spawned child's completed update");
+      await awaitCoordinatorWoken(h, [child!]);
     } finally {
       await h.daemon!.winter.get(h.dispatchId)?.end();
       h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
@@ -314,6 +337,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
         const reply = h.log(child).find((e) => e.type === "assistant_message") as { text?: string } | undefined;
         expect(reply?.text ?? "").toContain(specs[i]!.prompt);
       }
+      await awaitCoordinatorWoken(h, children);
     } finally {
       clearTimeout(giveUp);
       store.createSession = realCreate;
@@ -465,6 +489,10 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     await until(() => h.daemon!.winter.get(busyId)?.turnRunning === false || undefined, 30_000, "the second child's stop");
     expect(refused!.isError).toBe(true);
     expect(refused!.output).toContain("only code sessions can currently be messaged or stopped");
+    // Nobody has the coordinator open, so the stopped child's end reaches the headless fallback -- with the child's title.
+    // The guard caught it: no real notification was posted.
+    const posted = await until(() => h.notifications.posted.find((n) => n.title === "Spinner 2"), 10_000, "the headless notification for the stopped child");
+    expect(posted.message).toBe("finished");
   }, 180_000);
 
   test("(8) a TERMINAL that attaches to a turn it did not start and detaches leaves it running; a human-started turn still aborts", async () => {

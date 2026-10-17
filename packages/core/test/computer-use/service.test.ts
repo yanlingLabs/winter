@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, SCREENSHOT_DETAIL_CAP, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -32,6 +32,7 @@ interface WorldOpts {
   privateEventPath?: boolean;
   /** The live suite's screenshot sink (test seam). */
   screenshotSink?: (shot: { sessionId: string; primitive: string; mime: string; base64: string }) => void;
+  dangerousAdded?: string[];
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
 }
@@ -74,6 +75,8 @@ function world(opts: WorldOpts = {}) {
     helper, policy, settings: () => settings, telemetry, recentApps: new RecentApps(home),
     audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid), log: (l) => logs.push(l),
     ...(opts.screenshotSink === undefined ? {} : { screenshotSink: opts.screenshotSink }),
+    ...(opts.dangerousAdded === undefined ? {} : { site: { dangerousDomainsAdded: (cwd?: string) => (cwd === "/proj" ? opts.dangerousAdded : []) } }),
+    sessionCwd: () => "/proj",
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -180,10 +183,44 @@ describe("ComputerV2: binding, state and the diff base", () => {
     expect(r.isError).toBe(false);
     expect(w.fake.calls("target.act")[0]).toMatchObject({ linkOpensViaDaemon: true });
     expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["https://news.example.org/a"] });
-    expect(w.fake.calls("apps.openDocument")[0]).toMatchObject({ urls: ["https://news.example.org/a"] });
+    expect(w.fake.calls("apps.openDocument")[0]).toMatchObject({ urls: ["https://news.example.org/a"], app: "com.apple.Safari" });
     expect(cards(w.events).map((c) => c.summary)).toContain("Allow Winter to use Safari (com.apple.Safari)?");
     expect(w.fake.calls("target.bind").length).toBe(1);  // Notes only: the opener is not bound
     expect(text(r)).toContain("opened in Safari in the background — not bound");
+  }, 30_000);
+
+  macOnly("a rerouted link is an ACT in its opener: a click-only browser opens nothing", async () => {
+    const w = world({ apps: { "com.apple.Safari": { access: "click" } } });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://news.example.org/a" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(true);
+    expect(w.fake.calls("apps.openDocument").length).toBe(0);
+  }, 30_000);
+
+  macOnly("a rerouted link to a domain the USER added to the dangerous list is refused too (no browser engine)", async () => {
+    const w = world({ dangerousAdded: ["evil.example"] });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://www.evil.example/x" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(true);
+    expect(w.fake.calls("apps.openDocument").length).toBe(0);
+  }, 30_000);
+
+  macOnly("a rerouted link to a dangerous domain is refused before anything opens", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => ({ rung: 1, linkOpen: "https://pastebin.com/raw/x" });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 77 }, windowID: 5 });
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await notes.click(14)");
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("dangerous-domains list");
+    expect(w.fake.calls("apps.openDocument").length).toBe(0);
   }, 30_000);
 
   macOnly("reset: a fresh runtime, the bindings and bases are gone, and the model is told", async () => {
@@ -686,6 +723,18 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain("captured Notes's window on another desktop (another Space or full screen) — an app that stops drawing while hidden may show slightly older content\n");
     const r2 = await w.run("const quiet = await notes.screenshot({ emit: false })");
     expect(r2.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toEqual(["captured Notes's window on another desktop (another Space or full screen) — an app that stops drawing while hidden may show slightly older content\n"]);
+  }, 30_000);
+
+  macOnly("an off-desktop screenshot's label keeps its after-act tail whole (the 300-character cap cut it)", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    // The helper's words as the live run printed them (2026-10-14), with the tail the cap cut.
+    const label = "stale since 1 s ago: captured Google Chrome for Testing's window on another desktop (another Space or full screen), unchanged although input was sent since — Google Chrome for Testing is not redrawing it there; to see what is really there, read it (state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window — this picture may predate the last action: Google Chrome for Testing may not redraw a window on another desktop until it is seen; screenshot({ live: true, reason }) takes one where the window is (the user is asked first)";
+    w.fake.handlers["target.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg-x").toString("base64"), mime: "image/jpeg", width: 10, height: 10, shotId: "shotY", detail: label });
+    const r = await w.run("await notes.screenshot({ emit: false })");
+    expect(text(r)).toContain("this picture may predate the last action");
+    expect(text(r)).toContain("screenshot({ live: true, reason }) takes one where the window is (the user is asked first)");
+    expect(label.length).toBeLessThan(SCREENSHOT_DETAIL_CAP);
   }, 30_000);
 
   macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {

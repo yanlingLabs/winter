@@ -7,10 +7,11 @@ import WinterProtocol
 
 // MARK: - Code-mode image input (2026-09-29; raw image paths 2026-10-10)
 //
-// In a CODE session, pasting image data or an image file, or dropping image files, onto the composer
-// adds an attachment to the draft and inserts the plain-text placeholder `[Image #n]` (n counts per
-// draft from 1 and is never reused within it). There are two kinds of attachment, and neither is ever
-// resized or copied by default (the runtime's Read tool prepares any image for the model itself):
+// In a CODE session, pasting image data or an image file, dropping image files, or picking one with the
+// composer's "+" attaches an IMAGE to the draft — a chip in the text, at the caret (`ComposerAttachments.swift`,
+// which also holds the draft, the intake and the submit-time resolution; any other file is a FILE attachment).
+// There are two kinds of image, and neither is ever resized or copied by default (the runtime's Read tool
+// prepares any image for the model itself):
 //
 //   - a FILE (a Finder drag, a dropped file, a file copied in Finder): the ORIGINAL file's path. It is
 //     never read beyond its first few bytes, never copied and never staged — the path itself rides in
@@ -20,11 +21,10 @@ import WinterProtocol
 //     `session.stageImage` into the session's own temp directory at submit. Only an image whose bytes
 //     cannot fit one request line (`composerImageMaxBytes`) is downscaled, and only that one.
 //
-// The text is sent WITH its placeholders (the user's message shows `[Image #n]`) and `images` names each
-// one's path; the daemon gives the MODEL the text with the paths in place. A daemon whose stage answer
-// lacks `imagesOnSend` (it would silently drop `images`) is sent the paths substituted into the text
-// instead, as before. A placeholder the user deleted is never sent. Every other mode keeps today's
-// behaviour: the intake answers "not handled" and AppKit's own paste/drop runs.
+// At submit the message carries an `[Image #n]` placeholder per image and `images` names each one's path;
+// the daemon gives the MODEL the text with the paths in place. A daemon whose stage answer lacks
+// `imagesOnSend` (it would silently drop `images`) is sent the paths substituted into the text instead.
+// Every other mode keeps today's behaviour: the intake answers "not handled" and AppKit's own paste/drop runs.
 //
 // Everything here is pure (or reads only a pasteboard handed to it), so the rules are unit-tested
 // without a view (`ComposerImagesTests`).
@@ -50,6 +50,9 @@ let composerImageFileTooLargeMessage = "Image files must be 64 MB or smaller"
 
 /// Shown when a dropped file vanished or stopped being a plain file between the drop and the attach.
 let composerImageFileUnreadableMessage = "That image file could not be read"
+
+/// Shown when a dropped or picked file or folder vanished between the drop and the attach.
+let composerFileUnreadableMessage = "That file could not be found"
 
 /// Image DATA with no file of its own: its bytes and the media type those bytes ARE (sniffed, never
 /// guessed from a name — the daemon refuses a declared type the bytes disagree with).
@@ -317,38 +320,6 @@ func composerImages(from pasteboard: NSPasteboard) -> [ComposerImage]? {
     }
 }
 
-/// One draft's attachments.
-struct ComposerImageDraft: Equatable {
-    private(set) var images: [Int: ComposerImage] = [:]
-    private(set) var nextNumber = 1
-
-    static func token(_ n: Int) -> String { "[Image #\(n)]" }
-
-    var isEmpty: Bool { images.isEmpty }
-
-    /// Adds an image and answers its number. Numbers climb for the draft's whole life: a deleted
-    /// placeholder's number is never reused, so ⌘Z bringing it back still finds its image. `draftText`
-    /// is the draft as it stands: the number also lands past every `[Image #n]` already WRITTEN in it,
-    /// so a placeholder that came back after the attachments were reset (⌘Z past a send, a pasted old
-    /// message) never binds to a different, newly attached image — it stays literal text.
-    mutating func add(_ image: ComposerImage, draftText: String = "") -> Int {
-        let n = max(nextNumber, (composerImageTokenNumbers(in: draftText).max() ?? 0) + 1)
-        nextNumber = n + 1
-        images[n] = image
-        return n
-    }
-
-    /// Drops these attachments (a sent message's), keeping every other one and the counter.
-    mutating func remove(_ numbers: [Int]) {
-        for n in numbers { images[n] = nil }
-    }
-
-    /// The attachments `text` still references, first-appearance order, each once.
-    func referencedNumbers(in text: String) -> [Int] {
-        composerImageTokenNumbers(in: text).filter { images[$0] != nil }
-    }
-}
-
 private let composerImageTokenRegex = try! NSRegularExpression(pattern: #"\[Image #(\d+)\]"#)
 
 /// Every `[Image #n]` number in `text`, first-appearance order, each once.
@@ -382,50 +353,9 @@ let composerImagesPerMessageMax = 20
 /// The daemon's own sentence for that refusal (`USER_MESSAGE_IMAGES_MAX_MESSAGE`).
 let composerImagesPerMessageMaxMessage = "A message can carry at most 20 images"
 
-/// `resolveComposerImages`' own refusal (the per-message cap), shown on the composer's notice line.
+/// `resolveComposerAttachments`' own refusal (a per-message cap), shown on the composer's notice line.
 struct ComposerImagesRefusal: Error, Equatable {
     let message: String
-}
-
-/// What a code-mode submit sends: `session.send`/`session.steer`'s `text` and `images`.
-struct ComposerOutgoing: Equatable {
-    let text: String
-    let images: [SessionEvent.UserMessageImageRef]
-}
-
-/// **The one submit-time helper** every code-mode submit site goes through: resolve each attachment the
-/// text still references into the path the model is given, in order. A FILE is its own path — nothing is
-/// staged; DATA is staged raw (`stage` is `session.stageImage` for that session). When every stage
-/// answered `imagesOnSend` — and, if any attachment is a FILE, the daemon announced it takes original paths
-/// (`originalPaths`: the hello's `image-original-paths`) — the text goes as written (placeholders kept) with
-/// `images` naming each path; otherwise (an older daemon) each placeholder is replaced by its path in the text
-/// and `images` is empty. The first refusal throws — the caller sends nothing. A text with no live placeholder
-/// comes back unchanged, with no images, and stages nothing.
-func resolveComposerImages(_ text: String, draft: ComposerImageDraft, originalPaths: Bool = true,
-                           stage: (ComposerImageData) async throws -> StagedImage) async throws -> ComposerOutgoing {
-    var refs: [SessionEvent.UserMessageImageRef] = []
-    var imagesOnSend = true
-    let referenced = draft.referencedNumbers(in: text)
-    if referenced.count > composerImagesPerMessageMax {
-        throw ComposerImagesRefusal(message: composerImagesPerMessageMaxMessage)
-    }
-    for n in referenced {
-        guard let image = draft.images[n] else { continue }
-        switch image {
-        case .file(let path):
-            refs.append(SessionEvent.UserMessageImageRef(n: n, path: path))
-            // A file stages nothing, so it cannot learn from `stageImage` whether the daemon takes an original
-            // path: the hello announcement says (`originalPaths`). An older daemon is sent the text instead.
-            if !originalPaths { imagesOnSend = false }
-        case .data(let data):
-            let staged = try await stage(data)
-            refs.append(SessionEvent.UserMessageImageRef(n: n, path: staged.path))
-            if !staged.imagesOnSend { imagesOnSend = false }
-        }
-    }
-    if refs.isEmpty || imagesOnSend { return ComposerOutgoing(text: text, images: refs) }
-    let paths = Dictionary(uniqueKeysWithValues: refs.map { ($0.n, $0.path) })
-    return ComposerOutgoing(text: substituteComposerImageTokens(text, paths: paths), images: [])
 }
 
 /// Whether a session takes composer images at all: a CODE session only (an absent mode is code), and
@@ -442,13 +372,4 @@ func composerImageInputEnabled(row: SessionSummary?) -> Bool {
 func composerModelAcceptsImages(model: String?, catalogue: SyncConfigSnapshot) -> Bool {
     guard let model, let row = catalogue.models.first(where: { $0.id == model }) else { return true }
     return row.supportsImages
-}
-
-/// What a composer surface hands `ComposerTextView` so its paste/drop can take images.
-struct ComposerImageIntake {
-    /// Read at paste/drop time: `false` (not a code session) leaves AppKit's own behaviour untouched.
-    let isEnabled: () -> Bool
-    /// Attach one image: the placeholder to insert, or `nil` when it was refused (the surface has
-    /// already shown why, in its composer notice line).
-    let attach: (ComposerImage) -> String?
 }

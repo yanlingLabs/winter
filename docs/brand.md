@@ -53,6 +53,8 @@ These exist only in the Mac catalog. They are **deliberate platform extensions, 
 | `ChromeHover` | `#EDEDEE` | `#2A2A2A` | Window-chrome controls' hover fill — titlebar icons, panel tabs, the address field. Dark is ChatGPT's measured value; light was not captured and sits one step past `ChromeSelected`. |
 | `ChromeSelected` | `#F3F3F4` | `#242424` | The same controls' on/selected fill (the active panel tab, a toggled titlebar icon) — ChatGPT's measured values. |
 
+The Dispatch pill's command mode and its terminal add seventeen more Mac-only tokens — `CommandPurple` and the sixteen `Terminal…` ANSI colours — documented with their surface in § 3.9.
+
 `ElevatedSurface` cannot serve as `PaletteSurface`: its light value (`#F2F2F7`) is a retained cool system grey that is *darker* than `CardSurface`. That is the wrong direction for something that floats above.
 
 **Why there are two hairlines.** `Hairline` is defined against the shell's two planes, and it collapses above them: on `ElevatedSurface` it measures **1.159:1 light and 1.040:1 dark** — in dark, a rule that is very nearly not drawn at all. The 2026-08-12 transcript pass walked straight into that by moving the interaction cards onto `ElevatedSurface` while leaving their separators and code-block rims on the shell token, which is how a divider added *because* "stacked blocks left the reader to infer from spacing alone" ended up back at nothing. `HairlineElevated` measures **1.313:1 light / 1.312:1 dark** on that plane — the same separation in both appearances by construction — and 1.389 / 1.431 on `CardSurface`, which is the ground a floating control's rim has to read against.
@@ -216,6 +218,35 @@ The five contrast figures are not new measurements — they are § 3.6's own "on
 **The light-mode `systemGreen` limitation carries over, unfixed, as § 3.6 already records it.** `2.11:1` is below the 4.5:1 body floor, and it is not a property of the editor or of this payload — it is Apple's `systemGreen` on `CardSurface`, true of every string literal in every code surface this app has, editor included. § 3.6's own ruling stands without amendment: "fixing the syntax palette is a separate change to a shared surface; tracked here, not fixed here."
 
 **The white flash — the OTHER half of this task, not a color-token question.** A Chromium page paints opaque white by default for the whole window between a browser existing and its own first paint — for the editor (asset load, the Monaco AMD bootstrap) on the order of a few hundred milliseconds, well before `setTheme` above could ever reach it. Two changes close that window rather than reduce it: the CEF browser's own `background_color` is set AT CREATION to `EditorTheme.cardSurfaceBackgroundARGB(for:)` — the scheme's `CardSurface`, opaque, packed `0xAARRGGBB` (`WinterCEF.h`'s `backgroundColorARGB` parameter — `0x00000000` is reserved as "no override" for every non-editor caller); `editor.html`'s body becomes `background: transparent`, so that browser-level color shows through instead of Chromium's own white until Monaco's first paint lands. Measured live (editor-product Task 4's harness run): with the branded theme sent immediately on `ready` (drill 1's `1.brand` step), a screenshot taken well into the run shows the editor already painted in `CardSurface`'s own tone, not white.
+
+### 3.9 The Dispatch pill's command mode and its terminal
+
+The Dispatch pill runs a line the user types as a shell command when it validates as one (command mode), and each run opens in a Winter-drawn terminal window. Seventeen Mac-only tokens serve that surface — Mac-only because the phone has no pill and no terminal.
+
+**`CommandPurple`** — light `#7C3AED`, dark `#BF8CFF`. The composer's text while it is a command, the blinking cursor of a running command pill, the `$` in a terminal window's title and its "running" dot. A violet, chosen so it never reads as the `/` menu's command blue (`#6BA3FF`) or the brand's ice blue: colour is the one cue that the line will RUN rather than be sent. The pill renders dark whatever the system's appearance, so the dark half is the one on screen: **8.4:1 on black, 7.1:1 on `CardSurface` dark** — body-text legible. The light half (5.7:1 on white) is there for any light surface that ever names it.
+
+**The terminal's ANSI palette** — sixteen tokens, `TerminalBlack` … `TerminalBrightWhite`, read by name (`TerminalStyle.ansiColorNames`) and handed to the emulator. **The same value in both appearances**, like `AccentColor`: the terminal window is dark whatever the system says. Built from colours this document already names wherever one fits, so a terminal reads as part of Winter:
+
+| Token | Value | Source |
+| --- | --- | --- |
+| `TerminalBlack` | `#2E2E2E` | A step above the window's black, so ANSI-black cells stay visible. |
+| `TerminalRed` | `#FF6B70` | `DiffRemoved` dark. |
+| `TerminalGreen` | `#4CC38A` | `DiffAdded` dark. |
+| `TerminalYellow` | `#F2C66D` | — |
+| `TerminalBlue` | `#6BA3FF` | The `/` menu's command blue. |
+| `TerminalMagenta` | `#BF8CFF` | `CommandPurple` dark. |
+| `TerminalCyan` | `#8CCBF0` | `AccentColor`. |
+| `TerminalWhite` | `#D4D4D4` | — |
+| `TerminalBrightBlack` | `#767676` | 4.6:1 on black — dim text (comments, autosuggestions) stays legible. |
+| `TerminalBrightRed` | `#FF8E92` | — |
+| `TerminalBrightGreen` | `#74D9A6` | — |
+| `TerminalBrightYellow` | `#FFDB8F` | — |
+| `TerminalBrightBlue` | `#92BCFF` | — |
+| `TerminalBrightMagenta` | `#D4B3FF` | — |
+| `TerminalBrightCyan` | `#B3DDF5` | — |
+| `TerminalBrightWhite` | `#FFFFFF` | — |
+
+The rest of the terminal reuses tokens: the ground is the pill's black; the text is `TextSecondary` (dark `#DEDEDE`); the cursor is `AccentColor` — every caret in the app one colour; the selection is `SelectionPill` (dark `#383838`). The cell face is `Typography.terminalNS` (13 mono, § 4.3).
 
 ---
 
@@ -401,6 +432,7 @@ The scale (§ 4.5) plus its mono variants and the named one-offs:
 | `chipLabel` | — | `.caption2` | Activity chips, sidebar count chips. |
 | `fieldCodeLabelNS` | — | 11 medium | The orb field's code-block language label. |
 | `fieldCodeBlockNS` | — | 13 mono | The orb field's code-block body. |
+| `terminalNS` | — | 13 mono | The Dispatch pill's terminal window — the emulator's cell face. |
 | `fieldInlineCodeNS` | — | derived | The orb field's inline-code run — re-bound through the shared transcript metrics by the orb ruling (12.5 today: 14 − 1.5). |
 | `fieldUserMessage` | — | derived | The orb field's echo of what you asked — bound to the transcript's user-message size (both 14 today). Face stays the field's difference-blend sans. |
 | `fieldAssistantMessage` | — | derived | The orb field's reply — the transcript's assistant voice, FACE AND SIZE: `Theme.assistantProse` (the system sans since 2026-09-17) at the assistant role's size. |

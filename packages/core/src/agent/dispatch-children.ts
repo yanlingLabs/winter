@@ -73,7 +73,7 @@
 // you (TaskStop)." (`manage_session stop` was the third door until ManageSession left Dispatch, 2026-10-02.)
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { DISPATCH_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winter-protocol";
+import { COMPUTER_WAKE_CLIENT_NAME, DISPATCH_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { canonicalSessionCwd } from "../sessions/dirs";
 import { TurnOriginPairer } from "../sessions/turn-origins";
 
@@ -404,6 +404,28 @@ export class DispatchChildren {
     return () => { this.consumeFollowUp(childId, (x) => x === entry); };
   }
 
+  /**
+   * ComputerV2 wake triggers (2026-10-12): is a turn of `sessionId` being FOLLOWED by its coordinator right now? Asked
+   * when the child's script arms a trigger: a trigger armed in a turn Dispatch followed has its wake turn followed too.
+   */
+  followingTurn(sessionId: string): boolean {
+    const c = this.children.get(sessionId);
+    return c !== undefined && c.turnOpen && c.relayOnly !== true;
+  }
+
+  /**
+   * ComputerV2 wake triggers: the child `childId` is about to be woken with `text` (`clientName: "computer-wake"`) for a
+   * trigger it armed in a followed turn — that wake turn is followed too (child_update running → completed, and the
+   * coordinator's wake), even for a child already forgotten (its stored link picks it back up). Keyed on the exact text,
+   * like a follow-up. Returns the undo for a message that could not be delivered.
+   */
+  expectWake(childId: string, text: string): () => void {
+    let meta: { origin?: string; parentSessionId?: string };
+    try { meta = this.deps.store.meta(childId); } catch { return () => {}; }
+    if (meta.origin !== "dispatch-child" || meta.parentSessionId === undefined) return () => {};
+    return this.expectFollowUp(childId, meta.parentSessionId, text);
+  }
+
   /** Remove (and report) the first expectation on `childId` that `match` accepts. */
   private consumeFollowUp(childId: string, match: (x: { coordinatorId: string; text: string }) => boolean): { coordinatorId: string; text: string } | undefined {
     const list = this.expectedFollowUps.get(childId);
@@ -470,7 +492,7 @@ export class DispatchChildren {
     if (e.type === "user_message") {
       if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) return undefined;
       const followed = e.clientName === DISPATCH_CLIENT_NAME
-        || (e.clientName === MESSAGING_CLIENT_NAME && this.consumeFollowUp(e.sessionId, (x) => x.text === e.text) !== undefined);
+        || ((e.clientName === MESSAGING_CLIENT_NAME || e.clientName === COMPUTER_WAKE_CLIENT_NAME) && this.consumeFollowUp(e.sessionId, (x) => x.text === e.text) !== undefined);
       let pairer = this.turnOrigins.get(e.sessionId);
       if (pairer === undefined) { pairer = new TurnOriginPairer<boolean>(); this.turnOrigins.set(e.sessionId, pairer); }
       pairer.message(followed);

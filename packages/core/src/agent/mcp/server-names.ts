@@ -23,8 +23,9 @@
 // trusted project's `.winter/agents` (at its project root, and at the cwd when that differs) and each plugin's
 // `agents/`. The name is the CONFIG name: a clash inside a session renames the server (`cf` → `cf_2`), and
 // the runtime states the config name beside each call (`winter_mcp_server.config_name`), which is what the
-// stored values are keyed by. NOTE: agent SDK 0.0.38's own file parser does not read `mcpServers` from an
-// agent file yet (only a programmatic definition carries them), so these rows anticipate the runtime.
+// stored values are keyed by. NOTE: the pinned runtime's own agent-file parser (`parseAgentDefinitionFile`, checked at
+// winter-agent-runtime 0.0.53) still does not read `mcpServers` from an agent file (only a programmatic
+// definition carries them), so these rows anticipate the runtime.
 //
 // Never throws: an unreadable file or directory is simply not there.
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";

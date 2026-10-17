@@ -139,7 +139,7 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     // (`Norma.app` / `com.norma.app` / `~/.norma` / `com.norma.core`) until Migration B (9c).
     // …and (9c) the Migration B section, which names the legacy project files a `winter migrate-project` converts.
     regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev|Norma\.app|com\.norma\.(app|core)|~\/\.norma(?![A-Za-z0-9_-])|NORMA\.md|(?<![A-Za-z0-9_~/])\.norma(?=\/)/g,
-    files: ["CLAUDE.md"],
+    files: ["CLAUDE.md", "docs/claude/settings-and-migrations.md"],
     why: "the dev-guide trap naming the stale `norma-dev` wrapper/env names, and the hard rule naming the live Norma install until 9c (P9b-13; whole-branch review)",
   },
   {

@@ -20,6 +20,16 @@ public protocol BrowserLinkHandler: AnyObject {
     /// handler that hands each command to CEF before returning keeps the daemon's order (a mouse press
     /// before its release). Answer exactly once, now or later, through `reply`.
     func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier)
+    /// Feature `headless`: one `headless.*` command (show, hide, the session's tabs), in the same order as the
+    /// others. Answer exactly once through `reply`.
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier)
+}
+
+public extension BrowserLinkHandler {
+    /// A handler that cannot show headless tabs refuses them (its app should not name the feature).
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
+        reply(.failure(code: .notAllowed, message: "this Winter can't show a headless tab"))
+    }
 }
 
 /// The answer door for ONE command. A second answer is ignored, so a late completion racing a
@@ -67,6 +77,8 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
         /// Every wait the link makes. Injected so a test can run a reconnect without waiting a second.
         public var sleep: @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
         public var log: @Sendable (String) -> Void = { _ in }
+        /// What the app names at attach (`BrowserLinkProtocol.features` by default).
+        public var features: [String] = BrowserLinkProtocol.features
 
         public init(appVersion: String, pid: Int32) {
             self.appVersion = appVersion
@@ -87,7 +99,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
     private var activeClient: WinterClient?
-    private var connection: (client: WinterClient, linkId: String)?
+    private var connection: (client: WinterClient, linkId: String, features: Set<String>)?
     private var runTask: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
 
@@ -100,6 +112,10 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
     /// The link that is up right now, if any.
     public var linkId: String? { lock.withLock { connection?.linkId } }
+
+    /// What the daemon named at attach for the link that is up (empty while none is). A feature is used only when
+    /// both sides named it.
+    public var daemonFeatures: Set<String> { lock.withLock { connection?.features ?? [] } }
 
     /// Start connecting; reconnects on its own until `stop()`. Calling it twice does nothing.
     public func start() {
@@ -191,12 +207,17 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
             let detaches = client.notifications(method: BrowserLinkProtocol.Method.detached)
 
             let linkId: String
+            var features: Set<String> = []
             do {
-                let answer = try await client.request(BrowserLinkProtocol.Method.attach, params: .object([
+                var attachParams: [String: JSONValue] = [
                     "protocol": .number(Double(BrowserLinkProtocol.version)),
                     "appVersion": .string(configuration.appVersion),
                     "pid": .number(Double(configuration.pid)),
-                ]))
+                ]
+                if !configuration.features.isEmpty {
+                    attachParams["features"] = .array(configuration.features.map(JSONValue.string))
+                }
+                let answer = try await client.request(BrowserLinkProtocol.Method.attach, params: .object(attachParams))
                 guard let id = answer["linkId"]?.stringValue, !id.isEmpty else {
                     throw RpcError(code: -3, message: "browserLink.attach answered no linkId")
                 }
@@ -205,6 +226,9 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
                                    data: .object(["code": .string("protocol_mismatch")]))
                 }
                 linkId = id
+                // The features both sides named are the ones used.
+                let named = Set((answer["features"]?.arrayValue ?? []).compactMap(\.stringValue))
+                features = named.intersection(configuration.features)
             } catch {
                 let rpc = error as? RpcError
                 if rpc?.isMethodNotFound == true {
@@ -225,7 +249,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
             backoff = configuration.backoffInitial
             saidNoMethod = false
-            lock.withLock { connection = (client, linkId) }
+            lock.withLock { connection = (client, linkId, features) }
             configuration.log("browser link: attached (\(linkId))")
             await MainActor.run { handlerBox.handler?.browserLinkAttached(linkId: linkId) }
 
@@ -278,6 +302,12 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     }
 
     private func handle(_ params: JSONValue, linkId: String) async {
+        // Feature `headless`'s ops have their own parser (`BrowserLinkHeadlessCommand`): the ordinary one's `Op`
+        // stays closed, since Winter Headless compiles it and switches over every case.
+        if let op = params["op"]?.stringValue, BrowserLinkHeadlessCommand.handles(op: op) {
+            await handleHeadless(params, linkId: linkId)
+            return
+        }
         switch BrowserLinkCommand.parse(params) {
         case .failure(let unreadable):
             configuration.log("browser link: unreadable command — \(unreadable.reason)")
@@ -298,6 +328,64 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
         }
     }
 
+    /// A `headless.*` op: read by its own parser, answered with a failure when it does not read (as any other
+    /// command is), handed to the handler in arrival order when it does.
+    private func handleHeadless(_ params: JSONValue, linkId: String) async {
+        switch BrowserLinkHeadlessCommand.parse(params) {
+        case .failure(let unreadable):
+            configuration.log("browser link: unreadable command — \(unreadable.reason)")
+            if let commandLink = unreadable.linkId, let cmdId = unreadable.cmdId, commandLink == linkId {
+                outbox.push(.result(linkId: linkId, cmdId: cmdId,
+                                    reply: .failure(code: .notAllowed, message: unreadable.reason)))
+            }
+        case .success(let command):
+            guard command.linkId == linkId else { return }
+            let reply = replier(linkId: linkId, cmdId: command.cmdId)
+            await MainActor.run {
+                if let handler = handlerBox.handler {
+                    handler.browserLinkHeadlessCommand(command, reply: reply)
+                } else {
+                    reply(.failure(code: .notLive, message: "Winter's panel is not available"))
+                }
+            }
+        }
+    }
+
+    // MARK: - Feature `headless`: the person's actions
+
+    /// `browserLink.headless {linkId, sessionId, tabId?, action}` — one of the person's actions on a session's
+    /// headless tab, from the panel. Returns the tabs for `.list` (nil for every other action).
+    ///
+    /// Sent straight on the link's connection, NOT through the outbox: the daemon may answer only after it has
+    /// sent the app a `headless.show` and read its result, and that result leaves through the outbox — queued
+    /// behind this request, it could never be sent.
+    @discardableResult
+    public func headless(sessionId: String, tabId: String?, action: BrowserLinkHeadlessAction) async throws -> [BrowserLinkHeadlessTab]? {
+        guard let (client, linkId, features) = currentConnection else { throw BrowserLinkHeadlessError.notConnected }
+        guard features.contains("headless") else { throw BrowserLinkHeadlessError.unsupported }
+        var params: [String: JSONValue] = [
+            "linkId": .string(linkId), "sessionId": .string(sessionId), "action": .string(action.rawValue),
+        ]
+        if let tabId { params["tabId"] = .string(tabId) }
+        let answer: JSONValue
+        do {
+            answer = try await client.request(BrowserLinkProtocol.Method.headless, params: .object(params))
+        } catch let rpc as RpcError {
+            if rpc.isMethodNotFound { throw BrowserLinkHeadlessError.unsupported }
+            // A negative code below -32000 is the daemon's own refusal (`data.code` names it); the client's own
+            // failures (a dropped connection, a timeout) carry small negative codes of its own.
+            if rpc.code <= -32000 || rpc.data?["code"]?.stringValue != nil {
+                throw BrowserLinkHeadlessError.refused(code: rpc.data?["code"]?.stringValue, message: rpc.message)
+            }
+            throw BrowserLinkHeadlessError.failed(message: rpc.message)
+        } catch {
+            throw BrowserLinkHeadlessError.failed(message: "\(error)")
+        }
+        guard action == .list else { return nil }
+        let rows = answer["tabs"]?.arrayValue ?? []
+        return rows.compactMap(BrowserLinkHeadlessTab.read)
+    }
+
     private func teardown(_ client: WinterClient, _ watcher: ConnectionWatcher) async {
         lock.withLock { if activeClient === client { activeClient = nil } }
         await client.close()
@@ -306,7 +394,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
     // MARK: - The outbox: what leaves, in the order it was produced
 
-    private var currentConnection: (client: WinterClient, linkId: String)? { lock.withLock { connection } }
+    private var currentConnection: (client: WinterClient, linkId: String, features: Set<String>)? { lock.withLock { connection } }
 
     private func drainLoop() async {
         while !Task.isCancelled {
@@ -338,7 +426,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     }
 
     private func send(events batch: [BrowserLinkOutbox.QueuedEvent]) async {
-        guard let (client, linkId) = currentConnection else { return }
+        guard let (client, linkId, _) = currentConnection else { return }
         let encoder = JSONEncoder()
         // Every event is bounded before it leaves (`BrowserLinkProtocol.eventStringMaxBytes`,
         // `eventMaxBytes`), and the batch goes in as many requests as it takes to keep each under
@@ -373,7 +461,7 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     }
 
     private func send(_ item: BrowserLinkOutbox.Item) async {
-        guard let (client, linkId) = currentConnection else { return }
+        guard let (client, linkId, _) = currentConnection else { return }
         switch item {
         case .result(let itemLink, let cmdId, let reply):
             guard itemLink == linkId else { return }

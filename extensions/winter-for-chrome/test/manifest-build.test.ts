@@ -22,7 +22,7 @@ describe("the manifest", () => {
       // 1.1.0: the optional permissions, asked for in the popup only (an update from 1.0.0 carries no new warning).
       expect(m.optional_permissions).toEqual(["history", "bookmarks", "downloads"]);
       expect(m.incognito).toBe("not_allowed");
-      expect(m.version).toBe("1.1.0");
+      expect(m.version).toBe("1.2.0");
       expect(m.minimum_chrome_version).toBe(MINIMUM_CHROME_VERSION);
     }
     expect(MINIMUM_CHROME_VERSION).toBe("125");

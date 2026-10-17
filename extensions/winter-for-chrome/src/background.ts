@@ -32,6 +32,7 @@ const api: ChromeApi = {
     },
     onRemoved: chrome.tabs.onRemoved,
     onActivated: chrome.tabs.onActivated,
+    onUpdated: chrome.tabs.onUpdated,
   },
   tabGroups: {
     get: (groupId) => chrome.tabGroups.get(groupId),
@@ -121,6 +122,8 @@ chrome.runtime.onInstalled.addListener((details: { reason?: string }) => {
 });
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (typeof message !== "object" || message === null || sender.id !== api.runtimeId) return undefined;
+  // A wake watcher in a tab's top frame (the extension's own isolated world): an event to relay, or its heartbeat.
+  if (controller.watchMessage(message, sender, sendResponse)) return undefined;
   const m = message as { type?: unknown; tabId?: unknown; done?: unknown };
   if (m.type === "winter.status") {
     const s = status.get();

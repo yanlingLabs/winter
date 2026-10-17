@@ -1,4 +1,4 @@
-import { SessionEvent, type SessionActivity, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
+import { SessionEvent, type SessionActivity, type UserMessageFileRef, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import type { SessionStore, EventInput } from "./store";
 
 /** Default bound on `SessionHub`'s last-emitted-activity memo (see `emitActivity`). Sessions are
@@ -33,6 +33,9 @@ export interface HubClient {
    *  hub's removal paths hold. `"remote"` is what makes the phone's gateway app-kind by the
    *  daemon's own record rather than by string-matching its name (`harnessKindOf`). */
   role?: string | null;
+  /** The Winter island: the connection's controlling terminal from its hello (`HelloParams.tty`), for a terminal
+   *  client — how the Mac app tells whether that exact terminal window or tab is in front. */
+  tty?: string | null;
   deliver(event: SessionEvent): boolean;
   /** Bracket `attach`'s synchronous replay loop: a socket-backed client suspends its slow-consumer
    *  cap for the burst (`ConnWriter.beginBulk`/`endBulk`) — a log past the cap must still replay. */
@@ -136,13 +139,14 @@ export class SessionHub {
     catch (err) { console.error(`[hub] detach hook failed for ${sessionId}:`, err); }
   }
 
-  send(client: HubClient, sessionId: string, text: string, images?: readonly UserMessageImageRef[]): number {
+  send(client: HubClient, sessionId: string, text: string, images?: readonly UserMessageImageRef[], files?: readonly UserMessageFileRef[]): number {
     if (this.byClient.get(client) !== sessionId) {
       throw new Error(`client ${client.clientName} not attached to ${sessionId}`);
     }
     return this.appendAndBroadcast(sessionId, {
       type: "user_message", sessionId, threadId: "main", text, clientName: client.clientName,
       ...(images !== undefined && images.length > 0 ? { images: images.map((i) => ({ n: i.n, path: i.path })) } : {}),
+      ...(files !== undefined && files.length > 0 ? { files: files.map((f) => ({ n: f.n, path: f.path })) } : {}),
     }).seq;
   }
 
@@ -175,8 +179,10 @@ export class SessionHub {
    *  The hub deliberately does NOT classify them — `harnessKindOf`'s prefix/role rules live in
    *  `activity-enforcement.ts` and the panel-specific question ("could this client be hosting a
    *  panel?") lives with the browser tool that asks it. This method only reports what is attached. */
-  attachedHarnesses(sessionId: string): Array<{ clientName: string; role?: string | null }> {
-    return [...(this.attachments.get(sessionId) ?? [])].map((c) => ({ clientName: c.clientName, role: c.role }));
+  attachedHarnesses(sessionId: string): Array<{ clientName: string; role?: string | null; tty?: string }> {
+    return [...(this.attachments.get(sessionId) ?? [])].map((c) => ({
+      clientName: c.clientName, role: c.role, ...(typeof c.tty === "string" ? { tty: c.tty } : {}),
+    }));
   }
 
   /** Which session `client` is currently attached to, or `undefined` if none — read-only, no side
@@ -194,7 +200,9 @@ export class SessionHub {
     this.fanOut(sessionId, event);
     // Narrow on purpose: session_created already has its own server-side broadcast, and every
     // other event type is scoped to a session's own attachments.
-    if (event.type === "session_titled") this.onGlobalEvent?.(event);
+    // ComputerV2 wake triggers (2026-10-12): the pair is global the same way — a session list shows a "waiting for you"
+    // mark on a row nobody has open. Persisted, so the attached double is absorbed by seq dedupe like `session_titled`'s.
+    if (event.type === "session_titled" || event.type === "wake_armed" || event.type === "wake_ended") this.onGlobalEvent?.(event);
     this.notifyObservers(event);
     return event;
   }

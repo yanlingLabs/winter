@@ -59,6 +59,8 @@ describe("projector/event-coverage: the relocated exhaustiveness maps", () => {
       approval_resolved: "runtime-sdk/approval-bridge.ts (Task 8), plus daemon.ts:143-213",
       question_asked: "runtime-sdk/question-bridge.ts (Task 8)",
       question_resolved: "runtime-sdk/question-bridge.ts (Task 8)",
+      wake_armed: "computer-use/wakes/registry.ts (ComputerV2 wake triggers)",
+      wake_ended: "computer-use/wakes/registry.ts (ComputerV2 wake triggers)",
     };
     for (const type of HISTORY_EVENT_TYPES) {
       const accounted = PROJECTED_EVENT_COVERAGE[type] === true || NON_PROJECTOR_PRODUCERS[type] !== undefined;

@@ -88,8 +88,8 @@ enum WinterCEFRuntime {
             return false
         }
 
-        guard let subprocessPath = helperExecutablePath() else {
-            state = .failed("the CEF helper bundle is missing from this build")
+        guard let chromium = WinterChromium.location(appBundle: Bundle.main.bundleURL) else {
+            state = .failed("Winter's Chromium (in the nested Winter Headless helper) is missing from this build")
             return false
         }
 
@@ -102,7 +102,8 @@ enum WinterCEFRuntime {
         // `--use-angle=swiftshader`, `--enable-logging=stderr --v=1`. That is deliberately the
         // whole harness: no Winter-side env-var switch plumbing to ship, gate, or get wrong.
         let ok = WinterCEFInitialize(
-            CommandLine.argc, CommandLine.unsafeArgv, cachePath, subprocessPath)
+            CommandLine.argc, CommandLine.unsafeArgv, cachePath, chromium.framework.path,
+            chromium.subprocessExecutable.path)
 
         if ok {
             state = .ready
@@ -207,16 +208,6 @@ enum WinterCEFRuntime {
     /// `WinterCEFInitialize`'s own `NSApplicationWillTerminateNotification` subscription be
     /// unconditional, and what lets the unit-test host run the termination path at all.
     static func shutdown() { WinterCEFShutdown() }
-
-    /// `Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper` — the BASE helper.
-    /// Chromium appends its own per-role suffix (" (Renderer)", " (GPU)", …) to this path, so this
-    /// one setting reaches all five bundles. `CEFHelperBundlesTests` pins that they are all there.
-    private static func helperExecutablePath() -> String? {
-        let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Frameworks/Winter Helper.app/Contents/MacOS", isDirectory: true)
-            .appendingPathComponent("Winter Helper", isDirectory: false)
-        return FileManager.default.isExecutableFile(atPath: url.path) ? url.path : nil
-    }
 
     /// Chromium's profile directory. Bundle-id-scoped, so the dev app (`com.winter.app.dev`) and
     /// the distribution app never share one — the same dev/dist split `AppProfile` enforces for

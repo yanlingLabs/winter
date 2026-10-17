@@ -584,6 +584,49 @@ describe("state.ts — user messages", () => {
     s = reduce(s, { type: "user_message", threadId: "main", text: "<child_update>\nsession: s_1\n</child_update>", clientName: "dispatch-wake" }, T0);
     expect(s.committed).toEqual([{ kind: "note", text: "↻ child session update" }]);
   });
+
+  test("ComputerV2 wake triggers: armed → a note; the wake message (computer-wake) → what happened, from the pair — never the model's text", () => {
+    let s = initialState();
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000001", condition: "clicked", targetLabel: "Chrome — Dashboard", elementLabel: "“Submit for review”", expiresAt: 1 }, T0);
+    expect(s.committed).toEqual([{ kind: "note", text: "⏳ waiting for you to click “Submit for review” in Chrome — Dashboard" }]);
+    // The same event again (an attached client gets the pair twice: the session's fan-out and the global broadcast).
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000001", condition: "clicked", targetLabel: "Chrome — Dashboard", elementLabel: "“Submit for review”", expiresAt: 1 }, T0);
+    expect(s.committed.length).toBe(1);
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_000000000001", reason: "fired", at: 2, woken: true }, T0);
+    expect(s.committed.length).toBe(1); // said with the wake message
+    s = reduce(s, { type: "user_message", threadId: "main", text: "<computer-wake>\n…\n</computer-wake>", clientName: "computer-wake" }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "↻ Winter continued: you clicked “Submit for review” in Chrome — Dashboard" });
+    expect(s.committed.some((b) => b.kind === "user")).toBe(false);
+    expect(s.wakeNews).toBeUndefined();
+    // An ending that wakes nobody is said at once.
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_000000000002", condition: "appeared", targetLabel: "Mail — Inbox", elementLabel: "“Sent”", expiresAt: 1 }, T0);
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_000000000002", reason: "cancelled", at: 3, woken: false }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⏹ stopped waiting for “Sent” to appear in Mail — Inbox (cancelled)" });
+    expect(s.wakes).toEqual({});
+  });
+
+  test("ComputerV2 wake triggers: a SILENT expiry (woken: false) is said at once as 'ran out' and never glued onto a later wake's note", () => {
+    let s = initialState();
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_00000000000a", condition: "appeared", targetLabel: "Mail — Inbox", elementLabel: "“Sent”", expiresAt: 1 }, T0);
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_00000000000b", condition: "clicked", targetLabel: "Chrome — Dashboard", elementLabel: "“Submit”", expiresAt: 1 }, T0);
+    // A expires silently (the model did not ask to hear about it): no wake message will carry it.
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_00000000000a", reason: "expired", at: 2, woken: false }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⏹ stopped waiting for “Sent” to appear in Mail — Inbox (ran out)" });
+    expect(s.wakeNews ?? []).toEqual([]);
+    // Hours later B fires and wakes the session: its note names B alone.
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_00000000000b", reason: "fired", at: 3, woken: true }, T0);
+    s = reduce(s, { type: "user_message", threadId: "main", text: "<computer-wake>\n…\n</computer-wake>", clientName: "computer-wake" }, T0);
+    const note = s.committed.at(-1) as { kind: string; text: string };
+    expect(note).toEqual({ kind: "note", text: "↻ Winter continued: you clicked “Submit” in Chrome — Dashboard" });
+    expect(note.text).not.toContain("Sent");
+    expect(note.text).not.toContain("ran out");
+    // An expiry the model DID ask about (woken: true) is the wake's news, not a "stopped" note.
+    s = reduce(s, { type: "wake_armed", threadId: "main", wakeId: "wk_00000000000c", condition: "titled", targetLabel: "Mail", elementLabel: "“Done”", expiresAt: 1 }, T0);
+    const before = s.committed.length;
+    s = reduce(s, { type: "wake_ended", threadId: "main", wakeId: "wk_00000000000c", reason: "expired", at: 4, woken: true }, T0);
+    expect(s.committed.length).toBe(before);
+    expect(s.wakeNews).toEqual(["the wait for Mail's title to contain “Done” ran out"]);
+  });
 });
 
 describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree/directory/agent_error)", () => {
