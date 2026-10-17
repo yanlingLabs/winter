@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "7796dff913a9ec0810060099984c605215135d19",
+  "sdkCommit": "093fb3ead915d967e8a01b358abdbcc39a76f447",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -64,15 +64,15 @@
   "expectedArtifact": null,
   "sdkPin": {
     "previousCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
-    "mainAt": "7796dff913a9ec0810060099984c605215135d19",
+    "mainAt": "093fb3ead915d967e8a01b358abdbcc39a76f447",
     "mergedPullRequests": [
-      27
+      27,
+      28
     ],
     "doesNotContain": [
-      "agent-sdk #28 (cowork/root-guided-bootstrap), not merged when this pin was written",
       "the supervisor change that accepts the relay's pipes (N2 slice S5, SDK part)"
     ],
-    "note": "Re-pinned from the 21-commit-old artifact commit to SDK main. The supervisor still has to move once more, to a commit that contains both changes above, before the runtime transport can work. Nothing was rebuilt: expectedArtifact is therefore unpinned."
+    "note": "Re-pinned from the 21-commit-old artifact commit to SDK main (which contains agent-sdk #27 and #28). The supervisor still has to move once more, to a commit that contains the change above, before the runtime transport can work. Nothing was rebuilt: expectedArtifact is therefore unpinned."
   },
   "guest": {
     "target": "aarch64-linux-musl",

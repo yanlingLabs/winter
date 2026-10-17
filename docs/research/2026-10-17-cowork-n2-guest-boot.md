@@ -126,9 +126,9 @@ Every difference from the spike (the host-side oracle), nothing omitted:
   reachable through a root alias are still refused. It builds the guest programs through `build.py` (two passes, byte-identical or refuse), holds them and the bootstrap script to the pinned digests, and adds
   `/init`, `/opt/winter/libexec/{winter-guest-relay,guest_bootstrap.py}` and `/opt/winter/etc/supervisor-base.json` (the static part of the trusted config: helper paths and digests of the exact bytes in the cpio,
   `environment`, `controlDirectory`). `verify.py` reads the cpio back and demands the same.
-* `pins.json`: `sdkCommit` moved from `39ba77ec` to SDK main `7796dff9` (merged PR #27). It contains neither agent-sdk #28 (`cowork/root-guided-bootstrap`) nor the supervisor change of Part 2, so it must move
+* `pins.json`: `sdkCommit` moved from `39ba77ec` to SDK main `093fb3ea` (it contains agent-sdk #27 and #28, `cowork/root-guided-bootstrap`; it was `7796dff9` before #28 merged). It does not contain the supervisor change of Part 2, so it must move
   again. **`expectedArtifact` is now `null`** (the old digests belong to the old SDK commit and are kept under `previousExpectedArtifact`): nothing could be rebuilt offline. `image.py` writes every output and the
-  receipt and then **exits 3** with `UNPINNED`, so an unpinned artifact is never mistaken for a pinned one. `builderCommit` `180d3eff` is an ancestor of SDK main but whether that builder still compiles the 195-commit-newer
+  receipt and then **exits 3** with `UNPINNED`, so an unpinned artifact is never mistaken for a pinned one. `builderCommit` `180d3eff` is an ancestor of SDK main but whether that builder still compiles the 210-commit-newer
   SDK is unverified.
 * The image still contains no runtime launcher, session-owner library or `hostQueryRuntime` artifacts, so the static config is tools-only; building them is outside this slice.
 * **Offline readback.** A real 321 MiB pre-init candidate cpio (7,281 entries) was extended with the guest files using `image.py`'s own functions, passed `check_startup`, `refuse_blkid` and the ELF dependency
