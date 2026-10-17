@@ -18,6 +18,21 @@ final class FakeDaemon {
         XCTAssertEqual(try! Sock.send(end, line[...], rights: rights).get(), line.count)
     }
     func sendRaw(_ bytes: [UInt8], rights: [Int32] = []) { _ = Sock.send(end, bytes[...], rights: rights) }
+    /// Writes the whole line, waiting for room: the launcher stops reading L1 while its relay backlog is full. False if `timeout` passes first.
+    func sendAll(_ message: LineToLauncher, timeout: TimeInterval = 10) -> Bool {
+        let line = try! LauncherLineCodec.serialize(message)
+        var offset = 0
+        let deadline = Date().addingTimeInterval(timeout)
+        while offset < line.count {
+            switch Sock.send(end, line[offset...]) {
+            case .success(let n): offset += n
+            case .failure(.errno(EAGAIN)): var table = [pollfd(fd: end.raw, events: Int16(POLLOUT), revents: 0)]; _ = poll(&table, 1, 20)
+            case .failure: return false
+            }
+            if offset < line.count && Date() > deadline { return false }
+        }
+        return true
+    }
     private func pump(timeoutMs: Int32) {
         var table = [pollfd(fd: end.raw, events: Int16(POLLIN), revents: 0)]
         guard poll(&table, 1, timeoutMs) > 0 else { return }
@@ -83,6 +98,9 @@ final class RuntimeRig {
         let (d, l) = try Sock.pair(.stream)
         let launcherEnd = try Sock.relocate(l, above: 5)
         try Sock.setNonBlocking(launcherEnd)
+        // The daemon's end is non-blocking too, as the real daemon's is: a blocking sendmsg here would ignore MSG_DONTWAIT and could never
+        // tell the test that the launcher stopped reading.
+        try Sock.setNonBlocking(d)
         daemon = FakeDaemon(d)
         storeDirectory = makeTemporaryDirectory("rig-receipts")
         store = try DirectoryReceiptStore(directory: BuiltProducts.canonical(storeDirectory.path))
@@ -288,6 +306,68 @@ final class RuntimeIntegrationTests: XCTestCase {
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertTrue(rig.processGone(pid))
         XCTAssertFalse(rig.daemon.sees(timeout: 0.2) { if case .muxUp = $0 { true } else { false } }, "nothing from that stream is relayed")
         _ = baseline
+    }
+    // MARK: back-pressure on the relay
+
+    func testASlowButHealthyWorkerIsNotKilledWhenTheDaemonOutrunsItAndNothingIsLost() throws {
+        let rig = try RuntimeRig(mode: "sink", relayLimits: (soft: 128 << 10, hard: 32 << 20, stallMs: 20_000))
+        XCTAssertTrue(rig.hello()); let (pid, _) = try XCTUnwrap(rig.begin()); XCTAssertTrue(try rig.attach(try DiskPair()))
+        // 5 MiB of runtime frames against a 128 KiB soft limit: the backlog would have outgrown it forty times over. (Before back-pressure a
+        // backlog over a fixed 8 MiB SIGKILLed a worker that was only slow; a debug build parses a megabyte line slowly, hence only five.)
+        let payload = [UInt8](repeating: 0x61, count: 1_048_576)
+        for seq in 1...5 { XCTAssertTrue(rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.runtime, seq: UInt32(seq), payload: payload)), timeout: 30), "frame \(seq)") }
+        XCTAssertTrue(rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.bootstrap, seq: 1, payload: Array("done".utf8)))))
+        let report = try XCTUnwrap(rig.daemon.next(timeout: 30) { (line: LineToDaemon) -> String? in
+            if case .muxUp(let f) = line, f[5] == MuxClass.runtime.rawValue, f.count > 21, String(decoding: f[16..<21], as: UTF8.self) == "sunk:" { return String(decoding: f[16...], as: UTF8.self) }
+            return nil
+        })
+        XCTAssertEqual(report, "sunk:\(5 * 1_048_576 + 4):6", "every byte of every frame reached the worker, in order")
+        XCTAssertGreaterThan(rig.runtime.queue.sync { rig.runtime.backpressurePauses }, 0, "the launcher paused L1 instead of killing anything")
+        XCTAssertEqual(kill(Int32(pid), 0), 0, "the worker is alive")
+        rig.daemon.send(.stop(id: "req-stop", stopNonce: Fixture.nonce, reason: .user, budgetMs: 10_000))
+        let receipt = try XCTUnwrap(rig.daemon.next { if case .stopped(_, let r) = $0 { r } else { nil } })
+        XCTAssertTrue(receipt.invariantsHold)
+    }
+    func testAWorkerThatNeverDrainsL3IsKilledOnlyAfterTheStallWindowNotWhenTheBacklogFirstFills() throws {
+        let rig = try RuntimeRig(mode: "stalll3", relayLimits: (soft: 64 << 10, hard: 32 << 20, stallMs: 1_500))
+        XCTAssertTrue(rig.hello()); let (pid, _) = try XCTUnwrap(rig.begin()); XCTAssertTrue(try rig.attach(try DiskPair()))
+        let started = Date()
+        let payload = [UInt8](repeating: 0x62, count: 1_048_576)
+        var blocked = false
+        for seq in 1...40 where !blocked { blocked = !rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.runtime, seq: UInt32(seq), payload: payload)), timeout: 0.4) }
+        XCTAssertTrue(blocked, "the daemon's own sends back up: the launcher stopped reading L1")
+        XCTAssertEqual(kill(Int32(pid), 0), 0, "a worker that is merely behind is still alive while the stall window is open")
+        XCTAssertEqual(rig.daemon.nextFault(), .worker_channel_lost)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 1.3, "the kill waited for the stall window")
+        let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
+        XCTAssertEqual(b.reason, .workerKilled); XCTAssertTrue(rig.processGone(pid))
+    }
+    func testAFrameBiggerThanTheHardCapKillsTheWorker() throws {
+        let rig = try RuntimeRig(mode: "stalll3", relayLimits: (soft: 32 << 10, hard: 512 << 10, stallMs: 60_000))
+        XCTAssertTrue(rig.hello()); let (pid, _) = try XCTUnwrap(rig.begin()); XCTAssertTrue(try rig.attach(try DiskPair()))
+        XCTAssertTrue(rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.runtime, seq: 1, payload: [UInt8](repeating: 1, count: 1_000_000))), timeout: 5))
+        XCTAssertEqual(rig.daemon.nextFault(), .worker_channel_lost)
+        XCTAssertTrue(rig.processGone(pid))
+    }
+
+    // MARK: the guest artifacts, with the real verifier
+
+    func testTheRealGuestArtifactCheckRefusesAnotherDigestAndATamperedKernelAndStartsWithTheRightOne() throws {
+        let guest = try GuestWorkerDirectory()
+        let rig = try RuntimeRig(guest: guest)
+        XCTAssertTrue(rig.hello())
+        var wrong = rig.scope; wrong.runtimeImageDigest = String(repeating: "0", count: 64)
+        rig.daemon.send(.begin(id: "req-wrong", homeId: Fixture.homeId, scope: wrong))
+        XCTAssertEqual(rig.refusal(id: "req-wrong"), .code_identity_mismatch)
+        // The artifacts change after the daemon pinned them: the digest it states is no longer the files'.
+        try Data("tampered".utf8).write(to: URL(fileURLWithPath: guest.guestDirectory + "/kernel"))
+        chmod(guest.guestDirectory + "/kernel", 0o644)
+        rig.daemon.send(.begin(id: "req-tampered", homeId: Fixture.homeId, scope: rig.scope))
+        XCTAssertEqual(rig.refusal(id: "req-tampered"), .code_identity_mismatch)
+        try Data(guest.kernelBytes).write(to: URL(fileURLWithPath: guest.guestDirectory + "/kernel"))
+        chmod(guest.guestDirectory + "/kernel", 0o644)
+        XCTAssertNotNil(rig.begin(id: "req-right"), "restored, the pinned digest starts the worker: nothing was consumed by the refusals")
+        XCTAssertFalse(rig.daemon.sees(timeout: 0.1) { if case .uncertain = $0 { true } else { false } })
     }
     func testAGarbageDatagramFromTheWorkerKillsIt() throws {
         let rig = try RuntimeRig(mode: "garbage")

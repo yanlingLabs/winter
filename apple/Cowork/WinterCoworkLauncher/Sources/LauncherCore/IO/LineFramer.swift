@@ -39,14 +39,16 @@ public struct LineFramer {
         }
         var lines: [FramedLine] = []
         var start = 0
-        for index in 0..<chunk.count where chunk[index] == 0x0a {
-            let line = pending + chunk[start...index]
+        // `firstIndex(of:)` rather than a byte loop: a relayed frame is a megabyte-sized line cut into 64 KiB chunks.
+        while let newline = chunk[start...].firstIndex(of: 0x0a) {
+            var line = pending
+            line.append(contentsOf: chunk[start...newline])
             guard line.count <= maxLine else { throw FramingFailure.lineTooLong }
             pending.removeAll(keepingCapacity: true)
             // The first line completed since the descriptors arrived owns them.
             lines.append(FramedLine(bytes: line, rights: pendingRights))
             pendingRights = []
-            start = index + 1
+            start = newline + 1
         }
         pending.append(contentsOf: chunk[start...])
         guard pending.count <= maxLine else { throw FramingFailure.lineTooLong }
