@@ -54,6 +54,13 @@ static int teardown(struct wg_boot *boot, long long started) {
     return 1;
 }
 
+/* The only bytes PID 1 inspects of a bootstrap payload: whether it is the host's `ready` (canonical order: v, t, then the message's own members).
+ * The helper judges the whole message; this is defence in depth for the mount ordering. */
+static int is_ready_message(const uint8_t *payload, size_t length) {
+    static const char PREFIX[] = "{\"v\":1,\"t\":\"ready\",\"";
+    return payload != NULL && length > sizeof PREFIX - 1 && memcmp(payload, PREFIX, sizeof PREFIX - 1) == 0;
+}
+
 static void stop(struct wg_boot *boot, int acknowledged) {
     const struct wg_boot_ops *ops = boot->ops;
     boot->phase = WG_PHASE_DRAINING;
@@ -61,6 +68,12 @@ static void stop(struct wg_boot *boot, int acknowledged) {
     long long started = ops->now_ms(ops->ctx);
     if (acknowledged) ops->to_relay(ops->ctx, CTL_DRAIN_ACK, boot->nonce, WMX_NONCE_CHARS);
     int clean = teardown(boot, started);
+    if (clean) {
+        /* The superblocks are verified; now push the last writes to the devices themselves. `halting` promises the host that the
+         * disks are final, so a flush that fails withholds it exactly like a failed unmount. */
+        unsigned volumes = (boot->ever_mounted[0] ? 1u : 0u) | (boot->ever_mounted[1] ? 2u : 0u);
+        if (ops->flush_devices(ops->ctx, volumes) != 0) { note(boot, "flush-failed"); clean = 0; }
+    }
     if (acknowledged && clean) {
         ops->to_relay(ops->ctx, CTL_HALTING, boot->nonce, WMX_NONCE_CHARS);
         boot->halting_sent = 1;
@@ -112,7 +125,10 @@ void wg_boot_relay_message(struct wg_boot *boot, uint8_t tag, const uint8_t *pay
     switch (tag) {
     case CTL_BOOTSTRAP_DOWN:
         /* Only the helper can judge a bootstrap payload. With no helper to give it to, it is dropped. */
-        if (boot->phase == WG_PHASE_BOOTSTRAP && boot->helper_alive) ops->to_helper(ops->ctx, CTL_HELPER_DOWN, payload, length);
+        if (boot->phase == WG_PHASE_BOOTSTRAP && boot->helper_alive) {
+            if (is_ready_message(payload, length)) boot->host_ready_seen = 1;
+            ops->to_helper(ops->ctx, CTL_HELPER_DOWN, payload, length);
+        }
         else note(boot, "bootstrap-payload-dropped");
         break;
     case CTL_DRAIN: {
@@ -161,7 +177,7 @@ void wg_boot_helper_message(struct wg_boot *boot, uint8_t tag, const uint8_t *pa
         break;
     }
     case CTL_HELPER_MOUNT: {
-        if (boot->phase != WG_PHASE_BOOTSTRAP || boot->mount_requested) { wg_boot_fail_stop(boot, "mount-out-of-order"); return; }
+        if (boot->phase != WG_PHASE_BOOTSTRAP || boot->mount_requested || !boot->host_ready_seen) { wg_boot_fail_stop(boot, "mount-out-of-order"); return; }
         uint8_t data_uuid[WG_UUID_BYTES], environment_uuid[WG_UUID_BYTES];
         if (length != 73 || payload[36] != ' ' || wg_uuid_parse((const char *)payload, 36, data_uuid) != 0 ||
             wg_uuid_parse((const char *)payload + 37, 36, environment_uuid) != 0) {

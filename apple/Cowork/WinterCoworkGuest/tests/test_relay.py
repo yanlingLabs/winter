@@ -330,6 +330,42 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(got, blob)
         self.assertEqual(seqs, list(range(1, len(seqs) + 1)))
 
+    def test_pongs_queued_while_the_runtime_stream_has_filled_the_ring_still_fit(self):
+        """The runtime stream stops reading the supervisor while less than a reserve is free, so a burst of pings (answered at once, never deferred)
+        cannot overflow the upstream ring. Without the reserve the third burst below ends the stream with the overflow code."""
+        h = self.start()
+        self.open_runtime(h)
+        blob = bytes(range(256)) * 1024 * 12  # 3 MiB: more than the ring and the socket buffer together
+        writer = os.fork()
+        if writer == 0:
+            try:
+                view = memoryview(blob)
+                while view:
+                    view = view[os.write(h.sup_out_w, view):]
+            finally:
+                os._exit(0)
+        time.sleep(1.0)                                    # the host reads nothing: the ring and the socket buffer fill up
+        bursts, per_burst = 3, 1600                        # each burst is one 64 KiB read worth of pings (40 bytes each)
+        total = bursts * per_burst
+        for burst in range(bursts):
+            h.send(b"".join(control(burst * per_burst + i + 1, '{"v":1,"t":"ping","n":%d}' % (burst * per_burst + i + 1)) for i in range(per_burst)))
+            time.sleep(0.2)
+        self.assertIsNone(h.proc.poll(), "the relay ended the stream while pongs were queued")
+        got, pongs, runtime_seqs = b"", [], []
+        while len(pongs) < total or len(got) < len(blob):
+            cls, seq, payload = h.read_frame()
+            if cls == 0:
+                pongs.append((seq, payload))
+            else:
+                self.assertEqual(cls, 2)
+                runtime_seqs.append(seq)
+                got += payload
+        os.waitpid(writer, 0)
+        self.assertEqual(pongs, [(i, ('{"v":1,"t":"pong","n":%d}' % i).encode()) for i in range(1, total + 1)])
+        self.assertEqual(got, blob)
+        self.assertEqual(runtime_seqs, list(range(1, len(runtime_seqs) + 1)))
+        self.assertIsNone(h.proc.poll())
+
     def test_supervisor_stderr_is_drained_and_never_forwarded(self):
         h = self.start()
         self.open_runtime(h)

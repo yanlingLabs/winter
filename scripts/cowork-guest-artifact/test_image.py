@@ -1,4 +1,4 @@
-import hashlib, importlib.util, io, json, lzma, os, struct, subprocess, tarfile, tempfile, unittest
+import hashlib, importlib.util, io, json, lzma, os, struct, subprocess, sys, tarfile, tempfile, unittest
 from unittest.mock import patch
 from pathlib import Path
 import image
@@ -276,10 +276,10 @@ class GuestFilesTests(unittest.TestCase):
 class CpioReadbackTests(unittest.TestCase):
     """A tiny root through the real emitter and the independent reader (verify.py)."""
     INIT=b'\x7fELF-pinned-init'
-    def write(self,folder,tree,init_digest=None,present=True):
+    def write(self,folder,tree,init_digest=None,present=True,pinned=True):
         folder.mkdir(exist_ok=True)
         tree.cpio(folder/'immutable-root.cpio');(folder/'root.manifest.json').write_text(json.dumps(tree.manifest()))
-        (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':init_digest or sha(self.INIT),'initPresent':present}))
+        (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':init_digest or sha(self.INIT),'initPresent':present,'reproducibilityPinned':pinned}))
     def tree(self,init=None):
         tree=Tree();tree.add('bin/tool','file',b'tool-content-0123456789',True);tree.add('proc','directory')
         if init is not None:tree.add('init','file',init,True)
@@ -289,6 +289,26 @@ class CpioReadbackTests(unittest.TestCase):
             root=Path(folder);self.write(root,self.tree(self.INIT))
             result=cpio_verify.verify(root,pinned_init=sha(self.INIT))
             self.assertTrue(result['startupPresent']);self.assertEqual(result['startupEntries'],['init'])
+    def test_an_unpinned_receipt_is_refused_unless_the_flag_names_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for value in (False, None, 'true', 1):
+                root=Path(folder)/str(value);self.write(root,self.tree(self.INIT),pinned=value)
+                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+                self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),allow_unpinned=True)['startupPresent'])
+            root=Path(folder)/'missing';self.write(root,self.tree(self.INIT));receipt=json.loads((root/'receipt.json').read_text());del receipt['reproducibilityPinned'];(root/'receipt.json').write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            root=Path(folder)/'ok';self.write(root,self.tree(self.INIT))
+            self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT))['startupPresent'])
+    def test_the_command_line_needs_the_named_flag_for_an_unpinned_receipt(self):
+        script=Path(cpio_verify.__file__)
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'unpinned';self.write(root,self.tree(self.INIT),pinned=False)
+            refused=subprocess.run([sys.executable,'-I','-S','-B',str(script),str(root),'--no-init'],capture_output=True,text=True)
+            self.assertNotEqual(refused.returncode,0);self.assertIn('ValueError: receipt is not reproducibility-pinned',refused.stderr)
+            # --no-init only changes the startup rule; the flag is what accepts the unpinned receipt (this root has an init, so it still fails there)
+            named=subprocess.run([sys.executable,'-I','-S','-B',str(script),str(root),'--allow-unpinned','--no-init'],capture_output=True,text=True)
+            self.assertIn('cpio carries a startup program',named.stderr)
+            self.assertNotIn('ValueError: receipt is not reproducibility-pinned',named.stderr)
     def test_a_different_init_missing_init_or_extra_startup_entry_is_refused(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree(b'other'))

@@ -8,7 +8,7 @@
  *   BOOTSTRAP  helper running. It may ask for a journal replay (before any mount) and, after the host's `ready`, for the mount.
  *   MOUNTED    both volumes mounted and the skeleton made. The supervisor starts only when a trusted conversation set exists.
  *   RUNNING    supervisor up; the relay is told that runtime frames are now admitted.
- *   DRAINING   drain: ack, stop helper, stop supervisor, kill the rest, sync, unmount, `halting` ONLY if every unmount worked, sync, power off.
+ *   DRAINING   drain: ack, stop helper, stop supervisor, kill the rest, sync, unmount, flush the devices, `halting` ONLY if every unmount worked and the flush succeeded, sync, power off.
  *
  * Fail-stop (relay or supervisor gone, protocol garbage, a helper message out of order) is the drain without the ack and
  * without `halting`: the host learns of it only as a power-off with no `halting`, which it must treat as uncertain.
@@ -50,6 +50,8 @@ struct wg_boot_ops {
     void (*stop_supervisor)(void *ctx, long long deadline_ms);
     void (*kill_all)(void *ctx);
     void (*sync_all)(void *ctx);
+    /* after the last unmount: sync(), then fsync every block device named in `volumes` (bit 0 data, bit 1 environment). 0 only if all of it succeeded */
+    int (*flush_devices)(void *ctx, unsigned volumes);
     void (*power_off)(void *ctx);
 };
 
@@ -60,6 +62,7 @@ struct wg_boot {
     enum wg_phase phase;
     int helper_alive, helper_done;
     int mount_requested;
+    int host_ready_seen;               /* a `ready` down message was forwarded to the helper: the earliest the host can have released a mount */
     int data_mounted, environment_mounted;
     int ever_mounted[2];               /* this boot mounted the volume (its final unmount is verified before `halting`) */
     int replay_mounted[2];             /* a failed replay may have left the volume mounted under the replay root */

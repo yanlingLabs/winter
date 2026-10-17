@@ -459,6 +459,19 @@ static void op_kill_all(void *ctx) {
     }
 }
 static void op_sync_all(void *ctx) { (void)ctx; sync(); }
+static int op_flush_devices(void *ctx, unsigned volumes) {
+    (void)ctx;
+    sync();
+    int result = 0;
+    for (int v = 0; v < 2; v++) {
+        if (!(volumes & (1u << v))) continue;
+        int fd = open(v == WG_VOLUME_DATA ? G.data.node : G.environment.node, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) { result = -1; continue; }
+        if (fsync(fd) != 0) result = -1;
+        if (close(fd) != 0) result = -1;
+    }
+    return result;
+}
 static void op_power_off(void *ctx) { (void)ctx; power_off_now(); }
 
 /* ------------------------------------------------------------------------------------------------ event loop */
@@ -507,7 +520,7 @@ static void pump_supervisor_ready(void) {
             if (G.ready_seen) break;                 /* anything after the first line is discarded unread */
             if (chunk[i] == '\n') {
                 G.ready_line[G.ready_have] = '\0';
-                if (strcmp(G.ready_line, SUPERVISOR_READY_LINE) != 0) { wg_boot_fail_stop(&boot, "supervisor-ready-line"); return; }
+                if (G.ready_have != sizeof SUPERVISOR_READY_LINE - 1 || memcmp(G.ready_line, SUPERVISOR_READY_LINE, G.ready_have) != 0) { wg_boot_fail_stop(&boot, "supervisor-ready-line"); return; }
                 G.ready_seen = 1;
                 supervisor_deadline = 0;
                 wg_boot_supervisor_ready(&boot);
@@ -595,7 +608,7 @@ int main(void) {
     boot_ops.mount_volumes = op_mount_volumes; boot_ops.umount = op_umount; boot_ops.verify_unmounted = op_verify_unmounted;
     boot_ops.read_conversations = op_read_conversations; boot_ops.read_base_config = op_read_base_config; boot_ops.read_boot_id = op_read_boot_id;
     boot_ops.start_supervisor = op_start_supervisor; boot_ops.stop_helper = op_stop_helper; boot_ops.stop_supervisor = op_stop_supervisor;
-    boot_ops.kill_all = op_kill_all; boot_ops.sync_all = op_sync_all; boot_ops.power_off = op_power_off;
+    boot_ops.kill_all = op_kill_all; boot_ops.sync_all = op_sync_all; boot_ops.flush_devices = op_flush_devices; boot_ops.power_off = op_power_off;
     wg_boot_init(&boot, &boot_ops);
     ctl_reader_init(&relay_reader, relay_payload, sizeof relay_payload, "PDFf");
     ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQME");

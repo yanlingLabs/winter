@@ -48,7 +48,13 @@ enum {
 #define MAX_STRAY_SCAN 256
 
 static uint8_t rx_payload[WMX_MAX_RUNTIME];
-static uint8_t out_storage[512u * 1024u];
+/* Headroom the runtime stream must leave in the upstream ring. One loop iteration enqueues, ahead of any runtime read and without a way to
+ * defer them: the pongs for one 64 KiB port read (a pong is exactly as long as the ping it answers, so at most 64 KiB), the bootstrap frames
+ * for one 64 KiB read from PID 1 (at most 64 KiB / 8 bytes of ctl header = 8192 messages, each gaining a 16-byte frame header: 128 KiB at
+ * most, plus their payload bytes, which the ctl bytes already count), and the two drain frames (a few hundred bytes). 256 KiB covers it. */
+#define OUT_RESERVE (256u * 1024u)
+static uint8_t out_storage[1024u * 1024u];
+_Static_assert(sizeof out_storage >= OUT_RESERVE + WMX_HEADER_BYTES + 65536u + 65536u, "the upstream ring must hold the reserve plus a runtime chunk");
 static uint8_t rt_in_storage[4u * 1024u * 1024u];
 static uint8_t ctl_out_storage[128u * 1024u];
 static uint8_t ctl_payload[CTL_MAX_PAYLOAD];
@@ -311,7 +317,7 @@ int main(int argc, char **argv) {
         fds[CTL_IN].fd = ctl_in_fd; fds[CTL_IN].events = POLLIN;
         fds[CTL_OUT].fd = ctl_out_fd; fds[CTL_OUT].events = wg_ring_used(&ctl_out_ring) ? POLLOUT : 0;
         if (runtime_open && !rt_in_dead && wg_ring_used(&rt_in_ring)) { fds[RT_IN].fd = rt_in_fd; fds[RT_IN].events = POLLOUT; }
-        if (runtime_open && !rt_out_eof && wg_ring_free(&out_ring) >= WMX_HEADER_BYTES + RUNTIME_CHUNK) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
+        if (runtime_open && !rt_out_eof && wg_ring_free(&out_ring) >= OUT_RESERVE + WMX_HEADER_BYTES + RUNTIME_CHUNK) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
         if (runtime_open && !rt_err_eof) { fds[RT_ERR].fd = rt_err_fd; fds[RT_ERR].events = POLLIN; }
         long long wait = connected_once ? -1 : connect_deadline - now_ms();
         if (!connected_once && wait <= 0) die(EXIT_NEVER_CONNECTED, 0, WMX_OK);

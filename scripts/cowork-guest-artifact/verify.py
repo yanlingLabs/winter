@@ -6,11 +6,14 @@ HERE=Path(__file__).resolve().parent
 # Every other way a kernel or a package could start something in an initramfs root. Only `init` is allowed, and only the pinned one.
 STARTUP_NAMES={'sbin/init','usr/sbin/init','linuxrc','etc/inittab','init.sh','rdinit'}
 
-def verify(root,pinned_init=None,require_init=True):
+def verify(root,pinned_init=None,require_init=True,allow_unpinned=False):
     """Read the cpio back. With `require_init` the root must carry exactly one startup program: `init`, a regular 0555 file of
     uid/gid 0 whose bytes hash to the digest pinned in pins.json (or `pinned_init`). `require_init=False` is for roots built
     before slice S5, which must still have NO startup program."""
-    receipt=json.loads((root/'receipt.json').read_text());manifest=json.loads((root/'root.manifest.json').read_text())
+    receipt=json.loads((root/'receipt.json').read_text())
+    # image.py writes a full receipt with reproducibilityPinned false (and exits 3) while expectedArtifact is null: such a root is evidence of a build, not an accepted artifact
+    if receipt.get('reproducibilityPinned') is not True and not allow_unpinned:raise ValueError('receipt is not reproducibility-pinned')
+    manifest=json.loads((root/'root.manifest.json').read_text())
     if pinned_init is None and require_init:pinned_init=json.loads((HERE/'pins.json').read_text())['guest']['programs']['init']['binarySha256']
     startup={}
     expected={entry['path'].lstrip('/'):entry for entry in manifest};seen=set();inodes=set();count=0
@@ -53,4 +56,4 @@ def verify(root,pinned_init=None,require_init=True):
     elif startup:raise ValueError('cpio carries a startup program')
     return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None}
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init),sort_keys=True))
+    parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--allow-unpinned',action='store_true',help='accept a receipt with reproducibilityPinned false (a build whose expectedArtifact is still null)');parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init,allow_unpinned=args.allow_unpinned),sort_keys=True))

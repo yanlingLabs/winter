@@ -90,6 +90,13 @@ class GuestSourceHygiene(unittest.TestCase):
             self.assertNotIn("\"plan\"", code, path.name)
             self.assertNotIn("operationId", code, path.name)
 
+    def test_the_supervisor_ready_line_is_compared_by_length_and_bytes(self):
+        init = strip_comments((ROOT / "init/init_linux.c").read_text())
+        self.assertNotIn("strcmp(G.ready_line", init)
+        self.assertIn("G.ready_have != sizeof SUPERVISOR_READY_LINE - 1", init)
+        self.assertIn("memcmp(G.ready_line, SUPERVISOR_READY_LINE, G.ready_have)", init)
+        self.assertIn('#define SUPERVISOR_READY_LINE "{\\"fullGuestExecutionEnabled\\":false,\\"ready\\":true}"', init)
+
 
 if __name__ == "__main__":
     unittest.main()

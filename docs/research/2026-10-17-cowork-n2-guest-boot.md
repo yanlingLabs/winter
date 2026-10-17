@@ -223,3 +223,13 @@ Part 2 is a separate pull request on the agent SDK and starts only after the con
 
 `previousBootTermination` stays **null** and PID 1 does not provide it. A cold resume is out of scope (decision D10), and only the host can establish how the previous boot ended. A marker on the guest's own disk would be
 written by the party being judged, so it is forgeable by the guest. The one fact the guest can observe, a set `needs_recovery` flag in the superblock, is evidence against an orderly stop and says nothing in favour of one.
+
+## 11. Review round (findings folded into this PR)
+
+- `verify.py` now requires `reproducibilityPinned is True` in the receipt unless the named flag `--allow-unpinned` (argument `allow_unpinned`) is passed; tested on both sides, including the command line.
+- `halting` is preceded by a device flush: after the last unmount and the superblock check, PID 1 runs `sync()` and `fsync` on each block device it mounted (`flush_devices`). A failure logs `flush-failed` and withholds `halting`, like a failed unmount.
+- The workflow pins `actions/checkout` by commit SHA (`11d5960a` for v4).
+- The relay keeps a 256 KiB reserve in a 1 MiB upstream ring: the runtime stream stops reading the supervisor while less than reserve plus one chunk is free, so the pongs and bootstrap frames one loop iteration enqueues (at most 64 KiB of pongs, 128 KiB of bootstrap frame headers) cannot overflow it. A test fills the ring and floods pings.
+- PID 1 refuses the helper's mount request until it has forwarded a canonical `ready` down message (defence in depth; the helper still judges the message).
+- The supervisor's ready line is compared by length and bytes against the SDK's exact canonical line.
+- Mutation checks for the new guards: 18 more removals or inversions, all killed (the two C-side ready-gate mutations are killed by the native boot driver as a whole). The earlier totals are unchanged: 13 equivalent and the 2 Linux-only survivors.

@@ -43,7 +43,7 @@ struct fake {
     int conversations_rc;           /* 0 present, 1 absent, -1 unusable */
     const char *conversations;
     const char *base;
-    int base_rc, boot_id_rc, supervisor_rc, wait_flushed_rc;
+    int base_rc, boot_id_rc, supervisor_rc, wait_flushed_rc, flush_rc;
     char last_config[70000];
     char to_helper_tag[32];
     int to_helper_count;
@@ -134,11 +134,12 @@ static void f_stop_helper(void *c, long long deadline) { ev(c, "stop-helper:%lld
 static void f_stop_supervisor(void *c, long long deadline) { ev(c, "stop-supervisor:%lld", deadline - ((struct fake *)c)->now); }
 static void f_kill_all(void *c) { ev(c, "kill-all"); }
 static void f_sync(void *c) { ev(c, "sync"); }
+static int f_flush(void *c, unsigned volumes) { ev(c, "flush:%u", volumes); return ((struct fake *)c)->flush_rc; }
 static void f_power_off(void *c) { ev(c, "power-off"); }
 
 static struct wg_boot_ops ops_for(struct fake *f) {
     struct wg_boot_ops ops = { f, f_now, f_pause, f_log, f_to_relay, f_to_helper, f_wait_flushed, f_replay, f_umount_replay, f_mount, f_umount, f_verify,
-                               f_read_conversations, f_read_base, f_boot_id, f_start_supervisor, f_stop_helper, f_stop_supervisor, f_kill_all, f_sync, f_power_off };
+                               f_read_conversations, f_read_base, f_boot_id, f_start_supervisor, f_stop_helper, f_stop_supervisor, f_kill_all, f_sync, f_flush, f_power_off };
     return ops;
 }
 static void fresh(struct fake *f) {
@@ -156,8 +157,15 @@ static void drain_payload(uint8_t out[CTL_DRAIN_PAYLOAD_BYTES], const char *nonc
 }
 static const char MOUNT_PAYLOAD[] = UUID_DATA " " UUID_ENV;
 
+/* the host's `ready`, as the helper receives it (canonical spelling of the contract) */
+static const char READY_MESSAGE[] = "{\"v\":1,\"t\":\"ready\",\"operationId\":\"filesystem_55555555-5555-4555-8555-555555555555\",\"nonce\":\"" NONCE "\"}";
+static void host_ready(struct wg_boot *boot) {
+    wg_boot_relay_message(boot, CTL_BOOTSTRAP_DOWN, (const uint8_t *)READY_MESSAGE, sizeof READY_MESSAGE - 1);
+}
+
 /* drive the happy path up to a given point */
 static void to_mounted(struct wg_boot *boot) {
+    host_ready(boot);
     wg_boot_helper_message(boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     wg_boot_helper_message(boot, CTL_HELPER_DONE, NULL, 0);
 }
@@ -213,7 +221,7 @@ static void test_replay_after_the_mount_request_stops_the_guest(void) {
     struct fake f; fresh(&f);
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     wg_boot_helper_message(&boot, CTL_HELPER_REPLAY, (const uint8_t *)"data", 4);
     CHECK(!starts(&f, "replay:"));
     CHECK(has(&f, "log:replay-out-of-order"));
@@ -223,10 +231,10 @@ static void test_the_mount_happens_once_on_request_and_is_reported_to_the_helper
     struct fake f; fresh(&f);
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(has(&f, "mount-volumes") && has(&f, "helper:m:1"));
     CHECK(boot.data_mounted && boot.environment_mounted);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(has(&f, "log:mount-out-of-order") && has(&f, "power-off"));
 }
 
@@ -235,7 +243,7 @@ static void test_a_failed_mount_is_reported_and_leaves_nothing_mounted(void) {
     f.mount_rc = -1;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(has(&f, "helper:m:0") && has(&f, "log:mount-failed"));
     CHECK(!boot.data_mounted && !boot.environment_mounted);
     CHECK(!has(&f, "power-off"));   /* stays up: the host may still drain */
@@ -248,7 +256,7 @@ static void test_a_malformed_mount_payload_stops_the_guest_without_mounting(void
         struct fake f; fresh(&f);
         struct wg_boot_ops ops = ops_for(&f);
         struct wg_boot boot; wg_boot_init(&boot, &ops);
-        wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)bad[i], lens[i]);
+        host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)bad[i], lens[i]);
         CHECK(!has(&f, "mount-volumes"));
         CHECK(has(&f, "log:mount-payload"));
     }
@@ -315,7 +323,7 @@ static void test_a_helper_that_dies_after_the_mount_without_saying_done_stops_th
     f.conversations_rc = 0;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     wg_boot_helper_exited(&boot, 1);   /* no 'E': the host may never have been told `mounted` */
     CHECK(has(&f, "log:helper-ended-after-mount"));
     CHECK(!has(&f, "start-supervisor"));
@@ -572,7 +580,7 @@ static void test_a_mount_rollback_that_failed_is_tracked_and_verified(void) {
     f.mount_leftover = 1;   /* the data volume could not be unmounted during the rollback */
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(has(&f, "helper:m:0") && boot.data_mounted && !boot.environment_mounted);
     drain(&boot, NONCE, 1000);
     CHECK(has(&f, "umount:data") && !has(&f, "umount:env") && has(&f, "verify:data:11") && !has(&f, "verify:env:66") && starts(&f, "relay:H"));
@@ -584,7 +592,7 @@ static void test_a_leftover_environment_volume_is_tracked_and_verified_too(void)
     f.mount_leftover = 2;   /* the environment volume could not be unmounted during the rollback */
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(!boot.data_mounted && boot.environment_mounted);
     drain(&boot, NONCE, 1000);
     CHECK(has(&f, "umount:env") && !has(&f, "umount:data") && has(&f, "verify:env:66") && !has(&f, "verify:data:11") && starts(&f, "relay:H"));
@@ -758,6 +766,75 @@ typedef void (*test_fn)(void);
 struct test_case { const char *name; test_fn fn; };
 #define T(x) { #x, x }
 
+static void test_a_mount_request_before_the_hosts_ready_stops_the_guest(void) {
+    const char *others[] = { "{\"v\":1,\"t\":\"plan\",\"x\":1}", "{\"v\":1,\"t\":\"readyx\"}", "{\"v\":1,\"t\":\"ready\"", "{\"t\":\"ready\",\"v\":1}", "" };
+    for (int i = -1; i < 5; i++) {
+        struct fake f; fresh(&f);
+        struct wg_boot_ops ops = ops_for(&f);
+        struct wg_boot boot; wg_boot_init(&boot, &ops);
+        if (i >= 0) wg_boot_relay_message(&boot, CTL_BOOTSTRAP_DOWN, (const uint8_t *)others[i], strlen(others[i]));
+        wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+        CHECK(!has(&f, "mount-volumes"));
+        CHECK(has(&f, "log:mount-out-of-order") && has(&f, "power-off"));
+    }
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    host_ready(&boot);
+    wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
+    CHECK(has(&f, "mount-volumes") && !has(&f, "power-off"));
+}
+
+static void test_a_ready_that_arrives_after_the_helper_is_gone_does_not_unlock_the_mount(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    wg_boot_helper_exited(&boot, 1);
+    host_ready(&boot);
+    CHECK(!boot.host_ready_seen);
+}
+
+static void test_the_devices_are_flushed_after_the_last_unmount_and_before_halting(void) {
+    struct fake f; fresh(&f);
+    f.conversations_rc = 0;
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    wg_boot_supervisor_ready(&boot);
+    drain(&boot, NONCE, 30000);
+    int env = index_of(&f, "umount:env"), data = index_of(&f, "umount:data"), flush = index_of(&f, "flush:3"), halting = index_of(&f, "relay:H:" NONCE);
+    CHECK(env >= 0 && data >= 0 && flush > env && flush > data && halting > flush);
+    CHECK(boot.halting_sent);
+}
+
+static void test_a_failed_flush_withholds_halting_but_still_powers_off(void) {
+    struct fake f; fresh(&f);
+    f.conversations_rc = 0;
+    f.flush_rc = -1;
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    wg_boot_supervisor_ready(&boot);
+    drain(&boot, NONCE, 30000);
+    CHECK(has(&f, "relay:K:" NONCE) && !has(&f, "relay:H:" NONCE) && !boot.halting_sent);
+    CHECK(has(&f, "log:flush-failed") && has(&f, "power-off"));
+}
+
+static void test_no_flush_is_asked_for_a_volume_that_was_never_mounted_and_none_when_unmounting_failed(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    drain(&boot, NONCE, 30000);
+    CHECK(has(&f, "flush:0") && has(&f, "relay:H:" NONCE));
+    struct fake g; fresh(&g);
+    g.umount_data_rc = -1;
+    struct wg_boot_ops gops = ops_for(&g);
+    struct wg_boot b2; wg_boot_init(&b2, &gops);
+    to_mounted(&b2);
+    drain(&b2, NONCE, 30000);
+    CHECK(!starts(&g, "flush") && !has(&g, "relay:H:" NONCE));
+}
+
 int main(void) {
     static const struct test_case tests[] = {
         T(test_bootstrap_payloads_flow_both_ways), T(test_a_bootstrap_payload_with_no_helper_is_dropped),
@@ -776,7 +853,7 @@ int main(void) {
         T(test_the_fail_stop_unmounts_and_syncs_but_sends_no_frames), T(test_a_failed_replay_that_left_the_volume_mounted_is_unmounted_before_halting), T(test_a_replay_volume_that_cannot_be_unmounted_withholds_halting), T(test_a_clean_replay_failure_leaves_nothing_to_unmount), T(test_a_mount_rollback_that_failed_is_tracked_and_verified), T(test_a_leftover_environment_volume_is_tracked_and_verified_too), T(test_halting_needs_a_verified_clean_superblock_on_every_mounted_volume), T(test_a_volume_that_was_never_mounted_is_not_verified), T(test_an_unconfirmed_halting_is_logged), T(test_mount_flags_options_and_order),
         T(test_a_failed_check_mounts_nothing), T(test_a_failed_second_mount_unmounts_the_first), T(test_a_failed_skeleton_unmounts_both), T(test_rollback_unmount_failures_are_reported_per_volume),
         T(test_journal_replay_is_mount_flush_unmount_and_never_executable), T(test_a_replay_that_cannot_flush_or_unmount_does_not_succeed),
-        T(test_replay_refuses_unknown_purposes_and_failed_directories),
+        T(test_replay_refuses_unknown_purposes_and_failed_directories), T(test_a_mount_request_before_the_hosts_ready_stops_the_guest), T(test_a_ready_that_arrives_after_the_helper_is_gone_does_not_unlock_the_mount), T(test_the_devices_are_flushed_after_the_last_unmount_and_before_halting), T(test_a_failed_flush_withholds_halting_but_still_powers_off), T(test_no_flush_is_asked_for_a_volume_that_was_never_mounted_and_none_when_unmounting_failed),
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
         current_name = tests[i].name;
