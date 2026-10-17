@@ -67,13 +67,17 @@ export interface PeerInboxRecord {
   /** The epoch the current offer was made under; the only epoch an ack may present. */
   readonly offered: PeerEpoch | null;
   readonly deliveredUnder: PeerEpoch | null;
+  /** The authenticated user principal that discarded the record (`discard` with the `user` authority); null otherwise. */
+  readonly discardedBy: string | null;
   readonly acceptedAt: number; readonly updatedAt: number;
   /** Compare-and-set token, bumped by every update. */
   readonly version: number;
 }
 /** What the ledger chooses at append; the store adds sequence, body handle, version and the initial state. */
 export type PeerInboxEntry = Pick<PeerInboxRecord, "receiptId" | "senderSessionId" | "senderIncarnation" | "sendId" | "recipientSessionId" | "digest" | "size" | "acceptedAt">;
-export type PeerInboxPatch = Partial<Pick<PeerInboxRecord, "state" | "reason" | "attempts" | "offered" | "deliveredUnder">> & { updatedAt: number };
+/** The only fields `update` may change. An unspecified (or `undefined`) field is left untouched; an explicit `null`
+ * clears a nullable one. Anything else on the object is ignored, so `sequence`, identity and digest are immutable. */
+export type PeerInboxPatch = Partial<Pick<PeerInboxRecord, "state" | "reason" | "attempts" | "offered" | "deliveredUnder" | "discardedBy">> & { updatedAt: number };
 /** Exhaustion bounds, decided by the store INSIDE its atomic append. */
 export interface PeerInboxCaps { maxUnresolvedPerRecipient: number; maxUnresolvedPerSenderRecipient: number; maxUnresolvedBytesPerRecipient: number }
 export type PeerAppendResult =
@@ -81,11 +85,12 @@ export type PeerAppendResult =
   | { status: "full"; reason: PeerCapReason };
 /** Contract violations a store can detect about itself; every list is empty on a healthy store. */
 export interface PeerInboxAudit {
-  /** Unresolved records whose body handle is missing or does not resolve (a torn record). */
+  /** Unresolved records whose body handle is missing or does not resolve (a torn record). A record must never be
+   * committed before its body, so this means damage or loss; the ledger parks such a head `blocked: recovery`. */
   unresolvedWithoutBody: string[];
   /** Terminal records that still hold a body handle (a leaked body). */
   terminalWithBody: string[];
-  /** Bodies no record references (an orphan body, e.g. left by a failed append). */
+  /** Bodies no record references (an orphan body, e.g. left by a failed append or a hard crash). */
   orphanBodies: number;
 }
 
@@ -94,9 +99,17 @@ export interface PeerInboxAudit {
  * DURABILITY CLASS. "Returns means committed": when a mutating method returns, its effect survives a process
  * kill AND an OS crash or power loss, which is the class CoworkRepository gets from `durableCoworkTransaction`
  * (SQLite `synchronous=FULL` with `fullfsync` and `checkpoint_fullfsync` ON on Darwin) or stronger. A method
- * that throws has no visible effect, and a crash mid-method leaves either all of it or none of it (no torn
- * record, no orphan body). A weaker store (the in-memory one, or a cache) may prove the state machine but
- * must never back a production ledger.
+ * that throws has no visible effect, and an `append` that throws removes any body it already wrote.
+ *
+ * WHAT A HARD CRASH MAY LEAVE. A record never exists without its body: the body is durable before the record
+ * that points at it commits. With the records in a database and the bodies in a separate store (the owner's
+ * "kept out of backups" decision), a hard crash can still leave an ORPHAN body (written, record never
+ * committed) or a TERMINAL record whose body file was not yet deleted. The store MUST sweep both when it opens,
+ * driven by `audit()` (delete orphans, release terminal-with-body). `unresolvedWithoutBody` is never swept: it
+ * is damage, and the ledger fails closed on it.
+ *
+ * A weaker store (the in-memory one, or a cache) may prove the state machine but must never back a production
+ * ledger.
  *
  * Synchronous on purpose (the repository's SQLite style): "persisted before success" is then a property of
  * the call order, not of an await. docs/research/2026-10-16-cowork-peer-inbox.md states the full contract and
@@ -120,13 +133,18 @@ export interface PeerInboxStore {
   terminal(recipientSessionId: string): PeerInboxRecord[];
   recipients(): string[];
   /** Compare-and-set: a stale `expectedVersion` throws revision_conflict and changes nothing. Moving to a
-   * terminal state releases the body in the same step (`bodyHandle` becomes null); a terminal record is final
-   * (invalid_request). */
+   * terminal state commits the record with `bodyHandle` null and then deletes the body (a crash in between
+   * leaves a terminal-with-body file for the open-time sweep); a terminal record is final (invalid_request).
+   * Only the `PeerInboxPatch` fields change; `null` clears, unspecified is untouched, anything else is ignored. */
   update(receiptId: string, expectedVersion: number, patch: PeerInboxPatch): PeerInboxRecord;
+  /** `undefined` ONLY for definitive absence (the handle names no body). Any read error (I/O, permission, decode)
+   * MUST throw, never return `undefined`: the ledger treats `undefined` as a damaged body, and the host
+   * `discard` exit would then drop a healthy message after a transient failure. */
   readBody(handle: string): string | undefined;
   /** Removes a TERMINAL record; a non-terminal one throws invalid_request and stays. The recipient's sequence
    * counter is untouched, including across a restart. */
   remove(receiptId: string): void;
+  /** Read-only report. A durable store runs it at open and sweeps what a hard crash can leave (see above). */
   audit(): PeerInboxAudit;
 }
 
@@ -136,6 +154,8 @@ export const isTerminalPeerState = (state: PeerReceiptState): boolean => state =
 export interface PeerReceipt {
   receiptId: string; sendId: string; senderSessionId: string; recipientSessionId: string;
   state: PeerReceiptState; reason: PeerBlockReason | PeerEndReason | null;
+  /** The user principal that discarded it, when it was discarded by a user; null otherwise. */
+  discardedBy: string | null;
   attempts: number; size: number; acceptedAt: number; updatedAt: number;
 }
 export type PeerAcceptResult =
@@ -194,7 +214,7 @@ function durable<T>(operation: () => T): T {
   try { return operation(); } catch (error) { throw error instanceof CoworkError ? error : new CoworkError("recovery_required"); }
 }
 function view(record: PeerInboxRecord): PeerReceipt {
-  return { receiptId: record.receiptId, sendId: record.sendId, senderSessionId: record.senderSessionId, recipientSessionId: record.recipientSessionId, state: record.state, reason: record.reason, attempts: record.attempts, size: record.size, acceptedAt: record.acceptedAt, updatedAt: record.updatedAt };
+  return { receiptId: record.receiptId, sendId: record.sendId, senderSessionId: record.senderSessionId, recipientSessionId: record.recipientSessionId, state: record.state, reason: record.reason, discardedBy: record.discardedBy, attempts: record.attempts, size: record.size, acceptedAt: record.acceptedAt, updatedAt: record.updatedAt };
 }
 
 export class CoworkPeerInbox {
@@ -232,14 +252,13 @@ export class CoworkPeerInbox {
     if (!mayContactCoworkPeer(this.records, request.senderSessionId, request.recipientSessionId, "send")) return { outcome: "refused", reason: this.refusalFor(request.senderSessionId, request.recipientSessionId) };
 
     const entry: PeerInboxEntry = { ...identity, receiptId: this.newReceiptId(), recipientSessionId: request.recipientSessionId, digest, size, acceptedAt: this.now() };
-    // DECISION: owed delivery must survive a stopped recipient and a daemon restart (docs/cowork-spec.md,
-    // verification list: "peer delivery survives a stopped recipient and daemon restart"), and the sender does
-    // not retransmit, so the text has to be durable while it is owed. The spec leaves open WHERE it lives, whether
-    // it is encrypted at rest, how it is excluded from backups and how a stray body is cleaned up; the port keeps
-    // all four with the store. The body goes through the port in the SAME atomic append as an opaque handle, is
-    // released when the record turns terminal, and `audit()` finds a leaked or orphaned one. The record itself
-    // holds only digest + size, and terminal dedupe records hold no body at all. The caps ride into that same
-    // append so the check and the write are one operation.
+    // DECISION (owner, 2026-10-16; docs/research/2026-10-16-cowork-peer-inbox.md, "Owner decisions"): the body is
+    // persisted ONLY WHILE OWED, in the same atomic append, behind an opaque store-issued handle; it is deleted at
+    // every terminal state (delivery, sender_gone, discard, cancel, a gone recipient), kept out of backups, and
+    // not separately encrypted (the 2026-10-12 deferral). Owed delivery has to survive a stopped recipient and a
+    // daemon restart (docs/cowork-spec.md, verification list) and the sender does not retransmit. The record holds
+    // only digest + size, terminal dedupe records hold no body, and `audit()` finds a leaked or orphaned one. The
+    // caps ride into that same append so the check and the write are one operation.
     const appended = durable(() => this.store.append(entry, request.text, this.caps()));
     if (appended.status === "full") return { outcome: "refused", reason: appended.reason };
     if (appended.status === "existing") return this.retained(appended.record, digest); // lost a same-identity race
@@ -347,8 +366,8 @@ export class CoworkPeerInbox {
 
   /** Ends an unresolved record that nobody else can: a message from a sender that stays archived indefinitely
    * (`user`, an authenticated local user client), or a head whose body is provably damaged (`host`: the body
-   * must be missing or fail its digest, otherwise invalid_request). The body is released. A terminal record is
-   * returned unchanged. */
+   * must be missing or fail its digest, otherwise invalid_request). The body is released, and a user discard
+   * records the principal on the receipt (`discardedBy`). A terminal record is returned unchanged. */
   discard(receiptId: string, by: PeerDiscardAuthority): PeerReceipt {
     checkId(receiptId);
     if (by?.kind === "user") checkId(by.principalId);
@@ -356,7 +375,7 @@ export class CoworkPeerInbox {
     const record = durable(() => this.store.get(receiptId));
     if (!record) throw new CoworkError("not_found");
     if (isTerminalPeerState(record.state)) return view(record);
-    if (by.kind === "user") return view(this.move(record, { state: "refused", reason: "discarded", offered: null }));
+    if (by.kind === "user") return view(this.move(record, { state: "refused", reason: "discarded", offered: null, discardedBy: by.principalId }));
     const body = durable(() => record.bodyHandle === null ? undefined : this.store.readBody(record.bodyHandle));
     if (body !== undefined && peerSendDigest(record.recipientSessionId, body) === record.digest) throw new CoworkError("invalid_request");
     return view(this.move(record, { state: "refused", reason: "unrecoverable", offered: null }));
@@ -413,10 +432,16 @@ export class CoworkPeerInbox {
     if (record.state === "blocked" && record.reason === "authority") return;
     this.move(record, { state: "blocked", reason: "authority", offered: null });
   }
-  /** A binding that is deleted, or absent. Any other failure (a transient read error) is NOT "gone". */
+  /** A binding that is deleted or absent, or whose workspace is deleted (or absent): nothing there can ever send or
+   * receive again, so the owed body must not be kept. `deleting` and `archived` are NOT gone (they park). Any other
+   * failure (a transient read error) is NOT gone either: this path destroys the record, so it only acts on a
+   * definitive answer. */
   private gone(sessionId: string): boolean {
     if (!this.records) return false;
-    try { return this.records.binding(sessionId).state === "deleted"; } catch (error) { return error instanceof CoworkError && error.code === "not_found"; }
+    try {
+      const binding = this.records.binding(sessionId);
+      return binding.state === "deleted" || this.records.get(binding.workspaceId).state === "deleted";
+    } catch (error) { return error instanceof CoworkError && error.code === "not_found"; }
   }
   /** The accept-time refusal. `recipient_archived` is disclosed only to a current active same-Project member. */
   private refusalFor(senderSessionId: string, recipientSessionId: string): "not_found" | "recipient_archived" {
@@ -451,6 +476,7 @@ export interface PeerInboxMemoryState {
   bodyCounter: number;
 }
 export const createPeerInboxMemoryState = (): PeerInboxMemoryState => ({ records: new Map(), identities: new Map(), bodies: new Map(), sequences: new Map(), bodyCounter: 0 });
+const PATCHABLE = ["state", "reason", "attempts", "offered", "deliveredUnder", "discardedBy", "updatedAt"] as const;
 const identityKey = (identity: PeerSendIdentity): string => JSON.stringify([identity.senderSessionId, identity.senderIncarnation, identity.sendId]);
 
 export class InMemoryPeerInboxStore implements PeerInboxStore {
@@ -475,7 +501,7 @@ export class InMemoryPeerInboxStore implements PeerInboxStore {
     if (open.reduce((total, record) => total + record.size, 0) + entry.size > caps.maxUnresolvedBytesPerRecipient) return { status: "full", reason: "inbox_bytes_full" };
 
     const previous = this.state.sequences.get(entry.recipientSessionId) ?? 0, sequence = previous + 1, handle = `body_${this.state.bodyCounter + 1}`;
-    const record: PeerInboxRecord = { ...entry, bodyHandle: handle, sequence, state: "accepted", reason: null, attempts: 0, offered: null, deliveredUnder: null, updatedAt: entry.acceptedAt, version: 1 };
+    const record: PeerInboxRecord = { ...entry, bodyHandle: handle, sequence, state: "accepted", reason: null, attempts: 0, offered: null, deliveredUnder: null, discardedBy: null, updatedAt: entry.acceptedAt, version: 1 };
     const undo: Array<() => void> = [];
     try {
       this.beforeWrite(); this.state.bodies.set(handle, body); undo.push(() => { this.state.bodies.delete(handle); });
@@ -505,7 +531,9 @@ export class InMemoryPeerInboxStore implements PeerInboxStore {
     if (!current) throw new CoworkError("not_found");
     if (current.version !== expectedVersion) throw new CoworkError("revision_conflict", current.version);
     if (isTerminalPeerState(current.state)) throw new CoworkError("invalid_request");
-    const next: PeerInboxRecord = { ...current, ...patch, version: current.version + 1 };
+    const changes: Record<string, unknown> = {};
+    for (const key of PATCHABLE) if (patch[key] !== undefined) changes[key] = patch[key];
+    const next: PeerInboxRecord = { ...current, ...changes, version: current.version + 1 };
     if (isTerminalPeerState(next.state)) {
       if (current.bodyHandle !== null) this.state.bodies.delete(current.bodyHandle);
       this.state.records.set(receiptId, { ...next, bodyHandle: null });

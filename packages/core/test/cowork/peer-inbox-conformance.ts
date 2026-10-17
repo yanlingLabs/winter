@@ -1,4 +1,4 @@
-import { expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { CoworkError } from "../../src/cowork/types";
 import type { PeerAppendResult, PeerInboxCaps, PeerInboxEntry, PeerInboxRecord, PeerInboxStore } from "../../src/cowork/peer-inbox";
 
@@ -48,7 +48,8 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
       const store = open();
       const a = created(put(store, 1, "one")), b = created(put(store, 2, "two")), other = created(put(store, 3, "three", { recipientSessionId: "s_q" }));
       expect([a.sequence, b.sequence, other.sequence]).toEqual([1, 2, 1]);
-      expect([a.state, a.version, a.attempts, a.offered, a.deliveredUnder]).toEqual(["accepted", 1, 0, null, null]);
+      expect([a.state, a.version, a.attempts, a.offered, a.deliveredUnder, a.discardedBy, a.reason]).toEqual(["accepted", 1, 0, null, null, null, null]);
+      expect([a.updatedAt, a.acceptedAt]).toEqual([1_001, 1_001]); // a new record's updatedAt is its acceptedAt
       expect(store.readBody(a.bodyHandle!)).toBe("one");
       expect(store.readBody(b.bodyHandle!)).toBe("two");
       expect(a.bodyHandle).not.toBe(b.bodyHandle);
@@ -126,6 +127,12 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
       expect(store.terminal("s_r").map(record => record.receiptId)).toEqual(["r1", "r2"]);
       expect(store.unresolved("s_other")).toEqual([]);
       expect(store.recipients()).toEqual(["s_r"]);
+      // A recipient that only has terminal records is still listed: pruning walks recipients().
+      put(store, 7, "done", { recipientSessionId: "s_t" });
+      store.update("r7", 1, { state: "delivered", reason: null, updatedAt: 6 });
+      expect(store.unresolved("s_t")).toEqual([]);
+      expect(store.terminal("s_t").map(record => record.receiptId)).toEqual(["r7"]);
+      expect([...store.recipients()].sort()).toEqual(["s_r", "s_t"]);
     } },
     { name: "remove deletes only terminal records", run: ({ open }) => {
       const store = open();
@@ -134,6 +141,11 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
       expect(store.get("r2")).toBeDefined();
       expect(store.readBody(second.bodyHandle!)).toBe("y");
       store.update("r2", 1, { state: "delivered", reason: null, updatedAt: 3 });
+      // A terminal record stays findable (it is the dedupe record) until it is removed, also across a reopen.
+      for (const view of [store, open()]) {
+        expect(view.get("r2")?.state).toBe("delivered");
+        expect(view.find(identity(2))?.receiptId).toBe("r2");
+      }
       store.remove("r2");
       expect(store.get("r2")).toBeUndefined();
       expect(store.find(identity(2))).toBeUndefined();
@@ -193,6 +205,12 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
       expect(put(store, 11, "aaaa", {}, caps)).toEqual({ status: "full", reason: "sender_quota" });
       store.update("r1", 2, { state: "refused", reason: "canceled", updatedAt: 6 });
       expect(created(put(store, 12, "aaaa", {}, caps)).sequence).toBe(5);
+      // A blocked record still holds its bytes: the budget counts every unresolved record, not only the accepted ones.
+      const small: PeerInboxCaps = { ...WIDE, maxUnresolvedBytesPerRecipient: 10 };
+      put(store, 13, "aaaa", { recipientSessionId: "s_z" }, small);
+      store.update("r13", 1, { state: "blocked", reason: "resources", updatedAt: 7 });
+      expect(put(store, 14, "bbbbbbb", { recipientSessionId: "s_z" }, small)).toEqual({ status: "full", reason: "inbox_bytes_full" });
+      expect(put(store, 15, "bbbbbb", { recipientSessionId: "s_z" }, small).status).toBe("created");
     } },
     { name: "bodies round-trip byte-exactly: multibyte text, NUL and 64 KiB, also after a reopen", run: ({ open }) => {
       const store = open();
@@ -240,6 +258,35 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
       expect(store.audit()).toEqual(CLEAN);
       expect(open().audit()).toEqual(CLEAN);
     } },
+    { name: "update changes only the patchable fields: an explicit null clears, an unspecified field is untouched, extra keys are ignored", run: ({ open }) => {
+      const store = open();
+      const first = created(put(store, 1, "x")), epoch = { incarnationId: "boot-1", leaseEpoch: 3 };
+      const a = store.update("r1", 1, { state: "blocked", reason: "grants", attempts: 2, offered: epoch, deliveredUnder: epoch, discardedBy: "u1", updatedAt: 10 });
+      expect([a.state, a.reason, a.attempts, a.offered, a.deliveredUnder, a.discardedBy, a.updatedAt]).toEqual(["blocked", "grants", 2, epoch, epoch, "u1", 10]);
+      // Each explicit null clears exactly the field it names; everything not named is untouched.
+      const b = store.update("r1", 2, { reason: null, updatedAt: 11 });
+      expect([b.reason, b.state, b.attempts, b.offered, b.deliveredUnder, b.discardedBy]).toEqual([null, "blocked", 2, epoch, epoch, "u1"]);
+      const c = store.update("r1", 3, { offered: null, updatedAt: 12 });
+      expect([c.offered, c.deliveredUnder, c.discardedBy, c.reason, c.attempts]).toEqual([null, epoch, "u1", null, 2]);
+      const d = store.update("r1", 4, { deliveredUnder: null, discardedBy: null, updatedAt: 13 });
+      expect([d.deliveredUnder, d.discardedBy, d.attempts, d.state, d.offered]).toEqual([null, null, 2, "blocked", null]);
+      expect(open().get("r1")).toEqual(d); // and the cleared state is what a reopen sees
+      // Fields outside the patch are not writable, even if smuggled in.
+      const e = store.update("r1", 5, { updatedAt: 14, sequence: 99, receiptId: "evil", recipientSessionId: "s_evil", digest: "f".repeat(64), size: 999, bodyHandle: "evil", version: 77 } as never);
+      expect([e.sequence, e.receiptId, e.recipientSessionId, e.digest, e.size, e.bodyHandle, e.version]).toEqual([1, "r1", "s_r", DIGEST, 1, first.bodyHandle, 6]);
+    } },
+    { name: "attempts, offered, deliveredUnder and discardedBy survive a reopen, also on a terminal record", run: ({ open }) => {
+      const store = open(), epoch = { incarnationId: "boot-9", leaseEpoch: 4 };
+      put(store, 1, "x"); put(store, 2, "y");
+      store.update("r1", 1, { state: "accepted", attempts: 3, offered: epoch, updatedAt: 5 });
+      store.update("r1", 2, { state: "delivered", reason: null, offered: null, deliveredUnder: epoch, updatedAt: 6 });
+      store.update("r2", 1, { state: "refused", reason: "discarded", discardedBy: "local-user", updatedAt: 7 });
+      for (const view of [store, open()]) {
+        expect(view.get("r1")).toMatchObject({ state: "delivered", attempts: 3, offered: null, deliveredUnder: epoch, bodyHandle: null });
+        expect(view.get("r2")).toMatchObject({ state: "refused", reason: "discarded", discardedBy: "local-user", bodyHandle: null });
+        expect(view.find(identity(1))?.deliveredUnder).toEqual(epoch);
+      }
+    } },
     { name: "two live instances interleave appends, identities, compare-and-set and caps over one state", run: ({ open }) => {
       const a = open(), b = open();
       // Appends from either instance get distinct, consecutive sequences and each sees the other's record.
@@ -262,4 +309,10 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
       expect(a.audit()).toEqual(CLEAN);
     } },
   ];
+}
+
+/** Registers every conformance case for one store implementation: `runPeerInboxStoreConformance("sqlite", () => harness)`.
+ * `makeHarness` is called once per case, so each case gets fresh durable state. */
+export function runPeerInboxStoreConformance(label: string, makeHarness: () => PeerInboxStoreHarness): void {
+  for (const conformance of peerInboxStoreConformanceCases()) test(`conformance (${label}): ${conformance.name}`, () => conformance.run(makeHarness()));
 }

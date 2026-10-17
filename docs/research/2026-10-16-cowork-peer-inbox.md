@@ -45,8 +45,8 @@ No new `CoworkErrorCode` was added. Used: `invalid_request`, `request_conflict`,
 accepted --ack (epoch == offered == current, authority ok)--> delivered              [terminal]
 accepted --block (owner of the current offer: grants | resources | recovery)--> blocked
 accepted | blocked --sweep: authority lost--> blocked (authority)
-accepted | blocked --sweep: recipient deleted or unknown--> refused (not_found)        [terminal]
-accepted | blocked --sweep: sender deleted or unknown--> refused (sender_gone)         [terminal]
+accepted | blocked --sweep: recipient gone (deleted, absent, or its workspace deleted)--> refused (not_found)  [terminal]
+accepted | blocked --sweep: sender gone (deleted, absent, or its workspace deleted)--> refused (sender_gone)    [terminal]
 accepted | blocked --cancel (the sender)--> refused (canceled)                         [terminal]
 accepted | blocked --discard (user)--> refused (discarded)                             [terminal]
 blocked (recovery) --discard (host, body provably damaged)--> refused (unrecoverable)  [terminal]
@@ -71,10 +71,14 @@ parks the whole pair and cannot let a later message of the pair overtake an earl
   digest is parked `blocked: recovery` (once; later offers do not rewrite it) with nothing delivered past it. The
   way out of a held head is the delivery owner fixing the cause, the sender's `cancel`, or `discard`.
 - Revocation is `blocked`, not `refused`: the record is retained and visible, is not delivered, and is delivered
-  later only if authority returns. Archived is not deleted. A deleted or unknown recipient (which can never
-  receive it) and a deleted or unknown sender (which can never cancel it) end the record and release its body,
-  so a vanished sender cannot leave a record that fills the inbox forever. When both are gone the recipient's
-  reason wins. A transient read error is never "gone".
+  later only if authority returns. Archived is not deleted. A recipient that is gone (which can never receive it)
+  and a sender that is gone (which can never cancel it) end the record and release its body, so a vanished
+  sender cannot leave a record that fills the inbox forever. "Gone" means the binding is `deleted` or its row is
+  absent, or the binding's workspace is `deleted` or absent; this is what keeps the owner's rule (the body lives
+  only while owed) true when a workspace is deleted while its conversation rows are still `active`. A workspace
+  that is `archived` or `deleting` only parks. When both ends are gone the recipient's reason wins. This path
+  destroys the record, so it acts only on a definitive answer: any other read failure (a busy database, on
+  every call) is never "gone", the record parks and delivers after recovery.
 - An ack that finds authority revoked answers `authority_denied`, parks the record and delivers nothing. That is
   the signal for the recipient runtime to discard the input it was holding: the ack is the commit point.
 - `block(receiptId, epoch, reason)` is fenced. The record must be `accepted` and offered under `epoch`, and
@@ -82,10 +86,13 @@ parks the whole pair and cannot let a later message of the pair overtake an earl
   un-offer a message the current epoch holds (which used to make the current epoch's ack fail and re-offer in a
   loop). A terminal or already-blocked record is returned unchanged for any caller.
 - `discard(receiptId, by)`: `{ kind: "user", principalId }` ends any unresolved record as `discarded` (for a
-  sender that stays archived indefinitely); `{ kind: "host", reason: "unrecoverable_body" }` ends a record only
-  if its body is provably missing or damaged, as `unrecoverable`. The ledger cannot authenticate a user: the
-  wired surface must supply the principal from an authenticated local client, and peers and runtime principals
-  must never reach this door.
+  sender that stays archived indefinitely) and records the principal on the record and the receipt
+  (`discardedBy`; there is no DDL yet, so the column is free); `{ kind: "host", reason: "unrecoverable_body" }`
+  ends a record only if its body is provably missing or damaged, as `unrecoverable`, with no principal. A body
+  read that THROWS is an error, not damage: `offer` and the host exit both surface `recovery_required` and leave
+  the record untouched, so a transient failure can never get a healthy message discarded. The ledger cannot
+  authenticate a user: the wired surface must supply the principal from an authenticated local client, and peers
+  and runtime principals must never reach this door.
 
 ## Exhaustion bounds
 
@@ -113,30 +120,52 @@ visible.
 
 **Durability class: returns means committed.** When a mutating method returns, its effect survives a process kill
 and an OS crash or power loss, the class `durableCoworkTransaction` gets from SQLite `synchronous=FULL` with
-`fullfsync` and `checkpoint_fullfsync` on Darwin, or stronger. A crash mid-method leaves all of it or none of it:
-no torn record, no orphan body. The in-memory store proves the state machine and only the atomicity half of this;
-it must never back a production ledger. A unit case cannot show the fsync half, and a hard crash mid-append is the
-durable store's own transaction property and needs its own kill test.
+`fullfsync` and `checkpoint_fullfsync` on Darwin, or stronger. A method that throws has no visible effect, and an
+`append` that throws removes any body it already wrote.
+
+**What a hard crash may leave.** A record never exists without its body: the body is durable before the record
+that points at it commits. With the records in a database and the bodies in a separate store (the owner's "kept
+out of backups" decision), a hard crash can still leave an ORPHAN body (written, record never committed) or a
+TERMINAL record whose body file was not yet deleted. The store MUST sweep both when it opens, driven by
+`audit()`: delete orphans, release terminal-with-body. `unresolvedWithoutBody` is damage, is never swept, and
+the ledger fails closed on it (the head parks `blocked: recovery`; the host `discard` exit is the way out).
+
+The in-memory store proves the state machine and only the atomicity half of this; it must never back a
+production ledger. A unit case cannot show the fsync half, and a hard crash mid-append is the durable store's
+own transaction property and needs its own kill test.
 
 - `append(entry, body, caps)` atomically: returns the existing record for the same send identity unchanged
   (no body stored, no cap applied); otherwise checks the caps, then stores the record and the body together,
   assigning the next per-recipient sequence, a body handle and version 1. `size` must equal the body's UTF-8 length.
   A rejected or `full` append leaves no record, body or sequence gap.
-- `update` is compare-and-set on `version`. A move to a terminal state releases the body in the same step. A
-  terminal record is final.
+- `update` is compare-and-set on `version` and changes only the patchable fields: an explicit `null` clears a
+  nullable field, an unspecified field is untouched, and any other key (sequence, identity, digest, size, body
+  handle, version) is ignored. A move to a terminal state commits the record with no body handle and then deletes
+  the body (a crash in between leaves a terminal-with-body file for the open-time sweep). A terminal record is
+  final.
+- `readBody` returns `undefined` ONLY for definitive absence and THROWS on any read error (I/O, permission,
+  decode). The ledger treats `undefined` as a damaged body, so a swallowed transient error would let the host
+  exit discard a healthy message.
 - `remove` accepts terminal records only. The recipient's sequence counter survives removal and a restart.
 - `audit()` reports what a healthy store never has: unresolved records without a body (torn), terminal records
   that still hold a body (leaked) and bodies no record references (orphans). The ledger does not call it; a
-  durable store should run it at open, and it is the cleanup hook for stray bodies.
+  durable store MUST run it at open and sweep the last two (see "What a hard crash may leave").
 - Returned records are copies.
 
-`test/cowork/peer-inbox-conformance.ts` exports `peerInboxStoreConformanceCases()`: sixteen cases a durable store
-must pass, run today against the in-memory store with a `reopen` that models a restart. They cover the above plus
-body fidelity (multibyte text, NUL, 64 KiB, also after a reopen), caps inside `append`, an append that fails at
-every internal write leaving no torn record, orphan body or sequence gap (via the required `failAppendAtStep`
-hook, which a SQLite store supplies by throwing inside its transaction after the n-th statement), the sequence never being reused after remove, reopen and append, and two live instances interleaving
-appends, identities, compare-and-set and caps over one state. A future SQLite store adds one line to its own test
-file; the ledger tests then run unchanged over it.
+Two suites constrain a store, and both are importable test helpers. `test/cowork/peer-inbox-conformance.ts`
+exports `peerInboxStoreConformanceCases()` and `runPeerInboxStoreConformance(label, makeHarness)`: eighteen cases
+that pin the port contract field by field. They cover the above plus the patch semantics (null clears, unspecified
+is untouched, extra keys ignored), `attempts` / `offered` / `deliveredUnder` / `discardedBy` surviving a reopen,
+terminal records staying findable until removed, terminal-only recipients being listed, body fidelity (multibyte
+text, NUL, 64 KiB, also after a reopen), caps inside `append` (a blocked record still counts toward the byte
+budget), an append that fails at every internal write leaving no record, body or sequence gap (via the required
+`failAppendAtStep` hook, which a SQLite store supplies by throwing inside its transaction after the n-th
+statement), the sequence never being reused after remove, reopen and append, and two live instances interleaving
+appends, identities, compare-and-set and caps over one state. `test/cowork/peer-inbox-ledger-cases.ts` exports
+`definePeerInboxLedgerTests(label, makeHarness)`: the ledger behavior tests, written against the port only (fault
+injection and spies wrap the store with a decorator, nothing depends on the in-memory class). A harness is
+`{ open(): PeerInboxStore; failAppendAtStep(step): void }` over one durable state, where a second `open()` is a
+restart. A future SQLite store adds two lines to its own test file, and the ledger tests then really run over it.
 
 ## Owner decisions, decided 2026-10-16
 
@@ -272,6 +301,7 @@ call `offer` once it holds a current epoch, hand the body to the recipient and r
 
 ## Evidence
 
-`packages/core/test/cowork/peer-inbox.test.ts` (43 tests: 26 ledger tests, the sixteen store conformance cases
-and the anti-wiring pin), with real `CoworkRepository` records so the real `mayContactCoworkPeer` runs. Mutation
+`packages/core/test/cowork/peer-inbox.test.ts` runs 51 tests: 31 ledger tests (from `peer-inbox-ledger-cases.ts`),
+the eighteen store conformance cases (from `peer-inbox-conformance.ts`), an in-memory audit test and the
+anti-wiring pin. The ledger tests use real `CoworkRepository` records so the real `mayContactCoworkPeer` runs. Mutation
 checks (apply, run, see the named test fail, revert) are recorded in the pull request.
