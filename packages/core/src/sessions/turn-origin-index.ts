@@ -5,9 +5,11 @@
 // every computer-use card. Dispatch is the singleton that lives for months, so that read grew without
 // bound. This index answers from memory instead:
 //   - a session is TRACKED from its first question: seeded once from a bounded TAIL of its log
-//     (`SessionStore.readTail`, `SEED_TAIL_BYTES`) — exact whenever the log is smaller than that, and
-//     otherwise exact unless messages older than the window are still unpaired (a queue deeper than the
-//     window, which a real session does not hold);
+//     (`SessionStore.readTail`, `SEED_TAIL_BYTES`) — exact whenever the log is smaller than that. A CUT
+//     tail may open inside a running turn whose start it never saw, so until a turn it saw whole ends,
+//     every turn start it sees (a folded continuation included) reads UNKNOWN — the fail-safe answer,
+//     never a guess at "human" (`TurnOriginTracker`'s `cut`). After that it is exact unless messages
+//     older than the window are still unpaired (a queue deeper than the window);
 //   - from then on it is FED every event the hub appends for it (`hub.addObserver`), in seq order;
 //   - it is DROPPED (re-seeded at the next question) the moment it can no longer be trusted: an event that
 //     skips a seq (something appended to the store without the hub), or a store `lastSeq` ahead of what
@@ -49,8 +51,11 @@ export class TurnOriginIndex {
       let t = this.tracked.get(sessionId);
       if (t !== undefined && this.store.lastSeq(sessionId) !== t.lastSeq) { this.tracked.delete(sessionId); t = undefined; }
       if (t === undefined) {
-        t = new TurnOriginTracker();
-        for (const e of this.store.readTail(sessionId, SEED_TAIL_BYTES)) t.feed(e);
+        const tail = this.store.readTail(sessionId, SEED_TAIL_BYTES);
+        // A tail that does not begin at the log's first event may have cut into a running turn: its
+        // origin (and any continuation of it) reads unknown until a turn the tracker saw whole ends.
+        t = new TurnOriginTracker({ cut: tail.length > 0 && tail[0]!.seq > 1 });
+        for (const e of tail) t.feed(e);
         if (t.lastSeq === 0) t.lastSeq = this.store.lastSeq(sessionId);   // an empty log: start from the row
       } else {
         this.tracked.delete(sessionId);   // re-inserted below: most recently asked last

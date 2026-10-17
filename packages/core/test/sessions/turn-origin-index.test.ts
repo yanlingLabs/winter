@@ -84,3 +84,44 @@ describe("TurnOriginIndex — the running turn's origin from memory, never a who
     expect(turnOriginIndexFor(hub, store).origin("s_nope")).toBeUndefined();
   });
 });
+
+describe("a re-seed from a CUT tail never guesses a person (review: fail-safe)", () => {
+  const ev = (seq: number, type: string, extra: Record<string, unknown> = {}) =>
+    ({ seq, ts: 0, sessionId: "s1", threadId: "main", type, ...extra }) as never;
+  const storeOf = (tail: unknown[]) => ({ readTail: () => tail as never[], lastSeq: () => (tail.at(-1) as { seq: number }).seq });
+
+  test("a window that opens inside a running turn: a folded continuation reads unknown, not the oldest unanswered message", () => {
+    // Before the window: Dispatch's turn started on a wake. In it: the user's queued message, a peer's message
+    // folded into the running turn, and the runtime's continuation `turn_started`.
+    const tail = [
+      ev(500, "tool_call", { callId: "c1", name: "Bash", argsJson: "{}" }),   // main-thread, before any turn start: cut inside a turn
+      ev(501, "user_message", { text: "later please", clientName: "winter-mac" }),
+      ev(502, "user_message", { text: "status?", clientName: "messaging" }),
+      ev(503, "tool_result", { callId: "c1", output: "", isError: false }),
+      ev(504, "turn_started"),
+    ];
+    // What a fresh, uncut pairing would have guessed — a person — is exactly what must not be answered.
+    expect(runningTurnOrigin(tail as never)).toBe("winter-mac");
+    expect(new TurnOriginIndex(storeOf(tail)).origin("s1")).toBeUndefined();
+  });
+
+  test("a window whose only start is a continuation, right after the seed, reads unknown too", () => {
+    const tail = [ev(900, "user_message", { text: "x", clientName: "winter-mac" }), ev(901, "turn_started")];
+    expect(new TurnOriginIndex(storeOf(tail)).origin("s1")).toBeUndefined();
+  });
+
+  test("once a turn it saw whole has ended, the next turn reads exactly again", () => {
+    const tail = [
+      ev(500, "assistant_message", { text: "…" }),
+      ev(501, "turn_completed", { stopReason: "end_turn", inputTokens: 0, outputTokens: 0 }),
+      ev(502, "user_message", { text: "go", clientName: "winter-mac" }),
+      ev(503, "turn_started"),
+    ];
+    expect(new TurnOriginIndex(storeOf(tail)).origin("s1")).toBe("winter-mac");
+  });
+
+  test("an UNCUT log (it starts at seq 1) is read exactly, as before", () => {
+    const tail = [ev(1, "user_message", { text: "go", clientName: "winter-mac" }), ev(2, "turn_started")];
+    expect(new TurnOriginIndex(storeOf(tail)).origin("s1")).toBe("winter-mac");
+  });
+});

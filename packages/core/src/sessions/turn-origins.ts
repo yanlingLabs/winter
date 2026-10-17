@@ -60,6 +60,16 @@ export class TurnOriginTracker {
   private open = false;
   /** The highest `seq` fed so far (0: none). */
   lastSeq = 0;
+  /** Fed from a CUT log (a tail that does not start at the log's first event): until the first main
+   *  `turn_completed` closes a turn it saw whole, the window may have opened INSIDE a turn whose start
+   *  it never saw — so any turn it sees start (a continuation of that turn included) reads UNKNOWN, which
+   *  every caller treats as not-a-person (bounded). Fail-safe, never a guess. */
+  private uncertain: boolean;
+  private sawTurnStart = false;
+
+  constructor(opts: { cut?: boolean } = {}) {
+    this.uncertain = opts.cut === true;
+  }
 
   feed(e: SessionEvent): void {
     if (typeof (e as { seq?: unknown }).seq === "number") this.lastSeq = Math.max(this.lastSeq, e.seq);
@@ -68,10 +78,14 @@ export class TurnOriginTracker {
       if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) return;
       this.pairer.message(e.clientName ?? "session");
     } else if (e.type === "turn_started") {
-      this.origin = this.pairer.turnStarted(this.open);
+      const paired = this.pairer.turnStarted(this.open);
+      this.origin = this.uncertain ? undefined : paired;
       this.open = true;
+      this.sawTurnStart = true;
     } else {
-      if (e.type === "turn_completed") this.open = false;
+      if (e.type === "turn_completed") { this.open = false; this.uncertain = false; }
+      // A cut window whose first main event is not a turn's start landed inside a running turn.
+      else if (this.uncertain && !this.sawTurnStart) this.open = true;
       this.pairer.other();
     }
   }
