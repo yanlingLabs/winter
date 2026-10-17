@@ -2,14 +2,15 @@ import XCTest
 import WinterCUPresentation
 @testable import Winter
 
-/// The open island's morph out of the strip (no overshoot, contents after the shape, closing backwards), the strip's
-/// wing clicks that replaced the badge's hover, and the one hover grow every island panel shares.
+/// The open island's morph out of the strip (no overshoot, contents after the shape, closing backwards, its top attached
+/// to the screen's edge with its shoulders on every frame), its one fixed size, the strip's wing clicks that replaced
+/// the badge's hover, and the hover grow: none on the open island, the compact pill's points on every floating panel.
 @MainActor
 final class IslandOpenMorphTests: XCTestCase {
     private let notched = IslandScreenShape(housing: CGSize(width: 185, height: 32), menuBarHeight: 32)
 
     private func morph(waiting: Bool = true) -> IslandOpenMorph {
-        let island = IslandLayout.island(notched, contentHeight: 400)
+        let island = IslandLayout.island(notched)
         let strip = IslandLayout.strip(notched, waiting: waiting)!
         return IslandOpenMorph(source: strip.offsetBy(dx: island.width / 2, dy: 0),
                                target: CGRect(origin: .zero, size: island.size),
@@ -38,6 +39,7 @@ final class IslandOpenMorphTests: XCTestCase {
         let rest = m.frame(at: IslandOpenMorph.settle)
         XCTAssertEqual(rest.rect, m.target, "at rest exactly the island")
         XCTAssertEqual(rest.corner, IslandLayout.islandCorner)
+        XCTAssertEqual(rest.shoulder, IslandLayout.islandShoulder)
         XCTAssertEqual(rest.content, 1)
         XCTAssertEqual(rest.blur, 0)
     }
@@ -129,19 +131,113 @@ final class IslandOpenMorphTests: XCTestCase {
         XCTAssertEqual(IslandLayout.stripPart(at: CGPoint(x: 30, y: 10), plain, model: both), .workingWing)
     }
 
-    // MARK: One hover grow
+    // MARK: Attached to the screen's edge
 
-    func testEveryIslandPanelGrowsByTheDispatchPillsOwnHover() {
-        XCTAssertEqual(IslandHover.scale, DispatchPillMetrics.hoverScale)
-        XCTAssertEqual(DesktopIslandGeometry.hoverScale, DispatchPillMetrics.hoverScale,
-                       "the cards' liquid frame (WinterCUPresentation) grows by the same amount")
+    /// On EVERY frame of the morph the shape's top is the screen's edge: flat at y = 0 and flaring into it through two
+    /// concave shoulders (filled just under the edge, just outside the body; NOT filled lower down, where the fillet
+    /// curves away — concave, not a square ear). The first frame is the strip itself, which has none.
+    func testTheTopStaysAttachedWithItsShouldersOnEveryFrame() {
+        for (name, m) in [("from the strip", morph()), ("from the housing alone", morph(waiting: false)),
+                          ("without a housing", morphWithoutHousing())] {
+            let first = m.frame(at: 0)
+            XCTAssertEqual(first.shoulder, 0, "\(name): the strip's own silhouette at the click")
+            for i in 1...120 {
+                let f = m.frame(at: IslandOpenMorph.settle * Double(i) / 120)
+                XCTAssertEqual(f.rect.minY, 0, accuracy: 0.0001, "\(name) step \(i): flush with the screen's top")
+                XCTAssertGreaterThan(f.shoulder, 0, "\(name) step \(i): the shoulders are there")
+                let path = IslandEdgeShape(corner: f.corner, shoulder: f.shoulder).path(in: f.rect)
+                XCTAssertEqual(path.boundingRect.minY, 0, accuracy: 0.0001, "\(name) step \(i): nothing above the edge")
+                XCTAssertEqual(path.boundingRect.width, f.rect.width + 2 * f.shoulder, accuracy: 0.01,
+                               "\(name) step \(i): the shoulders flare out past the body along the edge")
+                let s = f.shoulder
+                for (x, outward) in [(f.rect.minX, -1.0), (f.rect.maxX, 1.0)] {
+                    let nearEdge = CGPoint(x: x + CGFloat(outward) * s * 0.5, y: s * 0.05)
+                    XCTAssertTrue(path.contains(nearEdge), "\(name) step \(i): the shoulder fills the corner at the edge")
+                    let lower = CGPoint(x: x + CGFloat(outward) * s * 0.5, y: s * 0.9)
+                    XCTAssertFalse(path.contains(lower), "\(name) step \(i): concave — it curves away below the edge")
+                }
+                XCTAssertTrue(path.contains(CGPoint(x: f.rect.midX, y: 0.01)), "\(name) step \(i): flat top, solid to the edge")
+            }
+        }
+        // At rest, and Reduce Motion's frame, are the island with its shoulders.
+        XCTAssertEqual(IslandOpenMorph.Frame.resting(.zero).shoulder, IslandLayout.islandShoulder)
+        XCTAssertEqual(IslandOpenMorph.Frame.resting(.zero).corner, IslandLayout.islandCorner)
     }
 
-    /// No island view writes its own grow: every `scaleEffect` under the pointer goes through `IslandHover` (a press's
-    /// shrink is not a hover), and no literal hover factor appears in the island's sources.
+    func testAShoulderIsNeverDeeperThanTheSideItFlaresFrom() {
+        XCTAssertEqual(IslandEdgeShape.clampedShoulder(14, height: 20, corner: 10), 10)
+        XCTAssertEqual(IslandEdgeShape.clampedShoulder(14, height: 24, corner: 4), 12, "never more than half the height")
+        XCTAssertEqual(IslandEdgeShape.clampedShoulder(14, height: 420, corner: 32), 14)
+        XCTAssertEqual(IslandEdgeShape.clampedShoulder(-3, height: 420, corner: 32), 0)
+    }
+
+    private func morphWithoutHousing() -> IslandOpenMorph {
+        let plain = IslandScreenShape(housing: nil, menuBarHeight: 24)
+        let island = IslandLayout.island(plain)
+        let strip = IslandLayout.strip(plain)
+        return IslandOpenMorph(source: strip.offsetBy(dx: island.width / 2, dy: 0),
+                               target: CGRect(origin: .zero, size: island.size),
+                               sourceCorner: IslandLayout.stripCorner, targetCorner: IslandLayout.islandCorner)
+    }
+
+    // MARK: One fixed size
+
+    /// One size for every tab and whatever it lists — nothing measures the content any more (each tab scrolls inside).
+    func testTheOpenIslandHasOneSizeForEveryTabAndAnyContent() throws {
+        let plain = IslandScreenShape(housing: nil, menuBarHeight: 24)
+        for shape in [notched, plain] {
+            let r = IslandLayout.island(shape)
+            XCTAssertEqual(r.size, CGSize(width: IslandLayout.islandWidth, height: IslandLayout.islandHeight))
+            XCTAssertEqual(r.size, CGSize(width: 560, height: 420))
+            XCTAssertEqual(r.minY, 0)
+            XCTAssertEqual(r.midX, 0, accuracy: 0.001)
+            XCTAssertEqual(IslandLayout.island(shape, screenHeight: 956), r, "fits the smallest current Mac screen")
+        }
+        // A short screen clamps it — the same for every tab there.
+        XCTAssertEqual(IslandLayout.island(notched, screenHeight: 600).height, 360)
+        XCTAssertLessThanOrEqual(IslandLayout.island(notched, screenHeight: 600).height, 600)
+        // The controller no longer measures a tab (it used to size the island to the selected tab's content).
+        let code = try String(contentsOf: sourceFile("IslandController.swift"), encoding: .utf8)
+        XCTAssertFalse(code.contains("islandContentHeight"), "the open island never measures its content")
+        XCTAssertFalse(code.contains("IslandTabBody("), "nor a tab's body")
+        XCTAssertFalse(code.contains("relayoutSoon"), "a tab change or new content never relayouts it")
+    }
+
+    // MARK: Hover
+
+    /// The open island has no hover grow at all (its rows and tiles glow; the island stays put), and no rim.
+    func testTheOpenIslandHasNoHoverGrowNorRim() throws {
+        let code = try String(contentsOf: sourceFile("IslandOpenMorph.swift"), encoding: .utf8)
+        let frame = try XCTUnwrap(code.range(of: "struct IslandOpenFrame").map { code[$0.lowerBound...] })
+        let body = String(frame[..<(frame.range(of: "struct IslandEdgeShape")?.lowerBound ?? frame.endIndex)])
+        for forbidden in ["islandHoverGrow", "hoverGrowth(", "scaleEffect", "strokeBorder", "hovered"] {
+            XCTAssertFalse(body.contains(forbidden), "the open island's frame uses \(forbidden)")
+        }
+        let model = IslandOpenModel()
+        XCTAssertFalse(Mirror(reflecting: model).children.contains { ($0.label ?? "").contains("hovered") },
+                       "the open island's model has no hover state")
+    }
+
+    /// Every floating panel grows by the compact Dispatch pill's POINTS (`HoverGrowth`), not by 3 % of itself.
+    func testEveryFloatingIslandPanelGrowsByTheCompactPillsPoints() {
+        let points = DispatchPillMetrics.compactWidth * (DispatchPillMetrics.hoverScale - 1)
+        for size in [CGSize(width: IslandLayout.cardWidth, height: 160),          // an island card
+                     CGSize(width: IslandLayout.waitingWidth, height: IslandLayout.waitingHeight), // the waiting pill
+                     CGSize(width: IslandActivityLayout.cuPillWidth, height: 44),  // the computer-use pill
+                     IslandActivityLayout.mirrorSize] {                            // the in-island mirror
+            let rect = CGRect(origin: CGPoint(x: 30, y: 42), size: size)
+            let grown = IslandHover.grown(rect)
+            XCTAssertEqual(grown.width - rect.width, points, accuracy: 0.0001, "\(size): the same points wider")
+            XCTAssertEqual(grown.height / rect.height, grown.width / rect.width, accuracy: 0.0001, "\(size): uniform")
+            XCTAssertEqual(grown.minY, rect.minY, "\(size): from its top edge")
+            XCTAssertEqual(grown.midX, rect.midX, accuracy: 0.0001)
+        }
+    }
+
+    /// No island view writes its own grow: a `scaleEffect` is only a press's shrink (the hover goes through
+    /// `islandHoverGrow`/`HoverGrowth`), and no literal hover factor appears in the island's sources.
     func testNoIslandSourceHardCodesAHoverScale() throws {
-        let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Sources/Island")
+        let folder = sourceFile("")
         let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "swift" }
         XCTAssertGreaterThan(files.count, 10)
@@ -149,10 +245,9 @@ final class IslandOpenMorphTests: XCTestCase {
             let code = try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")
                 .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             for (i, line) in code.enumerated() {
-                XCTAssertFalse(line.contains("1.03"), "\(file.lastPathComponent):\(i + 1) hard-codes a hover grow: use IslandHover")
+                XCTAssertFalse(line.contains("1.03"), "\(file.lastPathComponent):\(i + 1) hard-codes a hover grow: use HoverGrowth")
                 if line.contains("scaleEffect(") {
-                    XCTAssertTrue(line.contains("isPressed") || line.contains("IslandHover.scale"),
-                                  "\(file.lastPathComponent):\(i + 1) scales outside IslandHover: \(line)")
+                    XCTAssertTrue(line.contains("isPressed"), "\(file.lastPathComponent):\(i + 1) scales outside HoverGrowth: \(line)")
                 }
             }
         }
@@ -163,10 +258,11 @@ final class IslandOpenMorphTests: XCTestCase {
     func testTheHitAreaAndThePointerFollowTheGrownShape() {
         let rect = CGRect(x: 100, y: 40, width: 400, height: 200)
         let grown = IslandHover.grown(rect)
+        let s = HoverGrowth.factor(forWidth: 400)
         XCTAssertEqual(grown.minY, rect.minY, "it grows from its top edge")
         XCTAssertEqual(grown.midX, rect.midX, accuracy: 0.001)
-        XCTAssertEqual(grown.width, 400 * IslandHover.scale, accuracy: 0.001)
-        XCTAssertEqual(grown.height, 200 * IslandHover.scale, accuracy: 0.001)
+        XCTAssertEqual(grown.width, 400 + HoverGrowth.points, accuracy: 0.001)
+        XCTAssertEqual(grown.height, 200 * s, accuracy: 0.001)
         let band = CGPoint(x: rect.maxX + 3, y: rect.midY) // outside the resting shape, inside the grown one
         XCTAssertFalse(IslandHover.isOver(band, rect, wasHovered: false), "not hovered yet: the resting shape")
         XCTAssertTrue(IslandHover.isOver(band, rect, wasHovered: true), "hovered: the grown shape still holds it")
@@ -181,5 +277,10 @@ final class IslandOpenMorphTests: XCTestCase {
         XCTAssertEqual(bottomLeft.y, rect.height, accuracy: 0.001)
         // At rest the mapping is just the panel's origin.
         XCTAssertEqual(IslandHover.unscaled(CGPoint(x: 150, y: 60), in: rect, grown: false), CGPoint(x: 50, y: 20))
+    }
+
+    private func sourceFile(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/Island").appendingPathComponent(name)
     }
 }

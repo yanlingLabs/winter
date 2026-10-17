@@ -64,23 +64,106 @@ enum IslandGallery {
                                            t: IslandOpenMorph.settle * Double(i) / 7))
         }
         out.append(try write(try filmstrip(morphFrames), directory, "island-open-morph-filmstrip@2x.png"))
-        // Under the pointer the open island grows from its top edge (the housing's side).
-        out.append(try write(openMorphScene(store: store, shape: notched, waiting: compacted, t: IslandOpenMorph.settle, hovered: true),
-                             directory, "island-open-hovered@2x.png"))
 
-        // The open island, Needs you.
-        let island = IslandLayout.island(notched, contentHeight: 520)
+        // The open island, Needs you — at its ONE size, the list cut (and faded) at its edge.
+        let island = IslandLayout.island(notched)
         let open = scene(notched, width: island.width + 120, height: island.height + 50) {
             IslandExpandedView(store: store, shape: notched, size: island.size, scrolls: false)
         }
         out.append(try write(open, directory, "island-open-needs-you@2x.png"))
         let empty = IslandStore()
-        let island0 = IslandLayout.island(notched, contentHeight: 136)
-        out.append(try write(scene(notched, width: island0.width + 120, height: island0.height + 50) {
-            IslandExpandedView(store: empty, shape: notched, size: island0.size)
+        out.append(try write(scene(notched, width: island.width + 120, height: island.height + 50) {
+            IslandExpandedView(store: empty, shape: notched, size: island.size)
         }, directory, "island-open-empty@2x.png"))
         out.append(contentsOf: try renderTabs(to: directory, shape: notched))
         return out
+    }
+
+    // MARK: - The island's shape (user 2026-10-17): fixed size, edge integration, absolute hover growth
+
+    /// On a LIGHT desktop, where an outline or a shadow line at the screen's edge would show: the open island on every tab
+    /// at its one size, its morph out of the housing as an 8-frame filmstrip, the strip (no rim), and an island card
+    /// at rest beside the same card hovered (it grows by the compact Dispatch pill's points).
+    static func renderShape(to directory: URL) throws -> [URL] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var out: [URL] = []
+        let notched = IslandScreenShape(housing: housing, menuBarHeight: 32)
+        let plain = IslandScreenShape(housing: nil, menuBarHeight: 24)
+        let files = FileManager.default.temporaryDirectory.appendingPathComponent("winter-island-shape-shelf-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: files) }
+        let models = sampleTabModels(now: Date(), files: files)
+        // More Shelf files than fit, so its grid's scroll (cut and faded at the island's edge) shows.
+        var extra: [URL] = []
+        for i in 1...9 {
+            let url = files.appendingPathComponent("capture-\(i).png")
+            FileManager.default.createFile(atPath: url.path, contents: Data("sample".utf8))
+            extra.append(url)
+        }
+        models.shelf.add(extra)
+        models.shelf.resolveAllNow()
+        let store = sampleStore()
+        store.activity.apply(sampleWatches())
+
+        for tab in IslandTabRegistry.tabs {
+            store.tabs.select(tab.id)
+            out.append(try write(openScene(store: store, models: models, shape: notched, tab: tab.id, light: true), directory,
+                                 "shape-open-\(tab.id)@2x.png"))
+        }
+        store.tabs.select(IslandTabRegistry.needsYou.id)
+        out.append(try write(openScene(store: store, models: models, shape: plain, tab: IslandTabRegistry.needsYou.id, light: true),
+                             directory, "shape-open-no-housing@2x.png"))
+
+        let waiting = IslandStripModel(waitingCount: 2, workingCount: 1)
+        for (name, model) in [("idle", IslandStripModel(waitingCount: 0)), ("housing", waiting)] {
+            let frames = try (0..<8).map { i in
+                try renderImage(openMorphScene(store: store, shape: notched, waiting: model,
+                                               t: IslandOpenMorph.settle * Double(i) / 7, light: true))
+            }
+            out.append(try write(try filmstrip(frames), directory, "shape-open-morph-from-\(name)-filmstrip@2x.png"))
+        }
+        let noHousingFrames = try (0..<8).map { i in
+            try renderImage(openMorphScene(store: store, shape: plain, waiting: IslandStripModel(waitingCount: 1),
+                                           t: IslandOpenMorph.settle * Double(i) / 7, light: true))
+        }
+        out.append(try write(try filmstrip(noHousingFrames), directory, "shape-open-morph-no-housing-filmstrip@2x.png"))
+
+        for (name, shape, model) in [("housing-idle", notched, IslandStripModel(waitingCount: 0)),
+                                     ("housing-waiting-working", notched, waiting),
+                                     ("no-housing", plain, IslandStripModel(waitingCount: 2))] {
+            guard let strip = IslandLayout.strip(shape, waiting: model.showsWings) else { continue }
+            out.append(try write(scene(shape, width: 520, height: 80, light: true) {
+                IslandStripView(model: model, size: strip.size, housingWidth: shape.housing?.width)
+            }, directory, "shape-strip-\(name)@2x.png"))
+        }
+
+        // An island card at rest and hovered, side by side on the same backdrop.
+        let approval = store.cards[0]
+        let g = IslandLayout.cardGeometry(notched, size: size(of: approval, store: store), rounded: true)
+        let pair = HStack(spacing: 0) {
+            ForEach([false, true], id: \.self) { hovered in
+                scene(notched, width: g.panelSize.width + 60, height: g.panelSize.height + 20, light: true) {
+                    restingCard(approval, store: store, geometry: g, hovered: hovered)
+                }
+            }
+        }
+        out.append(try write(pair, directory, "shape-card-rest-vs-hovered@2x.png"))
+        return out
+    }
+
+    /// Three armed watches (the Watches tab's sample).
+    static func sampleWatches(nowMs: Int = Int(Date().timeIntervalSince1970 * 1000)) -> IslandActivitySnapshot {
+        IslandActivitySnapshot(watches: [
+            IslandWatchItem(sessionId: "s1", wakeId: "wk_1", condition: "clicked", targetLabel: "Chrome — Developer Dashboard",
+                            elementLabel: "“Submit for review”", armedAt: nowMs - 4 * 60_000, expiresAt: nowMs + 56 * 60_000,
+                            session: IslandSessionFacts(mode: "code", title: "List the extension")),
+            IslandWatchItem(sessionId: "s2", wakeId: "wk_2", condition: "appeared", targetLabel: "Mail — Inbox",
+                            elementLabel: "“Message Sent”", armedAt: nowMs - 30_000, expiresAt: nowMs + 2 * 60 * 60_000,
+                            session: IslandSessionFacts(mode: "dispatch")),
+            IslandWatchItem(sessionId: "s3", wakeId: "wk_3", condition: "titled", targetLabel: "Xcode — Winter",
+                            elementLabel: "“Build Succeeded”", armedAt: nowMs - 70 * 60_000, expiresAt: nowMs + 3 * 60 * 60_000,
+                            session: IslandSessionFacts(mode: "code", title: "Ship the island")),
+        ])
     }
 
     // MARK: - Phase 2: the tabs
@@ -123,12 +206,11 @@ enum IslandGallery {
         return out
     }
 
-    private static func openScene(store: IslandStore, models: IslandTabModels, shape: IslandScreenShape, tab: String) -> some View {
-        let host = NSHostingView(rootView: VStack(spacing: 0) { IslandTabBody(id: tab, models: models, scrolls: false) }
-            .frame(width: IslandLayout.islandWidth).environment(\.colorScheme, .dark))
-        let content = 46 + min(ceil(host.fittingSize.height), IslandLayout.islandMaxHeight) + 6
-        let island = IslandLayout.island(shape, contentHeight: content)
-        return scene(shape, width: island.width + 120, height: island.height + 50) {
+    private static func openScene(store: IslandStore, models: IslandTabModels, shape: IslandScreenShape, tab: String,
+                                  light: Bool = false) -> some View {
+        // The island's one size, whatever the tab.
+        let island = IslandLayout.island(shape)
+        return scene(shape, width: island.width + 120, height: island.height + 50, light: light) {
             IslandExpandedView(store: store, shape: shape, size: island.size, scrolls: false, tabModels: models)
         }
     }
@@ -232,20 +314,20 @@ enum IslandGallery {
 
     /// The open island `t` seconds into its morph out of the strip (drawn under it, as live), on Needs you.
     static func openMorphScene(store: IslandStore, shape: IslandScreenShape, waiting: IslandStripModel, t: Double,
-                               hovered: Bool = false) -> some View {
+                               light: Bool = false) -> some View {
         let pad = IslandController.islandPad
-        let island = IslandLayout.island(shape, contentHeight: 300)
+        let island = IslandLayout.island(shape)
         let strip = IslandLayout.strip(shape, waiting: waiting.showsWings) ?? IslandLayout.strip(shape)
         let target = CGRect(x: pad, y: 0, width: island.width, height: island.height)
         let source = strip.offsetBy(dx: island.width / 2 + pad, dy: 0)
         let morph = IslandOpenMorph(source: source, target: target, sourceCorner: IslandLayout.stripCorner,
                                     targetCorner: IslandLayout.islandCorner)
         let panel = CGSize(width: island.width + 2 * pad, height: island.height + pad)
-        return scene(shape, width: panel.width + 60, height: panel.height + 10) {
+        return scene(shape, width: panel.width + 60, height: panel.height + 10, light: light) {
             ZStack(alignment: .top) {
                 IslandStripView(model: waiting, size: strip.size, housingWidth: shape.housing?.width)
                 ZStack(alignment: .topLeading) {
-                    IslandOpenFrame(frame: morph.frame(at: t), target: target, shape: shape, hovered: hovered) {
+                    IslandOpenFrame(frame: morph.frame(at: t), target: target, shape: shape) {
                         IslandExpandedContent(store: store, shape: shape, size: target.size, scrolls: false)
                     }
                 }
@@ -288,13 +370,19 @@ enum IslandGallery {
         }
     }
 
-    /// A desktop backdrop, the menu bar strip and the black housing, with `content` hanging from the top centre.
-    private static func scene<Content: View>(_ shape: IslandScreenShape, width: CGFloat, height: CGFloat,
-                                             @ViewBuilder content: () -> Content) -> some View {
+    /// A desktop backdrop, the menu bar strip and the black housing, with `content` hanging from the top centre. `light`:
+    /// a pale desktop and menu bar, where any outline, shadow line or gap at the screen's edge would show.
+    static func scene<Content: View>(_ shape: IslandScreenShape, width: CGFloat, height: CGFloat, light: Bool = false,
+                                     @ViewBuilder content: () -> Content) -> some View {
         ZStack(alignment: .top) {
-            LinearGradient(colors: [Color(nsColor: .systemTeal).opacity(0.55), Color(nsColor: .systemIndigo).opacity(0.35)],
-                           startPoint: .top, endPoint: .bottom)
-            Rectangle().fill(Color.white.opacity(0.35)).frame(height: shape.topInset)
+            if light {
+                LinearGradient(colors: [Color(white: 0.93), Color(white: 0.86)], startPoint: .top, endPoint: .bottom)
+                Rectangle().fill(Color(white: 0.97)).frame(height: shape.topInset)
+            } else {
+                LinearGradient(colors: [Color(nsColor: .systemTeal).opacity(0.55), Color(nsColor: .systemIndigo).opacity(0.35)],
+                               startPoint: .top, endPoint: .bottom)
+                Rectangle().fill(Color.white.opacity(0.35)).frame(height: shape.topInset)
+            }
             if let housing = shape.housing {
                 UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 9, bottomTrailing: 9), style: .continuous)
                     .fill(Color.black).frame(width: housing.width, height: housing.height)
@@ -305,7 +393,7 @@ enum IslandGallery {
         .environment(\.colorScheme, .dark)
     }
 
-    private static func renderImage<V: View>(_ view: V) throws -> CGImage {
+    static func renderImage<V: View>(_ view: V) throws -> CGImage {
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let image = renderer.cgImage else { throw GalleryError.cannotRender }
@@ -316,7 +404,7 @@ enum IslandGallery {
         try write(try renderImage(view), directory, name)
     }
 
-    private static func write(_ image: CGImage, _ directory: URL, _ name: String) throws -> URL {
+    static func write(_ image: CGImage, _ directory: URL, _ name: String) throws -> URL {
         let url = directory.appendingPathComponent(name)
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
             throw GalleryError.cannotWrite
@@ -329,7 +417,7 @@ enum IslandGallery {
     enum GalleryError: Error { case cannotRender, cannotWrite }
 
     /// Frames stacked top to bottom.
-    private static func filmstrip(_ frames: [CGImage]) throws -> CGImage {
+    static func filmstrip(_ frames: [CGImage]) throws -> CGImage {
         guard let first = frames.first,
               let ctx = CGContext(data: nil, width: first.width, height: first.height * frames.count, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,

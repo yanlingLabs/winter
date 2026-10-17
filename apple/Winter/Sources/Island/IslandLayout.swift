@@ -77,10 +77,17 @@ enum IslandLayout {
     /// The open island's header (and Needs you's card headers) from the island's edge.
     static let headerInset: CGFloat = 20
 
-    // The open island.
-    static let islandWidth: CGFloat = 520
-    static let islandMaxHeight: CGFloat = 560
+    // The open island: ONE size for every tab and any content (user 2026-10-17) — each tab scrolls inside it. 560 is
+    // the island family's widest (the typing Dispatch pill, the desktop-switch pill's ceiling); 420 leaves ~340 pt under
+    // the housing and the header: two full rows of Shelf tiles, five Sessions rows, two Needs-you cards. Under half the
+    // smallest current Mac screen's height (956 pt), and clamped on any shorter one (`island(_:screenHeight:)`).
+    static let islandWidth: CGFloat = 560
+    static let islandHeight: CGFloat = 420
     static let islandCorner: CGFloat = 32
+    /// The concave shoulders by which the open island's flat top flares into the screen's edge (`IslandEdgeShape`).
+    static let islandShoulder: CGFloat = 14
+    /// The most of a screen's height the open island takes on a short screen.
+    static let islandMaxScreenFraction: CGFloat = 0.6
 
     /// The strip's rect (x from the centre), or nil when it is not there. While NOTHING waits it never covers anything
     /// the menu bar could have: with a housing it is exactly the housing (where no menu item can be — a click there
@@ -142,9 +149,14 @@ enum IslandLayout {
         }
     }
 
-    /// The open island's rect (x from the centre): its top is the screen's top — it grows out of the housing.
-    static func island(_ shape: IslandScreenShape, contentHeight: CGFloat) -> CGRect {
-        let height = min(islandMaxHeight, shape.topInset + contentHeight)
+    /// The open island's rect (x from the centre): its top is the screen's top — it grows out of the housing. FIXED:
+    /// the same for every tab and whatever it lists (the contents scroll inside); only a screen too short for it
+    /// clamps the height (`islandMaxScreenFraction`), still the same for every tab on that screen.
+    static func island(_ shape: IslandScreenShape, screenHeight: CGFloat? = nil) -> CGRect {
+        var height = islandHeight
+        if let screenHeight, screenHeight > 0 {
+            height = min(height, max(shape.topInset + 160, (screenHeight * islandMaxScreenFraction).rounded(.down)))
+        }
         return CGRect(x: -islandWidth / 2, y: 0, width: islandWidth, height: height)
     }
 

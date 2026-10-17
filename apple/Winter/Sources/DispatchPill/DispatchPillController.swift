@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CoreImage
 import SwiftUI
+import WinterCUPresentation
 import WinterKit
 
 /// The pill's panel. The orb's own `KeyableNonActivatingPanel` is `private` to
@@ -133,8 +134,13 @@ final class DispatchPillController: ObservableObject {
     @Published private(set) var presentation: DispatchPillPresentation = .compact
     @Published private(set) var isVisible = false
     /// The pointer is over what the pill draws (the mouse gate's verdict): the pill and everything floating above it
-    /// grow a little (`DispatchPillMetrics.hoverScale`).
+    /// grow by `hoverScale`.
     @Published private(set) var pointerOver = false
+    /// How much the stack grows under the pointer: the compact pill's own 3 % in POINTS, whatever the pill's shape now
+    /// (`HoverGrowth`: its width grows by 9.48 pt, uniformly) — the compact pill exactly as before, its card (440) by
+    /// 2.15 %, the typing pill (560) by 1.69 %. Set from the main pill's TARGET width (published on a retarget only,
+    /// never per spring tick); the floating layers are never wider than the pill.
+    @Published private(set) var hoverScale: CGFloat = HoverGrowth.factor(forWidth: DispatchPillMetrics.compactWidth)
     /// The pointer over the canvas, for the buttons' hover glow (`PillHoverGlow.swift`).
     let pointer = DispatchPillPointer()
     /// Which past turn the 2-finger swipe has pinned (index into the transcript), or nil for the
@@ -277,7 +283,16 @@ final class DispatchPillController: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var lastDraft = ""
     private var accessorySize: CGSize = .zero
-    private var accessoryFrame: CGRect = .zero
+    /// The floating layers' RESTING frame in canvas coordinates (`.zero` when nothing floats): centred over the main pill,
+    /// `stackGap` above its animated top — derived from their measured SIZE, which a hover grow does not change (a frame
+    /// measured in the canvas would come back already grown, and the gate would grow it twice).
+    private var accessoryFrame: CGRect {
+        guard accessorySize.width > 0, accessorySize.height > 0 else { return .zero }
+        let main = dispatchPillMainRect(canvasSize: canvas.size, mainSize: morph.size)
+        return CGRect(x: canvas.size.width / 2 - accessorySize.width / 2,
+                      y: main.minY - DispatchPillMetrics.stackGap - accessorySize.height,
+                      width: accessorySize.width, height: accessorySize.height)
+    }
     private var lockedVisibleFrame: CGRect = .zero
 
     private var springTimer: Timer?
@@ -335,6 +350,7 @@ final class DispatchPillController: ObservableObject {
 
         morph.size = initialMain
         morph.target = initialMain
+        hoverScale = HoverGrowth.factor(forWidth: initialMain.width)
         canvas.size = initialCanvas
         lockedVisibleFrame = currentVisibleFrame()
 
@@ -1191,11 +1207,14 @@ final class DispatchPillController: ObservableObject {
 
     // MARK: - Layout reports from the view
 
-    /// The floating layers' (cards + child pills) frame in canvas coordinates, or `.zero` when
-    /// nothing floats. Its SIZE drives the canvas; its frame drives the mouse gate.
+    /// The floating layers' (child pills, command runs, notices) frame, or `.zero` when nothing floats — only its SIZE
+    /// is used: it drives the canvas, and the mouse gate places it over the main pill (`accessoryFrame`).
     func accessoryLayoutChanged(frame: CGRect) {
-        accessoryFrame = frame
-        let size = frame.size
+        accessoryLayoutChanged(size: frame.size)
+    }
+
+    /// The floating layers' laid-out size (their own, unaffected by the hover grow), `.zero` when nothing floats.
+    func accessoryLayoutChanged(size: CGSize) {
         // A fraction of a point of rounding is not a new layout: resizing the canvas for it would re-measure the
         // accessories, which could round the other way.
         guard sizeChanged(size, from: accessorySize) else { return }
@@ -1315,6 +1334,7 @@ final class DispatchPillController: ObservableObject {
         let target = mainTarget()
         if target != morph.target {
             morph.target = target
+            updateHoverScale()
             reconcileCanvas()
             if isVisible { startSpring() } else { snapToTarget() }
         } else {
@@ -1328,12 +1348,22 @@ final class DispatchPillController: ObservableObject {
         cancelSpring()
         let target = mainTarget()
         morph.target = target
+        updateHoverScale()
         morph.size = target
         pendingShrink = false
         revealing = false
         morph.reveal = 1
         applyComposerBlur()
         setCanvas(canvasTarget())
+    }
+
+    /// The stack's grow as it is drawn now: `hoverScale` while hovered (never in full screen), else 1.
+    var drawnHoverScale: CGFloat { pointerOver && presentation != .fullScreen ? hoverScale : 1 }
+
+    /// The stack's grow for the main pill's target width (`HoverGrowth`).
+    private func updateHoverScale() {
+        let s = HoverGrowth.factor(forWidth: morph.target.width)
+        if abs(s - hoverScale) > 0.000_01 { hoverScale = s }
     }
 
     private func reconcileCanvas() {
@@ -1495,8 +1525,10 @@ final class DispatchPillController: ObservableObject {
         let point = mouseLocationOverrideForTesting ?? NSEvent.mouseLocation
         let frame = panel.frame
         let local = CGPoint(x: point.x - frame.minX, y: frame.maxY - point.y)
+        // The hit area IS the drawn stack: the resting one, and the GROWN one while hovered (no flicker at its edge).
         let accepts = dispatchPillHitTest(point: local, canvasSize: canvas.size, mainSize: morph.size,
-                                          accessoryFrame: presentation == .fullScreen ? .zero : accessoryFrame)
+                                          accessoryFrame: presentation == .fullScreen ? .zero : accessoryFrame,
+                                          scale: drawnHoverScale)
         if panel.ignoresMouseEvents == accepts { panel.ignoresMouseEvents = !accepts }
         if pointerOver != accepts { pointerOver = accepts }
         pointer.set(accepts ? local : nil)
@@ -1608,7 +1640,8 @@ final class DispatchPillController: ObservableObject {
                 let local = CGPoint(x: event.locationInWindow.x,
                                     y: self.panel.frame.height - event.locationInWindow.y)
                 if !dispatchPillHitTest(point: local, canvasSize: self.canvas.size, mainSize: self.morph.size,
-                                        accessoryFrame: self.presentation == .fullScreen ? .zero : self.accessoryFrame) {
+                                        accessoryFrame: self.presentation == .fullScreen ? .zero : self.accessoryFrame,
+                                        scale: self.drawnHoverScale) {
                     self.handleClickOutside()
                 }
             }
@@ -1874,6 +1907,9 @@ final class DispatchPillController: ObservableObject {
         snapToTarget()
     }
 
+    /// The pointer over the pill or not, as the mouse gate would decide (offscreen renders of the hover grow).
+    func setPointerOverForTesting(_ over: Bool) { pointerOver = over }
+
     /// Hold the spring mid-flight at `size` (offscreen renders of a change of shape).
     func setAnimatedSizeForTesting(_ size: CGSize) {
         morph.size = size
@@ -1890,8 +1926,22 @@ final class DispatchPillController: ObservableObject {
     }
 }
 
-/// PURE: does a canvas-local point (y-down) land on something the pill draws?
-func dispatchPillHitTest(point: CGPoint, canvasSize: CGSize, mainSize: CGSize, accessoryFrame: CGRect) -> Bool {
-    if dispatchPillMainRect(canvasSize: canvasSize, mainSize: mainSize).contains(point) { return true }
-    return accessoryFrame.width > 0 && accessoryFrame.height > 0 && accessoryFrame.contains(point)
+/// PURE: does a canvas-local point (y-down) land on something the pill draws? `scale` is the stack's hover grow as drawn
+/// (1 at rest): the main pill and the floating layers grow together about the pill's bottom centre. A hovered stack is
+/// hit over its RESTING shape OR its grown one (as `IslandHover.isOver`): growing from the bottom lifts the child row,
+/// so a point at the bottom of the resting row lies in the GROWN gap — judged on the grown shape alone it would leave
+/// the hover, shrink back under the pointer, hover again, and flicker.
+func dispatchPillHitTest(point: CGPoint, canvasSize: CGSize, mainSize: CGSize, accessoryFrame: CGRect,
+                         scale: CGFloat = 1) -> Bool {
+    let main = dispatchPillMainRect(canvasSize: canvasSize, mainSize: mainSize)
+    let pivot = CGPoint(x: canvasSize.width / 2, y: main.maxY)
+    let hasAccessories = accessoryFrame.width > 0 && accessoryFrame.height > 0
+    var scales: [CGFloat] = [1]
+    if scale != 1 { scales.append(scale) }
+    for k in scales {
+        let s = CGSize(width: k, height: k)
+        if HoverGrowth.grown(main, about: pivot, scale: s).contains(point) { return true }
+        if hasAccessories, HoverGrowth.grown(accessoryFrame, about: pivot, scale: s).contains(point) { return true }
+    }
+    return false
 }

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import WinterCUPresentation
 
 /// The pill panel's root: the floating layers (child sessions, command runs, notices) stacked above
 /// the main pill, bottom-aligned in a canvas exactly the panel's size. An ask waiting on the user is
@@ -47,10 +48,11 @@ struct DispatchPillView: View {
                 DispatchPillAccessories(controller: controller, adapter: adapter, commandRuns: commandRuns, morph: morph,
                                         commandMenu: commandMenu)
                     .fixedSize(horizontal: false, vertical: true)
-                    .onGeometryChange(for: CGRect.self) { proxy in
-                        proxy.frame(in: .named(Self.canvasSpace))
-                    } action: { frame in
-                        controller.accessoryLayoutChanged(frame: frame)
+                    // Their own laid-out SIZE (a frame measured in the canvas would include the hover grow).
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        proxy.size
+                    } action: { size in
+                        controller.accessoryLayoutChanged(size: size)
                     }
                     // Cards and the child row rise out of the main pill, and sink back into it.
                     .transition(.childPill)
@@ -64,12 +66,13 @@ struct DispatchPillView: View {
             }
         }
         // A slight grow under the pointer — the whole stack, anchored at the pill's bottom edge, so the floating
-        // layers above move up and scale with it and stay aligned. Not in full screen.
+        // layers above move up and scale with it and stay aligned. By the compact pill's few POINTS whatever the
+        // shape (`controller.hoverScale`, `HoverGrowth`): a card or the typing pill grows as much as the compact pill,
+        // not 3 % of itself. Not in full screen.
         // The animation is scoped to the scale alone: a container-wide one would also ease the layout the morph
         // spring drives frame by frame.
-        .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
-            view.scaleEffect(controller.pointerOver && controller.presentation != .fullScreen
-                             ? DispatchPillMetrics.hoverScale : 1, anchor: .bottom)
+        .animation(HoverGrowth.animation) { view in
+            view.scaleEffect(controller.drawnHoverScale, anchor: .bottom)
         }
         .padding(DispatchPillMetrics.shadowPad)
         .frame(width: canvas.size.width, height: canvas.size.height, alignment: .bottom)
@@ -77,7 +80,7 @@ struct DispatchPillView: View {
         .environment(\.colorScheme, .dark)
         .environment(\.dispatchPillPointer, controller.pointer)
         .onChange(of: accessories, initial: true) { _, present in
-            if !present { controller.accessoryLayoutChanged(frame: .zero) }
+            if !present { controller.accessoryLayoutChanged(size: .zero) }
         }
     }
 }

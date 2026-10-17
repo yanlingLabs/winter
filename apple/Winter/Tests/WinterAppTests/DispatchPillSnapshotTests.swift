@@ -492,4 +492,34 @@ final class DispatchPillSnapshotTests: XCTestCase {
         strip.unlockFocus()
         try write(strip, "21-morph-filmstrip")
     }
+
+    /// The pill as a card at rest and hovered, side by side on a light desktop: the hovered card grows by the compact
+    /// pill's 9.48 pt (2.15 % of a 440 pt card), not by 3 % of itself (`HoverGrowth`). Drawn with `ImageRenderer`.
+    func test22CardHoverGrowth() throws {
+        let p = pillWithCard(approvalRecord())
+        _ = try renderImage(p, settle: true) // measure the card, settle the canvas
+        let canvas = p.canvas.size
+        var frames: [CGImage] = []
+        for hovered in [false, true] {
+            p.setPointerOverForTesting(hovered)
+            let view = ZStack {
+                LinearGradient(colors: [Color(white: 0.93), Color(white: 0.86)], startPoint: .top, endPoint: .bottom)
+                DispatchPillView(controller: p)
+                    .environment(\.dispatchPillCardFlat, true)
+                    .transaction { $0.disablesAnimations = true }
+            }
+            .frame(width: canvas.width, height: canvas.height)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            frames.append(try XCTUnwrap(renderer.cgImage, hovered ? "hovered" : "at rest"))
+        }
+        let w = frames[0].width, h = frames[0].height
+        let pair = NSImage(size: CGSize(width: w * 2, height: h))
+        pair.lockFocus()
+        for (i, frame) in frames.enumerated() {
+            NSGraphicsContext.current?.cgContext.draw(frame, in: CGRect(x: w * i, y: 0, width: w, height: h))
+        }
+        pair.unlockFocus()
+        try write(pair, "22-card-rest-vs-hovered")
+    }
 }
