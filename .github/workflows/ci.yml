@@ -86,6 +86,7 @@ jobs:
   test-core:
     name: test · core
     runs-on: macos-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -122,15 +123,13 @@ jobs:
           WINTER_RUNTIME_REQUIRE_BINARY: "1"
           WINTER_CLAUDE_REQUIRE_RUNTIME: "1"
         # Bun 1.3.14 has an intermittent use-after-free ("Segmentation fault at address 0xA", exit 133)
-        # that crashes ONE long `bun test` process (after ~7 min, ~70 Workers spawned and terminated,
-        # ~1.4 GB RSS). It has no `--shard`, so the suite runs as 3 sequential processes over a sorted,
-        # round-robin split of the test files (scripts/test-shard.ts). Every shard is a fresh `bun test`
-        # in this directory, so it loads the same bunfig preload (per-process temp root, throwaway
-        # Keychain service) and sees the same env. All shards run even if one fails; any failure fails
-        # the job, which keeps its name and stays one required check.
-        run: |
-          bun scripts/test-shard.ts --check 3
-          bun scripts/test-shard.ts --all 3
+        # that can crash ONE long `bun test` process (after ~7 min, ~70 Workers spawned and
+        # terminated, ~1.4 GB RSS). The suite runs as 3 sequential native shards (`bun test
+        # --shard=K/3`, so discovery is bun's own). Every shard is a fresh process in this directory:
+        # same bunfig preload (per-process temp root, throwaway Keychain service), same env. The
+        # script runs all shards, then fails the step on any non-zero or signal exit, a missing
+        # "Ran N tests across M files" summary, a 0-file shard, or a file total below the glob count.
+        run: bun scripts/test-shards.ts 3
 
   # cli's non-TUI tests (`test/*.ts` only — `test/tui/**` renders the Ink transcript through
   # ink-testing-library and has ~30 pre-existing failures on main; widen back to a bare `bun test`
