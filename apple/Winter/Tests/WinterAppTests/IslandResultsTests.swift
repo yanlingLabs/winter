@@ -150,23 +150,21 @@ final class IslandResultsTests: XCTestCase {
     func testTheArbitersRuleTable() {
         typealias A = IslandActivityArbiter
         // A card needing an answer, or the open island, owns everything.
-        XCTAssertEqual(A.decide(cardOnTop: true, badgeUp: false, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: true), .none)
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: true, islandOpen: true, result: "r", computerUse: "s", mirrorOpen: false), .none)
+        XCTAssertEqual(A.decide(cardOnTop: true, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: true), .none)
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: true, result: "r", computerUse: "s", mirrorOpen: false), .none)
         // A result over the pill.
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: false, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: false),
-                       IslandActivityDecision(slot: .result("r"), belowBadge: false, compact: false))
-        // The pill, full; under the badge, compact; opened into its mirror.
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: false, islandOpen: false, result: nil, computerUse: "s", mirrorOpen: false),
-                       IslandActivityDecision(slot: .computerUse(sessionId: "s", expanded: false), belowBadge: false, compact: false))
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: true, islandOpen: false, result: nil, computerUse: "s", mirrorOpen: false),
-                       IslandActivityDecision(slot: .computerUse(sessionId: "s", expanded: false), belowBadge: true, compact: true))
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: true, islandOpen: false, result: nil, computerUse: "s", mirrorOpen: true),
-                       IslandActivityDecision(slot: .computerUse(sessionId: "s", expanded: true), belowBadge: true, compact: false))
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: true, islandOpen: false, result: "r", computerUse: nil, mirrorOpen: false),
-                       IslandActivityDecision(slot: .result("r"), belowBadge: true, compact: false))
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: false, islandOpen: false, result: nil, computerUse: nil, mirrorOpen: false), .none)
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: false),
+                       IslandActivityDecision(slot: .result("r")))
+        // The pill; opened into its mirror (compacted cards change nothing here: they draw nothing under the housing).
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: false, result: nil, computerUse: "s", mirrorOpen: false),
+                       IslandActivityDecision(slot: .computerUse(sessionId: "s", expanded: false)))
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: false, result: nil, computerUse: "s", mirrorOpen: true),
+                       IslandActivityDecision(slot: .computerUse(sessionId: "s", expanded: true)))
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: false, result: "r", computerUse: nil, mirrorOpen: false),
+                       IslandActivityDecision(slot: .result("r")))
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: false, result: nil, computerUse: nil, mirrorOpen: false), .none)
         // The agent's hardware pointer (rung 4): nothing of the island's in its way.
-        XCTAssertEqual(A.decide(cardOnTop: false, badgeUp: false, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: true,
+        XCTAssertEqual(A.decide(cardOnTop: false, islandOpen: false, result: "r", computerUse: "s", mirrorOpen: true,
                                 realMouse: true), .none)
     }
 

@@ -4,14 +4,16 @@ import Foundation
 // injected clock — `IslandQueueTests` drives it; the store schedules ONE wake-up at `nextDeadline` (none while nothing
 // is due, so an idle island runs no timer).
 //
-//   - Cards do not stack: a new card REPLACES the current one, which compacts (badge + Needs-you list).
+//   - Cards do not stack: a new card REPLACES the current one, which compacts (the strip's waiting count + Needs you).
 //   - …unless the current one is HOVERED (or is a view request, whose countdown must stay visible): the newcomer
 //     waits as a small compact pill just below it, and expands when the current one clears or self-compacts, or when
 //     the user CLICKS it — which tucks the current one away (compacted).
-//   - Approvals and questions SELF-COMPACT after `selfCompactAfter` when not hovered: into the badge pill hugging the
-//     housing ("2 waiting") AND the Needs-you list. Hovering the badge re-expands the newest. They stay pending until
-//     answered anywhere (`resolve`).
-//   - View requests keep their own countdown: they never self-compact.
+//   - Approvals and questions SELF-COMPACT after `selfCompactAfter` when not hovered: into the strip's left wing (the
+//     amber symbol and its count — nothing else is drawn for them) AND the Needs-you list, where a click on that wing
+//     opens the island. They stay pending until answered anywhere (`resolve`).
+//   - View requests keep their own countdown: they are NEVER compacted (nothing would draw them while their
+//     default-allow runs). Clicking the waiting pill under one swaps it into the waiting slot; a second one waits its turn
+//     (`viewQueue`, oldest first).
 
 struct IslandQueue: Equatable {
     /// How long an approval or question stays expanded before it compacts by itself (unhovered).
@@ -30,8 +32,12 @@ struct IslandQueue: Equatable {
     private(set) var current: Entry?
     /// The compact pill waiting just below the current card.
     private(set) var waiting: Entry?
-    /// Compacted cards, oldest first (the badge's count; its hover re-expands the LAST).
+    /// Compacted cards, oldest first (counted on the strip's left wing, listed in Needs you). Never a view request.
     private(set) var compacted: [Entry] = []
+    /// View requests in line behind the one on top and the one waiting (oldest first): never compacted — each expands
+    /// or takes the waiting slot in its turn. Not drawn, so not acked (`IslandStore.viewRequestsOnTop`): the helper's
+    /// own prompt covers one the island cannot show.
+    private(set) var viewQueue: [Entry] = []
     /// The pointer is over the current card.
     private(set) var currentHovered = false
     /// The user is typing into the current card (its panel holds the keyboard): it is held exactly like a hovered one —
@@ -40,12 +46,11 @@ struct IslandQueue: Equatable {
     /// Hovered or typed into: the current card stays.
     var currentHeld: Bool { currentHovered || currentTyping }
 
-    var badgeCount: Int { compacted.count }
-    var isEmpty: Bool { current == nil && waiting == nil && compacted.isEmpty }
+    var isEmpty: Bool { current == nil && waiting == nil && compacted.isEmpty && viewQueue.isEmpty }
 
     /// Every card the queue holds.
     var ids: Set<String> {
-        var out = Set(compacted.map(\.id))
+        var out = Set(compacted.map(\.id)).union(viewQueue.map(\.id))
         if let current { out.insert(current.id) }
         if let waiting { out.insert(waiting.id) }
         return out
@@ -64,7 +69,15 @@ struct IslandQueue: Equatable {
     /// A card arrives on top. A card the queue already holds is left where it is.
     mutating func arrive(_ id: String, selfCompacts: Bool, now: TimeInterval) {
         guard !ids.contains(id) else { return }
-        let new = entry(id, selfCompacts: selfCompacts, now: now)
+        place(entry(id, selfCompacts: selfCompacts, now: now))
+    }
+
+    private mutating func place(_ new: Entry) {
+        // View requests already in line go first: a newer one queues behind them (FIFO), never ahead.
+        if !new.selfCompacts, !viewQueue.isEmpty {
+            viewQueue.append(new)
+            return
+        }
         guard let cur = current else {
             current = new
             currentHovered = false
@@ -73,21 +86,35 @@ struct IslandQueue: Equatable {
         }
         // Hovered, typed into, or a view request counting down: the newcomer waits below as a compact pill.
         if currentHeld || !cur.selfCompacts {
-            if let old = waiting {
-                // A view request keeps the waiting slot over an approval or question; otherwise the newer waits there.
-                if !old.selfCompacts && new.selfCompacts {
-                    compact(new)
-                    return
-                }
-                compact(old)
-            }
+            putInWaitingSlot(new)
+            return
+        }
+        // Replace: the current card compacts. A view request already waiting goes first (oldest first).
+        compact(cur)
+        currentHovered = false
+        currentTyping = false
+        if let w = waiting, !w.selfCompacts, !new.selfCompacts {
+            current = w
+            waiting = new
+        } else {
+            current = new
+        }
+    }
+
+    /// The waiting slot under the current card: a view request keeps it over an approval or question (which compacts);
+    /// a second view request waits its turn in `viewQueue` (oldest first) — a view request is never compacted.
+    private mutating func putInWaitingSlot(_ new: Entry) {
+        guard let old = waiting else {
             waiting = new
             return
         }
-        // Replace: the current card compacts.
-        compact(cur)
-        current = new
-        currentHovered = false
+        switch (old.selfCompacts, new.selfCompacts) {
+        case (false, true): compact(new)
+        case (false, false): viewQueue.append(new)
+        case (true, _):
+            compact(old)
+            waiting = new
+        }
     }
 
     /// The pointer entered or left the current card.
@@ -118,31 +145,16 @@ struct IslandQueue: Equatable {
         promoteWaiting(now: now)
     }
 
-    /// The user clicked the waiting pill: the current card is tucked away (compacted) and the waiting one expands.
+    /// The user clicked the waiting pill: the current card is tucked away (compacted) and the waiting one expands. A
+    /// view request on top is never compacted: it swaps into the waiting slot instead (still on screen, still counting).
     mutating func clickWaiting(now: TimeInterval) {
         guard let w = waiting else { return }
-        if let cur = current { compact(cur) }
         waiting = nil
+        if let cur = current {
+            if cur.selfCompacts { compact(cur) } else { waiting = cur }
+        }
         current = entry(w.id, selfCompacts: w.selfCompacts, now: now)
-        currentHovered = false
-        currentTyping = false
-    }
-
-    /// The pointer is on the badge: the NEWEST compacted card expands again (the current one, if any, compacts).
-    mutating func expandNewestCompacted(now: TimeInterval) {
-        guard let newest = compacted.popLast() else { return }
-        if let cur = current { compact(cur) }
-        current = entry(newest.id, selfCompacts: newest.selfCompacts, now: now)
-        currentHovered = false
-        currentTyping = false
-    }
-
-    /// Expand this compacted card (a click on it in a list, say). No-op for one not compacted.
-    mutating func expand(_ id: String, now: TimeInterval) {
-        guard let i = compacted.firstIndex(where: { $0.id == id }) else { return }
-        let e = compacted.remove(at: i)
-        if let cur = current { compact(cur) }
-        current = entry(e.id, selfCompacts: e.selfCompacts, now: now)
+        refillWaiting()
         currentHovered = false
         currentTyping = false
     }
@@ -151,7 +163,11 @@ struct IslandQueue: Equatable {
     /// the waiting one expands.
     mutating func resolve(_ id: String, now: TimeInterval) {
         compacted.removeAll { $0.id == id }
-        if waiting?.id == id { waiting = nil }
+        viewQueue.removeAll { $0.id == id }
+        if waiting?.id == id {
+            waiting = nil
+            refillWaiting()
+        }
         if current?.id == id {
             current = nil
             currentHovered = false
@@ -160,21 +176,48 @@ struct IslandQueue: Equatable {
         }
     }
 
-    /// Put a card straight into the compacted set (it was on top before, and comes back after being hidden).
-    mutating func addCompacted(_ id: String, selfCompacts: Bool) {
+    /// Put a card straight into the compacted set (it was on top before, and comes back after being hidden). A view
+    /// request is never compacted: it is placed on top again (expanded, waiting, or in line).
+    mutating func addCompacted(_ id: String, selfCompacts: Bool, now: TimeInterval) {
         guard !ids.contains(id) else { return }
-        compacted.append(Entry(id: id, selfCompacts: selfCompacts, compactAt: nil))
+        if selfCompacts {
+            compacted.append(Entry(id: id, selfCompacts: true, compactAt: nil))
+        } else {
+            place(entry(id, selfCompacts: false, now: now))
+        }
     }
 
+    /// The current card cleared: the waiting one expands — else the oldest view request in line.
     private mutating func promoteWaiting(now: TimeInterval) {
-        guard let w = waiting else { return }
-        waiting = nil
-        current = entry(w.id, selfCompacts: w.selfCompacts, now: now)
+        let next: Entry?
+        if let w = waiting {
+            waiting = nil
+            next = w
+        } else if !viewQueue.isEmpty {
+            next = viewQueue.removeFirst()
+        } else {
+            next = nil
+        }
+        guard let next else { return }
+        current = entry(next.id, selfCompacts: next.selfCompacts, now: now)
         currentHovered = false
         currentTyping = false
+        refillWaiting()
     }
 
+    /// The waiting slot emptied: the oldest view request in line takes it.
+    private mutating func refillWaiting() {
+        guard waiting == nil, !viewQueue.isEmpty else { return }
+        waiting = viewQueue.removeFirst()
+    }
+
+    /// Into the compacted set — only a card that compacts by itself; a view request (whose countdown is its answer) is
+    /// put in line instead, never out of sight.
     private mutating func compact(_ e: Entry) {
+        guard e.selfCompacts else {
+            if current?.id != e.id, waiting?.id != e.id, !viewQueue.contains(where: { $0.id == e.id }) { viewQueue.append(e) }
+            return
+        }
         compacted.removeAll { $0.id == e.id }
         compacted.append(Entry(id: e.id, selfCompacts: e.selfCompacts, compactAt: nil))
     }

@@ -3,7 +3,7 @@ import WinterKit
 
 // The Winter island's turn-result cards (phase 2, `docs/claude/island.md`): a session's turn ended with the session idle
 // while its host is NOT in front → a rounded rectangle born from the housing with the session's title, the last
-// assistant text (two lines) and Open / ✕. Ephemeral: it never counts as "waiting for you", never goes to the badge or
+// assistant text (two lines) and Open / ✕. Ephemeral: it never counts as "waiting for you", never counts on the strip or
 // Needs you; unhovered it goes back up into the housing after `IslandQueue.selfCompactAfter` and is gone. Pure state with
 // an injected clock (`IslandResultsTests`).
 //
@@ -119,12 +119,8 @@ enum IslandActivitySlot: Equatable {
 /// The activity panel's decision.
 struct IslandActivityDecision: Equatable {
     let slot: IslandActivitySlot
-    /// The badge ("2 waiting") hangs from the housing: the slot sits just below it.
-    let belowBadge: Bool
-    /// The computer-use pill is drawn compact (under the badge).
-    let compact: Bool
 
-    static let none = IslandActivityDecision(slot: .none, belowBadge: false, compact: false)
+    static let none = IslandActivityDecision(slot: .none)
 }
 
 /// PURE precedence of everything born from the housing (`IslandActivityArbiterTests`):
@@ -136,16 +132,13 @@ struct IslandActivityDecision: Equatable {
 ///      here: the computer-use pill and its mirror YIELD (hidden, the mirror's capture stopped), a result is held;
 ///   3. a turn result;
 ///   4. the computer-use pill (or its mirror, when the user opened it).
-/// With only the badge up (cards compacted), 3 and 4 sit just below it — the pill in its compact form.
+/// Compacted cards draw nothing under the housing (only the strip's count), so 3 and 4 always hang from the housing.
 enum IslandActivityArbiter {
-    static func decide(cardOnTop: Bool, badgeUp: Bool, islandOpen: Bool, result: String?, computerUse: String?,
+    static func decide(cardOnTop: Bool, islandOpen: Bool, result: String?, computerUse: String?,
                        mirrorOpen: Bool, realMouse: Bool = false) -> IslandActivityDecision {
         if realMouse || islandOpen || cardOnTop { return .none }
-        if let result { return IslandActivityDecision(slot: .result(result), belowBadge: badgeUp, compact: false) }
-        if let computerUse {
-            return IslandActivityDecision(slot: .computerUse(sessionId: computerUse, expanded: mirrorOpen), belowBadge: badgeUp,
-                                          compact: badgeUp && !mirrorOpen)
-        }
+        if let result { return IslandActivityDecision(slot: .result(result)) }
+        if let computerUse { return IslandActivityDecision(slot: .computerUse(sessionId: computerUse, expanded: mirrorOpen)) }
         return .none
     }
 }

@@ -7,7 +7,8 @@ import WinterKit
 import WinterProtocol
 
 /// The Winter island rendered OFFSCREEN (no window, nothing on screen) for looking at it without a daemon: the strip,
-/// each card at rest, a rectangle's birth as a filmstrip, the waiting pill, the badge and the open island. Written by
+/// each card at rest, a rectangle's birth as a filmstrip, the waiting pill, the compacted state (the strip's count
+/// alone), the open island and its morph out of the strip as a filmstrip. Written by
 /// `IslandGalleryTests` into the folder `WINTER_ISLAND_RENDER_DIR` names (a temporary one otherwise). `ImageRenderer`
 /// cannot draw AppKit-backed controls, so a text field renders as a blank.
 @MainActor
@@ -50,12 +51,22 @@ enum IslandGallery {
         }
         out.append(try write(withWaiting, directory, "island-card-hovered-waiting@2x.png"))
 
-        // The badge hanging from the housing.
-        let badgeWidth = IslandBadge.width(for: 2)
-        let badge = scene(notched, width: 520, height: 90) {
-            IslandBadge(count: 2, width: badgeWidth).padding(.top, notched.topInset - IslandLayout.badgeTuck)
+        // Two cards compacted: nothing hangs under the housing — only the strip's left wing counts them.
+        let compacted = IslandStripModel(waitingCount: 2)
+        let compactedStrip = IslandLayout.strip(notched)
+        out.append(try write(scene(notched, width: 520, height: 120) {
+            IslandStripView(model: compacted, size: compactedStrip.size, housingWidth: notched.housing?.width)
+        }, directory, "island-compacted-strip@2x.png"))
+
+        // The open island growing out of the strip: eight frames from the click to rest (closing plays them backwards).
+        let morphFrames = try (0..<8).map { i in
+            try renderImage(openMorphScene(store: store, shape: notched, waiting: compacted,
+                                           t: IslandOpenMorph.settle * Double(i) / 7))
         }
-        out.append(try write(badge, directory, "island-badge@2x.png"))
+        out.append(try write(try filmstrip(morphFrames), directory, "island-open-morph-filmstrip@2x.png"))
+        // Under the pointer the open island grows from its top edge (the housing's side).
+        out.append(try write(openMorphScene(store: store, shape: notched, waiting: compacted, t: IslandOpenMorph.settle, hovered: true),
+                             directory, "island-open-hovered@2x.png"))
 
         // The open island, Needs you.
         let island = IslandLayout.island(notched, contentHeight: 520)
@@ -217,6 +228,30 @@ enum IslandGallery {
                        expiresAt: Int(Date().timeIntervalSince1970 * 1000) + 600_000),
         ])
         return store
+    }
+
+    /// The open island `t` seconds into its morph out of the strip (drawn under it, as live), on Needs you.
+    static func openMorphScene(store: IslandStore, shape: IslandScreenShape, waiting: IslandStripModel, t: Double,
+                               hovered: Bool = false) -> some View {
+        let pad = IslandController.islandPad
+        let island = IslandLayout.island(shape, contentHeight: 300)
+        let strip = IslandLayout.strip(shape, waiting: waiting.showsWings) ?? IslandLayout.strip(shape)
+        let target = CGRect(x: pad, y: 0, width: island.width, height: island.height)
+        let source = strip.offsetBy(dx: island.width / 2 + pad, dy: 0)
+        let morph = IslandOpenMorph(source: source, target: target, sourceCorner: IslandLayout.stripCorner,
+                                    targetCorner: IslandLayout.islandCorner)
+        let panel = CGSize(width: island.width + 2 * pad, height: island.height + pad)
+        return scene(shape, width: panel.width + 60, height: panel.height + 10) {
+            ZStack(alignment: .top) {
+                IslandStripView(model: waiting, size: strip.size, housingWidth: shape.housing?.width)
+                ZStack(alignment: .topLeading) {
+                    IslandOpenFrame(frame: morph.frame(at: t), target: target, shape: shape, hovered: hovered) {
+                        IslandExpandedContent(store: store, shape: shape, size: target.size, scrolls: false)
+                    }
+                }
+                .frame(width: panel.width, height: panel.height, alignment: .topLeading)
+            }
+        }
     }
 
     static func size(of card: IslandCard, store: IslandStore) -> CGSize {

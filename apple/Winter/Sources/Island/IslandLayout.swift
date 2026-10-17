@@ -14,6 +14,41 @@ struct IslandScreenShape: Equatable {
     var hasHousing: Bool { housing != nil }
 }
 
+/// The parts of the strip a click can land on.
+enum IslandStripPart: Equatable {
+    /// The left wing: the amber "waiting for you" symbol and its count (every compacted card is counted here).
+    case waitingWing
+    /// The housing itself (or an empty wing).
+    case housing
+    /// The right wing: the bolt and the working sessions' count.
+    case workingWing
+
+    /// PURE: the tab a click on this part opens the island on (nil: the island's current tab).
+    var tab: String? {
+        switch self {
+        case .waitingWing: return IslandTabRegistry.needsYou.id
+        case .workingWing: return IslandTabRegistry.sessions.id
+        case .housing: return nil
+        }
+    }
+
+    /// What a click on the strip does. PURE.
+    enum Action: Equatable {
+        /// Open the island, on this tab (nil: the one it was on).
+        case open(tab: String?)
+        /// The island is open on another tab: show this one.
+        case select(String)
+        case close
+    }
+
+    /// Closed: open (on the wing's tab). Open: a wing whose tab is not showing switches to it; anything else closes.
+    func action(isOpen: Bool, selectedTab: String?) -> Action {
+        guard isOpen else { return .open(tab: tab) }
+        if let tab, tab != selectedTab { return .select(tab) }
+        return .close
+    }
+}
+
 enum IslandLayout {
     // The slim strip.
     /// Each side of the housing the strip extends it by (where its icon and count sit).
@@ -27,13 +62,20 @@ enum IslandLayout {
     static let cardCorner: CGFloat = 24
     static let cardPadding: CGFloat = 16
 
-    // The waiting pill under a hovered card, and the badge hugging the housing.
+    // The waiting pill under a hovered card.
     static let waitingHeight: CGFloat = 32
     static let waitingWidth: CGFloat = 280
     static let waitingGap: CGFloat = 8
-    static let badgeHeight: CGFloat = 26
-    /// The badge tucks this far up under the strip's edge, so it reads as hanging from it.
-    static let badgeTuck: CGFloat = 4
+
+    // Inside the open island and on the cards: ONE corner for the rows and inner cards (a Needs-you link or view
+    // request, a Watches row, a Sessions row, a Usage or Devices row, a Shelf tile), one list gap, one side inset.
+    static let rowCorner: CGFloat = 16
+    static let rowGap: CGFloat = 8
+    static let listInset: CGFloat = 14
+    /// The transcript interaction card's corner: Needs you's cards (the transcript's own, a link, a view request).
+    static let innerCardCorner: CGFloat = 28
+    /// The open island's header (and Needs you's card headers) from the island's edge.
+    static let headerInset: CGFloat = 20
 
     // The open island.
     static let islandWidth: CGFloat = 520
@@ -79,9 +121,25 @@ enum IslandLayout {
                height: waitingHeight)
     }
 
-    /// The badge's rect (x from the centre): hanging from the housing (or the strip without one).
-    static func badge(_ shape: IslandScreenShape, width: CGFloat) -> CGRect {
-        CGRect(x: -width / 2, y: shape.topInset - badgeTuck, width: width, height: badgeHeight)
+    /// Which part of the strip a point is over (x from the centre, y from the top), nil outside it. The waiting wing
+    /// (the amber symbol and its count) and the working wing are only "there" while they show a count: an empty wing is
+    /// the housing's. Without a housing the tab shows both side by side — each half is its group when both show, the
+    /// whole tab when only one does.
+    static func stripPart(at p: CGPoint, _ shape: IslandScreenShape, model: IslandStripModel) -> IslandStripPart? {
+        guard let rect = strip(shape, waiting: model.showsWings), rect.contains(p) else { return nil }
+        let waiting = model.waitingCount > 0
+        let working = model.workingCount > 0
+        if let housing = shape.housing {
+            if p.x < -housing.width / 2 { return waiting ? .waitingWing : .housing }
+            if p.x > housing.width / 2 { return working ? .workingWing : .housing }
+            return .housing
+        }
+        switch (waiting, working) {
+        case (true, true): return p.x < 0 ? .waitingWing : .workingWing
+        case (true, false): return .waitingWing
+        case (false, true): return .workingWing
+        case (false, false): return .housing
+        }
     }
 
     /// The open island's rect (x from the centre): its top is the screen's top — it grows out of the housing.

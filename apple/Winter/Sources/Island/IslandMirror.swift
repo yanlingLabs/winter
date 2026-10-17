@@ -142,6 +142,8 @@ final class IslandDetachedMirrorPanel: NSPanel {
 struct IslandDetachedMirrorView: View {
     let title: String
     let model: CUMirrorModel?
+    /// The gallery's stand-in picture.
+    var placeholder: Image?
     let onClose: () -> Void
 
     var body: some View {
@@ -159,12 +161,13 @@ struct IslandDetachedMirrorView: View {
                 IslandSmallCircleButton(symbol: "xmark", action: onClose)
                     .accessibilityLabel("Close the live view")
             }
-            IslandMirrorPicture(model: model)
+            IslandMirrorPicture(model: model, placeholder: placeholder)
         }
-        .padding(10)
+        .padding(IslandMirrorPicture.inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.black))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: IslandActivityLayout.mirrorCorner, style: .continuous).fill(Color.black))
+        .overlay(RoundedRectangle(cornerRadius: IslandActivityLayout.mirrorCorner, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
         .environment(\.colorScheme, .dark)
     }
 }
@@ -175,12 +178,17 @@ struct IslandMirrorPicture: View {
     /// The gallery's stand-in picture (`ImageRenderer` cannot draw the live canvas).
     var placeholder: Image?
 
+    /// The mirror's padding around its picture, in the island and detached; the picture's corner is the shell's less
+    /// that (concentric).
+    static let inset: CGFloat = 12
+    static var corner: CGFloat { IslandActivityLayout.mirrorCorner - inset }
+
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.05))
+            RoundedRectangle(cornerRadius: Self.corner, style: .continuous).fill(Color.white.opacity(0.05))
             if let placeholder {
                 placeholder.resizable().aspectRatio(contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Self.corner - 1, style: .continuous))
             } else if let model, model.isActive {
                 CUMirrorView(model: model)
             } else {

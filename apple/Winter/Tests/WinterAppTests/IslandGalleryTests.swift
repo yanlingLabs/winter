@@ -37,6 +37,5 @@ final class IslandGalleryTests: XCTestCase {
         XCTAssertEqual(g.bodyCornerRadius, IslandLayout.cardCorner)
         XCTAssertTrue(g.sourceIsHousing)
         XCTAssertFalse(IslandLayout.cardGeometry(plain, size: CGSize(width: 400, height: 120), rounded: true).sourceIsHousing)
-        XCTAssertEqual(IslandLayout.badge(notched, width: 100).minY, 32 - IslandLayout.badgeTuck, "the badge hangs from the housing")
     }
 }
