@@ -1927,14 +1927,21 @@ final class DispatchPillController: ObservableObject {
 }
 
 /// PURE: does a canvas-local point (y-down) land on something the pill draws? `scale` is the stack's hover grow as drawn
-/// (1 at rest): the main pill and the floating layers grow together about the pill's bottom centre, so a hovered stack
-/// is hit over its GROWN shape.
+/// (1 at rest): the main pill and the floating layers grow together about the pill's bottom centre. A hovered stack is
+/// hit over its RESTING shape OR its grown one (as `IslandHover.isOver`): growing from the bottom lifts the child row,
+/// so a point at the bottom of the resting row lies in the GROWN gap — judged on the grown shape alone it would leave
+/// the hover, shrink back under the pointer, hover again, and flicker.
 func dispatchPillHitTest(point: CGPoint, canvasSize: CGSize, mainSize: CGSize, accessoryFrame: CGRect,
                          scale: CGFloat = 1) -> Bool {
     let main = dispatchPillMainRect(canvasSize: canvasSize, mainSize: mainSize)
     let pivot = CGPoint(x: canvasSize.width / 2, y: main.maxY)
-    let s = CGSize(width: scale, height: scale)
-    if HoverGrowth.grown(main, about: pivot, scale: s).contains(point) { return true }
-    return accessoryFrame.width > 0 && accessoryFrame.height > 0
-        && HoverGrowth.grown(accessoryFrame, about: pivot, scale: s).contains(point)
+    let hasAccessories = accessoryFrame.width > 0 && accessoryFrame.height > 0
+    var scales: [CGFloat] = [1]
+    if scale != 1 { scales.append(scale) }
+    for k in scales {
+        let s = CGSize(width: k, height: k)
+        if HoverGrowth.grown(main, about: pivot, scale: s).contains(point) { return true }
+        if hasAccessories, HoverGrowth.grown(accessoryFrame, about: pivot, scale: s).contains(point) { return true }
+    }
+    return false
 }

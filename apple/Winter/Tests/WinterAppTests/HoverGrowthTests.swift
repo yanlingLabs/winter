@@ -84,6 +84,34 @@ final class HoverGrowthTests: XCTestCase {
         XCTAssertTrue(dispatchPillHitTest(point: aboveChild, canvasSize: canvas, mainSize: main, accessoryFrame: child, scale: s))
     }
 
+    /// Growing from the bottom LIFTS the child row: the bottom of the resting row lies in the grown stack's gap. Judged
+    /// on the grown shape alone the pointer there would leave the hover, the stack would shrink back under it, hover
+    /// again — a flicker. While hovered, the resting stack OR the grown one holds.
+    func testTheChildRowsBandHoldsTheHoverWithoutFlicker() {
+        let canvas = CGSize(width: 600, height: 400)
+        let main = CGSize(width: DispatchPillMetrics.cardWidth, height: 200)
+        let rest = dispatchPillMainRect(canvasSize: canvas, mainSize: main)
+        let s = HoverGrowth.factor(forWidth: main.width)
+        let child = CGRect(x: rest.minX, y: rest.minY - DispatchPillMetrics.stackGap - 44, width: main.width, height: 44)
+        let pivot = CGPoint(x: canvas.width / 2, y: rest.maxY)
+        let grownChild = HoverGrowth.grown(child, about: pivot, scale: CGSize(width: s, height: s))
+        let grownMain = HoverGrowth.grown(rest, about: pivot, scale: CGSize(width: s, height: s))
+        let band = CGPoint(x: child.midX, y: child.maxY - 0.5)
+        XCTAssertGreaterThan(band.y, grownChild.maxY, "the band is below the lifted row…")
+        XCTAssertLessThan(band.y, grownMain.minY, "…and above the grown card: in the grown gap")
+        XCTAssertGreaterThan(child.maxY - grownChild.maxY, 4, "a band of several points on a card")
+        XCTAssertTrue(dispatchPillHitTest(point: band, canvasSize: canvas, mainSize: main, accessoryFrame: child),
+                      "at rest: on the row")
+        XCTAssertTrue(dispatchPillHitTest(point: band, canvasSize: canvas, mainSize: main, accessoryFrame: child, scale: s),
+                      "hovered: still held — no flicker")
+        // The compact pill has the same band, smaller (1.56 pt).
+        let compactRest = dispatchPillMainRect(canvasSize: canvas, mainSize: compact)
+        let compactChild = CGRect(x: compactRest.minX, y: compactRest.minY - DispatchPillMetrics.stackGap - 44,
+                                  width: compact.width, height: 44)
+        XCTAssertTrue(dispatchPillHitTest(point: CGPoint(x: compactChild.midX, y: compactChild.maxY - 0.3), canvasSize: canvas,
+                                          mainSize: compact, accessoryFrame: compactChild, scale: 1.03))
+    }
+
     /// Hovered, the child pills still follow the main pill: their row is laid out as wide as the pill (the stack then
     /// grows as one), so the floating layers' measured frame is the RESTING one the gate grows itself.
     func testTheChildPillsFollowThePillWhileHovered() {

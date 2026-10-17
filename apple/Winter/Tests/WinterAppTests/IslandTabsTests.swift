@@ -86,7 +86,7 @@ final class IslandTabsTests: XCTestCase {
                 let result = recognizer.handle(deltaX: e.dx, deltaY: e.dy, phase: e.phase, momentumPhase: e.momentum,
                                                timestamp: Double(i) * 0.01)
                 if case .swiped(let direction) = result { state.swipe(direction) }
-                if moves { if result.consumesScroll { swallowed += 1 } else { scrolled += 1 } }
+                if moves { if lock.passesOn(result) { scrolled += 1 } else { swallowed += 1 } }
             }
         }
         return (scrolled, swallowed)
@@ -125,15 +125,49 @@ final class IslandTabsTests: XCTestCase {
     func testTheAxisIsDecidedOncePerGestureAndAMouseWheelAlwaysScrolls() {
         var lock = IslandScrollAxisLock()
         XCTAssertEqual(lock.route(deltaX: 0, deltaY: 0, phase: .began, momentumPhase: .none), .swipe, "undecided: the recognizer looks")
-        XCTAssertEqual(lock.route(deltaX: 0, deltaY: -5, phase: .changed, momentumPhase: .none), .scrollAndForgetSwipe)
+        XCTAssertEqual(lock.route(deltaX: 0, deltaY: -6, phase: .changed, momentumPhase: .none), .swipe, "not far enough yet")
+        XCTAssertEqual(lock.axis, .undecided)
+        XCTAssertEqual(lock.route(deltaX: 1, deltaY: -7, phase: .changed, momentumPhase: .none), .scrollAndForgetSwipe)
         XCTAssertEqual(lock.axis, .vertical)
         XCTAssertEqual(lock.route(deltaX: -30, deltaY: 0, phase: .changed, momentumPhase: .none), .scroll, "held for the gesture")
         XCTAssertEqual(lock.route(deltaX: 0, deltaY: 0, phase: .ended, momentumPhase: .none), .scroll)
         // A new gesture decides afresh.
         XCTAssertEqual(lock.route(deltaX: 0, deltaY: 0, phase: .mayBegin, momentumPhase: .none), .swipe)
-        XCTAssertEqual(lock.route(deltaX: -6, deltaY: 1, phase: .changed, momentumPhase: .none), .swipe)
+        XCTAssertEqual(lock.route(deltaX: -13, deltaY: 1, phase: .changed, momentumPhase: .none), .swipe)
         XCTAssertEqual(lock.axis, .horizontal)
         // A wheel without phases (a mouse) goes to the list, whatever the lock holds.
         XCTAssertEqual(lock.route(deltaX: 0, deltaY: -3, phase: .none, momentumPhase: .none), .scroll)
+    }
+
+    /// A swipe that starts on a diagonal — (3, −4), which a 4 pt decision used to latch as vertical for the whole gesture —
+    /// stays undecided until one axis clearly leads, and then swipes.
+    func testADiagonalStartIsNotLatchedVertical() {
+        var lock = IslandScrollAxisLock()
+        var state = IslandTabState(tabs: tabs)
+        let recognizer = TrackpadHorizontalSwipeRecognizer()
+        var gesture: [(dx: CGFloat, dy: CGFloat, phase: TrackpadScrollEventPhase, momentum: TrackpadScrollEventPhase)] =
+            [(0, 0, .began, .none), (-3, -4, .changed, .none), (-6, -5, .changed, .none)]
+        _ = run(gesture, lock: &lock, recognizer: recognizer, state: &state)
+        XCTAssertEqual(lock.axis, .undecided, "9 × 9 pt so far: a diagonal, not yet an axis")
+        gesture = Array(repeating: (-14, -1, .changed, .none), count: 8) + [(0, 0, .ended, .none)]
+        _ = run(gesture, lock: &lock, recognizer: recognizer, state: &state)
+        XCTAssertEqual(state.selected?.id, "sessions", "it swiped once the fingers clearly went sideways")
+    }
+
+    /// Once a gesture is horizontal, a vertical turn the recognizer ignores (it un-latches on a vertical-dominant sample
+    /// before the swipe fires) is swallowed: the list never scrolls under a tab swipe.
+    func testAVerticalTurnInAHorizontalGestureNeverScrollsTheList() {
+        var lock = IslandScrollAxisLock()
+        var state = IslandTabState(tabs: tabs)
+        let recognizer = TrackpadHorizontalSwipeRecognizer()
+        var gesture: [(dx: CGFloat, dy: CGFloat, phase: TrackpadScrollEventPhase, momentum: TrackpadScrollEventPhase)] =
+            [(0, 0, .began, .none), (-14, 0, .changed, .none)]
+        gesture += Array(repeating: (0, -10, .changed, .none), count: 4)
+        gesture += [(0, 0, .ended, .none)]
+        let r = run(gesture, lock: &lock, recognizer: recognizer, state: &state)
+        XCTAssertEqual(lock.axis, .horizontal)
+        XCTAssertEqual(r.scrolled, 0, "the vertical turn reached the list")
+        XCTAssertEqual(r.swallowed, 5)
+        XCTAssertEqual(state.selected?.id, "needs-you", "too short to swipe")
     }
 }

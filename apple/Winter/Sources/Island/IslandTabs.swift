@@ -59,7 +59,8 @@ struct IslandTabState: Equatable {
 }
 
 /// Two fingers over the open island do ONE thing per gesture (user 2026-10-17: scrolling a tab's list and swiping tabs
-/// must not fight). The gesture's DOMINANT axis over its first few points decides, and holds until the next gesture
+/// must not fight). The gesture's DOMINANT axis decides — once it has travelled `decideAfter` and one axis leads the
+/// other by `dominance` (a diagonal start stays undecided) — and holds until the next gesture
 /// begins — through its momentum too: vertical → the event goes on to the tab's scroll view (and the swipe recognizer
 /// forgets what it saw); horizontal → the swipe recognizer takes it (`TrackpadHorizontalSwipeRecognizer`, which swallows
 /// it), and its momentum is swallowed. Undecided, the recognizer sees it (it passes a vertical sample through and holds a
@@ -81,8 +82,10 @@ struct IslandScrollAxisLock: Equatable {
     private var travelX: CGFloat = 0
     private var travelY: CGFloat = 0
 
-    /// The travel (points, both axes summed separately) after which the gesture's axis is decided.
-    static let decideAfter: CGFloat = 4
+    /// The travel (points, both axes summed separately) after which the gesture's axis may be decided.
+    static let decideAfter: CGFloat = 12
+    /// How far one axis must lead the other to decide it: a diagonal stays undecided.
+    static let dominance: CGFloat = 1.5
 
     mutating func route(_ event: NSEvent) -> Route {
         route(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY, phase: TrackpadScrollEventPhase(event.phase),
@@ -104,14 +107,25 @@ struct IslandScrollAxisLock: Equatable {
             travelX += abs(deltaX)
             travelY += abs(deltaY)
             if max(travelX, travelY) >= Self.decideAfter {
-                axis = travelX > travelY ? .horizontal : .vertical
-                if axis == .vertical { return .scrollAndForgetSwipe }
+                if travelX >= travelY * Self.dominance {
+                    axis = .horizontal
+                } else if travelY >= travelX * Self.dominance {
+                    axis = .vertical
+                    return .scrollAndForgetSwipe
+                }
             }
         }
         switch axis {
         case .vertical: return .scroll
         case .horizontal, .undecided: return .swipe
         }
+    }
+
+    /// Whether an event routed to the swipe recognizer goes on to the list: never once the gesture is HORIZONTAL (an
+    /// event the recognizer ignores — a vertical turn mid-swipe — is swallowed, so the list never moves under a tab
+    /// swipe); otherwise as the recognizer says.
+    func passesOn(_ result: TrackpadHorizontalSwipeResult) -> Bool {
+        axis == .horizontal ? false : !result.consumesScroll
     }
 
     private mutating func reset() {

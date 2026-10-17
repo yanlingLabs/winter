@@ -223,7 +223,25 @@ struct IslandOpenFrame<Content: View>: View {
                 outline.fill(Color.black)
             }
         }
+        // The shoulders (drawn past the body, outside its frame) take a click like the top band they belong to.
+        .overlay(alignment: .top) {
+            if frame.shoulder > 1 {
+                HStack(spacing: frame.rect.width) {
+                    ear(x: -(frame.rect.width + frame.shoulder) / 2)
+                    ear(x: (frame.rect.width + frame.shoulder) / 2)
+                }
+                .frame(width: frame.rect.width + 2 * frame.shoulder)
+            }
+        }
         .offset(x: frame.rect.minX, y: frame.rect.minY)
+    }
+
+    /// One shoulder's click target (its square), told to `onTopBand` at its centre — x from the shape's centre.
+    private func ear(x: CGFloat) -> some View {
+        Color.clear
+            .frame(width: frame.shoulder, height: frame.shoulder)
+            .contentShape(Rectangle())
+            .onTapGesture { onTopBand(CGPoint(x: x, y: frame.shoulder / 2)) }
     }
 
     static var shadowOpacity: Double { 0.45 }

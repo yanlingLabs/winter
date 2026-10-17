@@ -267,13 +267,38 @@ private struct IslandOverlayScrollers: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class OverlayScrollerProbe: NSView {
+        private var styleObserver: NSObjectProtocol?
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if window == nil {
+                stopObserving()
+                return
+            }
+            apply()
+            // The scroll view follows the system's preferred style when it changes (a mouse plugged in, the setting
+            // changed): put overlay back after it has — event-driven, nothing runs otherwise.
+            if styleObserver == nil {
+                styleObserver = NotificationCenter.default.addObserver(
+                    forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: .main
+                ) { [weak self] _ in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.apply() } }
+                }
+            }
+        }
+
+        private func apply() {
             guard let scroll = enclosingScrollView else { return }
-            scroll.scrollerStyle = .overlay
+            if scroll.scrollerStyle != .overlay { scroll.scrollerStyle = .overlay }
             scroll.autohidesScrollers = true
             scroll.hasHorizontalScroller = false
         }
+
+        private func stopObserving() {
+            if let styleObserver { NotificationCenter.default.removeObserver(styleObserver) }
+            styleObserver = nil
+        }
+
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }

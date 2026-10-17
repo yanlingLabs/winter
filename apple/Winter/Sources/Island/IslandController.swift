@@ -727,7 +727,7 @@ final class IslandController {
             case .swipe:
                 let result = self.swipeRecognizer.handle(event)
                 result.performAcceptedFeedback { direction in self.store.tabs.swipe(direction) }
-                return result.consumesScroll ? nil : event
+                return self.scrollAxis.passesOn(result) ? event : nil
             }
         }) { openMonitors.append(m) }
     }
