@@ -169,6 +169,12 @@ describe("capabilities.list", () => {
         expect(tool.exposure.code).toBe(!disallowed.code.has(childName));
         expect(tool.exposure.dispatch).toBe(!disallowed.dispatch.has(childName));
         expect(tool.exposure.chat).toBe(!disallowed.chat.has(childName));
+        // Cowork (session door): recognised, never runnable — no tool registers it, and the exposure map carries NO
+        // `cowork` key at all: the Mac Library tab reads every `false` in the map as "withheld in <mode>", so an
+        // emitted `cowork: false` would label every row "withheld in cowork" (an absent mode = "daemon said nothing").
+        expect(Object.keys(tool.exposure).sort()).toEqual(["chat", "code", "dispatch"]);
+        expect(tool.modes).not.toContain("cowork");
+        expect(tool.deferred ?? []).not.toContain("cowork");
       }
     }
     // Spot-check one concretely: the sessions trio is dispatch-only, shown as `SpawnSession`, loaded up front.

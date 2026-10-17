@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -213,4 +213,28 @@ export function migrateCoworkOutputSchema(db: Database): void {
     revision INTEGER NOT NULL CHECK(revision=1), created_at TEXT NOT NULL,
     UNIQUE(workspace_id,session_id)
   );`);
+}
+
+/** v16 storage-lifecycle bookkeeping. Records only: neither table grants access or starts anything, and an
+ * imported manifest never populates them. Image pins: docs/cowork-spec.md ("Pin the writable environment to
+ * its base-image digest; a new base cannot silently replace the lower layer"; "Image/runtime updates occur
+ * while stopped"). Exports: docs/cowork-execution-contracts.md ("bound to one recorded export generation"). */
+export function migrateCoworkStorageLifecycleSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cowork_workspace_images (
+      workspace_id TEXT PRIMARY KEY REFERENCES cowork_workspaces(workspace_id),
+      base_image_digest TEXT NOT NULL CHECK(length(base_image_digest)=64 AND base_image_digest NOT GLOB '*[^0-9a-f]*'),
+      runtime_image_digest TEXT NOT NULL CHECK(length(runtime_image_digest)=64 AND runtime_image_digest NOT GLOB '*[^0-9a-f]*'),
+      pending_update_json TEXT, revision INTEGER NOT NULL CHECK(revision>0),
+      pinned_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS cowork_exports (
+      export_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+      generation INTEGER NOT NULL CHECK(generation>0),
+      state TEXT NOT NULL CHECK(state IN ('prepared','complete','failed')),
+      manifest_json TEXT NOT NULL, manifest_digest TEXT NOT NULL CHECK(length(manifest_digest)=64),
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE(workspace_id,generation)
+    );
+  `);
 }

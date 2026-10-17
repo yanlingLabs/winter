@@ -46,13 +46,16 @@ import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/wi
 import { runHomeHandleOf } from "./run-home-support";
 import { HostCodeExecutionService, HostCodeUnavailable, type HostCodeOutputTransportFactory } from "./host-code-broker";
 import { HostStorageFenceUnavailable } from "./host-storage-fence";
+import type { RunnableSessionMode } from "../sessions/session-mode";
 import { loadBundledHostOutputFactory } from "./host-output-loader";
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
 type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"]>;
 
-/** The three session modes, as `agent/tools/registry.ts`'s `Mode` already spells them. */
-export type SessionMode = "code" | "dispatch" | "chat";
+/** The three session modes a runtime child can be started for, as `agent/tools/registry.ts`'s `Mode` already
+ *  spells them. `cowork` is recognised by the protocol and deliberately NOT in this type: nothing below the
+ *  `session-driver.ts` boundary can hold it, so no mode table here can fall through to Code for it. */
+export type SessionMode = RunnableSessionMode;
 
 /**
  * How long `dispose()` waits for ONE live session to end before it aborts that one.

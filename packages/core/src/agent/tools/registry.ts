@@ -5,6 +5,7 @@ import { isWithin } from "../paths";
 import type { AskOutcome } from "../questions";
 import type { ComputerUseService } from "../computer-use";
 import type { DiffHeader } from "../../diffs/store";
+import type { RunnableSessionMode } from "../../sessions/session-mode";
 
 export interface ToolContext {
   cwd: string;
@@ -136,8 +137,10 @@ export type ToolRunResult = string | {
 
 /** The three session modes a tool's `modes`/`deferred` fields (and every `isDeferred`-adjacent
  *  registry method below) resolve against. One alias so a fourth mode, were one ever added, is a
- *  one-site edit instead of an N-site find/replace across this file. */
-export type Mode = "code" | "dispatch" | "chat";
+ *  one-site edit instead of an N-site find/replace across this file. It is the RUNNABLE set
+ *  (`sessions/session-mode.ts`): `cowork` is recognised by the protocol but is registered nowhere, so a
+ *  tool can never name it, no tool's `modes` includes it and the registry hands a cowork session nothing. */
+export type Mode = RunnableSessionMode;
 
 /** Tool names ridden by ToolSearch deferral (registry.ts) and gated as external code by the
  *  permission gate (agent/gate.ts) — MCP server tools (`mcp__<server>__<tool>`) and Phase 4b

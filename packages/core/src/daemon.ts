@@ -9,6 +9,7 @@ import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./wi
 import { acquireLock, type Lock } from "./lock";
 import { keychainService, resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
+import { inspectCoworkSource } from "./migration/cowork-exclusion";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
@@ -20,6 +21,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
+import { isUnrunnableStoredMode } from "./sessions/session-mode";
 import { CallThreads } from "./sessions/call-threads";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
@@ -279,7 +281,7 @@ export interface RunningDaemon {
  *  through, so the approval card's summary reads it off this closure's own parameter instead of
  *  a synchronous set/get side-channel (the former `peripheralClassHint` map) that only stayed
  *  race-safe because nothing ever awaited between the set and the card emit. */
-function buildLeasePolicy(deps: {
+export function buildLeasePolicy(deps: {
   store: SessionStore;
   approvals: ApprovalBroker;
   hub: SessionHub;
@@ -309,6 +311,9 @@ function buildLeasePolicy(deps: {
     // stale-row test (packages/core/test/peripheral/e2e.test.ts) that GRANTS instead of denying
     // without this `mode` check.
     if (meta.mode === "chat") return "denied";
+    // A stored `cowork` row (or any mode that is not a runnable one) can run nothing, so it never holds a lease
+    // either — whatever its policy says.
+    if (isUnrunnableStoredMode(meta.mode)) return "denied";
     if (meta.approvalPolicy === "plan") return "denied";
     if (meta.approvalPolicy === "auto") return "granted";
 
@@ -545,7 +550,14 @@ export async function startDaemon(opts: {
       console.error(`migration: ${home} is not the default home for the ${profile} profile — auto-migration skipped; run \`winter migrate --from ${legacyHome}\` to migrate it by hand`);
     } else {
       const check = describeHomePristineness(home);
-      if (check.pristine) {
+      // Cowork storage in the legacy source is never auto-copied (`migration/cowork-exclusion.ts`): skip
+      // with one line, like a non-pristine home, rather than refusing to boot.
+      const coworkSource = check.pristine ? inspectCoworkSource(legacyHome) : undefined;
+      if (coworkSource?.present) {
+        console.error(coworkSource.kind === "uninspectable"
+          ? `migration: a legacy home was found at ${legacyHome}, but it could not be checked for Cowork storage (${coworkSource.detail}) — auto-migration skipped; repair or move aside the unreadable entry, then restart to migrate`
+          : `migration: a legacy home was found at ${legacyHome}, but it holds Cowork storage (${coworkSource.detail}) — auto-migration skipped; Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`);
+      } else if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
         // Fix wave C3 (P9c-17, Critical): most per-item failures are already absorbed inside
         // `runMigrationB` itself (a single Keychain item never aborts the run — see

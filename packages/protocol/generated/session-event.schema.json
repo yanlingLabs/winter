@@ -464,7 +464,8 @@
           "enum": [
             "code",
             "dispatch",
-            "chat"
+            "chat",
+            "cowork"
           ]
         },
         "runtimeKind": {

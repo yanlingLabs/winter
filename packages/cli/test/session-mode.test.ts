@@ -3,6 +3,7 @@ import {
   checkCodeSession, filterCodeSessions, isCodeMode, nonCodeRefusalMessage, sessionModeMarker,
   sessionRuntimeMarker,
 } from "../src/session-mode";
+import type { WinterClient } from "../src/client";
 
 // Plan-immunity Task 2 (mode×surface matrix — ledger .superpowers/sdd/2026-07-28-plan-immunity/
 // progress.md): the TUI/CLI's single source for "is this session's mode one the CLI is allowed to
@@ -123,5 +124,26 @@ describe("checkCodeSession — shared attach/send/watch gate", () => {
   test("dispatch session -> refused with the dispatch-specific message", () => {
     const r = checkCodeSession(rows, "s-dispatch");
     expect(r).toEqual({ ok: false, message: "dispatch lives in the orb and the app" });
+  });
+});
+
+// Cowork (session door): the protocol now RECOGNISES `cowork` and `session.create` refuses it for every role
+// (`unsupported_topology`). The CLI is code-only: it cannot ask for any non-code session (its `createSession`
+// takes no `mode`), and a cowork row that reaches it — a stored one, listed by `winter sessions` — is
+// "app-only" in every surface, never code.
+describe("cowork is recognised but never actionable from the CLI", () => {
+  test("WinterClient.createSession cannot name a mode, so the CLI cannot even ask for a cowork session", () => {
+    const compileTimeOnly = (c: WinterClient): void => {
+      // @ts-expect-error the CLI's createSession options have no `mode`
+      void c.createSession("global", { mode: "cowork" });
+    };
+    expect(typeof compileTimeOnly).toBe("function");
+  });
+
+  test("a cowork row is filtered from pickers, marked in listings, and refused by every direct-attach door", () => {
+    const rows = [{ sessionId: "s-code" }, { sessionId: "s-cowork", mode: "cowork" }];
+    expect(filterCodeSessions(rows)).toEqual([{ sessionId: "s-code" }]);
+    expect(sessionModeMarker("cowork")).toBe(" [cowork — app only]");
+    expect(checkCodeSession(rows, "s-cowork")).toEqual({ ok: false, message: "cowork sessions are app-only" });
   });
 });

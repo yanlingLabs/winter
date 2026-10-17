@@ -17,6 +17,17 @@ const Base = z.object({
  *  prefix can never collide with a real session's id). */
 export const SYSTEM_SESSION_ID = "$system";
 
+/** Every session mode this protocol RECOGNISES — the one list the wire, the log and the capability
+ *  table share. Recognised is not runnable: `cowork` is named so a client, a stored row or a replayed
+ *  log can carry it, but no Winter can create or run one yet — `session.create` refuses it for every
+ *  role with the Cowork `unsupported_topology` error and core's runtime keeps its own three-valued
+ *  `RunnableSessionMode` (`sessions/session-mode.ts`, pinned to this list at compile time), so a new
+ *  entry here is a type error there until someone classifies it. Do not enable Cowork by listing it
+ *  somewhere else: see docs/cowork-status.md. */
+export const SESSION_MODES = ["code", "dispatch", "chat", "cowork"] as const;
+export const SessionModeSchema = z.enum(SESSION_MODES);
+export type SessionMode = z.infer<typeof SessionModeSchema>;
+
 export const SessionCreatedEvent = Base.extend({
   type: z.literal("session_created"),
   scope: z.string().min(1),
@@ -29,7 +40,9 @@ export const SessionCreatedEvent = Base.extend({
   // absent means "code" (same convention as SessionRow.mode/opts.mode elsewhere).
   // Chat Mode Slice A: "chat" added — a conversation with no filesystem/shell access that shares
   // dispatch's _assistant memory bucket but, unlike dispatch, is NOT a singleton (many chats).
-  mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Cowork (session door): "cowork" is RECOGNISED on the wire and in a stored log, never produced by
+  // any Winter today — `session.create` refuses it before a row exists (see `SESSION_MODES`).
+  mode: SessionModeSchema.optional(),
   // Winter Phase 8c (P8c-5): the runtime annotation — which leg backs this session, its provider
   // and the model it opened with. All three OPTIONAL by design (protocol discipline P8c-5: no new
   // variant, no new method): the row in `sessions/store.ts`'s `createSession` is inserted BEFORE
