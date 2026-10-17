@@ -229,13 +229,13 @@ static void a_violation_ends_the_stream_not_the_vm(void) {
         l2_event events[4];
         size_t count = collect_l2(events, 4);
         CHECK(count == 1 && events[0].kind == CW_ENV_FAULT && events[0].value == CW_FAULT_MUX_VIOLATION);
-        /* Nothing more is read from either mux link: a valid frame after the violation is never forwarded. */
+        /* Nothing more is read from either mux link: a frame that WOULD be valid (bootstrap seq 1 in each direction) is never forwarded. */
         uint8_t after[40];
-        size_t n = frame(after, sizeof after, CW_CLASS_RUNTIME, 99, "z", 1);
+        size_t n = frame(after, sizeof after, CW_CLASS_BOOTSTRAP, 1, "z", 1);
         (void)send(rig.l3[0], after, n, 0);
         (void)send(rig.l4[0], after, n, 0);
-        uint8_t byte;
-        CHECK(nothing_to_read(rig.l3[0]) || recv(rig.l3[0], &byte, 1, 0) >= 0); /* tolerate the in-flight frame of case 2 */
+        CHECK(nothing_to_read(rig.l4[0]));
+        CHECK(nothing_to_read(rig.l3[0]));
         rig_down();
     }
 }

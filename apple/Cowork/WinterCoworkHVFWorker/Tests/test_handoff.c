@@ -197,6 +197,33 @@ static int stream_exercise(void) {
     return cw_test_failures != 0 ? 1 : 0;
 }
 
+/* The same input through the whole intake: twenty descriptors with VOLUMES. With a 16 slot control buffer that is a truncated
+ * control buffer; with 256 slots it is simply the wrong number of descriptors. Both end silently with exit 79, and the reason
+ * says which one it was, so a mapping that sent CTRUNC down the ordinary-fault path would be caught here. */
+static int intake_fake_sandbox(void *context) { (void)context; return 0; }
+static int intake_exercise(void) {
+    cw_test_failures = 0;
+    const cw_env_vector *scope = NULL, *volumes = NULL;
+    for (size_t i = 0; i < ENV_VECTOR_COUNT; i++) {
+        if (strcmp(env_vectors[i].name, "scope") == 0) scope = &env_vectors[i];
+        if (strcmp(env_vectors[i].name, "volumes-two-descriptors") == 0) volumes = &env_vectors[i];
+    }
+    int pair[2];
+    CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) == 0);
+    int fd = open("/dev/null", O_RDWR);
+    send_with_fds(pair[0], scope->bytes, scope->length, fd, 0);
+    send_with_fds(pair[0], volumes->bytes, volumes->length, fd, 20);
+    cw_intake_config config = { intake_fake_sandbox, NULL, 1000, 1000, geteuid(), { 2, 768, 1024 } };
+    cw_intake_result result;
+    int before = cw_test_open_descriptors();
+    cw_intake_run(&config, pair[1], &result);
+    CHECK(result.outcome == CW_INTAKE_SILENT_EXIT && result.exit_code == CW_EXIT_RIGHTS);
+    CHECK(result.fds[0] == -1 && result.fds[1] == -1 && !result.volumes_accepted);
+    if (CW_FD_CAPACITY < 20) CHECK_STR(result.reason, "truncated control buffer");
+    else { CHECK_STR(result.reason, "descriptor count"); CHECK(cw_test_open_descriptors() == before); }
+    return cw_test_failures != 0 ? 1 : (result.outcome == CW_INTAKE_SILENT_EXIT ? CTRUNC_EXIT : 0); /* the worker exits 79 here in both builds */
+}
+
 static int run_child(int (*body)(void)) {
     fflush(NULL);
     pid_t child = fork();
@@ -212,7 +239,9 @@ int main(void) {
     channel_admission();
     if (cw_test_failures != 0) return cw_test_finish("test_handoff(admission)");
     int expected = CW_FD_CAPACITY < 20 ? CTRUNC_EXIT : 0;
-    int datagram = run_child(exercise), stream = run_child(stream_exercise);
+    int datagram = run_child(exercise), stream = run_child(stream_exercise), intake = run_child(intake_exercise);
+    if (intake != CTRUNC_EXIT) fprintf(stderr, "intake child exited %d, wanted %d\n", intake, CTRUNC_EXIT);
+    CHECK(intake == CTRUNC_EXIT);
     if (datagram != expected) fprintf(stderr, "datagram child exited %d, wanted %d (capacity %d)\n", datagram, expected, CW_FD_CAPACITY);
     if (stream != expected) fprintf(stderr, "stream child exited %d, wanted %d (capacity %d)\n", stream, expected, CW_FD_CAPACITY);
     CHECK(datagram == expected);
