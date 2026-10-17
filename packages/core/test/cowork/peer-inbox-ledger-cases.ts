@@ -331,7 +331,7 @@ test("the record keeps digest and size; the body is an opaque handle released at
   expect(JSON.stringify(record)).not.toContain(text);
   expect([record.size, record.digest]).toEqual([Buffer.byteLength(text), peerSendDigest(r, text)]);
   expect(record.bodyHandle).not.toBeNull();
-  expect(Object.keys(result.receipt).sort()).toEqual(["acceptedAt", "attempts", "discardedBy", "reason", "receiptId", "recipientSessionId", "sendId", "senderSessionId", "size", "state", "updatedAt"]);
+  expect(Object.keys(result.receipt).sort()).toEqual(["acceptedAt", "attempts", "reason", "receiptId", "recipientSessionId", "sendId", "senderSessionId", "size", "state", "updatedAt"]);
   expect(JSON.stringify(result.receipt)).not.toContain(record.digest);
   expect(JSON.stringify(result.receipt)).not.toContain(record.bodyHandle!);
 
@@ -367,7 +367,7 @@ test("a damaged or missing HEAD body holds the queue, untouched after the first 
   expect(codeOf(() => inbox.discard(before.receiptId, { kind: "host", reason: "whatever" } as never))).toBe("invalid_request"); // only the named host reason
   expect(store.get(before.receiptId)).toEqual(before);
   const dropped = inbox.discard(before.receiptId, { kind: "host", reason: "unrecoverable_body" });
-  expect([dropped.state, dropped.reason, dropped.discardedBy]).toEqual(["refused", "unrecoverable", null]); // the host exit names no user
+  expect([dropped.state, dropped.reason, f.store.get(dropped.receiptId)!.discardedBy]).toEqual(["refused", "unrecoverable", null]); // the host exit names no user
   expect(store.audit()).toEqual({ unresolvedWithoutBody: [], terminalWithBody: [], orphanBodies: 0 });
   expect(f.drain(inbox, r, epoch)).toEqual(["second"]);
 
@@ -501,7 +501,7 @@ test("discard is the user's door for a record nobody else can end; it is idempot
   expect(inbox.lookup(f.id(a, "m1"))!.state).toBe("blocked");
 
   const discarded = inbox.discard(receiptId, user);
-  expect([discarded.state, discarded.reason, discarded.discardedBy]).toEqual(["refused", "discarded", "local-user"]); // the principal is recorded on the receipt
+  expect([discarded.state, discarded.reason, f.store.get(receiptId)!.discardedBy]).toEqual(["refused", "discarded", "local-user"]); // the principal is recorded on the record, for audit
   expect(f.store.get(receiptId)!.bodyHandle).toBeNull();
   expect(inbox.discard(receiptId, user)).toEqual(discarded);
   expect(inbox.lookup(f.id(a, "m2"))!.state).toBe("blocked"); // others untouched
@@ -802,6 +802,27 @@ test("a body read that throws is an error, not damage: the head is not parked an
   expect(f.store.get(before.receiptId)).toEqual(before); // untouched: not blocked, not discarded
   failing = false;
   expect(f.drain(inbox, r, epoch)).toEqual(["hello"]);
+});
+
+
+test("the discarding user's principal stays in the audit record and never reaches a sender-visible projection", () => {
+  const f = fixture(), p = f.project(), a = f.bind(p), b = f.bind(p), r = f.bind(p), inbox = f.make();
+  const principal = "local-user-principal-7f3a";
+  inbox.accept(f.req(a, r, "kept", "m1")); inbox.accept(f.req(b, r, "other", "m2"));
+  f.setBinding(a, "archived"); inbox.settle(r);
+  const receiptId = inbox.lookup(f.id(a, "m1"))!.receiptId;
+  const returned = inbox.discard(receiptId, { kind: "user", principalId: principal });
+  expect(f.store.get(receiptId)!.discardedBy).toBe(principal); // kept on the record for audit
+  const retry = inbox.accept(f.req(a, r, "kept", "m1")); // a retry of the discarded send: the retained receipt
+  expect(retry.outcome).toBe("retained");
+  const projections: unknown[] = [returned, inbox.lookup(f.id(a, "m1")), retry, inbox.cancel(f.id(a, "m1")), inbox.discard(receiptId, { kind: "user", principalId: "someone-else" }), ...inbox.pending(r)];
+  expect(projections.length).toBeGreaterThan(5);
+  for (const projection of projections) {
+    expect(JSON.stringify(projection)).not.toContain(principal);
+    expect(JSON.stringify(projection)).not.toContain("discardedBy");
+    expect(JSON.stringify(projection)).not.toContain("someone-else");
+  }
+  expect(f.store.get(receiptId)!.discardedBy).toBe(principal); // a second discard never rewrites a terminal record
 });
 
 });

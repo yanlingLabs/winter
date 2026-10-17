@@ -86,8 +86,10 @@ parks the whole pair and cannot let a later message of the pair overtake an earl
   un-offer a message the current epoch holds (which used to make the current epoch's ack fail and re-offer in a
   loop). A terminal or already-blocked record is returned unchanged for any caller.
 - `discard(receiptId, by)`: `{ kind: "user", principalId }` ends any unresolved record as `discarded` (for a
-  sender that stays archived indefinitely) and records the principal on the record and the receipt
-  (`discardedBy`; there is no DDL yet, so the column is free); `{ kind: "host", reason: "unrecoverable_body" }`
+  sender that stays archived indefinitely) and records the principal on the record, for audit
+  (`discardedBy`; there is no DDL yet, so the column is free). It never reaches the sender: a host identity must
+  not reach a possibly untrusted guest agent, so `PeerReceipt` carries no `discardedBy` and neither `lookup`, a
+  retried `accept`, `cancel`, `pending` nor the `discard` return value shows it. `{ kind: "host", reason: "unrecoverable_body" }`
   ends a record only if its body is provably missing or damaged, as `unrecoverable`, with no principal. A body
   read that THROWS is an error, not damage: `offer` and the host exit both surface `recovery_required` and leave
   the record untouched, so a transient failure can never get a healthy message discarded. The ledger cannot
@@ -166,6 +168,32 @@ appends, identities, compare-and-set and caps over one state. `test/cowork/peer-
 injection and spies wrap the store with a decorator, nothing depends on the in-memory class). A harness is
 `{ open(): PeerInboxStore; failAppendAtStep(step): void }` over one durable state, where a second `open()` is a
 restart. A future SQLite store adds two lines to its own test file, and the ledger tests then really run over it.
+
+## Checklist for the SQLite store slice
+
+Nothing below is code in this slice; it is what the follow-on slice must add so that the store contract is
+enforced against a real implementation and not only the in-memory one.
+
+- **Harness.** Supply a `PeerInboxStoreHarness` (`open()` over one durable state, where a second `open()` is a
+  restart, and `failAppendAtStep(step)`, which throws inside the transaction after the n-th statement) and run both
+  `runPeerInboxStoreConformance` and `definePeerInboxLedgerTests` over it.
+- **An unreadable-body hook, and a case that needs it.** Extend the harness with a hook that makes ONE body
+  unreadable (for example `makeBodyUnreadable(handle)`: the body store raises an I/O or permission error for that
+  handle), and add a conformance case requiring `readBody` to THROW for that body and to return `undefined` only
+  for a handle that names no body. The in-memory store has no unreadable state, so today nothing pins the
+  "throws, never `undefined`" half of the `readBody` contract against a store that can really fail a read; the
+  ledger tests only prove the ledger's side (a throwing read is neither parked as damage nor lets the host exit
+  discard the message).
+- **The open-time sweep.** A test that a hard-crash leftover is cleaned at open, driven by `audit()`: an orphan
+  body is deleted, a terminal record's leaked body is released, and an unresolved record without a body is left
+  alone and reported (the ledger fails closed on it). The failure-atomicity case already requires the FAILING
+  instance to audit clean before any reopen, so a store cannot lean on the sweep to hide a body it left behind.
+- **A kill test.** `kill -9` mid-`append`, mid-terminal-`update` and mid-`remove`, then reopen: no record without
+  its body, and only the leftovers the sweep is specified to clean.
+- **Backups.** The body store is excluded from backups (the owner decision), verified at creation and on every open.
+- **Schema 17.** The table joins `COWORK_TABLES`, the downgrade ladder and `RUNTIME_STATE_SCHEMA_VERSION` move
+  to 17, and the columns are those of `PeerInboxRecord` including `discardedBy` (audit only; never projected to a
+  sender).
 
 ## Owner decisions, decided 2026-10-16
 
@@ -301,7 +329,7 @@ call `offer` once it holds a current epoch, hand the body to the recipient and r
 
 ## Evidence
 
-`packages/core/test/cowork/peer-inbox.test.ts` runs 51 tests: 31 ledger tests (from `peer-inbox-ledger-cases.ts`),
+`packages/core/test/cowork/peer-inbox.test.ts` runs 52 tests: 32 ledger tests (from `peer-inbox-ledger-cases.ts`),
 the eighteen store conformance cases (from `peer-inbox-conformance.ts`), an in-memory audit test and the
 anti-wiring pin. The ledger tests use real `CoworkRepository` records so the real `mayContactCoworkPeer` runs. Mutation
 checks (apply, run, see the named test fail, revert) are recorded in the pull request.

@@ -67,7 +67,9 @@ export interface PeerInboxRecord {
   /** The epoch the current offer was made under; the only epoch an ack may present. */
   readonly offered: PeerEpoch | null;
   readonly deliveredUnder: PeerEpoch | null;
-  /** The authenticated user principal that discarded the record (`discard` with the `user` authority); null otherwise. */
+  /** The authenticated user principal that discarded the record (`discard` with the `user` authority); null otherwise.
+   * Kept for audit only: a host identity must never reach a possibly untrusted guest agent, so no `PeerReceipt`
+   * (the sender-visible projection) carries it. */
   readonly discardedBy: string | null;
   readonly acceptedAt: number; readonly updatedAt: number;
   /** Compare-and-set token, bumped by every update. */
@@ -150,12 +152,10 @@ export interface PeerInboxStore {
 
 export const isTerminalPeerState = (state: PeerReceiptState): boolean => state === "delivered" || state === "refused";
 
-/** The sender-visible receipt: no body, no digest, no store handle, no queue position. */
+/** The sender-visible receipt: no body, no digest, no store handle, no queue position, no discarding principal. */
 export interface PeerReceipt {
   receiptId: string; sendId: string; senderSessionId: string; recipientSessionId: string;
   state: PeerReceiptState; reason: PeerBlockReason | PeerEndReason | null;
-  /** The user principal that discarded it, when it was discarded by a user; null otherwise. */
-  discardedBy: string | null;
   attempts: number; size: number; acceptedAt: number; updatedAt: number;
 }
 export type PeerAcceptResult =
@@ -214,7 +214,7 @@ function durable<T>(operation: () => T): T {
   try { return operation(); } catch (error) { throw error instanceof CoworkError ? error : new CoworkError("recovery_required"); }
 }
 function view(record: PeerInboxRecord): PeerReceipt {
-  return { receiptId: record.receiptId, sendId: record.sendId, senderSessionId: record.senderSessionId, recipientSessionId: record.recipientSessionId, state: record.state, reason: record.reason, discardedBy: record.discardedBy, attempts: record.attempts, size: record.size, acceptedAt: record.acceptedAt, updatedAt: record.updatedAt };
+  return { receiptId: record.receiptId, sendId: record.sendId, senderSessionId: record.senderSessionId, recipientSessionId: record.recipientSessionId, state: record.state, reason: record.reason, attempts: record.attempts, size: record.size, acceptedAt: record.acceptedAt, updatedAt: record.updatedAt };
 }
 
 export class CoworkPeerInbox {
@@ -367,7 +367,8 @@ export class CoworkPeerInbox {
   /** Ends an unresolved record that nobody else can: a message from a sender that stays archived indefinitely
    * (`user`, an authenticated local user client), or a head whose body is provably damaged (`host`: the body
    * must be missing or fail its digest, otherwise invalid_request). The body is released, and a user discard
-   * records the principal on the receipt (`discardedBy`). A terminal record is returned unchanged. */
+   * records the principal on the RECORD (`discardedBy`, for audit); the returned receipt does not carry it. A
+   * terminal record is returned unchanged. */
   discard(receiptId: string, by: PeerDiscardAuthority): PeerReceipt {
     checkId(receiptId);
     if (by?.kind === "user") checkId(by.principalId);

@@ -238,6 +238,9 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
           return;
         }
         failures++;
+        // The instance that failed must itself be clean: a store that leaves its body file behind fails here even
+        // though the sweep a durable store MUST run at open would clean it for the reopened instance below.
+        expect(store.audit()).toEqual(CLEAN);
         const after = open();
         expect(after.get(`rf${step}`)).toBeUndefined();
         expect(after.find({ ...identity(1), sendId: `f${step}` })).toBeUndefined();
