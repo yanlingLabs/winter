@@ -737,17 +737,30 @@ describe("the review's smaller findings", () => {
   });
 
   test("a character set this runtime can't decode is said, never returned as mojibake", async () => {
+    // A label no TextDecoder knows (Bun 1.3.14 also threw for windows-1251 and koi8-r; 1.4 decodes them, below).
+    const t = setup({
+      names: { "a.example": ["93.184.216.34"] },
+      pages: {
+        "a.example/ru": () => new Response(new Uint8Array([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]), { headers: { "content-type": "text/plain; charset=x-no-such-charset" } }),
+        "a.example/meta": () => new Response(Buffer.from('<html><head><meta charset="x-also-unknown"></head><body>x</body></html>'), { headers: { "content-type": "text/html" } }),
+        "a.example/sjis": () => new Response(new Uint8Array([0x93, 0xfa, 0x96, 0x7b]), { headers: { "content-type": "text/plain; charset=shift_jis" } }),
+      },
+    });
+    expect((await failure(t.read("https://a.example/ru"))).message).toBe("the page is in a character set browsers.read() can't decode (x-no-such-charset) — open it in a tab");
+    expect((await failure(t.read("https://a.example/meta"))).message).toContain("can't decode (x-also-unknown)");
+    expect((await t.read("https://a.example/sjis", { emit: false })).text).toBe("日本");
+  });
+
+  test("a single-byte legacy character set is decoded to the right text (Bun 1.4 supports windows-1251 and koi8-r)", async () => {
     const t = setup({
       names: { "a.example": ["93.184.216.34"] },
       pages: {
         "a.example/ru": () => new Response(new Uint8Array([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]), { headers: { "content-type": "text/plain; charset=windows-1251" } }),
         "a.example/meta": () => new Response(Buffer.from('<html><head><meta charset="koi8-r"></head><body>x</body></html>'), { headers: { "content-type": "text/html" } }),
-        "a.example/sjis": () => new Response(new Uint8Array([0x93, 0xfa, 0x96, 0x7b]), { headers: { "content-type": "text/plain; charset=shift_jis" } }),
       },
     });
-    expect((await failure(t.read("https://a.example/ru"))).message).toBe("the page is in a character set browsers.read() can't decode (windows-1251) — open it in a tab");
-    expect((await failure(t.read("https://a.example/meta"))).message).toContain("can't decode (koi8-r)");
-    expect((await t.read("https://a.example/sjis", { emit: false })).text).toBe("日本");
+    expect((await t.read("https://a.example/ru", { emit: false })).text).toBe("Привет");
+    expect((await t.read("https://a.example/meta", { emit: false })).text).toBe("x");
   });
 
   test("0.0.0.0 points at localhost; the audit names every hop's host", async () => {
