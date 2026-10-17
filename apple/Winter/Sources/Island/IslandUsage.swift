@@ -274,7 +274,7 @@ struct IslandUsageTab: View {
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.06)))
+                        .background(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous).fill(Color.white.opacity(0.06)))
                     }
                 }
             }
