@@ -1,0 +1,13 @@
+{
+  "files": {
+    "mux-frames.json": {
+      "sha256": "e2fa1d5406a437f27aeae0b4a6b2a0bf461ea3a9b6b4d2e5e807221dbbd21fde",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "eeb7618f9d016284bfd5eae37e4a1df9af3791df",
+      "sourcePath": "packages/core/test/cowork/native/vectors/mux-frames.json",
+      "sourceRepository": "yanlingLabs/winter"
+    }
+  },
+  "formatVersion": 1,
+  "note": "Byte-identical copies of the S1 golden vectors. The guest copies the contract, never the other way round; edit nothing here, re-copy from the contract branch and update this pin in the same change."
+}
