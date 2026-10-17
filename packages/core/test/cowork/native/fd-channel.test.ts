@@ -100,6 +100,16 @@ describe("bun:ffi sendmsg/recvmsg with SCM_RIGHTS", () => {
     expect(refusal(() => receiveMessage(b, 50, 2)).code).toBe("data_truncated");
     for (let fd = 3; fd < 200; fd++) if (open(fd) && !before.has(fd)) throw new Error(`leaked descriptor ${fd}`);
   });
+  live("a long-lived receiver reads into one scratch buffer and hands out copies; a scratch that is too small is refused", () => {
+    const [a, b] = pair("stream"), scratch = new Uint8Array(64).fill(0xee);
+    sendMessage(a, encode("first\n"));
+    const one = receiveMessage(b, 64, 0, undefined, scratch)!;
+    sendMessage(a, encode("second\n"));
+    const two = receiveMessage(b, 64, 0, undefined, scratch)!;
+    expect([text(one.data), text(two.data)]).toEqual(["first\n", "second\n"]); // the first result was not overwritten by the second read
+    expect(one.data.buffer).not.toBe(scratch.buffer);
+    expect(refusal(() => receiveMessage(b, 128, 0, undefined, scratch)).code).toBe("invalid");
+  });
   live("an idle socket is null, a closed peer is empty data, and a write to a closed peer is an error never a signal", () => {
     const [a, b] = pair("stream");
     expect(receiveMessage(b, 64, 0)).toBeNull();

@@ -49,6 +49,7 @@ Control-class frames terminate at the worker. They never cross L3 or L1: the dae
   re-serializes it; the result must equal the input byte for byte. That one comparison refuses duplicate keys, reordered keys,
   alternate escapes, alternate number spellings, and trailing data. Every positive vector exercises the order; the negative
   vectors include reordered keys, whitespace, duplicate keys and float spellings.
+* A UTF-8 byte order mark is malformed: it is never skipped, on an L1 line or in a mux payload (negative vectors `bom-line`, `bom-mux`, `bom-mux-bootstrap`).
 * Free-form nested objects (a filesystem plan or receipt inside a bootstrap frame) use recursively SORTED keys (UTF-16 code unit order).
 * Binary formats are little-endian. Every reserved byte is zero. All endpoints (macOS arm64 host, Linux arm64 guest) are
   little-endian, which is why no byte-swapping is specified.
