@@ -132,6 +132,23 @@ final class LauncherMainTests: XCTestCase {
         p.daemon.end.close()
         XCTAssertEqual(p.exitCode(), 0)
     }
+    func testASigtermMakesTheRealBinaryDrainTheWorkerLeaveAReceiptAndExit() throws {
+        let p = try LauncherProcess(arguments: try pinned())
+        XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
+        let scope = Fixture.scope(mode: "ok")
+        p.daemon.send(.begin(id: "req-begin", scope: scope))
+        let pid = try XCTUnwrap(p.daemon.next { if case .begun(_, _, let pid, _) = $0 { pid } else { nil } })
+        let disks = try DiskPair()
+        p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))
+        XCTAssertNotNil(p.daemon.next { if case .volumesAccepted = $0 { true } else { nil } })
+        kill(p.pid, SIGTERM)
+        let receipt = try XCTUnwrap(p.daemon.next { if case .stopped(_, let r) = $0 { r } else { nil } }, "the daemon was still there and is told")
+        XCTAssertEqual(receipt.origin, .ownerLossDrain); XCTAssertTrue(receipt.invariantsHold)
+        XCTAssertEqual(p.exitCode(), 0)
+        XCTAssertEqual(kill(Int32(pid), 0), -1, "the worker did not outlive the launcher")
+        let store = try DirectoryReceiptStore(directory: BuiltProducts.canonical(receipts.path))
+        XCTAssertNotNil(try store.load(ReceiptScope(scope)))
+    }
     func testLosingTheDaemonMakesTheRealBinaryDrainLeaveAReceiptAndExit() throws {
         let p = try LauncherProcess(arguments: try pinned())
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })

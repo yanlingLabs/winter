@@ -68,6 +68,7 @@ public final class LauncherSession {
     private var drainRequestId: String?
     private var drainDeadlineMs: Int64 = 0
     private var faultGraceArmed = false
+    private var terminating = false
     private var l2OutSeq: UInt32 = 0
     private var l2InSeq: UInt32 = 1
     private var muxDown = MuxSequencer()
@@ -115,6 +116,11 @@ public final class LauncherSession {
     public func daemonChannelClosed() {
         guard !daemonGone else { return }
         daemonGone = true
+        daemonChannelClosedLocally()
+    }
+
+    /// The shared body of owner loss: a bounded drain (or an immediate kill if the worker never reported READY), never a release.
+    private func daemonChannelClosedLocally() {
         switch phase {
         case .awaitingBegin: ports.finish()
         case .starting: killAndCommit(reason: .daemonLost, refusal: nil)
@@ -129,6 +135,16 @@ public final class LauncherSession {
             }
         case .finished: ports.finish()
         }
+    }
+
+    /// SIGTERM, SIGHUP or SIGINT reached the launcher itself (a shutdown, a logout, an operator). The worker must not be left behind
+    /// running on two raw images: this is owner loss with the daemon possibly still listening. The same bounded drain, the same
+    /// durable receipt, and then the process ends whether or not anyone retires it.
+    public func terminationRequested() {
+        guard !terminating else { return }
+        terminating = true
+        if phase == .finished || phase == .awaitingBegin { ports.finish(); return }
+        daemonChannelClosedLocally()
     }
 
     private func refuse(_ id: String, _ code: RefusalCode) { ports.sendToDaemon(.refused(id: id, code: code)) }
@@ -346,8 +362,9 @@ public final class LauncherSession {
     private func startDrain(origin: DrainOrigin, nonce: String, budgetMs: Int, requestId: String?) {
         phase = .draining
         drainRequestId = requestId
-        evidence.drain = DrainRecord(nonce: nonce, origin: origin == .hostStop ? .hostStop : .ownerLossDrain)
+        // Only a DRAIN the worker was actually handed is evidence that a drain was requested.
         guard sendEnvelope({ .drain(seq: $0, stopNonce: nonce, budgetMs: budgetMs, origin: origin) }) else { killAndCommit(reason: .launcherFault, refusal: nil); return }
+        evidence.drain = DrainRecord(nonce: nonce, origin: origin == .hostStop ? .hostStop : .ownerLossDrain)
         drainDeadlineMs = deps.monotonicMs() + Int64(budgetMs)
         ports.arm(.drain, afterMs: budgetMs)
     }
@@ -416,7 +433,7 @@ public final class LauncherSession {
         case .uncertain(let r): ports.sendToDaemon(.uncertain(receipt: r))
         }
         // Nobody is waiting for it: the receipt is durable, and the next daemon decides what it means.
-        if daemonGone { ports.finish() }
+        if daemonGone || terminating { ports.finish() }
     }
 
     private func handleRetire(_ confirmationId: String) {

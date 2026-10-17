@@ -350,6 +350,28 @@ final class SessionTests: XCTestCase {
         let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt(); h.workerExits(.code(0)); XCTAssertFalse(h.ports.finished)
         h.session.daemonChannelClosed(); XCTAssertTrue(h.ports.finished); XCTAssertEqual(h.store.retired, [], "EOF does not retire the receipt")
     }
+    func testATerminationSignalDrainsLikeOwnerLossAndEndsTheProcessEvenWithTheDaemonStillListening() throws {
+        let h = harness(); try h.bringUp(); h.session.terminationRequested()
+        guard case .drain(_, _, let budget, let origin)? = h.ports.datagrams.last else { return XCTFail("the worker is drained, never left behind") }
+        XCTAssertEqual(origin, .ownerLoss); XCTAssertEqual(budget, 30_000); XCTAssertFalse(h.ports.finished)
+        h.cleanHalt(); h.workerExits(.code(0))
+        guard case .stopped(let id, let receipt)? = h.ports.lines.last else { return XCTFail("a daemon that is still there is told") }
+        XCTAssertNil(id); XCTAssertEqual(receipt.origin, .ownerLossDrain)
+        XCTAssertTrue(h.ports.finished, "and the process ends without waiting to be retired")
+        XCTAssertNotNil(try h.store.load(ReceiptScope(Fixture.scope)))
+    }
+    func testATerminationSignalBeforeAnyWorkerJustEndsAndOneAfterTheVerdictToo() throws {
+        let a = harness(); a.session.terminationRequested(); XCTAssertTrue(a.ports.finished)
+        let b = harness(); try b.bringUp(); b.stop(); b.cleanHalt(); b.workerExits(.code(0)); XCTAssertFalse(b.ports.finished)
+        b.session.terminationRequested(); XCTAssertTrue(b.ports.finished); XCTAssertEqual(b.store.retired, [], "a signal does not retire the receipt")
+    }
+    func testADrainThatCouldNotBeHandedToTheWorkerIsNotEvidenceOfADrain() throws {
+        let h = harness(); try h.bringUp(); h.ports.workerSendOK = false
+        h.stop()
+        XCTAssertNil(h.session.evidence.drain)
+        XCTAssertEqual(h.ports.process.killCalls, 1); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.launcherFault]); XCTAssertTrue(h.ports.stopped.isEmpty)
+    }
+
     func testAProtocolViolationOnL1IsOwnerLossAfterOneFaultLine() throws {
         let h = harness(); try h.bringUp()
         h.sendRaw("this is not json\n")

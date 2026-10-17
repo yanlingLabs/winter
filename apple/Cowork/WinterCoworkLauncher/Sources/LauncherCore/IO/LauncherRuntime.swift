@@ -55,6 +55,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private var timers: [SessionTimer: DispatchSourceTimer] = [:]
     private var timerGeneration: [SessionTimer: Int] = [:]
     private var power: PowerObserver?
+    private var signalSources: [DispatchSourceSignal] = []
 
     /// `l1` must already be numbered above 4 (so the worker's descriptors 3 and 4 are free), non-blocking and FD_CLOEXEC.
     public init(l1: OwnedFD, spawner: WorkerSpawning, label: String = "winter.cowork.launcher", onFinish: @escaping @Sendable () -> Void) {
@@ -63,7 +64,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     }
 
     /// Builds the session and starts reading L1. Call once; everything after runs on `queue`.
-    public func start(config: SessionConfig, dependencies: SessionDependencies, observePower: Bool) {
+    public func start(config: SessionConfig, dependencies: SessionDependencies, observePower: Bool, handleTerminationSignals: Bool = false) {
         queue.async { [self] in
             session = LauncherSession(config: config, ports: self, dependencies: dependencies)
             let read = DispatchSource.makeReadSource(fileDescriptor: l1.raw, queue: queue)
@@ -73,6 +74,15 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
             if observePower {
                 let observer = PowerObserver(queue: queue) { [weak self] event in self?.session?.powerEvent(event) }
                 if (try? observer.start()) != nil { power = observer }
+            }
+            if handleTerminationSignals {
+                // A launcher that dies on SIGTERM would leave a worker running on two raw images with nobody to reap or receipt it.
+                for number in [SIGTERM, SIGHUP, SIGINT] {
+                    signal(number, SIG_IGN)
+                    let source = DispatchSource.makeSignalSource(signal: number, queue: queue)
+                    source.setEventHandler { [weak self] in self?.session.terminationRequested() }
+                    signalSources.append(source); source.resume()
+                }
             }
             session.start()
             l1Readable() // anything the daemon wrote before we were listening
@@ -282,6 +292,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
         guard !finished else { return }
         finished = true
         power?.stop(); power = nil
+        signalSources.forEach { $0.cancel() }; signalSources.removeAll()
         timers.values.forEach { $0.cancel() }; timers.removeAll()
         [l1Read, l2Read, l3Read].forEach { $0?.cancel() }
         processSource?.cancel()
