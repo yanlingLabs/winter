@@ -4,7 +4,7 @@ import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumeRequest, CoworkVolumes } from "../volumes";
 import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-filesystem";
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
-import { CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
+import { CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
 import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
 import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeObserved, type CoworkNativeStopRegistry } from "./stop-proof";
@@ -72,6 +72,8 @@ export interface CoworkNativeHostDeps {
   /** This daemon process as the admission ledger knows it (pid, start token, boot id, instance nonce). */
   readonly daemon: () => AdmissionOwner;
   readonly timeouts?: Partial<CoworkNativeHostTimeouts>; readonly memoryMiB?: number;
+  /** TEST ONLY: lets a test pass timeouts shorter than the contract's floor. Never set outside tests. */
+  readonly unsafeTestTimeouts?: boolean;
   readonly now?: () => number;
   /** Isolated crash/fault testing only, never serialized or supplied by an RPC. A throw stands for the process dying there. */
   readonly checkpoint?: (phase: string) => void;
@@ -156,6 +158,8 @@ export class CoworkNativeHost {
   private readonly now: () => number;
   constructor(private readonly deps: CoworkNativeHostDeps) {
     this.timeouts = { ...COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS, ...deps.timeouts };
+    // The stop wait may never be shorter than the contract's H (guest budget + the VMM exit allowance + margins): a shorter wait gives up on a launcher that is still entitled to answer.
+    if (deps.unsafeTestTimeouts !== true && this.timeouts.drainBudgetMs + this.timeouts.exitAllowanceMs + this.timeouts.stopGraceMs < coworkNativeHostStopWaitMs(this.timeouts.drainBudgetMs)) throw new CoworkNativeHostError("protocol", "stop wait is shorter than the contract's host wait");
     this.now = deps.now ?? Date.now;
   }
   private hook(phase: string): void { try { this.deps.checkpoint?.(phase); } catch (error) { throw isCrash(error) ? error : new CoworkNativeSimulatedCrash(phase); } }

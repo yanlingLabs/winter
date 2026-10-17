@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import * as ts from "typescript";
 
 // Anti-wiring pin for the native worker modules (N2 S1). They are SOURCE ONLY: nothing outside src/cowork/native/ imports them,
 // no port they declare has an implementation in src/, and they reach no VM, no network and no secret store.
@@ -35,6 +36,24 @@ export function reachesNative(file: string, specifier: string): boolean {
   return target === nativeDirectory || target.startsWith(`${nativeDirectory}${sep}`);
 }
 
+
+/** Every module a source names, by AST (not by regex): `import x from`, bare `import "x"`, `export ... from`, `import type`, `import x = require()`, `require("x")` and `import("x")`.
+ * A dynamic or require call whose argument is not a string literal is reported as `<dynamic:...>` and is never allowed. */
+export function astSpecifiers(source: string, file = "x.ts"): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) found.push(node.moduleSpecifier.text);
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteralLike(node.moduleReference.expression)) found.push(node.moduleReference.expression.text);
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
+      const argument = node.arguments[0];
+      found.push(argument && ts.isStringLiteralLike(argument) ? argument.text : `<dynamic:${node.getText()}>`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true));
+  return found;
+}
+
 test("the module set is exactly the reviewed one and has no barrel", () => {
   expect(everyNativeSource.map(file => basename(file, ".ts")).sort()).toEqual([...MODULES, ...OTHER_SLICES].sort());
   expect(existsSync(join(nativeDirectory, "index.ts"))).toBe(false);
@@ -66,8 +85,7 @@ test("the native modules import only the reviewed neighbours and reach no daemon
   const allowed = new Set(["node:crypto", "bun:ffi", "../admission", "../repository", "../types", "../volumes", "../volume-filesystem", "../durable-transaction", "../../runtime-state/db"]);
   for (const file of nativeSources) {
     const text = readFileSync(file, "utf8");
-    for (const match of text.matchAll(/(?:^|\n)\s*import[^;]*?from "([^"]+)"/g)) {
-      const target = match[1]!;
+    for (const target of astSpecifiers(text, file)) {
       expect(`${basename(file)}:${target}:${allowed.has(target) || (target.startsWith("./") && MODULES.includes(target.slice(2)))}`).toBe(`${basename(file)}:${target}:true`);
     }
     for (const forbidden of ["Bun.connect(", "Bun.listen(", "node:net", "node:http", "fetch(", "Bun.secrets", "process.env", "Keychain", "Hypervisor", "hv_vm_", "krun_start_enter", "sandbox_init", "pmset", "codesign", "child_process"])
@@ -127,4 +145,16 @@ test("the specifier scanner sees every form of import, and resolves it relative 
     expect(specifiersOf(text).filter(specifier => reachesNative(file, specifier))).toEqual([]);
   // a sibling named like the directory is not the directory
   expect(reachesNative(cowork, "./native-adapter/host")).toBe(false);
+});
+
+test("the neighbour scanner sees bare imports, export-from, dynamic import() and require(), and refuses what the old regex missed", () => {
+  expect(astSpecifiers('import "node:net";')).toEqual(["node:net"]);
+  expect(astSpecifiers('export { a } from "../daemon";\nexport * from "./index";')).toEqual(["../daemon", "./index"]);
+  expect(astSpecifiers('const m = await import("../ipc/server");')).toEqual(["../ipc/server"]);
+  expect(astSpecifiers('const m = require("node:http"); import x = require("node:net");')).toEqual(["node:http", "node:net"]);
+  expect(astSpecifiers("const m = await import(name);")).toEqual(["<dynamic:import(name)>"]);
+  expect(astSpecifiers('import type { T } from "../types"; import { b,\n c } from "./protocol";')).toEqual(["../types", "./protocol"]);
+  // None of the planted forms is an allowed neighbour.
+  const allowedFixture = new Set(["node:crypto", "bun:ffi", "../admission"]);
+  for (const planted of ['import "node:net";', 'export { a } from "../daemon";', 'await import("../ipc/server");', "await import(name);"]) expect(astSpecifiers(planted).every(target => allowedFixture.has(target))).toBe(false);
 });

@@ -11,10 +11,11 @@ import { CoworkNativePower } from "../../../src/cowork/native/power";
 import { CoworkNativeRecovery, type CoworkNativeDurableReceiptPort, type CoworkNativeOwnerRecoverPort } from "../../../src/cowork/native/recovery";
 import { coworkNativeLedgerStopProbe, CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeRecoverGuards, type CoworkNativeRecoverSubject } from "../../../src/cowork/native/stop-proof";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../../src/runtime-state/db";
+import { guidedSet } from "./conversation-fixtures";
 import { FakeLauncher, type FakeBehavior } from "./fake-launcher";
 
 export const IMAGE_DIGEST = "d".repeat(64);
-const PHASES = ["incarnation-begun", "admission-reserved", "launcher-spawned", "worker-begun", "claimed", "filesystem-intent", "volumes-opened", "transferred", "bootstrap-sent", "receipt-received", "filesystems-confirmed", "ready-sent", "power-running"] as const;
+const PHASES = ["incarnation-begun", "admission-reserved", "launcher-spawned", "worker-begun", "claimed", "filesystem-intent", "volumes-opened", "transferred", "bootstrap-sent", "receipt-received", "filesystems-confirmed", "ready-sent", "conversations-sent", "runtime-ready", "power-running"] as const;
 export const START_PHASES: readonly string[] = PHASES;
 /** Volume-layer checkpoints that fire inside CoworkVolumes, in sequence order. */
 export const VOLUME_PHASES = ["filesystem-intent-committed"] as const;
@@ -144,7 +145,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     const deps: CoworkNativeHostDeps = {
       records: harness.records, volumes: harness.volumes, admission: harness.ledger, authority: harness.authority, power: harness.power, recovery: harness.recovery, registry: harness.registry, hostBoot,
       launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, runtimeReadyMs: 400, stopGraceMs: 150, exitAllowanceMs: 0, drainBudgetMs: 150, ...boot.timeouts },
-      conversations: options.conversations, now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
+      conversations: "conversations" in options ? options.conversations : guidedSet, unsafeTestTimeouts: true, now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
     };
     harness.deps = deps;
     harness.host = new CoworkNativeHost(deps);

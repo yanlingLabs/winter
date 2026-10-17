@@ -20,7 +20,7 @@ test("the full sequence runs in order and ends running, owned, ready and admitte
   const host = h.events.filter(event => event.startsWith("host:")).map(event => event.slice(5));
   expect(host).toEqual([...START_PHASES]);
   const launcher = h.events.filter(event => event.startsWith("launcher:")).map(event => event.slice(9));
-  expect(launcher).toEqual(["begin", "volumes", "mux_down", "mux_down"]);
+  expect(launcher).toEqual(["begin", "volumes", "mux_down", "mux_down", "mux_down"]); // plan, ready, conversations
   // claim happened BEFORE the descriptors reached the launcher, the format intent BEFORE they were opened.
   const order = h.events.filter(event => event === "host:claimed" || event === "host:filesystem-intent" || event === "host:volumes-opened" || event === "launcher:volumes" || event === "host:transferred");
   expect(order).toEqual(["host:claimed", "host:filesystem-intent", "host:volumes-opened", "launcher:volumes", "host:transferred"]);
@@ -341,4 +341,13 @@ test("the host waits for the stop verdict through the VMM exit allowance: an ans
 });
 test("the host's default wait for a stop is the contract's H: budget, plus the exit watchdog and the launcher's margin, plus the daemon's margin", () => {
   expect(COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS.drainBudgetMs + COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS.exitAllowanceMs + COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS.stopGraceMs).toBe(coworkNativeHostStopWaitMs(COWORK_NATIVE_LIMITS.drainBudgetMs));
+});
+
+test("the host refuses a stop wait shorter than the contract's H unless a test says so", () => {
+  const h = createHarness();
+  const deps = { ...h.deps, unsafeTestTimeouts: undefined };
+  expect(() => new CoworkNativeHost({ ...deps, timeouts: { drainBudgetMs: 30_000, exitAllowanceMs: 0, stopGraceMs: 1_000 } })).toThrow();
+  expect(() => new CoworkNativeHost({ ...deps, timeouts: { drainBudgetMs: 120_000 } })).not.toThrow(); // defaults for the other two still reach H for the larger budget
+  expect(() => new CoworkNativeHost({ ...deps, timeouts: undefined })).not.toThrow();
+  expect(() => new CoworkNativeHost({ ...h.deps, timeouts: { drainBudgetMs: 30_000, exitAllowanceMs: 0, stopGraceMs: 1_000 } })).not.toThrow(); // the harness's explicit test override
 });
