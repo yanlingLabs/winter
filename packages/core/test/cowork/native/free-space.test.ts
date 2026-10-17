@@ -3,7 +3,7 @@ import { closeSync, constants, ftruncateSync, mkdirSync, mkdtempSync, openSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  COWORK_FREE_SPACE_MAX_IMAGES, COWORK_FREE_SPACE_RESERVE_BYTES, STATFS_BYTES, assessFreeSpace, createFstatFootprintReader, createStatfsReader, parseStatfs, preflightImageAdmission, readSpaceSafely, reverifyStickyExclusion,
+  COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES, COWORK_FREE_SPACE_MAX_IMAGES, COWORK_FREE_SPACE_RESERVE_BYTES, STATFS_BYTES, assessFreeSpace, createFstatFootprintReader, createStatfsReader, parseStatfs, preflightImageAdmission, readSpaceSafely, reverifyStickyExclusion,
   type ExclusionVerifier, type FilesystemSpace, type FilesystemSpaceReader, type FreeSpaceInput, type ImageFootprintReader, type PressureView, type ProvisionedImage, type SpaceTarget, type StatfsLibrary,
 } from "../../../src/cowork/native/free-space";
 import { closeFd, openDirAt, openImageAt, AT_FDCWD } from "../../../src/cowork/volume-fs";
@@ -210,13 +210,22 @@ test("the caller must say what is outstanding: omitting it is an invalid request
   expect(preflightImageAdmission({ images: [{ name: "a.ext4", provisionedBytes: GiB, path: "/p/a.ext4", fd: 10 }], outstanding: undefined, space: reader, footprint: noFootprint, guard: open, backup: verifier().backup } as never).outcome).toBe("invalid_request");
   expect(reader.reads).toEqual([]);
 });
-test("the number of images is bounded, counting outstanding ones", () => {
+test("the number of images is bounded: a few being admitted, and a machine's worth together with the outstanding ones", () => {
   const many = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => image(`${prefix}${i}`, 4096, 3));
   const everything = { read: () => space(10 ** 13) } satisfies FilesystemSpaceReader;
-  expect(COWORK_FREE_SPACE_MAX_IMAGES).toBe(8192);
+  expect(COWORK_FREE_SPACE_MAX_IMAGES).toBe(8192); expect(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES).toBe(4);
+  // Both sides of the admitted-images cap (one guest admits two; four is the ceiling).
+  expect(assess({ images: many(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES, "c"), space: everything }).outcome).toBe("admit");
+  expect(assess({ images: many(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES + 1, "c"), space: everything }).outcome).toBe("invalid_request");
+  expect(assess({ images: many(COWORK_FREE_SPACE_MAX_IMAGES, "c"), space: everything }).outcome).toBe("invalid_request"); // not a way to pass everything as "being admitted"
+  // Both sides of the combined cap.
   expect(assess({ images: many(1, "c"), outstanding: many(COWORK_FREE_SPACE_MAX_IMAGES - 1, "o"), space: everything }).outcome).toBe("admit");
   expect(assess({ images: many(1, "c"), outstanding: many(COWORK_FREE_SPACE_MAX_IMAGES, "o"), space: everything }).outcome).toBe("invalid_request");
-  expect(assess({ images: many(COWORK_FREE_SPACE_MAX_IMAGES + 1, "c"), space: everything }).outcome).toBe("invalid_request");
+  expect(assess({ images: many(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES, "c"), outstanding: many(COWORK_FREE_SPACE_MAX_IMAGES - COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES, "o"), space: everything }).outcome).toBe("admit");
+  expect(assess({ images: many(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES, "c"), outstanding: many(COWORK_FREE_SPACE_MAX_IMAGES - COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES + 1, "o"), space: everything }).outcome).toBe("invalid_request");
+  // The preflight inherits both caps.
+  const pre = (n: number) => preflightImageAdmission({ images: Array.from({ length: n }, (_, i) => ({ name: `p${i}`, provisionedBytes: 4096, path: `/p/${i}`, fd: 3 })), outstanding: [], space: everything, footprint: noFootprint, guard: open, backup: verifier().backup }).outcome;
+  expect(pre(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES)).toBe("admit"); expect(pre(COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES + 1)).toBe("invalid_request");
 });
 test("shared pool: the MIN of every observed filesystem decides, never a per-filesystem group", () => {
   // Two APFS volumes of one container report the same pool under different fsids. 60 + 60 + reserve does not fit

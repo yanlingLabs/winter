@@ -35,8 +35,9 @@ export const IOREG_ARGS: readonly string[] = Object.freeze(["-rd1", "-c", "IOPla
 export const HOST_COMMAND_TIMEOUT_MS = 5000;
 export const HOST_COMMAND_MAX_BUFFER_BYTES = 256 * 1024;
 export interface HostCommandLimits { readonly timeoutMs?: number; readonly maxBufferBytes?: number }
-/** Bounded and synchronous: a hung child is killed at the timeout, output beyond the cap kills it too, the environment
- * is empty, stdin is /dev/null, stderr is discarded. This matters because `hostIdentity()` runs inside the ledger's
+/** Bounded and synchronous: a hung child is killed at the timeout with SIGKILL (a child that traps or ignores SIGTERM
+ * cannot outlive it, and the synchronous call never waits on it), output beyond the cap kills it too, the environment
+ * is empty, stdin is /dev/null, stderr is discarded (so a chatty child can neither fill a pipe nor reach the result). This matters because `hostIdentity()` runs inside the ledger's
  * `BEGIN IMMEDIATE`: a command that never returned would hold the coordination write lock. Only the first good
  * answer is cached, so a hang costs at most one timeout per attempt. */
 export function createHostCommandRunner(limits: HostCommandLimits = {}): HostCommandRunner {
@@ -44,7 +45,7 @@ export function createHostCommandRunner(limits: HostCommandLimits = {}): HostCom
   if (!Number.isSafeInteger(timeout) || timeout < 1 || !Number.isSafeInteger(maxBuffer) || maxBuffer < 1) throw new RangeError("host_command_limits");
   return (file, args) => {
     try {
-      const result = spawnSync(file, [...args], { encoding: "utf8", timeout, maxBuffer, env: {}, stdio: ["ignore", "pipe", "ignore"] });
+      const result = spawnSync(file, [...args], { encoding: "utf8", timeout, killSignal: "SIGKILL", maxBuffer, env: {}, stdio: ["ignore", "pipe", "ignore"] });
       const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
       return { status: result.error ? null : result.status, stdout: typeof result.stdout === "string" ? result.stdout : "", timedOut };
     } catch {

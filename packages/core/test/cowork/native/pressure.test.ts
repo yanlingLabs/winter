@@ -225,6 +225,37 @@ test("a halt that timed out is re-issued for the same (key, episode) while the e
   await new Promise(resolve => setTimeout(resolve, 5));
   expect(guard.snapshot().entries[0]).toMatchObject({ state: "blocked", haltConfirmed: false });
 });
+test("a sample taken from a target that was retargeted during the evaluation is discarded, not applied to the new target", async () => {
+  // b is blocked; a's halt callback then retargets b. The old target reads healthy (it would clear b), the new one is not yet sampled.
+  const { guard, reader, writers } = guardFor(["a", "b"]);
+  reader.set("b", R - 1); await guard.evaluate();                                  // b: blocked, halt confirmed
+  expect(guard.snapshot().entries.find(e => e.key === "b")).toMatchObject({ state: "blocked", haltConfirmed: true, filesystemId: "fsid:b" });
+  reader.set("b", R + M + GiB, "fsid:old");                                        // the OLD target now looks healthy and would clear b
+  reader.set("a", R - 1);
+  writers.script = request => { if (request.key === "a") guard.watch("b", { kind: "path", path: "/b2" }); return { halted: true }; };
+  const report = await guard.evaluate();
+  expect(report.transitions.map(t => `${t.key}:${t.to}`)).toEqual(["a:blocked"]);                // b did not clear on the stale reading
+  expect(guard.snapshot().entries.find(e => e.key === "b")).toMatchObject({ state: "blocked", episode: 1, haltConfirmed: true, observed: false, filesystemId: null });
+  expect(guard.admitsNewWork()).toBe(false);
+  reader.readings.set("/b2", space(R + M + GiB, "fsid:new"));                      // the new target, once sampled, is what decides
+  await guard.evaluate();
+  expect(guard.snapshot().entries.find(e => e.key === "b")).toMatchObject({ state: "clear", observed: true, filesystemId: "fsid:new" });
+});
+test("a retarget made inside a key's own halt keeps that key blocked until the new target is sampled", async () => {
+  const { guard, reader, writers } = guardFor(["b"]);
+  reader.set("b", R - 1);
+  writers.script = () => ({ halted: false });
+  await guard.evaluate();                                                         // blocked, halt NOT confirmed
+  reader.set("b", R + M + GiB);                                                   // the old target recovers ...
+  writers.script = () => { guard.watch("b", { kind: "path", path: "/b2" }); return { halted: true }; }; // ... but the retry retargets the key
+  await guard.evaluate();
+  expect(guard.snapshot().entries[0]).toMatchObject({ state: "blocked", haltConfirmed: true, observed: false, filesystemId: null });
+  reader.readings.set("/b2", space(R - 1, "fsid:new"));                           // the new target is itself under the reserve
+  await guard.evaluate();
+  expect(guard.snapshot().entries[0]).toMatchObject({ state: "blocked", observed: true, filesystemId: "fsid:new" });
+  reader.readings.set("/b2", space(R + M, "fsid:new")); await guard.evaluate();
+  expect(guard.snapshot().entries[0]).toMatchObject({ state: "clear" });
+});
 test("a watched target that starts answering for a different filesystem blocks and does not clear until it is watched again", async () => {
   const { guard, reader, writers } = guardFor(["a"]);
   reader.set("a", 100 * GiB, "fsid:first"); await guard.evaluate(); expect(guard.admitsNewWork()).toBe(true);

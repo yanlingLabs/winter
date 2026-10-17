@@ -14,8 +14,9 @@
  *    episode is confirmed. A failed or timed-out halt is retried on every evaluation and keeps the key blocked.
  *  - An unreadable filesystem blocks (fail closed) and clears only on a good reading above the resume line.
  *  - A watched target that starts answering for a DIFFERENT filesystem (`f_fsid` changed since its first sample,
- *    for example a closed fd number reused) blocks with `free_space_filesystem_changed` and does not clear until the
- *    host re-`watch`es the key. The caller owns any fd target for the guard's lifetime and must not close it while
+ *    for example a closed fd number reused) blocks with `free_space_filesystem_changed` and does not clear while it
+ *    keeps answering for the other filesystem. It clears again if the target returns to its original filesystem
+ *    (then judged on space like any key), or when the host re-`watch`es the key. The caller owns any fd target for the guard's lifetime and must not close it while
  *    watched; path targets avoid the hazard. The check is a tripwire, not a substitute for that ownership.
  *  - "Clear" means the guard stops refusing new work. Restarting a halted writer is the CALLER's step after it
  *    revalidates pressure and uncertain operations; the guard never resumes anything.
@@ -91,6 +92,8 @@ export interface PressureGuardOptions {
 interface Entry {
   key: string; target: SpaceTarget; state: "clear" | "blocked"; episode: number; reason: WriterHaltReason | null;
   availableBytes: number | null; filesystemId: string | null; haltConfirmed: boolean; observed: boolean;
+  /** Bumped by every retarget, so a sample taken before it can be recognised as stale. */
+  generation: number;
 }
 const KEY = /^[A-Za-z0-9._:-]{1,200}$/;
 
@@ -118,8 +121,8 @@ export class CoworkPressureGuard implements PressureView {
   watch(key: string, target: SpaceTarget): void {
     if (typeof key !== "string" || !KEY.test(key) || !target) throw new TypeError("pressure_guard_target");
     const existing = this.entries.get(key);
-    if (existing) { existing.target = target; existing.observed = false; existing.filesystemId = null; return; }
-    this.entries.set(key, { key, target, state: "clear", episode: 0, reason: null, availableBytes: null, filesystemId: null, haltConfirmed: false, observed: false });
+    if (existing) { existing.target = target; existing.observed = false; existing.filesystemId = null; existing.generation += 1; return; }
+    this.entries.set(key, { key, target, state: "clear", episode: 0, reason: null, availableBytes: null, filesystemId: null, haltConfirmed: false, observed: false, generation: 0 });
   }
   /** The host decides when a filesystem is no longer its concern (for example the workspace is gone). The
    * result says whether it was blocked so the host can keep any halted writer halted. */
@@ -153,10 +156,12 @@ export class CoworkPressureGuard implements PressureView {
   private async run(): Promise<PressureReport> {
     const at = this.now();
     // Take every sample before acting on any: one instant, however slow a halt is.
-    const sampled = [...this.entries.values()].map(entry => ({ entry, space: this.sample(entry.target) }));
+    const sampled = [...this.entries.values()].map(entry => ({ entry, generation: entry.generation, space: this.sample(entry.target) }));
     const transitions: PressureTransition[] = [];
-    for (const { entry, space } of sampled) {
-      if (this.entries.get(entry.key) !== entry) continue;
+    for (const { entry, generation, space } of sampled) {
+      // A halt callback earlier in this loop may have unwatched or RETARGETED the key. A sample taken from the old target
+      // must not undo the retarget (it would mark the new target observed and learn the old filesystem as its identity).
+      if (this.entries.get(entry.key) !== entry || entry.generation !== generation) continue;
       // The first good sample fixes the key's filesystem. A later sample that answers for another one is untrusted.
       const changed = space !== null && entry.filesystemId !== null && space.filesystemId !== entry.filesystemId;
       const available = space === null || changed ? null : space.availableBytes;
@@ -170,7 +175,8 @@ export class CoworkPressureGuard implements PressureView {
         transitions.push(blocked); this.emit(blocked);
       }
       if (!entry.haltConfirmed) entry.haltConfirmed = await this.halt(entry);
-      if (this.entries.get(entry.key) !== entry) continue;
+      // The halt may have retargeted or unwatched this very key: the reading above no longer describes it, so it cannot clear it.
+      if (this.entries.get(entry.key) !== entry || entry.generation !== generation) continue;
       // Clear needs BOTH a good reading above the resume line AND a confirmed halt for this episode.
       if (entry.haltConfirmed && available !== null && available >= this.reserve + this.margin) {
         const cleared: PressureTransition = { key: entry.key, from: "blocked", to: "clear", episode: entry.episode, reason: null, availableBytes: available };

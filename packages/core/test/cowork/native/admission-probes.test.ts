@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { AdmissionError, type AdmissionOwner, type AdmissionProbes, type HostIdentity, type ResourceObservation, type StopReceipt } from "../../../src/cowork/admission";
 import {
@@ -77,6 +77,27 @@ runnerTest("the host command runner is bounded: a hung child times out, runaway 
   // stdin is /dev/null (a character device), never the caller's pipe or terminal.
   const perl = 'print((-c STDIN ? "char" : -p STDIN ? "pipe" : -t STDIN ? "tty" : "other"), "\\n")';
   expect(createHostCommandRunner()("/usr/bin/perl", ["-e", perl])).toEqual({ status: 0, stdout: "char\n", timedOut: false });
+});
+runnerTest("a child that traps SIGTERM (and every other catchable signal) is killed at the timeout: the call returns promptly and no process is left running", () => {
+  const root = mkdtempSync(join(tmpdir(), "winter-n2-runner-")); cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  const pidFile = join(root, "pid");
+  // The child ignores every catchable termination signal (only SIGKILL ends it) and spins, but gives up by itself after 8 s so a
+  // broken runner can never leave a busy process behind.
+  const script = 'echo $$ > "$1"; trap "" TERM INT HUP QUIT; end=$((SECONDS+8)); while [ $SECONDS -lt $end ]; do :; done';
+  const started = Date.now(), result = createHostCommandRunner({ timeoutMs: 300 })("/bin/sh", ["-c", script, "sh", pidFile]);
+  const elapsed = Date.now() - started;
+  expect(result.status).toBeNull(); expect(result.timedOut).toBe(true);
+  expect(elapsed).toBeLessThan(3000);
+  const pid = Number(readFileSync(pidFile, "utf8").trim());
+  expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
+  let alive = true; try { process.kill(pid, 0); } catch { alive = false; }
+  expect(alive).toBe(false);
+});
+runnerTest("a child that floods stderr neither blocks nor reaches the result", () => {
+  // 1 MB on stderr is four times the output cap: were stderr piped it would exceed the cap and fail the call, and were it
+  // merged it would appear in stdout.
+  const result = createHostCommandRunner()("/bin/sh", ["-c", "/usr/bin/head -c 1000000 /dev/zero 1>&2; echo out"]);
+  expect(result).toEqual({ status: 0, stdout: "out\n", timedOut: false });
 });
 test("the host command runner refuses nonsensical limits", () => {
   for (const bad of [{ timeoutMs: 0 }, { timeoutMs: -1 }, { timeoutMs: 1.5 }, { timeoutMs: Number.NaN }, { maxBufferBytes: 0 }, { maxBufferBytes: 2.5 }]) expect(() => createHostCommandRunner(bad)).toThrow(RangeError);
@@ -369,7 +390,7 @@ real("the real sysctl adapter answers the facts the resource observer reads", ()
   const sysctl = createProductionHostAdapters().sysctl;
   expect(sysctl.uint64("hw.memsize")! >= 1n << 30n).toBe(true);
   expect(sysctl.int32("hw.ncpu")! >= 1).toBe(true);
-  expect([1, 2, 4]).toContain(sysctl.int32("kern.memorystatus_vm_pressure_level")!);
+  expect([1, 2, 4].includes(sysctl.int32("kern.memorystatus_vm_pressure_level")!)).toBe(true);
   expect(shaped(sysctl.string("kern.bootsessionuuid"), UUID_SHAPE)).toBe(true);
   expect(sysctl.string("kern.no_such_sysctl_name") === null).toBe(true); expect(sysctl.int32("hw.memsize") === null).toBe(true); // wrong width for an 8-byte value
 });

@@ -36,8 +36,11 @@ import type { CoworkVolumeBackup } from "../volume-backup";
 
 /** docs/cowork-execution-contracts.md: "Begin with a tunable 5 GiB free-space reserve". */
 export const COWORK_FREE_SPACE_RESERVE_BYTES = 5 * 1024 ** 3;
-/** Two images per guest across the ledger's 4096-guest cap. */
+/** Two images per guest across the ledger's 4096-guest cap: the bound on `images` and `outstanding` together. */
 export const COWORK_FREE_SPACE_MAX_IMAGES = 8192;
+/** The bound on `images` alone. One guest admits two (data and environment); four leaves room without letting a caller
+ * hand over a whole machine's worth of images as "being admitted" (those belong in `outstanding`). */
+export const COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES = 4;
 
 export type SpaceTarget = { readonly kind: "fd"; readonly fd: number } | { readonly kind: "path"; readonly path: string };
 export interface FilesystemSpace {
@@ -203,7 +206,7 @@ export function assessFreeSpace(input: FreeSpaceInput): FreeSpaceAssessment {
   const reserve = input?.reserveBytes ?? COWORK_FREE_SPACE_RESERVE_BYTES;
   if (!input || !Array.isArray(input.images) || input.images.length < 1) return invalid("images");
   if (!Array.isArray(input.outstanding)) return invalid("outstanding");
-  if (input.images.length + input.outstanding.length > COWORK_FREE_SPACE_MAX_IMAGES) return invalid("images");
+  if (input.images.length > COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES || input.images.length + input.outstanding.length > COWORK_FREE_SPACE_MAX_IMAGES) return invalid("images");
   if (!Number.isSafeInteger(reserve) || reserve < 1) return invalid("reserveBytes");
   if (typeof input.space?.read !== "function" || typeof input.footprint?.allocatedBytes !== "function" || typeof input.guard?.admitsNewWork !== "function") return invalid("ports");
   const all = [...input.images, ...input.outstanding];

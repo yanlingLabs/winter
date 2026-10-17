@@ -81,8 +81,10 @@ required:
   explicitly when there is none; omitting it is an `invalid_request`.
 
 Leaving an outstanding image out under-counts, because that guest can still grow into the same pool. Outstanding images get
-the same remaining-liability credit, and their filesystems are observed too, so the smallest pool decides. The list is bounded
-at `COWORK_FREE_SPACE_MAX_IMAGES` (8192: two images per guest at the ledger's 4096-guest cap). Admissions of other Winter homes
+the same remaining-liability credit, and their filesystems are observed too, so the smallest pool decides. The lists are
+bounded: `images` at `COWORK_FREE_SPACE_MAX_ADMITTED_IMAGES` (4: one guest admits two, data and environment, and this keeps a
+caller from handing over a whole machine's images as "being admitted"), and `images` plus `outstanding` together at
+`COWORK_FREE_SPACE_MAX_IMAGES` (8192: two images per guest at the ledger's 4096-guest cap). Admissions of other Winter homes
 are invisible to this daemon's databases and cannot be listed; they are covered only by the reserve and the reactive guard.
 
 **Export while stopped must bypass this admission (S7-facing).** The check exists to stop a guest from writing a full disk. An
@@ -138,10 +140,13 @@ module). Per watched key:
   key that is unwatched and watched again can never re-send an earlier `(key, episode)`; `(key, episode)` names exactly one
   episode for the guard's lifetime.
 - **Retargeting** (`watch` on an existing key) keeps the blocked state, the episode and the confirmed halt, but makes the key
-  unobserved: `admitsNewWork()` is false until the next evaluation, and the key's filesystem identity is learned afresh.
+  unobserved: `admitsNewWork()` is false until the next evaluation, and the key's filesystem identity is learned afresh. A
+  retarget made while an evaluation is running (for example from inside another key's halt callback, or the key's own) is
+  respected: a sample taken from the old target is discarded rather than applied to the new one, and cannot clear the key.
 - **A target that changes filesystem blocks.** The first good sample fixes the key's `f_fsid`. A later sample answering for a
   different one (for example a closed fd number reused for another file) blocks with `free_space_filesystem_changed`, halts
-  writers, and does not clear while the target keeps answering for the other filesystem; the host clears it by re-watching.
+  writers, and does not clear while the target keeps answering for the other filesystem. It clears again if the target returns to
+  its original filesystem (then judged on space like any key), or when the host re-watches it.
   The caller owns any fd target for the guard's lifetime and must not close it while watched; path targets avoid the hazard
   altogether. The identity check is a tripwire, not a substitute for that ownership.
 - **Resume is the caller's.** "Clear" means the guard stops refusing new work. Restarting a halted writer is the host's step
@@ -176,9 +181,9 @@ Decision: **do not implement guest DISCARD, WRITE_ZEROES or host-side hole punch
 
 Reasons:
 
-1. **The guard does not need it.** Admission already counts every image at its full provisioned size, so a sparse image's
-   high-water mark can never exceed what admission covered, and the reactive guard handles the rest. Reclaiming freed guest
-   blocks is a space-efficiency feature, not a safety property.
+1. **The guard does not need it.** Admission reserves each image's remaining growth (provisioned size minus what is already
+   allocated), so a sparse image's high-water mark can never exceed what admission covered, and the reactive guard handles the
+   rest. Reclaiming freed guest blocks is a space-efficiency feature, not a safety property.
 2. **It enlarges the VMM surface.** Discard means a new virtio feature bit and host file operations
    (`fcntl(F_PUNCHHOLE)` on the image descriptor) at guest-chosen offsets and lengths, with APFS block alignment, range
    validation and error mapping, inside the sandboxed worker whose device inventory and drain/pin budget are a reviewed
@@ -203,7 +208,7 @@ Real, read-only:
 
 | Fact | Source | Notes |
 |---|---|---|
-| `machineId` | IOPlatformUUID from `/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice` | Fixed absolute path and arguments through an injected runner (`createHostCommandRunner`: empty environment, stdin `/dev/null`, stderr discarded, 5 s timeout, 256 KiB cap; behaviour tested against real children). Exactly one line may mention the key and it must be a well-formed non-nil UUID. Cached after the first good answer. |
+| `machineId` | IOPlatformUUID from `/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice` | Fixed absolute path and arguments through an injected runner (`createHostCommandRunner`: empty environment, stdin `/dev/null`, stderr discarded, a 5 s timeout enforced with SIGKILL so a child that ignores SIGTERM cannot outlive it, 256 KiB cap; behaviour tested against real children, including one that traps SIGTERM and one that floods stderr). Exactly one line may mention the key and it must be a well-formed non-nil UUID. Cached after the first good answer. |
 | `bootId` | `kern.bootsessionuuid` via sysctl FFI | Read on every call. Well-formed non-nil UUID or `null`. |
 | process identity | `proc_pidinfo(PROC_PIDTBSDINFO)`, 136-byte `proc_bsdinfo` | `startToken` is `<seconds>.<microseconds>`. Only ESRCH proves a process absent (`dead`); a short read, a record for another pid, a zero start or EPERM is `unknown`. A zombie is `dead`. |
 | Coordination ledger path | `coordinationLedgerPath({ env, homeDirectory })` | Pure spelling, no IO. `WINTER_COWORK_COORDINATION_DIR` or `~/Library/Application Support/Winter/Coordination`, exactly as the host-storage fence spells it (a test pins the two together). A set-but-invalid override throws; it never falls back to the real path. |
@@ -313,4 +318,4 @@ real process table only). All literals in the tests are obviously synthetic.
 12. **Real-host tests** beyond the four sanctioned probes (all shape-only, read-only or temp-only): the `statfs`/`fstatfs`
     layout check, the existing `tmutil` helper applied to a `mkdtemp` image and then re-verified, `hw.memsize`/`hw.ncpu`/
     memory-pressure reads, a `/usr/sbin/sysctl -n` cross-check compared as a boolean, a `/bin/sleep` child started and killed by
-    the test, and harmless coreutils (`env`, `yes`, `perl`, `false`, `sh`) run to test the command runner's bounds.
+    the test, and harmless coreutils (`env`, `perl`, `false`, `sh`, `head`) run to test the command runner's bounds.

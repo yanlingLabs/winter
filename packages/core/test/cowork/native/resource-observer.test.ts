@@ -129,9 +129,14 @@ test("a blocked disk guard makes the real ledger refuse a reservation with press
 
 // ---------------------------------------------------------------- the real host (read-only; shape, not values)
 real("the real observer reads the host's memory pressure and budget inputs", () => {
+  // Shape only: every check is a boolean before it reaches expect(), so a failure can never print this machine's numbers.
   const seen = createCoworkResourceObserver({ sysctl: createProductionHostAdapters().sysctl, disk: healthy, budget, now: () => NOW })();
-  expect(seen).not.toBeNull();
-  expect(["normal", "elevated", "critical"]).toContain(seen!.pressure);
-  expect(seen!.budget.guestLimit).toBe(2); expect(seen!.budget.cpuUnits).toBeGreaterThanOrEqual(1); expect(seen!.budget.memoryBytes).toBeGreaterThanOrEqual(1 << 29);
-  expect(seen!.admitNew).toBe(seen!.pressure !== "critical");
+  expect(seen !== null).toBe(true);
+  if (seen === null) return;
+  expect(["normal", "elevated", "critical"].includes(seen.pressure)).toBe(true);
+  expect(seen.budget.guestLimit === 2).toBe(true);
+  expect(Number.isSafeInteger(seen.budget.cpuUnits) && seen.budget.cpuUnits >= 1).toBe(true);
+  expect(Number.isSafeInteger(seen.budget.memoryBytes) && seen.budget.memoryBytes >= 1 << 29).toBe(true);
+  expect(seen.admitNew === (seen.pressure !== "critical")).toBe(true);
+  expect(seen.observedAt === NOW && seen.validUntil === NOW + RESOURCE_OBSERVATION_VALIDITY_MS).toBe(true);
 });
