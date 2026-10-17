@@ -22,7 +22,7 @@ A new or changed **`SessionEvent` variant**, in order:
 ## Remote allowlists
 
 - FOUR lists in lockstep: `REMOTE_ALLOWED_METHODS` (`packages/core/src/ipc/server.ts`, 40 entries) + `packages/core/test/ipc/remote-allowlist-parity.test.ts` + Swift `Gateway.remoteAllowedMethods` (`apple/WinterKit/Sources/WinterKit/Gateway/Gateway.swift`) + `GatewayGateTests`' count.
-- `REMOTE_ELIGIBLE_SESSION_MODES` (`code`/`dispatch`/`chat`): `assertRemoteMayUseSession` gates every bare-`sessionId` method, daemon-side.
+- `REMOTE_ELIGIBLE_SESSION_MODES` (`code`/`dispatch`/`chat`): `assertRemoteMayUseSession` gates every bare-`sessionId` method, daemon-side. `cowork` is a recognised wire mode (`SESSION_MODES`) but stays OUT of this set until its per-record and parameter gates exist ([cowork-host-protocol](../cowork-host-protocol.md#producerconsumer-and-release-checklist)); `session.create {mode: "cowork"}` is refused for the remote role like every other (`unsupported_topology`), and `sync.push` already requires a chat `session_created`.
 
 ## History and the remote stream
 

@@ -76,6 +76,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         // Dispatch (Phase 7 durability follow-up): carried so a full index.db rebuild can restore
         // the dispatch-singleton invariant (see events.ts's SessionCreatedEvent doc comment).
         // Additive/optional — pure Codable synthesis, no Discriminator/decode/encode changes.
+        // Cowork (session door): `"cowork"` is now a recognised value (`SESSION_MODES` in events.ts),
+        // carried verbatim like `"dispatch"`/`"chat"`. No Winter creates one yet — `session.create` refuses it
+        // with `unsupported_topology` — and the app's `SessionMode.cowork.isAvailable` stays false.
         public let mode: String?
         // Winter Phase 8c (P8c-5): the runtime annotation — same additive-optional shape as `mode`
         // above, so no Discriminator/decode/encode change here either. `runtimeKind` is a closed

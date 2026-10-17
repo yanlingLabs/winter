@@ -2,7 +2,7 @@
 
 *Read this before touching `packages/core/src/cowork/**`, `packages/protocol/src/cowork.ts`, `apple/Cowork/**`, the host-storage fence or `home-fence`'s Cowork roots, `refreshForStorage`, or the `workspace.*` / `project.*` methods and events.*
 
-Cowork is not an implemented session mode: no Cowork session can be created or run, and `SpawnSession` refuses `type: "cowork"`. The host side exists: workspace metadata, guidance, schedules and outputs. What exists and what still blocks a functional mode: [cowork-status.md](../cowork-status.md). The design: [cowork-spec.md](../cowork-spec.md).
+Cowork is not an implemented session mode: no Cowork session can be created or run, and `SpawnSession` refuses `type: "cowork"`. The protocol RECOGNISES the name (`SESSION_MODES`) so every door can refuse it typed: `session.create {mode: "cowork"}` answers `unsupported_topology` for every role, and a stored cowork row is refused rather than read as Code (see [runtime-and-sessions.md](./runtime-and-sessions.md)); there is deliberately no Cowork prompt, tool allowlist or run home. The host side exists: workspace metadata, guidance, schedules and outputs. What exists and what still blocks a functional mode: [cowork-status.md](../cowork-status.md). The design: [cowork-spec.md](../cowork-spec.md).
 
 ## Ordinary host execution policy
 

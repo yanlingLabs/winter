@@ -109,6 +109,7 @@ import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
 import { SESSION_REPLACED } from "./session-replaced";
+import { COWORK_SESSION_UNSUPPORTED_CODE, isUnrunnableStoredMode, runnableModeOf, unrunnableModeMessage } from "../sessions/session-mode";
 import { type HostCodeAuthority } from "./host-code-broker";
 import { buildCoreBrand } from "./brand";
 
@@ -140,6 +141,10 @@ export type WinterLegRefusalCode =
   // opening: that open spawns nothing, and a send that joined it is refused, appending nothing. Sending
   // again reaches the session's next driver.
   | "session_replaced"
+  // Cowork (session door): the stored `mode` is `cowork` — a mode the protocol recognises and nothing can
+  // run. Refused FIRST (before a record is read, adopted or re-keyed, before a run home or a spawn hook), so
+  // a cowork row can never fall through to Code. The same code and text `session.create` answers.
+  | "unsupported_topology"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
 
@@ -269,7 +274,6 @@ function userRulesFrom(home: string, runHomeApplied: boolean): { userAllow?: rea
   return { ...(allow === undefined ? {} : { userAllow: allow }), userDeny: sdkDenyRules(home) };
 }
 
-/** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere). */
 /** The capability server KEYS (`sessions`, `browser`, …) of the servers one incarnation built — the record
  *  is keyed by server name, `winter__<key>`. A name of any other shape is not a capability server. */
 export function capabilityKeysOf(capabilities: CapabilityServerRecord): ReadonlySet<string> {
@@ -277,7 +281,20 @@ export function capabilityKeysOf(capabilities: CapabilityServerRecord): Readonly
   return new Set(Object.keys(capabilities).filter((name) => name.startsWith(prefix) && name.length > prefix.length).map((name) => name.slice(prefix.length)));
 }
 
-const modeOf = (raw: string | undefined): SessionMode => (raw === "chat" || raw === "dispatch" ? raw : "code");
+const unrunnableModeRefusal = (raw: string | null | undefined): WinterLegRefusal => new WinterLegRefusal(COWORK_SESSION_UNSUPPORTED_CODE, unrunnableModeMessage(raw));
+
+/** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere).
+ *
+ *  `cowork` — and any other string that is not a runnable mode (a newer daemon's, a hand-edited index) — is
+ *  REFUSED here, never narrowed: it used to read as "not chat, not dispatch, so code", which is the one
+ *  fall-through a recognised-but-unrunnable mode must not have. Every runtime-facing `SessionMode` is the
+ *  runnable set (`sessions/session-mode.ts`), so this is the only place a stored string becomes one.
+ *  Exported for `session-driver.test.ts`. */
+export const modeOf = (raw: string | null | undefined): SessionMode => {
+  const mode = runnableModeOf(raw);
+  if (mode === undefined) throw unrunnableModeRefusal(raw);
+  return mode;
+};
 
 /** Winter's effort strings that are also the SDK's `EffortLevel`. `none` is the wire's "unset" and
  *  `ultra` is Winter-only (a client-side selector the engine translates); neither crosses here. */
@@ -1569,8 +1586,18 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (shuttingDown) throw shutdownRefusal();
   }
 
+  /** Refuse a session whose stored mode is not one a child can run (`cowork`, or anything unrecognised) before
+   *  ANY record work, file move or spawn. A store that will not answer for the id (unknown session) is not this
+   *  check's business: the caller's own error wins. */
+  const refuseUnrunnableMode = (sessionId: string): void => {
+    let stored: string | undefined;
+    try { stored = deps.store.meta(sessionId).mode; } catch { return; }
+    if (isUnrunnableStoredMode(stored)) throw unrunnableModeRefusal(stored);
+  };
+
   const create = async (sessionId: string): Promise<LegSession> => {
     assertNotShuttingDown();
+    refuseUnrunnableMode(sessionId);
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
     // The executable was asserted by the caller BEFORE the product row was minted (`session.create`);
@@ -1675,6 +1702,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    */
   const resume = async (sessionId: string): Promise<LegSession> => {
     assertNotShuttingDown();
+    refuseUnrunnableMode(sessionId);   // before adoption / re-keying move a transcript for a session that can never run
     assertSpine();
     // WS-23 (R2): a record the retired official leg wrote is adopted onto the Winter leg first — its
     // transcript re-keyed, its runtime kind and selection rewritten — or refused typed, having moved
@@ -1715,6 +1743,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     async ensure(sessionId) {
       const live = drivers.get(sessionId);
       if (live !== undefined) return live;
+      refuseUnrunnableMode(sessionId);   // typed, even for a cowork row that has no runtime record (`undefined` would read as unrecorded)
       if (!isResumableLeg(sessionLegOf(recordOf(sessionId)))) return undefined;
       return resume(sessionId);   // synchronous up to `drivers.set` — see the invariant above
     },
