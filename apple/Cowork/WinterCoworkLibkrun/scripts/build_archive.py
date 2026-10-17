@@ -137,6 +137,12 @@ def build_key(queue, expected):
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
+def can_reuse(key, key_file, raw, stripped, pinned, force=False):
+    """An archive is reused only if the build key matches AND both archives are the pinned ones."""
+    return bool(not force and key_file.exists() and json.loads(key_file.read_text()).get('key') == key and raw.exists() and stripped.exists()
+                and digest(raw) == pinned['rawSha256'] and digest(stripped) == pinned['strippedSha256'])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--toolchain-archive', help='local rust-<version>-aarch64-apple-darwin.tar.xz to prove the installed toolchain against')
@@ -155,8 +161,7 @@ def main():
     PRODUCTION_DIR.mkdir(exist_ok=True)
     raw, stripped = PRODUCTION_DIR / 'libkrun-production-raw.a', PRODUCTION_DIR / 'libkrun-production.a'
     key_file = PRODUCTION_DIR / 'build-key.json'
-    if (not args.force and key_file.exists() and json.loads(key_file.read_text()).get('key') == key and raw.exists() and stripped.exists()
-            and digest(raw) == pinned['rawSha256'] and digest(stripped) == pinned['strippedSha256']):
+    if can_reuse(key, key_file, raw, stripped, pinned, args.force):
         print(json.dumps({'reused': True, 'key': key, 'rawSha256': pinned['rawSha256'], 'strippedSha256': pinned['strippedSha256'], 'vmStarted': False}))
         return {'reused': True}
     toolchain = check_toolchain()

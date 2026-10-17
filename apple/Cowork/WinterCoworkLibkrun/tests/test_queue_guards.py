@@ -149,27 +149,6 @@ class ReproRoot(unittest.TestCase):
             other.mkdir()
             self.assertEqual(self.build.check_repro_root(fake_source, other), fake_source.absolute())
 
-    def test_the_protected_clause_refuses_on_its_own(self):
-        """The non-empty clause must not be what stops these: the protected directory is empty, or does not exist
-        yet, so only the protected-directory clause can refuse it."""
-        with tempfile.TemporaryDirectory() as directory:
-            fake_source = Path(directory) / 'source'
-            fake_source.mkdir()
-            self.assertEqual(list(fake_source.iterdir()), [])
-            with self.assertRaises(RuntimeError) as empty:
-                self.build.check_repro_root(fake_source, fake_source)
-            self.assertIn('protected', str(empty.exception))
-            self.assertTrue(fake_source.is_dir())
-            with self.assertRaises(RuntimeError) as inside:
-                self.build.check_repro_root(fake_source / 'repro', fake_source)
-            self.assertIn('protected', str(inside.exception))
-            with self.assertRaises(RuntimeError) as parent:
-                self.build.check_repro_root(Path(directory), fake_source)
-            self.assertIn('protected', str(parent.exception))
-            other = Path(directory) / 'other'
-            other.mkdir()
-            self.assertEqual(self.build.check_repro_root(fake_source, other), fake_source.absolute())
-
     def test_a_new_or_empty_directory_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(self.build.check_repro_root(directory, self.source), Path(directory).absolute())
@@ -441,6 +420,69 @@ class Scripts(unittest.TestCase):
         self.assertNotEqual(build_archive.build_key(changed, expected), key)
         other = dict(expected, composedSourceDiffSha256='1' * 64)
         self.assertNotEqual(build_archive.build_key(queue, other), key)
+
+
+class SupplyChainGuards(unittest.TestCase):
+    def test_download_refuses_a_wrong_hash_without_any_network(self):
+        import fetch_inputs
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'archive.bin'
+            path.write_bytes(b'not the pinned archive')
+            good = hashlib.sha256(b'not the pinned archive').hexdigest()
+            self.assertEqual(fetch_inputs.download('http://invalid.invalid/never-fetched', path, good), path)
+            with self.assertRaises(RuntimeError):
+                fetch_inputs.download('http://invalid.invalid/never-fetched', path, '0' * 64)
+
+    def test_every_tar_extraction_carries_a_filter(self):
+        import ast
+        found = 0
+        for path in sorted((ROOT / 'scripts').glob('*.py')):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('extractall', 'extract'):
+                    found += 1
+                    self.assertIn('filter', [k.arg for k in node.keywords], f'{path.name}:{node.lineno}')
+                    self.assertEqual([k.value.value for k in node.keywords if k.arg == 'filter'], ['data'], f'{path.name}:{node.lineno}')
+        self.assertGreaterEqual(found, 3)
+
+    def test_the_archive_is_reused_only_with_the_key_and_both_pinned_hashes(self):
+        import build_archive
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            raw, stripped, key_file = d / 'raw.a', d / 'stripped.a', d / 'key.json'
+            raw.write_bytes(b'raw')
+            stripped.write_bytes(b'stripped')
+            pinned = {'rawSha256': hashlib.sha256(b'raw').hexdigest(), 'strippedSha256': hashlib.sha256(b'stripped').hexdigest()}
+            key_file.write_text(json.dumps({'key': 'k'}))
+            self.assertTrue(build_archive.can_reuse('k', key_file, raw, stripped, pinned))
+            self.assertFalse(build_archive.can_reuse('other', key_file, raw, stripped, pinned))
+            self.assertFalse(build_archive.can_reuse('k', key_file, raw, stripped, pinned, force=True))
+            self.assertFalse(build_archive.can_reuse('k', key_file, raw, stripped, dict(pinned, rawSha256='0' * 64)))
+            self.assertFalse(build_archive.can_reuse('k', key_file, raw, stripped, dict(pinned, strippedSha256='0' * 64)))
+            self.assertFalse(build_archive.can_reuse('k', d / 'missing.json', raw, stripped, pinned))
+            raw.write_bytes(b'tampered')
+            self.assertFalse(build_archive.can_reuse('k', key_file, raw, stripped, pinned))
+
+
+class CiJob(unittest.TestCase):
+    def setUp(self):
+        text = (ROOT.parents[2] / '.github/workflows/ci.yml').read_text()
+        self.job = text[text.index('\n  libkrun-queue:'):]
+
+    def test_the_scope_step_does_not_follow_renames(self):
+        step = self.job[self.job.index('name: Is this change in scope?'):self.job.index('name: Fetch the pinned upstream source')]
+        self.assertIn('git diff --no-renames --name-only "$from" HEAD', step)
+        self.assertNotIn('git diff --name-only', step)
+
+    def test_least_privilege_pinned_actions_and_a_timeout(self):
+        self.assertRegex(self.job, r'permissions:\n\s+contents: read\n')
+        self.assertEqual(len(re.findall(r'persist-credentials: false', self.job)), len(re.findall(r'uses: actions/checkout', self.job)))
+        self.assertGreaterEqual(len(re.findall(r'uses: ', self.job)), 1)
+        for ref in re.findall(r'uses: (\S+)', self.job):
+            self.assertRegex(ref, r'@[0-9a-f]{40}$')
+        self.assertLessEqual(int(re.search(r'timeout-minutes: (\d+)', self.job).group(1)), 10)
+        self.assertNotIn('secrets.', self.job)
+        for forbidden in ['cargo', 'rustup', 'build_archive', 'run_cargo_tests']:
+            self.assertNotIn(forbidden, self.job.replace('No cargo', ''))
 
 
 if __name__ == '__main__':

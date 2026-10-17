@@ -403,7 +403,7 @@ jobs:
             *) from="" ;;
           esac
           if [ -n "$from" ] && [ "$from" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$from^{commit}" 2>/dev/null; then
-            if git diff --name-only "$from" HEAD | grep -Eq '^(apple/Cowork/WinterCoworkLibkrun/|\.github/workflows/ci\.yml$)'; then run=true; else run=false; fi
+            if git diff --no-renames --name-only "$from" HEAD | grep -Eq '^(apple/Cowork/WinterCoworkLibkrun/|\.github/workflows/ci\.yml$)'; then run=true; else run=false; fi
           fi
           echo "run=${run}" >> "$GITHUB_OUTPUT"
           echo "libkrun queue checks in scope: ${run}"
