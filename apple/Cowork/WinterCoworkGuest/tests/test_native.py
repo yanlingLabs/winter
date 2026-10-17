@@ -23,7 +23,7 @@ SANITIZE = os.environ.get("WG_SANITIZE", "1") == "1"
 
 # The five payload-level negatives are judged by the Python bootstrap helper; in C they are well-formed frames (the relay
 # forwards bootstrap payloads byte for byte). test_guest_bootstrap.py holds them to the contract category.
-PAYLOAD_LEVEL = {"plan-travelling-up", "plan-protocol-2", "plan-unsorted-nested-keys", "hello-wrong-serial", "bootstrap-invalid-utf8"}
+PAYLOAD_LEVEL = {"plan-travelling-up", "plan-protocol-2", "plan-unsorted-nested-keys", "hello-wrong-serial", "bootstrap-invalid-utf8", "bom-mux-bootstrap"}
 
 
 def build(sources, output, extra=()):

@@ -145,7 +145,7 @@ class VectorTests(unittest.TestCase):
                     self.assertEqual(gb.canonical_text(message).encode(), payload)
 
     def test_bootstrap_negative_vectors_are_refused_with_the_contract_category(self):
-        for name in ("plan-travelling-up", "plan-protocol-2", "plan-unsorted-nested-keys", "hello-wrong-serial", "bootstrap-invalid-utf8"):
+        for name in ("plan-travelling-up", "plan-protocol-2", "plan-unsorted-nested-keys", "hello-wrong-serial", "bootstrap-invalid-utf8", "bom-mux-bootstrap"):
             with self.subTest(name):
                 vector = NEGATIVE[name]
                 frame = bytes.fromhex(vector["hex"])
