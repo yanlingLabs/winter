@@ -305,15 +305,23 @@ export class CoworkRepository {
     return this.one("SELECT coalesce(max(sequence),0) AS n FROM cowork_outbox WHERE workspace_id=?", workspaceId)!.n;
   }
   /** Host logical-session deletion/missing-session retirement only. Keep workspace, sources,
-   * operation receipts and guest data; tombstone prevents future notification fanout. */
+   * operation receipts and guest data; tombstone prevents future notification fanout.
+   * docs/cowork-execution-contracts.md: "Deleting a standalone conversation does not silently destroy its
+   * workspace. Detach/archive its workspace for explicit later deletion/export". So the sole conversation
+   * of a STOPPED, retained standalone workspace archives it in the same transaction (data untouched; wake is
+   * refused until it is explicitly restored). A Project workspace is unaffected, and one that is not stopped
+   * stays retained: nothing drains a running guest yet, so its state is not flipped beneath it. */
   abandonConversation(sessionId: string): void {
     id(sessionId);
-    if (!this.one("SELECT 1 FROM cowork_conversations WHERE session_id=?", sessionId)) return;
+    const binding = this.one("SELECT workspace_id FROM cowork_conversations WHERE session_id=?", sessionId);
+    if (!binding) return;
     durableCoworkTransaction(this.rs, () => {
       this.run("UPDATE cowork_conversations SET state='deleted' WHERE session_id=?", sessionId);
       const changes = this.all("SELECT change_id FROM cowork_outbox_deliveries WHERE session_id=?", sessionId);
       this.run("DELETE FROM cowork_outbox_deliveries WHERE session_id=?", sessionId);
       for (const change of changes) this.run("DELETE FROM cowork_outbox WHERE change_id=? AND NOT EXISTS (SELECT 1 FROM cowork_outbox_deliveries WHERE change_id=?)", change.change_id, change.change_id);
+      const detached = this.one("SELECT workspace_id FROM cowork_workspaces WHERE workspace_id=? AND ownership='standalone' AND owner_id=? AND state='retained' AND power='stopped'", binding.workspace_id, sessionId);
+      if (detached) { this.run("UPDATE cowork_workspaces SET state='archived' WHERE workspace_id=?", detached.workspace_id); this.advance(detached.workspace_id); }
     });
   }
   /** Bounded delivery receipt retention; pending deliveries and other conversations' rows remain.
