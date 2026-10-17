@@ -152,7 +152,12 @@ function waitFor(fd: number, events: number, timeoutMs: number): number {
   return revents;
 }
 
-export interface FdSendOptions { readonly deadlineMs?: number }
+export interface FdSendOptions {
+  readonly deadlineMs?: number;
+  /** TEST SEAM: replaces the sendmsg call (returns bytes accepted, or a negative errno). A real kernel accepts a message this size in one
+   * call, so the rule "rights ride the first sendmsg only" can only be exercised by scripting partial writes and would-blocks. */
+  readonly sendmsg?: (fd: number, data: Uint8Array, rights: readonly number[]) => number;
+}
 /**
  * Send ALL of `data`, attaching `rights` (at most FD_CHANNEL_MAX_RIGHTS descriptors) to the FIRST sendmsg only, so on a
  * stream socket the descriptors belong to the first byte of this message and to nothing else. A datagram is one atomic
@@ -163,7 +168,7 @@ export function sendMessage(fd: number, data: Uint8Array, rights: readonly numbe
   const deadline = performance.now() + (options.deadlineMs ?? 5000);
   let offset = 0, first = true;
   while (offset < data.length || first) {
-    const sent = load().sendmsg(fd, data.subarray(offset), first ? rights : []);
+    const sent = (options.sendmsg ?? load().sendmsg)(fd, data.subarray(offset), first ? rights : []);
     if (sent >= 0) { offset += sent; first = false; if (data.length === 0) return; continue; }
     const error = -sent;
     if (error === EINTR) continue;

@@ -65,6 +65,41 @@ describe("a healthy run outlives the admission heartbeat timeout, and a stop nev
   });
 });
 
+describe("a row that lapsed in the middle of a start", () => {
+  test("is revived before it is moved, so the start completes and the admission ends running", async () => {
+    const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "ready-sent") { harness.clock.advance(31_000); harness.ledger.reconcile(); } } });
+    const record = () => h.ledger.listActive()[0]!;
+    const running = await h.host.start(h.workspaceId);
+    expect(record()).toMatchObject({ state: "running", uncertainReason: null });
+    expect(power(h)).toBe("running");
+    expect(await running.stop()).toEqual({ released: true, evidence: "orderly-receipt" });
+  });
+});
+
+describe("a stop receipt may not know less than the daemon saw, each observation on its own", () => {
+  test("the descriptors were accepted and nothing else was seen: an `unattached` receipt is refused", async () => {
+    const h = createHarness({ behavior: { quietVm: true, stop: "denies-attach" }, timeouts: { guestHelloMs: 80 } });
+    await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "timeout" });
+    expect(power(h)).toBe("uncertain"); expect(owners(h).every(owner => owner !== null)).toBe(true);
+    expect(h.calls.volumeRelease + h.calls.ledgerRelease).toBe(0);
+  });
+  test("a running VM was reported and the descriptors never acknowledged: a `not-booted` receipt is refused", async () => {
+    const h = createHarness({ behavior: { volumes: "silent", chatter: ["vm_running"], stop: "denies-boot" }, timeouts: { volumesMs: 80 } });
+    await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "timeout" });
+    expect(power(h)).toBe("uncertain"); expect(h.calls.volumeRelease + h.calls.ledgerRelease).toBe(0);
+  });
+  test("a guest greeting was seen and the descriptors never acknowledged: a `not-booted` receipt is refused", async () => {
+    const h = createHarness({ behavior: { volumes: "silent", chatter: ["hello"], stop: "denies-boot" }, timeouts: { volumesMs: 80 } });
+    await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "timeout" });
+    expect(power(h)).toBe("uncertain"); expect(h.calls.volumeRelease + h.calls.ledgerRelease).toBe(0);
+  });
+  test("with nothing observed, the same honest receipts are accepted", async () => {
+    const h = createHarness({ behavior: { volumes: "silent" }, timeouts: { volumesMs: 80 } });
+    await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "timeout" });
+    expect(power(h)).toBe("stopped"); expect(h.ledger.listActive()).toEqual([]);
+  });
+});
+
 describe("the launch journal and owner recovery", () => {
   test("the journal is written before the spawn, with the launcher's identity once it exists, with the worker's at begun, and forgotten after the release", async () => {
     const spawning = createHarness({ behavior: { spawn: "crash" } });

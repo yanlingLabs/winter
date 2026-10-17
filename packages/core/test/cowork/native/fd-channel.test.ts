@@ -119,6 +119,14 @@ describe("bun:ffi sendmsg/recvmsg with SCM_RIGHTS", () => {
     expect(receiveMessage(b, 64, 0)!.data).toHaveLength(0);
     expect(refusal(() => sendMessage(b, encode("into the void\n"))).code).toBe("closed");
   });
+  live("rights attach to the first sendmsg only, whatever the kernel accepts in between (scripted partial writes and would-blocks)", () => {
+    const [writable] = pair("stream"), script: number[] = [-35, 3, -35, -35, 4, 2, 100], calls: { length: number; rights: number }[] = [];
+    const sendmsg = (_fd: number, data: Uint8Array, rights: readonly number[]) => { calls.push({ length: data.length, rights: rights.length }); const next = script.shift()!; return next < 0 ? next : Math.min(next, data.length); };
+    sendMessage(writable, new Uint8Array(12), [5, 6], { sendmsg, deadlineMs: 5000 });
+    // would-block with nothing sent keeps the rights for the retry; once any byte went, they never ride again
+    expect(calls.map(call => call.rights)).toEqual([2, 2, 0, 0, 0, 0, 0]);
+    expect(calls.map(call => call.length)).toEqual([12, 12, 9, 9, 9, 5, 3]);
+  });
   live("argument bounds: no rights without data, no more than the cap, no negative descriptor", () => {
     const [a] = pair("stream"), { fds } = files(1);
     expect(refusal(() => sendMessage(a, new Uint8Array(0), fds)).code).toBe("invalid");

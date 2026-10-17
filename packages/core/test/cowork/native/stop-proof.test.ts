@@ -214,6 +214,8 @@ describe("the mint trusts nothing it did not just validate", () => {
     expect(code(() => mint(c, {}, { admission: { admissionId: "adm-other", owner: { bootId: "boot-one" } } }))).toBe("wrong_binding");
     expect(code(() => mint(c, {}, { admission: { admissionId: c.admissionId, owner: { bootId: "boot-two" } } }))).toBe("wrong_binding");
     expect(code(() => mint(c, {}, { admission: null }))).toBe("accepted"); // a restarted daemon may not know it; every other binding stays
+    // ...and then the boot the receipt claims is still the boot inside the owner tuple
+    expect(code(() => mint(c, { hostBootId: "boot-two" }, { admission: null }))).toBe("wrong_binding");
   });
 });
 

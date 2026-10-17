@@ -16,6 +16,10 @@ export interface FakeBehavior {
   spawn?: "ok" | "fail" | "crash" | "hang" | "slow";
   begin?: "ok" | "refuse" | "silent" | "other-worker";
   volumes?: "ok" | "refuse" | "silent";
+  /** Accept the descriptors but say nothing about a VM (no vm_running, no guest hello). */
+  quietVm?: boolean;
+  /** Unsolicited things the worker says even though it never accepted the descriptors. */
+  chatter?: ("vm_running" | "hello")[];
   guestHello?: "ok" | "silent";
   bootstrap?: "ok" | "fault" | "silent" | "wrong-nonce" | "wrong-operation" | "tampered-receipt" | "duplicate-receipt" | "runtime-frame";
   mounted?: "ok" | "silent";
@@ -118,9 +122,16 @@ export class FakeSession implements CoworkLauncherSession {
     const seen = rights.map(fd => { const st = fstatSync(fd, { bigint: true }); return { dev: String(st.dev), ino: String(st.ino), size: Number(st.size) }; });
     this.arrivals.push(seen);
     this.volumes = message.volumes;
-    if (this.behavior.volumes === "silent") return;
+    if (this.behavior.volumes === "silent") {
+      for (const item of this.behavior.chatter ?? []) {
+        if (item === "vm_running") { this.deliver({ t: "worker_state", state: "vm_running" }); this.vmRunning = true; }
+        else this.muxUp({ t: "hello", guestBootId: "66666666-6666-4666-8666-666666666666", dataSerial: "winter-data", environmentSerial: "winter-environment" });
+      }
+      return;
+    }
     if (this.behavior.volumes === "refuse" || seen.some((item, index) => item.dev !== message.volumes[index]!.device || item.ino !== message.volumes[index]!.inode)) { this.volumes = []; return this.deliver({ t: "refused", id: message.id, code: "volumes_rejected" }); }
     this.deliver({ t: "volumes_accepted", id: message.id });
+    if (this.behavior.quietVm) return;
     this.deliver({ t: "worker_state", state: "vm_running" }); this.vmRunning = true;
     if (this.behavior.guestHello !== "silent") { this.guestBooted = true; this.muxUp({ t: "hello", guestBootId: "66666666-6666-4666-8666-666666666666", dataSerial: "winter-data", environmentSerial: "winter-environment" }); }
   }

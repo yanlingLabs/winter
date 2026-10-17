@@ -251,6 +251,17 @@ describe("volume ownership that does not describe the current incarnation is nev
     setOwner(h, "data", owner); setOwner(h, "environment", owner);
     expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "released" }); // restored and attested: the receipt works again
   });
+  test("a pair owned by another EPOCH or INCARNATION is retained with the same reason even when the boot is confirmed ended", async () => {
+    const h = createHarness({ crashAt: "power-running" });
+    await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);
+    const owner = h.volumes.records(h.workspaceId)[0]!.owner!;
+    h.restart({ newBoot: true }); h.hostBoot.ended = true;
+    for (const stale of [{ ...owner, leaseEpoch: owner.leaseEpoch + 1 }, { ...owner, incarnationId: "inc-older" }]) {
+      setOwner(h, "data", stale); setOwner(h, "environment", stale);
+      expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "retained", reason: "volume ownership does not match the current incarnation", ownerRetained: true });
+    }
+    expect(h.calls.volumeRelease).toBe(0);
+  });
   test("boot evidence does not paper over it either: a changed, confirmed boot still retains a pair that is not one owner's", async () => {
     const h = createHarness({ crashAt: "power-running" });
     await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);

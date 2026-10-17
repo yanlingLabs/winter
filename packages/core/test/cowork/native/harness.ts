@@ -23,6 +23,8 @@ export const STOP_PHASES = ["drain-requested", "stop-receipt-received", "volumes
 export interface HarnessOptions {
   readonly behavior?: FakeBehavior; readonly crashAt?: string; readonly timeouts?: Partial<CoworkNativeHostTimeouts>;
   readonly volumeCheckpoint?: (phase: string) => void;
+  /** Runs at every host checkpoint, before a crash is raised: lets a test change the world between two steps of a start. */
+  readonly onCheckpoint?: (phase: string, harness: Harness) => void;
 }
 export interface Harness {
   readonly root: string; readonly home: string; readonly workspaceId: string; readonly homeId: string;
@@ -131,7 +133,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     };
     const ownerRecover: CoworkNativeOwnerRecoverPort = { confirm: () => ownerRecoverAttestation.value as never };
     const recoveryGuards: CoworkNativeRecoverGuards = { processAbsent: subject => { guards.seen.push(subject); return guards.processAbsent; }, imagesUnlocked: () => guards.imagesUnlocked };
-    const checkpoint = (phase: string) => { events.push(`host:${phase}`); if (crashAt === phase) throw new CoworkNativeSimulatedCrash(phase); };
+    const checkpoint = (phase: string) => { events.push(`host:${phase}`); options.onCheckpoint?.(phase, harness); if (crashAt === phase) throw new CoworkNativeSimulatedCrash(phase); };
     harness.recovery = new CoworkNativeRecovery({ records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, journal: journalPort, now: () => clock.now, checkpoint });
     harness.launcher = new FakeLauncher({ behavior: boot.behavior ?? {}, homeId, hostBootId: () => hostBoot.current, receipts, events });
     harness.daemon = daemon;
