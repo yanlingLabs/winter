@@ -278,7 +278,8 @@ class Package(unittest.TestCase):
         self.assertIn('sys.executable, "-I"', build, "child Python runs isolated")
 
     def test_no_personal_paths_or_names_in_the_package(self):
-        for path in list(PACKAGE.rglob("*")):
+        document = REPO / "docs" / "research" / "2026-10-17-cowork-n2-worker.md"
+        for path in list(PACKAGE.rglob("*")) + ([document] if document.exists() else []):
             if path.is_file() and path.suffix in (".c", ".h", ".py", ".json", ".md", ".entitlements"):
                 text = path.read_text()
                 for needle in ("/Us" + "ers/", "/ho" + "me/", "@" + "gmail", "kar" + "im", "Kar" + "im", "Norma" + " v2"):
