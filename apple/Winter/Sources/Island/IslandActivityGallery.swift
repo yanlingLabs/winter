@@ -94,7 +94,7 @@ enum IslandActivityGallery {
                             elementLabel: "“Build Succeeded”", armedAt: nowMs - 70 * 60_000, expiresAt: nowMs + 3 * 60 * 60_000,
                             session: IslandSessionFacts(mode: "code", title: "Ship the island")),
         ]))
-        let island = IslandLayout.island(notched, contentHeight: 330)
+        let island = IslandLayout.island(notched)
         out.append(try write(scene(notched, width: island.width + 120, height: island.height + 50) {
             IslandExpandedViewForGallery(store: store, shape: notched, size: island.size, nowMs: nowMs)
         }, directory, "island-open-watches@2x.png"))
@@ -210,8 +210,7 @@ private struct IslandExpandedViewForGallery: View {
 
     var body: some View {
         let target = CGRect(origin: .zero, size: size)
-        IslandOpenFrame(frame: IslandOpenMorph.Frame(rect: target, corner: IslandLayout.islandCorner, content: 1, blur: 0),
-                        target: target, shape: shape) {
+        IslandOpenFrame(frame: .resting(target), target: target, shape: shape) {
             VStack(spacing: 0) {
                 Color.clear.frame(height: shape.topInset)
                 IslandOpenHeader(store: store)

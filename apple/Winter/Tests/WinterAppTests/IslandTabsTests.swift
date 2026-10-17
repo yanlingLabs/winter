@@ -62,4 +62,78 @@ final class IslandTabsTests: XCTestCase {
         }
         XCTAssertEqual(state.selected?.id, "sessions", "one swipe, one tab")
     }
+
+    // MARK: Scrolling a tab's list vs swiping tabs (one axis per gesture)
+
+    /// Feeds a gesture through the lock and the recognizer exactly as the controller does; returns what reached the
+    /// list (the events passed on) and the tab it ended on.
+    private func run(_ samples: [(dx: CGFloat, dy: CGFloat, phase: TrackpadScrollEventPhase, momentum: TrackpadScrollEventPhase)],
+                     lock: inout IslandScrollAxisLock, recognizer: TrackpadHorizontalSwipeRecognizer,
+                     state: inout IslandTabState) -> (scrolled: Int, swallowed: Int) {
+        // Only events that carry movement count (a zero-delta `began` reaching the list moves nothing).
+        var scrolled = 0, swallowed = 0
+        for (i, e) in samples.enumerated() {
+            let moves = e.dx != 0 || e.dy != 0
+            switch lock.route(deltaX: e.dx, deltaY: e.dy, phase: e.phase, momentumPhase: e.momentum) {
+            case .scroll:
+                if moves { scrolled += 1 }
+            case .scrollAndForgetSwipe:
+                recognizer.reset()
+                if moves { scrolled += 1 }
+            case .swallow:
+                if moves { swallowed += 1 }
+            case .swipe:
+                let result = recognizer.handle(deltaX: e.dx, deltaY: e.dy, phase: e.phase, momentumPhase: e.momentum,
+                                               timestamp: Double(i) * 0.01)
+                if case .swiped(let direction) = result { state.swipe(direction) }
+                if moves { if result.consumesScroll { swallowed += 1 } else { scrolled += 1 } }
+            }
+        }
+        return (scrolled, swallowed)
+    }
+
+    func testAVerticalScrollThatDriftsSidewaysNeverChangesTab() {
+        var lock = IslandScrollAxisLock()
+        var state = IslandTabState(tabs: tabs)
+        let recognizer = TrackpadHorizontalSwipeRecognizer()
+        // Mostly down, then the hand drifts hard to the left for many samples (enough to swipe on its own), then momentum.
+        var gesture: [(dx: CGFloat, dy: CGFloat, phase: TrackpadScrollEventPhase, momentum: TrackpadScrollEventPhase)] =
+            [(0, 0, .began, .none), (1, -6, .changed, .none), (0, -8, .changed, .none)]
+        gesture += Array(repeating: (-14, -1, .changed, .none), count: 10)
+        gesture += [(0, 0, .ended, .none), (-10, -3, .none, .began), (-6, -2, .none, .changed), (0, 0, .none, .ended)]
+        let r = run(gesture, lock: &lock, recognizer: recognizer, state: &state)
+        XCTAssertEqual(lock.axis, .undecided, "the momentum's end closed the gesture")
+        XCTAssertEqual(state.selected?.id, "needs-you", "a vertical gesture never swipes, however it drifts")
+        XCTAssertEqual(r.swallowed, 0, "every event of it reached the list")
+    }
+
+    func testAHorizontalSwipeChangesOneTabAndNeverScrollsTheList() {
+        var lock = IslandScrollAxisLock()
+        var state = IslandTabState(tabs: tabs)
+        let recognizer = TrackpadHorizontalSwipeRecognizer()
+        var gesture: [(dx: CGFloat, dy: CGFloat, phase: TrackpadScrollEventPhase, momentum: TrackpadScrollEventPhase)] =
+            [(0, 0, .began, .none)]
+        gesture += Array(repeating: (-12, 2, .changed, .none), count: 6)
+        // The fingers then wander down — still the same horizontal gesture.
+        gesture += Array(repeating: (-2, -9, .changed, .none), count: 5)
+        gesture += [(0, 0, .ended, .none), (-8, 0, .none, .began), (0, 0, .none, .ended)]
+        let r = run(gesture, lock: &lock, recognizer: recognizer, state: &state)
+        XCTAssertEqual(state.selected?.id, "sessions", "one swipe, one tab")
+        XCTAssertEqual(r.scrolled, 0, "nothing of a horizontal gesture reaches the list")
+    }
+
+    func testTheAxisIsDecidedOncePerGestureAndAMouseWheelAlwaysScrolls() {
+        var lock = IslandScrollAxisLock()
+        XCTAssertEqual(lock.route(deltaX: 0, deltaY: 0, phase: .began, momentumPhase: .none), .swipe, "undecided: the recognizer looks")
+        XCTAssertEqual(lock.route(deltaX: 0, deltaY: -5, phase: .changed, momentumPhase: .none), .scrollAndForgetSwipe)
+        XCTAssertEqual(lock.axis, .vertical)
+        XCTAssertEqual(lock.route(deltaX: -30, deltaY: 0, phase: .changed, momentumPhase: .none), .scroll, "held for the gesture")
+        XCTAssertEqual(lock.route(deltaX: 0, deltaY: 0, phase: .ended, momentumPhase: .none), .scroll)
+        // A new gesture decides afresh.
+        XCTAssertEqual(lock.route(deltaX: 0, deltaY: 0, phase: .mayBegin, momentumPhase: .none), .swipe)
+        XCTAssertEqual(lock.route(deltaX: -6, deltaY: 1, phase: .changed, momentumPhase: .none), .swipe)
+        XCTAssertEqual(lock.axis, .horizontal)
+        // A wheel without phases (a mouse) goes to the list, whatever the lock holds.
+        XCTAssertEqual(lock.route(deltaX: 0, deltaY: -3, phase: .none, momentumPhase: .none), .scroll)
+    }
 }

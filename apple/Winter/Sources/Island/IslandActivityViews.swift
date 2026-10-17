@@ -171,7 +171,7 @@ struct IslandMorphShell<Content: View>: View {
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
             .compositingGroup()
             .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
-            .islandHoverGrow(hovered)
+            .islandHoverGrow(hovered, size: size)
     }
 }
 
@@ -228,12 +228,8 @@ struct IslandWatchesList: View {
     var body: some View {
         if activity.watches.isEmpty {
             IslandEmptyTab(symbol: "eye", line: "Nothing is being watched")
-        } else if scrolls {
-            ScrollView(.vertical) { rows }
-                .scrollIndicators(.never)
         } else {
-            rows
-            Spacer(minLength: 0)
+            IslandTabScroll(scrolls: scrolls) { rows }
         }
     }
 
@@ -289,19 +285,4 @@ struct IslandWatchRow: View {
         }
         .padding(12)
     }
-}
-
-/// The Watches tab's content height at the island's width (the list scrolls past the island's maximum).
-@MainActor
-func islandWatchesHeight(_ activity: IslandActivityStore, header: CGFloat) -> CGFloat {
-    guard !activity.watches.isEmpty else { return header + 90 }
-    var rows: CGFloat = 0
-    let now = Int(Date().timeIntervalSince1970 * 1000)
-    for watch in activity.watches {
-        let host = NSHostingView(rootView: IslandWatchRow(watch: watch, nowMs: now, stopping: false, error: nil, onStop: {})
-            .frame(width: IslandLayout.islandWidth - 2 * IslandLayout.listInset).environment(\.colorScheme, .dark))
-        rows += ceil(host.fittingSize.height) + IslandLayout.rowGap
-        if header + rows > IslandLayout.islandMaxHeight { break }
-    }
-    return header + rows + 14
 }

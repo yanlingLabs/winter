@@ -64,6 +64,8 @@ final class IslandController {
     private let openModel = IslandOpenModel()
     private(set) var isOpen = false
     private let swipeRecognizer = TrackpadHorizontalSwipeRecognizer()
+    /// Which way the two fingers over the open island are going this gesture: a tab's list scrolls, or the tabs swipe.
+    private var scrollAxis = IslandScrollAxisLock()
 
     private var pointerMonitors: [Any] = []
     private var openMonitors: [Any] = []
@@ -80,7 +82,6 @@ final class IslandController {
     /// connection). Cancelled on close: nothing runs while the island is closed.
     private var openRefresh: Task<Void, Never>?
     static let openRefreshInterval: Duration = .seconds(5)
-    private var relayoutPending = false
     private var cancellables = Set<AnyCancellable>()
 
     init(store: IslandStore, tabs: IslandTabModels? = nil) {
@@ -133,41 +134,19 @@ final class IslandController {
     // MARK: - The tabs
 
     private func observeTabs() {
-        // A tab change: relayout (each tab has its own height) and refresh what it shows.
+        // A tab change refreshes what it shows. Nothing is laid out again: the open island has ONE size for every tab
+        // and any content (`IslandLayout.island`) — each tab scrolls inside it.
         store.$tabs.map { $0.selected?.id }.removeDuplicates().dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self, self.isOpen else { return }
-                self.layoutIsland()
                 self.restartOpenRefresh()
             }
-            .store(in: &cancellables)
-        // The selected tab's content changed size: relayout once (coalesced).
-        let changes: [AnyPublisher<Void, Never>] = [
-            store.$cards.map { _ in () }.eraseToAnyPublisher(),
-            tabModels.sessions.$rows.map { _ in () }.eraseToAnyPublisher(),
-            tabModels.shelf.$items.map { _ in () }.eraseToAnyPublisher(),
-            tabModels.usage.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
-            tabModels.devices.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
-            store.activity.$watches.map { _ in () }.eraseToAnyPublisher(),
-        ]
-        Publishers.MergeMany(changes)
-            .sink { [weak self] in self?.relayoutSoon() }
             .store(in: &cancellables)
         // A card arriving or leaving changes a session's "waiting for you".
         store.$cards.receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.tabModels.sessions.recompute() }
             .store(in: &cancellables)
-    }
-
-    private func relayoutSoon() {
-        guard isOpen, !relayoutPending else { return }
-        relayoutPending = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.relayoutPending = false
-            if self.isOpen { self.layoutIsland() }
-        }
     }
 
     private func restartOpenRefresh() {
@@ -207,7 +186,6 @@ final class IslandController {
                 if !self.isOpen { self.open() }
                 self.store.tabs.select(IslandTabRegistry.shelf.id)
                 let taken = self.tabModels.shelf.add(urls) > 0 || !urls.isEmpty
-                self.relayoutSoon()
                 let shelf = self.tabModels.shelf
                 Task { await shelf.resolveAll() }
                 return taken
@@ -664,9 +642,9 @@ final class IslandController {
     }
 
     private func layoutIsland() {
-        let contentHeight = islandContentHeight()
-        let r = IslandLayout.island(shape, contentHeight: contentHeight)
-        // Room for the shadow (and the hover grow) below and at the sides; panel-local rects from here.
+        // ONE size, whatever the tab and whatever it lists (only a too-short screen clamps it).
+        let r = IslandLayout.island(shape, screenHeight: screenFrame.height)
+        // Room for the shadow below and at the sides, and the top shoulders; panel-local rects from here.
         let pad = Self.islandPad
         let target = CGRect(x: pad, y: 0, width: r.width, height: r.height)
         let source = morphSource.offsetBy(dx: r.width / 2 + pad, dy: 0)
@@ -687,39 +665,15 @@ final class IslandController {
         islandPanel.setFrame(panelFrame(for: CGRect(x: r.minX - pad, y: 0, width: r.width + 2 * pad, height: r.height + pad)), display: true)
     }
 
-    /// Around the open island inside its panel: its shadow (18 pt, 6 down) and its hover grow (3 % of 560 is under 17 pt).
+    /// Around the open island inside its panel: its shadow (18 pt, 6 down) and its top shoulders (14 pt).
     static let islandPad: CGFloat = 42
-    /// The open island's resting rect in its panel (its hover is judged against it).
+    /// The open island's resting rect in its panel (the pointer is mapped into its space).
     private var islandRect: CGRect = .zero
-
-    /// The open island's content height: its header and each listed card, measured at the island's width (the list
-    /// scrolls past the island's maximum).
-    private func islandContentHeight() -> CGFloat {
-        let header = IslandOpenHeader.height
-        if store.tabs.selected?.id == IslandTabRegistry.watches.id {
-            // The Watches tab (phase 2, lane B): its rows measured at the island's width.
-            return islandWatchesHeight(store.activity, header: header)
-        }
-        if let id = store.tabs.selected?.id, id != IslandTabRegistry.needsYou.id {
-            // A phase-2 tab: its flat body measured at the island's width.
-            let host = NSHostingView(rootView: VStack(spacing: 0) { IslandTabBody(id: id, models: tabModels, scrolls: false) }
-                .frame(width: IslandLayout.islandWidth).environment(\.colorScheme, .dark))
-            return header + min(ceil(host.fittingSize.height), IslandLayout.islandMaxHeight) + 6
-        }
-        guard !store.cards.isEmpty else { return header + 90 }
-        var rows: CGFloat = 0
-        for card in store.cards.reversed() {
-            let host = NSHostingView(rootView: IslandNeedsYouRow(card: card, store: store)
-                .frame(width: IslandLayout.islandWidth - 2 * IslandLayout.listInset).environment(\.colorScheme, .dark))
-            rows += ceil(host.fittingSize.height) + IslandNeedsYouList.gap
-            if header + rows > IslandLayout.islandMaxHeight { break }
-        }
-        return header + rows - IslandNeedsYouList.gap + IslandLayout.listInset
-    }
 
     private func installOpenMonitors() {
         guard openMonitors.isEmpty else { return }
         swipeRecognizer.reset()
+        scrollAxis = IslandScrollAxisLock()
         // A click in another app closes it (mouse-downs need no permission)…
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
             MainActor.assumeIsolated { self?.close(outsideClick: true) }
@@ -739,16 +693,16 @@ final class IslandController {
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
             MainActor.assumeIsolated { if event.keyCode == 53 { self?.close() } }
         }) { openMonitors.append(m) }
-        // The pointer over the open island: it grows a little, its rows lighten and its buttons glow under it.
+        // The pointer over the open island: its rows lighten and its buttons glow under it. The island itself never
+        // grows (user 2026-10-17).
         let movedOpen: (NSEvent?) -> Void = { [weak self] _ in
             guard let self, self.isOpen else { return }
             let mouse = NSEvent.mouseLocation
             let frame = self.islandPanel.frame
-            let local: CGPoint? = frame.contains(mouse) ? CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y) : nil
-            let hovered = !self.openModel.isClosing && IslandHover.isOver(local, self.islandRect, wasHovered: self.openModel.hovered)
-            if self.openModel.hovered != hovered { self.openModel.hovered = hovered }
-            // Into the island's own (unscaled) space, where its rows and buttons measure themselves.
-            self.openPointer.set(local.map { IslandHover.unscaled($0, in: self.islandRect, grown: hovered) })
+            let local: CGPoint? = frame.contains(mouse) && !self.openModel.isClosing
+                ? CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y) : nil
+            // Into the island's own space, where its rows and buttons measure themselves.
+            self.openPointer.set(local.map { IslandHover.unscaled($0, in: self.islandRect, grown: false) })
         }
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: { event in
             MainActor.assumeIsolated { movedOpen(event) }
@@ -758,12 +712,23 @@ final class IslandController {
             return event
         }) { openMonitors.append(m) }
         islandPanel.acceptsMouseMovedEvents = true
-        // The two-finger swipe over the island changes tabs.
+        // Two fingers over the island: the gesture's DOMINANT axis decides, once, for the whole gesture and its momentum
+        // (`IslandScrollAxisLock`) — vertical scrolls the tab's list (the event goes on to it), horizontal swipes tabs.
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel], handler: { [weak self] event in
             guard let self, self.isOpen, event.window === self.islandPanel else { return event }
-            let result = self.swipeRecognizer.handle(event)
-            result.performAcceptedFeedback { direction in self.store.tabs.swipe(direction) }
-            return result.consumesScroll ? nil : event
+            switch self.scrollAxis.route(event) {
+            case .scroll:
+                return event
+            case .swallow:
+                return nil
+            case .scrollAndForgetSwipe:
+                self.swipeRecognizer.reset()
+                return event
+            case .swipe:
+                let result = self.swipeRecognizer.handle(event)
+                result.performAcceptedFeedback { direction in self.store.tabs.swipe(direction) }
+                return result.consumesScroll ? nil : event
+            }
         }) { openMonitors.append(m) }
     }
 

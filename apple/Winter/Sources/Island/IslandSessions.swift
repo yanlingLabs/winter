@@ -252,11 +252,8 @@ struct IslandSessionsList: View {
     var body: some View {
         if model.rows.isEmpty {
             IslandEmptyTab(symbol: "rectangle.stack", line: "No sessions running")
-        } else if scrolls {
-            ScrollView(.vertical) { list }.scrollIndicators(.never)
         } else {
-            list
-            Spacer(minLength: 0)
+            IslandTabScroll(scrolls: scrolls) { list }
         }
     }
 

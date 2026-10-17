@@ -23,11 +23,9 @@ struct IslandShelfTab: View {
                 .background(dropOutline)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 14)
-        } else if scrolls {
-            ScrollView(.vertical) { grid }.scrollIndicators(.never)
         } else {
-            grid
-            Spacer(minLength: 0)
+            // The grid scrolls inside the island's fixed size, like every tab.
+            IslandTabScroll(scrolls: scrolls) { grid }
         }
     }
 

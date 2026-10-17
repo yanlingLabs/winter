@@ -430,7 +430,7 @@ struct IslandRectShell: View {
 // MARK: - The waiting pill
 
 /// The compact pill waiting under a hovered card: one short line; a click expands it (the current card tucks away). It
-/// grows a little under the pointer, like every island panel.
+/// grows under the pointer by the compact Dispatch pill's few points, like every floating island panel.
 struct IslandWaitingPill: View {
     let card: IslandCard
     /// Hovered, as the controller judged it (the grown shape while hovered).
@@ -457,7 +457,7 @@ struct IslandWaitingPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(IslandPressStyle())
-        .islandHoverGrow(hovered)
+        .islandHoverGrow(hovered, size: CGSize(width: IslandLayout.waitingWidth, height: IslandLayout.waitingHeight))
         .accessibilityLabel("Waiting: \(islandWaitingLine(card)). Show it.")
     }
 }
@@ -470,22 +470,23 @@ struct IslandExpandedView: View {
     @ObservedObject var store: IslandStore
     let shape: IslandScreenShape
     let size: CGSize
-    /// The list scrolls (always, live); the offscreen gallery lays it out flat (`ImageRenderer` cannot draw a scroll view).
+    /// The list scrolls (always, live); the offscreen gallery lays it out flat, cut at the island's edge (`ImageRenderer`
+    /// cannot draw a scroll view).
     var scrolls = true
     /// The phase-2 tabs' models (nil: only Needs you has a body).
     var tabModels: IslandTabModels?
 
     var body: some View {
         let target = CGRect(origin: .zero, size: size)
-        IslandOpenFrame(frame: IslandOpenMorph.Frame(rect: target, corner: IslandLayout.islandCorner, content: 1, blur: 0),
-                        target: target, shape: shape) {
+        IslandOpenFrame(frame: .resting(target), target: target, shape: shape) {
             IslandExpandedContent(store: store, shape: shape, size: size, scrolls: scrolls, tabModels: tabModels)
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 }
 
-/// The open island's contents (no shell): the housing's band, the header, the selected tab.
+/// The open island's contents (no shell): the housing's band, the header (pinned), the selected tab — which scrolls
+/// inside the island's fixed size (`IslandTabScroll`).
 struct IslandExpandedContent: View {
     @ObservedObject var store: IslandStore
     let shape: IslandScreenShape
@@ -583,12 +584,8 @@ struct IslandNeedsYouList: View {
     var body: some View {
         if store.cards.isEmpty {
             IslandEmptyTab(symbol: "checkmark.circle", line: "Nothing needs you")
-        } else if scrolls {
-            ScrollView(.vertical) { rows }
-                .scrollIndicators(.never)
         } else {
-            rows
-            Spacer(minLength: 0)
+            IslandTabScroll(scrolls: scrolls) { rows }
         }
     }
 

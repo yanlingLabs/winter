@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 // The Winter island's tabs (`docs/claude/island.md`). The open island shows one tab at a time; a TWO-FINGER horizontal
 // swipe while the pointer is over it moves between them (`TrackpadHorizontalSwipeRecognizer`, the Dispatch pill's), with
@@ -55,5 +55,68 @@ struct IslandTabState: Equatable {
         guard let i = tabs.firstIndex(where: { $0.id == id }), i != selectedIndex else { return false }
         selectedIndex = i
         return true
+    }
+}
+
+/// Two fingers over the open island do ONE thing per gesture (user 2026-10-17: scrolling a tab's list and swiping tabs
+/// must not fight). The gesture's DOMINANT axis over its first few points decides, and holds until the next gesture
+/// begins — through its momentum too: vertical → the event goes on to the tab's scroll view (and the swipe recognizer
+/// forgets what it saw); horizontal → the swipe recognizer takes it (`TrackpadHorizontalSwipeRecognizer`, which swallows
+/// it), and its momentum is swallowed. Undecided, the recognizer sees it (it passes a vertical sample through and holds a
+/// horizontal one). A mouse wheel (no gesture phases) always scrolls. Pure — `IslandTabsTests`.
+struct IslandScrollAxisLock: Equatable {
+    enum Axis: Equatable { case undecided, vertical, horizontal }
+    enum Route: Equatable {
+        /// To the tab's scroll view.
+        case scroll
+        /// To the scroll view, the gesture having just been judged vertical: the swipe recognizer resets.
+        case scrollAndForgetSwipe
+        /// To the swipe recognizer.
+        case swipe
+        /// Nowhere: a horizontal gesture's momentum (the tab already changed; the list must not move).
+        case swallow
+    }
+
+    private(set) var axis: Axis = .undecided
+    private var travelX: CGFloat = 0
+    private var travelY: CGFloat = 0
+
+    /// The travel (points, both axes summed separately) after which the gesture's axis is decided.
+    static let decideAfter: CGFloat = 4
+
+    mutating func route(_ event: NSEvent) -> Route {
+        route(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY, phase: TrackpadScrollEventPhase(event.phase),
+              momentumPhase: TrackpadScrollEventPhase(event.momentumPhase))
+    }
+
+    mutating func route(deltaX: CGFloat, deltaY: CGFloat, phase: TrackpadScrollEventPhase,
+                        momentumPhase: TrackpadScrollEventPhase) -> Route {
+        // A plain mouse wheel: no gesture, the list.
+        if phase == .none && momentumPhase == .none { return .scroll }
+        // The fingers' momentum after they lift: the gesture's own axis; its end closes the gesture.
+        if momentumPhase != .none {
+            let route: Route = axis == .horizontal ? .swallow : .scroll
+            if momentumPhase.isTerminal { reset() }
+            return route
+        }
+        if phase == .mayBegin || phase == .began { reset() }
+        if axis == .undecided, !phase.isTerminal {
+            travelX += abs(deltaX)
+            travelY += abs(deltaY)
+            if max(travelX, travelY) >= Self.decideAfter {
+                axis = travelX > travelY ? .horizontal : .vertical
+                if axis == .vertical { return .scrollAndForgetSwipe }
+            }
+        }
+        switch axis {
+        case .vertical: return .scroll
+        case .horizontal, .undecided: return .swipe
+        }
+    }
+
+    private mutating func reset() {
+        axis = .undecided
+        travelX = 0
+        travelY = 0
     }
 }

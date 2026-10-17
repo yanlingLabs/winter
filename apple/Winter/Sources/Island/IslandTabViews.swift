@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WinterCUPresentation
 
@@ -37,8 +38,8 @@ final class IslandTabModels {
 }
 
 /// A row's surface: a soft fill that lightens and glows softly (the pills' `pillHoverGlow`, white and gentler) while the
-/// island's pointer is over it — never a grow: the open island itself grows under the pointer, and a row inside it must
-/// not add a second scale. No pointer (the offscreen gallery): at rest.
+/// island's pointer is over it — never a grow (nothing in the open island grows, the island included). No pointer (the
+/// offscreen gallery): at rest.
 struct IslandHoverSurface<Content: View>: View {
     var corner: CGFloat = IslandLayout.rowCorner
     @ViewBuilder let content: (Bool) -> Content
@@ -81,6 +82,8 @@ struct IslandEmptyTab: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 18)
         .padding(.horizontal, 24)
+        // Centred in the island's fixed body.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -183,21 +186,95 @@ struct IslandTabBody: View {
         case IslandTabRegistry.shelf.id:
             IslandShelfTab(shelf: models.shelf, thumbnails: models.thumbnails, scrolls: scrolls)
         case IslandTabRegistry.usage.id:
-            scrolling { IslandUsageTab(model: models.usage) }
+            IslandTabScroll(scrolls: scrolls) { IslandUsageTab(model: models.usage) }
         case IslandTabRegistry.devices.id:
-            scrolling { IslandDevicesTab(model: models.devices) }
+            IslandTabScroll(scrolls: scrolls) { IslandDevicesTab(model: models.devices) }
         default:
             Spacer()
         }
     }
+}
 
-    @ViewBuilder
-    private func scrolling<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+// MARK: - Scrolling inside the fixed island
+
+/// PURE: which edges of a tab's list have more beyond them — each such edge fades (`IslandTabScroll`).
+struct IslandScrollEdges: Equatable {
+    var top = false
+    var bottom = false
+
+    /// From the visible part of the content and the content's height.
+    static func of(visible: CGRect, contentHeight: CGFloat) -> IslandScrollEdges {
+        IslandScrollEdges(top: visible.minY > 0.5, bottom: visible.maxY < contentHeight - 0.5)
+    }
+}
+
+/// A tab's body inside the open island's FIXED size: a vertical scroll view whose top and bottom edges fade softly where
+/// more of the list lies beyond them (judged on scroll, never on a timer), with overlay scrollers that show only while
+/// scrolling. The header above stays pinned. Flat (`scrolls` false — the offscreen gallery, which cannot draw a scroll
+/// view): top-aligned, cut at the island's edge with the bottom fade a longer list shows.
+struct IslandTabScroll<Content: View>: View {
+    var scrolls = true
+    @ViewBuilder let content: Content
+    @State private var edges = IslandScrollEdges()
+
+    /// How far the fade reaches into the list at an edge with more beyond it.
+    static var fade: CGFloat { 18 }
+
+    var body: some View {
         if scrolls {
-            ScrollView(.vertical) { content() }.scrollIndicators(.never)
+            ScrollView(.vertical) {
+                content.background(IslandOverlayScrollers())
+            }
+            .scrollIndicators(.automatic)
+            .onScrollGeometryChange(for: IslandScrollEdges.self) { geometry in
+                .of(visible: geometry.visibleRect, contentHeight: geometry.contentSize.height)
+            } action: { _, new in
+                edges = new
+            }
+            .mask { IslandScrollFade(edges: edges, fade: Self.fade) }
         } else {
-            content()
-            Spacer(minLength: 0)
+            content
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 0, maxHeight: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity)
+                .clipped()
+                .mask { IslandScrollFade(edges: IslandScrollEdges(top: false, bottom: true), fade: Self.fade) }
         }
+    }
+}
+
+/// The fade mask of `IslandTabScroll`: opaque, softening to nothing over `fade` at each edge that has more beyond it.
+struct IslandScrollFade: View {
+    let edges: IslandScrollEdges
+    let fade: CGFloat
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [edges.top ? .clear : .black, .black], startPoint: .top, endPoint: .bottom)
+                .frame(height: fade)
+            Color.black
+            LinearGradient(colors: [.black, edges.bottom ? .clear : .black], startPoint: .top, endPoint: .bottom)
+                .frame(height: fade)
+        }
+        .animation(.easeOut(duration: 0.15), value: edges)
+    }
+}
+
+/// Asks the scroll view around it for OVERLAY scrollers (shown only while scrolling, over the content) whatever the
+/// system's preference, so no scroll bar sits in the island at rest. Nothing else is touched.
+private struct IslandOverlayScrollers: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { OverlayScrollerProbe() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class OverlayScrollerProbe: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let scroll = enclosingScrollView else { return }
+            scroll.scrollerStyle = .overlay
+            scroll.autohidesScrollers = true
+            scroll.hasHorizontalScroller = false
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }

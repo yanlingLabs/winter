@@ -2,9 +2,11 @@ import SwiftUI
 import WinterCUPresentation
 
 // The open island's morph (`docs/claude/island.md`): the black mass grows OUT OF the strip (or the housing alone) into
-// the open island — one shape whose rect and bottom corners reshape continuously from the strip's into the island's, on
-// critically damped springs (no overshoot, no bounce: the size only ever grows towards its rest), with the contents
-// fading and un-blurring in (the cards' morph blur) only once the shape has nearly grown. Closing plays it backwards,
+// the open island — one shape whose rect, bottom corners and top shoulders reshape continuously from the strip's into the
+// island's, on critically damped springs (no overshoot, no bounce: the size only ever grows towards its rest), with the
+// contents fading and un-blurring in (the cards' morph blur) only once the shape has nearly grown. Its top is the
+// screen's edge on EVERY frame: flat, flush with it, flaring into it through two concave shoulders (`IslandEdgeShape`),
+// so the island reads as the hardware housing grown, never as a panel hanging below it. Closing plays it backwards,
 // faster: the contents go first, then the mass shrinks back into the strip. Pure — a function of the seconds since the
 // opening began (`IslandOpenMorphTests`); display-rate frames only while it moves.
 
@@ -14,6 +16,9 @@ struct IslandOpenMorph: Equatable {
     let target: CGRect
     let sourceCorner: CGFloat
     let targetCorner: CGFloat
+    /// The top shoulders: none on the strip (the housing's own silhouette, black on black), the island's at rest.
+    var sourceShoulder: CGFloat = 0
+    var targetShoulder: CGFloat = IslandLayout.islandShoulder
 
     /// The opening is over after this many seconds.
     static let settle: Double = 0.5
@@ -31,9 +36,17 @@ struct IslandOpenMorph: Equatable {
         var rect: CGRect
         /// Its bottom corners now (the top is the screen's edge: square).
         var corner: CGFloat
+        /// Its top shoulders now: the concave fillets by which its flat top flares into the screen's edge, OUTSIDE the
+        /// rect (`IslandEdgeShape`).
+        var shoulder: CGFloat
         /// How much of the contents shows (0…1), and their blur.
         var content: Double
         var blur: CGFloat
+
+        /// The island at rest in `rect`: its corners and shoulders, contents in.
+        static func resting(_ rect: CGRect) -> Frame {
+            Frame(rect: rect, corner: IslandLayout.islandCorner, shoulder: IslandLayout.islandShoulder, content: 1, blur: 0)
+        }
     }
 
     func frame(at seconds: Double) -> Frame {
@@ -47,11 +60,14 @@ struct IslandOpenMorph: Equatable {
         let minY = Self.lerp(source.minY, target.minY, kh)
         let rect = CGRect(x: midX - width / 2, y: minY, width: width, height: height)
         let corner = min(Self.lerp(sourceCorner, targetCorner, kh), min(width, height) / 2)
+        // The shoulders spread with the width (along the screen's edge), never deeper than the body beside them.
+        let shoulder = IslandEdgeShape.clampedShoulder(Self.lerp(sourceShoulder, targetShoulder, kw), height: height,
+                                                       corner: corner)
         let content = t >= Self.settle ? 1 : Self.easeOut(Self.phase(t, Self.contentIn.from, Self.contentIn.to))
         // The cards' morph blur: by how far the shape still has to go, and while the contents are still coming in.
         let blur = content >= 1 ? 0 : DesktopIslandGeometry.morphBlur(size: rect.size, target: target.size)
             + DesktopIslandGeometry.maxMorphBlur * CGFloat(1 - content)
-        return Frame(rect: rect, corner: max(0, corner), content: content, blur: blur)
+        return Frame(rect: rect, corner: max(0, corner), shoulder: shoulder, content: content, blur: blur)
     }
 
     // MARK: curves
@@ -69,14 +85,13 @@ struct IslandOpenMorph: Equatable {
 }
 
 /// The open island's clock: opening (forward from `openedAt`), closing (backwards from where it was, `closeSpeed`
-/// faster), and at rest (`still`: no frame driver). `hovered` changes only when the pointer enters or leaves.
+/// faster), and at rest (`still`: no frame driver). The open island has no hover grow (user 2026-10-17): its rows and
+/// tiles glow under the pointer, the island itself stays put.
 @MainActor final class IslandOpenModel: ObservableObject {
     @Published private(set) var openedAt: Date?
     @Published private(set) var closing: (at: Date, from: Double)?
     /// At rest (fully open, or not drawn): the frame driver stops.
     @Published var still = true
-    /// The pointer is over the open island: it grows a little (`IslandHover.scale`).
-    @Published var hovered = false
 
     var isClosing: Bool { closing != nil }
     /// Fully open and at rest: its contents are in (what a view request's ack waits for).
@@ -95,7 +110,6 @@ struct IslandOpenMorph: Equatable {
         closing = nil
         openedAt = now.addingTimeInterval(-from)
         still = instant
-        hovered = false
     }
 
     /// Starts closing from wherever the opening is. Returns how long the way back takes.
@@ -104,7 +118,6 @@ struct IslandOpenMorph: Equatable {
         let from = seconds(at: now)
         closing = (now, from)
         still = false
-        hovered = false
         return from / IslandOpenMorph.closeSpeed
     }
 
@@ -119,7 +132,6 @@ struct IslandOpenMorph: Equatable {
         openedAt = nil
         closing = nil
         still = true
-        hovered = false
     }
 }
 
@@ -159,31 +171,32 @@ struct IslandOpenRoot: View {
         if reduceMotion {
             // No growth: the island fades in and out where it rests.
             let on = model.isClosing ? 0.0 : 1.0
-            f = IslandOpenMorph.Frame(rect: target, corner: IslandLayout.islandCorner, content: on, blur: 0)
+            f = .resting(target)
+            f.content = on
         }
-        return IslandOpenFrame(frame: f, target: target, shape: shape, hovered: model.hovered,
+        return IslandOpenFrame(frame: f, target: target, shape: shape,
                                interactive: f.content > 0.9 && !model.isClosing, onTopBand: onTopBand) {
             IslandExpandedContent(store: store, shape: shape, size: target.size, tabModels: tabModels)
         }
     }
 }
 
-/// One frame of the open island: the black shell at the morph's rect and corners (hairline rim, shadow), the contents laid
-/// out at the island's resting size, clipped to the shell, blurred and faded by the morph; growing a little under the
-/// pointer from its top edge (the housing's side).
+/// One frame of the open island: pure black, the hardware housing grown — its flat top flush with the screen's edge and
+/// flaring into it through concave shoulders, rounded below (`IslandEdgeShape`). No rim (a light line would outline it
+/// against the housing) and no hover grow. The soft drop shadow only below the housing's height, fading in, so nothing
+/// darkens the menu bar along its top edge or its shoulders. The contents are laid out at the island's resting size,
+/// clipped to the shape, blurred and faded by the morph.
 struct IslandOpenFrame<Content: View>: View {
     let frame: IslandOpenMorph.Frame
     let target: CGRect
     let shape: IslandScreenShape
-    var hovered = false
     var interactive = true
     /// A click on the top band (the housing's height), x from the shape's centre.
     var onTopBand: (CGPoint) -> Void = { _ in }
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        let outline = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: frame.corner, bottomTrailing: frame.corner),
-                                             style: .continuous)
+        let outline = IslandEdgeShape(corner: frame.corner, shoulder: frame.shoulder)
         ZStack(alignment: .top) {
             content()
                 .frame(width: target.width, height: target.height, alignment: .top)
@@ -201,33 +214,110 @@ struct IslandOpenFrame<Content: View>: View {
         }
         .frame(width: frame.rect.width, height: frame.rect.height, alignment: .top)
         .clipShape(outline)
-        .background(outline.fill(Color.black))
-        .overlay(outline.strokeBorder(Color.white.opacity(0.09), lineWidth: 1).opacity(frame.content))
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
-        .islandHoverGrow(hovered)
+        .background {
+            ZStack {
+                outline.fill(Color.black)
+                    .shadow(color: .black.opacity(IslandOpenFrame.shadowOpacity), radius: IslandOpenFrame.shadowRadius,
+                            y: IslandOpenFrame.shadowY)
+                    .mask { IslandOpenFrame.shadowMask(size: frame.rect.size, from: shape.topInset) }
+                outline.fill(Color.black)
+            }
+        }
         .offset(x: frame.rect.minX, y: frame.rect.minY)
+    }
+
+    static var shadowOpacity: Double { 0.45 }
+    static var shadowRadius: CGFloat { 18 }
+    static var shadowY: CGFloat { 6 }
+    /// How far past the shape the shadow reaches (its radius plus its drop), for its mask.
+    static var shadowReach: CGFloat { 40 }
+    /// Over this many points below the housing's height the shadow fades in.
+    static var shadowFadeIn: CGFloat { 28 }
+
+    /// The shadow's mask: nothing down to the housing's height (no shadow on the menu bar, along the top edge or by the
+    /// shoulders), fading in below it; reaching past the shape on every other side.
+    static func shadowMask(size: CGSize, from top: CGFloat) -> some View {
+        let reach = shadowReach
+        return VStack(spacing: 0) {
+            Color.clear.frame(height: reach + top)
+            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: shadowFadeIn)
+            Color.black
+        }
+        .frame(width: size.width + 2 * reach, height: size.height + 2 * reach)
+        .frame(width: size.width, height: size.height)
+    }
+}
+
+/// The open island's outline: a flat top flush with the screen's edge, a concave shoulder at each top corner flaring OUT
+/// into that edge (outside the rect, like the hardware housing's own flare into the display), straight sides, and
+/// continuous rounded bottom corners. One path (the shoulders are sub-paths adjoining the body), so a fill has no seam.
+struct IslandEdgeShape: Shape {
+    var corner: CGFloat
+    var shoulder: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(corner, shoulder) }
+        set { corner = newValue.first; shoulder = newValue.second }
+    }
+
+    /// The circle's control-point ratio for a quarter arc drawn as one cubic.
+    static let kappa: CGFloat = 0.552_284_75
+
+    /// PURE: a shoulder never deeper than the side it flares from (the height less the bottom corner), nor than half the
+    /// height.
+    static func clampedShoulder(_ shoulder: CGFloat, height: CGFloat, corner: CGFloat) -> CGFloat {
+        max(0, min(shoulder, height - corner, height / 2))
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: max(0, corner), bottomTrailing: max(0, corner)),
+                                          style: .continuous).path(in: rect)
+        let s = Self.clampedShoulder(shoulder, height: rect.height, corner: corner)
+        guard s > 0.01 else { return path }
+        let k = Self.kappa * s
+        // Left: from the screen's edge `s` out from the side, along the edge to the body's corner, down its side, and
+        // back up along the quarter circle centred `s` out and `s` down — concave, flaring into the edge.
+        path.move(to: CGPoint(x: rect.minX - s, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + s))
+        path.addCurve(to: CGPoint(x: rect.minX - s, y: rect.minY),
+                      control1: CGPoint(x: rect.minX, y: rect.minY + s - k),
+                      control2: CGPoint(x: rect.minX - s + k, y: rect.minY))
+        path.closeSubpath()
+        // Right: the mirror image.
+        path.move(to: CGPoint(x: rect.maxX + s, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + s))
+        path.addCurve(to: CGPoint(x: rect.maxX + s, y: rect.minY),
+                      control1: CGPoint(x: rect.maxX, y: rect.minY + s - k),
+                      control2: CGPoint(x: rect.maxX + s - k, y: rect.minY))
+        path.closeSubpath()
+        return path
     }
 }
 
 // MARK: - Hover
 
-/// Every standalone island panel grows by the Dispatch pill's own hover (`DesktopIslandGeometry.hoverScale`, the same
-/// value as `DispatchPillMetrics.hoverScale`) from its TOP edge (the housing's side), on the same spring. Inner rows and
-/// tiles never add a second grow: they lighten and glow (`IslandHoverSurface`).
+/// Every floating island panel — a card on top (approval, question, link, view request), the waiting pill, the turn
+/// result, the computer-use pill and the in-island mirror — grows under the pointer by the SAME few points as the
+/// compact Dispatch pill (`HoverGrowth`: its width by 9.48 pt, uniformly), from its TOP edge (the housing's side), on
+/// the same spring. The open island does not grow at all; inner rows and tiles never grow: they lighten and glow
+/// (`IslandHoverSurface`).
 enum IslandHover {
-    static let scale = DesktopIslandGeometry.hoverScale
-    static let animation = Animation.spring(response: 0.3, dampingFraction: 0.7)
+    static let animation = HoverGrowth.animation
     /// A row's soft glow under the pointer (the pills' `pillHoverGlow` radii, white, gentler on a large surface).
     static let rowGlowNear: Double = 0.10
     static let rowGlowFar: Double = 0.05
 }
 
 extension IslandHover {
+    /// PURE: a panel of `size`'s scale under the pointer (`HoverGrowth.scale(for:)`).
+    static func scale(for size: CGSize) -> CGSize { HoverGrowth.scale(for: size) }
+
     /// PURE: `rect` grown by the hover from its top edge — what a hovered panel covers, and so its hit area while
     /// hovered (it leaves the hover only when the pointer leaves the GROWN shape: no flicker at the edge).
     static func grown(_ rect: CGRect) -> CGRect {
-        CGRect(x: rect.midX - rect.width * scale / 2, y: rect.minY, width: rect.width * scale, height: rect.height * scale)
+        HoverGrowth.grown(rect, anchor: .top)
     }
 
     /// PURE: hovering with this hysteresis — inside the shape, or inside the grown one while already hovered.
@@ -240,8 +330,8 @@ extension IslandHover {
     /// space, origin at its top-left: where its rows and buttons are laid out, so their hover sits under the pointer
     /// whether or not the panel has grown.
     static func unscaled(_ point: CGPoint, in rect: CGRect, grown: Bool) -> CGPoint {
-        let s = grown ? scale : 1
-        return CGPoint(x: (point.x - rect.midX) / s + rect.width / 2, y: (point.y - rect.minY) / s)
+        let s = grown ? scale(for: rect.size) : CGSize(width: 1, height: 1)
+        return CGPoint(x: (point.x - rect.midX) / s.width + rect.width / 2, y: (point.y - rect.minY) / s.height)
     }
 }
 
@@ -253,11 +343,9 @@ extension IslandHover {
 }
 
 extension View {
-    /// Grows by `IslandHover.scale` from the top edge while `hovered`; the animation is scoped to the scale alone.
-    func islandHoverGrow(_ hovered: Bool) -> some View {
-        animation(IslandHover.animation) { view in
-            view.scaleEffect(hovered ? IslandHover.scale : 1, anchor: .top)
-        }
+    /// Grows a panel of `size` by `HoverGrowth` from its top edge while `hovered`; the animation is scoped to the scale.
+    func islandHoverGrow(_ hovered: Bool, size: CGSize) -> some View {
+        hoverGrowth(hovered, size: size, anchor: .top)
     }
 
     /// The panel's own space for the pointer-reading views inside it (rows, buttons): the controller publishes the

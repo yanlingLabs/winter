@@ -4,7 +4,8 @@ import WinterProtocol
 
 // The card the Dispatch pill morphs into (`DispatchPillCards.swift` decides which), drawn in the pill's OWN language —
 // the family of the island's cards (`docs/claude/island.md`), not the transcript's: the pill's black shell (the
-// shell is `DispatchPillShell`'s, so the rim, shadow, morph blur and 3 % hover grow are the pill's own), the pill's
+// shell is `DispatchPillShell`'s, so the rim, shadow, morph blur and hover grow — the compact pill's points, not 3 % of
+// the card — are the pill's own), the pill's
 // typed-text face for every line the user reads (`Typography.composerField()`), quiet caption meta, compact
 // capsule rows for options, and the white ✕ / blue ✓ circles with the pills' hover glow.
 //
