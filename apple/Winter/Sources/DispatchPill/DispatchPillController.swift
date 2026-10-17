@@ -1549,15 +1549,15 @@ final class DispatchPillController: ObservableObject {
         armGateTimer(after: Self.gateTickInterval)
 
         // Esc. A LOCAL monitor sees only this app's events; it acts only on keys bound for this panel.
-        // A printable key under a card (no card field being typed in) sets the cards aside and types (`typeAsideCard`).
+        // The same monitor: a printable key under a card (no card field being typed in) sets the cards aside and
+        // types (`typeAsideCard`).
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
-            guard let self, self.isVisible, event.keyCode != 53, event.window === self.panel else { return event }
-            return self.typeAsideCard(event) ? nil : event
-        }) { monitors.append(m) }
-
-        if let m = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
-            guard let self, self.isVisible, event.keyCode == 53,
-                  event.window === self.panel || (event.window == nil && self.panel.isKeyWindow) else { return event }
+            guard let self, self.isVisible else { return event }
+            if event.keyCode != 53 {
+                guard event.window === self.panel else { return event }
+                return self.typeAsideCard(event) ? nil : event
+            }
+            guard event.window === self.panel || (event.window == nil && self.panel.isKeyWindow) else { return event }
             return self.handleEscape() ? nil : event
         }) { monitors.append(m) }
 
