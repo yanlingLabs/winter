@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AdmissionRecord, StopReceipt as LedgerStopReceipt } from "../admission";
 import type { CoworkVolumeOwner, CoworkVolumeRecord } from "../volumes";
-import { classAInvariantsHold, type CoworkNativeOrderlyReceipt } from "./protocol";
+import { classAInvariantsHold, parseCoworkNativeStopReceipt, serializeCoworkNativeStopReceipt, type CoworkNativeOrderlyReceipt } from "./protocol";
 
 /*
  * Stop evidence: what may release the two disks of a workspace, and the sealed objects that carry it.
@@ -47,7 +47,26 @@ export interface CoworkNativeHostBoot {
 export interface CoworkNativeOwnerRecoverAttestation {
   readonly kind: "owner-recover"; readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly attestedBy: "owner";
 }
-export interface CoworkNativeRecoverSubject { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly owner: CoworkVolumeOwner | null }
+/** The processes of one launch, as the daemon recorded them DURABLY while it lived: what an absence check needs after a crash
+ * (a pid alone is reused; the start token and the boot id make it an identity). `launcher` is null while the spawn was requested but its
+ * identity not yet written, `worker` is null until the launcher's `begun`. */
+export interface CoworkNativeLaunchEntry {
+  readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly bootId: string;
+  readonly launcher: { readonly pid: number; readonly startToken: string; readonly instanceId: string } | null;
+  readonly worker: { readonly pid: number; readonly startToken: string } | null;
+}
+/** Durable, synchronous, keyed by (workspace, incarnation, epoch); `record` replaces the previous entry of that key. Written BEFORE the
+ * launcher is spawned, again with the launcher's identity, again at `begun`. S7 binds it to a store outside the runtime-state schema. */
+export interface CoworkNativeLaunchJournalPort {
+  record(entry: CoworkNativeLaunchEntry): void;
+  load(scope: { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number }): CoworkNativeLaunchEntry | null;
+  forget(scope: { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number }): void;
+}
+export interface CoworkNativeRecoverSubject {
+  readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly owner: CoworkVolumeOwner | null;
+  /** The launch journal entry, or null when none was ever written (no launch was started by this daemon for the incarnation). */
+  readonly processes: CoworkNativeLaunchEntry | null;
+}
 /** The two guard checks of D1. Extra safety only: they can only make recovery stricter, never replace the attestation. */
 export interface CoworkNativeRecoverGuards {
   processAbsent(subject: Readonly<CoworkNativeRecoverSubject>): boolean;
@@ -114,27 +133,40 @@ export class CoworkNativeStopRegistry {
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 24);
 
+/** What the daemon saw on the channel before the stop: a receipt cannot know LESS than the daemon observed. */
+export interface CoworkNativeObserved { readonly volumesAccepted: boolean; readonly vmRunning: boolean; readonly guestHello: boolean }
+/** The admission record, reduced to what a receipt must agree with. */
+export interface CoworkNativeAdmissionView { readonly admissionId: string; readonly owner: { readonly bootId: string } }
 export interface OrderlyEvidenceInput {
   readonly receipt: CoworkNativeOrderlyReceipt; readonly owner: CoworkVolumeOwner; readonly homeId: string;
-  /** The admission this incarnation reserved, when the caller knows it (a restarted daemon may not). */
-  readonly admissionId: string | null;
+  /** The admission this incarnation reserved, when the caller knows it (a restarted daemon may not): the receipt must name it AND the boot it was made in. */
+  readonly admission: CoworkNativeAdmissionView | null;
   readonly volumes: readonly CoworkVolumeRecord[];
   /** True when the volumes were already released (owner null) and only the admission and power remain to settle. */
   readonly volumesReleased?: boolean;
-  /** `live`: the receipt arrived on the launcher channel this process owns, in answer to a stop it issued, so the nonce must be the
-   * one it issued. `retained`: it was read back from the launcher's durable store through an attesting port. */
-  readonly source: { readonly kind: "live"; readonly stopNonce: string } | { readonly kind: "retained" };
+  /** `live`: the receipt arrived on the launcher channel this process owns, in answer to a stop it issued: the nonce must be the one it
+   * issued, the launcher the one on the channel, and the receipt may not contradict what this process observed. `retained`: it was read
+   * back from the launcher's durable store through an attesting port. */
+  readonly source: { readonly kind: "live"; readonly stopNonce: string; readonly launcherInstanceId: string; readonly observed: CoworkNativeObserved } | { readonly kind: "retained" };
   readonly registry: CoworkNativeStopRegistry; readonly now: () => number;
 }
 /** Class A receipt to sealed release proof, or a refusal that says which binding failed. Class B has no function here at all. */
 export function mintOrderlyStopProof(input: OrderlyEvidenceInput): CoworkNativeStopProof {
-  const { receipt, owner, volumes } = input;
-  if (receipt?.class !== "A" || !classAInvariantsHold(receipt)) return refuse("not_orderly");
+  const { owner, volumes } = input;
+  // Re-validate from scratch: a typed object is not trusted because it has the right type. The strict serializer refuses an extra key,
+  // a wrong type, a malformed id; the strict parser then refuses anything the wire would refuse (the worker's exit, status, reaping...).
+  let receipt: CoworkNativeOrderlyReceipt;
+  try {
+    const reparsed = parseCoworkNativeStopReceipt(serializeCoworkNativeStopReceipt(input.receipt));
+    if (reparsed.class !== "A") return refuse("not_orderly");
+    receipt = reparsed;
+  } catch (error) { if (error instanceof CoworkNativeStopEvidenceError) throw error; return refuse("not_orderly"); }
+  if (!classAInvariantsHold(receipt)) return refuse("not_orderly");
   const bootId = ownerBootId(owner);
   if (bootId === null) return refuse("boot_unknown");
   if (receipt.workspaceId !== volumes[0]?.workspaceId || receipt.incarnationId !== owner.incarnationId || receipt.leaseEpoch !== owner.leaseEpoch || receipt.controllerInstanceId !== owner.controllerInstanceId
     || receipt.workerInstanceId !== owner.workerInstanceId || receipt.runtimeImageDigest !== owner.runtimeImageDigest || receipt.homeId !== input.homeId || receipt.hostBootId !== bootId
-    || (input.admissionId !== null && receipt.admissionId !== input.admissionId)) return refuse("wrong_binding");
+    || (input.admission !== null && (receipt.admissionId !== input.admission.admissionId || receipt.hostBootId !== input.admission.owner.bootId))) return refuse("wrong_binding");
   if (volumes.length !== 2) return refuse("wrong_binding");
   for (const [index, volume] of volumes.entries()) {
     const attested = receipt.volumes[index]!;
@@ -142,7 +174,14 @@ export function mintOrderlyStopProof(input: OrderlyEvidenceInput): CoworkNativeS
     const identityOk = !attested.attached || (volume.identity !== null && volume.identity.device === attested.device && volume.identity.inode === attested.inode && volume.capacityBytes === attested.capacityBytes);
     if (volume.purpose !== attested.purpose || volume.workspaceId !== receipt.workspaceId || !identityOk || (input.volumesReleased === true ? volume.owner !== null : !sameOwnerTuple(volume.owner, owner))) return refuse("wrong_binding");
   }
-  if (input.source.kind === "live" && (receipt.origin !== "host-stop" || receipt.stopNonce !== input.source.stopNonce)) return refuse("nonce_mismatch");
+  if (input.source.kind === "live") {
+    const { stopNonce, launcherInstanceId, observed } = input.source;
+    if (receipt.launcherInstanceId !== launcherInstanceId) return refuse("wrong_binding");
+    if (receipt.origin !== "host-stop" || receipt.stopNonce !== stopNonce) return refuse("nonce_mismatch");
+    // `unattached` means the worker never accepted the descriptors and `not-booted` that it never reported a running VM. A daemon that saw
+    // either happen cannot accept a receipt that says it did not.
+    if ((observed.volumesAccepted && receipt.volumes.some(v => !v.attached)) || ((observed.vmRunning || observed.guestHello) && receipt.guest.drain === "not-booted")) return refuse("not_orderly");
+  }
   if (input.registry.wasSpent(receipt.confirmationId, receipt.stopNonce)) return refuse("replayed");
   return seal({ kind: "orderly-receipt", workspaceId: receipt.workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, owner: { ...owner }, confirmationId: receipt.confirmationId, receipt, issuedAtMs: input.now(), consumed: false });
 }
@@ -162,6 +201,9 @@ export function mintNewBootStopProof(input: { readonly owner: CoworkVolumeOwner;
 export function mintOwnerRecoverStopProof(input: { readonly subject: CoworkNativeRecoverSubject; readonly attestation: CoworkNativeOwnerRecoverAttestation | null; readonly guards: CoworkNativeRecoverGuards; readonly volumes: readonly CoworkVolumeRecord[]; readonly now: () => number }): CoworkNativeStopProof {
   const { attestation, subject } = input;
   if (!attestation || attestation.kind !== "owner-recover" || attestation.attestedBy !== "owner" || attestation.workspaceId !== subject.workspaceId || attestation.incarnationId !== subject.incarnationId || attestation.leaseEpoch !== subject.leaseEpoch) return refuse("recover_refused");
+  // A launch that was requested but whose launcher identity was never written leaves a process nobody can name: absence cannot be shown.
+  const entry = subject.processes;
+  if (entry !== null && (entry.launcher === null || entry.workspaceId !== subject.workspaceId || entry.incarnationId !== subject.incarnationId || entry.leaseEpoch !== subject.leaseEpoch)) return refuse("recover_refused");
   let absent = false, unlocked = false;
   try { absent = input.guards.processAbsent(subject) === true; unlocked = input.guards.imagesUnlocked(input.volumes) === true; } catch { /* a guard that cannot answer refuses */ }
   if (!absent || !unlocked) return refuse("recover_refused");
@@ -193,21 +235,24 @@ export function coworkNativeLedgerStopProbe(receipt: LedgerStopReceipt, record: 
 
 const released = new WeakMap<object, { workspaceId: string; incarnationId: string; leaseEpoch: number; via: "release" | "volumes-free" }>();
 export interface CoworkNativeReleaseToken { readonly workspaceId: string; readonly via: "release" | "volumes-free" }
-/** Minted by the host AFTER `volumes.release` succeeded, and the only thing (with the pre-claim token below) that power.ts accepts
- * for a move to `stopped`. It re-reads nothing: the caller passes the current volume records, which must all be free. */
-export function mintReleaseToken(input: { readonly proof: CoworkNativeStopProof; readonly volumesNowFree: readonly CoworkVolumeRecord[] }): CoworkNativeReleaseToken {
+/** The only thing the tokens read volumes through. `CoworkVolumes` is one; a caller cannot hand over records it made up. */
+export interface CoworkNativeVolumeReader { records(workspaceId: string): readonly CoworkVolumeRecord[] }
+const bothFree = (volumes: readonly CoworkVolumeRecord[]): boolean => volumes.length === 2 && volumes.every(v => v.owner === null);
+/** Minted by the host AFTER `volumes.release` succeeded, and the only thing (with the volumes-free token below) that power.ts accepts
+ * for a move to `stopped`. It reads the CURRENT records itself: both images must be free. */
+export function mintReleaseToken(input: { readonly proof: CoworkNativeStopProof; readonly volumes: CoworkNativeVolumeReader }): CoworkNativeReleaseToken {
   const state = stopProofState(input.proof);
   if (!state) return refuse("invalid");
-  if (input.volumesNowFree.length !== 2 || input.volumesNowFree.some(v => v.owner !== null)) return refuse("wrong_binding");
+  if (!bothFree(input.volumes.records(state.workspaceId))) return refuse("wrong_binding");
   const token = Object.freeze({ workspaceId: state.workspaceId, via: "release" as const });
   released.set(token, { workspaceId: state.workspaceId, incarnationId: state.incarnationId, leaseEpoch: state.leaseEpoch, via: "release" });
   return token;
 }
 /** The volumes are free: no claim is recorded on either image. That alone moves nothing; it is the last step for an incarnation whose
  * evidence was already accepted (volumes released earlier) or that never claimed anything (the start died before the claim), and
- * whose admission is gone. The caller proves it with the CURRENT volume records, never with a claim about itself. */
-export function mintVolumesFreeToken(input: { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly volumes: readonly CoworkVolumeRecord[] }): CoworkNativeReleaseToken {
-  if (input.volumes.length !== 2 || input.volumes.some(v => v.owner !== null)) return refuse("wrong_binding");
+ * whose admission is gone. It reads the current records itself, so an unknown workspace (no pair) is refused too. */
+export function mintVolumesFreeToken(input: { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly volumes: CoworkNativeVolumeReader }): CoworkNativeReleaseToken {
+  if (!bothFree(input.volumes.records(input.workspaceId))) return refuse("wrong_binding");
   const token = Object.freeze({ workspaceId: input.workspaceId, via: "volumes-free" as const });
   released.set(token, { workspaceId: input.workspaceId, incarnationId: input.incarnationId, leaseEpoch: input.leaseEpoch, via: "volumes-free" });
   return token;

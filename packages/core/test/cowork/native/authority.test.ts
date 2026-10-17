@@ -35,6 +35,11 @@ describe("adoption: a binding exists only for the live launcher of the current i
     refusal(() => h.authority.adopt({ isLive: () => true }, { ...scope, homeId: "home-elsewhere" }), "invalid");
     refusal(() => h.authority.adopt({ isLive: () => true }, { ...scope, owner: { ...scope.owner, incarnationId: "inc-other" } }), "stale_incarnation");
     refusal(() => h.authority.adopt({ isLive: () => true }, { ...scope, owner: { ...scope.owner, leaseEpoch: 2 } }), "stale_incarnation");
+    for (const power of ["running", "draining", "uncertain", "stopped"]) { // adoption is for a launch that is STARTING, nothing else
+      h.db.db.run("UPDATE cowork_workspaces SET power=? WHERE workspace_id=?", [power, h.workspaceId]);
+      refusal(() => h.authority.adopt({ isLive: () => true }, scope), "stale_incarnation");
+    }
+    h.db.db.run("UPDATE cowork_workspaces SET power='starting' WHERE workspace_id=?", [h.workspaceId]);
     const link = { live: true, isLive() { return this.live; } };
     const first = h.authority.adopt(link, scope);
     refusal(() => h.authority.adopt({ isLive: () => true }, scope), "already_bound");
@@ -134,7 +139,7 @@ describe("release goes through sealed stop evidence only", () => {
     const running = await h.host.start(h.workspaceId);
     const session = h.launcher.last, volumes = h.volumes.records(h.workspaceId);
     const receipt = session.stagedOrderly("ab".repeat(16));
-    const proof = mintOrderlyStopProof({ receipt, owner: running.owner, homeId: h.homeId, admissionId: running.admissionId, volumes, source: { kind: "live", stopNonce: "ab".repeat(16) }, registry: h.registry, now: () => 1 });
+    const proof = mintOrderlyStopProof({ receipt, owner: running.owner, homeId: h.homeId, admission: { admissionId: running.admissionId, owner: { bootId: "boot-one" } }, volumes, source: { kind: "live", stopNonce: "ab".repeat(16), launcherInstanceId: session.launcherInstanceId, observed: { volumesAccepted: true, vmRunning: true, guestHello: true } }, registry: h.registry, now: () => 1 });
     return { h, request: { workspaceId: h.workspaceId, owner: running.owner, proof }, proof, owner: running.owner };
   }
   test("only the sealed proof releases; every copy, clone and mismatch is refused, and release is allowed without a live binding", async () => {
@@ -152,8 +157,18 @@ describe("release goes through sealed stop evidence only", () => {
     expect(h.authority.volumes.verifyStopped({ ...request, owner: { ...owner, leaseEpoch: 9 } }, stop, volumes)).toBe(false);
     expect(h.authority.volumes.verifyStopped({ ...request, workspaceId: "workspace-other" }, stop, volumes)).toBe(false);
     expect(h.authority.volumes.verifyStopped(request, stop, volumes.slice(0, 1))).toBe(false);
+    // both volumes must be this owner's, in this workspace: one foreign owner, one other-workspace volume, one free volume each break it
+    expect(h.authority.volumes.verifyStopped(request, stop, [volumes[0]!, { ...volumes[1]!, owner: { ...owner, workerInstanceId: "wrk-else" } }])).toBe(false);
+    expect(h.authority.volumes.verifyStopped(request, stop, [volumes[0]!, { ...volumes[1]!, workspaceId: "workspace-other" }])).toBe(false);
+    expect(h.authority.volumes.verifyStopped(request, stop, [volumes[0]!, { ...volumes[1]!, owner: null }])).toBe(false);
     expect(h.authority.volumes.authorize("release", request, "home-other")).toBe(false);
-    // power `stopped` or a different current incarnation: the evidence is for a state that no longer exists
+    // a different current epoch, a different current incarnation, power `stopped`: the evidence is for a state that no longer exists
+    h.db.db.run("UPDATE cowork_workspaces SET lease_epoch=lease_epoch+1 WHERE workspace_id=?", [h.workspaceId]);
+    expect(h.authority.volumes.authorize("release", request, h.homeId)).toBe(false);
+    h.db.db.run("UPDATE cowork_workspaces SET lease_epoch=lease_epoch-1,incarnation_id='inc-newer' WHERE workspace_id=?", [h.workspaceId]);
+    expect(h.authority.volumes.authorize("release", request, h.homeId)).toBe(false);
+    h.db.db.run("UPDATE cowork_workspaces SET incarnation_id=? WHERE workspace_id=?", [owner.incarnationId, h.workspaceId]);
+    expect(h.authority.volumes.authorize("release", request, h.homeId)).toBe(true);
     h.db.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [h.workspaceId]);
     expect(h.authority.volumes.authorize("release", request, h.homeId)).toBe(false);
   });
@@ -250,6 +265,7 @@ describe("filesystem authority and the bootstrap receipt", () => {
     expect(check({ operationId: "x", owner: request.owner })).toBe(false);
     expect(check(debt, "home-other")).toBe(false);
     h.registry.noteStopped(foreign, "orderly-receipt");
+    expect(check(debt, "home-other")).toBe(false); // known stopped, but asked about another home
     expect(check()).toBe(true);
     // boot evidence: the tuple's boot is not this one and the host confirms it ended
     const aged: CoworkVolumeOwner = { ...foreign, controllerInstanceId: mintControllerInstanceId("boot-ancient", "0000000e"), incarnationId: "inc-ancient" };

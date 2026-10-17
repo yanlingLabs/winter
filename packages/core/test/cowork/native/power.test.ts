@@ -11,7 +11,7 @@ function started(h: Harness, label = "p"): CoworkPowerKey {
   return { workspaceId: h.workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch };
 }
 const code = (body: () => unknown): string => { try { body(); } catch (error) { expect(error).toBeInstanceOf(CoworkNativePowerError); return (error as CoworkNativePowerError).code; } return "accepted"; };
-const freeToken = (h: Harness, key: CoworkPowerKey) => mintVolumesFreeToken({ ...key, volumes: h.volumes.records(h.workspaceId) });
+const freeToken = (h: Harness, key: CoworkPowerKey) => mintVolumesFreeToken({ ...key, volumes: h.volumes });
 const power = (h: Harness) => h.power.read(h.workspaceId).power;
 const set = (h: Harness, value: CoworkPower) => h.db.db.run("UPDATE cowork_workspaces SET power=? WHERE workspace_id=?", [value, h.workspaceId]);
 
@@ -48,22 +48,25 @@ describe("compare-and-set power transitions", () => {
     expect(code(() => h.power.transition(key, "starting", "stopped"))).toBe("needs_release");
     for (const forged of [{}, { workspaceId: h.workspaceId, via: "release" }, JSON.parse(JSON.stringify(freeToken(h, key))), Object.create(freeToken(h, key)), null, "token"])
       expect(code(() => h.power.transition(key, "starting", "stopped", forged))).toBe("needs_release");
-    const other = mintVolumesFreeToken({ ...key, incarnationId: "inc-other", volumes: h.volumes.records(h.workspaceId) });
+    const other = mintVolumesFreeToken({ ...key, incarnationId: "inc-other", volumes: h.volumes });
     expect(code(() => h.power.transition(key, "starting", "stopped", other))).toBe("needs_release");
-    expect(code(() => h.power.transition(key, "starting", "stopped", mintVolumesFreeToken({ ...key, leaseEpoch: 99, volumes: h.volumes.records(h.workspaceId) })))).toBe("needs_release");
+    expect(code(() => h.power.transition(key, "starting", "stopped", mintVolumesFreeToken({ ...key, leaseEpoch: 99, volumes: h.volumes })))).toBe("needs_release");
     expect(power(h)).toBe("starting");
     h.power.transition(key, "starting", "stopped", freeToken(h, key));
     expect(power(h)).toBe("stopped");
   });
-  test("a free-volumes token cannot be minted while any volume has an owner, and a release token needs a sealed proof", async () => {
+  test("a free-volumes token cannot be minted while any volume has an owner or for a workspace with no pair, and a release token needs a sealed proof", async () => {
     const h = createHarness();
     const running = await h.host.start(h.workspaceId);
     const key = { workspaceId: h.workspaceId, incarnationId: running.incarnationId, leaseEpoch: running.leaseEpoch }, volumes = h.volumes.records(h.workspaceId);
-    expect(() => mintVolumesFreeToken({ ...key, volumes })).toThrow(CoworkNativeStopEvidenceError);
-    expect(() => mintVolumesFreeToken({ ...key, volumes: [volumes[0]!] })).toThrow(CoworkNativeStopEvidenceError);
-    expect(() => mintReleaseToken({ proof: {} as never, volumesNowFree: volumes })).toThrow(CoworkNativeStopEvidenceError);
-    const proof = mintOrderlyStopProof({ receipt: h.launcher.last.stagedOrderly("ab".repeat(16)), owner: running.owner, homeId: h.homeId, admissionId: running.admissionId, volumes, source: { kind: "live", stopNonce: "ab".repeat(16) }, registry: h.registry, now: () => 1 });
-    expect(() => mintReleaseToken({ proof, volumesNowFree: volumes })).toThrow(CoworkNativeStopEvidenceError); // volumes still owned
+    expect(() => mintVolumesFreeToken({ ...key, volumes: h.volumes })).toThrow(CoworkNativeStopEvidenceError);
+    // It reads the records itself: a caller cannot hand over records it made up, and a workspace with no volume pair has nothing to be free.
+    expect(() => mintVolumesFreeToken({ ...key, workspaceId: "workspace-none", volumes: h.volumes })).toThrow(CoworkNativeStopEvidenceError);
+    expect(() => mintVolumesFreeToken({ ...key, volumes: { records: () => volumes.map(v => ({ ...v, owner: null })) } })).not.toThrow(); // the reader is the only source of truth it has
+    expect(() => mintVolumesFreeToken({ ...key, volumes: { records: () => [] } })).toThrow(CoworkNativeStopEvidenceError);
+    expect(() => mintReleaseToken({ proof: {} as never, volumes: h.volumes })).toThrow(CoworkNativeStopEvidenceError);
+    const proof = mintOrderlyStopProof({ receipt: h.launcher.last.stagedOrderly("ab".repeat(16)), owner: running.owner, homeId: h.homeId, admission: { admissionId: running.admissionId, owner: { bootId: "boot-one" } }, volumes, source: { kind: "live", stopNonce: "ab".repeat(16), launcherInstanceId: h.launcher.last.launcherInstanceId, observed: { volumesAccepted: true, vmRunning: true, guestHello: true } }, registry: h.registry, now: () => 1 });
+    expect(() => mintReleaseToken({ proof, volumes: h.volumes })).toThrow(CoworkNativeStopEvidenceError); // volumes still owned
     expect(power(h)).toBe("running");
   });
   test("an archived workspace cannot be moved", () => {

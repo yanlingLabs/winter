@@ -1,12 +1,12 @@
-// Worker thread of FdReceiver (fd-channel.ts): blocks in poll(2) and recvmsg(2) on a private descriptor and posts each message
-// to the main thread. It owns no descriptor; the receiver that started it closes them after this thread has ended.
-import { runReceiveLoop } from "./fd-channel";
+// The shared receiver thread of fd-channel.ts (see ReceiverHub there): one blocking loop that polls a control socket and every
+// registered data socket and posts what it receives. It owns no descriptor; the main thread closes each data descriptor after
+// the `end` event for it.
+import { runHubLoop } from "./fd-channel";
 
 declare const self: Worker;
-self.onmessage = (message: MessageEvent<{ fd: number; wake: number; maxBytes: number; maxRights: number }>) => {
-  const { fd, wake, maxBytes, maxRights } = message.data;
-  runReceiveLoop(fd, wake, maxBytes, maxRights, event => {
+self.onmessage = (message: MessageEvent<{ control: number }>) => {
+  runHubLoop(message.data.control, (id, event) => {
     // Message bytes move without a copy; descriptor numbers are plain integers valid in this whole process.
-    if (event.kind === "data") self.postMessage(event, [event.data.buffer]); else self.postMessage(event);
+    if (event.kind === "data") self.postMessage({ id, event }, [event.data.buffer]); else self.postMessage({ id, event });
   });
 };

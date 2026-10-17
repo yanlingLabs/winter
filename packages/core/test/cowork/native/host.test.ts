@@ -89,7 +89,6 @@ const SETTLED_ORDERLY: [string, FakeBehavior, string][] = [
   ["the launcher never answers begin", { begin: "silent" }, "timeout"],
   ["the launcher rejects the volumes", { volumes: "refuse" }, "launcher_refused"],
   ["the launcher never accepts the volumes", { volumes: "silent" }, "timeout"],
-  ["the guest never says hello", { guestHello: "silent" }, "timeout"],
   ["the guest reports a format fault", { bootstrap: "fault" }, "guest_fault"],
   ["the guest never answers the plan", { bootstrap: "silent" }, "timeout"],
   ["the guest echoes another nonce", { bootstrap: "wrong-nonce" }, "start_failed"],
@@ -111,6 +110,14 @@ for (const [name, behavior, expected] of SETTLED_ORDERLY) {
     expect(h.calls.volumeRelease).toBe(h.volumes.records(h.workspaceId)[0]!.lastStopId === null ? 0 : 1);
   });
 }
+
+test("a guest that never says hello leaves a VM that cannot have drained: the launcher's answer is uncertain and nothing is released", async () => {
+  const h = createHarness({ behavior: { guestHello: "silent" } });
+  await expect(h.host.start(h.workspaceId)).rejects.toMatchObject({ code: "timeout" });
+  expect(h.records.get(h.workspaceId).power).toBe("uncertain");
+  expect(admissionState(h)).toEqual(["uncertain"]); expect(owners(h).every(owner => owner !== null)).toBe(true);
+  expect(h.calls.volumeRelease + h.calls.ledgerRelease).toBe(0);
+});
 
 test("a hostile bootstrap that sends a runtime frame before the mount is a protocol fault, settled orderly", async () => {
   const h = createHarness({ behavior: { bootstrap: "runtime-frame", mounted: "silent" } });
@@ -160,7 +167,7 @@ test("a failed start whose stop is not orderly keeps ownership and marks everyth
 
 // ------------------------------------------------------------------------------------------------ D1: a Class B event never releases
 
-const NOT_ORDERLY = ["uncertain", "eof", "silent", "fault", "wrong-nonce", "bad-invariants", "other-incarnation", "wrong-volume"] as const;
+const NOT_ORDERLY = ["uncertain", "eof", "silent", "fault", "wrong-nonce", "bad-invariants", "other-incarnation", "wrong-volume", "other-request-id", "other-launcher", "denies-attach", "denies-boot"] as const;
 for (const stop of NOT_ORDERLY) {
   test(`stop answered by "${stop}": nothing is released, ownership is retained, and no later EOF, dead process or repeat changes that`, async () => {
     const h = createHarness({ behavior: { stop } });

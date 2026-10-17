@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { StopReceipt as LedgerStopReceipt } from "../../../src/cowork/admission";
-import type { CoworkNativeOrderlyReceipt } from "../../../src/cowork/native/protocol";
+import { classAInvariantsHold, type CoworkNativeOrderlyReceipt } from "../../../src/cowork/native/protocol";
 import {
   COWORK_NATIVE_RELEASE_POLICY, CoworkNativeStopEvidenceError, CoworkNativeStopRegistry, coworkNativeLedgerStopProbe, isStopProof, ledgerStopReceipt, mintControllerInstanceId, mintNewBootStopProof, mintOrderlyStopProof, mintOwnerRecoverStopProof,
   ownerBootId, ownerKey, releasesOwnership, stopProofState, type CoworkNativeStopProof,
@@ -16,8 +16,11 @@ async function running(): Promise<{ h: Harness; owner: CoworkVolumeOwner; volume
   const h = createHarness(), handle = await h.host.start(h.workspaceId);
   return { h, owner: handle.owner, volumes: h.volumes.records(h.workspaceId), admissionId: handle.admissionId, receipt: h.launcher.last.stagedOrderly(NONCE) };
 }
+const OBSERVED = { volumesAccepted: true, vmRunning: true, guestHello: true };
+const admissionOf = (c: Awaited<ReturnType<typeof running>>) => ({ admissionId: c.admissionId, owner: { bootId: "boot-one" } });
+const liveSource = (c: Awaited<ReturnType<typeof running>>, observed = OBSERVED) => ({ kind: "live" as const, stopNonce: NONCE, launcherInstanceId: c.h.launcher.last.launcherInstanceId, observed });
 const mint = (c: Awaited<ReturnType<typeof running>>, over: Partial<CoworkNativeOrderlyReceipt> = {}, extra: Partial<Parameters<typeof mintOrderlyStopProof>[0]> = {}) =>
-  mintOrderlyStopProof({ receipt: { ...c.receipt, ...over } as CoworkNativeOrderlyReceipt, owner: c.owner, homeId: c.h.homeId, admissionId: c.admissionId, volumes: c.volumes, source: { kind: "live", stopNonce: NONCE }, registry: c.h.registry, now: () => 7, ...extra });
+  mintOrderlyStopProof({ receipt: { ...c.receipt, ...over } as CoworkNativeOrderlyReceipt, owner: c.owner, homeId: c.h.homeId, admission: admissionOf(c), volumes: c.volumes, source: liveSource(c), registry: c.h.registry, now: () => 7, ...extra });
 
 describe("D1: the release policy is one table", () => {
   test("exactly three kinds release; everything else is written down as NOT evidence", () => {
@@ -60,7 +63,7 @@ describe("a Class A receipt becomes a release proof only if every binding holds"
     for (const [name, over, expected] of cases) expect(`${name}:${code(() => mint(c, over))}`).toBe(`${name}:${expected}`);
     const file = (i: number, over: object) => ({ volumes: [i === 0 ? { ...c.receipt.volumes[0], ...over } : c.receipt.volumes[0], i === 1 ? { ...c.receipt.volumes[1], ...over } : c.receipt.volumes[1]] }) as never;
     for (const [name, over] of [["inode", { inode: "1" }], ["device", { device: "1" }], ["capacity", { capacityBytes: 33554432 }]] as const) for (const i of [0, 1]) expect(`${name}${i}:${code(() => mint(c, file(i, over)))}`).toBe(`${name}${i}:wrong_binding`);
-    expect(code(() => mint(c, { volumes: [c.receipt.volumes[1], c.receipt.volumes[0]] } as never))).toBe("wrong_binding"); // swapped purposes
+    expect(code(() => mint(c, { volumes: [c.receipt.volumes[1], c.receipt.volumes[0]] } as never))).toBe("not_orderly"); // swapped purposes: refused by the re-validation, before any binding is looked at
   });
   test("an owner tuple whose boot cannot be read, and volumes that are not exactly this owner's pair, refuse", async () => {
     const c = await running();
@@ -80,9 +83,9 @@ describe("a Class A receipt becomes a release proof only if every binding holds"
   });
   test("a Class B receipt has no path to a proof at all", async () => {
     const c = await running(), b = c.h.launcher.last.stagedUncertain("daemon-lost");
-    expect(code(() => mintOrderlyStopProof({ receipt: b as never, owner: c.owner, homeId: c.h.homeId, admissionId: c.admissionId, volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
-    expect(code(() => mintOrderlyStopProof({ receipt: { ...c.receipt, class: "B" } as never, owner: c.owner, homeId: c.h.homeId, admissionId: c.admissionId, volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
-    expect(code(() => mintOrderlyStopProof({ receipt: null as never, owner: c.owner, homeId: c.h.homeId, admissionId: c.admissionId, volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
+    expect(code(() => mintOrderlyStopProof({ receipt: b as never, owner: c.owner, homeId: c.h.homeId, admission: admissionOf(c), volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
+    expect(code(() => mintOrderlyStopProof({ receipt: { ...c.receipt, class: "B" } as never, owner: c.owner, homeId: c.h.homeId, admission: admissionOf(c), volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
+    expect(code(() => mintOrderlyStopProof({ receipt: null as never, owner: c.owner, homeId: c.h.homeId, admission: admissionOf(c), volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
   });
   test("a spent receipt (by id or by nonce) can never mint again", async () => {
     const c = await running(), proof = mint(c);
@@ -116,7 +119,7 @@ describe("boot evidence", () => {
 });
 
 describe("explicit owner recovery", () => {
-  const subject = { workspaceId: "w", incarnationId: "inc-1", leaseEpoch: 1, owner: null };
+  const subject = { workspaceId: "w", incarnationId: "inc-1", leaseEpoch: 1, owner: null, processes: null };
   const attestation = { kind: "owner-recover", workspaceId: "w", incarnationId: "inc-1", leaseEpoch: 1, attestedBy: "owner" } as const;
   const guards = (absent: unknown, unlocked: unknown) => ({ processAbsent: () => absent as boolean, imagesUnlocked: () => unlocked as boolean });
   test("needs the attestation naming this incarnation AND both guards answering exactly true", () => {
@@ -146,6 +149,7 @@ describe("the admission ledger bridge", () => {
     expect(coworkNativeLedgerStopProbe(receipt, { ...record, admissionId: "adm-other" })).toBe(false);
     expect(code(() => ledgerStopReceipt({ ...proof } as CoworkNativeStopProof, record, c.h.homeId))).toBe("invalid");
     expect(code(() => ledgerStopReceipt(proof, { ...record, leaseEpoch: 9 }, c.h.homeId))).toBe("wrong_binding");
+    expect(code(() => ledgerStopReceipt(proof, { ...record, incarnationId: "inc-another" }, c.h.homeId))).toBe("wrong_binding");
     expect(code(() => ledgerStopReceipt(proof, { ...record, workspaceId: "workspace-x" }, c.h.homeId))).toBe("wrong_binding");
     expect(code(() => ledgerStopReceipt(proof, record, "home-x"))).toBe("wrong_binding");
     c.h.registry.consume(proof);
@@ -164,5 +168,67 @@ describe("the registry", () => {
     registry.noteStopped({ ...c.owner, workerInstanceId: "wrk-n" }, "new-boot");
     expect(registry.isOwnerStopped({ ...c.owner, workerInstanceId: "wrk-n" })).toBe(true);
     expect(ownerKey(c.owner)).not.toBe(ownerKey({ ...c.owner, workerInstanceId: "wrk-n" }));
+  });
+});
+
+describe("the mint trusts nothing it did not just validate", () => {
+  test("a hand-built receipt object is re-validated through the strict wire form: an extra key, a bad id, a worker that was killed", async () => {
+    const c = await running();
+    const forged: [string, object][] = [
+      ["extra key", { extra: 1 }], ["id with a space", { confirmationId: "not a token" }], ["uppercase nonce", { stopNonce: "AB".repeat(16) }],
+      ["worker killed", { worker: { ...c.receipt.worker, exit: "signal", status: 9 } }], ["worker status 1", { worker: { ...c.receipt.worker, status: 1 } }], ["worker not reaped", { worker: { ...c.receipt.worker, reaped: false } }],
+      ["class B", { class: "B" }], ["version 2", { v: 2 }],
+    ];
+    for (const [name, over] of forged) expect(`${name}:${code(() => mint(c, over as never))}`).toBe(`${name}:not_orderly`);
+    expect(code(() => mintOrderlyStopProof({ ...({} as Parameters<typeof mintOrderlyStopProof>[0]), receipt: { ...c.receipt, worker: undefined } as never, owner: c.owner, homeId: c.h.homeId, admission: null, volumes: c.volumes, source: { kind: "retained" }, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
+  });
+  test("the invariants alone also refuse a worker that did not exit cleanly (a typed object that skipped the parser)", async () => {
+    const c = await running();
+    for (const worker of [{ ...c.receipt.worker, exit: "signal", status: 9 }, { ...c.receipt.worker, status: 1 }, { ...c.receipt.worker, reaped: false }]) expect(classAInvariantsHold({ ...c.receipt, worker } as never)).toBe(false);
+    expect(classAInvariantsHold(c.receipt)).toBe(true);
+  });
+  test("a live receipt may not know less than the daemon saw", async () => {
+    const c = await running(), none = { volumesAccepted: false, vmRunning: false, guestHello: false };
+    const neverAttached = c.h.launcher.last.stagedOrderly(NONCE, { guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: [0, 1].map(i => ({ purpose: i ? "environment" : "data", device: "0", inode: "0", capacityBytes: 0, attached: false, flushRequested: 0, flushCompleted: 0, finalFlush: "not-attached" })) as never });
+    const attachedNeverBooted = c.h.launcher.last.stagedOrderly(NONCE, { guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: c.receipt.volumes.map(v => ({ ...v, flushRequested: 0, flushCompleted: 0 })) as never });
+    const volumesFree = c.volumes.map(v => ({ ...v, owner: null }));
+    const attempt = (receipt: CoworkNativeOrderlyReceipt, observed: typeof none, volumesReleased: boolean) => code(() => mint(c, receipt, { source: liveSource(c, observed), ...(volumesReleased ? { volumes: volumesFree, volumesReleased: true } : {}) }));
+    // nothing observed: both honest "nothing happened" receipts are fine
+    expect(attempt(neverAttached, none, true)).toBe("accepted");
+    expect(attempt(attachedNeverBooted, none, false)).toBe("accepted");
+    // the daemon saw the descriptors accepted: "unattached" is a lie
+    expect(attempt(neverAttached, { ...none, volumesAccepted: true }, true)).toBe("not_orderly");
+    // the daemon saw the VM run (or the guest greet): "not booted" is a lie
+    expect(attempt(attachedNeverBooted, { ...none, vmRunning: true }, false)).toBe("not_orderly");
+    expect(attempt(attachedNeverBooted, { ...none, guestHello: true }, false)).toBe("not_orderly");
+    // a receipt that does describe a boot is untouched by any observation
+    expect(attempt(c.receipt, OBSERVED, false)).toBe("accepted");
+  });
+  test("a live receipt must come from the launcher on the channel", async () => {
+    const c = await running();
+    expect(code(() => mint(c, { launcherInstanceId: "launcher-impostor" }))).toBe("wrong_binding");
+    expect(code(() => mint(c, {}, { source: { ...liveSource(c), launcherInstanceId: "launcher-other" } }))).toBe("wrong_binding");
+  });
+  test("the receipt must name the admission AND the boot that admission was made in", async () => {
+    const c = await running();
+    expect(code(() => mint(c, {}, { admission: { admissionId: "adm-other", owner: { bootId: "boot-one" } } }))).toBe("wrong_binding");
+    expect(code(() => mint(c, {}, { admission: { admissionId: c.admissionId, owner: { bootId: "boot-two" } } }))).toBe("wrong_binding");
+    expect(code(() => mint(c, {}, { admission: null }))).toBe("accepted"); // a restarted daemon may not know it; every other binding stays
+  });
+});
+
+describe("owner recovery names the processes it is vouching for", () => {
+  const base = { workspaceId: "w", incarnationId: "inc-1", leaseEpoch: 1, owner: null };
+  const attest = { kind: "owner-recover", workspaceId: "w", incarnationId: "inc-1", leaseEpoch: 1, attestedBy: "owner" } as const;
+  const entry = (over: object = {}) => ({ workspaceId: "w", incarnationId: "inc-1", leaseEpoch: 1, bootId: "boot-one", launcher: { pid: 10, startToken: "s10", instanceId: "launcher-1" }, worker: { pid: 11, startToken: "s11" }, ...over });
+  const go = (processes: object | null) => code(() => mintOwnerRecoverStopProof({ subject: { ...base, processes } as never, attestation: attest, guards: { processAbsent: () => true, imagesUnlocked: () => true }, volumes: [], now: () => 1 }));
+  test("a launch with an unknown launcher, or a journal entry for another incarnation, refuses; no entry and a full entry are fine", () => {
+    expect(go(null)).toBe("accepted");
+    expect(go(entry())).toBe("accepted");
+    expect(go(entry({ worker: null }))).toBe("accepted"); // the launcher is the process to show absent; its death takes the worker's ownership with it
+    expect(go(entry({ launcher: null }))).toBe("recover_refused");
+    expect(go(entry({ incarnationId: "inc-2" }))).toBe("recover_refused");
+    expect(go(entry({ leaseEpoch: 2 }))).toBe("recover_refused");
+    expect(go(entry({ workspaceId: "w2" }))).toBe("recover_refused");
   });
 });

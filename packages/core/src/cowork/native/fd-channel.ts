@@ -173,6 +173,30 @@ export function sendMessage(fd: number, data: Uint8Array, rights: readonly numbe
   }
 }
 
+/**
+ * The control buffer a recvmsg returned, as data. `received` is every descriptor number found in it; `bad` is true for anything but
+ * ONE well-formed SCM_RIGHTS item of whole descriptors: a header shorter than the minimum, a length past the returned bytes, another
+ * level or type, a payload that is not a whole number of descriptors, or a second item. (macOS refuses to SEND two rights items, so a
+ * second one is not expected from a real peer; it is refused here regardless, and this function is what tests feed crafted buffers.)
+ */
+export function parseRightsControl(control: Uint8Array, controllen: number): { readonly received: number[]; readonly bad: boolean } {
+  const view = new DataView(control.buffer, control.byteOffset, control.byteLength), received: number[] = [];
+  let bad = false, items = 0;
+  for (let offset = 0; offset + CMSG_HEADER <= controllen;) {
+    const length = view.getUint32(offset, true), level = view.getInt32(offset + 4, true), type = view.getInt32(offset + 8, true);
+    if (length < CMSG_HEADER || offset + length > controllen) { bad = true; break; }
+    if (level !== SOL_SOCKET || type !== SCM_RIGHTS) bad = true;
+    else {
+      items++;
+      const payload = length - CMSG_HEADER;
+      if (payload % 4 !== 0) bad = true;
+      for (let at = 0; at + 4 <= payload; at += 4) received.push(view.getInt32(offset + CMSG_HEADER + at, true));
+    }
+    offset += (length + 3) & ~3;
+  }
+  return { received, bad: bad || items > 1 };
+}
+
 export interface FdReceived { readonly data: Uint8Array; readonly rights: number[] }
 /**
  * One nonblocking recvmsg. Returns null when nothing is ready; an empty `data` on a stream socket means the peer closed. Every descriptor received is given FD_CLOEXEC and returned for the caller to own; on ANY refusal below, every
@@ -184,31 +208,20 @@ export interface FdReceived { readonly data: Uint8Array; readonly rights: number
  *  - More than `maxRights` descriptors, or rights where `maxRights` is 0: `unexpected_rights`.
  *  - Anything other than exactly one SCM_RIGHTS control message of a whole number of descriptors: `bad_control`.
  */
-export function receiveMessage(fd: number, maxBytes: number, maxRights = 0, controlSlots = FD_CHANNEL_MAX_RIGHTS + 1): FdReceived | null {
+export function receiveMessage(fd: number, maxBytes: number, maxRights = 0, controlSlots = FD_CHANNEL_MAX_RIGHTS + 1, scratch?: Uint8Array): FdReceived | null {
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 4 * 1024 * 1024 || !Number.isInteger(maxRights) || maxRights < 0 || maxRights > FD_CHANNEL_MAX_RIGHTS || !Number.isInteger(controlSlots) || controlSlots < 0 || controlSlots > 2 * FD_CHANNEL_MAX_RIGHTS) throw new FdChannelError("invalid");
-  const buffer = new Uint8Array(maxBytes);
+  // `scratch` lets a long-lived receiver read into one buffer instead of allocating up to `maxBytes` per wake-up; the caller gets a copy.
+  if (scratch !== undefined && scratch.length < maxBytes) throw new FdChannelError("invalid");
+  const buffer = scratch === undefined ? new Uint8Array(maxBytes) : scratch.subarray(0, maxBytes);
   // `controlSlots` is a TEST HOOK that shrinks the control buffer to provoke ancillary truncation. Its default has room for one
   // descriptor more than the most any caller may accept, so an extra is SEEN (and refused) instead of silently truncated.
   const capacity = controlSlots === 0 ? 0 : CMSG_HEADER + 4 * controlSlots;
   const result = load().recvmsg(fd, buffer, capacity);
   if (result.bytes < 0) { const error = -result.bytes; if (error === EAGAIN || error === EINTR) return null; throw new FdChannelError(error === 54 ? "closed" : "syscall", error); }
-  const control = new DataView(result.control.buffer), received: number[] = [];
-  let bad = false, items = 0;
-  for (let offset = 0; offset + CMSG_HEADER <= result.controllen;) {
-    const length = control.getUint32(offset, true), level = control.getInt32(offset + 4, true), type = control.getInt32(offset + 8, true);
-    if (length < CMSG_HEADER || offset + length > result.controllen) { bad = true; break; }
-    if (level !== SOL_SOCKET || type !== SCM_RIGHTS) bad = true;
-    else {
-      items++;
-      const payload = length - CMSG_HEADER;
-      if (payload % 4 !== 0) bad = true;
-      for (let at = 0; at + 4 <= payload; at += 4) received.push(control.getInt32(offset + CMSG_HEADER + at, true));
-    }
-    offset += (length + 3) & ~3;
-  }
+  const { received, bad } = parseRightsControl(result.control, result.controllen);
   const cleanup = (): void => { for (const descriptor of received) if (descriptor >= 0) load().close(descriptor); };
   if (result.flags & MSG_CTRUNC) { cleanup(); throw new FdChannelError("rights_truncated", 0, true); }
-  if (bad || items > 1) { cleanup(); throw new FdChannelError("bad_control"); }
+  if (bad) { cleanup(); throw new FdChannelError("bad_control"); }
   if (received.length > maxRights) { cleanup(); throw new FdChannelError("unexpected_rights"); }
   if (result.flags & MSG_TRUNC) { cleanup(); throw new FdChannelError("data_truncated"); }
   try { for (const descriptor of received) setCloseOnExec(descriptor, true); } catch (error) { cleanup(); throw error; }
@@ -229,10 +242,12 @@ export interface FdChannelProcess {
  * immediately: the launcher's death must produce EOF on `channel`, which only happens once nothing else holds the other end.
  * No other descriptor reaches the child. `stdin` is ignored, `stdout` and `stderr` are whatever the caller asks.
  */
+/** The environment a launched child gets unless the caller names one: two locale variables and nothing of the daemon's. */
+export const FD_CHANNEL_MINIMAL_ENV: Readonly<Record<string, string>> = Object.freeze({ LC_ALL: "C", LANG: "C" });
 export function spawnWithChannel(argv: string[], options: { env?: Record<string, string>; cwd?: string; stdout?: "ignore" | "pipe" | "inherit"; stderr?: "ignore" | "pipe" | "inherit" } = {}): FdChannelProcess {
   const [daemonEnd, childEnd] = socketPair("stream");
   try {
-    const subprocess = Bun.spawn(argv, { stdio: ["ignore", options.stdout ?? "ignore", options.stderr ?? "ignore", childEnd], env: options.env, cwd: options.cwd });
+    const subprocess = Bun.spawn(argv, { stdio: ["ignore", options.stdout ?? "ignore", options.stderr ?? "ignore", childEnd], env: options.env ?? { ...FD_CHANNEL_MINIMAL_ENV }, cwd: options.cwd });
     closeDescriptor(childEnd);
     return { channel: daemonEnd, subprocess };
   } catch (error) { closeDescriptor(daemonEnd); closeDescriptor(childEnd); throw error; }
@@ -240,82 +255,131 @@ export function spawnWithChannel(argv: string[], options: { env?: Record<string,
 
 // ---------------------------------------------------------------------------------------------------- receiving
 
-/** The blocking receive loop that runs on a worker thread (fd-receiver-worker.ts): poll the data socket and a wake socket,
- * recvmsg when data is ready, hand each message to `emit`. It ends on EOF, on a refusal (rights where none are allowed,
- * truncation) or when the wake socket becomes readable. It owns neither descriptor. */
-export function runReceiveLoop(fd: number, wakeFd: number, maxBytes: number, maxRights: number, emit: (event: ReceiveEvent) => void): void {
-  for (;;) {
-    const result = load().poll([{ fd, events: POLLIN | POLLHUP }, { fd: wakeFd, events: POLLIN | POLLHUP }], -1);
-    if (typeof result === "number") { if (-result === EINTR) continue; emit({ kind: "end", reason: "error", code: "syscall", errno: -result, fatal: false }); return; }
-    if (result[1]! !== 0) { emit({ kind: "end", reason: "closed" }); return; }
-    if (result[0]! & POLLNVAL) { emit({ kind: "end", reason: "error", code: "closed", errno: 0, fatal: false }); return; }
-    if (result[0]! === 0) continue;
-    try {
-      const got = receiveMessage(fd, maxBytes, maxRights);
-      if (got === null) continue;
-      if (got.data.length === 0 && got.rights.length === 0) { emit({ kind: "end", reason: "eof" }); return; }
-      emit({ kind: "data", data: got.data, rights: got.rights });
-    } catch (error) {
-      const failure = error instanceof FdChannelError ? error : new FdChannelError("syscall");
-      emit({ kind: "end", reason: "error", code: failure.code, errno: failure.errno, fatal: failure.fatal }); return;
-    }
-  }
-}
 export type ReceiveEvent =
   | { readonly kind: "data"; readonly data: Uint8Array; readonly rights: number[] }
   | { readonly kind: "end"; readonly reason: "eof" | "closed" }
   | { readonly kind: "end"; readonly reason: "error"; readonly code: FdChannelFailure; readonly errno: number; readonly fatal: boolean };
 
-/**
- * Event-driven receiver for one socket. A worker thread blocks in poll(2) and recvmsg(2), so the daemon's event loop never
- * waits on the peer and never wakes while the channel is idle. The receiver works on a PRIVATE DUP of `fd` and closes it
- * itself, after the worker has stopped; the caller keeps ownership of `fd`. `onEvent` runs on the main thread.
+/** What the hub worker thread runs (fd-receiver-worker.ts): ONE blocking loop that polls a control socket and every registered data
+ * socket, `recvmsg`s whatever is ready and posts each message tagged with its registration id.
  *
- * Bun 1.3.14 leaves ONE descriptor open per Worker it ever started, even after terminate() (reproduced with a Worker that does
- * nothing, so it is not this module's). A receiver per workspace launch therefore costs one descriptor for the life of the
- * process, the same cost the daemon's per-session chat Workers already pay. A shared receiver hub would cap it at one; that
- * is an S7 decision once the real launcher port exists.
+ * The control socket carries newline-terminated commands from the main thread, `add\t<id>\t<fd>\t<maxBytes>\t<maxRights>` and
+ * `remove\t<id>`; its end of file stops the loop. A registration ends on EOF, on a refusal (rights where none are allowed,
+ * truncation, a bad control message) or when it is removed, and the loop posts exactly one `end` event for it. The loop owns no
+ * descriptor: the main thread closes each data descriptor after that `end`. */
+export function runHubLoop(controlFd: number, post: (id: number, event: ReceiveEvent) => void): void {
+  const entries = new Map<number, { fd: number; maxBytes: number; maxRights: number; scratch: Uint8Array }>();
+  let pending = "";
+  const endAll = (event: ReceiveEvent): void => { for (const id of [...entries.keys()]) { entries.delete(id); post(id, event); } };
+  for (;;) {
+    const ids = [...entries.keys()];
+    const result = load().poll([{ fd: controlFd, events: POLLIN | POLLHUP }, ...ids.map(id => ({ fd: entries.get(id)!.fd, events: POLLIN | POLLHUP }))], -1);
+    if (typeof result === "number") {
+      if (-result === EINTR) continue;
+      endAll({ kind: "end", reason: "error", code: "syscall", errno: -result, fatal: false }); return;
+    }
+    if (result[0]! !== 0) {
+      let command: FdReceived | null;
+      try { command = receiveMessage(controlFd, 4096, 0); } catch { endAll({ kind: "end", reason: "error", code: "bad_control", errno: 0, fatal: true }); return; }
+      if (command !== null) {
+        if (command.data.length === 0) { endAll({ kind: "end", reason: "closed" }); return; }
+        pending += new TextDecoder().decode(command.data);
+        for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n")) {
+          const [verb, ...args] = pending.slice(0, newline).split("\t"); pending = pending.slice(newline + 1);
+          const id = Number(args[0]);
+          if (verb === "add") entries.set(id, { fd: Number(args[1]), maxBytes: Number(args[2]), maxRights: Number(args[3]), scratch: new Uint8Array(Number(args[2])) });
+          else if (verb === "remove" && entries.delete(id)) post(id, { kind: "end", reason: "closed" });
+        }
+      }
+    }
+    for (const [index, id] of ids.entries()) {
+      const entry = entries.get(id), revents = result[index + 1]!;
+      if (!entry || revents === 0) continue;
+      if (revents & POLLNVAL) { entries.delete(id); post(id, { kind: "end", reason: "error", code: "closed", errno: 0, fatal: false }); continue; }
+      try {
+        const got = receiveMessage(entry.fd, entry.maxBytes, entry.maxRights, undefined, entry.scratch);
+        if (got === null) continue;
+        if (got.data.length === 0 && got.rights.length === 0) { entries.delete(id); post(id, { kind: "end", reason: "eof" }); continue; }
+        post(id, { kind: "data", data: got.data, rights: got.rights });
+      } catch (error) {
+        const failure = error instanceof FdChannelError ? error : new FdChannelError("syscall");
+        entries.delete(id); post(id, { kind: "end", reason: "error", code: failure.code, errno: failure.errno, fatal: failure.fatal });
+      }
+    }
+  }
+}
+
+/** The ONE worker thread that serves every receiver in this process. Bun leaves one descriptor open per Worker it ever starts (a
+ * Worker that does nothing reproduces it), so a worker per launch would cost one descriptor per launch for the life of the daemon;
+ * a shared hub costs one in total. It is created on first use and unref'd, so it never keeps the process alive. */
+class ReceiverHub {
+  private readonly worker: Worker;
+  private readonly control: [number, number];
+  private readonly sinks = new Map<number, (event: ReceiveEvent) => void>();
+  private next = 1;
+  private broken = false;
+  constructor() {
+    this.control = socketPair("stream");
+    this.worker = new Worker(new URL("./fd-receiver-worker.ts", import.meta.url).href);
+    (this.worker as unknown as { unref(): void }).unref(); // Bun's Worker has it; the DOM typings do not
+    this.worker.onmessage = (message: MessageEvent<{ id: number; event: ReceiveEvent }>) => {
+      const { id, event } = message.data, sink = this.sinks.get(id);
+      if (!sink) return;
+      if (event.kind === "end") this.sinks.delete(id);
+      sink(event);
+    };
+    this.worker.onerror = () => this.fail();
+    this.worker.postMessage({ control: this.control[1] });
+  }
+  private fail(): void {
+    this.broken = true;
+    for (const [id, sink] of [...this.sinks]) { this.sinks.delete(id); sink({ kind: "end", reason: "error", code: "syscall", errno: 0, fatal: false }); }
+  }
+  add(fd: number, maxBytes: number, maxRights: number, sink: (event: ReceiveEvent) => void): number {
+    if (this.broken) throw new FdChannelError("closed");
+    const id = this.next++;
+    this.sinks.set(id, sink);
+    try { sendMessage(this.control[0], new TextEncoder().encode(`add\t${id}\t${fd}\t${maxBytes}\t${maxRights}\n`)); } catch (error) { this.sinks.delete(id); throw error; }
+    return id;
+  }
+  remove(id: number): void {
+    if (this.sinks.has(id)) { try { sendMessage(this.control[0], new TextEncoder().encode(`remove\t${id}\n`)); } catch { this.fail(); } }
+  }
+}
+let hub: ReceiverHub | undefined;
+
+/**
+ * Event-driven receiver for one socket, served by the shared hub thread, so the daemon's event loop never waits on the peer and
+ * never wakes while the channel is idle. The receiver works on a PRIVATE DUP of `fd` and closes it itself, after the hub has stopped
+ * polling it; the caller keeps ownership of `fd`. `onEvent` runs on the main thread and gets exactly one `end` event.
  *
  * `maxRights` 0 means the peer may never send a descriptor: if one arrives it is closed and the channel ends with
  * `unexpected_rights`. Ancillary truncation ends it with a `fatal` `rights_truncated`.
  */
 export class FdReceiver {
-  private worker: Worker | undefined;
   private readonly dataFd: number;
-  private readonly wake: [number, number];
-  private stopped = false;
+  private readonly id: number;
   private finished = false;
+  private closing = false;
   readonly done: Promise<void>;
-  /** The descriptors this receiver made and will close (its private dup and its wake pair), for tests and diagnostics. */
-  get descriptors(): readonly number[] { return [this.dataFd, this.wake[0], this.wake[1]]; }
+  /** The descriptors this receiver made and will close (its private dup), for tests and diagnostics. */
+  get descriptors(): readonly number[] { return [this.dataFd]; }
   constructor(fd: number, options: { maxBytes: number; maxRights: number }, private readonly onEvent: (event: ReceiveEvent) => void) {
     this.dataFd = duplicateDescriptor(fd);
-    try { this.wake = socketPair("stream"); } catch (error) { closeDescriptor(this.dataFd); throw error; }
     let finish!: () => void;
     this.done = new Promise<void>(resolve => { finish = resolve; });
-    const worker = new Worker(new URL("./fd-receiver-worker.ts", import.meta.url).href);
-    this.worker = worker;
-    const settle = (): void => {
-      if (this.finished) return; this.finished = true;
-      worker.terminate();
-      // The worker is gone: nothing can be in poll on these any more.
-      closeDescriptor(this.dataFd); closeDescriptor(this.wake[0]); closeDescriptor(this.wake[1]);
-      this.worker = undefined; finish();
-    };
-    worker.onmessage = (message: MessageEvent<ReceiveEvent>) => {
-      const event = message.data;
-      if (!this.finished) this.onEvent(event);
-      if (event.kind === "end") settle();
-    };
-    worker.onerror = () => { if (!this.finished) this.onEvent({ kind: "end", reason: "error", code: "syscall", errno: 0, fatal: false }); settle(); };
-    worker.postMessage({ fd: this.dataFd, wake: this.wake[0], maxBytes: options.maxBytes, maxRights: options.maxRights });
+    hub ??= new ReceiverHub();
+    try {
+      this.id = hub.add(this.dataFd, options.maxBytes, options.maxRights, event => {
+        if (this.finished) { if (event.kind === "data") event.rights.forEach(closeDescriptor); return; }
+        if (event.kind === "end") { this.finished = true; closeDescriptor(this.dataFd); }
+        try { this.onEvent(event); } finally { if (event.kind === "end") finish(); }
+      });
+    } catch (error) { closeDescriptor(this.dataFd); throw error; }
   }
-  /** Ask the worker to stop. Resolves once the private descriptors are closed. Safe to call more than once. */
+  /** Stop receiving. Resolves once the private descriptor is closed. Safe to call more than once. */
   close(): Promise<void> {
-    if (!this.stopped) {
-      this.stopped = true;
-      if (!this.finished) { try { sendMessage(this.wake[1], new Uint8Array([1])); } catch { /* the worker already ended */ } }
-    }
+    if (!this.finished && !this.closing) { this.closing = true; hub!.remove(this.id); }
     return this.done;
   }
 }
@@ -357,12 +421,13 @@ export class FdLineChannel {
     this.receiver = new FdReceiver(fd, { maxBytes: Math.min(options.maxLine, 1 << 20), maxRights: options.maxRights ?? 0 }, event => this.receive(event));
   }
   private receive(event: ReceiveEvent): void {
+    // Rights are only legal where the owner asked for them, and this channel's owner takes none from the stream: close them FIRST,
+    // whatever happens next (a line over its bound, an earlier end, a malformed chunk).
+    if (event.kind === "data") event.rights.forEach(closeDescriptor);
     if (this.ended) return;
     try {
       if (event.kind === "data") {
         for (const line of this.splitter.push(event.data)) this.queue.push(line);
-        // Rights are only legal where the owner asked for them; this channel's owner takes none from the stream.
-        event.rights.forEach(closeDescriptor);
       } else if (event.kind === "end") {
         if (event.reason === "error") this.ended = { error: new FdChannelError(event.code, event.errno, event.fatal) };
         else this.ended = this.splitter.partial > 0 ? { error: new FdChannelError("closed") } : {};

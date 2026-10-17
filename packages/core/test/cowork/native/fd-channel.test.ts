@@ -3,8 +3,8 @@ import { closeSync, fstatSync, mkdtempSync, openSync, rmSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  closeDescriptor, duplicateDescriptor, FdChannelError, FdLineChannel, FdLineSplitter, FdReceiver, fdChannelSupported, hasCloseOnExec, receiveMessage, sendMessage, setCloseOnExec, setNonBlocking, shutdownDescriptor, socketPair, spawnWithChannel, waitReadable,
-  FD_CHANNEL_MAX_RIGHTS,
+  closeDescriptor, duplicateDescriptor, FdChannelError, FdLineChannel, FdLineSplitter, FdReceiver, FD_CHANNEL_MINIMAL_ENV, fdChannelSupported, type ReceiveEvent, hasCloseOnExec, receiveMessage, sendMessage, setCloseOnExec, setNonBlocking, shutdownDescriptor, socketPair, spawnWithChannel, waitReadable,
+  FD_CHANNEL_MAX_RIGHTS, parseRightsControl,
 } from "../../../src/cowork/native/fd-channel";
 
 // bun:ffi against libSystem is bound for macOS on Apple silicon only (CI runs there). Elsewhere these tests have nothing to bind to.
@@ -223,6 +223,107 @@ describe("FdLineChannel and FdReceiver", () => {
     expect(() => new FdLineSplitter(8).push(Uint8Array.from([0xff, 0x0a]))).toThrow();
     // a byte order mark is part of the line, never skipped: the protocol parser then refuses the line
     expect(new FdLineSplitter(16).push(Uint8Array.from([0xef, 0xbb, 0xbf, 0x7b, 0x0a]))).toEqual(["\ufeff{\n"]);
+  });
+});
+
+describe("the shared receiver hub", () => {
+  const openCount = () => { let n = 0; for (let fd = 3; fd < 600; fd++) if (open(fd)) n++; return n; };
+  live("receivers share ONE worker: after the first, whole lifecycles leave no descriptor behind", async () => {
+    const [w, x] = pair("stream"); void w;
+    await new FdReceiver(x, { maxBytes: 64, maxRights: 0 }, () => {}).close(); // warms the hub: its Worker (and Bun's one leaked descriptor per Worker) and control pair exist now
+    await Bun.sleep(30);
+    const before = openCount();
+    for (let round = 0; round < 12; round++) {
+      const [a, b] = socketPair("stream"), receiver = new FdReceiver(b, { maxBytes: 64, maxRights: 0 }, () => {});
+      sendMessage(a, encode("x\n")); await Bun.sleep(2);
+      await receiver.close(); closeDescriptor(a); closeDescriptor(b);
+    }
+    await Bun.sleep(30);
+    expect(openCount()).toBe(before);
+  });
+  live("many receivers at once are served independently and each ends exactly once", async () => {
+    const received = new Map<number, string>(), ends = new Map<number, number>(), receivers: FdReceiver[] = [], ends2: Promise<void>[] = [];
+    const ends3: number[] = [];
+    const pairs = Array.from({ length: 24 }, (_, index) => {
+      const [a, b] = pair("stream");
+      const receiver = new FdReceiver(b, { maxBytes: 64, maxRights: 0 }, event => {
+        if (event.kind === "data") received.set(index, `${received.get(index) ?? ""}${text(event.data)}`);
+        else { ends.set(index, (ends.get(index) ?? 0) + 1); ends3.push(index); }
+      });
+      receivers.push(receiver); ends2.push(receiver.done);
+      return a;
+    });
+    pairs.forEach((a, index) => sendMessage(a, encode(`msg-${index}\n`)));
+    for (let attempt = 0; attempt < 200 && received.size < 24; attempt++) await Bun.sleep(5);
+    expect([...received.entries()].sort((l, r) => l[0] - r[0]).map(([index, value]) => value === `msg-${index}\n`)).toEqual(Array(24).fill(true));
+    pairs.slice(0, 12).forEach(closeDescriptor);        // half of the peers hang up
+    await Promise.all(receivers.slice(12).map(receiver => receiver.close()));
+    await Promise.all(ends2.slice(0, 12));
+    await Promise.all(receivers.slice(0, 12).map(receiver => receiver.close()));
+    expect([...ends.values()].every(count => count === 1)).toBe(true);
+    expect(ends.size).toBe(24);
+  });
+  live("a receiver that is never read from but is closed first still ends once and frees its descriptor", async () => {
+    const [a, b] = pair("stream"), events: ReceiveEvent[] = [], receiver = new FdReceiver(b, { maxBytes: 64, maxRights: 0 }, event => events.push(event));
+    await receiver.close(); await receiver.close();
+    expect(events.map(event => event.kind)).toEqual(["end"]);
+    expect(receiver.descriptors.some(open)).toBe(false);
+    expect(open(a)).toBe(true);
+  });
+  live("rights ride the FIRST sendmsg only: a message too big for the socket buffer delivers them once", async () => {
+    const { fds } = files(2), [a, b] = pair("stream"), events: ReceiveEvent[] = [];
+    const receiver = new FdReceiver(b, { maxBytes: 65536, maxRights: 2 }, event => events.push(event)); cleanup.push(() => { void receiver.close(); });
+    sendMessage(a, new Uint8Array(1_000_000).fill(7), fds); // blocks (polling) until the hub thread has drained enough, so it is sent in many pieces
+    const total = () => events.reduce((sum, event) => sum + (event.kind === "data" ? event.data.length : 0), 0);
+    for (let attempt = 0; attempt < 400 && total() < 1_000_000; attempt++) await Bun.sleep(5);
+    const rights = events.flatMap(event => event.kind === "data" ? event.rights : []);
+    rights.forEach(fd => cleanup.push(() => closeDescriptor(fd)));
+    expect(total()).toBe(1_000_000);
+    expect(events.filter(event => event.kind === "end")).toEqual([]);
+    expect(rights).toHaveLength(2);
+    expect(events.findIndex(event => event.kind === "data" && event.rights.length > 0)).toBe(0); // with the first byte
+  });
+});
+
+describe("what the kernel may hand over, and what the launched child gets", () => {
+  // macOS refuses to SEND two rights items in one message (EINVAL, checked with a C program), so the receive-side refusal of a second
+  // item, of a foreign control message and of a ragged payload is pinned on the pure parser with crafted buffers.
+  const item = (descriptors: number[], level = 0xffff, type = 1, length = 12 + 4 * descriptors.length): number[] => {
+    const bytes = new Uint8Array(Math.max((length + 3) & ~3, 16)), view = new DataView(bytes.buffer);
+    view.setUint32(0, length, true); view.setInt32(4, level, true); view.setInt32(8, type, true);
+    descriptors.forEach((descriptor, index) => { if (12 + 4 * index + 4 <= bytes.length) view.setInt32(12 + 4 * index, descriptor, true); });
+    return [...bytes];
+  };
+  const parse = (...items: number[][]) => { const bytes = Uint8Array.from(items.flat()); return parseRightsControl(bytes, bytes.length); };
+  test("the control parser accepts exactly one rights item of whole descriptors", () => {
+    expect(parse(item([7, 9]))).toEqual({ received: [7, 9], bad: false });
+    expect(parse()).toEqual({ received: [], bad: false });
+    expect(parse(item([7]), item([9])).bad).toBe(true);                      // a second item
+    expect(parse(item([7], 0xffff, 2)).bad).toBe(true);                      // another control type
+    expect(parse(item([7], 6, 1)).bad).toBe(true);                           // another level
+    expect(parse(item([7], 0xffff, 1, 14)).bad).toBe(true);                  // 2 stray bytes after a descriptor
+    expect(parse(item([7], 0xffff, 1, 8)).bad).toBe(true);                   // shorter than a header
+    const past = Uint8Array.from(item([7, 9])); expect(parseRightsControl(past, past.length - 4).bad).toBe(true); // claims more than was returned
+  });
+  live("the launched child gets two locale variables and nothing of the daemon's environment", async () => {
+    process.env.NATIVE_CHANNEL_PROBE_SECRET = "must-not-travel";
+    try {
+      const child = spawnWithChannel(["/usr/bin/env"], { stdout: "pipe" });
+      cleanup.push(() => closeDescriptor(child.channel));
+      const output = await new Response(child.subprocess.stdout as ReadableStream).text();
+      await child.subprocess.exited;
+      expect(output).not.toContain("NATIVE_CHANNEL_PROBE_SECRET");
+      expect(output.trim().split("\n").sort()).toEqual(Object.entries(FD_CHANNEL_MINIMAL_ENV).map(([key, value]) => `${key}=${value}`).sort());
+    } finally { delete process.env.NATIVE_CHANNEL_PROBE_SECRET; }
+  });
+  live("rights on a channel that took none are closed BEFORE a bad line is looked at, even with rights allowed", async () => {
+    const { fds } = files(1), [a, b] = pair("stream"), channel = new FdLineChannel(b, { maxLine: 16, maxRights: 2 }), iterator = channel.lines();
+    sendMessage(a, encode("hello\n")); expect((await iterator.next()).value).toBe("hello\n");
+    const before = new Set<number>(); for (let fd = 3; fd < 300; fd++) if (open(fd)) before.add(fd);
+    sendMessage(a, encode(`${"y".repeat(40)}\n`), fds); // a line over its bound AND a descriptor
+    expect(await failure(iterator.next())).toMatchObject({ code: "oversize" });
+    await channel.close();
+    for (let fd = 3; fd < 300; fd++) if (open(fd) && !before.has(fd)) throw new Error(`leaked descriptor ${fd}`);
   });
 });
 

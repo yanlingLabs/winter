@@ -1,5 +1,5 @@
 import { fstatSync } from "node:fs";
-import type { CoworkLauncherPort, CoworkLauncherSession } from "../../../src/cowork/native/host";
+import { CoworkNativeSimulatedCrash, type CoworkLauncherPort, type CoworkLauncherSession } from "../../../src/cowork/native/host";
 import {
   CoworkNativeMuxSequence, parseCoworkNativeLauncherLine, serializeCoworkNativeLauncherLine, serializeCoworkNativeStopReceipt, COWORK_NATIVE_VOLUME_PURPOSES,
   type CoworkNativeMuxFrame, type CoworkNativeOrderlyReceipt, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity,
@@ -13,14 +13,14 @@ import { COWORK_EXT4_FEATURES } from "../../../src/cowork/volume-filesystem";
  * It starts no process and touches no VM.
  */
 export interface FakeBehavior {
-  spawn?: "ok" | "fail";
+  spawn?: "ok" | "fail" | "crash" | "hang" | "slow";
   begin?: "ok" | "refuse" | "silent" | "other-worker";
   volumes?: "ok" | "refuse" | "silent";
   guestHello?: "ok" | "silent";
   bootstrap?: "ok" | "fault" | "silent" | "wrong-nonce" | "wrong-operation" | "tampered-receipt" | "duplicate-receipt" | "runtime-frame";
   mounted?: "ok" | "silent";
   /** What the launcher does when asked to stop. */
-  stop?: "orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault";
+  stop?: "orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault" | "other-request-id" | "other-launcher" | "denies-attach" | "denies-boot";
   /** Hello with another boot id. */
   helloBoot?: string;
 }
@@ -34,6 +34,9 @@ export class FakeLauncher implements CoworkLauncherPort {
   async spawn(request: { workspaceId: string; incarnationId: string; leaseEpoch: number }): Promise<CoworkLauncherSession> {
     this.spawned.push(request);
     if (this.behavior.spawn === "fail") throw new Error("spawn failed");
+    if (this.behavior.spawn === "crash") throw new CoworkNativeSimulatedCrash("launcher spawn");
+    if (this.behavior.spawn === "hang") return new Promise<CoworkLauncherSession>(() => {});
+    if (this.behavior.spawn === "slow") await new Promise(resolve => setTimeout(resolve, 300));
     const session = new FakeSession(this, request);
     this.sessions.push(session);
     return session;
@@ -45,6 +48,8 @@ export class FakeLauncher implements CoworkLauncherPort {
 
 export class FakeSession implements CoworkLauncherSession {
   readonly launcherInstanceId = "launcher-fake0001";
+  readonly pid = 5151; readonly startToken = "start-5151";
+  vmRunning = false;
   readonly hostBootId: string;
   readonly received: Received[] = [];
   /** What each descriptor looked like WHEN it arrived. */
@@ -116,7 +121,7 @@ export class FakeSession implements CoworkLauncherSession {
     if (this.behavior.volumes === "silent") return;
     if (this.behavior.volumes === "refuse" || seen.some((item, index) => item.dev !== message.volumes[index]!.device || item.ino !== message.volumes[index]!.inode)) { this.volumes = []; return this.deliver({ t: "refused", id: message.id, code: "volumes_rejected" }); }
     this.deliver({ t: "volumes_accepted", id: message.id });
-    this.deliver({ t: "worker_state", state: "vm_running" });
+    this.deliver({ t: "worker_state", state: "vm_running" }); this.vmRunning = true;
     if (this.behavior.guestHello !== "silent") { this.guestBooted = true; this.muxUp({ t: "hello", guestBootId: "66666666-6666-4666-8666-666666666666", dataSerial: "winter-data", environmentSerial: "winter-environment" }); }
   }
   private onMux(frame: CoworkNativeMuxFrame): void {
@@ -169,6 +174,11 @@ export class FakeSession implements CoworkLauncherSession {
     if (!this.scope) return this.deliver({ t: "refused", id: message.id, code: "not_begun" });
     switch (this.behavior.stop ?? "orderly") {
       case "silent": return;
+      case "other-request-id": return this.emitOrderly("req-someone-else", this.orderly({}, message.stopNonce), false);
+      case "other-launcher": return this.emitOrderly(message.id, this.orderly({ launcherInstanceId: "launcher-impostor" }, message.stopNonce), false);
+      // Internally consistent receipts that say less than the daemon saw: the volumes were never accepted / the VM never ran.
+      case "denies-attach": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: [this.unattached(0), this.unattached(1)] }, message.stopNonce), false);
+      case "denies-boot": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "not-booted", powerOff: "not-booted" }, volumes: this.orderly({}, message.stopNonce).volumes.map(v => ({ ...v, flushRequested: 0, flushCompleted: 0 })) as never }, message.stopNonce), false);
       case "eof": return queueMicrotask(() => this.eof());
       case "fault": return this.deliver({ t: "fault", code: "worker_channel_lost" });
       case "uncertain": return this.deliver({ t: "uncertain", receipt: this.uncertain("drain-timeout") });
@@ -177,8 +187,14 @@ export class FakeSession implements CoworkLauncherSession {
       case "bad-invariants": return this.emitOrderly(message.id, this.orderly({ guest: { drain: "acked", powerOff: "not-booted" } }, message.stopNonce));
       case "other-incarnation": return this.emitOrderly(message.id, this.orderly({ incarnationId: "inc-an-older-one" }, message.stopNonce));
       case "wrong-volume": return this.emitOrderly(message.id, this.orderlyWithWrongVolume(message.stopNonce));
-      default: return this.emitOrderly(message.id, this.orderly({}, message.stopNonce));
+      default:
+        // A VM that ran but whose guest never answered cannot have halted by a drain: an honest launcher says so with a Class B.
+        if (this.vmRunning && !this.guestBooted) return this.deliver({ t: "uncertain", receipt: this.uncertain("drain-timeout") });
+        return this.emitOrderly(message.id, this.orderly({}, message.stopNonce));
     }
+  }
+  private unattached(index: number): CoworkNativeOrderlyReceipt["volumes"][number] {
+    return { purpose: COWORK_NATIVE_VOLUME_PURPOSES[index]!, device: "0", inode: "0", capacityBytes: 0, attached: false, flushRequested: 0, flushCompleted: 0, finalFlush: "not-attached" };
   }
   private orderlyWithWrongVolume(stopNonce: string): CoworkNativeOrderlyReceipt {
     const good = this.orderly({}, stopNonce), first = { ...good.volumes[0], inode: "424242" };

@@ -6,8 +6,8 @@ import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-fi
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
 import { CoworkNativeMuxSequence, COWORK_NATIVE_LIMITS, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
-import { CoworkNativeRecovery, type CoworkNativeRecoveryReport } from "./recovery";
-import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeStopRegistry } from "./stop-proof";
+import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
+import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeObserved, type CoworkNativeStopRegistry } from "./stop-proof";
 
 /*
  * CoworkNativeHost: the whole launch sequence of one Cowork workspace over an INJECTED launcher port, plus stop, release and
@@ -25,8 +25,7 @@ import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFre
  *  - a simulated crash (the isolated `checkpoint` hook) is rethrown untouched: a dead process runs no cleanup.
  */
 
-/** Thrown by a test's `checkpoint` hook to stand for the process dying at that point. The host never catches it. */
-export class CoworkNativeSimulatedCrash extends Error { constructor(readonly phase: string) { super(`simulated crash at ${phase}`); this.name = "CoworkNativeSimulatedCrash"; } }
+export { CoworkNativeSimulatedCrash };
 
 export type CoworkNativeHostFailure = "busy" | "not_stopped" | "not_allocated" | "owner_held" | "bad_image_digest" | "bad_boot" | "launcher_refused" | "protocol" | "timeout" | "guest_fault" | "start_failed" | "not_running" | "closed";
 export class CoworkNativeHostError extends Error {
@@ -37,6 +36,8 @@ export class CoworkNativeHostError extends Error {
  * (`hello`) it has already read. The host never reads a socket; it only sees typed messages. */
 export interface CoworkLauncherSession extends CoworkNativeLink {
   readonly launcherInstanceId: string;
+  /** The launcher PROCESS: the port spawned it, so it knows its pid and start token (kept in the launch journal for owner recovery). */
+  readonly pid: number; readonly startToken: string;
   /** The host boot id the launcher reported in `hello`. */
   readonly hostBootId: string;
   send(message: CoworkNativeToLauncher, rights?: readonly number[]): void;
@@ -51,13 +52,17 @@ export interface CoworkLauncherPort { spawn(request: { readonly workspaceId: str
  * of the pinned runtime image; a missing or malformed pin refuses. */
 export interface CoworkNativeImagePins { runtimeImageDigest(workspaceId: string): string }
 
-export interface CoworkNativeHostTimeouts { readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; readonly drainBudgetMs: number }
-const DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: 10_000, drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
+export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; readonly drainBudgetMs: number }
+const DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: 10_000, drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
 
 export interface CoworkNativeHostDeps {
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly authority: CoworkNativeAuthority;
   readonly power: CoworkNativePower; readonly recovery: CoworkNativeRecovery; readonly registry: CoworkNativeStopRegistry; readonly hostBoot: CoworkNativeHostBoot;
   readonly launcher: CoworkLauncherPort; readonly images: CoworkNativeImagePins;
+  /** The durable record of which processes each launch started (written before the spawn, then with each identity). */
+  readonly journal?: CoworkNativeLaunchJournalPort;
+  /** A repeating timer, so the admission heartbeat can be driven by a test clock. The default is an unref'd `setInterval`. */
+  readonly timers?: { every(ms: number, run: () => void): () => void };
   /** This daemon process as the admission ledger knows it (pid, start token, boot id, instance nonce). */
   readonly daemon: () => AdmissionOwner;
   readonly timeouts?: Partial<CoworkNativeHostTimeouts>; readonly memoryMiB?: number;
@@ -82,6 +87,9 @@ interface Run {
   readonly key: CoworkPowerKey; readonly owner: CoworkVolumeOwner; readonly homeId: string;
   admissionId: string | null; session: CoworkLauncherSession | null; binding: CoworkNativeChannelBinding | null; inbox: SessionInbox | null;
   phase: RunPhase; unsubscribe: (() => void)[]; downSeq: number; upSeq: CoworkNativeMuxSequence;
+  /** What this process saw happen on the channel: a stop receipt cannot say less. */
+  observed: { volumesAccepted: boolean; vmRunning: boolean; guestHello: boolean };
+  stopHeartbeat: (() => void) | null;
 }
 
 const isCrash = (error: unknown): boolean => error instanceof CoworkNativeSimulatedCrash;
@@ -179,9 +187,14 @@ export class CoworkNativeHost {
     if (daemon.bootId !== bootId) throw new CoworkNativeHostError("bad_boot", "daemon identity is from another boot");
 
     const homeId = records.recordedHomeIdentity(), incarnationId = `inc-${this.uuid()}`;
+    // Everything that can be refused about the ids is refused BEFORE the incarnation moves: the boot id has to fit the owner tuple.
+    let controllerInstanceId: string;
+    try { controllerInstanceId = mintControllerInstanceId(bootId, this.suffix()); } catch { throw new CoworkNativeHostError("bad_boot", "the host boot id cannot be part of an owner tuple"); }
+    const workerInstanceId = `wrk-${this.uuid()}`;
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
-    const owner: CoworkVolumeOwner = { controllerInstanceId: mintControllerInstanceId(bootId, this.suffix()), workerInstanceId: `wrk-${this.uuid()}`, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
-    const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence() };
+    const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
+    const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
+      observed: { volumesAccepted: false, vmRunning: false, guestHello: false }, stopHeartbeat: null };
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
     try {
@@ -206,24 +219,37 @@ export class CoworkNativeHost {
     // 1. admission reserve
     const reserved = admission.reserve({ requestId: `req-${incarnationId}`, homeId: run.homeId, owner: this.deps.daemon(), workspaceId, incarnationId, leaseEpoch, commitment: { memoryBytes: memoryMiB * 1024 * 1024, cpuUnits: COWORK_NATIVE_LIMITS.vcpus } });
     run.admissionId = reserved.admissionId;
+    this.startHeartbeat(run);
     this.hook("admission-reserved");
 
-    // 2. launcher spawn (verified and hello'd by the port)
-    const session = await launcher.spawn({ workspaceId, incarnationId, leaseEpoch });
+    // 2. launcher spawn (verified and hello'd by the port). The journal is written BEFORE the spawn, so a crash in it leaves a record that a
+    // launch was started, and again with the launcher's identity as soon as it is known.
+    const bootId = this.deps.hostBoot.bootId(), journal = (entry: Pick<CoworkNativeLaunchEntry, "launcher" | "worker">): void => this.deps.journal?.record({ workspaceId, incarnationId, leaseEpoch, bootId, ...entry });
+    journal({ launcher: null, worker: null });
+    const session = await this.spawnWithin(run, () => launcher.spawn({ workspaceId, incarnationId, leaseEpoch }));
     run.session = session;
+    journal({ launcher: { pid: session.pid, startToken: session.startToken, instanceId: session.launcherInstanceId }, worker: null });
     this.hook("launcher-spawned");
     if (session.hostBootId !== this.deps.hostBoot.bootId()) throw new CoworkNativeHostError("bad_boot", "launcher reports another boot");
     run.inbox = new SessionInbox(session);
+    run.unsubscribe.push(session.onMessage(message => {
+      if (message.t === "worker_state" && message.state === "vm_running") run.observed.vmRunning = true;
+      else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "hello") run.observed.guestHello = true;
+    }));
     const binding = authority.adopt(session, { workspaceId, homeId: run.homeId, admissionId: reserved.admissionId, owner });
     run.binding = binding;
-    admission.transition(reserved.admissionId, this.deps.daemon(), "reserved", "booting");
+    this.moveAdmission(run, "booting");
 
     // 3. begin: the worker is spawned suspended, validated, sandboxed
     const full: CoworkNativeScope = { ...scope, admissionId: reserved.admissionId };
     const begin = `req-${this.uuid()}`.slice(0, 63);
     session.send({ t: "begin", id: begin, homeId: run.homeId, ...full });
     await run.inbox.expect(message => message.t === "begun" && message.id === begin ? message : message.t === "refused" && message.id === begin ? message : undefined, this.timeouts.begunMs, "begun")
-      .then(message => { if (message.t === "refused") throw new CoworkNativeHostError("launcher_refused", message.code); if (message.t !== "begun" || message.workerInstanceId !== owner.workerInstanceId) throw new CoworkNativeHostError("protocol", "begun names another worker"); });
+      .then(message => {
+        if (message.t === "refused") throw new CoworkNativeHostError("launcher_refused", message.code);
+        if (message.t !== "begun" || message.workerInstanceId !== owner.workerInstanceId) throw new CoworkNativeHostError("protocol", "begun names another worker");
+        journal({ launcher: { pid: session.pid, startToken: session.startToken, instanceId: session.launcherInstanceId }, worker: { pid: message.workerPid, startToken: message.workerStartToken } });
+      });
     binding.advance("begun");
     this.hook("worker-begun");
 
@@ -244,7 +270,7 @@ export class CoworkNativeHost {
       const id = `req-${this.uuid()}`.slice(0, 63), pair: [CoworkNativeVolumeIdentity, CoworkNativeVolumeIdentity] = [identityOf(data.volume), identityOf(environment.volume)];
       session.send({ t: "volumes", id, scopeDigest: coworkNativeScopeDigest(full), volumes: pair }, [data.fd, environment.fd]);
       await run.inbox.expect(message => message.t === "volumes_accepted" && message.id === id ? message : message.t === "refused" && message.id === id ? message : undefined, this.timeouts.volumesMs, "volumes_accepted")
-        .then(message => { if (message.t === "refused") throw new CoworkNativeHostError("launcher_refused", message.code); });
+        .then(message => { if (message.t === "refused") throw new CoworkNativeHostError("launcher_refused", message.code); run.observed.volumesAccepted = true; });
     } finally {
       // The worker holds its own copies now (or never will). Closing ours is cleanup, never a release.
       handles.forEach(handle => handle.close());
@@ -281,7 +307,38 @@ export class CoworkNativeHost {
     run.upSeq.accept(mounted, "up");
     binding.advance("ready");
     this.deps.power.transition(run.key, "starting", "running");
-    admission.transition(reserved.admissionId, this.deps.daemon(), "booting", "running");
+    this.moveAdmission(run, "running");
+  }
+
+  /** Move the admission to `to` from whatever state it REALLY is in. A row the ledger marked `uncertain` only because the heartbeat lapsed is
+   * revived by a heartbeat first (the ledger restores its accounting phase); a harder `uncertain` is left to the transitions the ledger allows. */
+  private moveAdmission(run: Run, to: "booting" | "running" | "draining"): void {
+    const { admission } = this.deps, daemon = this.deps.daemon();
+    let record = admission.get(run.admissionId!);
+    if (record.state === "uncertain" && record.heartbeatResumeState !== null) record = admission.heartbeat(run.admissionId!, daemon);
+    if (record.state === to) return;
+    admission.transition(run.admissionId!, daemon, record.state, to);
+  }
+  /** The admission ledger treats a silent owner as lost after its heartbeat timeout (30 s by default): beat from the reserve until the run is disposed. */
+  private startHeartbeat(run: Run): void {
+    const every = this.deps.timers?.every ?? ((ms: number, fn: () => void) => { const timer = setInterval(fn, ms); (timer as { unref?: () => void }).unref?.(); return () => clearInterval(timer); });
+    run.stopHeartbeat = every(this.timeouts.heartbeatMs, () => {
+      if (run.phase === "dead" || run.admissionId === null) return;
+      try { this.deps.admission.heartbeat(run.admissionId, this.deps.daemon()); } catch (error) {
+        // A released or unknown row has nothing left to keep alive; anything else is retried at the next beat.
+        const code = (error as { code?: unknown }).code;
+        if (code === "transition_refused" || code === "not_found") { run.stopHeartbeat?.(); run.stopHeartbeat = null; }
+      }
+    });
+  }
+  /** `launcher.spawn` with a deadline. A session that arrives after it is closed: the host has already given up on that launch. */
+  private spawnWithin(run: Run, spawn: () => Promise<CoworkLauncherSession>): Promise<CoworkLauncherSession> {
+    return new Promise<CoworkLauncherSession>((resolve, reject) => {
+      const timer = setTimeout(() => { late = true; reject(new CoworkNativeHostError("timeout", "launcher spawn")); }, this.timeouts.spawnMs);
+      let late = false;
+      spawn().then(session => { clearTimeout(timer); if (late) { try { session.close(); } catch { /* gone */ } } else resolve(session); }, error => { clearTimeout(timer); if (!late) reject(error); });
+      void run;
+    });
   }
 
   private sendBootstrap(run: Run, message: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>["message"]): void {
@@ -302,13 +359,13 @@ export class CoworkNativeHost {
         if (outcome.released) return;
       } else if (run.admissionId === null && !claimed) {
         // Nothing but the incarnation bump happened: no admission, no launcher, no claim. Back to stopped.
-        power.transition(run.key, "starting", "stopped", mintVolumesFreeToken({ ...run.key, volumes }));
+        power.transition(run.key, "starting", "stopped", mintVolumesFreeToken({ ...run.key, volumes: this.deps.volumes }));
         return;
       }
       this.markUncertain(run, "start failed before an orderly stop was proved");
     } catch (error) {
       if (isCrash(error)) throw error;
-      try { this.markUncertain(run, `start cleanup failed (${describe(error)})`); } catch (inner) { if (isCrash(inner)) throw inner; }
+      try { this.markUncertain(run, `start cleanup failed (${describeNativeError(error)})`); } catch (inner) { if (isCrash(inner)) throw inner; }
     } finally {
       this.dispose(run);
     }
@@ -347,6 +404,7 @@ export class CoworkNativeHost {
   private dispose(run: Run): void {
     if (run.phase === "dead") return;
     run.phase = "dead";
+    run.stopHeartbeat?.(); run.stopHeartbeat = null;
     run.unsubscribe.splice(0).forEach(off => off());
     run.binding?.close(); run.inbox?.close();
     try { run.session?.close(); } catch { /* already closed */ }
@@ -359,11 +417,16 @@ export class CoworkNativeHost {
     const run = this.runs.get(workspaceId);
     if (!run || run.phase !== "running") throw new CoworkNativeHostError("not_running");
     run.phase = "stopping";
-    const { power, admission } = this.deps;
-    power.transition(run.key, "running", "draining");
-    admission.transition(run.admissionId!, this.deps.daemon(), "running", "draining");
-    this.hook("drain-requested");
     try {
+      // The stop request goes out whatever the bookkeeping says: an admission that lapsed to `uncertain` (a missed heartbeat) or a power state that
+      // moved under us must not keep a healthy guest from being drained. Both moves read the REAL state and are best effort here; the release
+      // flow settles whatever they leave.
+      try { this.moveAdmission(run, "draining"); } catch (error) { if (isCrash(error)) throw error; }
+      try {
+        const power = this.deps.power.read(workspaceId).power;
+        if (power === "running" || power === "uncertain") this.deps.power.transition(run.key, power, "draining");
+      } catch (error) { if (isCrash(error)) throw error; }
+      this.hook("drain-requested");
       const outcome = await this.requestStop(run, reason);
       if (!outcome.released) this.markUncertain(run, outcome.reason);
       return outcome;
@@ -388,25 +451,25 @@ export class CoworkNativeHost {
     let proof;
     try {
       // A stop answered before any claim (a start that failed early) finds the volumes free: the receipt then attests nothing attached.
-      proof = mintOrderlyStopProof({ receipt: verdict.receipt, owner: run.owner, homeId: run.homeId, admissionId: run.admissionId, volumes, volumesReleased: volumes.every(v => v.owner === null), source: { kind: "live", stopNonce }, registry: this.deps.registry, now: this.now });
+      const record = run.admissionId === null ? null : this.deps.admission.get(run.admissionId);
+      proof = mintOrderlyStopProof({ receipt: verdict.receipt, owner: run.owner, homeId: run.homeId, admission: record === null ? null : { admissionId: record.admissionId, owner: { bootId: record.owner.bootId } }, volumes, volumesReleased: volumes.every(v => v.owner === null),
+        source: { kind: "live", stopNonce, launcherInstanceId: session.launcherInstanceId, observed: { ...run.observed } as CoworkNativeObserved }, registry: this.deps.registry, now: this.now });
     } catch (error) {
       if (error instanceof CoworkNativeStopEvidenceError) return { released: false, reason: `stop receipt refused (${error.code})` };
       throw error;
     }
-    const admission = run.admissionId === null ? null : this.deps.admission.get(run.admissionId);
-    const { retired } = this.deps.recovery.release(run.key, run.owner, volumes, admission, run.homeId, proof);
+    let retired: boolean;
+    try { ({ retired } = this.deps.recovery.release(run.key, run.owner, run.homeId, proof)); } catch (error) {
+      if (isCrash(error)) throw error;
+      // Part of the release may have happened; the records say how much, and the next recovery finishes from them.
+      return { released: false, reason: `release incomplete (${describeNativeError(error)})` };
+    }
     // Only when nothing still needs it: a replay debt keeps the receipt, so the launcher must keep it too.
     if (retired) { try { session.send({ t: "receipt_retire", confirmationId: proof.confirmationId }); } catch { /* the channel may be gone; the durable store retires it on the next recovery */ } }
     return { released: true, evidence: proof.kind };
   }
 }
 
-/** An error's class and code, nothing else: never a message that could carry a path or a receipt. */
-function describe(error: unknown): string {
-  if (!(error instanceof Error)) return "unknown";
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" && /^[a-z_]{1,40}$/.test(code) ? `${error.name}:${code}` : error.name;
-}
 function identityOf(volume: CoworkVolumeRecord): CoworkNativeVolumeIdentity {
   const identity = volume.identity;
   if (!identity) throw new CoworkNativeHostError("not_allocated", "volume has no recorded identity");

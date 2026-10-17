@@ -9,7 +9,7 @@ import { CoworkNativeAuthority } from "../../../src/cowork/native/authority";
 import { CoworkNativeHost, CoworkNativeSimulatedCrash, type CoworkNativeHostDeps, type CoworkNativeHostTimeouts } from "../../../src/cowork/native/host";
 import { CoworkNativePower } from "../../../src/cowork/native/power";
 import { CoworkNativeRecovery, type CoworkNativeDurableReceiptPort, type CoworkNativeOwnerRecoverPort } from "../../../src/cowork/native/recovery";
-import { coworkNativeLedgerStopProbe, CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeRecoverGuards } from "../../../src/cowork/native/stop-proof";
+import { coworkNativeLedgerStopProbe, CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeRecoverGuards, type CoworkNativeRecoverSubject } from "../../../src/cowork/native/stop-proof";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../../src/runtime-state/db";
 import { FakeLauncher, type FakeBehavior } from "./fake-launcher";
 
@@ -30,7 +30,14 @@ export interface Harness {
   power: CoworkNativePower; recovery: CoworkNativeRecovery; host: CoworkNativeHost; launcher: FakeLauncher; deps: CoworkNativeHostDeps;
   hostBoot: CoworkNativeHostBoot & { current: string; ended: boolean };
   receipts: Map<string, string>; ownerRecoverAttestation: { value: unknown };
-  guards: { processAbsent: boolean; imagesUnlocked: boolean };
+  guards: { processAbsent: boolean; imagesUnlocked: boolean; seen: CoworkNativeRecoverSubject[] };
+  /** The test clock shared by the admission ledger and the host, in ms; `advance` moves it. */
+  clock: { now: number; advance(ms: number): void };
+  /** The host's repeating timers, driven by hand: `tick()` runs every registered callback once. */
+  timers: { active: number; tick(): void };
+  /** The launch journal (in memory) and the switches of the fakes the recovery reads. */
+  journal: Map<string, CoworkNativeLaunchEntry>;
+  attested: boolean; ledgerAgrees: boolean;
   daemon: AdmissionOwner;
   /** Calls observed on the release paths (spies). */
   calls: { volumeRelease: number; ledgerRelease: number; reconcile: number };
@@ -68,17 +75,26 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const receipts = new Map<string, string>();
   const calls = { volumeRelease: 0, ledgerRelease: 0, reconcile: 0 };
   const events: string[] = [];
-  const guards = { processAbsent: true, imagesUnlocked: true };
+  const guards = { processAbsent: true, imagesUnlocked: true, seen: [] as CoworkNativeRecoverSubject[] };
+  const clock = { now: 1_000_000, advance(ms: number) { this.now += ms; } };
+  const callbacks = new Set<() => void>();
+  const timers = { get active() { return callbacks.size; }, tick() { [...callbacks].forEach(run => run()); }, every(_ms: number, run: () => void) { callbacks.add(run); return () => { callbacks.delete(run); }; } };
+  const journal = new Map<string, CoworkNativeLaunchEntry>();
+  const switches = { attested: true, ledgerAgrees: true };
+  const journalPort: CoworkNativeLaunchJournalPort = {
+    record: entry => { journal.set(`${entry.workspaceId}|${entry.incarnationId}|${entry.leaseEpoch}`, structuredClone(entry)); },
+    load: scope => structuredClone(journal.get(`${scope.workspaceId}|${scope.incarnationId}|${scope.leaseEpoch}`) ?? null),
+    forget: scope => { journal.delete(`${scope.workspaceId}|${scope.incarnationId}|${scope.leaseEpoch}`); },
+  };
   const ownerRecoverAttestation: { value: unknown } = { value: null };
   const resources: ResourceObservation = { budget: { memoryBytes: 64 * 1024 ** 3, cpuUnits: 64, guestLimit: 8 }, pressure: "normal", admitNew: true, observedAt: 0, validUntil: Number.MAX_SAFE_INTEGER };
-  let now = 1_000_000;
   const machine = { machineId: "machine-fixture", installationId: "installation-fixture" };
   const probes: AdmissionProbes = {
     hostIdentity: () => ({ ...machine, bootId: hostBoot.current }),
     homeIdentity: atPath => { try { const canonicalPath = realpathSync(atPath), st = statSync(canonicalPath), identity = persisted.get(canonicalPath); return identity ? { canonicalPath, volumeId: `dev-${st.dev}`, directoryId: `inode-${st.ino}`, canonicalDbBinding: { ...identity } } : null; } catch { return null; } },
     processIdentity: pid => processes.get(pid) ?? { state: "unknown" },
     verifyStopReceipt: coworkNativeLedgerStopProbe,
-    confirmsPreviousBootEnded: previous => hostBoot.confirmsPreviousBootEnded(previous),
+    confirmsPreviousBootEnded: previous => switches.ledgerAgrees && hostBoot.confirmsPreviousBootEnded(previous),
     authorizeRelocation: () => false,
   };
   const st = statSync(home);
@@ -86,7 +102,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   persisted.set(home, binding);
 
   let sequence = 0;
-  const harness = { root, home, workspaceId, homeId, hostBoot, receipts, guards, ownerRecoverAttestation, calls, events } as unknown as Harness;
+  const harness = { root, home, workspaceId, homeId, hostBoot, receipts, guards, ownerRecoverAttestation, calls, events, clock, timers, journal } as unknown as Harness;
+  Object.defineProperties(harness, { attested: { get: () => switches.attested, set: (value: boolean) => { switches.attested = value; } }, ledgerAgrees: { get: () => switches.ledgerAgrees, set: (value: boolean) => { switches.ledgerAgrees = value; } } });
 
   function build(boot: { behavior?: FakeBehavior; crashAt?: string; volumeCheckpoint?: (phase: string) => void; timeouts?: Partial<CoworkNativeHostTimeouts> }): void {
     sequence += 1;
@@ -102,26 +119,26 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     // Spy on the two release doors without changing them.
     const realRelease = harness.volumes.release.bind(harness.volumes);
     harness.volumes.release = ((...args: Parameters<CoworkVolumes["release"]>) => { calls.volumeRelease += 1; return realRelease(...args); }) as CoworkVolumes["release"];
-    harness.ledger = new CoworkAdmissionLedger({ path: coordination, domainId: "fixture-user-domain", probes, observeResources: () => resources, now: () => now, heartbeatTimeoutMs: 3_600_000 });
+    harness.ledger = new CoworkAdmissionLedger({ path: coordination, domainId: "fixture-user-domain", probes, observeResources: () => resources, now: () => clock.now, heartbeatTimeoutMs: 30_000 });
     try { harness.ledger.registerHome(binding, home); } catch { /* already registered by an earlier instance */ }
     const realLedgerRelease = harness.ledger.release.bind(harness.ledger), realReconcile = harness.ledger.reconcile.bind(harness.ledger);
     harness.ledger.release = ((...args: Parameters<CoworkAdmissionLedger["release"]>) => { calls.ledgerRelease += 1; return realLedgerRelease(...args); }) as CoworkAdmissionLedger["release"];
     harness.ledger.reconcile = (() => { calls.reconcile += 1; return realReconcile(); }) as CoworkAdmissionLedger["reconcile"];
     harness.power = new CoworkNativePower(db);
     const durable: CoworkNativeDurableReceiptPort = {
-      load: scope => { const text = receipts.get(`${scope.workspaceId}|${scope.incarnationId}|${scope.leaseEpoch}`); return text === undefined ? null : { text, attested: true }; },
+      load: scope => { const text = receipts.get(`${scope.workspaceId}|${scope.incarnationId}|${scope.leaseEpoch}`); return text === undefined ? null : { text, attested: switches.attested as true }; },
       retire: scope => { receipts.delete(`${scope.workspaceId}|${scope.incarnationId}|${scope.leaseEpoch}`); },
     };
     const ownerRecover: CoworkNativeOwnerRecoverPort = { confirm: () => ownerRecoverAttestation.value as never };
-    const recoveryGuards: CoworkNativeRecoverGuards = { processAbsent: () => guards.processAbsent, imagesUnlocked: () => guards.imagesUnlocked };
+    const recoveryGuards: CoworkNativeRecoverGuards = { processAbsent: subject => { guards.seen.push(subject); return guards.processAbsent; }, imagesUnlocked: () => guards.imagesUnlocked };
     const checkpoint = (phase: string) => { events.push(`host:${phase}`); if (crashAt === phase) throw new CoworkNativeSimulatedCrash(phase); };
-    harness.recovery = new CoworkNativeRecovery({ records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, now: () => now, checkpoint });
+    harness.recovery = new CoworkNativeRecovery({ records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, journal: journalPort, now: () => clock.now, checkpoint });
     harness.launcher = new FakeLauncher({ behavior: boot.behavior ?? {}, homeId, hostBootId: () => hostBoot.current, receipts, events });
     harness.daemon = daemon;
     const deps: CoworkNativeHostDeps = {
       records: harness.records, volumes: harness.volumes, admission: harness.ledger, authority: harness.authority, power: harness.power, recovery: harness.recovery, registry: harness.registry, hostBoot,
-      launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, daemon: () => daemon, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, stopGraceMs: 150, drainBudgetMs: 150, ...boot.timeouts },
-      now: () => now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
+      launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, stopGraceMs: 150, drainBudgetMs: 150, ...boot.timeouts },
+      now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
     };
     harness.deps = deps;
     harness.host = new CoworkNativeHost(deps);

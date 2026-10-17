@@ -106,10 +106,16 @@ Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned b
 * **A plain `read()` installs rights on macOS.** Descriptors a peer attaches to a stream socket are installed in the reader's table by an
   ordinary `read()`, by `fs.read` and by `Bun.file(fd).stream()` alike, invisibly (reproduced with a C program and with Bun). Every reader of
   every link, in every language, must use `recvmsg` with a control buffer and close what it did not ask for. The daemon therefore never reads
-  L1 any other way: `FdReceiver` runs `poll` and `recvmsg` on a worker thread, and `net.Socket({ fd })` and `Bun.connect` are not used.
+  L1 any other way: every `FdReceiver` is served by ONE shared hub thread that runs `poll` and `recvmsg`, and `net.Socket({ fd })` and
+  `Bun.connect` are not used.
 * `sendmsg` and `recvmsg` go through `bun:ffi` against libSystem (struct layouts checked against clang). Ancillary truncation (`MSG_CTRUNC`)
   can leave descriptors installed that the reader cannot see, so it is fatal for the channel.
-* Bun leaves one descriptor open per Worker it ever starts (a Worker that does nothing reproduces it): one per launched workspace.
+* Bun leaves one descriptor open per Worker it ever starts (a Worker that does nothing reproduces it), so the receiver is ONE Worker for the whole
+  daemon, created on first use and unref'd: one descriptor in total, not one per launched workspace.
+* Rights attach to the FIRST `sendmsg` of a message only. If the kernel accepts just part of a line, the rest is sent without rights, so on a
+  stream the descriptors belong to the first byte of their line and to nothing after it. The receiver attributes them to the line that starts at the
+  first byte of the chunk they arrived with. (macOS refuses to send two rights items in one message; a receiver refuses a second one anyway.)
+* The child of `spawnWithChannel` gets two locale variables (`LC_ALL=C`, `LANG=C`) and nothing of the daemon's environment.
 
 ## 5. L2: launcher and worker (envelopes)
 
@@ -299,6 +305,24 @@ with the two descriptors, the bootstrap exchange (`plan` with a fresh nonce, `re
 `running` and admission `running`. A failure after the worker exists is answered with a `stop`; only a valid orderly receipt for THAT request
 releases, anything else leaves the workspace and its admission `uncertain` with the owner retained. Release order is volumes, admission,
 power, then the proof is spent; each step is idempotent and re-derives its evidence, so a crash between any two is finished by the next run.
+While a launch lives the host keeps the admission row alive with a heartbeat from the reserve until the run is disposed (the ledger expires a silent
+owner after 30 s), and a stop reads the row's REAL state before it moves it, so a row the ledger marked lapsed is revived rather than wedging the stop.
+A stop request is always sent and the run always disposed, whatever the bookkeeping did. A receipt may not know less than the daemon saw: after
+`volumes_accepted` an `unattached` receipt, and after a running VM or a guest `hello` a `not-booted` one, is refused on the live path.
+
+The **launch journal** (`CoworkNativeLaunchJournalPort`, durable, outside the runtime-state schema) records, keyed by (workspace, incarnation, epoch): the
+host boot id, then before the spawn that a launch started, then the launcher's pid, start token and instance id, then the worker's pid and start token
+from `begun`. Owner recovery hands it to the guard probes as `subject.processes`, because a pid alone is reused after a daemon crash and absence has to be
+shown for an identity. A journal entry with no launcher identity (the spawn was requested and its result never written) makes owner recovery refuse; no
+entry at all means this daemon started no launcher for that incarnation. The entry is forgotten after the release.
+
+**Retained receipts and the launcher's store (S2).** The launcher keeps a Class A receipt in a write-once, 0600 file per scope,
+`<workspaceId>.<incarnationId>.<epoch>.receipt`, in a user-level directory outside the Winter home that the daemon names with `--receipt-dir`, until
+`receipt_retire`. `CoworkNativeDurableReceiptPort` is the daemon's reading end of exactly that store: `load(scope)` returns the file's text
+(the exact receipt line) and `retire(scope)` removes it, both keyed by the same triple. The port must also say `attested`; a file in a same-user directory
+proves nothing by itself, and the open question of how the launcher's store is attested (S2's options: the owner-recover guard probes also for a
+retained receipt, a MAC with a Keychain key, or a launcher-served read) stays with the controller. The adapter ignores any record the port does not attest.
+
 Boot reconcile runs `CoworkAdmissionLedger.reconcile()` first, then settles every workspace that is not `stopped`. A replay debt (an interrupted
 journal replay) names a previous writer; the next incarnation proves THAT writer stopped from memory, from the boot id inside its owner tuple, or
 from the launcher's retained receipt, which is therefore kept until the debt is settled.

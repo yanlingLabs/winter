@@ -1,17 +1,36 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 // Anti-wiring pin for the native worker modules (N2 S1). They are SOURCE ONLY: nothing outside src/cowork/native/ imports them,
 // no port they declare has an implementation in src/, and they reach no VM, no network and no secret store.
 const packages = join(import.meta.dir, "..", "..", "..", "..");
+const repositoryRoot = join(packages, "..");
 const nativeDirectory = join(packages, "core", "src", "cowork", "native");
 const MODULES = ["authority", "fd-channel", "fd-receiver-worker", "host", "power", "protocol", "recovery", "stop-proof"];
 function sourceFiles(directory: string): string[] {
-  return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
+  return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs|mts|cts)$/.test(entry.name) && !entry.parentPath.split(sep).includes("node_modules")).map(entry => join(entry.parentPath, entry.name));
 }
 const allSources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
 const nativeSources = sourceFiles(nativeDirectory);
+const scriptSources = existsSync(join(repositoryRoot, "scripts")) ? sourceFiles(join(repositoryRoot, "scripts")) : [];
+
+/** Every module specifier a source text names: static imports and re-exports (any form, multi-line included), bare `import "x"`, `import("x")`,
+ * `require("x")` and the `new URL("x", import.meta.url)` of a Worker or an asset. Comments are stripped first, strings in them do not count. */
+export function specifiersOf(source: string): string[] {
+  const code = source.replace(/\/\*[\s\S]*?\*\/|(^|[^:\\])\/\/[^\n]*/g, "$1");
+  const found: string[] = [];
+  for (const pattern of [/\b(?:import|export)\b[^"'`;]*?\bfrom\s*["'`]([^"'`]+)["'`]/g, /\bimport\s*["'`]([^"'`]+)["'`]/g, /\bimport\s*\(\s*["'`]([^"'`]+)["'`]/g, /\brequire\s*\(\s*["'`]([^"'`]+)["'`]/g, /new\s+URL\(\s*["'`]([^"'`]+)["'`]\s*,\s*import\.meta\.url/g])
+    for (const match of code.matchAll(pattern)) found.push(match[1]!);
+  return found;
+}
+/** True when `specifier`, written in `file`, reaches anything under src/cowork/native/ (relative, absolute, or through a package path). */
+export function reachesNative(file: string, specifier: string): boolean {
+  if (/cowork\/native(\/|$)/.test(specifier) && !specifier.startsWith(".")) return true;
+  if (!specifier.startsWith(".") && !specifier.startsWith("/")) return false;
+  const target = specifier.startsWith("/") ? resolve(specifier) : resolve(dirname(file), specifier);
+  return target === nativeDirectory || target.startsWith(`${nativeDirectory}${sep}`);
+}
 
 test("the module set is exactly the reviewed one and has no barrel", () => {
   expect(nativeSources.map(file => basename(file, ".ts")).sort()).toEqual(MODULES);
@@ -75,4 +94,34 @@ test("no module under cowork/native reads anything at import time", () => {
     const code = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
     expect(`${basename(file)}:${/^(?:await |new Database|readFileSync|openSync|Bun\.spawn)/m.test(code)}`).toBe(`${basename(file)}:false`);
   }
+});
+
+test("no file anywhere (every package's src, and scripts/) imports from cowork/native, however the specifier is written", () => {
+  const offenders: string[] = [];
+  for (const file of [...allSources, ...scriptSources].filter(candidate => !nativeSources.includes(candidate)))
+    for (const specifier of specifiersOf(readFileSync(file, "utf8"))) if (reachesNative(file, specifier)) offenders.push(`${relative(repositoryRoot, file)} -> ${specifier}`);
+  expect(offenders).toEqual([]);
+  expect(scriptSources.length).toBeGreaterThan(5);
+  expect(allSources.length).toBeGreaterThan(100);
+});
+
+test("the specifier scanner sees every form of import, and resolves it relative to the file that wrote it", () => {
+  const cowork = join(packages, "core", "src", "cowork", "x.ts"), other = join(packages, "core", "src", "agent", "y.ts"), script = join(repositoryRoot, "scripts", "z.ts");
+  const forms: [string, string, string][] = [
+    ['import { a } from "./native/host";', cowork, "static"], ['import type { A } from "./native/protocol";', cowork, "type-only"], ['export * from "./native/protocol";', cowork, "star re-export"],
+    ['export { a } from "./native/authority.js";', cowork, "named re-export with extension"], ['import("./native/recovery");', cowork, "dynamic"], ['const m = await import(`./native/power`);', cowork, "dynamic template"],
+    ['const m = require("./native/stop-proof");', cowork, "require"], ['import "./native/fd-channel";', cowork, "side effect"], ['import {\n  a,\n  b,\n} from "./native/host";', cowork, "multi-line"],
+    ['import x from "../cowork/native/host";', cowork, "up and back down"], ['import x from "../cowork/native/host";', other, "from a sibling directory"], ['import x from "../../core/src/cowork/native/host";', script.replace("scripts", "scripts"), "from scripts via a path that climbs"],
+    ['const w = new Worker(new URL("./native/fd-receiver-worker.ts", import.meta.url));', cowork, "worker url"], ['import x from "@yanlinglabs/winter-core/src/cowork/native/host";', other, "package path"],
+  ];
+  // The scripts case needs a real climb: scripts/ is a sibling of packages/.
+  forms[11] = ['import x from "../packages/core/src/cowork/native/host";', script, "from scripts via a path that climbs"];
+  for (const [text, file, name] of forms) {
+    const hits = specifiersOf(text).filter(specifier => reachesNative(file, specifier));
+    expect(`${name}:${hits.length}`).toBe(`${name}:1`);
+  }
+  for (const [text, file] of [['import x from "./volumes";', cowork], ['import x from "../native-thing/x";', cowork], ['// import x from "./native/host";', cowork], ['/* import("./native/host") */', cowork], ['import x from "bun:ffi";', cowork]] as const)
+    expect(specifiersOf(text).filter(specifier => reachesNative(file, specifier))).toEqual([]);
+  // a sibling named like the directory is not the directory
+  expect(reachesNative(cowork, "./native-adapter/host")).toBe(false);
 });

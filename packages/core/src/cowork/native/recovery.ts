@@ -5,7 +5,7 @@ import { parseCoworkNativeStopReceipt, type CoworkNativeOrderlyReceipt } from ".
 import { CoworkNativePower, type CoworkPower, type CoworkPowerKey } from "./power";
 import {
   CoworkNativeStopEvidenceError, ledgerStopReceipt, mintVolumesFreeToken, mintNewBootStopProof, mintOrderlyStopProof, mintOwnerRecoverStopProof, mintReleaseToken, sameOwnerTuple, stopProofState,
-  type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeOwnerRecoverAttestation, type CoworkNativeRecoverGuards, type CoworkNativeStopProof, type CoworkNativeStopRegistry,
+  type CoworkNativeAdmissionView, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchJournalPort, type CoworkNativeOwnerRecoverAttestation, type CoworkNativeRecoverGuards, type CoworkNativeStopProof, type CoworkNativeStopRegistry,
 } from "./stop-proof";
 
 /*
@@ -40,6 +40,16 @@ export interface CoworkNativeOwnerRecoverPort {
   confirm(request: { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number }): CoworkNativeOwnerRecoverAttestation | null;
 }
 
+/** Thrown by a test's `checkpoint` hook to stand for the process dying at that point. Nothing in this module (or the host) catches it. */
+export class CoworkNativeSimulatedCrash extends Error { constructor(readonly phase: string) { super(`simulated crash at ${phase}`); this.name = "CoworkNativeSimulatedCrash"; } }
+/** An error's class and code, nothing else: never a message that could carry a path or a receipt. */
+export function describeNativeError(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown";
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && /^[a-z_]{1,40}$/.test(code) ? `${error.name}:${code}` : error.name;
+}
+const view = (admission: AdmissionRecord | null): CoworkNativeAdmissionView | null => admission === null ? null : { admissionId: admission.admissionId, owner: { bootId: admission.owner.bootId } };
+
 export type CoworkNativeRecoveryAction = "none" | "retained" | "released";
 export interface CoworkNativeRecoveryReport {
   readonly workspaceId: string;
@@ -57,6 +67,8 @@ export interface CoworkNativeRecoveryDeps {
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly power: CoworkNativePower;
   readonly registry: CoworkNativeStopRegistry; readonly hostBoot: CoworkNativeHostBoot;
   readonly receipts?: CoworkNativeDurableReceiptPort; readonly ownerRecover?: CoworkNativeOwnerRecoverPort; readonly guards?: CoworkNativeRecoverGuards;
+  /** The durable record of which processes each launch started; consulted by owner recovery and forgotten once an incarnation is released. */
+  readonly journal?: CoworkNativeLaunchJournalPort;
   readonly now?: () => number;
   /** Isolated crash/fault testing only, never serialized: called after each durable step. */
   readonly checkpoint?: (phase: string) => void;
@@ -81,7 +93,11 @@ export class CoworkNativeRecovery {
       if (workspace.state !== "retained" || workspace.incarnationId === null || exclude.has(workspace.workspaceId)) continue;
       const volumes = this.deps.volumes.records(workspace.workspaceId);
       if (workspace.power === "stopped" && volumes.every(v => v.owner === null) && this.findAdmission(workspace.workspaceId, workspace.incarnationId, workspace.leaseEpoch) === null) continue;
-      reports.push(this.recover(workspace.workspaceId));
+      try { reports.push(this.recover(workspace.workspaceId)); } catch (error) {
+        if (error instanceof CoworkNativeSimulatedCrash) throw error;
+        // One workspace that cannot be read must not stop the others from being settled.
+        reports.push({ workspaceId: workspace.workspaceId, action: "retained", evidence: null, power: workspace.power, ownerRetained: volumes.some(v => v.owner !== null), admission: "none", reason: `recovery failed (${describeNativeError(error)})` });
+      }
     }
     return reports;
   }
@@ -123,7 +139,15 @@ export class CoworkNativeRecovery {
       this.finishPower(key, null);
       return report("released", admission === null ? "nothing-held" : "admission-reconcile", null);
     }
-    this.release(key, owner, volumes, admission, homeId, found.proof);
+    try {
+      this.release(key, owner, homeId, found.proof);
+    } catch (error) {
+      if (error instanceof CoworkNativeSimulatedCrash) throw error;
+      // A step failed part-way (for example the ledger disagreed about a boot change): whatever was already released stays released, the
+      // rest is held, and the next run starts from the records again.
+      this.retain(key, this.deps.power.read(workspaceId).power);
+      return report("retained", null, `release incomplete (${describeNativeError(error)})`);
+    }
     return report("released", found.proof.kind, null);
   }
 
@@ -136,7 +160,7 @@ export class CoworkNativeRecovery {
     if (stored?.attested === true) {
       try {
         const receipt = parseCoworkNativeStopReceipt(stored.text);
-        if (receipt.class === "A") return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admissionId: admission?.admissionId ?? null, volumes, source: { kind: "retained" }, registry: this.deps.registry, now: this.now }) };
+        if (receipt.class === "A") return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admission: view(admission), volumes, source: { kind: "retained" }, registry: this.deps.registry, now: this.now }) };
         reason = `uncertain receipt (${receipt.reason}) never releases`;
       } catch (error) { reason = error instanceof CoworkNativeStopEvidenceError ? `retained receipt refused (${error.code})` : "retained receipt unreadable"; }
     }
@@ -161,7 +185,7 @@ export class CoworkNativeRecovery {
         const receipt = parseCoworkNativeStopReceipt(stored.text);
         if (receipt.class === "A") {
           const owner = ownerFromReceipt(receipt);
-          return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admissionId: admission.admissionId, volumes, volumesReleased: true, source: { kind: "retained" }, registry: this.deps.registry, now: this.now }) };
+          return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admission: view(admission), volumes, volumesReleased: true, source: { kind: "retained" }, registry: this.deps.registry, now: this.now }) };
         }
         reason = `uncertain receipt (${receipt.reason}) never releases`;
       } catch (error) { reason = error instanceof CoworkNativeStopEvidenceError ? `retained receipt refused (${error.code})` : "retained receipt unreadable"; }
@@ -178,32 +202,40 @@ export class CoworkNativeRecovery {
     if (!ownerRecover || !guards) return null;
     try {
       const attestation = ownerRecover.confirm({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch });
-      return mintOwnerRecoverStopProof({ subject: { workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch, owner }, attestation, guards, volumes, now: this.now });
+      const processes = this.deps.journal?.load({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch }) ?? null;
+      return mintOwnerRecoverStopProof({ subject: { workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch, owner, processes }, attestation, guards, volumes, now: this.now });
     } catch { return null; }
   }
 
   // ----------------------------------------------------------------------------------------------- the release flow
 
-  /** Volumes, then admission, then power, then spend the proof. Public so a live `stop` uses exactly the same steps. */
-  release(key: CoworkPowerKey, owner: CoworkVolumeOwner | null, volumes: readonly CoworkVolumeRecord[], admission: AdmissionRecord | null, homeId: string, proof: CoworkNativeStopProof): { readonly retired: boolean } {
+  /** Volumes, then admission, then power, then spend the proof. Public so a live `stop` uses exactly the same steps. Every step reads
+   * the CURRENT records (the arguments are only what the caller believed), so a retry after a crash finishes what is left. */
+  release(key: CoworkPowerKey, owner: CoworkVolumeOwner | null, homeId: string, proof: CoworkNativeStopProof): { readonly retired: boolean } {
     const state = stopProofState(proof);
     if (!state || state.workspaceId !== key.workspaceId || state.incarnationId !== key.incarnationId || state.leaseEpoch !== key.leaseEpoch) throw new CoworkNativeStopEvidenceError("wrong_binding");
-    if (volumes.some(v => v.owner !== null)) {
+    // A boot change releases only if the ledger's own probe AGREES: two independent answers before a single disk is freed.
+    if (proof.kind === "new-boot" && this.findAdmission(key.workspaceId, key.incarnationId, key.leaseEpoch) !== null) {
+      this.deps.admission.reconcile();
+      if (this.findAdmission(key.workspaceId, key.incarnationId, key.leaseEpoch) !== null) throw new CoworkNativeStopEvidenceError("boot_not_ended");
+    }
+    if (this.deps.volumes.records(key.workspaceId).some(v => v.owner !== null)) {
       if (owner === null || state.owner === null) throw new CoworkNativeStopEvidenceError("wrong_binding");
       this.deps.volumes.release({ workspaceId: key.workspaceId, owner, proof }, { confirmationId: proof.confirmationId, proof });
       this.checkpoint("volumes-released");
     }
-    const free = this.deps.volumes.records(key.workspaceId);
+    const admission = this.findAdmission(key.workspaceId, key.incarnationId, key.leaseEpoch);
     if (admission !== null && activeStates.has(admission.state)) {
       if (proof.kind === "new-boot") {
-        // The ledger decides boot changes itself, through its own probe. If it disagrees the row stays held and `power` stays uncertain.
+        // The ledger decides boot changes itself, through its own probe; it already agreed above (or released the row).
         this.deps.admission.reconcile();
-        if (this.findAdmission(key.workspaceId, key.incarnationId, key.leaseEpoch) !== null) throw new CoworkNativeStopEvidenceError("boot_not_ended");
       } else this.deps.admission.release(admission.admissionId, admission.owner, ledgerStopReceipt(proof, admission, homeId));
       this.checkpoint("admission-released");
     }
-    this.finishPower(key, mintReleaseToken({ proof, volumesNowFree: free }));
+    const free = this.deps.volumes.records(key.workspaceId);
+    this.finishPower(key, mintReleaseToken({ proof, volumes: this.deps.volumes }));
     this.deps.registry.consume(proof);
+    this.deps.journal?.forget({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch });
     // A receipt is still needed while a replay debt names its owner: the successor must prove THAT writer stopped. It is retired by `settleDebt`,
     // and the caller must not tell the launcher to forget it either (hence the result).
     const owed = free.some(v => v.filesystemJournal?.replayDebt?.owner.incarnationId === key.incarnationId && v.filesystemJournal.replayDebt.owner.leaseEpoch === key.leaseEpoch);
@@ -215,7 +247,7 @@ export class CoworkNativeRecovery {
   private finishPower(key: CoworkPowerKey, token: ReturnType<typeof mintReleaseToken> | null): void {
     let from = this.deps.power.read(key.workspaceId).power;
     if (from === "stopped") return;
-    const release = token ?? mintVolumesFreeToken({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch, volumes: this.deps.volumes.records(key.workspaceId) });
+    const release = token ?? mintVolumesFreeToken({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch, volumes: this.deps.volumes });
     // A workspace that was running had no orderly drain of its own; it passes through `draining` like any other stop.
     if (from === "running") { this.deps.power.transition(key, "running", "draining"); from = "draining"; }
     this.deps.power.transition(key, from, "stopped", release);
@@ -238,7 +270,7 @@ export class CoworkNativeRecovery {
       const receipt = parseCoworkNativeStopReceipt(stored.text);
       if (receipt.class !== "A" || !sameOwnerTuple(ownerFromReceipt(receipt), debt.owner)) return false;
       // The proof is minted only to validate the receipt against the canonical records; it releases nothing here.
-      mintOrderlyStopProof({ receipt, owner: debt.owner, homeId: this.deps.records.recordedHomeIdentity(), admissionId: null, volumes, volumesReleased: true, source: { kind: "retained" }, registry: this.deps.registry, now: this.now });
+      mintOrderlyStopProof({ receipt, owner: debt.owner, homeId: this.deps.records.recordedHomeIdentity(), admission: null, volumes, volumesReleased: true, source: { kind: "retained" }, registry: this.deps.registry, now: this.now });
       this.deps.registry.noteStopped(debt.owner, "orderly-receipt");
       return true;
     } catch { return false; }
