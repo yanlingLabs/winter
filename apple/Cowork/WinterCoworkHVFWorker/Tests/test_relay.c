@@ -25,10 +25,10 @@ static void rig_up(pid_t parent, uint32_t env_next_seq) {
     CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, rig.l2) == 0);
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, rig.l3) == 0);
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, rig.l4) == 0);
-    for (int i = 0; i < 2; i++) { /* the test's ends are non-blocking too, so a full buffer is a visible condition and not a hang */
-        fcntl(rig.l3[i], F_SETFL, fcntl(rig.l3[i], F_GETFL) | O_NONBLOCK);
-        fcntl(rig.l4[i], F_SETFL, fcntl(rig.l4[i], F_GETFL) | O_NONBLOCK);
-    }
+    /* The TEST's ends are non-blocking so a full buffer is a visible condition and not a hang. The relay's own ends are left exactly as
+     * socketpair() made them: cw_relay_init must make them non-blocking itself, or a full socket would block the pump. */
+    fcntl(rig.l3[0], F_SETFL, fcntl(rig.l3[0], F_GETFL) | O_NONBLOCK);
+    fcntl(rig.l4[0], F_SETFL, fcntl(rig.l4[0], F_GETFL) | O_NONBLOCK);
     cw_l2_out_init(&l2_out, rig.l2[1]);
     cw_relay_env env = { fake_now, fake_random, &rig };
     cw_relay_init(&relay, rig.l2[1], rig.l3[1], rig.l4[1], &l2_out, env_next_seq, parent, &env);

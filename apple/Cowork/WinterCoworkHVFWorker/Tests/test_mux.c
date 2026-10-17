@@ -76,6 +76,8 @@ static void control_grammar(void) {
     CHECK(control_error(text, CW_MUX_DOWN) == CW_E_BAD_FIELD); /* upper case hex */
     snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain_ack\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\"}");
     CHECK(control_error(text, CW_MUX_UP) == CW_E_BAD_FIELD); /* 30 characters */
+    snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain_ack\",\"stopNonce\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\"}");
+    CHECK(control_error(text, CW_MUX_UP) == CW_E_BAD_FIELD); /* 36 characters: the first 32 are valid hex, the rest must not be ignored */
     snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain_ack\",\"stopNonce\":\"%s\"}\n", nonce);
     CHECK(control_error(text, CW_MUX_UP) == CW_E_MALFORMED); /* no trailing newline in a mux payload */
     snprintf(text, sizeof text, "{\"v\":1,\"t\":\"drain_ack\",\"stopNonce\":\"%s\"} ", nonce);
