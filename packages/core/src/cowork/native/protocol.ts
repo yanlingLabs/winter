@@ -611,6 +611,8 @@ export class CoworkNativeMuxSequence {
     if (frame.seq !== expected) fail("bad_sequence");
     this.next.set(key, expected + 1);
   }
+  /** The sequence number the next frame of this class and direction must carry (diagnostics and tests). */
+  nextExpected(cls: CoworkNativeMuxFrame["class"], direction: CoworkNativeMuxDirection): number { return this.next.get(`${cls}:${direction}`) ?? 1; }
 }
 
 /** Per-stream state of the runtime class, one instance per link end: a conversation outside the delivered set, and any byte or second end after a stream's end, are refused. */
@@ -625,8 +627,8 @@ export class CoworkNativeRuntimeStreams {
     if (frame.class !== "runtime") return fail("bad_field");
     const key = `${frame.conversation}:${frame.stream}`;
     if (frame.conversation >= this.conversations || this.ended.has(key)) return fail("bad_field");
-    // Flow control (host side, normative): IN bytes the guest has not answered stay at or below runtimeInFlightBytes. Any OUT or ERR frame shows the guest is reading and clears the count.
-    if (frame.stream === "in") { if (this.inFlight + frame.payload.length > COWORK_NATIVE_LIMITS.runtimeInFlightBytes) return fail("oversize"); this.inFlight += frame.payload.length; } else this.inFlight = 0;
+    // Flow control (host side, normative): IN bytes the guest has not answered stay at or below runtimeInFlightBytes. Any OUT or ERR frame that carries payload bytes shows the guest is reading and clears the count; an empty one (the end flag alone) does not.
+    if (frame.stream === "in") { if (this.inFlight + frame.payload.length > COWORK_NATIVE_LIMITS.runtimeInFlightBytes) return fail("oversize"); this.inFlight += frame.payload.length; } else if (frame.payload.length > 0) this.inFlight = 0; // only payload BYTES prove the guest is reading: an empty frame (the end flag alone) clears nothing
     if (frame.end) this.ended.add(key);
   }
   /** What a sender may still put on IN before it must wait for the guest to answer. */

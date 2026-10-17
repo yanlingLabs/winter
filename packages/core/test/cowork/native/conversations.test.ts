@@ -31,11 +31,16 @@ test("happy path: the set goes out once after mounted, bound to the plan, and ru
 });
 test("power is still `starting` while the host waits for runtime_ready", async () => {
   const h = createHarness({ behavior: { conversations: "silent" }, conversations: guidedSet, timeouts: { runtimeReadyMs: 150 }, onCheckpoint: (phase, harness) => { if (phase === "conversations-sent") expect(harness.records.get(harness.workspaceId).power).toBe("starting"); } });
-  const started = Date.now();
   const error = await failure(h);
   expect(String(error!.code)).toBe("timeout");
-  expect(Date.now() - started).toBeLessThan(380); // the runtime_ready deadline (150 ms here), not the 400 ms mounted one
+  expect(error!.message).toContain("runtime_ready"); // which wait expired, deterministically (no wall-clock bound)
   settledOrderly(h);
+});
+test("runtime_ready is awaited for its OWN deadline, not the mounted one: an answer at 600 ms beats a 5000 ms wait though the mounted wait is 400 ms", async () => {
+  const h = createHarness({ behavior: { conversations: "late-ready" }, conversations: guidedSet, timeouts: { runtimeReadyMs: 5_000 } });
+  const running = await h.host.start(h.workspaceId);
+  expect(h.records.get(h.workspaceId).power).toBe("running");
+  await running.stop();
 });
 test("a tools-only set may hold several conversations and is acknowledged the same way", async () => {
   const h = createHarness({ conversations: toolsOnlySet });
@@ -59,6 +64,44 @@ test("a duplicate runtime_ready is ignored: the first stands, as a second DRAIN 
   expect(h.records.get(h.workspaceId).power).toBe("running");
   expect(h.launcher.last.conversationSets.length).toBe(1);
   expect(await running.stop()).toEqual({ released: true, evidence: "orderly-receipt" });
+});
+test("a duplicate runtime_ready still passes the up-sequence check: no gap for a later bootstrap-up consumer, and nothing else moves", async () => {
+  const single = createHarness({ behavior: { conversations: "ok" }, conversations: guidedSet }), doubled = createHarness({ behavior: { conversations: "duplicate-ready" }, conversations: guidedSet });
+  const first = await single.host.start(single.workspaceId), second = await doubled.host.start(doubled.workspaceId);
+  await Bun.sleep(20);
+  // hello, receipt, mounted, runtime_ready = 4 frames; the duplicate is the fifth.
+  expect(single.host.nextBootstrapUpSequence(single.workspaceId)).toBe(5);
+  expect(doubled.host.nextBootstrapUpSequence(doubled.workspaceId)).toBe(6);
+  expect(doubled.host.duplicateReadySeqAnomaly(doubled.workspaceId)).toBe(false);
+  expect(doubled.records.get(doubled.workspaceId).power).toBe("running");
+  expect(doubled.ledger.listActive().map(record => record.state)).toEqual(["running"]);
+  expect(owners(doubled).every(owner => owner !== null)).toBe(true);
+  await first.stop(); await second.stop();
+});
+test("a duplicate runtime_ready with a wrong sequence number is ignored but recorded: still running, the expected sequence unchanged, the anomaly flag set", async () => {
+  const h = createHarness({ conversations: guidedSet });
+  const running = await h.host.start(h.workspaceId);
+  const set = h.launcher.last.conversationSets[0]!;
+  expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(false);
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  await Bun.sleep(10);
+  expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
+  expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(true);
+  expect(h.records.get(h.workspaceId).power).toBe("running");
+  expect(h.ledger.listActive().map(record => record.state)).toEqual(["running"]);
+  expect(owners(h).every(owner => owner !== null)).toBe(true);
+  await running.stop();
+});
+test("a duplicate runtime_ready that arrives after the start is counted in the up sequence too, and changes nothing", async () => {
+  const h = createHarness({ conversations: guidedSet });
+  const running = await h.host.start(h.workspaceId);
+  const set = h.launcher.last.conversationSets[0]!;
+  expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  await Bun.sleep(10);
+  expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(6);
+  expect(h.records.get(h.workspaceId).power).toBe("running");
+  await running.stop();
 });
 
 const GUEST_FAILURES: [string, FakeBehavior, string][] = [

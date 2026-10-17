@@ -24,7 +24,7 @@ export interface FakeBehavior {
   bootstrap?: "ok" | "fault" | "silent" | "wrong-nonce" | "wrong-operation" | "tampered-receipt" | "duplicate-receipt" | "runtime-frame";
   mounted?: "ok" | "silent";
   /** What the guest does with the conversation set: answer, stay silent, fault, echo wrongly, or announce readiness before it was sent anything / twice. */
-  conversations?: "ok" | "silent" | "bad" | "supervisor-failed" | "second" | "wrong-count" | "wrong-nonce" | "wrong-operation" | "duplicate-ready" | "early-ready";
+  conversations?: "ok" | "silent" | "bad" | "supervisor-failed" | "second" | "wrong-count" | "wrong-nonce" | "wrong-operation" | "duplicate-ready" | "late-ready" | "early-ready";
   /** What the launcher does when asked to stop. */
   stop?: "orderly" | "late-orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault" | "other-request-id" | "other-launcher" | "denies-attach" | "denies-boot";
   /** Hello with another boot id. */
@@ -171,6 +171,7 @@ export class FakeSession implements CoworkLauncherSession {
         case "wrong-count": return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count + 1 });
         case "wrong-nonce": return this.muxUp({ t: "runtime_ready", operationId, nonce: "ee".repeat(16), conversations: count });
         case "wrong-operation": return this.muxUp({ t: "runtime_ready", operationId: "filesystem_other", nonce, conversations: count });
+        case "late-ready": { setTimeout(() => { if (this.scope) this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); }, 600); return; }
         case "duplicate-ready": this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
         default: return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
       }

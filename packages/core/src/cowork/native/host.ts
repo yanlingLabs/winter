@@ -100,6 +100,8 @@ interface Run {
   stopHeartbeat: (() => void) | null;
   /** True once the conversation set went out: a `runtime_ready` before that is out of order. */
   conversationsSent: boolean; earlyReady: boolean;
+  /** A second `runtime_ready` is ignored for power, admission and ownership but still passes the up-sequence check, so a later bootstrap-up consumer sees no gap. */
+  readySeen: boolean; readyAccepted: boolean; duplicateSeqAnomaly: boolean; pendingDuplicates: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>[];
 }
 
 const isCrash = (error: unknown): boolean => error instanceof CoworkNativeSimulatedCrash;
@@ -206,7 +208,7 @@ export class CoworkNativeHost {
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
     const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
-      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false };
+      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, duplicateSeqAnomaly: false, pendingDuplicates: [] };
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
     try {
@@ -249,6 +251,11 @@ export class CoworkNativeHost {
       else if (message.t === "worker_state" && message.state === "guest_fault") run.observed.guestFault = true;
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "hello") run.observed.guestHello = true;
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "runtime_ready" && !run.conversationsSent) run.earlyReady = true;
+      else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "runtime_ready") {
+        if (!run.readySeen) run.readySeen = true;
+        else if (run.readyAccepted) this.acceptDuplicate(run, message.frame);
+        else run.pendingDuplicates.push(message.frame);
+      }
     }));
     const binding = authority.adopt(session, { workspaceId, homeId: run.homeId, admissionId: reserved.admissionId, owner });
     run.binding = binding;
@@ -326,6 +333,13 @@ export class CoworkNativeHost {
     this.moveAdmission(run, "running");
   }
 
+  /** A duplicate `runtime_ready` changes nothing (power, admission, ownership) but is counted in the up sequence; a malformed sequence number on it is not a reason to stop a running guest. */
+  private acceptDuplicate(run: Run, frame: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>): void { try { run.upSeq.accept(frame, "up"); } catch { run.duplicateSeqAnomaly = true; /* recorded, otherwise ignored: the first runtime_ready stands */ } }
+  /** True when a duplicate `runtime_ready` carried a wrong up-sequence number: the frame was ignored (no power, admission or ownership change) but the anomaly is kept for diagnostics. */
+  duplicateReadySeqAnomaly(workspaceId: string): boolean | undefined { return this.runs.get(workspaceId)?.duplicateSeqAnomaly; }
+  /** The up-direction bootstrap sequence number the host expects next for a workspace it runs (diagnostics and tests). */
+  nextBootstrapUpSequence(workspaceId: string): number | undefined { return this.runs.get(workspaceId)?.upSeq.nextExpected("bootstrap", "up"); }
+
   /** Contract 6.1: the conversation set goes out ONCE, after `mounted`, bound to the plan's operation and nonce; `running` waits for `runtime_ready`.
    * A refusal to bind or to serialize means nothing was sent. A bootstrap fault, a wrong echo or a wrong count fails the start (and the stop that follows is orderly). */
   private async deliverConversations(run: Run, context: CoworkNativeConversationContext, operationId: string, nonce: string): Promise<void> {
@@ -343,6 +357,8 @@ export class CoworkNativeHost {
     this.hook("conversations-sent");
     const reply = await run.inbox!.expect(item => item.t === "mux_up" && item.frame.class === "bootstrap" && (item.frame.message.t === "runtime_ready" || item.frame.message.t === "fault") ? item.frame : undefined, this.timeouts.runtimeReadyMs, "runtime_ready");
     run.upSeq.accept(reply, "up");
+    run.readyAccepted = true;
+    for (const frame of run.pendingDuplicates.splice(0)) this.acceptDuplicate(run, frame);
     const answer = (reply as Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>).message;
     if (answer.t === "fault") throw new CoworkNativeHostError("guest_fault", answer.code);
     if (answer.t !== "runtime_ready" || answer.operationId !== operationId || answer.nonce !== nonce || answer.conversations !== set.conversations.length) throw new CoworkNativeHostError("protocol", "runtime_ready does not answer this set");
