@@ -91,12 +91,15 @@ export class CoworkNativeRecovery {
     const reports: CoworkNativeRecoveryReport[] = [];
     for (const workspace of this.deps.records.list()) {
       if (workspace.state !== "retained" || workspace.incarnationId === null || exclude.has(workspace.workspaceId)) continue;
-      const volumes = this.deps.volumes.records(workspace.workspaceId);
-      if (workspace.power === "stopped" && volumes.every(v => v.owner === null) && this.findAdmission(workspace.workspaceId, workspace.incarnationId, workspace.leaseEpoch) === null) continue;
-      try { reports.push(this.recover(workspace.workspaceId)); } catch (error) {
+      let volumes: readonly CoworkVolumeRecord[] | null = null;
+      try {
+        volumes = this.deps.volumes.records(workspace.workspaceId);
+        if (workspace.power === "stopped" && volumes.every(v => v.owner === null) && this.findAdmission(workspace.workspaceId, workspace.incarnationId, workspace.leaseEpoch) === null) continue;
+        reports.push(this.recover(workspace.workspaceId));
+      } catch (error) {
         if (error instanceof CoworkNativeSimulatedCrash) throw error;
         // One workspace that cannot be read must not stop the others from being settled.
-        reports.push({ workspaceId: workspace.workspaceId, action: "retained", evidence: null, power: workspace.power, ownerRetained: volumes.some(v => v.owner !== null), admission: "none", reason: `recovery failed (${describeNativeError(error)})` });
+        reports.push({ workspaceId: workspace.workspaceId, action: "retained", evidence: null, power: workspace.power, ownerRetained: volumes === null || volumes.some(v => v.owner !== null), admission: "none", reason: `recovery failed (${describeNativeError(error)})` });
       }
     }
     return reports;

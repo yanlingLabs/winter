@@ -48,6 +48,8 @@ export interface Harness {
   restart(options?: { newBoot?: boolean; behavior?: FakeBehavior; crashAt?: string; volumeCheckpoint?: (phase: string) => void }): void;
   setBehavior(behavior: FakeBehavior): void;
   stopAll(): void;
+  /** Another retained workspace with its own allocated volume pair (so two workspaces can be in flight at once). */
+  addWorkspace(): string;
   dispose(): void;
 }
 
@@ -151,6 +153,12 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     db.close(); db = openRuntimeStateDb(home);
     if (restartOptions.newBoot) hostBoot.current = `boot-${sequence + 2}`;
     build({ behavior: restartOptions.behavior, crashAt: restartOptions.crashAt, volumeCheckpoint: restartOptions.volumeCheckpoint, timeouts: options.timeouts });
+  };
+  let extra = 0;
+  harness.addWorkspace = () => {
+    const made = harness.records.create({ principalId: "fixture-user", requestId: `create-extra-${++extra}` }, { ownership: "project", title: `Extra ${extra}`, sources: [{ kind: "folder", label: "Extra", access: "read-write", detail: { grantRef: `extra-grant-${extra}`, rootIdentity: `extra-root-${extra}` } }], ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" } });
+    new CoworkVolumes(db, home, provisioning, backup).allocate({ workspaceId: made.workspaceId, proof: {}, owner: { controllerInstanceId: "provision", workerInstanceId: "provision", incarnationId: "provision", leaseEpoch: 1, runtimeImageDigest: IMAGE_DIGEST } }, { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES });
+    return made.workspaceId;
   };
   harness.setBehavior = behavior => { harness.launcher.behavior = behavior; };
   harness.stopAll = () => { harness.launcher?.killAll(); };

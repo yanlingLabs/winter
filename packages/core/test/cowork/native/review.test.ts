@@ -190,6 +190,19 @@ describe("a boot change releases only when the ledger's own probe agrees", () =>
     h.restart({ newBoot: true }); h.hostBoot.ended = true; h.ledgerAgrees = false;
     expect(h.host.bootReconcile()).toMatchObject([{ action: "retained", reason: expect.stringContaining("release incomplete") }]);
   });
+  test("a workspace whose records cannot even be read is reported, and the next one is still settled", async () => {
+    const h = createHarness({ crashAt: "power-running" });
+    const second = h.addWorkspace();
+    await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);
+    h.restart({ crashAt: "power-running" });
+    await expect(h.host.start(second)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);
+    h.restart();
+    h.db.db.run("UPDATE cowork_volumes SET owner_json=? WHERE workspace_id=?", ["{not json", h.workspaceId]); // the first workspace's pair no longer reads
+    const reports = h.host.bootReconcile();
+    expect(reports).toHaveLength(2);
+    expect(reports.find(report => report.workspaceId === h.workspaceId)).toMatchObject({ action: "retained", ownerRetained: true, reason: "recovery failed (CoworkVolumeError:recovery_required)" });
+    expect(reports.find(report => report.workspaceId === second)).toMatchObject({ action: "retained", power: "uncertain", ownerRetained: true, reason: "no release evidence" });
+  });
 });
 
 describe("the release flow binds its proof to the incarnation it was asked about", () => {
