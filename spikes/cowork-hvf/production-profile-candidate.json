@@ -97,7 +97,7 @@
         "src/vmm/src/resources.rs"
       ],
       "purpose": "running tests for every reviewed device-inventory refusal, a table of every device-adding public setter, exhaustive classification of the context types, the pre-VMM phase, and a start-free split of the normalized-gpu admission test",
-      "patchSha256": "e5ae8da74ccd63b4d2f7b88bdaeb830e76c9a72e1338cd5abf0d4db46abe1d85"
+      "patchSha256": "311e58b4695d91703519c6173a484077b15977a5930eef453510cf7111a84d45"
     },
     {
       "patchFile": "patches/0019-proposed-production-start-admission.patch",
@@ -110,7 +110,7 @@
         "src/libkrun/src/lib.rs"
       ],
       "purpose": "mandatory preflight recorded on the context and enforced at start; cowork-production-only feature: krun_start_enter refuses any context without the production profile",
-      "patchSha256": "c4986fa77023fa945dcd88d3cd08460e4002ca6cf0be3faaa6c8a8a26e1d9feb"
+      "patchSha256": "805356bdf1f74146b0daa92d7c502107702d6b0520c9eb814fdf6c3bef30c82a"
     },
     {
       "patchFile": "patches/0020-proposed-production-quiet-block-and-reclaim-paths.patch",
@@ -162,7 +162,7 @@
       "patchSha256": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a"
     }
   ],
-  "fullSourceDiffSha256": "f4259bdf1cc133b302570aed9d835e538e0f80d1c4a4aee64c687ff91c80e946",
+  "fullSourceDiffSha256": "505a68e38b3415e6b503ea06ddc68f15d313ce91066cbb50f69cfc09b9bcbe29",
   "allAddedFiles": [
     "src/devices/src/block_bounce.rs",
     "src/devices/src/block_trace.rs",

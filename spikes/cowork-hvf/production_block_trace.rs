@@ -19,6 +19,10 @@ static REQUESTS: AtomicU64 = AtomicU64::new(0);
 pub const MAX_ROWS: u64 = 60000;
 /// True only in builds that carry the trace (test and `cowork-fixture-trace`).
 pub const COMPILED: bool = cfg!(any(test, feature = "cowork-fixture-trace"));
+/// The fixture's per-request completion hold (it widens the window in which a request is in flight so the
+/// reclaim fixture can observe it). It is a sleep after the host I/O of EVERY block request, so a production
+/// build must not carry it: zero outside test and `cowork-fixture-trace`.
+pub const COMPLETION_HOLD_MILLIS: u64 = if COMPILED { 25 } else { 0 };
 #[cfg(any(test, feature = "cowork-fixture-trace"))]
 pub fn clock_micros() -> u128 {
     START.get_or_init(Instant::now).elapsed().as_micros()

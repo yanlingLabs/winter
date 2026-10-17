@@ -41,7 +41,7 @@ index 4d252fb..b8d7764 100644
  [dependencies]
  crossbeam-channel = ">=0.5.15"
 diff --git a/src/libkrun/src/cowork_production_gate_matrix_tests.rs b/src/libkrun/src/cowork_production_gate_matrix_tests.rs
-index 1654642..cc8dd40 100644
+index 9b4ca5d..d88a622 100644
 --- a/src/libkrun/src/cowork_production_gate_matrix_tests.rs
 +++ b/src/libkrun/src/cowork_production_gate_matrix_tests.rs
 @@ -226,6 +226,7 @@ fn every_context_field_is_classified() {

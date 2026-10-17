@@ -1,9 +1,9 @@
 diff --git a/src/libkrun/src/cowork_production_gate_matrix_tests.rs b/src/libkrun/src/cowork_production_gate_matrix_tests.rs
 new file mode 100644
-index 0000000..1654642
+index 0000000..9b4ca5d
 --- /dev/null
 +++ b/src/libkrun/src/cowork_production_gate_matrix_tests.rs
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,325 @@
 +//! N2 production gate matrix: the reviewed device-inventory refusals, every public setter that can add or
 +//! change a device, and an exhaustive classification of the context types. Pure context and validator
 +//! checks: nothing here creates a VM, calls Hypervisor.framework or calls `krun_start_enter`. Run with
@@ -321,8 +321,12 @@ index 0000000..1654642
 +    let id = production.id;
 +    for (vcpus, memory, admitted) in [(2u8, 768usize, true), (2, 900, true), (2, 1024, true), (1, 768, false), (3, 768, false), (4, 1024, false), (2, 767, false), (2, 1025, false), (2, 2048, false)] {
 +        machine(id, vcpus, memory);
-+        let map = CTX_MAP.lock().unwrap();
-+        assert_eq!(cowork_validate_production(map.get(&id).unwrap()).is_ok(), admitted, "{vcpus} vCPU / {memory} MiB");
++        // Asserting while holding the context map would poison it and abort the test process on unwind.
++        let ok = {
++            let map = CTX_MAP.lock().unwrap();
++            cowork_validate_production(map.get(&id).unwrap()).is_ok()
++        };
++        assert_eq!(ok, admitted, "{vcpus} vCPU / {memory} MiB");
 +    }
 +}
 diff --git a/src/libkrun/src/cowork_production_profile_tests.rs b/src/libkrun/src/cowork_production_profile_tests.rs

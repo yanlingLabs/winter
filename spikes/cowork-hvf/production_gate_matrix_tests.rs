@@ -1,0 +1,326 @@
+//! N2 production gate matrix: the reviewed device-inventory refusals, every public setter that can add or
+//! change a device, and an exhaustive classification of the context types. Pure context and validator
+//! checks: nothing here creates a VM, calls Hypervisor.framework or calls `krun_start_enter`. Run with
+//! `--test-threads=1`: contexts, descriptors and the context map are process-wide.
+use super::*;
+use crate::cowork_production_profile_tests::{bare, machine, valid, Production};
+use std::ffi::CString;
+use std::os::raw::c_char;
+
+type Change = Box<dyn Fn(&mut ContextConfig)>;
+fn change(f: impl Fn(&mut ContextConfig) + 'static) -> Change {
+    Box::new(f)
+}
+
+/// Each clause of the reviewed start-time gate that keeps a device or a payload out of the admitted
+/// inventory: applying the change to a valid production context must refuse it, undoing it must admit
+/// it again (so the refusal is that clause and not a side effect), and only that clause is touched.
+#[test]
+fn every_reviewed_inventory_clause_refuses_a_production_context() {
+    let clauses: Vec<(&str, Change, Change)> = vec![
+        ("virtiofs device (r.fs)", change(|c| {
+            c.vmr.add_fs_device(FsDeviceConfig {
+                fs_id: "x".into(),
+                shared_dir: None,
+                semantics: PermissionSemantics::LinuxComplete,
+                shm_size: None,
+                read_only: false,
+                virtual_entries: Vec::new(),
+            })
+        }), change(|c| c.vmr.fs.clear())),
+        ("extra virtio console (r.virtio_consoles)", change(|c| {
+            c.vmr.virtio_consoles.push(VirtioConsoleConfigMode::Explicit(Vec::new()))
+        }), change(|c| c.vmr.virtio_consoles.clear())),
+        ("implicit console enabled", change(|c| c.vmr.disable_implicit_console = false), change(|c| c.vmr.disable_implicit_console = true)),
+        ("second serial console", change(|c| {
+            c.vmr.serial_consoles.push(SerialConsoleConfig { input_fd: -1, output_fd: -1 })
+        }), change(|c| c.vmr.serial_consoles.truncate(1))),
+        ("no serial console", change(|c| c.vmr.serial_consoles.clear()), change(|c| {
+            c.vmr.serial_consoles.push(SerialConsoleConfig { input_fd: -1, output_fd: -1 })
+        })),
+        ("no external kernel", change(|c| c.vmr.external_kernel = None), change(|c| c.vmr.external_kernel = Some(ExternalKernel::default()))),
+        ("kernel bundle (r.kernel_bundle)", change(|c| {
+            c.vmr.kernel_bundle = Some(KernelBundle { host_addr: 0x1000, guest_addr: 0x1000, entry_addr: 0x1000, size: 0x1000 })
+        }), change(|c| c.vmr.kernel_bundle = None)),
+        ("firmware (r.firmware_config)", change(|c| {
+            c.vmr.firmware_config = Some(FirmwareConfig { path: PathBuf::from("/nonexistent") })
+        }), change(|c| c.vmr.firmware_config = None)),
+        ("nested virtualisation", change(|c| c.vmr.nested_enabled = true), change(|c| c.vmr.nested_enabled = false)),
+        ("implicit vsock (TSI)", change(|c| c.vsock_config = VsockConfig::default()), change(|c| c.vsock_config = VsockConfig::Disabled)),
+        ("explicit vsock", change(|c| c.vsock_config = VsockConfig::Explicit { tsi_flags: TsiFlags::empty() }), change(|c| c.vsock_config = VsockConfig::Disabled)),
+        ("public gpu virgl flags", change(|c| c.gpu_virgl_flags = Some(1)), change(|c| c.gpu_virgl_flags = None)),
+        ("public gpu shm size", change(|c| c.gpu_shm_size = Some(1 << 30)), change(|c| c.gpu_shm_size = None)),
+        ("public gpu render server fd", change(|c| c.render_server_fd = Some(1)), change(|c| c.render_server_fd = None)),
+        ("normalized gpu virgl flags (r.gpu_virgl_flags)", change(|c| c.vmr.set_gpu_virgl_flags(1)), change(|c| c.vmr.gpu_virgl_flags = None)),
+        ("normalized gpu shm size (r.gpu_shm_size)", change(|c| c.vmr.set_gpu_shm_size(8 * 1024 * 1024 * 1024)), change(|c| c.vmr.gpu_shm_size = None)),
+        ("normalized gpu render server fd (r.gpu_render_server_fd)", change(|c| c.vmr.set_gpu_render_server_fd(1)), change(|c| c.vmr.gpu_render_server_fd = None)),
+        ("path-backed block device", change(|c| {
+            c.block_cfgs.push(BlockDeviceConfig {
+                block_id: "x".into(),
+                cache_type: CacheType::Writeback,
+                disk_image_path: "/nonexistent".into(),
+                disk_image_format: ImageType::Raw,
+                is_disk_read_only: false,
+                direct_io: false,
+                sync_mode: SyncMode::Full,
+            })
+        }), change(|c| c.block_cfgs.clear())),
+        ("root block config", change(|c| c.root_block_cfg = Some(block_config())), change(|c| c.root_block_cfg = None)),
+        ("data block config", change(|c| c.data_block_cfg = Some(block_config())), change(|c| c.data_block_cfg = None)),
+        ("block root", change(|c| c.block_root = Some(BlockRootConfig { device: "/dev/vda".into(), fstype: None, options: None })), change(|c| c.block_root = None)),
+        ("runtime port fixture trace", change(|c| c.vmr.cowork_runtime_fixture_trace = true), change(|c| c.vmr.cowork_runtime_fixture_trace = false)),
+        ("shutdown eventfd (PL061 GPIO)", change(|c| c.shutdown_efd = Some(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap())), change(|c| c.shutdown_efd = None)),
+    ];
+    let production = Production::new();
+    let id = production.id;
+    for (name, apply, undo) in &clauses {
+        {
+            let mut map = CTX_MAP.lock().unwrap();
+            apply(map.get_mut(&id).unwrap());
+        }
+        assert!(!valid(id), "not refused: {name}");
+        assert_eq!(krun_cowork_validate_profile_v1(id), -libc::EINVAL, "preflight accepted: {name}");
+        {
+            let mut map = CTX_MAP.lock().unwrap();
+            undo(map.get_mut(&id).unwrap());
+        }
+        assert!(valid(id), "not restored: {name}");
+    }
+    assert_eq!(clauses.len(), 23);
+}
+
+fn block_config() -> BlockDeviceConfig {
+    BlockDeviceConfig {
+        block_id: "x".into(),
+        cache_type: CacheType::Writeback,
+        disk_image_path: "/nonexistent".into(),
+        disk_image_format: ImageType::Raw,
+        is_disk_read_only: false,
+        direct_io: false,
+        sync_mode: SyncMode::Full,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expect {
+    /// The setter is accepted and the preflight turns to -EINVAL.
+    Flips,
+    /// The setter refuses (negative status) and leaves the context admissible.
+    Refused,
+    /// The setter is accepted but inert in this feature set (its device code is compiled out); the
+    /// context stays admissible. Only valid while the corresponding libkrun feature is off.
+    Inert,
+}
+
+/// Every public setter that can add, enable or replace a device (or a payload). For each one the status
+/// of the setter and the preflight must agree with the table: a setter that is accepted and changes the
+/// device set must flip the preflight, a setter that refuses must leave the context untouched. A new
+/// device-adding setter that is not refused by the gate fails here once it is added to the table; the
+/// exhaustive context classification below is what forces it to be added.
+#[test]
+fn every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert() {
+    let path = CString::new("/nonexistent-never-opened").unwrap();
+    let tag = CString::new("tag").unwrap();
+    let name = CString::new("port").unwrap();
+    let (p, t, n) = (path.as_ptr(), tag.as_ptr(), name.as_ptr());
+    let volume = CString::new("/a:/b").unwrap();
+    let volumes: [*const c_char; 2] = [volume.as_ptr(), std::ptr::null()];
+    let ports: [*const c_char; 1] = [std::ptr::null()];
+    let data = [0u8; 4];
+    type Call = Box<dyn Fn(u32) -> i32>;
+    use Expect::{Flips, Inert, Refused};
+    let table: Vec<(&str, Expect, Call)> = vec![
+        ("krun_add_vsock", Flips, Box::new(|id| krun_add_vsock(id, 0))),
+        ("krun_add_vsock_port", Refused, Box::new(move |id| unsafe { krun_add_vsock_port(id, 1234, p) })),
+        ("krun_add_vsock_port2", Refused, Box::new(move |id| unsafe { krun_add_vsock_port2(id, 1234, p, false) })),
+        ("krun_set_port_map", Refused, Box::new(move |id| unsafe { krun_set_port_map(id, ports.as_ptr()) })),
+        ("krun_add_virtiofs", Flips, Box::new(move |id| unsafe { krun_add_virtiofs(id, t, p) })),
+        ("krun_add_virtiofs2", Flips, Box::new(move |id| unsafe { krun_add_virtiofs2(id, t, p, 0) })),
+        ("krun_add_virtiofs3", Flips, Box::new(move |id| unsafe { krun_add_virtiofs3(id, t, p, 0, false) })),
+        ("krun_add_virtiofs4", Flips, Box::new(move |id| unsafe { krun_add_virtiofs4(id, t, p, 0, false, 0) })),
+        ("krun_set_root", Flips, Box::new(move |id| unsafe { krun_set_root(id, p) })),
+        ("krun_set_mapped_volumes", Refused, Box::new(move |id| unsafe { krun_set_mapped_volumes(id, volumes.as_ptr()) })),
+        ("krun_fs_add_overlay_dir", Refused, Box::new(move |id| unsafe { krun_fs_add_overlay_dir(id, t, p, 0o755) })),
+        ("krun_fs_add_overlay_file", Refused, Box::new(move |id| unsafe { krun_fs_add_overlay_file(id, t, p, data.as_ptr(), data.len(), 0o644, false) })),
+        ("krun_add_virtio_console_default", Flips, Box::new(|id| unsafe { krun_add_virtio_console_default(id, -1, -1, -1) })),
+        ("krun_add_virtio_console_multiport", Flips, Box::new(|id| unsafe { krun_add_virtio_console_multiport(id) })),
+        ("krun_add_console_port_tty", Refused, Box::new(move |id| unsafe { krun_add_console_port_tty(id, 0, n, -1) })),
+        ("krun_add_console_port_inout", Refused, Box::new(move |id| unsafe { krun_add_console_port_inout(id, 0, n, -1, -1) })),
+        ("krun_add_serial_console_default", Flips, Box::new(|id| unsafe { krun_add_serial_console_default(id, -1, -1) })),
+        ("krun_add_disk", Flips, Box::new(move |id| unsafe { krun_add_disk(id, t, p, false) })),
+        ("krun_add_disk2", Flips, Box::new(move |id| unsafe { krun_add_disk2(id, t, p, 0, false) })),
+        ("krun_add_disk3", Flips, Box::new(move |id| unsafe { krun_add_disk3(id, t, p, 0, false, false, 0) })),
+        ("krun_set_root_disk", Flips, Box::new(move |id| unsafe { krun_set_root_disk(id, p) })),
+        ("krun_set_data_disk", Flips, Box::new(move |id| unsafe { krun_set_data_disk(id, p) })),
+        ("krun_add_input_device_fd", Refused, Box::new(|id| unsafe { krun_add_input_device_fd(id, -1) })),
+        ("krun_add_input_device", Refused, Box::new(|id| krun_add_input_device(id, std::ptr::null(), 0, std::ptr::null(), 0))),
+        ("krun_add_display", Refused, Box::new(|id| unsafe { krun_add_display(id, 100, 100) })),
+        ("krun_set_gpu_options", Flips, Box::new(|id| unsafe { krun_set_gpu_options(id, 1) })),
+        ("krun_set_gpu_options2", Flips, Box::new(|id| unsafe { krun_set_gpu_options2(id, 1, 1 << 30) })),
+        ("krun_set_gpu_render_server_fd", Flips, Box::new(|id| unsafe { krun_set_gpu_render_server_fd(id, 1) })),
+        ("krun_set_snd_device", Inert, Box::new(|id| unsafe { krun_set_snd_device(id, true) })),
+        ("krun_set_firmware", Flips, Box::new(move |id| unsafe { krun_set_firmware(id, p) })),
+        ("krun_set_nested_virt", Flips, Box::new(|id| unsafe { krun_set_nested_virt(id, true) })),
+        ("krun_split_irqchip", Refused, Box::new(|id| krun_split_irqchip(id, true))),
+        ("krun_disable_implicit_init", Inert, Box::new(|id| krun_disable_implicit_init(id))),
+        ("krun_get_shutdown_eventfd", Flips, Box::new(|id| {
+            let fd = krun_get_shutdown_eventfd(id);
+            if fd >= 0 {
+                assert_eq!(unsafe { libc::close(fd) }, 0);
+                0
+            } else {
+                fd
+            }
+        })),
+    ];
+    // The Inert rows are inert only because their device code is not built; the gate also refuses any
+    // build that carries it.
+    assert!(!cfg!(any(feature = "snd", feature = "net", feature = "gpu", feature = "input", feature = "efi", feature = "tee", feature = "init-blob")));
+    assert!(table.len() >= 25);
+    for (name, expect, call) in table {
+        let production = Production::new();
+        let id = production.id;
+        let status = call(id);
+        match expect {
+            Expect::Flips => {
+                assert_eq!(status, 0, "{name} should be accepted");
+                assert!(!valid(id), "{name}: accepted but the gate admits the context");
+                assert_eq!(krun_cowork_validate_profile_v1(id), -libc::EINVAL, "{name}: preflight");
+            }
+            Expect::Refused => {
+                assert!(status < 0, "{name} should be refused, got {status}");
+                assert!(valid(id), "{name}: refused but the context changed");
+            }
+            Expect::Inert => {
+                assert_eq!(status, 0, "{name} should be accepted");
+                assert!(valid(id), "{name}: inert in this feature set but the context changed");
+            }
+        }
+    }
+}
+
+/// Setters and configuration that do not add a device: accepted, and the context stays admissible.
+#[test]
+fn non_device_setters_leave_a_production_context_admissible() {
+    let text = CString::new("value").unwrap();
+    let kernel = CString::new("/nonexistent-kernel-never-opened").unwrap();
+    let empty: [*const c_char; 1] = [std::ptr::null()];
+    let production = Production::new();
+    let id = production.id;
+    assert_eq!(unsafe { krun_set_workdir(id, text.as_ptr()) }, 0);
+    assert_eq!(unsafe { krun_set_exec(id, text.as_ptr(), empty.as_ptr(), empty.as_ptr()) }, 0);
+    assert_eq!(unsafe { krun_set_kernel(id, kernel.as_ptr(), 0, std::ptr::null(), std::ptr::null()) }, 0);
+    assert_eq!(krun_set_vm_config(id, 2, 768), 0);
+    assert!(valid(id));
+    assert_eq!(krun_cowork_validate_profile_v1(id), 0);
+}
+
+/// Exhaustive destructure of the private context type: adding a field to `ContextConfig` breaks this
+/// build until the field is classified here, so a field that can add a device cannot slip past the gate.
+/// The device-adding fields are exactly the ones the clauses above exercise.
+#[test]
+fn every_context_field_is_classified() {
+    let production = Production::new();
+    let map = CTX_MAP.lock().unwrap();
+    let ContextConfig {
+        krunfw: _,                    // payload loader, only used when no external kernel is set (admission requires one)
+        vmr: _,                       // VmResources: classified field by field in the vmm crate (resources.rs tests)
+        cowork_production: _,         // the profile marker itself
+        cowork_validated: _,          // records the mandatory preflight; gates start, admits nothing by itself
+        workdir: _,                   // guest environment text, no device
+        exec_path: _,                 // guest environment text, no device
+        env: _,                       // guest environment text, no device
+        args: _,                      // guest environment text, no device
+        rlimits: _,                   // guest environment text, no device
+        #[cfg(feature = "net")]
+        legacy_net_cfg: _,            // net builds only (the net feature is refused)
+        #[cfg(feature = "net")]
+        legacy_mac: _,                // net builds only (the net feature is refused)
+        net_index: _,                 // net builds only (the net feature is refused)
+        #[cfg(feature = "tee")]
+        tee_config_file: _,           // tee builds only (the tee feature is refused)
+        #[cfg(all(feature = "init-blob", not(any(feature = "tee", feature = "aws-nitro"))))]
+        disable_implicit_init: _,     // init-blob builds only (the init-blob feature is refused)
+        tsi_port_map: _,              // TSI only; implicit vsock is refused, so inert
+        vsock_config: _,              // DEVICE: vsock; must be Disabled
+        block_cfgs: _,                // DEVICE: path-backed block; must be empty
+        root_block_cfg: _,            // DEVICE: path-backed block; must be None
+        data_block_cfg: _,            // DEVICE: path-backed block; must be None
+        block_root: _,                // DEVICE: path-backed block root; must be None
+        unix_ipc_port_map: _,         // vsock only; vsock disabled, so inert
+        shutdown_efd: _,              // DEVICE: PL061 GPIO shutdown device; must be None
+        gpu_virgl_flags: _,           // DEVICE: gpu; must be None
+        gpu_shm_size: _,              // DEVICE: gpu; must be None
+        render_server_fd: _,          // DEVICE: gpu; must be None
+        enable_snd: _,                // DEVICE: snd; inert while the snd feature is off, refused by the feature check otherwise
+        console_output: _,            // kernel console sink path, no device
+        vmm_uid: _,                   // process credentials, no device
+        vmm_gid: _,                   // process credentials, no device
+    } = map.get(&production.id).unwrap();
+}
+
+/// Puts a context taken out of the context map back even if the test panics: a missing context would make
+/// `Production`'s drop fail while unwinding.
+struct Taken(u32, Option<ContextConfig>);
+impl Drop for Taken {
+    fn drop(&mut self) {
+        if let Some(cfg) = self.1.take() {
+            CTX_MAP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(self.0, cfg);
+        }
+    }
+}
+
+/// The production admission also runs at the last start phase, after the block devices are built.
+#[test]
+fn the_pre_vmm_phase_applies_the_production_admission() {
+    let production = Production::new();
+    let id = production.id;
+    let mut taken = Taken(id, CTX_MAP.lock().unwrap().remove(&id));
+    let cfg = taken.1.as_mut().unwrap();
+    assert!(cowork_prepare_blocks(cfg).is_ok());
+    assert!(cowork_validate_profile_in_phase(cfg, CoworkProfilePhase::BeforeVmm).is_ok());
+    cfg.shutdown_efd = Some(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+    assert!(cowork_validate_profile_in_phase(cfg, CoworkProfilePhase::BeforeVmm).is_err());
+    cfg.shutdown_efd = None;
+    cfg.vmr.cowork_runtime_fixture_trace = true;
+    assert!(cowork_validate_profile_in_phase(cfg, CoworkProfilePhase::BeforeVmm).is_err());
+    cfg.vmr.cowork_runtime_fixture_trace = false;
+    assert!(cowork_validate_profile_in_phase(cfg, CoworkProfilePhase::BeforeVmm).is_ok());
+}
+
+/// Production enable accepts only a virgin context: each reduced-device switch set alone, and the marker
+/// itself, is refused (partial states the public API cannot produce, but the gate must not rely on that).
+#[test]
+fn production_enable_refuses_every_partial_fixture_state() {
+    for which in 0..3 {
+        let id = bare();
+        {
+            let mut map = CTX_MAP.lock().unwrap();
+            let cfg = map.get_mut(&id).unwrap();
+            match which {
+                0 => cfg.vmr.cowork_fixture_reclaim = true,
+                1 => cfg.vmr.cowork_guarded_block = true,
+                _ => cfg.cowork_production = true,
+            }
+        }
+        assert_eq!(krun_cowork_enable_profile_v1(id), -libc::EINVAL, "state {which}");
+        assert_eq!(krun_free_ctx(id), 0);
+    }
+}
+
+/// The production check refuses on its own. It runs in front of the reviewed gate, which repeats the vCPU and
+/// memory ceilings, so a test through the whole gate cannot tell whether the production copy still works.
+#[test]
+fn the_production_check_refuses_the_limits_on_its_own() {
+    let production = Production::new();
+    let id = production.id;
+    for (vcpus, memory, admitted) in [(2u8, 768usize, true), (2, 900, true), (2, 1024, true), (1, 768, false), (3, 768, false), (4, 1024, false), (2, 767, false), (2, 1025, false), (2, 2048, false)] {
+        machine(id, vcpus, memory);
+        // Asserting while holding the context map would poison it and abort the test process on unwind.
+        let ok = {
+            let map = CTX_MAP.lock().unwrap();
+            cowork_validate_production(map.get(&id).unwrap()).is_ok()
+        };
+        assert_eq!(ok, admitted, "{vcpus} vCPU / {memory} MiB");
+    }
+}
