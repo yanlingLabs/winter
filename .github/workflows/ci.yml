@@ -127,7 +127,8 @@ jobs:
         # terminated, ~1.4 GB RSS). The suite runs as 3 sequential native shards (`bun test
         # --shard=K/3`, so discovery is bun's own). Every shard is a fresh process in this directory:
         # same bunfig preload (per-process temp root, throwaway Keychain service), same env. The
-        # script runs all shards, then fails the step on any non-zero or signal exit, a missing
+        # script runs all shards (one that clearly crashed Bun - exit 133 or a signal, with no summary -
+        # is re-run ONCE, with a ::warning::; a second crash fails), then fails the step on any non-zero or signal exit, a missing
         # "Ran N tests across M files" summary, a 0-file shard, or a file total below the glob count.
         run: bun scripts/test-shards.ts 3
 

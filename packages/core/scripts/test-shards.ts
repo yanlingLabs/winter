@@ -7,6 +7,10 @@
 //
 //   bun scripts/test-shards.ts [N]    run shards 1..N (default 3); every shard runs even if one fails
 //
+// A shard that CLEARLY crashed Bun (exit 133 or a signal, AND no "Ran N tests across M files" summary) is
+// re-run once, with a loud log line and a ::warning:: annotation. A second crash fails the step; any other
+// non-zero exit (including 133 WITH a summary: tests failed, then Bun crashed) is a real failure, never retried.
+//
 // The step fails if ANY shard exits non-zero or dies on a signal, prints no "Ran X tests across Y files"
 // summary (a crash), runs 0 files, or the shards do not look like an exact partition of the test files
 // (see `verdict`). Bun's own `--shard` does the split, so discovery always matches bun's.
@@ -25,6 +29,32 @@ export interface ShardResult {
 export function parseSummary(output: string): { tests: number; files: number } | null {
   const m = [...output.matchAll(/^Ran (\d+) tests? across (\d+) files?\./gm)].pop();
   return m ? { tests: Number(m[1]), files: Number(m[2]) } : null;
+}
+
+/** A clear Bun crash: exit 133 or death by signal, and the summary line never appeared. */
+export function isClearCrash(r: ShardResult): boolean {
+  const crashExit = r.exitCode === 133 || r.exitCode === null || !!r.signal;
+  return crashExit && r.tests === null && r.files === null;
+}
+
+/** Runs shards 1..total in order; a clearly crashed shard is re-run once (never more). */
+export async function runAll(
+  total: number,
+  run: (shard: number) => Promise<ShardResult>,
+  log: (line: string) => void = console.log,
+): Promise<ShardResult[]> {
+  const results: ShardResult[] = [];
+  for (let s = 1; s <= total; s++) {
+    let r = await run(s);
+    if (isClearCrash(r)) {
+      const how = r.exitCode === null ? `signal ${r.signal ?? "unknown"}` : `exit ${r.exitCode}`;
+      log(`shard ${s}/${total} crashed (Bun ${how}, no summary) \u2014 retrying once`);
+      log(`::warning::shard ${s}/${total} crashed (Bun ${how}, no summary) \u2014 retried once`);
+      r = await run(s);
+    }
+    results.push(r);
+  }
+  return results;
 }
 
 /**
@@ -89,8 +119,7 @@ if (import.meta.main) {
     process.exit(2);
   }
   const minFiles = globCount();
-  const results: ShardResult[] = [];
-  for (let s = 1; s <= total; s++) results.push(await runShard(s, total));
+  const results = await runAll(total, (s) => runShard(s, total));
   for (const r of results) console.log(`shard ${r.shard}/${total}: ${r.tests ?? "?"} tests across ${r.files ?? "?"} files, exit ${r.exitCode ?? r.signal}`);
   const problems = verdict(results, total, minFiles);
   const sum = (k: "tests" | "files") => results.reduce((a, r) => a + (r[k] ?? 0), 0);
