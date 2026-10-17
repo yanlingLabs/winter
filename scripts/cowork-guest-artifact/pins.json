@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "093fb3ead915d967e8a01b358abdbcc39a76f447",
+  "sdkCommit": "7e71929d0231be2d77645bfa47ee2b550f3add22",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -64,15 +64,21 @@
   "expectedArtifact": null,
   "sdkPin": {
     "previousCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
-    "mainAt": "093fb3ead915d967e8a01b358abdbcc39a76f447",
+    "intermediateCommits": [
+      "093fb3ead915d967e8a01b358abdbcc39a76f447"
+    ],
+    "mainAt": "7e71929d0231be2d77645bfa47ee2b550f3add22",
     "mergedPullRequests": [
       27,
-      28
+      28,
+      29,
+      30
     ],
-    "doesNotContain": [
-      "the supervisor change that accepts the relay's pipes (N2 slice S5, SDK part)"
+    "contains": [
+      "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])"
     ],
-    "note": "Re-pinned from the 21-commit-old artifact commit to SDK main (which contains agent-sdk #27 and #28). The supervisor still has to move once more, to a commit that contains the change above, before the runtime transport can work. Nothing was rebuilt: expectedArtifact is therefore unpinned."
+    "supervisorSha256": "2c5be1e8b2cf30956ae14f3ca02224db52aeb4387c2eac22ceceb49a875ceaa8",
+    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) are source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed."
   },
   "guest": {
     "target": "aarch64-linux-musl",

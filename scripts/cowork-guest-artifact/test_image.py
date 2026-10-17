@@ -186,6 +186,9 @@ class PinTests(unittest.TestCase):
         self.assertRegex(PINS['sdkPin']['previousCommit'],r'^[0-9a-f]{40}$')
         self.assertNotEqual(PINS['sdkCommit'],PINS['sdkPin']['previousCommit'])
         self.assertEqual(PINS['sdkCommit'],PINS['sdkPin']['mainAt'])
+        self.assertEqual(PINS['sdkCommit'],'7e71929d0231be2d77645bfa47ee2b550f3add22')
+        self.assertIn(29,PINS['sdkPin']['mergedPullRequests']);self.assertIn(30,PINS['sdkPin']['mergedPullRequests'])
+        self.assertRegex(PINS['sdkPin']['supervisorSha256'],r'^[0-9a-f]{64}$')
     def test_the_re_pin_left_the_expected_artifact_honestly_unpinned_and_kept_the_old_one(self):
         self.assertIsNone(PINS['expectedArtifact'])
         self.assertEqual(PINS['previousExpectedArtifact']['sdkCommit'],PINS['sdkPin']['previousCommit'])
@@ -351,5 +354,37 @@ class CpioReadbackTests(unittest.TestCase):
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
             with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+
+
+
+SDK_CLI=json.loads((HERE/'sdk-supervisor-cli.json').read_text())
+class SupervisorCliContract(unittest.TestCase):
+    """The pinned SDK supervisor accepts the two command lines PID 1 uses. Checked by importing only
+    parse_arguments from the pinned source (never run as root, nothing started)."""
+    def test_fixture_is_for_the_pinned_commit_and_file(self):
+        self.assertEqual(SDK_CLI['sdkCommit'],PINS['sdkCommit'])
+        self.assertEqual(SDK_CLI['supervisorSha256'],PINS['sdkPin']['supervisorSha256'])
+    def test_pid1_command_lines_are_accepted_and_the_wrong_ones_refused(self):
+        accepted={tuple(case['argv']) for case in SDK_CLI['accepted']}
+        self.assertIn(('--trusted-config-fd','3'),accepted)
+        self.assertIn(('--trusted-config-fd','3','--runtime-ports-fds','4,5,6'),accepted)
+        self.assertIn(('--trusted-config-fd','3','--runtime-ports-fds','4,5'),[tuple(r) for r in SDK_CLI['refused']])
+        self.assertIn(('--runtime-ports-fds','4,5,6'),[tuple(r) for r in SDK_CLI['refused']])
+    def test_the_guest_init_builds_exactly_those_argv_forms(self):
+        text=(GUEST/'init/init_linux.c').read_text()
+        self.assertIn('--runtime-ports-fds',text);self.assertIn('--trusted-config-fd',text)
+    def test_fixture_agrees_with_the_sdk_source_when_a_checkout_is_given(self):
+        checkout=os.environ.get('WINTER_SDK_CHECKOUT')
+        if not checkout:self.skipTest('set WINTER_SDK_CHECKOUT to an SDK clone to re-derive')
+        data=subprocess.check_output(['git','-C',checkout,'show',PINS['sdkCommit']+':packages/runtime/src/guest/linux-supervisor.py'])
+        self.assertEqual(sha(data),PINS['sdkPin']['supervisorSha256'])
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'sup.py';path.write_bytes(data)
+            spec=importlib.util.spec_from_file_location('sup',path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            for case in SDK_CLI['accepted']:
+                result=module.parse_arguments(['x',*case['argv']])
+                self.assertEqual([result[0],list(result[1]) if result[1] else None],case['result'])
+            for argv in SDK_CLI['refused']:
+                with self.assertRaises(SystemExit):module.parse_arguments(['x',*argv])
 
 if __name__=='__main__':unittest.main()

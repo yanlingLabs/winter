@@ -376,7 +376,9 @@ def main():
         if not info['static']: raise ValueError('native helper must be static')
         helper_receipts[source]={'sourceSha256':sha((helper_dir/source).read_bytes()),'binarySha256':sha(data),'compileFlags':[flag.replace(str(sdkcopy),'<SDK_SOURCE>') for flag in command[2:-3]]}
         tree.add('opt/winter/helpers/'+binary.name,'file',data,True,'sdk:'+pins['sdkCommit'])
-    supervisor=helper_dir/'linux-supervisor.py';tree.add('opt/winter/libexec/linux-supervisor.py','file',supervisor.read_bytes(),False,'sdk:'+pins['sdkCommit'])
+    supervisor=helper_dir/'linux-supervisor.py'
+    if sha(supervisor.read_bytes())!=pins['sdkPin']['supervisorSha256']: raise ValueError('supervisor source does not match the pinned sdkPin.supervisorSha256')
+    tree.add('opt/winter/libexec/linux-supervisor.py','file',supervisor.read_bytes(),False,'sdk:'+pins['sdkCommit'])
     # N2 slice S5: the pinned PID 1, the relay, the bootstrap helper and the static part of the supervisor's trusted config.
     helper_digests={source.removesuffix('.c'):record['binarySha256'] for source,record in helper_receipts.items()}
     programs,scripts,guest_receipt=build_guest(zig,out/'guest',pins)
