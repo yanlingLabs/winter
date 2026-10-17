@@ -249,13 +249,16 @@ struct DispatchPillComposerBar: View {
                 DispatchPillCardView(record: card,
                                      wiring: dispatchPillCardWiring(adapter: adapter, records: records),
                                      header: controller.cardHeader(for: card),
-                                     waiting: controller.cardQueue.waiting)
+                                     waiting: controller.cardQueue.waiting,
+                                     bodyCap: controller.cardBodyCap)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: controller.cardLayoutWidth)
                     .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
                         controller.cardContentHeightChanged(height)
                     }
                     .id(card.callId)
+                    // Fading out ahead of a swap (answered, or leaving): no second click lands on it.
+                    .allowsHitTesting(!controller.contentFadingOut)
             }
         }
     }
@@ -322,6 +325,9 @@ struct DispatchPillComposerBar: View {
                         tintOverride: .white,
                         onViewCreated: { controller.registerComposerView($0) },
                         viewAlpha: hidden ? 0 : 1,
+                        // Under a card the composer never holds the keyboard: a Return meant for the card must not
+                        // reach (and send) a draft hidden underneath.
+                        takesFocus: !controller.cardHoldsPill,
                         onFocusKey: { key, _, _ in controller.handleMenuKey(key) },
                         // A shell line the pill will RUN reads in purple, whole; a `/` command typed in full in blue.
                         highlightRanges: { [commandMode] text in

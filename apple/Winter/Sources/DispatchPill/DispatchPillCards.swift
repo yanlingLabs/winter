@@ -83,6 +83,9 @@ func interactionRecord(for interaction: PendingInteraction) -> InteractionRecord
 ///   set aside at once — a card never takes over a composer being written in. Set-aside cards wait behind a small
 ///   "waiting for you" pill above the main one; they come back (`bringBack`) when it is clicked, or when the
 ///   composer is empty again (sent, cleared, or put away).
+/// - A COUNTDOWN card (`urgent`: one that default-ALLOWS at a deadline — ComputerV2's desktop switch) is never set
+///   aside, by typing or by arriving while the user types, and goes to the front even ahead of an older plain card:
+///   hidden, it would run out and act on its own while the island stays out of the way of a visible pill.
 struct DispatchPillCardQueue: Equatable {
     /// The ask the pill has become, nil = the pill itself.
     private(set) var front: String?
@@ -90,24 +93,30 @@ struct DispatchPillCardQueue: Equatable {
     private(set) var setAside: Set<String> = []
     /// Every pending ask, oldest first, as of the last update.
     private(set) var pending: [String] = []
+    /// The pending asks that act by themselves at a deadline (`dispatchPillCountdownCardIds`).
+    private(set) var urgent: Set<String> = []
 
     /// How many asks wait behind the one on the pill (or, with none on it, all of them).
     var waiting: Int { front == nil ? pending.count : pending.count - 1 }
 
     /// The pending list changed (or was re-read). `typing` = the user is writing in the composer right now (the
     /// typing pill is out with text in it) — a NEW ask then waits aside instead of taking the composer over.
-    mutating func update(pending next: [String], typing: Bool) {
+    mutating func update(pending next: [String], urgent nextUrgent: Set<String> = [], typing: Bool) {
         let arrivals = next.filter { !pending.contains($0) }
         pending = next
+        urgent = nextUrgent.intersection(next)
         setAside.formIntersection(next)
         if typing, front == nil { setAside.formUnion(arrivals) }
+        setAside.subtract(urgent)
         reselect()
     }
 
-    /// The user typed while a card was on the pill: every pending card steps aside.
+    /// The user typed while a card was on the pill: every pending card steps aside — except a countdown card, which
+    /// stays on the pill.
     mutating func setAllAside() {
-        setAside = Set(pending)
+        setAside = Set(pending).subtracting(urgent)
         front = nil
+        reselect()
     }
 
     /// The set-aside cards come back: the "waiting for you" pill was clicked, or the composer is empty again.
@@ -116,11 +125,23 @@ struct DispatchPillCardQueue: Equatable {
         reselect()
     }
 
-    /// Keep the card on the pill while it is pending and not set aside; else the oldest one that is not set aside.
+    /// Keep the card on the pill while it is pending and not set aside — unless a countdown card is waiting behind a
+    /// plain one; else the oldest countdown card, else the oldest one that is not set aside.
     private mutating func reselect() {
-        if let front, pending.contains(front), !setAside.contains(front) { return }
-        front = pending.first { !setAside.contains($0) }
+        let candidates = pending.filter { !setAside.contains($0) }
+        let firstUrgent = candidates.first { urgent.contains($0) }
+        if let front, candidates.contains(front), urgent.contains(front) || firstUrgent == nil { return }
+        front = firstUrgent ?? candidates.first
     }
+}
+
+/// PURE: the pending asks that act by themselves at a deadline — an approval with `defaultAllowAt` (it ALLOWS when
+/// nobody answers). The pill never hides one (`DispatchPillCardQueue.urgent`).
+func dispatchPillCountdownCardIds(_ records: [InteractionRecord]) -> Set<String> {
+    Set(records.compactMap { record in
+        if case .approval(_, _, _, _, let defaultAllowAt?) = record.ask, defaultAllowAt > 0 { return record.callId }
+        return nil
+    })
 }
 
 // MARK: - What the card says (pure — `DispatchPillCardTests`)
@@ -145,6 +166,14 @@ func dispatchPillCardTrailing(questionIndex: Int, questionCount: Int, waiting: I
     if questionCount > 1 { parts.append("\(questionIndex + 1) of \(questionCount)") }
     if waiting > 0 { parts.append("+\(waiting) waiting") }
     return parts.isEmpty ? nil : parts.joined(separator: " · ")
+}
+
+/// PURE: a default-allow card's countdown, in the pill card's own words — its refuse is the ✕ circle (the transcript's
+/// "Don't switch" button is only the ✕'s tooltip here). Whole seconds, rounded up, never negative.
+func dispatchPillCountdownText(defaultAllowAt: Int, now: Date) -> String {
+    let remainingMs = Double(defaultAllowAt) - now.timeIntervalSince1970 * 1000
+    let seconds = max(0, Int((remainingMs / 1000).rounded(.up)))
+    return seconds > 0 ? "Switching in \(seconds) s unless you press ✕" : "Switching…"
 }
 
 /// PURE: what the "waiting for you" pill says for `count` set-aside asks.

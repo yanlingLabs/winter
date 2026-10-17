@@ -15,7 +15,23 @@ import WinterProtocol
 // No repeating animation and no timer: the countdowns are `TimelineView(.explicit(...))` schedules that end at their
 // deadline.
 
-/// One pending ask, as the pill's card.
+/// Which part of a card a body draws: the header line, the body (which scrolls past `bodyCap`), or the answer row
+/// (pinned under it, never scrolled away or cut off).
+enum DispatchPillCardPart { case header, content, actions }
+
+private struct DispatchPillCardFlatKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    /// TEST SEAM (`ImageRenderer` filmstrips, which cannot draw a scroll view): the card's body laid out flat. False
+    /// everywhere in the app.
+    var dispatchPillCardFlat: Bool {
+        get { self[DispatchPillCardFlatKey.self] }
+        set { self[DispatchPillCardFlatKey.self] = newValue }
+    }
+}
+
+/// One pending ask, as the pill's card: its header, its body — scrolling once it is taller than `bodyCap` — and its
+/// answer row, pinned at the bottom.
 struct DispatchPillCardView: View {
     let record: InteractionRecord
     let wiring: InteractionCardWiring
@@ -23,37 +39,68 @@ struct DispatchPillCardView: View {
     let header: String
     /// How many asks wait behind this one.
     let waiting: Int
+    /// The tallest the body shows before it scrolls (`dispatchPillCardBodyCap`).
+    var bodyCap: CGFloat = .greatestFiniteMagnitude
+
+    @Environment(\.dispatchPillCardFlat) private var flat
+    /// The body's own height (measured inside its scroll view).
+    @State private var contentHeight: CGFloat = 0
 
     private var isInFlight: Bool { wiring.inFlight.contains(record.callId) }
     private var errorLine: String? { wiring.errorLines[record.callId] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            switch record.ask {
-            case .approval(let toolName, let summary, let reviewerReason, let options, let defaultAllowAt):
-                DispatchPillCardHeader(symbol: "hand.raised.fill", line: header,
-                                       trailing: dispatchPillCardTrailing(questionIndex: 0, questionCount: 1, waiting: waiting))
-                DispatchPillApprovalBody(record: record, toolName: toolName, summary: summary,
-                                         reviewerReason: reviewerReason, options: options, defaultAllowAt: defaultAllowAt,
-                                         isInFlight: isInFlight, errorLine: errorLine, wiring: wiring)
-            case .question(let questions):
-                DispatchPillQuestionBody(record: record, questions: questions, header: header, waiting: waiting,
-                                         isInFlight: isInFlight, errorLine: errorLine, wiring: wiring)
-            case .plan(let plan):
-                DispatchPillCardHeader(symbol: "list.bullet.rectangle", line: header,
-                                       trailing: dispatchPillCardTrailing(questionIndex: 0, questionCount: 1, waiting: waiting))
-                DispatchPillPlanBody(record: record, plan: plan, isInFlight: isInFlight, errorLine: errorLine, wiring: wiring)
-            case .urlElicitation(let serverName, let message, let host, let origin, let expiresAt):
-                DispatchPillCardHeader(symbol: "link", line: header,
-                                       trailing: dispatchPillCardTrailing(questionIndex: 0, questionCount: 1, waiting: waiting))
-                DispatchPillElicitationBody(record: record, serverName: serverName, message: message, host: host,
-                                            origin: origin, expiresAt: expiresAt, isInFlight: isInFlight,
-                                            errorLine: errorLine, wiring: wiring)
+            section(.header)
+            if flat {
+                section(.content)
+            } else {
+                ScrollView(.vertical) {
+                    section(.content)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+                }
+                .frame(height: min(contentHeight, bodyCap))
+                .scrollDisabled(contentHeight <= bodyCap)
+                .scrollIndicators(contentHeight > bodyCap ? .automatic : .never)
             }
+            section(.actions)
         }
         .padding(.horizontal, DispatchPillMetrics.cardHorizontalPadding)
         .padding(.vertical, DispatchPillMetrics.cardVerticalPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder private func section(_ part: DispatchPillCardPart) -> some View {
+        let trailing = dispatchPillCardTrailing(questionIndex: 0, questionCount: 1, waiting: waiting)
+        switch record.ask {
+        case .approval(let toolName, let summary, let reviewerReason, let options, let defaultAllowAt):
+            if part == .header {
+                DispatchPillCardHeader(symbol: "hand.raised.fill", line: header, trailing: trailing)
+            } else {
+                DispatchPillApprovalBody(record: record, toolName: toolName, summary: summary,
+                                         reviewerReason: reviewerReason, options: options, defaultAllowAt: defaultAllowAt,
+                                         isInFlight: isInFlight, errorLine: errorLine, wiring: wiring, part: part)
+            }
+        case .question(let questions):
+            DispatchPillQuestionBody(record: record, questions: questions, header: header, waiting: waiting,
+                                     isInFlight: isInFlight, errorLine: errorLine, wiring: wiring, part: part)
+        case .plan(let plan):
+            if part == .header {
+                DispatchPillCardHeader(symbol: "list.bullet.rectangle", line: header, trailing: trailing)
+            } else {
+                DispatchPillPlanBody(record: record, plan: plan, isInFlight: isInFlight, errorLine: errorLine,
+                                     wiring: wiring, part: part)
+            }
+        case .urlElicitation(let serverName, let message, let host, let origin, let expiresAt):
+            if part == .header {
+                DispatchPillCardHeader(symbol: "link", line: header, trailing: trailing)
+            } else {
+                DispatchPillElicitationBody(record: record, serverName: serverName, message: message, host: host,
+                                            origin: origin, expiresAt: expiresAt, isInFlight: isInFlight,
+                                            errorLine: errorLine, wiring: wiring, part: part)
+            }
+        }
     }
 }
 
@@ -173,6 +220,8 @@ private struct DispatchPillChoiceRow: View {
     /// A multiple-choice option shows a box (ticked when chosen), so the row says "pick any".
     var multiSelect = false
     var enabled = true
+    /// How many lines the label may take — nil (an approval's rule text) shows it whole, wrapped.
+    var labelLines: Int? = 2
     let action: () -> Void
 
     static let height: CGFloat = 34
@@ -185,7 +234,8 @@ private struct DispatchPillChoiceRow: View {
                     Text(label)
                         .font(Typography.composerField())
                         .foregroundStyle(selected ? Color.black : Color.white)
-                        .lineLimit(2)
+                        .lineLimit(labelLines)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let detail, !detail.isEmpty {
                         Text(detail)
                             .font(Typography.caption())
@@ -240,8 +290,9 @@ private struct DispatchPillCardField: View {
 
 /// What the tool wants to do, in the pill's type; the safety reviewer's reason in amber when it escalated; a
 /// default-allow card's countdown; each extra option the daemon offered (allow always, add the folder…) as a quiet
-/// row; then ✕ deny and ✓ allow once. ✓ and ✕ send exactly what the transcript's Approve and Deny send (a plain
-/// approve / deny, no option id); a row sends its option's id.
+/// row showing the daemon's rule text whole; then ✕ deny and ✓ allow once. ✓ and ✕ send exactly what the transcript's
+/// Approve and Deny send (a plain approve / deny, no option id); a row sends its option's id. No key answers it —
+/// approving is a click.
 private struct DispatchPillApprovalBody: View {
     let record: InteractionRecord
     let toolName: String
@@ -252,19 +303,23 @@ private struct DispatchPillApprovalBody: View {
     let isInFlight: Bool
     let errorLine: String?
     let wiring: InteractionCardWiring
+    let part: DispatchPillCardPart
 
     private var mightOverflow: Bool { summary.count > 160 || summary.filter { $0 == "\n" }.count >= 4 }
 
     var body: some View {
+        if part == .actions { actions } else { content }
+    }
+
+    private var content: some View {
         let draft = wiring.draftBinding(record.callId)
-        let primary = approvalPrimaryChoice(options)
         let extras = approvalAdditionalOptions(options)
-        VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(summary)
                     .font(Typography.composerField())
                     .foregroundStyle(Color.white)
-                    .lineLimit(draft.wrappedValue.isSummaryExpanded ? 14 : 4)
+                    .lineLimit(draft.wrappedValue.isSummaryExpanded ? nil : 4)
                     .truncationMode(.middle)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
@@ -281,14 +336,16 @@ private struct DispatchPillApprovalBody: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                     Text("Reviewer: \(capReviewerReason(reviewerReason))")
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .font(Typography.caption(.medium))
                 .foregroundStyle(pillReviewAmber)
             }
             if let defaultAllowAt, !isInFlight {
-                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { context in
-                    Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: context.date))
+                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { _ in
+                    // The schedule only REDRAWS; the clock is read here (an explicit timeline's first context date is
+                    // its next, future entry).
+                    Text(dispatchPillCountdownText(defaultAllowAt: defaultAllowAt, now: Date()))
                         .font(Typography.captionDigits(.medium))
                         .foregroundStyle(Theme.textMuted)
                 }
@@ -296,23 +353,27 @@ private struct DispatchPillApprovalBody: View {
             if !extras.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(extras, id: \.id) { option in
-                        DispatchPillChoiceRow(label: option.label, enabled: !isInFlight) {
+                        DispatchPillChoiceRow(label: option.label, enabled: !isInFlight, labelLines: nil) {
                             wiring.onApproval(record.callId, true, option.id, record.childSessionId)
                         }
                     }
                 }
             }
-            HStack(spacing: 8) {
-                DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine,
-                                       hint: primary.approveLabel == "Approve" ? nil : primary.approveLabel)
-                Spacer(minLength: 8)
-                DispatchPillCircleButton(role: .refuse, enabled: !isInFlight, label: primary.denyLabel) {
-                    wiring.onApproval(record.callId, false, nil, record.childSessionId)
-                }
-                DispatchPillCircleButton(role: .accept, enabled: !isInFlight,
-                                         label: primary.approveLabel == "Approve" ? "Allow once" : primary.approveLabel) {
-                    wiring.onApproval(record.callId, true, nil, record.childSessionId)
-                }
+        }
+    }
+
+    private var actions: some View {
+        let primary = approvalPrimaryChoice(options)
+        return HStack(spacing: 8) {
+            DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine,
+                                   hint: primary.approveLabel == "Approve" ? nil : primary.approveLabel)
+            Spacer(minLength: 8)
+            DispatchPillCircleButton(role: .refuse, enabled: !isInFlight, label: primary.denyLabel) {
+                wiring.onApproval(record.callId, false, nil, record.childSessionId)
+            }
+            DispatchPillCircleButton(role: .accept, enabled: !isInFlight,
+                                     label: primary.approveLabel == "Approve" ? "Allow once" : primary.approveLabel) {
+                wiring.onApproval(record.callId, true, nil, record.childSessionId)
             }
         }
     }
@@ -322,7 +383,8 @@ private struct DispatchPillApprovalBody: View {
 
 /// One question at a time: the question in the pill's type, its options as compact rows (multiple choice shows its
 /// boxes and "Choose any"), an Other field, a note when the ask allows one; then ‹ back, and the blue ✓ — Next before
-/// the last question, Send on it, enabled by `dispatchPillQuestionAdvance`. Choosing never sends by itself.
+/// the last question, Send on it, enabled by `dispatchPillQuestionAdvance`. Choosing never sends by itself; Return in
+/// a field does what ✓ does, and only when ✓ is enabled.
 private struct DispatchPillQuestionBody: View {
     let record: InteractionRecord
     let questions: [SessionEvent.Question]
@@ -331,90 +393,110 @@ private struct DispatchPillQuestionBody: View {
     let isInFlight: Bool
     let errorLine: String?
     let wiring: InteractionCardWiring
+    let part: DispatchPillCardPart
 
     var body: some View {
         let draft = wiring.draftBinding(record.callId)
         let index = min(max(draft.wrappedValue.visibleQuestion, 0), max(questions.count - 1, 0))
         let advance = dispatchPillQuestionAdvance(questions: questions, draft: draft.wrappedValue, index: index,
                                                   inFlight: isInFlight)
-        VStack(alignment: .leading, spacing: 10) {
+        switch part {
+        case .header:
             DispatchPillCardHeader(symbol: "questionmark.bubble.fill", line: header,
                                    trailing: dispatchPillCardTrailing(questionIndex: index, questionCount: questions.count,
                                                                       waiting: waiting))
+        case .content:
             if questions.indices.contains(index) {
-                let question = questions[index]
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(question.question)
-                        .font(Typography.composerField())
-                        .foregroundStyle(Color.white)
-                        .lineLimit(6)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if question.multiSelect {
-                        Text("Choose any")
-                            .font(Typography.caption())
-                            .foregroundStyle(Theme.textMuted)
-                    }
-                }
-                VStack(spacing: 6) {
-                    ForEach(Array(question.options.enumerated()), id: \.offset) { i, option in
-                        DispatchPillChoiceRow(label: option.label, detail: option.description,
-                                              selected: draft.wrappedValue.selections[index]?.contains(i) == true,
-                                              multiSelect: question.multiSelect, enabled: !isInFlight) {
-                            if question.multiSelect {
-                                draft.wrappedValue.toggleMulti(i, forQuestion: index)
-                            } else {
-                                draft.wrappedValue.selectSingle(i, forQuestion: index)
-                            }
-                        }
-                    }
-                    DispatchPillCardField(
-                        placeholder: "Other…",
-                        text: Binding(get: { draft.wrappedValue.otherTexts[index] ?? "" },
-                                      set: { draft.wrappedValue.setOtherText($0, forQuestion: index) }),
-                        enabled: !isInFlight,
-                        onSubmit: { go(advance, index: index, draft: draft) }
-                    )
-                    if questionAllowsNotes(question), draft.wrappedValue.notesOpen.contains(index) {
-                        DispatchPillCardField(
-                            placeholder: "Add a note (optional)",
-                            text: Binding(get: { draft.wrappedValue.notes[index] ?? "" },
-                                          set: { draft.wrappedValue.setNote($0, forQuestion: index) }),
-                            enabled: !isInFlight,
-                            onSubmit: { go(advance, index: index, draft: draft) }
-                        )
-                    }
-                }
-                .id(index) // each question is its own page: a field never inherits the last one's text
-                HStack(spacing: 8) {
-                    DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine)
-                    Spacer(minLength: 8)
-                    if questionAllowsNotes(question) {
-                        let open = draft.wrappedValue.notesOpen.contains(index)
-                        DispatchPillCircleButton(role: .quiet, symbol: open ? "note.text" : "note.text.badge.plus",
-                                                 enabled: !isInFlight, label: open ? "Hide note" : "Add a note") {
-                            draft.wrappedValue.toggleNote(forQuestion: index)
-                        }
-                    }
-                    if index > 0 {
-                        DispatchPillCircleButton(role: .refuse, symbol: "chevron.left", enabled: !isInFlight,
-                                                 label: "Previous question") {
-                            draft.wrappedValue.visibleQuestion = index - 1
-                        }
-                    }
-                    DispatchPillCircleButton(role: .accept,
-                                             symbol: advance.action == .next ? "chevron.right" : "checkmark",
-                                             enabled: advance.enabled,
-                                             label: advance.action == .next ? "Next question" : "Send answer") {
-                        go(advance, index: index, draft: draft)
-                    }
-                }
+                content(questions[index], index: index, advance: advance, draft: draft)
+            }
+        case .actions:
+            if questions.indices.contains(index) {
+                actions(questions[index], index: index, advance: advance, draft: draft)
             }
         }
     }
 
-    /// ✓ (or Return in a field): the next question, or — on the last — the answers, once.
-    private func go(_ advance: (action: DispatchPillQuestionAdvance, enabled: Bool), index: Int,
-                    draft: Binding<PendingCardDraft>) {
+    private func content(_ question: SessionEvent.Question, index: Int,
+                         advance: (action: DispatchPillQuestionAdvance, enabled: Bool),
+                         draft: Binding<PendingCardDraft>) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(question.question)
+                    .font(Typography.composerField())
+                    .foregroundStyle(Color.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                if question.multiSelect {
+                    Text("Choose any")
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textMuted)
+                }
+            }
+            VStack(spacing: 6) {
+                ForEach(Array(question.options.enumerated()), id: \.offset) { i, option in
+                    DispatchPillChoiceRow(label: option.label, detail: option.description,
+                                          selected: draft.wrappedValue.selections[index]?.contains(i) == true,
+                                          multiSelect: question.multiSelect, enabled: !isInFlight) {
+                        if question.multiSelect {
+                            draft.wrappedValue.toggleMulti(i, forQuestion: index)
+                        } else {
+                            draft.wrappedValue.selectSingle(i, forQuestion: index)
+                        }
+                    }
+                }
+                DispatchPillCardField(
+                    placeholder: "Other…",
+                    text: Binding(get: { draft.wrappedValue.otherTexts[index] ?? "" },
+                                  set: { draft.wrappedValue.setOtherText($0, forQuestion: index) }),
+                    enabled: !isInFlight,
+                    onSubmit: { go(index: index, draft: draft) }
+                )
+                if questionAllowsNotes(question), draft.wrappedValue.notesOpen.contains(index) {
+                    DispatchPillCardField(
+                        placeholder: "Add a note (optional)",
+                        text: Binding(get: { draft.wrappedValue.notes[index] ?? "" },
+                                      set: { draft.wrappedValue.setNote($0, forQuestion: index) }),
+                        enabled: !isInFlight,
+                        onSubmit: { go(index: index, draft: draft) }
+                    )
+                }
+            }
+            .id(index) // each question is its own page: a field never inherits the last one's text
+        }
+    }
+
+    private func actions(_ question: SessionEvent.Question, index: Int,
+                         advance: (action: DispatchPillQuestionAdvance, enabled: Bool),
+                         draft: Binding<PendingCardDraft>) -> some View {
+        HStack(spacing: 8) {
+            DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine)
+            Spacer(minLength: 8)
+            if questionAllowsNotes(question) {
+                let open = draft.wrappedValue.notesOpen.contains(index)
+                DispatchPillCircleButton(role: .quiet, symbol: open ? "note.text" : "note.text.badge.plus",
+                                         enabled: !isInFlight, label: open ? "Hide note" : "Add a note") {
+                    draft.wrappedValue.toggleNote(forQuestion: index)
+                }
+            }
+            if index > 0 {
+                DispatchPillCircleButton(role: .refuse, symbol: "chevron.left", enabled: !isInFlight,
+                                         label: "Previous question") {
+                    draft.wrappedValue.visibleQuestion = index - 1
+                }
+            }
+            DispatchPillCircleButton(role: .accept,
+                                     symbol: advance.action == .next ? "chevron.right" : "checkmark",
+                                     enabled: advance.enabled,
+                                     label: advance.action == .next ? "Next question" : "Send answer") {
+                go(index: index, draft: draft)
+            }
+        }
+    }
+
+    /// ✓ (or Return in a field): the next question, or — on the last — the answers, once. Judged afresh at the press
+    /// (the field's Return carries no stale verdict): nothing happens while ✓ would be disabled.
+    private func go(index: Int, draft: Binding<PendingCardDraft>) {
+        let advance = dispatchPillQuestionAdvance(questions: questions, draft: draft.wrappedValue, index: index,
+                                                  inFlight: wiring.inFlight.contains(record.callId))
         guard advance.enabled else { return }
         switch advance.action {
         case .next:
@@ -445,13 +527,17 @@ private struct DispatchPillElicitationBody: View {
     let isInFlight: Bool
     let errorLine: String?
     let wiring: InteractionCardWiring
+    let part: DispatchPillCardPart
 
     var body: some View {
+        if part == .actions { actions } else { content }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(message.isEmpty ? "\(serverName) asks you to open a link" : message)
                 .font(Typography.composerField())
                 .foregroundStyle(Color.white)
-                .lineLimit(6)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
             VStack(alignment: .leading, spacing: 2) {
@@ -469,21 +555,24 @@ private struct DispatchPillElicitationBody: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            TimelineView(.explicit([Date(timeIntervalSince1970: Double(expiresAt) / 1000)])) { _ in
-                // The schedule only REDRAWS at the deadline; the clock is read here — an explicit timeline's first
-                // context date is its (future) entry, which would read as expired from the start.
-                let expired = elicitationIsExpired(expiresAt: expiresAt, now: Date())
-                HStack(spacing: 8) {
-                    DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine,
-                                           hint: expired ? "This request has expired" : nil)
-                    Spacer(minLength: 8)
-                    DispatchPillCircleButton(role: .refuse, enabled: !isInFlight, label: "Decline") {
-                        wiring.onElicitation(record.callId, false, host, expiresAt)
-                    }
-                    DispatchPillCircleButton(role: .accept, symbol: "arrow.up.right", enabled: !isInFlight && !expired,
-                                             label: "Open \(host)") {
-                        wiring.onElicitation(record.callId, true, host, expiresAt)
-                    }
+        }
+    }
+
+    private var actions: some View {
+        TimelineView(.explicit([Date(timeIntervalSince1970: Double(expiresAt) / 1000)])) { _ in
+            // The schedule only REDRAWS at the deadline; the clock is read here — an explicit timeline's first
+            // context date is its (future) entry, which would read as expired from the start.
+            let expired = elicitationIsExpired(expiresAt: expiresAt, now: Date())
+            HStack(spacing: 8) {
+                DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine,
+                                       hint: expired ? "This request has expired" : nil)
+                Spacer(minLength: 8)
+                DispatchPillCircleButton(role: .refuse, enabled: !isInFlight, label: "Decline") {
+                    wiring.onElicitation(record.callId, false, host, expiresAt)
+                }
+                DispatchPillCircleButton(role: .accept, symbol: "arrow.up.right", enabled: !isInFlight && !expired,
+                                         label: "Open \(host)") {
+                    wiring.onElicitation(record.callId, true, host, expiresAt)
                 }
             }
         }
@@ -501,26 +590,12 @@ private struct DispatchPillPlanBody: View {
     let isInFlight: Bool
     let errorLine: String?
     let wiring: InteractionCardWiring
+    let part: DispatchPillCardPart
 
     var body: some View {
         let draft = wiring.draftBinding(record.callId)
         let requesting = draft.wrappedValue.isRequestingChanges
-        VStack(alignment: .leading, spacing: 10) {
-            Text(plan)
-                .font(Typography.composerField())
-                .foregroundStyle(Color.white)
-                .lineLimit(10)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-            if requesting {
-                DispatchPillCardField(placeholder: "What should change?", text: draft.feedback, enabled: !isInFlight) {
-                    sendChanges(draft.wrappedValue.feedback)
-                }
-            } else {
-                DispatchPillChoiceRow(label: "Approve and auto-accept edits", enabled: !isInFlight) {
-                    wiring.onPlan(record.callId, true, true, nil)
-                }
-            }
+        if part == .actions {
             HStack(spacing: 8) {
                 DispatchPillCardStatus(isInFlight: isInFlight, errorLine: errorLine)
                 Spacer(minLength: 8)
@@ -537,6 +612,23 @@ private struct DispatchPillPlanBody: View {
                     }
                     DispatchPillCircleButton(role: .accept, enabled: !isInFlight, label: "Approve") {
                         wiring.onPlan(record.callId, true, false, nil)
+                    }
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(plan)
+                    .font(Typography.composerField())
+                    .foregroundStyle(Color.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                if requesting {
+                    DispatchPillCardField(placeholder: "What should change?", text: draft.feedback, enabled: !isInFlight) {
+                        sendChanges(draft.wrappedValue.feedback)
+                    }
+                } else {
+                    DispatchPillChoiceRow(label: "Approve and auto-accept edits", enabled: !isInFlight) {
+                        wiring.onPlan(record.callId, true, true, nil)
                     }
                 }
             }

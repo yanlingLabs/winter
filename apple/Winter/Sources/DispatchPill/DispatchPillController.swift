@@ -558,6 +558,7 @@ final class DispatchPillController: ObservableObject {
         if swaps { beginReveal() }
         retargetMain()
         if swaps, springTimer == nil { endReveal() }
+        syncComposerFocus()
     }
 
     /// Click outside the pill (any app, any other window): compress to the compact pill, never hide,
@@ -586,6 +587,9 @@ final class DispatchPillController: ObservableObject {
 
     /// Enter / the send circle.
     func submit(_ text: String) {
+        // A card on the pill: Return never sends a draft hidden under it (the user means the card), and never answers
+        // the card either — an approval is a click on ✓; a question's fields send through its own ✓.
+        guard !cardHoldsPill else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         // The `/` menu: a row the arrows moved to runs at once; otherwise the first Enter completes a
         // partly typed command (or mode) to the closest match, and the next one runs it.
@@ -924,6 +928,10 @@ final class DispatchPillController: ObservableObject {
     /// The pill IS a card right now — full screen never is one (its transcript draws every pending ask inline).
     var cardShowsOnPill: Bool { shellCardId != nil && presentation != .fullScreen }
 
+    /// A card is on the pill, or on its way there or out (the content swap's fade): the composer under it can neither
+    /// take the keyboard nor send (`submit`), so a Return meant for the card never sends a hidden draft.
+    var cardHoldsPill: Bool { presentation != .fullScreen && (cardQueue.front != nil || shellCardId != nil) }
+
     /// How many set-aside asks the "waiting for you" pill above the main one counts (0: it is not shown).
     var setAsideCardCount: Int {
         cardQueue.front == nil && presentation != .fullScreen ? cardQueue.setAside.count : 0
@@ -935,6 +943,9 @@ final class DispatchPillController: ObservableObject {
         dispatchPillCardSize(presentation: presentation, measuredHeight: cardContentHeight,
                              visibleFrame: lockedVisibleFrame).width
     }
+
+    /// The most the card's body shows before it scrolls (`dispatchPillCardBodyCap`).
+    var cardBodyCap: CGFloat { dispatchPillCardBodyCap(visibleFrame: lockedVisibleFrame) }
 
     /// Who is asking, as the card's header says it.
     func cardHeader(for record: InteractionRecord) -> String {
@@ -953,7 +964,8 @@ final class DispatchPillController: ObservableObject {
         var next = cardQueue
         let typing = presentation == .expanded && cardQueue.front == nil
             && !adapter.composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        next.update(pending: pendingCardRecords.map(\.callId), typing: typing)
+        let records = pendingCardRecords
+        next.update(pending: records.map(\.callId), urgent: dispatchPillCountdownCardIds(records), typing: typing)
         applyCardQueue(next)
     }
 
@@ -976,6 +988,7 @@ final class DispatchPillController: ObservableObject {
         }
         if had != nil, next.front == nil { cardLeftPill() }
         syncShellContent()
+        syncComposerFocus()
     }
 
     /// Bring what the shell draws in line with the queue, as the island's open morph does: the OLD content fades out
@@ -1019,6 +1032,7 @@ final class DispatchPillController: ObservableObject {
         }
         retargetMain()
         if !reveals || springTimer == nil { endReveal() }
+        syncComposerFocus()
     }
 
     /// The new content starts hidden; the spring's ticks raise it (`advanceReveal`).
@@ -1050,10 +1064,41 @@ final class DispatchPillController: ObservableObject {
         guard isVisible else { return }
         if engagedByCard, presentation == .compact, adapter.composerDraft.isEmpty {
             rest(restoreFocus: true)
-        } else if panel.isKeyWindow, let textView = composerView?.documentView as? NSTextView,
-                  panel.firstResponder !== textView {
+        }
+    }
+
+    /// The composer may hold the keyboard only while no card holds the pill (`cardHoldsPill`): with one, it refuses
+    /// first responder and gives it up — the same gate `ComposerTextView.takesFocus` applies on its next update, set
+    /// here at once so nothing in between can hand it the keyboard. Back to the pill, it takes the keyboard again
+    /// when the panel has it, so typing just works.
+    private func syncComposerFocus() {
+        guard let textView = composerView?.documentView as? CommandTextView else { return }
+        let allowed = !cardHoldsPill
+        textView.focusAllowed = allowed
+        if !allowed {
+            if panel.firstResponder === textView { panel.makeFirstResponder(nil) }
+        } else if isVisible, panel.isKeyWindow,
+                  composerShouldClaimFirstResponder(current: panel.firstResponder, composer: textView) {
             panel.makeFirstResponder(textView)
         }
+    }
+
+    /// A printable key pressed while a card holds the pill and no field of the card is being typed in: the user went
+    /// back to writing — every card that may step aside does (`setAllAside`; a countdown card stays) and the key goes
+    /// into the composer. Never Return, Tab, arrows, or a ⌘/⌃ shortcut: those are not writing. Returns whether the key
+    /// was taken.
+    func typeAsideCard(_ event: NSEvent) -> Bool {
+        guard cardHoldsPill, !(panel.firstResponder is NSText),
+              event.modifierFlags.intersection([.command, .control]).isEmpty,
+              let characters = event.characters, let scalar = characters.unicodeScalars.first,
+              scalar.value >= 0x20, scalar.value != 0x7F, !(0xF700...0xF8FF).contains(scalar.value),
+              let textView = composerView?.documentView as? NSTextView else { return false }
+        var next = cardQueue
+        next.setAllAside()
+        guard next.front == nil else { return false } // a countdown card stays: the key is not for the composer
+        applyCardQueue(next)
+        textView.insertText(characters, replacementRange: textView.selectedRange())
+        return true
     }
 
     /// A click on the working pill's plume: open the typing pill (stop stays on the circle, Enter
@@ -1157,6 +1202,7 @@ final class DispatchPillController: ObservableObject {
         if externalFocus == nil { externalFocus = ExternalFocusSnapshot.captureCurrent() }
         panel.acceptsKeyInput = true
         makePanelKeyWinningLateActivation()
+        syncComposerFocus()
     }
 
     /// The orb's Finding-2 fix, same shape: assert key now and re-assert on the next runloop
@@ -1346,6 +1392,7 @@ final class DispatchPillController: ObservableObject {
 
     func registerComposerView(_ view: NSScrollView) {
         composerView = view
+        (view.documentView as? CommandTextView)?.focusAllowed = !cardHoldsPill
         view.wantsLayer = true
         view.layerUsesCoreImageFilters = true
         appliedComposerBlur = -1
@@ -1502,6 +1549,12 @@ final class DispatchPillController: ObservableObject {
         armGateTimer(after: Self.gateTickInterval)
 
         // Esc. A LOCAL monitor sees only this app's events; it acts only on keys bound for this panel.
+        // A printable key under a card (no card field being typed in) sets the cards aside and types (`typeAsideCard`).
+        if let m = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
+            guard let self, self.isVisible, event.keyCode != 53, event.window === self.panel else { return event }
+            return self.typeAsideCard(event) ? nil : event
+        }) { monitors.append(m) }
+
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
             guard let self, self.isVisible, event.keyCode == 53,
                   event.window === self.panel || (event.window == nil && self.panel.isKeyWindow) else { return event }

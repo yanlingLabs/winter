@@ -1188,8 +1188,10 @@ private struct PendingApprovalBody: View {
             // ComputerV2's desktop switch: what silence does, counting down — redrawn once a second only until the
             // deadline (an explicit schedule, never a timer left running on a frozen card).
             if let defaultAllowAt, !isInFlight {
-                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { context in
-                    Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: context.date))
+                // The schedule only REDRAWS; the clock is read here (an explicit timeline's first context date is its
+                // next, future entry — a second early).
+                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { _ in
+                    Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: Date()))
                         .font(Typography.captionDigits(.medium))
                         .foregroundStyle(.secondary)
                 }

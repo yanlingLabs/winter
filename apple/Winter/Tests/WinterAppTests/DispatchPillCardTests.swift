@@ -90,6 +90,46 @@ final class DispatchPillCardTests: XCTestCase {
         XCTAssertNil(q.front)
     }
 
+    // MARK: - Countdown cards are never hidden
+
+    func testACountdownCardArrivingWhileTheUserTypesStaysOnThePill() {
+        var q = DispatchPillCardQueue()
+        q.update(pending: ["switch"], urgent: ["switch"], typing: true)
+        XCTAssertEqual(q.front, "switch", "a card that acts by itself at a deadline is never set aside")
+        XCTAssertTrue(q.setAside.isEmpty)
+    }
+
+    func testTypingKeepsACountdownCardOnThePill() {
+        var q = DispatchPillCardQueue()
+        q.update(pending: ["a1", "switch"], urgent: ["switch"], typing: false)
+        q.setAllAside()
+        XCTAssertEqual(q.front, "switch", "the plain card steps aside, the countdown card stays")
+        XCTAssertEqual(q.setAside, ["a1"])
+    }
+
+    func testACountdownCardGoesAheadOfAnOlderPlainCard() {
+        var q = DispatchPillCardQueue()
+        q.update(pending: ["a1"], typing: false)
+        XCTAssertEqual(q.front, "a1")
+        q.update(pending: ["a1", "switch"], urgent: ["switch"], typing: false)
+        XCTAssertEqual(q.front, "switch", "it would run out behind \"+1 waiting\"")
+        XCTAssertEqual(q.waiting, 1)
+        q.update(pending: ["a1"], typing: false)
+        XCTAssertEqual(q.front, "a1", "answered (or run out): the plain card comes back")
+    }
+
+    func testOnlyADefaultAllowApprovalIsACountdownCard() {
+        let records = [
+            InteractionRecord(callId: "s", ask: .approval(toolName: "ComputerV2", summary: "switch", defaultAllowAt: 1_900_000_000_000)),
+            InteractionRecord(callId: "a", ask: .approval(toolName: "Bash", summary: "ls")),
+            InteractionRecord(callId: "q", ask: .question(questions: [])),
+        ]
+        XCTAssertEqual(dispatchPillCountdownCardIds(records), ["s"])
+        XCTAssertEqual(dispatchPillCountdownText(defaultAllowAt: 10_500, now: Date(timeIntervalSince1970: 0)),
+                       "Switching in 11 s unless you press ✕", "the card's own refuse is the ✕")
+        XCTAssertEqual(dispatchPillCountdownText(defaultAllowAt: 0, now: Date(timeIntervalSince1970: 1)), "Switching…")
+    }
+
     // MARK: - The question card's ✓
 
     private func question(_ text: String, multi: Bool = false) -> SessionEvent.Question {
@@ -304,5 +344,112 @@ final class DispatchPillCardTests: XCTestCase {
         XCTAssertGreaterThan(p.morph.target.width, DispatchPillMetrics.expandedWidth)
         p.setPresentationForTesting(.compact)
         XCTAssertTrue(p.cardShowsOnPill, "leaving full screen with the ask pending: the pill becomes its card")
+    }
+
+    // MARK: - Return under a card never sends the hidden draft (a real, shown pill)
+
+    private var shown: [DispatchPillController] = []
+
+    override func tearDown() async throws {
+        shown.forEach { $0.hide() }
+        shown.removeAll()
+        try await super.tearDown()
+    }
+
+    private func shownPill() -> (DispatchPillController, SessionModel, () -> [String]) {
+        let (p, session) = pill()
+        shown.append(p)
+        let sent = SentBox()
+        p.onSubmit = { text in await sent.add(text); return true }
+        p.show()
+        return (p, session, { sent.texts })
+    }
+
+    @MainActor private final class SentBox {
+        var texts: [String] = []
+        func add(_ text: String) { texts.append(text) }
+    }
+
+    private func waitUntil(_ timeout: TimeInterval = 3, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    }
+
+    /// The card holds the pill over a non-empty draft: Return (the composer's submit) sends nothing, the draft stays,
+    /// and the composer cannot take the keyboard.
+    private func assertReturnSendsNothing(_ p: DispatchPillController, sent: () -> [String], draft: String,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        waitUntil { p.cardShowsOnPill }
+        XCTAssertTrue(p.cardShowsOnPill, file: file, line: line)
+        XCTAssertEqual(p.adapter.composerDraft, draft, file: file, line: line)
+        p.submit(p.adapter.composerDraft)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertTrue(sent().isEmpty, "Return under a card must not send the hidden draft", file: file, line: line)
+        XCTAssertEqual(p.adapter.composerDraft, draft, "the draft is kept", file: file, line: line)
+        waitUntil { p.composerTextViewForTesting != nil }
+        if let textView = p.composerTextViewForTesting {
+            XCTAssertFalse(textView.acceptsFirstResponder, "the composer refuses the keyboard under a card",
+                           file: file, line: line)
+            XCTAssertFalse(textView.window?.firstResponder === textView, file: file, line: line)
+        }
+    }
+
+    func testBringingSetAsideCardsBackOverADraftNeverSendsIt() {
+        let (p, session, sent) = shownPill()
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [self.approvalItem("a1")])]
+        }
+        waitUntil { p.cardShowsOnPill }
+        p.adapter.composerDraft = "half a message"
+        waitUntil { p.setAsideCardCount == 1 && !p.cardShowsOnPill }
+        XCTAssertEqual(p.setAsideCardCount, 1, "typing set the card aside")
+        p.bringBackCards()
+        assertReturnSendsNothing(p, sent: sent, draft: "half a message")
+    }
+
+    func testAPillShownWithARestoredDraftUnderACardNeverSendsIt() {
+        let (p, session, sent) = shownPill()
+        p.adapter.composerDraft = "restored later"
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        p.hide() // stashes the draft
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [self.approvalItem("a1")])]
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        p.show() // restores it — no typing sink runs — with the card already waiting
+        assertReturnSendsNothing(p, sent: sent, draft: "restored later")
+    }
+
+    func testLeavingFullScreenWithADraftUnderACardNeverSendsIt() {
+        let (p, session, sent) = shownPill()
+        p.adapter.composerDraft = "typed before full screen"
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        p.requestFullScreen()
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [self.approvalItem("a1")])]
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(p.cardShowsOnPill, "full screen draws the ask inline")
+        p.closeFullScreen()
+        XCTAssertEqual(p.presentation, .expanded, "back to the typing pill, its draft kept")
+        assertReturnSendsNothing(p, sent: sent, draft: "typed before full screen")
+    }
+
+    func testWithTheCardAnsweredReturnSendsTheDraftAgain() {
+        let (p, session, sent) = shownPill()
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [self.approvalItem("a1")])]
+        }
+        waitUntil { p.cardShowsOnPill }
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [
+                self.approvalItem("a1", outcome: .approval(approved: true, by: "island"))])]
+        }
+        waitUntil { !p.cardHoldsPill }
+        p.adapter.composerDraft = "now it can go"
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        p.submit(p.adapter.composerDraft)
+        waitUntil { !sent().isEmpty }
+        XCTAssertEqual(sent(), ["now it can go"])
     }
 }

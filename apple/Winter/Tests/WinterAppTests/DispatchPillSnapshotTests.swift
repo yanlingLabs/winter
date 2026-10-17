@@ -374,7 +374,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
                                          reviewerReason: "Pushes a tag to the shared remote",
                                          options: try! JSONDecoder().decode([SessionEvent.ApprovalOption].self, from: Data("""
                                              [{"id":"allow_once","label":"Allow once"},
-                                              {"id":"allow_project","label":"Always allow `git push` in this project","rule":"Bash(git push:*)","scope":"project"},
+                                              {"id":"allow_project","label":"Always allow `git push origin release/*` and `git push --follow-tags` from the release sessions in this project","rule":"Bash(git push:*)","scope":"project"},
                                               {"id":"deny","label":"Deny"}]
                                              """.utf8))),
                           childSessionId: "c1")
@@ -476,6 +476,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
                 LinearGradient(colors: [Color(red: 0.62, green: 0.56, blue: 0.50), Color(red: 0.36, green: 0.42, blue: 0.52)],
                                startPoint: .top, endPoint: .bottom)
                 DispatchPillView(controller: p)
+                    .environment(\.dispatchPillCardFlat, true)
             }
             .frame(width: canvas.width, height: canvas.height)
             let renderer = ImageRenderer(content: view)

@@ -85,6 +85,9 @@ enum DispatchPillMetrics {
     /// The card's insets inside the shell — the pill's own leading inset on the sides.
     static var cardHorizontalPadding: CGFloat { leadingPadding }
     static let cardVerticalPadding: CGFloat = 14
+    /// What a card spends outside its scrolling body: the header line, the pinned answer row (a 30 pt circle), the gaps
+    /// between them and the insets — generous, so the whole card stays under its ceiling.
+    static let cardChromeAllowance: CGFloat = 112
     /// Inset of the full-screen surface from the visible frame's sides and top.
     static let fullScreenInset: CGFloat = 28
     /// The most the content blurs mid-change of shape (`dispatchPillMorphBlur`).
@@ -156,11 +159,22 @@ func dispatchPillCardSize(presentation: DispatchPillPresentation, measuredHeight
                           visibleFrame: CGRect) -> CGSize {
     let width = presentation == .expanded ? DispatchPillMetrics.expandedWidth : DispatchPillMetrics.cardWidth
     let content = measuredHeight > 0 ? measuredHeight : DispatchPillMetrics.cardEstimatedHeight
-    // Never taller than the screen leaves room for (the child row and a margin above it).
-    let ceiling = min(DispatchPillMetrics.maxCardHeight,
-                      max(DispatchPillMetrics.pillHeight, visibleFrame.height * 0.7))
     return CGSize(width: width,
-                  height: ceil(min(max(content, DispatchPillMetrics.pillHeight), ceiling)))
+                  height: ceil(min(max(content, DispatchPillMetrics.pillHeight),
+                                   dispatchPillCardCeiling(visibleFrame: visibleFrame))))
+}
+
+/// PURE: the tallest the card gets — `maxCardHeight`, never more than the screen leaves room for (the child row and
+/// a margin above it).
+func dispatchPillCardCeiling(visibleFrame: CGRect) -> CGFloat {
+    min(DispatchPillMetrics.maxCardHeight, max(DispatchPillMetrics.pillHeight, visibleFrame.height * 0.7))
+}
+
+/// PURE: the most the card's BODY shows before it scrolls — the ceiling less the header, the pinned answer row and
+/// the insets (`cardChromeAllowance`), so the ✓ row is never cut off.
+func dispatchPillCardBodyCap(visibleFrame: CGRect) -> CGFloat {
+    max(DispatchPillMetrics.pillHeight,
+        dispatchPillCardCeiling(visibleFrame: visibleFrame) - DispatchPillMetrics.cardChromeAllowance)
 }
 
 /// What Esc does while the pill IS a card: it lets go of the keyboard (back to the app the user was in) and the
