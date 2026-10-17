@@ -397,7 +397,7 @@ export class CoworkInstructions {
   }
   private agentScope(principal: Extract<CoworkPrincipal, { kind: "runtime" }>): string {
     const binding = this.records.binding(principal.sessionId), workspace = this.records.get(principal.workspaceId);
-    if (binding.workspaceId !== principal.workspaceId || binding.state !== "active" || workspace.state !== "retained" || binding.policy === "plan") fail("authority_denied");
+    if (binding.workspaceId !== principal.workspaceId || binding.state !== "active" || workspace.state !== "retained" || binding.policy === "plan" || binding.policy === "dont-ask") fail("authority_denied");
     const capabilities = this.authority.effectiveCapabilities(principal.sessionId);
     if (!capabilities.toolClasses.includes("write") || !capabilities.hostServices.includes("workspace.instructions.update")) fail("authority_denied");
     this.authority.requireSource(principal.workspaceId, binding.sourceId);
