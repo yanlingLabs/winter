@@ -195,7 +195,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
     await signIn();
     expect((await c.request(METHODS.mcpLogout, { name: "linear", forgetClient: true })).result).toEqual({ ok: true });
     expect(await oauthStore.read(mcpOAuthClientAccount(fx.mcpUrl))).toBeNull();
-  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
+  }, 20_000); // its 2 waits (signIn runs twice) are bounded at 5 s each by until: the test's own timeout must sit above them
 
   test("mcp.setClientSecret: the DERIVED account, bound to the user server's own issuer; never echoed; the sign-in then uses it", async () => {
     const port = freePort();

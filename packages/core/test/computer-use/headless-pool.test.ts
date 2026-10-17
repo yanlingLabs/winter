@@ -233,7 +233,7 @@ describe("the budget (8 per session, 24 in all, 3 GB of memory)", () => {
     expect((JSON.parse(readFileSync(headlessPidPath(r.home), "utf8")) as { pid: number }).pid).toBe(r.pool.pid!);
     // The old helper got its pipe's EOF (it exits as the real one does).
     expect(r.commands().filter((c) => c.op === "eof").length).toBe(1);
-  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the memory restart): the test's own timeout must sit above all three
 });
 
 describe("the checks before anything is sent", () => {
@@ -286,7 +286,7 @@ describe("the helper's life", () => {
     expect(((await failure(r.pool.send(a.tabKey, "Page.enable"))) as TransportError).code).toBe("tab_gone");
     await r.pool.createTab({ sessionId: "s1", url: "https://again.example/" });
     expect(r.spawned).toBe(2);
-  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the fresh one after the crash): the test's own timeout must sit above all three
 
   test("a renderer crash loses only its tab", async () => {
     const r = rig();
@@ -313,7 +313,7 @@ describe("the helper's life", () => {
     expect(r.pool.connected).toBe(true);
     await r.pool.createTab({ sessionId: "s1", url: "https://b.example/" });
     expect(r.spawned).toBe(2);
-  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the one started again on demand): the test's own timeout must sit above all three
 
   test("only the browser's components outlive a run: the next run starts with them, never with the last run's own data", async () => {
     const r = rig({ idleExitMs: 100 });
@@ -329,7 +329,7 @@ describe("the helper's life", () => {
     const second = r.commands().filter((c) => c.op === "started")[1]!.params as { cacheRoot: string; entries: string[] };
     expect(second.entries).toEqual(["PKIMetadata"]); // no Default/ (the run's cookies), no Local State
     expect(readFileSync(join(second.cacheRoot, "PKIMetadata", "1798", "manifest.json"), "utf8")).toContain("pkiMetadata");
-  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first run's helper, then the next run's): the test's own timeout must sit above all three
 
   test("turned off in Settings while running: the helper stops and its tabs read closed", async () => {
     const r = rig({ enabledPollMs: 50 });
@@ -417,7 +417,7 @@ describe("the helper's life", () => {
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "crash" });
     await r.pool.createTab({ sessionId: "s1", url: "https://again.example/" });
     expect(r.spawned).toBe(2);
-  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the fresh one after the kill): the test's own timeout must sit above all three
 
   test("turned off in Settings: the next command stops the helper at once, not at the next poll", async () => {
     const r = rig();
