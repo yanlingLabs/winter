@@ -77,9 +77,92 @@
       ],
       "purpose": "the fixture-only block trace rows and their 60000-row fatal process cap are compiled out of production builds",
       "patchSha256": "97708943e9ac82db658fe0c322d5140f66966cab201bae4b33e3e56e334fbdf8"
+    },
+    {
+      "patchFile": "patches/0017-proposed-production-abi-v1-names.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "mechanical rename of the production entry points to the canonical _v1 names (enable_profile, create_runtime_port, set_workspace_disks, validate_profile)",
+      "patchSha256": "628c88a57fbb7216132eba089d1fd028ea706d7a1658ba3fe4c7765950d8a529"
+    },
+    {
+      "patchFile": "patches/0018-proposed-production-gate-matrix-tests.patch",
+      "allowedFiles": [
+        "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/src/resources.rs"
+      ],
+      "purpose": "running tests for every reviewed device-inventory refusal, a table of every device-adding public setter, exhaustive classification of the context types, the pre-VMM phase, and a start-free split of the normalized-gpu admission test",
+      "patchSha256": "e5ae8da74ccd63b4d2f7b88bdaeb830e76c9a72e1338cd5abf0d4db46abe1d85"
+    },
+    {
+      "patchFile": "patches/0019-proposed-production-start-admission.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/libkrun/Cargo.toml",
+        "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/cowork_production_start_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "mandatory preflight recorded on the context and enforced at start; cowork-production-only feature: krun_start_enter refuses any context without the production profile",
+      "patchSha256": "c4986fa77023fa945dcd88d3cd08460e4002ca6cf0be3faaa6c8a8a26e1d9feb"
+    },
+    {
+      "patchFile": "patches/0020-proposed-production-quiet-block-and-reclaim-paths.patch",
+      "allowedFiles": [
+        "src/devices/src/block_trace.rs",
+        "src/devices/src/virtio/block/cowork.rs",
+        "src/libkrun/Cargo.toml",
+        "src/libkrun/src/cowork_production_quiet_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/Cargo.toml",
+        "src/vmm/src/cowork_fixture.rs",
+        "src/vmm/src/lib.rs"
+      ],
+      "purpose": "production block requests have no fixture completion hold; the fixture reclaim rows (host virtual addresses) on stderr are compiled out of production builds",
+      "patchSha256": "8f395ba2db2cec9b7ba0551e3497ce5664c62ee85a76597ded93e52abb418590"
+    },
+    {
+      "patchFile": "patches/0021-proposed-production-flush-and-pin-counters.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/block_bounce.rs",
+        "src/devices/src/cowork_counters.rs",
+        "src/devices/src/lib.rs",
+        "src/devices/src/reclaim_access.rs",
+        "src/libkrun/src/cowork_production_counters_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "process-global flush counters per disk and pin high-water counters, with krun_cowork_get_flush_counters_v1 and krun_cowork_get_pin_counters_v1",
+      "patchSha256": "f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a"
+    },
+    {
+      "patchFile": "patches/0022-proposed-production-exit-path-final-flush-and-hook.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/virtio/block/device.rs",
+        "src/hvf/src/lib.rs",
+        "src/libkrun/src/cowork_production_exit_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/src/builder.rs",
+        "src/vmm/src/cowork_exit.rs",
+        "src/vmm/src/cowork_fixture.rs",
+        "src/vmm/src/lib.rs",
+        "src/vmm/src/macos/vstate.rs",
+        "src/vmm/src/resources.rs"
+      ],
+      "purpose": "one exit path for every stop (reason recorded once: off, reset, vcpu error, terminal fault; PSCI reset distinguished from off), final flush observer for both volumes, exit hook registered last, fatal() routed through the same path",
+      "patchSha256": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a"
     }
   ],
-  "fullSourceDiffSha256": "e067b60ec68919f85588125475101e63993fb43e4c720561be1f5d9c62da537b",
+  "fullSourceDiffSha256": "f4259bdf1cc133b302570aed9d835e538e0f80d1c4a4aee64c687ff91c80e946",
   "allAddedFiles": [
     "src/devices/src/block_bounce.rs",
     "src/devices/src/block_trace.rs",
@@ -102,10 +185,16 @@
     "src/vmm/src/cowork_ranges.rs",
     "src/vmm/src/vmm_config/workspace_disks_builder_tests.rs",
     "src/libkrun/src/cowork_production_profile_tests.rs",
-    "src/libkrun/src/cowork_production_trace_tests.rs"
+    "src/libkrun/src/cowork_production_trace_tests.rs",
+    "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+    "src/libkrun/src/cowork_production_start_tests.rs",
+    "src/libkrun/src/cowork_production_quiet_tests.rs",
+    "src/devices/src/cowork_counters.rs",
+    "src/libkrun/src/cowork_production_counters_tests.rs",
+    "src/libkrun/src/cowork_production_exit_tests.rs",
+    "src/vmm/src/cowork_exit.rs"
   ],
   "moduleCorrespondence": {
-    "stream_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
     "stream_io_v3.rs": "src/devices/src/stream_io.rs",
     "runtime_port_control.rs": "src/devices/src/virtio/console/runtime_port_control.rs",
     "runtime_port_traced.rs": "src/devices/src/virtio/console/runtime_port.rs",
@@ -117,10 +206,18 @@
     "workspace_disks_api_tests_v2.rs": "src/libkrun/src/cowork_workspace_disks_tests.rs",
     "production_profile_tests.rs": "src/libkrun/src/cowork_production_profile_tests.rs",
     "production_trace_tests.rs": "src/libkrun/src/cowork_production_trace_tests.rs",
-    "production_block_trace.rs": "src/devices/src/block_trace.rs"
+    "production_block_trace.rs": "src/devices/src/block_trace.rs",
+    "production_gate_matrix_tests.rs": "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+    "production_start_tests.rs": "src/libkrun/src/cowork_production_start_tests.rs",
+    "production_quiet_tests.rs": "src/libkrun/src/cowork_production_quiet_tests.rs",
+    "production_counters_tests.rs": "src/libkrun/src/cowork_production_counters_tests.rs",
+    "production_exit_tests.rs": "src/libkrun/src/cowork_production_exit_tests.rs",
+    "production_block_bounce.rs": "src/devices/src/block_bounce.rs",
+    "production_reclaim_access.rs": "src/devices/src/reclaim_access.rs",
+    "production_cowork_counters.rs": "src/devices/src/cowork_counters.rs",
+    "production_cowork_exit.rs": "src/vmm/src/cowork_exit.rs"
   },
   "inheritedCore": {
-    "block_bounce.rs": "src/devices/src/block_bounce.rs",
     "block_reclaim_control.rs": "src/vmm/src/cowork_control.rs",
     "reclaim_ranges.rs": "src/vmm/src/cowork_ranges.rs",
     "reclaim_barrier.rs": "src/vmm/src/cowork_barrier.rs",
@@ -136,7 +233,7 @@
   ],
   "profile": "n2-production-admitted-raw-pair-and-generic-runtime-port",
   "features": {
-    "production": "blk",
+    "production": "blk,cowork-production-only",
     "oracle": "blk,cowork-fixture-oracle"
   },
   "limits": {
@@ -172,5 +269,16 @@
     "No VM has run this profile; G4 (three-cycle reclaim on real ext4 at 2 vCPU and 768..1024 MiB) is required and needs owner approval.",
     "Independent code review of this exact patch queue is required before any run.",
     "The guest console and reclaim JSON still print to stderr (host virtual addresses in reclaim_unmap rows); bounded capture and redaction belong to the worker."
+  ],
+  "deviceForbiddenAddedText": [
+    "attach_",
+    "register_mmio",
+    "add_subscriber(",
+    "Gpio"
+  ],
+  "deviceForbiddenExemptFiles": [
+    "src/libkrun/src/cowork_production_[a-z_]+_tests\\.rs",
+    "src/libkrun/src/cowork_workspace_disks_tests\\.rs",
+    "src/libkrun/src/lib\\.rs"
   ]
 }
