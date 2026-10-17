@@ -26,7 +26,7 @@ static void make_volume(volume *v, const char *name, uint64_t size) {
     CHECK(ftruncate(v->fd, (off_t)size) == 0); /* sparse */
     struct stat info;
     CHECK(fstat(v->fd, &info) == 0);
-    v->identity = (cw_volume_identity){ (uint64_t)(uint32_t)info.st_dev, (uint64_t)info.st_ino, size, (uint32_t)info.st_uid, 0600 };
+    v->identity = (cw_volume_identity){ cw_device_u64(info.st_dev), (uint64_t)info.st_ino, size, (uint32_t)info.st_uid, 0600 };
 }
 static void drop_volume(volume *v) { if (v->fd >= 0) close(v->fd); unlink(v->path); v->fd = -1; }
 
@@ -408,6 +408,8 @@ static void volume_admit_unit(void) {
     make_volume(&v, "unit", 16ull << 20);
     uid_t me = geteuid();
     CHECK(cw_volume_admit(v.fd, &v.identity, me) == CW_VOL_OK);
+    /* dev_t is a signed 32 bit number; the daemon and libkrun both sign-extend it, so the worker must too. */
+    CHECK(cw_device_u64((dev_t)-1) == 0xffffffffffffffffull && cw_device_u64((dev_t)0x01000012) == 0x01000012ull && cw_device_u64((dev_t)INT32_MIN) == 0xffffffff80000000ull);
     cw_volume_identity wrong = v.identity;
     wrong.capacity_bytes += 4096;
     CHECK(cw_volume_admit(v.fd, &wrong, me) == CW_VOL_SIZE);

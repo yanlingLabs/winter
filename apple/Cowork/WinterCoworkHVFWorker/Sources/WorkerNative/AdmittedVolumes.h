@@ -33,6 +33,10 @@ enum {
 };
 const char *cw_volume_result_name(int result);
 
+/* The record's `device` is st_dev read the way the daemon (libuv: `st_dev` assigned to a uint64) and libkrun's own identity check
+ * (Rust: `st_dev as u64`) read it: dev_t is a signed 32 bit number on macOS and both SIGN-extend it. */
+uint64_t cw_device_u64(dev_t device);
+
 /* Validate a received descriptor against its identity record, the same list libkrun's own setter applies (so a refusal is a
  * `bad_volumes` fault at intake, not a `vm_failed` later): a regular file, one link, owned by the effective user and by the
  * record's uid, mode exactly 0600, opened O_RDWR and not O_APPEND, with the recorded device, inode and size. Returns CW_VOL_OK

@@ -63,6 +63,8 @@ const char *cw_volume_result_name(int result) {
     }
 }
 
+uint64_t cw_device_u64(dev_t device) { return (uint64_t)(int64_t)device; }
+
 int cw_volume_admit(int fd, const cw_volume_identity *identity, uid_t effective_uid) {
     int status = fcntl(fd, F_GETFL);
     if (status < 0) return CW_VOL_FSTAT;
@@ -74,8 +76,7 @@ int cw_volume_admit(int fd, const cw_volume_identity *identity, uid_t effective_
     if (info.st_nlink != 1) return CW_VOL_NLINK;
     if (info.st_uid != effective_uid || (uint64_t)info.st_uid != (uint64_t)identity->uid) return CW_VOL_OWNER;
     if ((uint32_t)(info.st_mode & 07777) != identity->mode) return CW_VOL_MODE;
-    /* dev_t is a signed 32 bit number on macOS; the daemon's record is its unsigned reading. */
-    if ((uint64_t)(uint32_t)info.st_dev != identity->device || (uint64_t)info.st_ino != identity->inode) return CW_VOL_IDENTITY;
+    if (cw_device_u64(info.st_dev) != identity->device || (uint64_t)info.st_ino != identity->inode) return CW_VOL_IDENTITY;
     if (info.st_size < 0 || (uint64_t)info.st_size != identity->capacity_bytes) return CW_VOL_SIZE;
     return CW_VOL_OK;
 }
