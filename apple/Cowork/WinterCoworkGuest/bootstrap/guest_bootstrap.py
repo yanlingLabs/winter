@@ -15,6 +15,7 @@ The behaviour differences are listed in docs/research/2026-10-17-cowork-n2-guest
   * authentication is the channel (one virtio port, host peer) plus a nonce-bound, single-shot operation; there is no
     `authenticate` callable and no proof object, because the guest cannot hold a host-side proof.
 """
+import array
 import errno
 import fcntl
 import json
@@ -25,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 PROTOCOL_VERSION = 3
@@ -39,6 +41,7 @@ ENVIRONMENT_SERIAL = "winter-environment"
 MAX_BOOTSTRAP_PAYLOAD = 262_144
 MAX_CONVERSATIONS_BYTES = 20_480      # the `conversations` message; the relay refuses anything above it before it reaches this process
 MAX_CONVERSATIONS = 16
+UNIX_ID_MIN, UNIX_ID_MAX = 1000, 65533   # 65534 is `nobody` and 65535 the invalid id (contract section 6.1)
 MAX_ROOTS = 16
 MAX_PROVIDER_BYTES = 4096
 MAX_SAFE_INTEGER = 2**53 - 1
@@ -365,7 +368,7 @@ def _conversation(item):
     if not (_sdk_id(authority["workspaceId"]) and _sdk_id(authority["sessionId"]) and _sdk_id(authority["incarnationId"]) and _uint(authority["leaseEpoch"], 1, 0xFFFFFFFF)
             and all(_uint(authority[k]) for k in ("configRevision", "grantRevision", "policyRevision"))):
         return False
-    if not all(_uint(item[k], 1000, 65535) for k in ("runtimeUid", "toolUid", "workspaceGid")) or item["policy"] not in POLICIES:
+    if not all(_uint(item[k], UNIX_ID_MIN, UNIX_ID_MAX) for k in ("runtimeUid", "toolUid", "workspaceGid")) or item["policy"] not in POLICIES:
         return False
     # The nested checks run in the order protocol.ts runs them, so that a value with several defects names the same category.
     if not _roots(item["roots"], session_id) or not _runtime(item["runtime"]):
@@ -407,7 +410,7 @@ def _check_conversations_message(message):
     if len({i["logicalSessionId"] for i in items}) != len(items) or len({i["authority"]["sessionId"] for i in items}) != len(items):
         return False
     uids = [uid for i in items for uid in (i["runtimeUid"], i["toolUid"])]
-    if len(set(uids)) != len(uids) or any(a["workspaceGid"] == b["runtimeUid"] for a in items for b in items):
+    if len(set(uids)) != len(uids) or any(a["workspaceGid"] in (b["runtimeUid"], b["toolUid"]) for a in items for b in items):
         return False
     return len({i["runtime"]["provider"]["scope"]["bootId"] for i in items if i["runtime"]}) <= 1
 
@@ -1047,6 +1050,13 @@ class PipeChannel:
         require(body is not None, "channel_truncated")
         return tag, body
 
+    def has_pending(self):
+        """True when bytes from PID 1 are already waiting. Asked right after the host's `ready`: nothing the host may send can be there yet,
+        because the host sends its next message only after it has seen `mounted` (contract section 6.1)."""
+        waiting = array.array("i", [0])
+        fcntl.ioctl(self.read_fd, termios.FIONREAD, waiting, True)
+        return waiting[0] > 0
+
     def send(self, tag, payload=b""):
         data = ctl_encode(tag, payload)
         view = memoryview(data)
@@ -1192,6 +1202,8 @@ class Session:
                     disk.close()
                 return 2
             return fault(error if isinstance(error, Refused) else Refused("ready_refused"))
+        if self.channel.has_pending():   # the host spoke again before it could have seen `mounted`: mount nothing, start nothing
+            return fault(Refused("message_before_mounted", "plan"))
         try:
             uuids = self.verify(disks, first["plan"])
             for disk in disks:  # the mount claims the devices; this process holds no descriptor while PID 1 mounts

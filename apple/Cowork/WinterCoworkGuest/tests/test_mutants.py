@@ -19,7 +19,7 @@ from test_native import CC, ROOT
 
 LINUX = sys.platform.startswith("linux")
 
-# (file, old text, new text, suite) -- suite: pid1 | config | relay
+# (file, old text, new text, suite) -- suite: a key of SUITES
 MUTANTS = [
     ("init/init_linux.c","    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);","    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);","pid1"),
     ("init/init_linux.c","    int parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);","    int parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);","pid1"),
@@ -64,12 +64,29 @@ MUTANTS = [
     ("relay/relay.c", "if (runtime_open && runtime_ready_framed && !err_end_sent", "if (runtime_open && !err_end_sent", "relay"),
     ("relay/relay.c", 'runtime_ready\\"", 19) != NULL', 'runtime_ready\\"", 19) == NULL', "relay"),
     ("relay/relay.c", 'runtime_ready\\"", 19)', 'runtime_ready\\"", 18)', "relay"),
+    # contract re-pin round: unixId 1000 to 65533, a workspaceGid that is no uid, nothing from the host before `mounted`, runtime IN flow, guided profile
+    ("bootstrap/guest_bootstrap.py", "UNIX_ID_MIN, UNIX_ID_MAX = 1000, 65533", "UNIX_ID_MIN, UNIX_ID_MAX = 1000, 65535", "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", "UNIX_ID_MIN, UNIX_ID_MAX = 1000, 65533", "UNIX_ID_MIN, UNIX_ID_MAX = 999, 65533", "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", 'a["workspaceGid"] in (b["runtimeUid"], b["toolUid"])', 'a["workspaceGid"] == b["runtimeUid"]', "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", 'a["workspaceGid"] in (b["runtimeUid"], b["toolUid"])', 'a["workspaceGid"] == b["toolUid"]', "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", "        if self.channel.has_pending():", "        if False:", "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", "return waiting[0] > 0", "return waiting[0] >= 0", "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", "fcntl.ioctl(self.read_fd, termios.FIONREAD, waiting, True)", "pass", "bootstrap"),
+    ("init/boot.c", "uid < WG_UNIX_ID_MIN || uid > WG_UNIX_ID_MAX", "uid < WG_UNIX_ID_MIN || uid > 65535", "cboot"),
+    ("init/boot.c", "uid < WG_UNIX_ID_MIN || uid > WG_UNIX_ID_MAX", "uid < 999 || uid > WG_UNIX_ID_MAX", "cboot"),
+    ("init/boot.c", "ops->read_runtime_artifacts(ops->ctx, set.profile, runtime_buffer,", "ops->read_runtime_artifacts(ops->ctx, 1, runtime_buffer,", "cboot"),
+    ("init/init_linux.c", "    if (profile != 1) return -1;", "    if (profile == 0) return -1;", "hygiene"),
+    ("relay/relay.c", "static uint8_t rt_in_storage[4u * 1024u * 1024u];", "static uint8_t rt_in_storage[512u * 1024u];", "flow"),
 ]
 
 SUITES = {
-    "pid1": ["tests/test_pid1_linux.py", []],
-    "config": ["tests/test_init_modules.py", ["-k", "TrustedConfig"]],
-    "relay": ["tests/test_relay.py", ["-k", "output_written_before_g", "-k", "runtime_ready", "-k", "held_until"]],
+    "pid1": ("tests", "test_pid1_linux.py", []),
+    "config": ("tests", "test_init_modules.py", ["-k", "TrustedConfig"]),
+    "relay": ("tests", "test_relay.py", ["-k", "output_written_before_g", "-k", "runtime_ready", "-k", "held_until"]),
+    "flow": ("tests", "test_relay.py", ["-k", "runtime_flow"]),
+    "cboot": ("tests", "test_init_modules.py", ["-k", "BootStateMachine"]),
+    "hygiene": ("tests", "test_hygiene.py", []),
+    "bootstrap": ("bootstrap", "test_guest_bootstrap.py", []),
 }
 
 
@@ -84,8 +101,8 @@ def run_mutant(mutant):
         if old not in text:
             return "STALE"
         path.write_text(text.replace(old, new, 1))
-        script, arguments = SUITES[suite]
-        result = subprocess.run([sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(copy / "tests"), "-p", Path(script).name, *arguments],
+        directory, script, arguments = SUITES[suite]
+        result = subprocess.run([sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(copy / directory), "-p", script, *arguments],
                                 capture_output=True, text=True, timeout=900)
         return "KILLED" if result.returncode != 0 else "SURVIVED"
     finally:

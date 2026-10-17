@@ -106,6 +106,13 @@ class GuestSourceHygiene(unittest.TestCase):
         self.assertNotRegex(build, r"-D\s*(PYTHON_PATH|SUPERVISOR_PATH|TRUSTED_DIR)")
         self.assertNotIn("sys_calls.", (ROOT / "relay/relay.c").read_text())
 
+    def test_only_the_host_query_profile_has_runtime_artifacts_in_this_image(self):
+        init = strip_comments((ROOT / "init/init_linux.c").read_text())
+        body = init[init.index("static int op_read_runtime_artifacts"):]
+        body = body[:body.index("\n}\n")]
+        self.assertLess(body.index("if (profile != 1) return -1;"), body.index("wg_read_small_file(RUNTIME_ARTIFACTS_PATH"))
+        self.assertEqual(init.count("RUNTIME_ARTIFACTS_PATH"), 2)   # its definition and the one read
+
     def test_the_supervisor_ready_line_is_compared_by_length_and_bytes(self):
         init = strip_comments((ROOT / "init/init_linux.c").read_text())
         self.assertNotIn("strcmp(G.ready_line", init)

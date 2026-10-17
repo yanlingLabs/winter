@@ -140,11 +140,17 @@ class TempDirTest(unittest.TestCase):
 # ---------------------------------------------------------------------------------------------------- vectors + framing
 
 class VectorTests(unittest.TestCase):
-    def test_the_vector_copy_is_pinned_by_sha256(self):
-        pin = VECTOR_PINS["files"]["mux-frames.json"]
-        self.assertEqual(hashlib.sha256(VECTOR_BYTES).hexdigest(), pin["sha256"])
-        self.assertEqual(pin["sourceBranch"], "cowork/n2-host-adapter")
-        self.assertRegex(pin["sourceCommit"], r"^[0-9a-f]{40}$")
+    def test_the_vector_copies_are_pinned_by_sha256_to_one_contract_commit(self):
+        commits = set()
+        for name in ("mux-frames.json", "bootstrap-order.json", "runtime-flow.json"):
+            pin = VECTOR_PINS["files"][name]
+            self.assertEqual(hashlib.sha256((VECTORS / name).read_bytes()).hexdigest(), pin["sha256"], name)
+            self.assertEqual(pin["sourceBranch"], "cowork/n2-host-adapter")
+            self.assertRegex(pin["sourceCommit"], r"^[0-9a-f]{40}$")
+            self.assertEqual(pin["sourcePath"], "packages/core/test/cowork/native/vectors/" + name)
+            commits.add(pin["sourceCommit"])
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(hashlib.sha256(VECTOR_BYTES).hexdigest(), VECTOR_PINS["files"]["mux-frames.json"]["sha256"])
 
     def test_every_bootstrap_positive_vector_parses_and_reencodes_to_the_same_bytes(self):
         for name, direction, kind in (("bootstrap-up-hello", "up", "hello"), ("bootstrap-down-plan", "down", "plan"),
@@ -152,7 +158,10 @@ class VectorTests(unittest.TestCase):
                                       ("bootstrap-down-ready", "down", "ready"), ("bootstrap-up-mounted", "up", "mounted"),
                                       ("bootstrap-down-conversations-guided", "down", "conversations"), ("bootstrap-down-conversations-tools-only", "down", "conversations"),
                                       ("bootstrap-up-runtime-ready", "up", "runtime_ready"), ("bootstrap-up-fault-bad-conversations", "up", "fault"),
-                                      ("bootstrap-up-fault-supervisor-failed", "up", "fault"), ("bootstrap-up-fault-second-conversations", "up", "fault")):
+                                      ("bootstrap-up-fault-supervisor-failed", "up", "fault"), ("bootstrap-up-fault-second-conversations", "up", "fault"),
+                                      ("bootstrap-up-fault-bad-plan", "up", "fault"), ("bootstrap-up-fault-probe-failed", "up", "fault"),
+                                      ("bootstrap-up-fault-format-failed", "up", "fault"), ("bootstrap-up-fault-replay-failed", "up", "fault"),
+                                      ("bootstrap-up-fault-mount-failed", "up", "fault"), ("bootstrap-up-fault-internal", "up", "fault")):
             with self.subTest(name):
                 payload = payload_of(POSITIVE[name])
                 message = gb.parse_bootstrap_message(payload, direction)
@@ -163,9 +172,21 @@ class VectorTests(unittest.TestCase):
                 else:
                     self.assertEqual(gb.canonical_text(message).encode(), payload)
 
+    def test_each_fault_vector_is_what_the_guest_says_for_that_refusal_phase(self):
+        """The six phase faults of the contract: the helper maps a refusal phase to the vector's code, and its encoding of the fault is the vector's bytes."""
+        for phase, code, name in (("plan", "bad_plan", "bootstrap-up-fault-bad-plan"), ("probe", "probe_failed", "bootstrap-up-fault-probe-failed"),
+                                  ("format", "format_failed", "bootstrap-up-fault-format-failed"), ("replay", "replay_failed", "bootstrap-up-fault-replay-failed"),
+                                  ("mount", "mount_failed", "bootstrap-up-fault-mount-failed"), (None, "internal", "bootstrap-up-fault-internal")):
+            with self.subTest(code):
+                self.assertEqual(gb.fault_code(gb.Refused("anything", phase)), code)
+                vector = gb.parse_bootstrap_message(payload_of(POSITIVE[name]), "up")
+                self.assertEqual(vector["code"], code)
+                self.assertEqual(gb.encode_bootstrap_message({"t": "fault", "operationId": vector["operationId"], "nonce": vector["nonce"], "code": code}), payload_of(POSITIVE[name]))
+        self.assertEqual(gb.fault_code(ValueError("unexpected")), "internal")
+
     def test_every_bootstrap_positive_vector_is_covered(self):
         names = [v["name"] for v in VECTOR_DATA["positive"] if bytes.fromhex(v["hex"])[5] == 1]
-        self.assertEqual(len(names), 12)
+        self.assertEqual(len(names), 18)
         for name in names:
             with self.subTest(name):
                 direction = next(v["direction"] for v in VECTOR_DATA["positive"] if v["name"] == name)
@@ -1117,6 +1138,10 @@ class FakeChannel:
     def send(self, tag, payload=b""):
         self.sent.append((tag, payload))
 
+    def has_pending(self):
+        """What is already queued from the host: the next scripted item is one of its messages (a scripted PID 1 answer is not)."""
+        return bool(self.incoming) and self.incoming[0][0] == gb.TAG_DOWN
+
 
 class FakeEngine:
     def __init__(self, error=None):
@@ -1372,6 +1397,27 @@ class ChannelTests(unittest.TestCase):
             if write_fd >= 0:
                 os.close(write_fd)
 
+    def test_pending_means_bytes_from_pid_1_are_already_waiting(self):
+        """Asked right after the host's `ready`: any byte already there was sent before the host could have seen `mounted`. An empty pipe and a closed one are not pending."""
+        read_fd, write_fd = os.pipe()
+        try:
+            channel = gb.PipeChannel(read_fd, write_fd)
+            self.assertFalse(channel.has_pending())
+            os.write(write_fd, b"x")
+            self.assertTrue(channel.has_pending())
+            os.read(read_fd, 1)
+            self.assertFalse(channel.has_pending())
+            os.write(write_fd, bytes(5000))
+            self.assertTrue(channel.has_pending())
+            os.read(read_fd, 5000)
+            os.close(write_fd)
+            write_fd = -1
+            self.assertFalse(channel.has_pending())   # end of stream is not a message
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
     def test_truncated_and_oversize_messages_are_refused(self):
         read_fd, write_fd = os.pipe()
         try:
@@ -1619,6 +1665,10 @@ class ConversationSetTests(unittest.TestCase):
         for key in ("runtimeUid", "toolUid", "workspaceGid"):
             self.refused(lambda m, k=key: item(m).__setitem__(k, 999))
             self.refused(lambda m, k=key: item(m).__setitem__(k, 65536))
+            self.refused(lambda m, k=key: item(m).__setitem__(k, 65535))     # the invalid id
+            self.refused(lambda m, k=key: item(m).__setitem__(k, 65534))     # nobody
+            self.accepted(lambda m, k=key: item(m).__setitem__(k, 65533))
+            self.accepted(lambda m, k=key: item(m).__setitem__(k, 1000))
         def epoch(m, value):
             item(m)["authority"]["leaseEpoch"] = value
             item(m)["runtime"]["provider"]["scope"]["leaseEpoch"] = value           # the two must agree, so only the range can refuse it
@@ -1727,6 +1777,9 @@ class ConversationSetTests(unittest.TestCase):
         self.refused(lambda m: two(m)[1]["authority"].__setitem__("sessionId", two(m)[0]["authority"]["sessionId"]), vector=tools)
         self.refused(lambda m: two(m)[1].__setitem__("toolUid", two(m)[0]["toolUid"]), vector=tools)
         self.refused(lambda m: two(m)[1].__setitem__("workspaceGid", two(m)[0]["runtimeUid"]), vector=tools)
+        self.refused(lambda m: two(m)[1].__setitem__("workspaceGid", two(m)[0]["toolUid"]), vector=tools)       # a gid equal to a uid is that user's private group
+        self.refused(lambda m: two(m)[1].__setitem__("workspaceGid", two(m)[1]["toolUid"]), vector=tools)       # ... including the item's own
+        self.refused(lambda m: two(m)[1].__setitem__("workspaceGid", two(m)[1]["runtimeUid"]), vector=tools)
         self.refused(lambda m: two(m)[1]["authority"].__setitem__("workspaceId", "ws-other"), vector=tools)
         self.refused(lambda m: two(m)[1]["authority"].__setitem__("leaseEpoch", 9), vector=tools)
         self.refused(lambda m: two(m)[1]["authority"].__setitem__("incarnationId", "inc-other"), vector=tools)
@@ -1890,6 +1943,169 @@ class ConversationSessionTests(unittest.TestCase):
 def time_now():
     import time
     return time.monotonic()
+
+
+# ---------------------------------------------------------------------------------------------------- bootstrap order (contract vectors)
+
+ORDER_VECTORS = json.loads((VECTORS / "bootstrap-order.json").read_text())
+ORDER_STEPS = {"hello": ("up", None), "plan": ("down", "hello"), "receipt": ("up", "plan"), "ready": ("down", "receipt"), "mounted": ("up", "ready"),
+               "conversations": ("down", "mounted"), "runtime_ready": ("up", "conversations")}
+
+
+def bootstrap_order(events):
+    """The contract's coworkNativeBootstrapOrder (protocol.ts), ported statement for statement: the first message that breaks the order, or ok."""
+    seen = set()
+    for index, (direction, kind) in enumerate(events):
+        if kind == "fault":
+            if direction != "up" or "hello" not in seen:
+                return {"ok": False, "index": index, "reason": "out_of_order"}
+            continue
+        step = ORDER_STEPS.get(kind)
+        if step is None or step[0] != direction:
+            return {"ok": False, "index": index, "reason": "out_of_order"}
+        if kind in seen:
+            return {"ok": False, "index": index, "reason": {"conversations": "second_conversations", "runtime_ready": "duplicate_runtime_ready"}.get(kind, "out_of_order")}
+        if step[1] is not None and step[1] not in seen:
+            return {"ok": False, "index": index, "reason": "out_of_order"}
+        seen.add(kind)
+    return {"ok": True}
+
+
+class RecordingChannel(FakeChannel):
+    """Records the chronological transcript the way the contract writes one: ('down'|'up', message type)."""
+
+    def __init__(self, incoming):
+        super().__init__(incoming)
+        self.transcript = []
+
+    def receive(self):
+        item = super().receive()
+        if item is not None and item[0] == gb.TAG_DOWN:
+            self.transcript.append(("down", json.loads(item[1])["t"]))
+        return item
+
+    def send(self, tag, payload=b""):
+        super().send(tag, payload)
+        if tag == gb.TAG_UP:
+            self.transcript.append(("up", json.loads(payload)["t"]))
+
+    def has_pending(self):
+        pending = super().has_pending()
+        if pending:   # it arrived, even though the guest refuses to read it
+            self.transcript.append(("down", json.loads(self.incoming[0][1])["t"]))
+            self.incoming.pop(0)
+        return pending
+
+
+class BootstrapOrderVectorTests(unittest.TestCase):
+    """bootstrap-order.json: 16 transcripts. The guest is one end of each: it sends the `up` messages and judges the `down` ones. A transcript the guest
+    cannot be put into (it always speaks first, so `plan-before-hello` cannot happen) is named below with the reason."""
+    BOOT = "66666666-6666-4666-8666-666666666666"
+    BODIES = {"plan": lambda: payload_of(POSITIVE["bootstrap-down-plan"]), "ready": lambda: payload_of(POSITIVE["bootstrap-down-ready"]),
+              "conversations": lambda: payload_of(POSITIVE["bootstrap-down-conversations-guided"]),
+              "mounted": lambda: payload_of(POSITIVE["bootstrap-up-mounted"]),
+              "reboot": lambda: gb.canonical_text({"v": 1, "t": "reboot", "operationId": "filesystem_x", "nonce": "0f" * 16}).encode()}
+
+    def inputs_for(self, events):
+        """The channel the transcript's `down` events make: PID 1's mount and supervisor answers come after the message that asks for them."""
+        incoming = []
+        pending_answer = None
+        for index, (direction, kind) in enumerate(events):
+            if direction == "up":
+                if kind == "mounted":   # PID 1 answers the guest's mount request just before the guest says `mounted`
+                    incoming.append((gb.TAG_MOUNT_RESULT, b"\x01"))
+                if pending_answer is not None and kind in ("runtime_ready", "fault"):
+                    incoming.append(pending_answer(kind))
+                    pending_answer = None
+                continue
+            incoming.append((gb.TAG_DOWN, self.BODIES[kind]()))
+            if kind == "conversations" and pending_answer is None:
+                pending_answer = lambda up: (gb.TAG_CONVERSATIONS_RESULT, bytes([2, 0]) if up == "fault" else bytes([0, 1]))
+        if pending_answer is not None:
+            incoming.append(pending_answer("runtime_ready"))
+        return incoming
+
+    def run_guest(self, events):
+        class D:
+            def close(self):
+                pass
+
+        channel = RecordingChannel(self.inputs_for(events))
+        session = gb.Session(channel, FakeEngine(), lambda plan: [D(), D()], self.BOOT, verify=lambda disks, plan: [UUID_A, UUID_B])
+        session.run()
+        return channel
+
+    def test_the_port_of_the_oracle_gives_every_recorded_result(self):
+        self.assertEqual(len(ORDER_VECTORS["cases"]), 16)
+        for case in ORDER_VECTORS["cases"]:
+            with self.subTest(case["name"]):
+                self.assertEqual(bootstrap_order([(e["dir"], e["t"]) for e in case["events"]]), case["result"])
+
+    def test_the_guest_is_a_conforming_end_of_every_transcript_that_can_involve_it(self):
+        not_applicable = {"plan-before-hello"}   # the guest sends `hello` before it reads anything, so a plan can never be the first message of its transcript
+        names = []
+        for case in ORDER_VECTORS["cases"]:
+            if case["name"] in not_applicable:
+                continue
+            names.append(case["name"])
+            with self.subTest(case["name"]):
+                events = [(e["dir"], e["t"]) for e in case["events"]]
+                downs = [(d, t) for d, t in events if d == "down"]
+                channel = self.run_guest(events)
+                merged = channel.transcript
+                self.assertEqual(merged[0], ("up", "hello"))           # the guest always speaks first
+                # what the guest actually did, with the `down` messages that reached it in the order they reached it, obeys the same rules
+                result = bootstrap_order(merged)
+                expected = case["result"]
+                violating = None if expected["ok"] else events[expected["index"]]
+                if expected["ok"] or violating[0] == "up":
+                    # a transcript that is fine for the host's messages, or whose violation is a message only the guest could send: the guest sends none
+                    self.assertEqual(result, {"ok": True}, merged)
+                    if violating == ("up", "runtime_ready"):
+                        self.assertEqual(merged.count(violating), 1 if case["name"] == "duplicate-runtime-ready" else 0)
+                    if violating == ("up", "fault"):
+                        self.assertEqual(merged.count(("up", "fault")), 0)
+                else:
+                    # a violation by the host: the oracle names the same message and the same rule, and the guest answered no further than the rules allow
+                    self.assertFalse(result["ok"], merged)
+                    self.assertEqual(result["reason"], expected["reason"])
+                    self.assertEqual(merged[result["index"]], violating)
+                self.assertLessEqual(merged.count(("up", "runtime_ready")), 1)
+                self.assertLessEqual(sum(1 for tag, _ in channel.sent if tag == gb.TAG_CONVERSATIONS), 1)
+        self.assertEqual(len(names), 15)
+
+    def test_the_guest_says_runtime_ready_only_for_a_set_that_came_after_mounted(self):
+        for case in ORDER_VECTORS["cases"]:
+            if case["name"] == "plan-before-hello":
+                continue
+            with self.subTest(case["name"]):
+                events = [(e["dir"], e["t"]) for e in case["events"]]
+                merged = self.run_guest(events).transcript
+                if ("up", "runtime_ready") in merged:
+                    at = merged.index(("up", "runtime_ready"))
+                    self.assertIn(("down", "conversations"), merged[:at])
+                    self.assertIn(("up", "mounted"), merged[:merged.index(("down", "conversations"))])
+
+    def test_exact_outputs_for_the_violations_by_the_host(self):
+        expect = {
+            "conversations-before-mounted": ["hello", "receipt", "fault:bad_plan"],
+            "conversations-before-ready": ["hello", "receipt", "fault:internal"],
+            "conversations-without-any-plan": ["hello", "fault:bad_plan"],
+            "second-conversation-set": ["hello", "receipt", "mounted", "runtime_ready", "fault:second_conversations"],
+            "second-set-before-the-answer": ["hello", "receipt", "mounted", "runtime_ready", "fault:second_conversations"],
+            "unknown-message": ["hello", "fault:bad_plan"],
+            "mounted-travelling-down": ["hello", "receipt", "fault:bad_plan"],
+        }
+        for name, ups in expect.items():
+            with self.subTest(name):
+                case = next(c for c in ORDER_VECTORS["cases"] if c["name"] == name)
+                channel = self.run_guest([(e["dir"], e["t"]) for e in case["events"]])
+                got = []
+                for tag, body in channel.sent:
+                    if tag == gb.TAG_UP:
+                        message = gb.parse_bootstrap_message(body, "up")
+                        got.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
+                self.assertEqual(got, ups)
 
 
 if __name__ == "__main__":

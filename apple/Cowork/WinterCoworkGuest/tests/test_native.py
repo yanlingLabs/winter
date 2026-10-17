@@ -124,7 +124,13 @@ class NativeCodecTests(unittest.TestCase):
                     self.assertEqual(fields, [v["error"]])
 
     def frames(self, direction):
-        order = [v for v in VECTORS["positive"] if v["direction"] == direction]
+        # One link's stream: the sequence number of a class rises by one frame at a time, so the vectors that restate a number already used
+        # (the alternative faults of the same slot) are left out here; each is parsed on its own by the vector tests.
+        order, seen = [], {}
+        for v in VECTORS["positive"]:
+            if v["direction"] == direction and v["seq"] == seen.get(v["class"], 0) + 1:
+                order.append(v)
+                seen[v["class"]] = v["seq"]
         return order, "".join(v["hex"] for v in order)
 
     def test_the_stream_assembler_yields_the_same_frames_at_every_chunk_size(self):

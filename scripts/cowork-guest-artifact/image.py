@@ -5,6 +5,7 @@ path is still refused. Nothing here runs it."""
 import argparse, hashlib, io, json, os, posixpath, re, shutil, stat, struct, subprocess, sys, tarfile, zlib
 from pathlib import Path, PurePosixPath
 from packages import sha, bounded_file, bounded_read, xz_chunks
+import verify
 HERE=Path(__file__).resolve().parent
 GUEST=HERE.parents[1]/'apple/Cowork/WinterCoworkGuest'
 SDK_GUEST_RELAY_NOTE='the in-guest relay presents FIFOs to a supervisor that accepts them only after the agent-SDK relay change merges'
@@ -285,6 +286,60 @@ def supervisor_base_config(helper_digests):
             'controlDirectory':'/run/winter/control','environment':'/opt/winter/environment/base','protectedStoreDirectories':[]}
     return json.dumps(config,sort_keys=True,separators=(',',':')).encode()
 
+# ---- N2: the host-query runtime the supervisor starts (supervisor `hostQueryRuntime.artifacts`) ---------------------------------------
+
+HOST_QUERY_ENTRY='scripts/guest-host-query/runtime.ts'   # imports packages/runtime/src/guest/linux-host-query-main.ts
+# The static launcher and the glibc owner library are built from exact SDK source with the pinned Zig; the executable is the SDK's host-query entry
+# compiled by the canonical builder against the pinned Bun base. Nothing here carries a provider: the supervisor takes only public provider
+# metadata, and the process that would serve `provider.sock` (the provider bridge) is not part of this image.
+NATIVE_STATIC=['file-worker.c','process-worker.c','linux-tool-compartment.c','linux-runtime-compartment.c']
+NATIVE_SHARED={'linux-session-owner.c':'aarch64-linux-gnu.2.36'}   # loaded by bun:ffi dlopen inside the glibc Bun executable; Debian 12 ships glibc 2.36
+
+def require_reproducible(first,second,label):
+    """Two independent passes of one build must give the same bytes; otherwise nothing built from them is an artifact."""
+    if first!=second:raise ValueError(label+' is not reproducible')
+    return first
+
+def native_name(source):
+    return source.removesuffix('.c')+('.so' if source in NATIVE_SHARED else '')
+
+def native_build(zig,cache,helper_dir,sdkcopy,source,outdir,env=None):
+    """One exact-SDK-source native artifact with the pinned Zig: the helpers and the launcher static against musl, the owner library a glibc shared
+    object (Debian 12 ships glibc 2.36) that may need nothing but libc. Stripped, no build id, source paths mapped away. Returns (bytes, command)."""
+    shared=source in NATIVE_SHARED
+    outdir=Path(outdir);outdir.mkdir(parents=True,exist_ok=True);cache=Path(cache)
+    binary=outdir/native_name(source)
+    environment=(env or os.environ.copy())|{'ZIG_GLOBAL_CACHE_DIR':str(cache/'global'),'ZIG_LOCAL_CACHE_DIR':str(cache/'local')}
+    common=['-std=c11','-O2','-Wall','-Wextra','-Werror','-pthread','-s','-Wl,--build-id=none','-ffile-prefix-map='+str(sdkcopy)+'=/winter-sdk']
+    command=[str(zig),'cc','-target',NATIVE_SHARED[source] if shared else 'aarch64-linux-musl',*(['-shared','-fPIC'] if shared else ['-static']),*common,str(Path(helper_dir)/source),'-o',str(binary)]
+    subprocess.run(command,capture_output=True,check=True,env=environment)
+    data=binary.read_bytes();info=elf(data)
+    if shared:
+        if info['type']!=3 or info['static'] or info['interpreter'] or info['needed']!=['libc.so.6']:raise ValueError('owner library must be a glibc shared object needing only libc')
+        if any(tuple(int(x) for x in v.removeprefix('GLIBC_').split('.'))>(2,36) for v in info['versionNeeds'].get('libc.so.6',[]) if v.startswith('GLIBC_')):raise ValueError('owner library needs a newer glibc than the image carries')
+    elif not info['static']:raise ValueError('native helper must be static')
+    return data,command
+
+def runtime_artifacts_config(digests):
+    """`/opt/winter/etc/supervisor-runtime-artifacts.json`: the value PID 1 splices under `hostQueryRuntime`. Exactly the three members the supervisor
+    demands, each a path and a digest of the exact bytes in the cpio. Canonical, one line."""
+    config={'artifacts':{key:{'path':path,'sha256':digests[key]} for key,path in verify.RUNTIME_ARTIFACT_PATHS.items()}}
+    return json.dumps(config,sort_keys=True,separators=(',',':')).encode()
+
+def refuse_provider_bridge(tree):
+    """Decision D10: the first Mac worker has no provider bridge. The image carries no provider worker, no provider socket server, no credential
+    broker and no extra runtime artifact for one; the supervisor's runtime artifacts are exactly launcher, executable and ownerLibrary."""
+    for name in tree.nodes:
+        lowered=name.lower()
+        if lowered.startswith('opt/winter/') and not lowered.startswith('opt/winter/environment/') and ('provider' in lowered or 'credential' in lowered or lowered.endswith('host-client') or lowered.endswith('hostclient')):raise ValueError('provider bridge component in the image: '+name)
+    if 'opt/winter/runtime/winter' in tree.nodes:raise ValueError('the main-entry runtime is not part of the image')
+    node=tree.nodes.get(verify.RUNTIME_ARTIFACTS_PATH)
+    if node is None or set(json.loads(node['data'])['artifacts'])!={'launcher','executable','ownerLibrary'}:raise ValueError('runtime artifacts are exactly launcher, executable, ownerLibrary')
+
+def tree_files(tree):
+    """The facts verify.check_runtime_artifacts reads, taken from the tree as it will be encoded (root uid/gid, one link)."""
+    return {'/'+name:{'kind':n['kind'],'mode':n['mode'],'uid':0,'gid':0,'nlink':1,'size':len(n['data']),'sha256':sha(n['data'])} for name,n in tree.nodes.items()}
+
 def check_expected(receipt,expected):
     """None = the expected digests are not pinned yet (the first build after a re-pin); otherwise any mismatch refuses."""
     if expected is None:return ['expectedArtifact is not pinned']
@@ -295,15 +350,16 @@ def check_expected(receipt,expected):
         if receipt['sourceHelpers'][source]['binarySha256']!=digest:problems.append('native helper reproducibility mismatch: '+source)
     return problems
 
-REQUIRED_PROGRAMS=['/opt/winter/runtime/winter','/usr/bin/python3.11','/bin/bash','/usr/bin/git','/sbin/mke2fs','/sbin/e2fsck','/sbin/dumpe2fs']
+REQUIRED_PROGRAMS=['/opt/winter/runtime/winter-host-query','/usr/bin/python3.11','/bin/bash','/usr/bin/git','/sbin/mke2fs','/sbin/e2fsck','/sbin/dumpe2fs']
 
-def add_guest_files(tree,programs,scripts,helper_digests):
+def add_guest_files(tree,programs,scripts,helper_digests,runtime_digests=None):
     """Everything slice S5 puts in the root: the pinned PID 1, the relay, the bootstrap helper, the static part of the supervisor's
     trusted config, and the mount point of the environment volume."""
     tree.add('init','file',programs['init'],True,'winter-guest:init')
     tree.add('opt/winter/libexec/winter-guest-relay','file',programs['winter-guest-relay'],True,'winter-guest:relay')
     for name,data in scripts.items():tree.add('opt/winter/libexec/'+name,'file',data,False,'winter-guest:'+name)
     tree.add('opt/winter/etc/supervisor-base.json','file',supervisor_base_config(helper_digests)+b'\n',False,'derived:supervisor-static-config')
+    if runtime_digests is not None:tree.add(verify.RUNTIME_ARTIFACTS_PATH,'file',runtime_artifacts_config(runtime_digests)+b'\n',False,'derived:supervisor-runtime-artifacts')
 
 def refuse_blkid(tree):
     """The probe is `dumpe2fs -h` plus a direct superblock read (decision D9); the image must not grow a blkid for anything to lean on."""
@@ -362,27 +418,40 @@ def main():
         for origin in node['origins']:tree.add(base+'/'+name,node['kind'],node['data'],node['mode']==0o555 and node['kind']=='file',origin)
     for name in ['bin','lib','lib64','sbin','usr','etc']:
         if base+'/'+name in tree.nodes:tree.add(name,'symlink',(base+'/'+name).encode(),origin='derived:immutable-environment-root-alias')
-    runtime=out/'winter';env=os.environ.copy();env['BUN_MAX_THREADS']='2'
-    result=subprocess.run(['bun',str(HERE/'build-sdk.ts'),str(sdkcopy),str(builder),str(runtime),str(args.bun_base.resolve())],capture_output=True,text=True,check=True,env=env)
-    (out/'runtime-build.log').write_text(result.stdout+result.stderr)
-    tree.add('opt/winter/runtime/winter','file',runtime.read_bytes(),True,'sdk:'+pins['sdkCommit'])
+    env=os.environ.copy();env['BUN_MAX_THREADS']='2'
+    # The host-query executable: the SDK's own entry compiled by the canonical builder, twice, byte-identical or refuse.
+    runtime=out/'winter-host-query'
+    second=out/'runtime-pass2'/'winter-host-query'   # the output's file name is embedded in the bundle (/$bunfs/root/<name>), so both passes use the same name
+    second.parent.mkdir()
+    for attempt,target in enumerate([runtime,second]):
+        result=subprocess.run(['bun',str(HERE/'build-sdk.ts'),str(sdkcopy),str(builder),str(target),str(args.bun_base.resolve()),HOST_QUERY_ENTRY],capture_output=True,text=True,check=True,env=env)
+        if attempt==0:(out/'runtime-build.log').write_text(result.stdout+result.stderr)
+    require_reproducible(runtime.read_bytes(),second.read_bytes(),'host-query executable')
+    shutil.rmtree(second.parent)
+    runtime_data=runtime.read_bytes()
+    tree.add(verify.RUNTIME_ARTIFACT_PATHS['executable'].lstrip('/'),'file',runtime_data,True,'sdk:'+pins['sdkCommit']+':'+HOST_QUERY_ENTRY)
     helper_dir=sdkcopy/'packages/runtime/src/guest'; helper_receipts={}
     tool_devices=check_tool_devices((helper_dir/'linux-tool-compartment.c').read_text())
-    for source in ['file-worker.c','process-worker.c','linux-tool-compartment.c']:
-        binary=out/source.removesuffix('.c');native_env=env|{'ZIG_GLOBAL_CACHE_DIR':str(out/'zig-global-cache'),'ZIG_LOCAL_CACHE_DIR':str(out/'zig-local-cache')}
-        command=[str(zig),'cc','-target','aarch64-linux-musl','-static','-std=c11','-O2','-Wall','-Wextra','-Werror','-pthread','-s','-Wl,--build-id=none','-ffile-prefix-map='+str(sdkcopy)+'=/winter-sdk',str(helper_dir/source),'-o',str(binary)]
-        subprocess.run(command,capture_output=True,check=True,env=native_env)
-        data=binary.read_bytes();info=elf(data)
-        if not info['static']: raise ValueError('native helper must be static')
-        helper_receipts[source]={'sourceSha256':sha((helper_dir/source).read_bytes()),'binarySha256':sha(data),'compileFlags':[flag.replace(str(sdkcopy),'<SDK_SOURCE>') for flag in command[2:-3]]}
-        tree.add('opt/winter/helpers/'+binary.name,'file',data,True,'sdk:'+pins['sdkCommit'])
+    # Native artifacts: exact SDK source, pinned Zig, two passes with separate caches and outputs, byte-identical or refuse.
+    native={}
+    for attempt in (1,2):
+        for source in [*NATIVE_STATIC,*NATIVE_SHARED]:
+            data,command=native_build(zig,out/f'zig-cache{attempt}',helper_dir,sdkcopy,source,out/f'native-pass{attempt}',env)
+            if attempt==2:
+                require_reproducible(native[source],data,'native artifact '+source)
+                continue
+            native[source]=data
+            helper_receipts[source]={'sourceSha256':sha((helper_dir/source).read_bytes()),'binarySha256':sha(data),'compileFlags':[flag.replace(str(sdkcopy),'<SDK_SOURCE>') for flag in command[2:-3]],'reproducedInSecondPass':True}
+    for source,data in native.items():tree.add('opt/winter/helpers/'+native_name(source),'file',data,True,'sdk:'+pins['sdkCommit'])
+    shutil.rmtree(out/'native-pass1');shutil.rmtree(out/'native-pass2')
     supervisor=helper_dir/'linux-supervisor.py'
     if sha(supervisor.read_bytes())!=pins['sdkPin']['supervisorSha256']: raise ValueError('supervisor source does not match the pinned sdkPin.supervisorSha256')
     tree.add('opt/winter/libexec/linux-supervisor.py','file',supervisor.read_bytes(),False,'sdk:'+pins['sdkCommit'])
     # N2 slice S5: the pinned PID 1, the relay, the bootstrap helper and the static part of the supervisor's trusted config.
     helper_digests={source.removesuffix('.c'):record['binarySha256'] for source,record in helper_receipts.items()}
     programs,scripts,guest_receipt=build_guest(zig,out/'guest',pins)
-    add_guest_files(tree,programs,scripts,helper_digests)
+    runtime_digests={'launcher':helper_receipts['linux-runtime-compartment.c']['binarySha256'],'executable':sha(runtime_data),'ownerLibrary':helper_receipts['linux-session-owner.c']['binarySha256']}
+    add_guest_files(tree,programs,scripts,helper_digests,runtime_digests)
     certificates=[n['data'].rstrip()+b'\n' for name,n in sorted(tree.nodes.items()) if name.startswith(base+'/usr/share/ca-certificates/mozilla/') and name.endswith('.crt') and n['kind']=='file']
     if not certificates: raise ValueError('CA provenance missing')
     tree.add(base+'/etc/ssl/certs/ca-certificates.crt','file',b''.join(certificates),origin='derived:verified-mozilla-package-certificates')
@@ -391,6 +460,8 @@ def main():
     check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
     records=verify_elfs(tree)
     refuse_blkid(tree)
+    refuse_provider_bridge(tree)
+    verify.check_runtime_artifacts(tree_files(tree),tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data'])
     required=REQUIRED_PROGRAMS
     for path in required:
         target,node=tree.resolve(path)
@@ -399,7 +470,7 @@ def main():
         if node['kind']=='file' and any(value in node['data'] for value in [str(args.sdk.resolve()).encode(),str(args.builder.resolve()).encode(),str(out).encode(),str(Path.home()).encode(),b'winter-build-runtime-']):raise ValueError('private/random build path in payload '+name)
     tree.materialize(out/'root');tree.cpio(out/'immutable-root.cpio')
     manifest=tree.manifest();(out/'root.manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n');(out/'elf-dependencies.json').write_text(json.dumps(records,sort_keys=True,indent=2)+'\n')
-    receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'vmAdmitted':False}
+    receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'hostQuery':{'entry':HOST_QUERY_ENTRY,'executablePath':verify.RUNTIME_ARTIFACT_PATHS['executable'],'artifacts':{key:{'path':verify.RUNTIME_ARTIFACT_PATHS[key],'sha256':digest} for key,digest in runtime_digests.items()},'runtimeArtifactsSha256':sha(tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data']),'secondPassIdentical':True,'providerBridge':False,'guidedProfile':False},'vmAdmitted':False}
     problems=check_expected(receipt,pins['expectedArtifact'])
     if pins['expectedArtifact'] is not None and problems:raise ValueError('; '.join(problems))
     receipt['reproducibilityPinned']=not problems

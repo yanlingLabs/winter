@@ -5,6 +5,7 @@ port and the in-guest pipes. The test plays the host on the port and PID 1 / the
 for the port only in this test build (-DWG_TEST_PORT_SOCKET); the production build refuses anything but a character device,
 and one test builds it that way to prove it.
 """
+import json
 import os
 import select
 import shutil
@@ -559,6 +560,39 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(h.read_frame()[0:2], (0, 1))
         ready, _, _ = select.select([h.sup_r], [], [], 0.3)
         self.assertEqual(ready, [])
+
+    def test_the_contracts_runtime_flow_cases_never_trouble_the_relay(self):
+        """runtime-flow.json: the host keeps runtime IN bytes sent with no OUT or ERR byte received since at or below 1 MiB. Every step the host may take
+        (everything before a case's `refusedAt`) must be absorbed: no stream end, every byte delivered in order, the relay still answering. The 4 MiB IN
+        queue is a quarter-ratio above that limit, so it needs no guest-side credit or check."""
+        flow = json.loads((ROOT / "vectors/runtime-flow.json").read_text())
+        self.assertEqual(flow["limitBytes"], 1048576)
+        self.assertEqual(len(flow["cases"]), 8)
+        for case in flow["cases"]:
+            with self.subTest(case["name"]):
+                h = self.start()
+                self.open_runtime(h)
+                seq, sent, seen = 1, bytearray(), {OUT: 0, ERR: 0}
+                steps = case["steps"] if case["refusedAt"] is None else case["steps"][:case["refusedAt"]]
+                for step in steps:
+                    if step["stream"] == "in":
+                        left = step["bytes"]
+                        while left:
+                            n = min(left, 256 * 1024)
+                            data = bytes((len(sent) + i) % 251 for i in range(n))
+                            h.send(frame(2, seq, rt(IN, data)))
+                            seq += 1
+                            sent += data
+                            left -= n
+                    else:
+                        stream = OUT if step["stream"] == "out" else ERR
+                        os.write(h.sup_out_w if stream == OUT else h.sup_err_w, b"x" * step["bytes"])
+                        got, _, _ = self.read_runtime_until(h, {stream: step["bytes"]})
+                        self.assertEqual(len(got[stream]), step["bytes"])
+                self.assertEqual(h.read_supervisor_input(len(sent), timeout=20), bytes(sent))
+                h.send(control(1, '{"v":1,"t":"ping","n":3}'))
+                self.assertEqual(h.read_frame(), (0, 1, b'{"v":1,"t":"pong","n":3}'))
+                self.assertIsNone(h.proc.poll())
 
     def test_a_flood_beyond_the_bounded_queue_ends_the_stream(self):
         h = self.start()

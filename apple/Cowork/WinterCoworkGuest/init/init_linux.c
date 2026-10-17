@@ -359,8 +359,11 @@ static int op_umount(void *ctx, int volume) {
     return volume == WG_VOLUME_DATA ? umount2(WG_WORKSPACE_PATH, 0) : -1;   /* the environment disk is never mounted in N2 */
 }
 
-static int op_read_runtime_artifacts(void *ctx, char *out, size_t capacity, size_t *length) {
+static int op_read_runtime_artifacts(void *ctx, unsigned profile, char *out, size_t capacity, size_t *length) {
     (void)ctx;
+    /* This image carries the host-query runtime only. The guided profile needs a second executable that is not part of it, so that profile fails here, at
+     * boot, instead of starting a supervisor whose runtime would refuse every session. */
+    if (profile != 1) return -1;
     long n = wg_read_small_file(RUNTIME_ARTIFACTS_PATH, out, capacity, 0);
     if (n < 0) return -1;
     *length = (size_t)n;

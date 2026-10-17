@@ -39,7 +39,7 @@ int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct 
         uint32_t uid = (uint32_t)payload[at] | ((uint32_t)payload[at + 1] << 8) | ((uint32_t)payload[at + 2] << 16) | ((uint32_t)payload[at + 3] << 24);
         size_t id_length = payload[at + 4];
         at += 5;
-        if (uid < 1000 || uid > 65535 || id_length < 1 || id_length > WG_SESSION_ID_MAX || length - at < id_length) return -1;
+        if (uid < WG_UNIX_ID_MIN || uid > WG_UNIX_ID_MAX || id_length < 1 || id_length > WG_SESSION_ID_MAX || length - at < id_length) return -1;
         for (size_t k = 0; k < id_length; k++) {
             char c = (char)payload[at + k];
             int alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
@@ -172,7 +172,7 @@ static void start_conversations(struct wg_boot *boot, const uint8_t *payload, si
     char boot_id[37];
     if (ops->read_base_config(ops->ctx, base_buffer, sizeof base_buffer, &base_length) != 0) { wg_boot_fail_stop(boot, "base-config-missing"); return; }
     if (ops->read_boot_id(ops->ctx, boot_id) != 0) { wg_boot_fail_stop(boot, "boot-id-unreadable"); return; }
-    if (runtime_key && ops->read_runtime_artifacts(ops->ctx, runtime_buffer, sizeof runtime_buffer, &runtime_length) != 0) {
+    if (runtime_key && ops->read_runtime_artifacts(ops->ctx, set.profile, runtime_buffer, sizeof runtime_buffer, &runtime_length) != 0) {
         conversations_failed(boot, 2, "runtime-artifacts-missing");   /* the image cannot run this profile: the supervisor cannot start */
         return;
     }

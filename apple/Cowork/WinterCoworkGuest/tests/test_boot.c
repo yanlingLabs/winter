@@ -40,7 +40,7 @@ struct fake {
     int count;
     long long now;
     int replay_rc, mount_rc, mount_leftover, umount_data_rc, umount_env_rc, umount_data_failures_left, umount_replay_failures_left, verify_rc[2];
-    int dirs_rc, artifacts_rc;
+    int dirs_rc, artifacts_rc, no_guided_artifacts;
     int last_with_ports;
     unsigned dirs_count;
     char dirs_ids[4][130];
@@ -122,10 +122,10 @@ static int f_prepare_dirs(void *c, const struct wg_conversation_set *set) {
     for (unsigned i = 0; i < set->count && i < 4; i++) snprintf(f->dirs_ids[i], sizeof f->dirs_ids[i], "%s:%u", set->session_id[i], (unsigned)set->runtime_uid[i]);
     return f->dirs_rc;
 }
-static int f_read_artifacts(void *c, char *out, size_t cap, size_t *len) {
+static int f_read_artifacts(void *c, unsigned profile, char *out, size_t cap, size_t *len) {
     struct fake *f = c;
-    ev(c, "read-artifacts");
-    if (f->artifacts_rc) return f->artifacts_rc;
+    ev(c, "read-artifacts:%u", profile);
+    if (f->artifacts_rc || (profile == 2 && f->no_guided_artifacts)) return f->artifacts_rc ? f->artifacts_rc : -1;
     snprintf(out, cap, "%s", f->artifacts);
     *len = strlen(out);
     return 0;
@@ -375,7 +375,7 @@ static void test_the_guided_profile_uses_its_own_key_and_a_tools_only_set_has_no
     CHECK(strstr(f.last_config, ",\"hostQueryGuidedRuntime\":{") != NULL && strstr(f.last_config, "\"hostQueryRuntime\"") == NULL && f.last_with_ports);
     fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
     to_running(&boot, 0);
-    CHECK(!f.last_with_ports && strstr(f.last_config, "hostQuery") == NULL && !has(&f, "read-artifacts"));
+    CHECK(!f.last_with_ports && strstr(f.last_config, "hostQuery") == NULL && !has(&f, "read-artifacts:0") && !has(&f, "read-artifacts:1") && !has(&f, "read-artifacts:2"));
     CHECK(has(&f, "relay:G:0") && has(&f, "helper:r:0:1"));   /* no runtime streams exist */
 }
 
@@ -401,7 +401,7 @@ static void test_malformed_conversation_payloads_are_refused_without_starting_an
         { 2, 0 },                                        // runtimeUid 999 or lower: first byte 0 gives 20000 & ~0xff... keep it a real change below
     };
     (void)edits;
-    for (int variant = 0; variant < 9; variant++) {
+    for (int variant = 0; variant < 12; variant++) {
         memcpy(bad, good, n);
         size_t length = n;
         switch (variant) {
@@ -414,6 +414,9 @@ static void test_malformed_conversation_payloads_are_refused_without_starting_an
         case 6: bad[7] = '/'; break;                     // a path separator in the id
         case 7: length = 6; break;                       // truncated
         case 8: length = 6 + 2; break;                   // no json after the ids
+        case 9: bad[2] = 0xfe; bad[3] = 0xff; bad[4] = 0; bad[5] = 0; break;     // uid 65534 is nobody
+        case 10: bad[2] = 0xff; bad[3] = 0xff; bad[4] = 0; bad[5] = 0; break;    // uid 65535 is the invalid id
+        case 11: bad[2] = 0xe7; bad[3] = 0x03; bad[4] = 0; bad[5] = 0; break;    // uid 999
         }
         struct fake f; fresh(&f);
         struct wg_boot_ops ops = ops_for(&f);
@@ -422,6 +425,15 @@ static void test_malformed_conversation_payloads_are_refused_without_starting_an
         wg_boot_helper_message(&boot, CTL_HELPER_CONVERSATIONS, bad, length);
         CHECK(has(&f, "log:conversations-payload") && has(&f, "helper:r:1:0") && !has(&f, "start-supervisor") && !has(&f, "prepare-dirs:1"));
         CHECK(!has(&f, "power-off") && boot.conv_state == WG_CONV_FAILED);
+    }
+    {   /* the ends of the contract's unixId range are accepted (1000 and 65533) */
+        struct wg_conversation_set set;
+        uint8_t edge[512];
+        memcpy(edge, good, n);
+        edge[2] = 0xe8; edge[3] = 0x03; edge[4] = 0; edge[5] = 0;
+        CHECK(wg_parse_conversation_payload(edge, n, &set) == 0 && set.runtime_uid[0] == 1000);
+        edge[2] = 0xfd; edge[3] = 0xff;
+        CHECK(wg_parse_conversation_payload(edge, n, &set) == 0 && set.runtime_uid[0] == 65533);
     }
     {   /* the count rules stand on their own, whatever else is in the payload */
         struct wg_conversation_set set;
@@ -481,6 +493,16 @@ static void test_a_set_that_cannot_start_leaves_the_guest_up_and_tells_the_helpe
     to_mounted(&boot);
     send_conversations(&boot, 1);
     CHECK(has(&f, "log:runtime-artifacts-missing") && has(&f, "helper:r:2:0") && !has(&f, "start-supervisor") && !has(&f, "power-off"));
+    CHECK(has(&f, "read-artifacts:1"));   /* the host-query profile asks for its own artifacts */
+    /* an image without the guided executable cannot run the guided profile: it fails at boot, with the supervisor not started */
+    fresh(&f); f.no_guided_artifacts = 1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 2);
+    CHECK(has(&f, "read-artifacts:2") && has(&f, "log:runtime-artifacts-missing") && has(&f, "helper:r:2:0") && !has(&f, "start-supervisor") && !has(&f, "power-off"));
+    fresh(&f); f.no_guided_artifacts = 1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 1);   /* the same image still serves host-query */
+    CHECK(has(&f, "start-supervisor") && !has(&f, "log:runtime-artifacts-missing"));
     fresh(&f); f.base_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
     to_mounted(&boot);
     send_conversations(&boot, 0);

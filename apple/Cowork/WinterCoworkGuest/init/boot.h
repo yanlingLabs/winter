@@ -34,6 +34,8 @@
  * then the JSON array of the items for the trusted config (the rest of the payload). PID 1 re-checks the small part it acts on. */
 #define WG_CONVERSATIONS_MAX 16u
 #define WG_SESSION_ID_MAX 128u
+#define WG_UNIX_ID_MIN 1000u   /* the contract's unixId range: 65534 is `nobody` and 65535 the invalid id */
+#define WG_UNIX_ID_MAX 65533u
 struct wg_conversation_set {
     unsigned profile;
     unsigned count;
@@ -66,8 +68,9 @@ struct wg_boot_ops {
     int (*verify_unmounted)(void *ctx, int volume, const uint8_t uuid[16]);
     /* /run/winter/conversations/<id> (owner runtimeUid, 0700) and /workspace/.winter/conversations/<id> for every conversation of the set; 0 = all made */
     int (*prepare_conversation_dirs)(void *ctx, const struct wg_conversation_set *set);
-    /* the runtime artifact pins the initramfs holds (an object), needed for a host-query profile; 0 = read */
-    int (*read_runtime_artifacts)(void *ctx, char *out, size_t capacity, size_t *length);
+    /* the runtime artifact pins the initramfs holds for this profile (1 = host-query, 2 = guided; an object), needed for a host-query profile; 0 = read, non-zero =
+     * the image cannot run that profile (the supervisor is not started and the set fails with `supervisor_failed`) */
+    int (*read_runtime_artifacts)(void *ctx, unsigned profile, char *out, size_t capacity, size_t *length);
     int (*read_base_config)(void *ctx, char *out, size_t capacity, size_t *length);
     int (*read_boot_id)(void *ctx, char out[37]);
     /* with_ports: pass --runtime-ports-fds 4,5,6 (one host-query conversation) */

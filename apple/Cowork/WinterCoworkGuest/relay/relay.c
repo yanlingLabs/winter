@@ -63,6 +63,9 @@ static uint8_t out_storage[1024u * 1024u];
 #define RUNTIME_GATE (OUT_RESERVE + 2u * RUNTIME_UP_FRAME)
 _Static_assert(sizeof out_storage >= RUNTIME_GATE, "the upstream ring must hold the reserve plus two runtime chunks");
 static uint8_t rt_in_storage[4u * 1024u * 1024u];
+/* The host keeps runtime IN in flight (sent with no OUT or ERR byte received since) at or below 1 MiB (contract section 6.2, runtime-flow.json); a quarter of this queue. */
+#define RUNTIME_IN_FLIGHT_LIMIT (1024u * 1024u)
+_Static_assert(sizeof rt_in_storage >= 4u * RUNTIME_IN_FLIGHT_LIMIT, "the IN queue must stay at least four times the host's in-flight bound");
 static uint8_t ctl_out_storage[128u * 1024u];
 static uint8_t ctl_payload[CTL_MAX_PAYLOAD];
 static uint8_t frame_scratch[WMX_HEADER_BYTES + WMX_RUNTIME_PREFIX_BYTES + CTL_MAX_PAYLOAD];
