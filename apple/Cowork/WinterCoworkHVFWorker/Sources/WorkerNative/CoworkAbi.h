@@ -1,6 +1,6 @@
 /* CoworkAbi.h: the ONE file that knows the libkrun production ABI as the linked archive really has it.
  *
- * Since S4's review round (PR #55, patch 0017, now through 0023, vendored in PR #62 at apple/Cowork/WinterCoworkLibkrun) the library exports the contract's `_v1` names, and since contract
+ * Since S4's review round (PR #55, patch 0017, now through 0023, vendored in PR #62 at PR #62's libkrun queue directory under apple/Cowork) the library exports the contract's `_v1` names, and since contract
  * round 3 (S1 1313040a) the contract's ABI section is this header's own: nothing is mapped and nothing differs. The worker codes against the header
  * it links, and pins.json pins every declaration it relies on, so a header change stops the build.
  *
@@ -36,10 +36,10 @@
 #include "Relay.h"
 
 #if !defined(KRUN_COWORK_PRODUCTION_VCPUS) || !defined(KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB) || !defined(KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB)
-#error "libkrun.h does not declare the production profile limits: link S4's header (apple/Cowork/WinterCoworkLibkrun, PR #62)"
+#error "libkrun.h does not declare the production profile limits: link S4's header (PR #62's libkrun queue directory under apple/Cowork, PR #62)"
 #endif
 #if !defined(KRUN_COWORK_EXIT_OFF) || !defined(KRUN_COWORK_EXIT_RESET) || !defined(KRUN_COWORK_EXIT_VCPU_ERROR) || !defined(KRUN_COWORK_EXIT_TERMINAL_FAULT)
-#error "libkrun.h does not declare the exit reasons: link S4's header (apple/Cowork/WinterCoworkLibkrun, PR #62)"
+#error "libkrun.h does not declare the exit reasons: link S4's header (PR #62's libkrun queue directory under apple/Cowork, PR #62)"
 #endif
 
 /* The flush evidence the Class A receipt needs is part of the library now. Always on; there is no fallback. */

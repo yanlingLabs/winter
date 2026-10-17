@@ -1,5 +1,5 @@
 {
-  "note": "The libkrun inputs the worker is built and checked against. build.py refuses to build unless the archive and the header match. The archive is S4's STRIPPED production archive (the raw one carries the Rust project's own CI Xcode path in its debug stabs). S3 did not rebuild it: S4 built it from its recipe (rustc 1.90.0, offline crate cache, --remap-path-prefix, ZERO_AR_DATE=1 strip, features blk,cowork-production-only) and recorded that it is bit-identical when produced twice at different absolute paths. S4's committed evidence records the ARCHIVE hash but no header hash, so the header hash below is DERIVED, not copied from a build directory: `build.py verify-header` applies the include/libkrun.h hunks of the vendored patch queue (PR #62, apple/Cowork/WinterCoworkLibkrun/patches) (each patch file pinned below by the hash S4 committed) to the pristine upstream header and requires this value.",
+  "note": "The libkrun inputs the worker is built and checked against. build.py refuses to build unless the archive and the header match. The archive is S4's STRIPPED production archive (the raw one carries the Rust project's own CI Xcode path in its debug stabs). S3 did not rebuild it: S4 built it from its recipe (rustc 1.90.0, offline crate cache, --remap-path-prefix, ZERO_AR_DATE=1 strip, features blk,cowork-production-only) and recorded that it is bit-identical when produced twice at different absolute paths. S4's committed evidence records the ARCHIVE hash but no header hash, so the header hash below is DERIVED, not copied from a build directory: `build.py verify-header` applies the include/libkrun.h hunks of the vendored patch queue (PR #62, PR #62's libkrun queue directory under apple/Cowork/patches) (each patch file pinned below by the hash S4 committed) to the pristine upstream header and requires this value.",
   "libkrun": {
     "archiveSha256": "e4433efe447fd123bb72989d024013d9c913d380d2a1190bc3e181d1f69a89b3",
     "headerSha256": "6b4d06085ad931eafc563aed4b4bcd31632d49a58273b1b342cf18c3a4754ca9",
@@ -7,9 +7,9 @@
     "fromPullRequest": 62,
     "fromBranch": "cowork/n2-libkrun-vendored",
     "fromCommit": "02c3a0f35fafe6d870a3b02acc270b051a6aec28",
-    "recipe": "apple/Cowork/WinterCoworkLibkrun/scripts/build_archive.py (README.md there); the reference hashes are apple/Cowork/WinterCoworkLibkrun/expected-hashes.json",
+    "recipe": "the `scripts/build_archive.py` of PR #62's libkrun queue directory under `apple/Cowork/` (README.md there); the reference hashes are that directory's `expected-hashes.json`",
     "libkrunSource": "v1.19.6 227b2de6ed323fe180e02f871c5f325a90c13cc2 plus patch queue 0004-0023",
-    "evidence": "apple/Cowork/WinterCoworkLibkrun/expected-hashes.json: productionArchive.strippedSha256 (linkThis: stripped), rawSha256 ca876b12..., composedSourceDiffSha256 3826aa68...; the build reproduces at two locations",
+    "evidence": "that directory's `expected-hashes.json`: productionArchive.strippedSha256 (linkThis: stripped), rawSha256 ca876b12..., composedSourceDiffSha256 3826aa68...; the build reproduces at two locations",
     "patchSha256": {
       "0004-proposed-guarded-block-reviewed-fixes.patch": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
       "0005-proposed-guarded-block-producer-progress.patch": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",

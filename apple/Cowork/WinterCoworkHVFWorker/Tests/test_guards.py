@@ -337,6 +337,13 @@ class Package(unittest.TestCase):
             self.assertNotIn(needle, build, needle)
         self.assertIn('sys.executable, "-I"', build, "child Python runs isolated")
 
+    def test_the_package_never_spells_the_libkrun_queue_directory(self):
+        # The libkrun patch queue package (PR #62) pins that nothing else in the repository names its directory; provenance here is by PR number.
+        needle = "WinterCowork" + "Libkrun"
+        for path in list(PACKAGE.rglob("*")) + [REPO / "docs" / "research" / "2026-10-17-cowork-n2-worker.md"]:
+            if path.is_file() and path.suffix in (".c", ".h", ".py", ".json", ".md"):
+                self.assertNotIn(needle, path.read_text(), str(path.relative_to(REPO)))
+
     def test_no_personal_paths_or_names_in_the_package(self):
         document = REPO / "docs" / "research" / "2026-10-17-cowork-n2-worker.md"
         for path in list(PACKAGE.rglob("*")) + ([document] if document.exists() else []):
