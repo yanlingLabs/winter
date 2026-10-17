@@ -183,6 +183,9 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
             case .data(let bytes, let rights): session.receiveWorkerDatagram(bytes, descriptors: rights)
             case .wouldBlock: return
             case .endOfStream: l2Read?.cancel(); l2Read = nil; return
+            // A datagram socket whose peer has closed answers every read with ECONNRESET: that is the worker's end going away, which its
+            // process-exit event judges; it is not a violation by itself.
+            case .failed(.errno(ECONNRESET)): l2Read?.cancel(); l2Read = nil; return
             case .failed: session.workerStreamFailed(.malformed); l2Read?.cancel(); l2Read = nil; return
             }
         }
@@ -200,6 +203,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
                 catch { session.workerStreamFailed((error as? WireFailure) ?? .malformed); l3Read?.cancel(); l3Read = nil; return }
             case .wouldBlock: return
             case .endOfStream: l3Read?.cancel(); l3Read = nil; return
+            case .failed(.errno(ECONNRESET)): l3Read?.cancel(); l3Read = nil; return
             case .failed: session.workerStreamFailed(.malformed); l3Read?.cancel(); l3Read = nil; return
             }
         }

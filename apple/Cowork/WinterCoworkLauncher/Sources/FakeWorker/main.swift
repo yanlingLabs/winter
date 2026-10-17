@@ -120,12 +120,10 @@ var counters = FlushCounters()
             // "Power off": close the disks. The final flush is reported by the exit hook, i.e. by the guest_halted status.
             volumeFDs.forEach { $0.close() }
         }
-        if booted && mode != "nohalt" {
-            let completed: UInt64 = mode == "badflush" ? 1 : 1
-            let requested: UInt64 = mode == "badflush" ? 2 : 1
-            sendStatus(.guestHalted, data: FlushCounters(requested: requested, completed: completed), environment: FlushCounters())
-        }
-        sendStatus(.exiting, data: counters, environment: FlushCounters())
+        // What the exit hook reports after the final flush. `badflush` leaves one requested flush incomplete, and says so consistently.
+        let final = mode == "badflush" ? FlushCounters(requested: 2, completed: 1) : counters
+        if booted && mode != "nohalt" { sendStatus(.guestHalted, data: final, environment: FlushCounters()) }
+        sendStatus(.exiting, data: booted ? final : counters, environment: FlushCounters())
         exit(0)
     default: fail(79)
     }
