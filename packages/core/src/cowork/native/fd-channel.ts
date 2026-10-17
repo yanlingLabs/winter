@@ -323,7 +323,8 @@ export class FdReceiver {
 /** Splits received chunks into complete newline-terminated lines and refuses a line over `maxLine` bytes. Pure. */
 export class FdLineSplitter {
   private pending = new Uint8Array(0);
-  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  // ignoreBOM keeps a leading U+FEFF in the line (the default strips it silently), so a byte order mark makes the line malformed instead of invisible.
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   constructor(private readonly maxLine: number) {}
   push(chunk: Uint8Array): string[] {
     const next = new Uint8Array(this.pending.length + chunk.length); next.set(this.pending); next.set(chunk, this.pending.length); this.pending = next;

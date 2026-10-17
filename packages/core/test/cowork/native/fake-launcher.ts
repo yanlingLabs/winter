@@ -101,7 +101,7 @@ export class FakeSession implements CoworkLauncherSession {
   }
 
   private onBegin(message: Extract<CoworkNativeToLauncher, { t: "begin" }>): void {
-    const { t: _t, id, ...scope } = message; void _t;
+    const { t: _t, id, homeId: _home, ...scope } = message; void _t; void _home;
     this.scope = scope;
     if (this.behavior.begin === "silent") return;
     if (this.behavior.begin === "refuse") return this.deliver({ t: "refused", id, code: "code_identity_mismatch" });

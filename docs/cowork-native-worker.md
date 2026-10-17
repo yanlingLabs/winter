@@ -83,7 +83,7 @@ launcher-bound side is refused as `bad_direction`.
 
 | `t` | Keys after `v`,`t` | Meaning |
 | --- | --- | --- |
-| `begin` | `id`, `workspaceId`, `incarnationId`, `leaseEpoch`, `admissionId`, `controllerInstanceId`, `workerInstanceId`, `runtimeImageDigest`, `vcpus`, `memoryMiB` | the owner scope. `vcpus` is 2, `memoryMiB` 256 to 1024 (D8). |
+| `begin` | `id`, `homeId`, `workspaceId`, `incarnationId`, `leaseEpoch`, `admissionId`, `controllerInstanceId`, `workerInstanceId`, `runtimeImageDigest`, `vcpus`, `memoryMiB` | the owner scope. `vcpus` is 2, `memoryMiB` 768 to 1024 (D8; 768 is the floor the library admits). `homeId` is the ONE source of the home identity: the launcher stamps it into every receipt, and it has no other input (no spawn argument). It does not travel on L2. |
 | `volumes` (**two descriptors**) | `id`, `scopeDigest`, `volumes` | `scopeDigest` is the SHA-256 of the 512 byte SCOPE payload (section 5). `volumes` is exactly two records `purpose, device, inode, uid, mode, capacityBytes`, data first then environment; `mode` is 384 (`0600`); the same file may not back both. |
 | `mux_down` | `frame` | one bootstrap or runtime frame |
 | `stop` | `id`, `stopNonce`, `reason`, `budgetMs` | `reason` one of `user shutdown restart update failed-start`; `budgetMs` at most 120000 (the documented budget is 30000) |
@@ -134,7 +134,22 @@ Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned b
 * `status` payload: `u32 state` (1 `sandboxed`, 2 `volumes_accepted`, 3 `vm_running`, 4 `guest_hello`, 5 `draining`, 6 `drain_acked`,
   7 `guest_halted`, 8 `exiting`), `u32 reserved`, then `u64 requested, u64 completed` flush counters for data and environment.
 * `fault` payload: `u32 code` (1 `bad_scope`, 2 `bad_volumes`, 3 `sandbox_failed`, 4 `vm_failed`, 5 `mux_violation`,
-  6 `truncated_rights`, 7 `internal`), `u32 reserved`.
+  6 `truncated_rights`, 7 `internal`, 8 `second_drain`), `u32 reserved`. A second DRAIN envelope is answered with FAULT `second_drain` and
+  otherwise ignored: the first DRAIN's nonce and budget stand, and a later one can neither replace nor extend them.
+
+### The worker process (final for N2)
+
+* argv is exactly `[path]`; the environment is the launcher's two variables (`LC_ALL=C`, `LANG=C`).
+* Descriptor **3** is the L2 end (an unnamed `AF_UNIX SOCK_DGRAM` socketpair), descriptor **4** is the L3 end (an unnamed
+  `AF_UNIX SOCK_STREAM` socketpair). Descriptors 0 to 2 are the launcher's business; every other descriptor is closed at start.
+* The guest boot artifacts are `<directory of the worker executable>/cowork-guest/kernel` and `.../cowork-guest/initramfs.cpio`.
+* Exit codes: `0` ok, `2` usage, `70` sandbox, `71` bad scope, `72` bad volumes, `73` VM failed, `74` mux quarantine, `75` drain timeout,
+  `76` intake timeout, `78` internal, `79` rights (a truncated or unexpected descriptor: terminal and silent). `77` is libkrun's own fatal
+  stop and is never used by the worker. Only `0` can accompany a Class A receipt.
+* `runtimeImageDigest` covers the guest boot artifacts and nothing else: the SHA-256 (lowercase hex) of the 64 bytes
+  `SHA-256(kernel) || SHA-256(initramfs.cpio)`, each part the RAW 32 byte digest of that file. The data and environment disks are not
+  covered. The daemon never hashes files: it learns the value from the image-pin port, and a launcher or worker that recomputes it and
+  finds another value refuses the scope (`code_identity_mismatch` for the launcher, exit `71` for the worker). Pinned by `runtime-image.json`.
 
 The worker keeps the fixture's fail-closed intake: it admits only an unnamed inherited `SOCK_DGRAM` control socket, installs its
 sandbox BEFORE it reads anything, accepts exactly one rights item with exactly two descriptors, and on a truncated control buffer
@@ -185,11 +200,14 @@ homeId, workspaceId, incarnationId, leaseEpoch, controllerInstanceId, workerInst
 worker{pid,startToken,exit("code"),status(0),reaped(true)}, volumes[2]{purpose,device,inode,capacityBytes,attached,flushRequested,flushCompleted,finalFlush},
 issuedAtMs`. The chain it attests: the guest halted through a `drain` frame and a power-off, libkrun exited, the launcher's
 `waitpid` confirmed the exit of the process it owns, and the worker's flush receipt shows every requested flush completed and a
-final flush after power-off. It is valid only when all of these hold (`classAInvariantsHold`): `guest.drain = acked` exactly when
-`guest.powerOff = observed`; both volumes attached or neither; an attached entry has `finalFlush = completed`, `flushRequested = flushCompleted`,
+final flush after power-off. It is valid only when all of these hold (`classAInvariantsHold`): the worker exited by itself with code 0 and
+was reaped (`exit = code`, `status = 0`, `reaped = true`; the libkrun exit hook reported reason `off`, never `reset`, `vcpu-error` or
+`terminal-fault`); `guest.drain = acked` exactly when `guest.powerOff = observed`; both volumes attached or neither; an attached entry has `finalFlush = completed`, `flushRequested = flushCompleted`,
 a non-zero `capacityBytes`, and zero counters when the guest never booted (it wrote nothing); an unattached entry has `finalFlush = not-attached`,
 both counters zero, and `device`, `inode` and `capacityBytes` all `0` (the launcher cannot name a file it never received). An attached entry names
-the exact file the daemon sent. A launcher that cannot state
+the exact file the daemon sent. **`not-booted` means "the worker never sent a `vm_running` status"**, and `unattached` means "the worker never
+accepted the two descriptors". A daemon that observed either event (`worker_state vm_running`, `volumes_accepted`, or the guest `hello`) refuses
+a live receipt that says the opposite (`not_orderly`): the receipt cannot know less than the daemon saw. A launcher that cannot state
 all of this emits Class B instead. `stopNonce` is the daemon's nonce from `stop` (`origin = host-stop`) or a launcher-minted one
 (`origin = owner-loss-drain`). The launcher writes the receipt to its durable store and fsyncs BEFORE sending it, and keeps it until
 the daemon sends `receipt_retire`.
@@ -215,23 +233,26 @@ These replace the `*_fixture_*` entry points of the pinned fixture library (comm
 S4 exports them. The fixture names stay behind a cfg in S4 as a regression oracle and are unreachable from the production worker.
 
 ```c
-struct krun_cowork_volume_identity_v1 { uint64_t device; uint64_t inode; uint64_t capacity_bytes; uint32_t uid; uint32_t mode; }
+struct krun_cowork_volume_identity { uint64_t device; uint64_t inode; uint64_t capacity_bytes; uint32_t uid; uint32_t mode; }
 struct krun_cowork_flush_counters_v1 { uint64_t data_requested; uint64_t data_completed; uint64_t environment_requested; uint64_t environment_completed; }
+enum krun_cowork_exit_reason { KRUN_COWORK_EXIT_OFF = 0, KRUN_COWORK_EXIT_RESET = 1, KRUN_COWORK_EXIT_VCPU_ERROR = 2, KRUN_COWORK_EXIT_TERMINAL_FAULT = 3 }
 
 int32_t krun_cowork_enable_profile_v1(uint32_t ctx_id)
-int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id, int32_t data_fd, const struct krun_cowork_volume_identity_v1 *data, int32_t environment_fd, const struct krun_cowork_volume_identity_v1 *environment)
-int32_t krun_cowork_create_mux_stream_v1(uint32_t ctx_id)
+int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id, int32_t data_fd, const struct krun_cowork_volume_identity *data, int32_t environment_fd, const struct krun_cowork_volume_identity *environment)
+int32_t krun_cowork_create_runtime_port_v1(uint32_t ctx_id)
+int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id)
 int32_t krun_cowork_get_flush_counters_v1(uint32_t ctx_id, struct krun_cowork_flush_counters_v1 *out)
-int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t guest_halted), void *user)
+int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t reason), void *user)
 ```
 
 | New symbol | Replaces | Notes |
 | --- | --- | --- |
-| `krun_cowork_enable_profile_v1` | `krun_enable_cowork_block_fixture_reclaim` | refuses anything outside 2 vCPU and 1024 MiB (the reviewed gate) |
+| `krun_cowork_enable_profile_v1` | `krun_enable_cowork_block_fixture_reclaim` | refuses anything outside 2 vCPU and 768 to 1024 MiB (the reviewed gate) |
 | `krun_cowork_set_workspace_disks_v1` | `krun_set_cowork_workspace_disks` | same atomic two-disk intake: 16 MiB to 256 GiB, 4096-aligned, same-inode aliases refused |
-| `krun_cowork_create_mux_stream_v1` | `krun_create_cowork_runtime_stream` | ONE generic virtio-console port; the caller owns only the returned opposite peer |
+| `krun_cowork_create_runtime_port_v1` | `krun_create_cowork_runtime_stream` | ONE generic virtio-console port, a BYTE stream; the caller owns only the returned opposite peer. The mux framing (section 6) sits above libkrun's byte port, in the worker, so no libkrun symbol is named after a mux |
+| `krun_cowork_validate_profile_v1` | none | MANDATORY preflight: the side-effect-free application of the admission `krun_start_enter` applies. The worker calls it after all configuration and before `krun_start_enter`, and starts no VM on a non-zero result |
 | `krun_cowork_get_flush_counters_v1` | none | the counters behind the receipt |
-| `krun_cowork_set_exit_hook_v1` | none | called on the VMM exit path after the block devices' final flush and before the process exits, so the worker can report `guest_halted` with its counters |
+| `krun_cowork_set_exit_hook_v1` | none | called on the VMM exit path after the block devices' final flush and before the process exits, with the reason the VMM is leaving: `off` (a guest power-off), `reset`, `vcpu-error` or `terminal-fault`. Only `off` can lead to a Class A receipt |
 
 Retired with no production equivalent: `krun_enable_cowork_runtime_port_fixture_trace`, `krun_create_cowork_bootstrap_stream`,
 `krun_set_cowork_bootstrap_stream`. **Not admitted: `krun_get_shutdown_eventfd`** (the PL061 GPIO shutdown device). The device
@@ -261,7 +282,7 @@ drain completed it writes a Class A with `origin = owner-loss-drain`. Either way
 * The `allocate` action of `CoworkVolumeAuthority` is refused by the native authority: provisioning is not on the launch path.
 * Authentication of a retained receipt that is read back from the launcher's durable store is the launcher slice's design (S2). The
   adapter accepts such a receipt only through a port that must attest it; file presence alone is never proof.
-* Sleep and wake, free-space admission and the guest side are other slices.
+* Sleep and wake have NO L1 line in this version (controller ruling): the launcher records power events and sends nothing. Free-space admission and the guest side are other slices.
 
 ## 11. The host adapter
 

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
-  CoworkNativeMuxSequence, CoworkNativeProtocolError, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
+  CoworkNativeMuxSequence, CoworkNativeProtocolError, COWORK_LIBKRUN_EXIT_REASONS, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_NATIVE_WORKER_EXIT_CODES, COWORK_NATIVE_WORKER_FAULTS, COWORK_NATIVE_WORKER_LAYOUT, coworkNativeRuntimeImageDigest, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
   COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES, COWORK_NATIVE_LIMITS, COWORK_NATIVE_MUX_CLASSES, classAInvariantsHold, coworkNativeScopeDigest, parseCoworkNativeEnvelope, parseCoworkNativeLauncherLine,
   parseCoworkNativeMuxFrame, parseCoworkNativeStopReceipt, serializeCoworkNativeEnvelope, serializeCoworkNativeLauncherLine, serializeCoworkNativeMuxFrame, serializeCoworkNativeStopReceipt,
   type CoworkNativeEnvelope, type CoworkNativeLauncherDirection, type CoworkNativeMuxDirection, type CoworkNativeOrderlyReceipt, type CoworkNativeProtocolFailure,
@@ -169,7 +169,7 @@ test("Class B has no confirmation: its schema carries no key a release could be 
 test("drift guard: the pinned literals", () => {
   expect({ ...COWORK_NATIVE_LIMITS, depth: { ...COWORK_NATIVE_LIMITS.depth }, muxPayloadBytes: { ...COWORK_NATIVE_LIMITS.muxPayloadBytes } }).toEqual({
     controlLineBytes: 16384, muxLineBytes: 1572864, depth: { launcher: 4, receipt: 3, control: 1, bootstrap: 8 }, headerBytes: 16,
-    muxPayloadBytes: { control: 4096, bootstrap: 262144, runtime: 1048576, provider: 0 }, receiptBytes: 8192, tokenChars: 63, vcpus: 2, minMemoryMiB: 256, maxMemoryMiB: 1024,
+    muxPayloadBytes: { control: 4096, bootstrap: 262144, runtime: 1048576, provider: 0 }, receiptBytes: 8192, tokenChars: 63, vcpus: 2, minMemoryMiB: 768, maxMemoryMiB: 1024,
     drainBudgetMs: 30000, drainBudgetCeilingMs: 120000, volumeRights: 2 });
   expect({ ...COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES }).toEqual({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
   // The runtime ceiling is the existing guest runtime transport frame, not a number invented here.
@@ -178,16 +178,21 @@ test("drift guard: the pinned literals", () => {
 });
 test("the production libkrun ABI replaces the fixture names and admits no new device", () => {
   const names = COWORK_LIBKRUN_PRODUCTION_ABI.map(symbol => symbol.name);
-  expect(names).toEqual(["krun_cowork_enable_profile_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_create_mux_stream_v1", "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1"]);
+  expect(names).toEqual(["krun_cowork_enable_profile_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_create_runtime_port_v1", "krun_cowork_validate_profile_v1", "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1"]);
   expect(new Set(names).size).toBe(names.length);
   for (const symbol of COWORK_LIBKRUN_PRODUCTION_ABI) {
     expect(symbol.name).not.toMatch(/fixture/);
     expect(symbol.signature).toContain(`${symbol.name}(`);
     expect(symbol.signature).not.toMatch(/fixture/);
-    expect(symbol.signature).toMatch(/^(int32_t) krun_cowork_[a-z0-9_]+\(uint32_t ctx_id/);
+    expect(symbol.signature).toMatch(/^(int32_t) krun_cowork_[a-z0-9_]+_v1\(uint32_t ctx_id/);
   }
   expect(COWORK_LIBKRUN_PRODUCTION_ABI.filter(symbol => symbol.replaces !== null).map(symbol => symbol.replaces)).toEqual(["krun_enable_cowork_block_fixture_reclaim", "krun_set_cowork_workspace_disks", "krun_create_cowork_runtime_stream"]);
   expect(COWORK_LIBKRUN_PRODUCTION_STRUCTS.every(declaration => !/fixture/.test(declaration))).toBe(true);
+  // The volume identity struct keeps its name (controller ruling); the other two are the new ones.
+  expect(COWORK_LIBKRUN_PRODUCTION_STRUCTS.map(declaration => declaration.split(" {")[0])).toEqual(["struct krun_cowork_volume_identity", "struct krun_cowork_flush_counters_v1", "enum krun_cowork_exit_reason"]);
+  expect({ ...COWORK_LIBKRUN_EXIT_REASONS }).toEqual({ off: 0, reset: 1, "vcpu-error": 2, "terminal-fault": 3 });
+  // Mux framing is ABOVE libkrun's byte port: no production symbol is named after a mux.
+  expect(names.some(name => /mux/.test(name))).toBe(false);
   // Retired and forbidden entry points: never re-exported under a production name.
   expect(COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS).toEqual(["krun_enable_cowork_runtime_port_fixture_trace", "krun_create_cowork_bootstrap_stream", "krun_set_cowork_bootstrap_stream"]);
   for (const forbidden of COWORK_LIBKRUN_FORBIDDEN_SYMBOLS) expect(names).not.toContain(forbidden);
@@ -200,8 +205,41 @@ test("the contract document names every production symbol, every message type an
   for (const type of new Set(lines.positive.map(entry => entry.t))) expect(`${type}:${doc.includes(`\`${type}\``)}`).toBe(`${type}:true`);
   for (const cls of COWORK_NATIVE_MUX_CLASSES) expect(doc).toContain(cls);
 });
-test("the vector files are exactly the four the contract names, and nothing else lives beside them", () => {
-  expect(readdirSync(vectorsDir).sort()).toEqual(["envelopes.json", "launcher-lines.json", "mux-frames.json", "stop-receipts.json"]);
+test("the vector files are exactly the five the contract names, and nothing else lives beside them", () => {
+  expect(readdirSync(vectorsDir).sort()).toEqual(["envelopes.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"]);
   for (const name of readdirSync(vectorsDir)) expect(basename(name).endsWith(".json")).toBe(true);
   expect(existsSync(join(vectorsDir, "launcher-lines.json"))).toBe(true);
+});
+
+// ---------------------------------------------------------------- the pins the controller made final for N2
+
+test("the worker layout and exit codes are pinned (S3's WorkerCommon.h), and 77 belongs to libkrun", () => {
+  expect({ ...COWORK_NATIVE_WORKER_LAYOUT }).toEqual({ l2Fd: 3, l3Fd: 4, argv: "[path]", guestDirectory: "cowork-guest", kernelFile: "kernel", initramfsFile: "initramfs.cpio" });
+  expect({ ...COWORK_NATIVE_WORKER_EXIT_CODES }).toEqual({ ok: 0, usage: 2, sandbox: 70, bad_scope: 71, bad_volumes: 72, vm_failed: 73, mux_quarantine: 74, drain_timeout: 75, intake_timeout: 76, libkrun_reserved: 77, internal: 78, rights: 79 });
+  const codes = Object.values(COWORK_NATIVE_WORKER_EXIT_CODES);
+  expect(new Set(codes).size).toBe(codes.length);
+  expect(Object.isFrozen(COWORK_NATIVE_WORKER_LAYOUT) && Object.isFrozen(COWORK_NATIVE_WORKER_EXIT_CODES)).toBe(true);
+});
+test("a second DRAIN has a named worker fault code, last in the list so no earlier code moves", () => {
+  expect([...COWORK_NATIVE_WORKER_FAULTS]).toEqual(["bad_scope", "bad_volumes", "sandbox_failed", "vm_failed", "mux_violation", "truncated_rights", "internal", "second_drain"]);
+});
+test("runtimeImageDigest covers exactly the kernel and the initramfs, in that order, as raw digests", () => {
+  const vectors = vector<{ positive: { name: string; kernelSha256: string; initramfsSha256: string; runtimeImageDigest: string }[] }>("runtime-image.json");
+  expect(vectors.positive).toHaveLength(2);
+  for (const entry of vectors.positive) expect(`${entry.name}:${coworkNativeRuntimeImageDigest(entry.kernelSha256, entry.initramfsSha256)}`).toBe(`${entry.name}:${entry.runtimeImageDigest}`);
+  expect(vectors.positive[0]!.runtimeImageDigest).not.toBe(vectors.positive[1]!.runtimeImageDigest);
+  for (const bad of [["", "a".repeat(64)], ["A".repeat(64), "a".repeat(64)], ["a".repeat(63), "a".repeat(64)]] as const) expect(code(() => coworkNativeRuntimeImageDigest(bad[0], bad[1]))).toBe("bad_field");
+});
+test("begin carries the home id (one source for it), right after the request id, and a scope below the 768 MiB floor is refused", () => {
+  const begin = lines.positive.find(entry => entry.name === "begin")!, parsed = parseCoworkNativeLauncherLine(begin.line, "to-launcher") as { homeId: string; memoryMiB: number };
+  expect(parsed.homeId).toMatch(/^home_/);
+  expect(begin.line.startsWith(`{"v":1,"t":"begin","id":"req-0001","homeId":"${parsed.homeId}","workspaceId":`)).toBe(true);
+  for (const memory of [767, 512, 256, 0]) expect(code(() => parseCoworkNativeLauncherLine(begin.line.replace('"memoryMiB":768', `"memoryMiB":${memory}`), "to-launcher"))).toBe("bad_field");
+  for (const memory of [768, 1024]) expect(parseCoworkNativeLauncherLine(begin.line.replace('"memoryMiB":768', `"memoryMiB":${memory}`), "to-launcher").t).toBe("begin");
+});
+test("a byte order mark is never skipped: not on an L1 line, not in a mux payload", () => {
+  expect(lines.negative.map(entry => entry.name)).toContain("bom-line");
+  expect(mux.negative.map(entry => entry.name)).toEqual(expect.arrayContaining(["bom-mux", "bom-mux-bootstrap"]));
+  const ping = lines.positive.find(entry => entry.name === "ping")!;
+  expect(code(() => parseCoworkNativeLauncherLine(`\ufeff${ping.line}`, "to-launcher"))).toBe("malformed");
 });

@@ -221,6 +221,8 @@ describe("FdLineChannel and FdReceiver", () => {
     expect(splitter.push(encode("e\n\n"))).toEqual(["cde\n", "\n"]);
     expect(() => new FdLineSplitter(4).push(encode("abcdef\n"))).toThrow("oversize");
     expect(() => new FdLineSplitter(8).push(Uint8Array.from([0xff, 0x0a]))).toThrow();
+    // a byte order mark is part of the line, never skipped: the protocol parser then refuses the line
+    expect(new FdLineSplitter(16).push(Uint8Array.from([0xef, 0xbb, 0xbf, 0x7b, 0x0a]))).toEqual(["\ufeff{\n"]);
   });
 });
 

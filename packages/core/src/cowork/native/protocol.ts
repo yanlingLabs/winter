@@ -52,8 +52,8 @@ export const COWORK_NATIVE_LIMITS = Object.freeze({
   receiptBytes: 8192,
   /** Identifier fields in the fixed-layout envelope are NUL padded to 64 bytes, so a token is at most 63 characters. */
   tokenChars: 63,
-  /** Guest sizing, D8: 2 vCPU and at most 1024 MiB inside the reviewed device gate. */
-  vcpus: 2, minMemoryMiB: 256, maxMemoryMiB: 1024,
+  /** Guest sizing, D8 and the controller's ruling: 2 vCPU, and 768 to 1024 MiB inside the reviewed device gate (768 is the floor the library admits). */
+  vcpus: 2, minMemoryMiB: 768, maxMemoryMiB: 1024,
   /** Documented graceful budget (execution contracts, "Daemon lifetime"); an explicit stop may ask for less, never more than the ceiling. */
   drainBudgetMs: 30_000, drainBudgetCeilingMs: 120_000,
   volumeRights: 2,
@@ -243,6 +243,8 @@ export type CoworkNativeStopReceipt = CoworkNativeOrderlyReceipt | CoworkNativeU
 /** The internal consistency a Class A receipt must have to mean what it says. A launcher that cannot state all of these
  * emits Class B instead. A receipt that parses but fails this is NOT orderly evidence: treat it as a protocol fault. */
 export function classAInvariantsHold(receipt: CoworkNativeOrderlyReceipt): boolean {
+  // The worker exited by itself with status 0 and the launcher reaped it: the only exit a Class A may describe.
+  if (receipt.worker?.exit !== "code" || receipt.worker.status !== 0 || receipt.worker.reaped !== true) return false;
   const booted = receipt.guest.drain === "acked";
   if (booted !== (receipt.guest.powerOff === "observed")) return false;
   const [data, environment] = receipt.volumes;
@@ -325,7 +327,8 @@ const BOOTSTRAP_SPECS: Record<CoworkNativeMuxDirection, Record<string, Spec>> = 
 function jsonPayload(bytes: Uint8Array, specs: Record<string, Spec>, maxBytes: number, depth: number): Record<string, unknown> {
   if (bytes.length > maxBytes) return fail("oversize");
   let text: string;
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return fail("malformed"); }
+  // ignoreBOM keeps a leading U+FEFF in the text (the default silently strips it), so a byte order mark is a malformed payload, never accepted.
+  try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); } catch { return fail("malformed"); }
   const { parsed } = strictLine(`${text}\n`, maxBytes + 1, depth);
   const type = Object.hasOwn(parsed, "t") ? parsed.t : undefined;
   const spec = typeof type === "string" && Object.hasOwn(specs, type) ? specs[type]! : undefined;
@@ -403,7 +406,7 @@ export const COWORK_NATIVE_ENVELOPE_MAGIC = "WEV1";
 export const COWORK_NATIVE_ENVELOPE_KINDS = Object.freeze(["scope", "volumes", "drain", "status", "fault"] as const);
 export const COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES = Object.freeze({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
 export const COWORK_NATIVE_WORKER_STATUS = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "guest_halted", "exiting"] as const);
-export const COWORK_NATIVE_WORKER_FAULTS = Object.freeze(["bad_scope", "bad_volumes", "sandbox_failed", "vm_failed", "mux_violation", "truncated_rights", "internal"] as const);
+export const COWORK_NATIVE_WORKER_FAULTS = Object.freeze(["bad_scope", "bad_volumes", "sandbox_failed", "vm_failed", "mux_violation", "truncated_rights", "internal", "second_drain"] as const);
 export interface CoworkNativeFlushCounters { readonly requested: number; readonly completed: number }
 export type CoworkNativeEnvelope =
   | { readonly kind: "scope"; readonly seq: number; readonly scope: CoworkNativeScope }
@@ -537,7 +540,7 @@ export type CoworkNativeToDaemon =
   | { readonly t: "pong"; readonly id: string }
   | { readonly t: "fault"; readonly code: typeof COWORK_NATIVE_CHANNEL_FAULTS[number] };
 export type CoworkNativeToLauncher =
-  | ({ readonly t: "begin"; readonly id: string } & CoworkNativeScope)
+  | ({ readonly t: "begin"; readonly id: string; readonly homeId: string } & CoworkNativeScope)
   | { readonly t: "volumes"; readonly id: string; readonly scopeDigest: string; readonly volumes: readonly [CoworkNativeVolumeIdentity, CoworkNativeVolumeIdentity] }
   | { readonly t: "mux_down"; readonly frame: CoworkNativeMuxFrame }
   | { readonly t: "stop"; readonly id: string; readonly stopNonce: string; readonly reason: typeof COWORK_NATIVE_STOP_REASONS[number]; readonly budgetMs: number }
@@ -571,7 +574,7 @@ const LAUNCHER_SPECS: Record<CoworkNativeLauncherDirection, Record<string, Spec>
     fault: [["t", literal("fault")], ["code", oneOf(COWORK_NATIVE_CHANNEL_FAULTS)]],
   },
   "to-launcher": {
-    begin: [["t", literal("begin")], ["id", token], ...SCOPE_SPEC],
+    begin: [["t", literal("begin")], ["id", token], ["homeId", token], ...SCOPE_SPEC],
     volumes: [["t", literal("volumes")], ["id", token], ["scopeDigest", digest], ["volumes", volumePair]],
     mux_down: [["t", literal("mux_down")], ["frame", muxField("down")]],
     stop: [["t", literal("stop")], ["id", token], ["stopNonce", nonce], ["reason", oneOf(COWORK_NATIVE_STOP_REASONS)], ["budgetMs", uint(0, COWORK_NATIVE_LIMITS.drainBudgetCeilingMs)]],
@@ -613,35 +616,64 @@ export function serializeCoworkNativeLauncherLine(message: CoworkNativeLauncherM
   return `${JSON.stringify(typed)}\n`;
 }
 
+// ------------------------------------------------------------------------------------------------ worker layout (controller ruling, final for N2)
+
+/** What the launcher installs and the worker may rely on. argv is `[path]` and nothing else; the environment is the launcher's two
+ * variables (`LC_ALL=C`, `LANG=C`). Descriptors 0 to 2 are the launcher's business; every other descriptor is closed at start. */
+export const COWORK_NATIVE_WORKER_LAYOUT = Object.freeze({
+  /** L2: an unnamed AF_UNIX SOCK_DGRAM socketpair end (envelopes). */ l2Fd: 3,
+  /** L3: an unnamed AF_UNIX SOCK_STREAM socketpair end (bootstrap and runtime mux frames). */ l3Fd: 4,
+  argv: "[path]" as const,
+  /** Guest boot artifacts: `<directory of the worker executable>/cowork-guest/kernel` and `.../cowork-guest/initramfs.cpio`. */
+  guestDirectory: "cowork-guest" as const, kernelFile: "kernel" as const, initramfsFile: "initramfs.cpio" as const,
+});
+/** The worker's process exit codes (S3's WorkerCommon.h). 77 belongs to libkrun's own fatal stops and is never used by the worker.
+ * Only 0 can accompany a Class A receipt; every other code is Class B at best. */
+export const COWORK_NATIVE_WORKER_EXIT_CODES = Object.freeze({ ok: 0, usage: 2, sandbox: 70, bad_scope: 71, bad_volumes: 72, vm_failed: 73, mux_quarantine: 74, drain_timeout: 75, intake_timeout: 76, libkrun_reserved: 77, internal: 78, rights: 79 } as const);
+/** `runtimeImageDigest` names the guest BOOT ARTIFACTS and nothing else: the SHA-256 (lowercase hex) of the 64 bytes
+ * `SHA-256(kernel) || SHA-256(initramfs.cpio)`, each part the raw 32 byte digest of that file's bytes. The data and environment
+ * disks are not covered (the image-pin record keeps a separate base digest for them). The daemon never hashes files: it learns the
+ * value from the image-pin port; a launcher or worker that recomputes it and finds another value refuses the scope. */
+export function coworkNativeRuntimeImageDigest(kernelSha256: string, initramfsSha256: string): string {
+  if (!DIGEST.test(kernelSha256) || !DIGEST.test(initramfsSha256)) return fail();
+  return createHash("sha256").update(Buffer.concat([Buffer.from(kernelSha256, "hex"), Buffer.from(initramfsSha256, "hex")])).digest("hex");
+}
+
 // ------------------------------------------------------------------------------------------------ libkrun production ABI
 
 /**
  * Names and signatures ONLY. These replace the `*_fixture_*` entry points of the pinned fixture library (two-disk fixture
- * commit 9a588735) and are what S3 (the C worker) links and S4 (the libkrun patch queue) must export. They declare a
+ * commit 9a588735) and are what S3 (the C worker) links and S4 (the libkrun patch queue) must export (controller ruling: all `_v1`,
+ * the volume identity struct keeps its name, S4 adds a rename patch and the two missing entry points). They declare a
  * contract; nothing here calls, loads or links libkrun. The fixture names stay behind a cfg in S4 as a regression oracle
  * and are never reachable from the production worker.
  *
  * Inventory rule: the device set does not change. Two virtio-blk disks (serial `winter-data`, `winter-environment`), one
- * generic virtio-console port for the mux, the PL011 serial output. NO NIC, NO vsock, NO virtiofs, NO GPU, NO input
+ * generic virtio-console port (a BYTE stream: the mux framing is above libkrun, in the worker), the PL011 serial output. NO NIC, NO vsock, NO virtiofs, NO GPU, NO input
  * device and NO shutdown GPIO (`krun_get_shutdown_eventfd` is not admitted): stop is a `drain` control frame and then a
  * guest power-off, observed as the process exit of the worker.
  */
 export interface CoworkLibkrunProductionSymbol { readonly name: string; readonly signature: string; readonly replaces: string | null }
 export const COWORK_LIBKRUN_PRODUCTION_STRUCTS = Object.freeze([
-  "struct krun_cowork_volume_identity_v1 { uint64_t device; uint64_t inode; uint64_t capacity_bytes; uint32_t uid; uint32_t mode; }",
+  "struct krun_cowork_volume_identity { uint64_t device; uint64_t inode; uint64_t capacity_bytes; uint32_t uid; uint32_t mode; }",
   "struct krun_cowork_flush_counters_v1 { uint64_t data_requested; uint64_t data_completed; uint64_t environment_requested; uint64_t environment_completed; }",
+  "enum krun_cowork_exit_reason { KRUN_COWORK_EXIT_OFF = 0, KRUN_COWORK_EXIT_RESET = 1, KRUN_COWORK_EXIT_VCPU_ERROR = 2, KRUN_COWORK_EXIT_TERMINAL_FAULT = 3 }",
 ] as const);
+/** Why the VMM is leaving, as the exit hook reports it. Only `off` (a guest power-off) can ever belong to a Class A receipt. */
+export const COWORK_LIBKRUN_EXIT_REASONS = Object.freeze({ off: 0, reset: 1, "vcpu-error": 2, "terminal-fault": 3 } as const);
 export const COWORK_LIBKRUN_PRODUCTION_ABI: readonly CoworkLibkrunProductionSymbol[] = Object.freeze([
   Object.freeze({ name: "krun_cowork_enable_profile_v1", replaces: "krun_enable_cowork_block_fixture_reclaim",
     signature: "int32_t krun_cowork_enable_profile_v1(uint32_t ctx_id)" }),
   Object.freeze({ name: "krun_cowork_set_workspace_disks_v1", replaces: "krun_set_cowork_workspace_disks",
-    signature: "int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id, int32_t data_fd, const struct krun_cowork_volume_identity_v1 *data, int32_t environment_fd, const struct krun_cowork_volume_identity_v1 *environment)" }),
-  Object.freeze({ name: "krun_cowork_create_mux_stream_v1", replaces: "krun_create_cowork_runtime_stream",
-    signature: "int32_t krun_cowork_create_mux_stream_v1(uint32_t ctx_id)" }),
+    signature: "int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id, int32_t data_fd, const struct krun_cowork_volume_identity *data, int32_t environment_fd, const struct krun_cowork_volume_identity *environment)" }),
+  Object.freeze({ name: "krun_cowork_create_runtime_port_v1", replaces: "krun_create_cowork_runtime_stream",
+    signature: "int32_t krun_cowork_create_runtime_port_v1(uint32_t ctx_id)" }),
+  Object.freeze({ name: "krun_cowork_validate_profile_v1", replaces: null,
+    signature: "int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id)" }),
   Object.freeze({ name: "krun_cowork_get_flush_counters_v1", replaces: null,
     signature: "int32_t krun_cowork_get_flush_counters_v1(uint32_t ctx_id, struct krun_cowork_flush_counters_v1 *out)" }),
   Object.freeze({ name: "krun_cowork_set_exit_hook_v1", replaces: null,
-    signature: "int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t guest_halted), void *user)" }),
+    signature: "int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t reason), void *user)" }),
 ]);
 /** Fixture entry points that get NO production equivalent. The single mux stream replaces the separate bootstrap and runtime ports; the control ACK trace is a fixture measurement. */
 export const COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS = Object.freeze(["krun_enable_cowork_runtime_port_fixture_trace", "krun_create_cowork_bootstrap_stream", "krun_set_cowork_bootstrap_stream"] as const);

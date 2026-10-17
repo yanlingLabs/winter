@@ -221,7 +221,7 @@ export class CoworkNativeHost {
     // 3. begin: the worker is spawned suspended, validated, sandboxed
     const full: CoworkNativeScope = { ...scope, admissionId: reserved.admissionId };
     const begin = `req-${this.uuid()}`.slice(0, 63);
-    session.send({ t: "begin", id: begin, ...full });
+    session.send({ t: "begin", id: begin, homeId: run.homeId, ...full });
     await run.inbox.expect(message => message.t === "begun" && message.id === begin ? message : message.t === "refused" && message.id === begin ? message : undefined, this.timeouts.begunMs, "begun")
       .then(message => { if (message.t === "refused") throw new CoworkNativeHostError("launcher_refused", message.code); if (message.t !== "begun" || message.workerInstanceId !== owner.workerInstanceId) throw new CoworkNativeHostError("protocol", "begun names another worker"); });
     binding.advance("begun");
