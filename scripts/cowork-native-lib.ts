@@ -40,9 +40,13 @@ export function coworkRequirement(identifier: string, teamId: string = COWORK_NA
   return `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = "${teamId}"`;
 }
 
+/** Without these a release build carries the builder's absolute source paths (the linker's debug map), which the release name scan
+ *  rejects: no debug info from swiftc, and `-S -x` at the link (measured: 903 kB offset of `/Users/…/Sources/…` paths gone). */
+export const LAUNCHER_PATH_HYGIENE_FLAGS = ["-Xswiftc", "-gnone", "-Xlinker", "-S", "-Xlinker", "-x"] as const;
+
 /** `swift build` for the launcher: release, into a scratch path the caller owns, product only. */
 export function launcherBuildArgs(i: { packagePath: string; scratchPath: string; testBuild?: boolean }): string[] {
-  return ["build", "--package-path", i.packagePath, "--scratch-path", i.scratchPath, "-c", "release", "--product", COWORK_NATIVE.launcher.name,
+  return ["build", "--package-path", i.packagePath, "--scratch-path", i.scratchPath, "-c", "release", "--product", COWORK_NATIVE.launcher.name, ...LAUNCHER_PATH_HYGIENE_FLAGS,
     ...(i.testBuild === true ? ["-Xswiftc", `-D${COWORK_TEST_BUILD_CONDITION}`] : [])];
 }
 

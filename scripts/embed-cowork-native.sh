@@ -65,7 +65,7 @@ check_input() { # $1 = path, $2 = name
   [ -z "${foreign}" ] || fail "${name} links non-platform libraries: ${foreign//$'\n'/, }"
   # The release name scan rejects absolute builder paths in a Mach-O; refuse them here with a name for the culprit.
   if LC_ALL=C grep -aqF "${REPO}" "${path}" || { [ -n "${HOME:-}" ] && [ "${HOME}" != "/" ] && LC_ALL=C grep -aqF "${HOME}/" "${path}"; }; then
-    fail "${name} embeds the builder's repository or home path — build with the path remaps and strip"
+    fail "${name} embeds the builder's repository or home path — build with scripts/cowork-native-lib.ts's launcherBuildArgs (-Xswiftc -gnone -Xlinker -S -Xlinker -x)"
   fi
 }
 check_input "${LAUNCHER_SRC}" "${LAUNCHER_NAME}"

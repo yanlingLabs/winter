@@ -232,7 +232,8 @@ describe("cowork-native-lib", () => {
     expect(nonPlatformLibraries(["/usr/libevil/x.dylib", "/System/Library/Frameworks/A"])).toEqual(["/usr/libevil/x.dylib"]);
   });
   test("the build and sign commands have the shapes the script and the package use", () => {
-    expect(launcherBuildArgs({ packagePath: "/p", scratchPath: "/s" })).toEqual(["build", "--package-path", "/p", "--scratch-path", "/s", "-c", "release", "--product", "winter-cowork-launcher"]);
+    expect(launcherBuildArgs({ packagePath: "/p", scratchPath: "/s" })).toEqual(["build", "--package-path", "/p", "--scratch-path", "/s", "-c", "release", "--product", "winter-cowork-launcher",
+      "-Xswiftc", "-gnone", "-Xlinker", "-S", "-Xlinker", "-x"]);
     expect(launcherBuildArgs({ packagePath: "/p", scratchPath: "/s", testBuild: true }).slice(-2)).toEqual(["-Xswiftc", `-D${COWORK_TEST_BUILD_CONDITION}`]);
     expect(coworkSignArgs({ identity: "HASH", role: "worker", path: "/w", entitlementsFile: "/e" })).toEqual([
       "--force", "--sign", "HASH", "--identifier", "com.winter.cowork.worker", "--options", "runtime", "--timestamp", "--entitlements", "/e",
