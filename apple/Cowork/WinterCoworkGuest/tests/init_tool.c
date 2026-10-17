@@ -132,6 +132,8 @@ int main(int argc, char **argv) {
         size_t out_length = 0;
         enum wg_config_result r = wg_build_trusted_config(argv[2], base, base_length, conv, conv_length, out, sizeof out, &out_length);
         printf("%d|%s\n", (int)r, r == WG_CONFIG_OK ? out : "");
+        free(base);
+        free(conv);
         return 0;
     }
     if (strcmp(argv[1], "writecfg") == 0 && (argc == 5 || argc == 6)) {
@@ -139,6 +141,7 @@ int main(int argc, char **argv) {
         size_t length = 0;
         char *text = slurp(argv[4], &length);
         int fd = wg_write_trusted_config(argv[2], argv[3], text, length);
+        free(text);
         if (fd < 0) { printf("fail\n"); return 0; }
         struct stat st;
         fstat(fd, &st);
