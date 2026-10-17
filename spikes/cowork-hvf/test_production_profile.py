@@ -3,6 +3,8 @@
 Runs, with the pinned offline toolchain and one thread:
   * production features (`blk`): the whole krun-vmm unit suite (fixed by patch 0014), the krun-devices
     suites the admitted fixture ran, and the whole libkrun suite including the new production tests;
+  * production-only features (`blk,cowork-production-only`): the whole libkrun suite again, with the
+    start admission refusing any context that is not the production profile;
   * oracle features (`blk,cowork-fixture-oracle`): the whole libkrun suite again, so the fixture
     entry points stay a regression oracle next to the production ones.
 Tests that would create a Hypervisor.framework VM or call krun_start_enter are #[ignore] and are
@@ -14,13 +16,14 @@ from prepare_production_profile import prepare
 from production_profile_lib import check_toolchain, load_candidate, release_env, toolchain_env
 
 # (package, features, filter) exactly as the admitted fixture ran them, plus the whole-crate suites.
-DEVICE_FILTERS = ['workspace_disks', 'runtime_port', 'cowork_stream', 'cowork_rng', 'reclaim_access::tests', 'cowork_frq', 'cowork_block', 'block_bounce::tests']
+DEVICE_FILTERS = ['workspace_disks', 'runtime_port', 'cowork_stream', 'cowork_rng', 'reclaim_access::tests', 'cowork_frq', 'cowork_block', 'block_bounce::tests', 'cowork_counters']
 RUNS = ([('krun-vmm', 'blk', '')]
         + [('krun-devices', 'blk', name) for name in DEVICE_FILTERS]
         + [('libkrun', 'blk', '')]
+        + [('libkrun', 'blk,cowork-production-only', '')]
         + [('libkrun', 'blk,cowork-fixture-oracle', '')])
 # The same suites again under the shipped release profile (overflow checks on, debug assertions off, LTO).
-RELEASE_RUNS = [('libkrun', 'blk', ''), ('krun-vmm', 'blk', ''), ('krun-devices', 'blk', 'cowork_block'), ('krun-devices', 'blk', 'block_bounce::tests'), ('krun-devices', 'blk', 'workspace_disks')]
+RELEASE_RUNS = [('libkrun', 'blk', ''), ('libkrun', 'blk,cowork-production-only', ''), ('krun-vmm', 'blk', ''), ('krun-devices', 'blk', 'cowork_block'), ('krun-devices', 'blk', 'block_bounce::tests'), ('krun-devices', 'blk', 'workspace_disks'), ('krun-devices', 'blk', 'cowork_counters')]
 FORBIDDEN_FLAGS = ('--ignored', '--include-ignored')
 LOG = []  # full cargo output of every run, written next to the receipt
 

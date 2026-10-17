@@ -45,6 +45,11 @@ class ScopePin(unittest.TestCase):
         self.assertTrue(prep.scope_findings('p', self.PATCH.format('vmm.register_mmio_gpio(vm, intc, em, efd);'), ['src/a.rs'], ['register_mmio_gpio(']))
         self.assertTrue(prep.scope_findings('p', self.PATCH.format('attach_mmio_device(&mut vmm, id, intc, dev);'), ['src/a.rs'], ['attach_mmio_device(&mut ']))
 
+    def test_device_attach_calls_are_found_in_any_non_test_file(self):
+        patch = 'diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs\n--- a/src/vmm/src/builder.rs\n+++ b/src/vmm/src/builder.rs\n@@ -1 +1,2 @@\n x\n+    attach_gpio_device(&mut vmm, intc.clone())?;\n'
+        self.assertTrue(prep.scope_findings('p', patch, ['src/vmm/src/builder.rs'], [], ['attach_'], []))
+        self.assertEqual(prep.scope_findings('p', patch, ['src/vmm/src/builder.rs'], [], ['attach_'], [r'src/vmm/src/builder\.rs']), [])
+
     def test_comment_mentioning_the_gpio_is_not_code(self):
         pin = json.loads((ROOT / 'production-profile-candidate.json').read_text())
         self.assertNotIn('GPIO', ' '.join(pin['forbiddenAddedText']))
@@ -67,6 +72,17 @@ class VmReachAudit(unittest.TestCase):
         source = self.tree('#[test]\n#[ignore = "creates a Hypervisor.framework VM (hv_vm_create)"]\nfn a() {\n    krun_start_enter(1);\n}\n// krun_start_enter(2);\nfn production() {\n    krun_start_enter(3);\n}\n')
         self.assertEqual(prep.unignored_vm_reaching_tests(source), [])
 
+    def test_string_literals_are_not_calls(self):
+        source = self.tree('#[test]\nfn a() {\n    let at = builder.find("pub fn build_microvm(");\n    let b = \"krun_start_enter(\";\n}\n')
+        self.assertEqual(prep.unignored_vm_reaching_tests(source), [])
+        source = self.tree('#[test]\nfn a() {\n    HvfGicV3::new(1);\n    let n = krun_get_max_vcpus();\n}\n')
+        self.assertEqual(len(prep.unignored_vm_reaching_tests(source)), 2)
+
+    def test_widened_hvf_and_query_calls_are_found(self):
+        for call in ['hv_vm_get_max_vcpu_count(&mut n);', 'HvfGicV3::new(2);', 'krun_check_nested_virt();', 'krun_get_max_vcpus();', 'HvfVcpu::create();']:
+            with self.subTest(call=call):
+                self.assertEqual(len(prep.unignored_vm_reaching_tests(self.tree('#[test]\nfn a() {\n    ' + call + '\n}\n'))), 1)
+
     def test_one_line_test_style_is_understood(self):
         source = self.tree(' #[test]fn a(){ assert_eq!(krun_start_enter(id),1); }\n #[test]#[ignore = "x"]fn b(){ assert_eq!(krun_start_enter(id),1); }\n')
         self.assertEqual(len(prep.unignored_vm_reaching_tests(source)), 1)
@@ -87,6 +103,37 @@ class ReleaseRecipe(unittest.TestCase):
         self.assertEqual(norm('/home/u/work/tree/x and /home/u/y'), '<WORKTREE>/x and <HOME>/y')
 
 
+class ReproRoot(unittest.TestCase):
+    def setUp(self):
+        import build_production_profile as build
+        self.build = build
+        self.source = ROOT / 'out/libkrun-production-profile'
+
+    def test_a_non_empty_directory_is_refused_and_survives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            keep = Path(directory) / 'keep.txt'
+            keep.write_text('x')
+            with self.assertRaises(RuntimeError):
+                self.build.check_repro_root(directory, self.source)
+            self.assertTrue(keep.exists())
+
+    def test_protected_directories_are_refused(self):
+        for path in [Path('/'), Path.home(), ROOT, ROOT.parent, OUT, self.source, self.source / 'src']:
+            with self.subTest(path=path):
+                with self.assertRaises(RuntimeError):
+                    self.build.check_repro_root(path, self.source)
+
+    def test_a_new_or_empty_directory_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(self.build.check_repro_root(directory, self.source), Path(directory).absolute())
+            self.assertEqual(self.build.check_repro_root(Path(directory) / 'fresh', self.source), (Path(directory) / 'fresh').absolute())
+
+    def test_a_missing_parent_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(RuntimeError):
+                self.build.check_repro_root(Path(directory) / 'a' / 'b', self.source)
+
+
 class Candidate(unittest.TestCase):
     def setUp(self):
         self.pin = json.loads((ROOT / 'production-profile-candidate.json').read_text())
@@ -96,20 +143,38 @@ class Candidate(unittest.TestCase):
         for patch in self.pin['basePatches'] + self.pin['newPatches']:
             self.assertEqual(hashlib.sha256((ROOT / patch['patchFile']).read_bytes()).hexdigest(), patch['patchSha256'], patch['patchFile'])
 
-    def test_queue_is_contiguous_and_the_new_patches_are_14_to_16(self):
+    def test_queue_is_contiguous_and_the_new_patches_are_14_to_22(self):
         numbers = [int(Path(p['patchFile']).name[:4]) for p in self.pin['basePatches'] + self.pin['newPatches']]
-        self.assertEqual(numbers, list(range(4, 17)))
-        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.pin['newPatches']], [14, 15, 16])
+        self.assertEqual(numbers, list(range(4, 23)))
+        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.pin['newPatches']], list(range(14, 23)))
 
     def test_declared_scope_equals_the_files_each_patch_touches(self):
         for entry in self.pin['newPatches']:
             text = (ROOT / entry['patchFile']).read_text()
             self.assertEqual(sorted(set(re.findall(r'^diff --git a/(\S+) b/', text, re.M))), sorted(entry['allowedFiles']), entry['patchFile'])
 
-    def test_no_new_patch_touches_the_device_set(self):
+    def test_the_device_set_files_change_only_where_declared_and_never_attach_a_device(self):
+        # builder.rs (the device attach sequence), hvf and the block device change only in the exit-path patch, which
+        # registers observers and adds a PSCI reset variant; nothing touches the device manager or the arch layer.
+        only_exit_path = {'src/vmm/src/builder.rs', 'src/hvf/src/lib.rs', 'src/devices/src/virtio/block/device.rs'}
         for entry in self.pin['newPatches']:
+            number = int(Path(entry['patchFile']).name[:4])
             for name in entry['allowedFiles']:
-                self.assertFalse(name.startswith(('src/vmm/src/builder.rs', 'src/vmm/src/device_manager/', 'src/hvf/', 'src/arch/')) or ('src/devices/src/' in name and name != 'src/devices/src/block_trace.rs'), name)
+                self.assertFalse(name.startswith(('src/vmm/src/device_manager/', 'src/arch/')), name)
+                if name in only_exit_path:
+                    self.assertEqual(number, 22, name)
+            text = (ROOT / entry['patchFile']).read_text()
+            self.assertEqual(prep.scope_findings(entry['patchFile'], text, entry['allowedFiles'], self.pin['forbiddenAddedText'], self.pin['deviceForbiddenAddedText'], self.pin['deviceForbiddenExemptFiles']), [])
+
+    def test_the_canonical_v1_names_are_the_production_surface(self):
+        header = (HERE / 'production_profile_tests.rs').read_text()
+        for name in ['krun_cowork_enable_profile_v1', 'krun_cowork_set_workspace_disks_v1', 'krun_cowork_create_runtime_port_v1', 'krun_cowork_validate_profile_v1', 'krun_cowork_get_flush_counters_v1', 'krun_cowork_set_exit_hook_v1']:
+            self.assertIn(f'"{name}"', header)
+        self.assertEqual(sorted(n[1:] for n in lib.PRODUCTION_EXPORTS), sorted(n for n in [
+            'krun_cowork_enable_profile_v1', 'krun_cowork_set_workspace_disks_v1', 'krun_cowork_create_runtime_port_v1', 'krun_cowork_validate_profile_v1',
+            'krun_cowork_get_flush_counters_v1', 'krun_cowork_set_exit_hook_v1', 'krun_cowork_get_pin_counters_v1']))
+        self.assertTrue(all(n.endswith('_v1') for n in lib.PRODUCTION_EXPORTS))
+        self.assertEqual(self.pin['features']['production'], 'blk,cowork-production-only')
 
     def test_limits_match_the_header_the_patch_adds(self):
         text = (ROOT / 'patches/0015-proposed-cowork-production-profile.patch').read_text()

@@ -15,7 +15,7 @@ from build import ROOT, OUT, PINS, checked, verify, digest
 from production_profile_lib import git, load_candidate
 
 # Calls that start a VM or reach Hypervisor.framework. In a test function they need an #[ignore].
-VM_REACHING = re.compile(r'(krun_start_enter\(|[^_a-z]Vm::new\(|HvfVm::new\(|hv_vm_create|hv_vcpu_create|build_microvm\()')
+VM_REACHING = re.compile(r'(krun_start_enter\(|[^_a-z]Vm::new\(|HvfVm::new\(|HvfGicV3::new\(|HvfVcpu::|\bhv_[a-z_0-9]+|krun_get_max_vcpus\(|krun_check_nested_virt\(|[^_a-z]check_nested_virt\(|[^_a-z]get_max_vcpus\(|build_microvm\()')
 
 
 def tree_after(source, patches, scratch):
@@ -39,7 +39,9 @@ def unignored_vm_reaching_tests(source):
         for number, line in enumerate(lines):
             stripped = line.strip()
             # Comments and attribute-only lines (an #[ignore] reason may name hv_vm_create) are not calls.
-            if stripped.startswith('//') or re.fullmatch(r'#\[[^\]]*\]', stripped) or not VM_REACHING.search(line):
+            # String literals are text, not calls (a test may search the builder source for "build_microvm(").
+            code = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+            if stripped.startswith('//') or re.fullmatch(r'#\[[^\]]*\]', stripped) or not VM_REACHING.search(code):
                 continue
             function = next((i for i in range(number, -1, -1) if re.search(r'\bfn [a-z_0-9]+', lines[i])), None)
             if function is None:
@@ -50,16 +52,36 @@ def unignored_vm_reaching_tests(source):
     return offenders
 
 
-def scope_findings(name, text, allowed, forbidden):
-    """Problems with one patch: files outside its declared scope, or added lines that attach a device or the GPIO."""
+def added_lines_by_file(text):
+    """Added lines of a git patch, keyed by the file they are added to."""
+    current, added = None, {}
+    for line in text.splitlines():
+        if line.startswith('diff --git '):
+            current = line.split(' b/', 1)[1]
+            added.setdefault(current, [])
+        elif current and line.startswith('+') and not line.startswith('+++'):
+            added[current].append(line[1:])
+    return added
+
+
+def scope_findings(name, text, allowed, forbidden, device_forbidden=(), device_exempt=()):
+    """Problems with one patch: files outside its declared scope, or added lines that attach a device or the GPIO.
+    `forbidden` applies to every added line; `device_forbidden` (device attach, subscriber and MMIO registration
+    calls) applies to every file except the exempt test files."""
     touched = sorted(set(re.findall(r'^diff --git a/(\S+) b/', text, re.M)))
     findings = []
     if touched != sorted(allowed):
         findings.append(f'{name} touches {touched}, not its declared scope {sorted(allowed)}')
-    added = [line[1:] for line in text.splitlines() if line.startswith('+') and not line.startswith('+++')]
+    by_file = added_lines_by_file(text)
     for needle in forbidden:
-        if any(needle in line for line in added):
+        if any(needle in line for lines in by_file.values() for line in lines):
             findings.append(f'{name} adds forbidden text {needle!r}')
+    for file, lines in by_file.items():
+        if any(re.fullmatch(pattern, file) for pattern in device_exempt):
+            continue
+        for needle in device_forbidden:
+            if any(needle in line for line in lines):
+                findings.append(f'{name} adds {needle!r} in {file}')
     return findings
 
 
@@ -67,7 +89,7 @@ def check_scope(pin, source):
     """Each new patch touches only its declared files and adds no device or GPIO attach."""
     findings = []
     for entry in pin['newPatches']:
-        findings += scope_findings(entry['patchFile'], (ROOT / entry['patchFile']).read_text(), entry['allowedFiles'], pin['forbiddenAddedText'])
+        findings += scope_findings(entry['patchFile'], (ROOT / entry['patchFile']).read_text(), entry['allowedFiles'], pin['forbiddenAddedText'], pin['deviceForbiddenAddedText'], pin['deviceForbiddenExemptFiles'])
     if findings:
         raise RuntimeError('; '.join(findings))
 

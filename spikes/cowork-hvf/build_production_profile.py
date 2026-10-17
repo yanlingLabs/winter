@@ -57,7 +57,7 @@ def run_probe(binary):
 def header_checks(source, scratch):
     """Header contract: C++ double include and layout, production names always visible, fixture names only with the oracle macro."""
     cpp = Path(scratch) / 'header.cpp'
-    cpp.write_text('#include "libkrun.h"\n#include "libkrun.h"\n#include <cstddef>\nstatic_assert(sizeof(krun_cowork_volume_identity)==32);\nstatic_assert(offsetof(krun_cowork_volume_identity,uid)==24);\nstatic_assert(KRUN_COWORK_PRODUCTION_VCPUS==2);\nauto a=&krun_cowork_enable_production_profile;\nauto b=&krun_cowork_create_runtime_port;\nauto c=&krun_cowork_set_workspace_disks;\nauto d=&krun_cowork_validate_production_profile;\n')
+    cpp.write_text('#include "libkrun.h"\n#include "libkrun.h"\n#include <cstddef>\nstatic_assert(sizeof(krun_cowork_volume_identity)==32);\nstatic_assert(offsetof(krun_cowork_volume_identity,uid)==24);\nstatic_assert(sizeof(krun_cowork_flush_counters_v1)==72);\nstatic_assert(sizeof(krun_cowork_pin_counters_v1)==48);\nstatic_assert(KRUN_COWORK_PRODUCTION_VCPUS==2);\nstatic_assert(KRUN_COWORK_EXIT_OFF!=KRUN_COWORK_EXIT_RESET);\nauto a=&krun_cowork_enable_profile_v1;\nauto b=&krun_cowork_create_runtime_port_v1;\nauto c=&krun_cowork_set_workspace_disks_v1;\nauto d=&krun_cowork_validate_profile_v1;\nauto e=&krun_cowork_get_flush_counters_v1;\nauto f=&krun_cowork_get_pin_counters_v1;\nauto g=&krun_cowork_set_exit_hook_v1;\n')
     subprocess.run(['/usr/bin/clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-fsyntax-only', '-I', str(source / 'include'), str(cpp)], check=True)
     hidden = Path(scratch) / 'hidden.c'
     hidden.write_text('#include "libkrun.h"\nint f(void){return krun_enable_cowork_block_fixture_reclaim(0)+krun_create_cowork_runtime_stream(0)+krun_enable_cowork_runtime_port_fixture_trace(0);}\n')
@@ -93,10 +93,24 @@ def inspect_archive(label, raw, stripped, expect_oracle):
             'rawArchivePathFindings': path_findings(blob_raw, builder_tokens()), 'strippedArchivePathFindings': findings_stripped, 'exportCount': len(found)}
 
 
+def check_repro_root(path, source):
+    """The reproduction directory is created by this script and removed afterwards. It must not exist or be an
+    empty directory, must not be (or contain) the home directory, the spike, the output directory or the source,
+    and must not lie inside the source."""
+    path = Path(path).absolute()
+    protected = [Path('/'), Path.home(), ROOT, OUT, Path(source).absolute()]
+    if any(path == item or path in item.parents for item in protected) or Path(source).absolute() in path.parents:
+        raise RuntimeError(f'--repro-root would delete or overlap a protected directory: {path}')
+    if path.exists() and (not path.is_dir() or any(path.iterdir())):
+        raise RuntimeError(f'--repro-root must not exist or be an empty directory (it is removed afterwards): {path}')
+    if not path.parent.is_dir():
+        raise RuntimeError(f'--repro-root parent does not exist: {path.parent}')
+    return path
+
+
 def reproduce(source, root, destination, features):
     """Rebuild from a copy of the source, the toolchain and the crate cache at a different absolute location."""
     destination = Path(destination)
-    shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True)
     second_source, second_root = destination / 'src', destination
     shutil.copytree(source, second_source, ignore=shutil.ignore_patterns('target', '.git'), symlinks=True)
@@ -113,6 +127,7 @@ def main():
     parser.add_argument('--repro-root', default=str(OUT / 'repro-b'), help='second absolute location for the reproduction build')
     parser.add_argument('--keep-repro', action='store_true')
     args = parser.parse_args()
+    repro_root = check_repro_root(args.repro_root, ROOT / load_candidate()['source'])
     source = prepare()
     pin = load_candidate()
     toolchain = check_toolchain()
@@ -134,14 +149,14 @@ def main():
         built[label] = (raw, stripped)
         receipt[label] = inspect_archive(label, raw, stripped, label == 'fixtureOracle')
     # Reproduction at a second location: bit-identical raw and stripped archives.
-    raw_b, stripped_b = reproduce(source, OUT, args.repro_root, pin['features']['production'])
-    receipt['reproduction'] = {'firstSourceRoot': 'out/libkrun-production-profile', 'secondLocation': str(Path(args.repro_root)),
+    raw_b, stripped_b = reproduce(source, OUT, repro_root, pin['features']['production'])
+    receipt['reproduction'] = {'firstSourceRoot': 'out/libkrun-production-profile', 'secondLocation': str(repro_root),
                                'rawArchiveSha256': [digest(built['production'][0]), digest(raw_b)], 'strippedArchiveSha256': [digest(built['production'][1]), digest(stripped_b)],
                                'rawIdentical': digest(built['production'][0]) == digest(raw_b), 'strippedIdentical': digest(built['production'][1]) == digest(stripped_b)}
     if not (receipt['reproduction']['rawIdentical'] and receipt['reproduction']['strippedIdentical']):
         raise RuntimeError('Archive is not reproducible across build locations')
     if not args.keep_repro:
-        shutil.rmtree(args.repro_root, ignore_errors=True)
+        shutil.rmtree(repro_root)
     # Header contract and linked probes.
     with tempfile.TemporaryDirectory(prefix='production-probe-', dir=PRODUCTION_DIR) as scratch:
         receipt['header'] = header_checks(source, scratch)
@@ -150,7 +165,8 @@ def main():
     # Name-scan stand-in: a Mach-O that only links the archive (no probe strings of its own), unstripped and
     # stripped the way a shipped worker is. It references every production export so the archive is pulled in.
     link_scan_c = PRODUCTION_DIR / 'link-scan.c'
-    link_scan_c.write_text('#include "libkrun.h"\nstatic volatile void *keep[]={(void*)krun_cowork_enable_production_profile,(void*)krun_cowork_create_runtime_port,(void*)krun_cowork_set_workspace_disks,(void*)krun_cowork_validate_production_profile};\nint main(void){return keep[0]==0;}\n')
+    keep = ','.join(f'(void*){name[1:]}' for name in PRODUCTION_EXPORTS)
+    link_scan_c.write_text('#include "libkrun.h"\nstatic volatile void *keep[]={' + keep + '};\nint main(void){return keep[0]==0;}\n')
     link_scan = link_probe(source, built['production'][1], link_scan_c, PRODUCTION_DIR / 'link-scan')
     stripped_scan = PRODUCTION_DIR / 'link-scan-stripped'
     shutil.copy2(link_scan, stripped_scan)

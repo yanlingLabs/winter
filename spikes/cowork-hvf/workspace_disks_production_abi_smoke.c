@@ -17,6 +17,10 @@ _Static_assert(KRUN_COWORK_PRODUCTION_VCPUS == 2, "production vCPU count");
 _Static_assert(KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB == 768, "production memory floor");
 _Static_assert(KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB == 1024, "production memory ceiling");
 _Static_assert(sizeof(struct krun_cowork_volume_identity) == 32, "identity layout");
+_Static_assert(sizeof(struct krun_cowork_flush_counters_v1) == 72, "flush counters layout");
+_Static_assert(sizeof(struct krun_cowork_pin_counters_v1) == 48, "pin counters layout");
+_Static_assert(KRUN_COWORK_EXIT_OFF != KRUN_COWORK_EXIT_RESET, "off and reset are distinct reasons");
+static void exit_hook(void *user_data, uint32_t reason) { (void)user_data; (void)reason; }
 
 static int descriptor_count(void) {
     DIR *directory=opendir("/dev/fd"); if (!directory) return -1;
@@ -45,37 +49,48 @@ int main(void) {
     int32_t made=krun_create_ctx();REQUIRE(made>=0);context=(uint32_t)made;live=true;
     int before=descriptor_count();REQUIRE(before>=2);
     /* The gate is not reachable without the production opt-in. */
-    REQUIRE(krun_cowork_validate_production_profile(context)<0);REQUIRE(krun_cowork_create_runtime_port(context)<0);
-    REQUIRE(krun_cowork_set_workspace_disks(context,data,&di,environment,&ei)<0);REQUIRE(descriptor_count()==before);
-    REQUIRE(krun_cowork_enable_production_profile(UINT32_MAX)<0);
+    REQUIRE(krun_cowork_validate_profile_v1(context)<0);REQUIRE(krun_cowork_create_runtime_port_v1(context)<0);
+    REQUIRE(krun_cowork_set_workspace_disks_v1(context,data,&di,environment,&ei)<0);REQUIRE(descriptor_count()==before);
+    REQUIRE(krun_cowork_enable_profile_v1(UINT32_MAX)<0);
     REQUIRE(configure(context,KRUN_COWORK_PRODUCTION_VCPUS,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB));
-    REQUIRE(krun_cowork_enable_production_profile(context)==0);REQUIRE(krun_cowork_enable_production_profile(context)<0);
-    REQUIRE(krun_cowork_validate_production_profile(context)<0); /* no runtime port and no pair yet */
-    peer=krun_cowork_create_runtime_port(context);REQUIRE(peer>=3);REQUIRE((fcntl(peer,F_GETFD)&FD_CLOEXEC)!=0);
-    REQUIRE(krun_cowork_create_runtime_port(context)<0); /* one port only */
+    REQUIRE(krun_cowork_enable_profile_v1(context)==0);REQUIRE(krun_cowork_enable_profile_v1(context)<0);
+    REQUIRE(krun_cowork_validate_profile_v1(context)<0); /* no runtime port and no pair yet */
+    REQUIRE(krun_cowork_set_exit_hook_v1(UINT32_MAX,exit_hook,NULL)<0);
+    peer=krun_cowork_create_runtime_port_v1(context);REQUIRE(peer>=3);REQUIRE((fcntl(peer,F_GETFD)&FD_CLOEXEC)!=0);
+    REQUIRE(krun_cowork_create_runtime_port_v1(context)<0); /* one port only */
     int with_port=descriptor_count();
     struct krun_cowork_volume_identity bad=ei;bad.inode^=1;
-    REQUIRE(krun_cowork_set_workspace_disks(context,data,&di,environment,&bad)<0);REQUIRE(descriptor_count()==with_port);
-    REQUIRE(krun_cowork_set_workspace_disks(context,data,&di,data,&di)<0);REQUIRE(descriptor_count()==with_port);
-    REQUIRE(krun_cowork_validate_production_profile(context)<0); /* still no pair */
-    REQUIRE(krun_cowork_set_workspace_disks(context,data,&di,environment,&ei)==0);REQUIRE(descriptor_count()==with_port+2);
-    REQUIRE(krun_cowork_validate_production_profile(context)==0);
+    REQUIRE(krun_cowork_set_workspace_disks_v1(context,data,&di,environment,&bad)<0);REQUIRE(descriptor_count()==with_port);
+    REQUIRE(krun_cowork_set_workspace_disks_v1(context,data,&di,data,&di)<0);REQUIRE(descriptor_count()==with_port);
+    REQUIRE(krun_cowork_validate_profile_v1(context)<0); /* still no pair */
+    REQUIRE(krun_cowork_set_workspace_disks_v1(context,data,&di,environment,&ei)==0);REQUIRE(descriptor_count()==with_port+2);
+    REQUIRE(krun_cowork_validate_profile_v1(context)==0);
+    /* The exit hook is optional, production-only and accepted once; the counters are process-global. */
+    REQUIRE(krun_cowork_set_exit_hook_v1(context,NULL,NULL)<0);
+    REQUIRE(krun_cowork_set_exit_hook_v1(context,exit_hook,NULL)==0);REQUIRE(krun_cowork_set_exit_hook_v1(context,exit_hook,NULL)<0);
+    struct krun_cowork_flush_counters_v1 flush={.size=sizeof(flush)};
+    REQUIRE(krun_cowork_get_flush_counters_v1(&flush)==0);REQUIRE(flush.size==sizeof(flush)&&flush.device_count==2);
+    REQUIRE(flush.device[0].requested==0&&flush.device[1].completed==0&&flush.device[0].final_sync_attempted==0);
+    struct krun_cowork_flush_counters_v1 short_flush={.size=sizeof(short_flush)-1};REQUIRE(krun_cowork_get_flush_counters_v1(&short_flush)<0);
+    struct krun_cowork_pin_counters_v1 pins={.size=sizeof(pins)};
+    REQUIRE(krun_cowork_get_pin_counters_v1(&pins)==0);REQUIRE(pins.max_pins==48&&pins.max_pinned_bytes==8ULL*1024*1024&&pins.high_water_pins==0&&pins.budget_refusals==0);
+    REQUIRE(krun_cowork_get_pin_counters_v1(NULL)<0);
     /* Explicit limits through the public setters: exactly two vCPUs, 768..1024 MiB. */
-    REQUIRE(krun_set_vm_config(context,2,KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_production_profile(context)==0);
-    REQUIRE(krun_set_vm_config(context,2,KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB+1)==0);REQUIRE(krun_cowork_validate_production_profile(context)<0);
-    REQUIRE(krun_set_vm_config(context,2,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB-1)==0);REQUIRE(krun_cowork_validate_production_profile(context)<0);
-    REQUIRE(krun_set_vm_config(context,3,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_production_profile(context)<0);
-    REQUIRE(krun_set_vm_config(context,1,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_production_profile(context)<0);
-    REQUIRE(krun_set_vm_config(context,KRUN_COWORK_PRODUCTION_VCPUS,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_production_profile(context)==0);
+    REQUIRE(krun_set_vm_config(context,2,KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_profile_v1(context)==0);
+    REQUIRE(krun_set_vm_config(context,2,KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB+1)==0);REQUIRE(krun_cowork_validate_profile_v1(context)<0);
+    REQUIRE(krun_set_vm_config(context,2,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB-1)==0);REQUIRE(krun_cowork_validate_profile_v1(context)<0);
+    REQUIRE(krun_set_vm_config(context,3,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_profile_v1(context)<0);
+    REQUIRE(krun_set_vm_config(context,1,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_profile_v1(context)<0);
+    REQUIRE(krun_set_vm_config(context,KRUN_COWORK_PRODUCTION_VCPUS,KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB)==0);REQUIRE(krun_cowork_validate_profile_v1(context)==0);
 #if defined(__aarch64__) && defined(__APPLE__)
     /* The shutdown eventfd attaches the PL061 GPIO device, which is not in the admitted inventory. */
     int shutdown=krun_get_shutdown_eventfd(context);REQUIRE(shutdown>=0);
-    REQUIRE(krun_cowork_validate_production_profile(context)<0);REQUIRE(close(shutdown)==0);
+    REQUIRE(krun_cowork_validate_profile_v1(context)<0);REQUIRE(close(shutdown)==0);
 #endif
     REQUIRE(krun_free_ctx(context)==0);live=false;
     close(peer);peer=-1;REQUIRE(descriptor_count()==before);
     REQUIRE(fcntl(data,F_GETFD)>=0&&fcntl(environment,F_GETFD)>=0);
-    puts("{\"productionAbiVerified\":true,\"limitsVerified\":true,\"shutdownDeviceRefused\":true,\"ownedFdCleanupVerified\":true,\"callerFdsRetained\":true,\"vmStarted\":false,\"krunStartEnterCalled\":false,\"workerStarted\":false,\"productionReady\":false}");status=0;
+    puts("{\"productionAbiVerified\":true,\"countersVerified\":true,\"exitHookRegistrationVerified\":true,\"limitsVerified\":true,\"shutdownDeviceRefused\":true,\"ownedFdCleanupVerified\":true,\"callerFdsRetained\":true,\"vmStarted\":false,\"krunStartEnterCalled\":false,\"workerStarted\":false,\"productionReady\":false}");status=0;
 cleanup:
     if(live)(void)krun_free_ctx(context);
     if(peer>=0)close(peer);
