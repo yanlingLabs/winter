@@ -4,7 +4,7 @@
  * (asserted equal to <sys/mount.h> in the Linux translation unit).
  *
  *   data volume          /workspace                       nosuid,nodev,noatime   noinit_itable,errors=remount-ro
- *   environment volume   /opt/winter/environment/disk     nosuid,nodev,noatime   noinit_itable,errors=remount-ro
+ *   environment volume   NOT mounted in N2 (checked against its plan, attached, flushed by the VMM at the end; a consumer comes later)
  *   journal replay       /run/winter/replay/<purpose>     nosuid,nodev,noexec,noatime   noinit_itable,errors=remount-ro
  *
  * `noinit_itable` is mandatory at every mount: the volumes were created with lazy inode tables from sparse zero files, and
@@ -25,7 +25,6 @@
 #define WG_MS_NOATIME 1024ul
 
 #define WG_WORKSPACE_PATH "/workspace"
-#define WG_ENVIRONMENT_PATH "/opt/winter/environment/disk"
 #define WG_REPLAY_ROOT "/run/winter/replay"
 
 #define WG_WORKING_FLAGS (WG_MS_NOSUID | WG_MS_NODEV | WG_MS_NOATIME)
@@ -44,8 +43,8 @@ struct wg_mount_ops {
     int (*skeleton)(void *ctx);
 };
 
-/* Both volumes are checked first, then the data volume is mounted, then the environment volume, then the skeleton is made. Any
- * failure unmounts what this call mounted; a rollback unmount that fails sets that volume's bit in *leftover (1 data, 2 environment)
+/* Both volumes are checked first, then the data volume is mounted, then the skeleton is made. Any failure unmounts what this call
+ * mounted; a rollback unmount that fails sets the data volume's bit in *leftover (1)
  * so the caller keeps track of a filesystem that is still mounted. Returns 0 only when everything is in place. */
 int wg_mount_volumes(const struct wg_mount_ops *ops, const char *data_node, const uint8_t data_uuid[16], const char *environment_node,
                      const uint8_t environment_uuid[16], int *leftover);

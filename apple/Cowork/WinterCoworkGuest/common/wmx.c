@@ -4,7 +4,7 @@
 #include <string.h>
 
 static const char *const STATUS_NAMES[WMX_STATUS_COUNT] = {
-    "ok", "malformed", "oversize", "version", "unknown_type", "bad_field", "reserved_class", "bad_sequence"
+    "ok", "malformed", "oversize", "version", "unknown_type", "bad_field", "reserved_class", "bad_sequence", "bad_direction"
 };
 
 const char *wmx_status_name(enum wmx_status status) {
@@ -95,7 +95,7 @@ int wmx_is_nonce(const char *text) {
     return text[WMX_NONCE_CHARS] == '\0';
 }
 
-enum field_kind { F_NONCE, F_U32, F_BUDGET, F_ORIGIN };
+enum field_kind { F_NONCE, F_U32, F_BUDGET, F_ORIGIN, F_FAULT_CODE, F_NONCE_OR_NULL };
 struct field_spec { const char *key; enum field_kind kind; };
 struct control_spec {
     const char *type;
@@ -110,7 +110,10 @@ static const struct control_spec SPECS[] = {
     { "drain_ack", WMX_CONTROL_DRAIN_ACK, WMX_UP, 1, { { "stopNonce", F_NONCE } } },
     { "halting", WMX_CONTROL_HALTING, WMX_UP, 1, { { "stopNonce", F_NONCE } } },
     { "pong", WMX_CONTROL_PONG, WMX_UP, 1, { { "n", F_U32 } } },
+    { "fault", WMX_CONTROL_FAULT, WMX_UP, 2, { { "code", F_FAULT_CODE }, { "stopNonce", F_NONCE_OR_NULL } } },
 };
+static const char *const FAULT_NAMES[] = { "none", "unmount_failed", "supervisor_lost", "protocol_violation", "internal" };
+const char *wmx_fault_code_name(enum wmx_fault_code code) { return (unsigned)code <= WMX_FAULT_INTERNAL ? FAULT_NAMES[code] : "none"; }
 #define SPEC_COUNT (sizeof SPECS / sizeof SPECS[0])
 
 struct cursor { const uint8_t *p; const uint8_t *end; };
@@ -181,18 +184,25 @@ static enum wmx_status read_value(struct cursor *c, enum field_kind kind, struct
         if (kind == F_BUDGET) out->budget_ms = value; else out->n = value;
         return WMX_OK;
     }
+    if (kind == F_NONCE_OR_NULL && take_literal(c, "null")) { out->has_stop_nonce = 0; return WMX_OK; }
     if (!take_literal(c, "\"")) return WMX_MALFORMED;
     const uint8_t *text;
     int length = read_token(c, &text);
     if (length < 0) return WMX_MALFORMED;
     c->p += length + 1; /* token and the closing quote */
-    if (kind == F_NONCE) {
+    if (kind == F_FAULT_CODE) {
+        for (unsigned code = WMX_FAULT_UNMOUNT_FAILED; code <= WMX_FAULT_INTERNAL; code++)
+            if (strlen(FAULT_NAMES[code]) == (size_t)length && memcmp(FAULT_NAMES[code], text, (size_t)length) == 0) { out->fault_code = (enum wmx_fault_code)code; return WMX_OK; }
+        return WMX_BAD_FIELD;
+    }
+    if (kind == F_NONCE || kind == F_NONCE_OR_NULL) {
         char candidate[WMX_NONCE_CHARS + 1];
         if (length != WMX_NONCE_CHARS) return WMX_BAD_FIELD;
         memcpy(candidate, text, WMX_NONCE_CHARS);
         candidate[WMX_NONCE_CHARS] = '\0';
         if (!wmx_is_nonce(candidate)) return WMX_BAD_FIELD;
         memcpy(out->stop_nonce, candidate, sizeof candidate);
+        out->has_stop_nonce = 1;
         return WMX_OK;
     }
     if (length == 9 && memcmp(text, "host-stop", 9) == 0) { out->origin = WMX_ORIGIN_HOST_STOP; return WMX_OK; }
@@ -246,12 +256,37 @@ size_t wmx_encode_control(const struct wmx_control *message, uint8_t *out, size_
     case WMX_CONTROL_PONG:
         n = snprintf(text, sizeof text, "{\"v\":1,\"t\":\"pong\",\"n\":%u}", (unsigned)message->n);
         break;
+    case WMX_CONTROL_FAULT:
+        if (message->fault_code < WMX_FAULT_UNMOUNT_FAILED || message->fault_code > WMX_FAULT_INTERNAL) return 0;
+        if (message->has_stop_nonce) {
+            if (!wmx_is_nonce(message->stop_nonce)) return 0;
+            n = snprintf(text, sizeof text, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":\"%s\"}", FAULT_NAMES[message->fault_code], message->stop_nonce);
+        } else {
+            n = snprintf(text, sizeof text, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":null}", FAULT_NAMES[message->fault_code]);
+        }
+        break;
     default:
         return 0; /* drain and ping are host messages: the guest never writes them */
     }
     if (n <= 0 || (size_t)n >= sizeof text || (size_t)n > capacity) return 0;
     memcpy(out, text, (size_t)n);
     return (size_t)n;
+}
+
+/* ------------------------------------------------------------------------------------------------ runtime payloads */
+
+enum wmx_status wmx_parse_runtime_payload(const uint8_t *payload, size_t length, enum wmx_direction direction, struct wmx_runtime_prefix *out) {
+    if (!payload || length < WMX_RUNTIME_PREFIX_BYTES) return WMX_MALFORMED;
+    unsigned conversation = payload[0], stream = payload[1], flags = payload[2];
+    if (conversation >= WMX_RUNTIME_CONVERSATIONS || stream < WMX_STREAM_IN || stream > WMX_STREAM_ERR || flags > 1 || payload[3] != 0) return WMX_BAD_FIELD;
+    if ((stream == WMX_STREAM_IN) != (direction == WMX_DOWN)) return WMX_BAD_DIRECTION;
+    if (length == WMX_RUNTIME_PREFIX_BYTES && flags == 0) return WMX_BAD_FIELD;
+    if (out) { out->conversation = conversation; out->stream = (enum wmx_stream)stream; out->end = (int)flags; }
+    return WMX_OK;
+}
+
+void wmx_write_runtime_prefix(uint8_t out[WMX_RUNTIME_PREFIX_BYTES], unsigned conversation, enum wmx_stream stream, int end) {
+    out[0] = (uint8_t)conversation; out[1] = (uint8_t)stream; out[2] = end ? 1 : 0; out[3] = 0;
 }
 
 /* ------------------------------------------------------------------------------------------------ stream assembler */

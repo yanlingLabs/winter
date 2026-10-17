@@ -69,19 +69,37 @@ static int top_level_key(const char *text, size_t length, const char *key) {
 }
 
 enum wg_config_result wg_build_trusted_config(const char *boot_id, const char *base, size_t base_length, const char *conversations,
-                                              size_t conversations_length, char *out, size_t capacity, size_t *out_length) {
+                                              size_t conversations_length, const char *runtime_key, const char *runtime_artifacts,
+                                              size_t runtime_artifacts_length, char *out, size_t capacity, size_t *out_length) {
     if (!wg_boot_id_ok(boot_id)) return WG_CONFIG_BOOT_ID;
     if (!wg_json_text_shape(base, base_length, '{', WG_CONFIG_BASE_MAX)) return WG_CONFIG_BASE_SHAPE;
-    if (top_level_key(base, base_length, "guestBootId") != 0 || top_level_key(base, base_length, "conversations") != 0) return WG_CONFIG_BASE_FORBIDDEN_KEY;
+    if (top_level_key(base, base_length, "guestBootId") != 0 || top_level_key(base, base_length, "conversations") != 0 ||
+        top_level_key(base, base_length, "hostQueryRuntime") != 0 || top_level_key(base, base_length, "hostQueryGuidedRuntime") != 0)
+        return WG_CONFIG_BASE_FORBIDDEN_KEY;
     if (!wg_json_text_shape(conversations, conversations_length, '[', WG_CONFIG_CONVERSATIONS_MAX)) return WG_CONFIG_CONVERSATIONS_SHAPE;
+    size_t runtime_extra = 0;
+    if (runtime_key != NULL) {
+        if ((strcmp(runtime_key, "hostQueryRuntime") != 0 && strcmp(runtime_key, "hostQueryGuidedRuntime") != 0) ||
+            !wg_json_text_shape(runtime_artifacts, runtime_artifacts_length, '{', WG_CONFIG_RUNTIME_ARTIFACTS_MAX))
+            return WG_CONFIG_RUNTIME_SHAPE;
+        runtime_extra = 1 + 2 + strlen(runtime_key) + 1 + runtime_artifacts_length;   /* ,"key":object */
+    }
     int has_members = base_length > 2;
-    size_t need = strlen("{\"guestBootId\":\"\",\"conversations\":") + 36 + conversations_length + (has_members ? 1 + (base_length - 2) : 0) + 1;
+    size_t need = strlen("{\"guestBootId\":\"\",\"conversations\":") + 36 + conversations_length + (has_members ? 1 + (base_length - 2) : 0) + runtime_extra + 1;
     if (need > WG_CONFIG_MAX_BYTES || need + 1 > capacity) return WG_CONFIG_TOO_LARGE;
     int n = snprintf(out, capacity, "{\"guestBootId\":\"%s\",\"conversations\":", boot_id);
     if (n < 0 || (size_t)n >= capacity) return WG_CONFIG_TOO_LARGE;
     size_t at = (size_t)n;
     memcpy(out + at, conversations, conversations_length); at += conversations_length;
     if (has_members) { out[at++] = ','; memcpy(out + at, base + 1, base_length - 2); at += base_length - 2; }
+    if (runtime_key != NULL) {
+        out[at++] = ',';
+        out[at++] = '"';
+        memcpy(out + at, runtime_key, strlen(runtime_key)); at += strlen(runtime_key);
+        out[at++] = '"';
+        out[at++] = ':';
+        memcpy(out + at, runtime_artifacts, runtime_artifacts_length); at += runtime_artifacts_length;
+    }
     out[at++] = '}';
     out[at] = '\0';
     if (out_length) *out_length = at;

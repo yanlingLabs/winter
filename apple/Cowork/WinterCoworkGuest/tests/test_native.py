@@ -21,9 +21,12 @@ PINS = json.loads((ROOT / "vectors/PINS.json").read_text())
 CC = os.environ.get("CC") or shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
 SANITIZE = os.environ.get("WG_SANITIZE", "1") == "1"
 
-# The five payload-level negatives are judged by the Python bootstrap helper; in C they are well-formed frames (the relay
-# forwards bootstrap payloads byte for byte). test_guest_bootstrap.py holds them to the contract category.
-PAYLOAD_LEVEL = {"plan-travelling-up", "plan-protocol-2", "plan-unsorted-nested-keys", "hello-wrong-serial", "bootstrap-invalid-utf8", "bom-mux-bootstrap"}
+# A bootstrap-class payload is judged by the Python bootstrap helper; in C it is a well-formed frame (the relay forwards bootstrap
+# payloads byte for byte), unless the header itself is at fault. test_guest_bootstrap.py holds every one of them to its contract
+# category. The class byte of the frame says which ones these are; control and runtime payloads are judged in C.
+def is_bootstrap(vector):
+    raw = bytes.fromhex(vector["hex"])
+    return len(raw) > 5 and raw[:4] == b"WMX1" and raw[5] == 1
 
 
 def build(sources, output, extra=()):
@@ -78,7 +81,7 @@ class NativeCodecTests(unittest.TestCase):
 
     def test_the_guests_own_control_messages_reencode_to_the_vector_bytes(self):
         results = self.vector_results()
-        for name in ("control-up-drain-ack", "control-up-halting", "control-up-pong"):
+        for name in ("control-up-drain-ack", "control-up-halting", "control-up-pong", "control-up-fault-during-drain", "control-up-fault-outside-drain"):
             self.assertEqual(results["pos:" + name][-1], "reencode-same", name)
 
     def test_control_fields_are_decoded(self):
@@ -86,14 +89,37 @@ class NativeCodecTests(unittest.TestCase):
         self.assertEqual(results["pos:control-down-drain-host-stop"][4:], ["drain", "0f" * 16, "30000", "0", "0"])
         self.assertEqual(results["pos:control-down-drain-owner-loss"][4:], ["drain", "a5" * 16, "30000", "1", "0"])
         self.assertEqual(results["pos:control-down-ping"][4:], ["ping", "", "0", "0", "7"])
+        self.assertEqual(results["pos:control-up-fault-during-drain"][4:8], ["fault", "0f" * 16, "0", "0"])
+        self.assertEqual(results["pos:control-up-fault-during-drain"][9:11], ["unmount_failed", "1"])
+        self.assertEqual(results["pos:control-up-fault-outside-drain"][9:11], ["supervisor_lost", "0"])
+
+    def test_runtime_prefixes_are_decoded_and_rebuilt(self):
+        results = self.vector_results()
+        expected = {"runtime-down-bytes": (0, 1, 0), "runtime-up-bytes": (0, 2, 0), "runtime-up-empty-end": (0, 2, 1), "runtime-up-err-bytes": (0, 3, 0),
+                    "runtime-down-in-end": (2, 1, 1), "runtime-up-last-conversation": (15, 2, 1)}
+        for name, (conversation, stream, end) in expected.items():
+            with self.subTest(name):
+                self.assertEqual(results["pos:" + name][4:], ["runtime", str(conversation), str(stream), str(end), "prefix-same"])
+
+    def test_the_guests_fault_frames_are_built_to_the_vector_bytes(self):
+        by_name = {v["name"]: v["hex"] for v in VECTORS["positive"]}
+        for name, code, seq, nonce in (("control-up-fault-during-drain", 1, None, "0f" * 16), ("control-up-fault-outside-drain", 2, None, "")):
+            raw = bytes.fromhex(by_name[name])
+            seq = int.from_bytes(raw[8:12], "little")
+            self.assertEqual(self.run_tool("encode", "fault", str(code), str(seq), nonce)[0], by_name[name])
+        for refused in (("0", "1", ""), ("5", "1", ""), ("1", "1", "ZZ" * 16), ("1", "0", "")):
+            self.assertEqual(self.run_tool("encode", "fault", *refused), ["refused"], refused)
+
+    def fault_hex(self, code, seq, nonce):
+        return self.run_tool("encode", "fault", str(code), str(seq), nonce)[0]
 
     def test_every_negative_vector_is_refused_with_the_contract_category(self):
         results = self.vector_results()
         for v in VECTORS["negative"]:
             with self.subTest(v["name"]):
                 fields = results["neg:" + v["name"]]
-                if v["name"] in PAYLOAD_LEVEL:
-                    self.assertEqual(fields[0], "ok", "well-formed frame; the payload belongs to the bootstrap helper")
+                if fields[0] == "ok":
+                    self.assertTrue(is_bootstrap(v), "only a bootstrap payload may be judged by the helper instead of C")
                 else:
                     self.assertEqual(fields, [v["error"]])
 
@@ -187,6 +213,17 @@ class NativeCodecTests(unittest.TestCase):
         self.assertEqual(self.control("down", up_nonce), "unknown_type")
         self.assertEqual(self.control("up", n % "7"), "unknown_type")
         self.assertEqual(self.control("up", '{"v":1,"t":"pong","n":7}'), "ok")
+        for code in ("unmount_failed", "supervisor_lost", "protocol_violation", "internal"):
+            self.assertEqual(self.control("up", '{"v":1,"t":"fault","code":"%s","stopNonce":null}' % code), "ok", code)
+            self.assertEqual(self.control("up", '{"v":1,"t":"fault","code":"%s","stopNonce":"%s"}' % (code, good_nonce)), "ok", code)
+        for text, expected in (('{"v":1,"t":"fault","code":"melted","stopNonce":null}', "bad_field"), ('{"v":1,"t":"fault","code":"","stopNonce":null}', "bad_field"),
+                               ('{"v":1,"t":"fault","code":"internal","stopNonce":"%s"}' % good_nonce.upper(), "bad_field"), ('{"v":1,"t":"fault","code":"internal","stopNonce":"abc"}', "bad_field"),
+                               ('{"v":1,"t":"fault","code":"internal","stopNonce":0}', "malformed"), ('{"v":1,"t":"fault","code":"internal"}', "bad_field"),
+                               ('{"v":1,"t":"drain_ack","stopNonce":null}', "malformed"), ('{"v":1,"t":"halting","stopNonce":null}', "malformed"),
+                               ('{"v":1,"t":"fault","stopNonce":null,"code":"internal"}', "malformed")):
+            with self.subTest(text=text):
+                self.assertEqual(self.control("up", text), expected)
+        self.assertEqual(self.control("down", '{"v":1,"t":"fault","code":"internal","stopNonce":null}'), "unknown_type")
         self.assertEqual(self.control("up", '{"v":1,"t":"halting","stopNonce":"%s"}' % good_nonce.upper()), "bad_field")
 
     # ---- ctl (private pipe framing)

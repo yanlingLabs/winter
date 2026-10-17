@@ -22,7 +22,7 @@ const struct wg_skeleton_entry WG_WORKSPACE_SKELETON[] = {
 const size_t WG_WORKSPACE_SKELETON_COUNT = sizeof WG_WORKSPACE_SKELETON / sizeof WG_WORKSPACE_SKELETON[0];
 
 /* /run is a fresh tmpfs. control/ is the supervisor's controlDirectory (root-owned, 0700 or 0711); trusted/ holds the trusted
- * config and the (not yet delivered) conversation set and is root-only. */
+ * config PID 1 writes when the host's conversation set arrives, and is root-only. */
 const struct wg_skeleton_entry WG_RUN_SKELETON[] = {
     { "winter", 0711, 0, 0 },
     { "winter/control", 0711, 0, 0 },

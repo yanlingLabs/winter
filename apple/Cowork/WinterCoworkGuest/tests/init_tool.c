@@ -6,6 +6,7 @@
 #include "../init/discover.h"
 #include "../init/ext4sb.h"
 #include "../init/skeleton.h"
+#include "../init/boot.h"
 #include "../init/trusted_config.h"
 
 #include <errno.h>
@@ -125,16 +126,32 @@ int main(int argc, char **argv) {
         printf("rc=%d\n", wg_skeleton_apply(root, &entry, 1, &ops));
         return 0;
     }
-    if (strcmp(argv[1], "config") == 0 && (argc == 5 || argc == 6)) {
-        size_t base_length = 0, conv_length = 0;
+    if ((strcmp(argv[1], "config") == 0 && (argc == 5 || argc == 6)) || (strcmp(argv[1], "configrt") == 0 && (argc == 7 || argc == 8))) {
+        int rt = strcmp(argv[1], "configrt") == 0;
+        size_t base_length = 0, conv_length = 0, art_length = 0;
         char *base = slurp(argv[3], &base_length), *conv = slurp(argv[4], &conv_length);
+        char *art = rt ? slurp(argv[6], &art_length) : NULL;
         static char out[70000];
         size_t out_length = 0;
-        enum wg_config_result r = wg_build_trusted_config(argv[2], base, base_length, conv, conv_length, out,
-                                                                 argc == 6 && strtoul(argv[5], NULL, 10) < sizeof out ? strtoul(argv[5], NULL, 10) : sizeof out, &out_length);
+        int cap_at = rt ? 7 : 5, has_cap = argc == cap_at + 1;
+        size_t capacity = has_cap && strtoul(argv[cap_at], NULL, 10) < sizeof out ? strtoul(argv[cap_at], NULL, 10) : sizeof out;
+        enum wg_config_result r = wg_build_trusted_config(argv[2], base, base_length, conv, conv_length, rt ? (strcmp(argv[5], "-") == 0 ? NULL : argv[5]) : NULL, art, art_length, out, capacity, &out_length);
         printf("%d|%s\n", (int)r, r == WG_CONFIG_OK ? out : "");
         free(base);
         free(conv);
+        free(art);
+        return 0;
+    }
+    if (strcmp(argv[1], "convparse") == 0 && argc == 3) {
+        size_t length = strlen(argv[2]) / 2;
+        uint8_t *bytes = malloc(length + 1);
+        for (size_t i = 0; i < length; i++) { unsigned v; sscanf(argv[2] + 2 * i, "%2x", &v); bytes[i] = (uint8_t)v; }
+        struct wg_conversation_set set;
+        if (wg_parse_conversation_payload(bytes, length, &set) != 0) { printf("refused\n"); free(bytes); return 0; }
+        printf("%u|%u", set.profile, set.count);
+        for (unsigned i = 0; i < set.count; i++) printf("|%s:%u", set.session_id[i], (unsigned)set.runtime_uid[i]);
+        printf("|%.*s\n", (int)set.json_length, set.json);
+        free(bytes);
         return 0;
     }
     if (strcmp(argv[1], "writecfg") == 0 && (argc == 5 || argc == 6)) {

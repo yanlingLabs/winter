@@ -47,6 +47,7 @@ enum wmx_status {
     WMX_BAD_FIELD,
     WMX_RESERVED_CLASS,
     WMX_BAD_SEQUENCE,
+    WMX_BAD_DIRECTION,
     WMX_STATUS_COUNT
 };
 const char *wmx_status_name(enum wmx_status status);
@@ -92,8 +93,12 @@ enum wmx_control_type {
     WMX_CONTROL_PING,      /* down */
     WMX_CONTROL_DRAIN_ACK, /* up */
     WMX_CONTROL_HALTING,   /* up */
-    WMX_CONTROL_PONG       /* up */
+    WMX_CONTROL_PONG,      /* up */
+    WMX_CONTROL_FAULT      /* up: the guest is failing (round 3 of the contract) */
 };
+/* The closed vocabulary of a control-up `fault` (protocol.ts COWORK_NATIVE_GUEST_FAULTS). */
+enum wmx_fault_code { WMX_FAULT_NONE = 0, WMX_FAULT_UNMOUNT_FAILED, WMX_FAULT_SUPERVISOR_LOST, WMX_FAULT_PROTOCOL_VIOLATION, WMX_FAULT_INTERNAL };
+const char *wmx_fault_code_name(enum wmx_fault_code code);
 #define WMX_NONCE_CHARS 32u
 #define WMX_DRAIN_BUDGET_CEILING_MS 120000u
 enum wmx_drain_origin { WMX_ORIGIN_HOST_STOP = 0, WMX_ORIGIN_OWNER_LOSS = 1 };
@@ -104,6 +109,8 @@ struct wmx_control {
     uint32_t budget_ms;                    /* drain */
     enum wmx_drain_origin origin;          /* drain */
     uint32_t n;                            /* ping, pong */
+    enum wmx_fault_code fault_code;        /* fault */
+    int has_stop_nonce;                    /* fault: 0 = the nonce is null; otherwise stop_nonce holds the drain's */
 };
 
 /* The exact canonical text only. The status mirrors protocol.ts: unknown type -> UNKNOWN_TYPE, a wrong key set or a bad value
@@ -114,6 +121,23 @@ enum wmx_status wmx_parse_control(const uint8_t *payload, size_t length, enum wm
 size_t wmx_encode_control(const struct wmx_control *message, uint8_t *out, size_t capacity);
 
 int wmx_is_nonce(const char *text); /* exactly 32 chars of [a-f0-9] */
+
+/* ---- runtime payloads (section 6.2): a 4 byte prefix, then the stream's bytes ----
+ *   0 1 conversation (0 to 15)   1 1 stream (1 IN host to guest, 2 OUT, 3 ERR guest to host)   2 1 flags (bit 0 = end of the stream)   3 1 zero
+ * An empty data section is valid only with the end flag. Direction decides which streams may travel. */
+#define WMX_RUNTIME_PREFIX_BYTES 4u
+#define WMX_RUNTIME_CONVERSATIONS 16u
+enum wmx_stream { WMX_STREAM_IN = 1, WMX_STREAM_OUT = 2, WMX_STREAM_ERR = 3 };
+struct wmx_runtime_prefix {
+    unsigned conversation;
+    enum wmx_stream stream;
+    int end;
+};
+/* Validates the prefix and the data section's length. Same categories as protocol.ts runtimeFrame: a payload shorter than the
+ * prefix is MALFORMED; a conversation above 15, a stream outside 1 to 3, a flag other than bit 0, a non-zero reserved byte or an
+ * empty section without the end flag is BAD_FIELD; the wrong stream for the direction is BAD_DIRECTION. */
+enum wmx_status wmx_parse_runtime_payload(const uint8_t *payload, size_t length, enum wmx_direction direction, struct wmx_runtime_prefix *out);
+void wmx_write_runtime_prefix(uint8_t out[WMX_RUNTIME_PREFIX_BYTES], unsigned conversation, enum wmx_stream stream, int end);
 
 /* ---- incremental frame assembler for a byte stream (the virtio port) ---- */
 

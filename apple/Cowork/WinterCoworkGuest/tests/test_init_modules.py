@@ -32,7 +32,7 @@ class InitModuleCase(unittest.TestCase):
     def setUpClass(cls):
         cls.folder = Path(tempfile.mkdtemp(prefix="guest-init-"))
         init = ROOT / "init"
-        cls.tool = build([ROOT / "tests/init_tool.c", init / "discover.c", init / "ext4sb.c", init / "skeleton.c", init / "trusted_config.c"],
+        cls.tool = build([ROOT / "tests/init_tool.c", init / "discover.c", init / "ext4sb.c", init / "skeleton.c", init / "trusted_config.c", init / "boot.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"],
                          cls.folder / "init_tool", extra=EXTRA)
 
     @classmethod
@@ -500,6 +500,78 @@ class TrustedConfigTests(InitModuleCase):
         self.assertEqual(self.build_config("{}", many)[0], 4)
         within = "[" + ",".join(['"' + "b" * 90 + '"'] * 500) + "]"
         self.assertEqual(self.build_config("{}", within)[0], 0)
+
+    def build_runtime_config(self, base, conversations, key, artifacts, capacity=None):
+        base_path, conv_path, art_path = self.dir / "base.json", self.dir / "conv.json", self.dir / "art.json"
+        base_path.write_text(base)
+        conv_path.write_text(conversations)
+        art_path.write_text(artifacts)
+        extra = [] if capacity is None else [str(capacity)]
+        code, _, text = self.run_tool("configrt", self.BOOT, base_path, conv_path, key, art_path, *extra).partition("|")
+        return int(code), text
+
+    def test_a_host_query_profile_gets_its_artifact_pins_under_its_own_key(self):
+        artifacts = '{"artifacts":{"launcher":{"path":"/opt/r/launcher","sha256":"' + "0" * 64 + '"}}}'
+        for key in ("hostQueryRuntime", "hostQueryGuidedRuntime"):
+            with self.subTest(key=key):
+                code, text = self.build_runtime_config('{"controlDirectory":"/run/winter/control"}', '[{"logicalSessionId":"s1"}]', key, artifacts)
+                self.assertEqual(code, 0)
+                parsed = json.loads(text)
+                self.assertEqual(list(parsed), ["guestBootId", "conversations", "controlDirectory", key])
+                self.assertEqual(parsed[key], json.loads(artifacts))
+        code, text = self.build_runtime_config("{}", "[]", "hostQueryRuntime", artifacts)
+        self.assertEqual((code, json.loads(text)["hostQueryRuntime"]["artifacts"]["launcher"]["path"]), (0, "/opt/r/launcher"))   # no stray comma with an empty static part
+        self.assertEqual(self.build_runtime_config("{}", "[]", "-", artifacts)[0], 0)   # a tools-only set carries no runtime key at all
+        self.assertNotIn("hostQuery", self.build_runtime_config("{}", "[]", "-", artifacts)[1])
+
+    def test_the_runtime_key_and_artifacts_are_checked(self):
+        artifacts = '{"artifacts":{}}'
+        for key in ("freshRuntime", "hostquery", "hostQueryRuntime\"", "conversations", "guestBootId"):
+            with self.subTest(key=key):
+                self.assertEqual(self.build_runtime_config("{}", "[]", key, artifacts)[0], 6)
+        for bad in ("[]", "{", '{"a":1}}', '"x"', "{" + '"k":"' + "a" * 4100 + '"}'):
+            with self.subTest(artifacts=bad[:12]):
+                self.assertEqual(self.build_runtime_config("{}", "[]", "hostQueryRuntime", bad)[0], 6)
+
+    def test_the_runtime_member_is_counted_in_the_size_check_to_the_byte(self):
+        artifacts = '{"artifacts":{"a":1}}'
+        code, text = self.build_runtime_config("{}", "[]", "hostQueryGuidedRuntime", artifacts)
+        self.assertEqual(code, 0)
+        whole = len(text)
+        self.assertEqual(self.build_runtime_config("{}", "[]", "hostQueryGuidedRuntime", artifacts, capacity=whole + 1)[0], 0)
+        for capacity in (whole, whole - 1, whole - 2, whole - 10):
+            with self.subTest(capacity=capacity):
+                self.assertEqual(self.build_runtime_config("{}", "[]", "hostQueryGuidedRuntime", artifacts, capacity=capacity)[0], 5)
+
+    def test_the_static_part_cannot_name_a_runtime_profile_key_either(self):
+        for key in ("hostQueryRuntime", "hostQueryGuidedRuntime"):
+            with self.subTest(key=key):
+                self.assertEqual(self.build_runtime_config('{"%s":{}}' % key, "[]", "hostQueryRuntime", '{"artifacts":{}}')[0], 3)
+
+    def test_the_message_the_helper_builds_is_read_the_same_way_by_pid_1(self):
+        """The helper's `conversations_payload` (Python) against `wg_parse_conversation_payload` (C), on the contract's own vectors."""
+        vectors = json.loads((ROOT / "vectors/mux-frames.json").read_text())["positive"]
+        for name in ("bootstrap-down-conversations-guided", "bootstrap-down-conversations-tools-only"):
+            message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == name), "down")
+            payload = gb.conversations_payload(message)
+            fields = self.run_tool("convparse", payload.hex()).split("|")
+            profile = {None: 0, "host-query-v1": 1, "host-query-guided-v1": 2}[message["profile"]]
+            self.assertEqual(fields[:2], [str(profile), str(len(message["conversations"]))], name)
+            self.assertEqual(fields[2:2 + len(message["conversations"])], ["%s:%d" % (c["logicalSessionId"], c["runtimeUid"]) for c in message["conversations"]], name)
+            self.assertEqual(json.loads(fields[-1]), gb.supervisor_items(message), name)
+
+    def test_pid_1_refuses_what_the_helper_would_never_send(self):
+        good = bytes([1, 1]) + (20000).to_bytes(4, "little") + bytes([2]) + b"s1" + b"[{}]"
+        self.assertTrue(self.run_tool("convparse", good.hex()).startswith("1|1|s1:20000|"))
+        cases = {"profile": bytes([3]) + good[1:], "zero count": good[:1] + bytes([0]) + good[2:], "two with a profile": good[:1] + bytes([2]) + good[2:],
+                 "uid 999": good[:2] + (999).to_bytes(4, "little") + good[6:], "uid 65536": good[:2] + (65536).to_bytes(4, "little") + good[6:],
+                 "empty id": good[:6] + bytes([0]) + good[7:], "slash in id": good[:7] + b"/1" + good[9:], "dot first": good[:7] + b".1" + good[9:],
+                 "too short": good[:7], "no json": good[:9], "one json byte": good[:10], "long id": good[:6] + bytes([129]) + b"a" * 129 + b"[{}]",
+                 "truncated id": good[:6] + bytes([40]) + b"abc"}
+        for label, payload in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.run_tool("convparse", payload.hex()), "refused")
+        self.assertTrue(self.run_tool("convparse", (good[:6] + bytes([128]) + b"a" * 128 + b"[{}]").hex()).startswith("1|1|"))   # 128 is the largest id
 
     def test_a_buffer_too_small_for_the_whole_config_is_refused_before_anything_is_copied(self):
         whole = len('{"guestBootId":"' + self.BOOT + '","conversations":[]}')

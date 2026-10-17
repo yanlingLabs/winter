@@ -6,12 +6,17 @@
  * and every guard below is unit-tested natively with a recording fake, even though PID 1 itself can only run in the guest.
  *
  *   BOOTSTRAP  helper running. It may ask for a journal replay (before any mount) and, after the host's `ready`, for the mount.
- *   MOUNTED    both volumes mounted and the skeleton made. The supervisor starts only when a trusted conversation set exists.
- *   RUNNING    supervisor up; the relay is told that runtime frames are now admitted.
+ *   MOUNTED    the data volume is mounted and the skeleton made (the environment disk is NOT mounted in N2). The helper stays up and
+ *              may deliver the conversation set ('C') once; PID 1 then makes the conversation directories, writes the trusted
+ *              config and starts the supervisor. Until the supervisor's ready line arrives the set is "starting"; if it never
+ *              does, or the supervisor dies first, the helper is told `supervisor_failed` and the guest stays up for the drain.
+ *   RUNNING    supervisor ready: the helper is told (it answers `runtime_ready`) and the relay is told that runtime frames are now admitted.
  *   DRAINING   drain: ack, stop helper, stop supervisor, kill the rest, sync, unmount, flush the devices, `halting` ONLY if every unmount worked and the flush succeeded, sync, power off.
  *
  * Fail-stop (relay or supervisor gone, protocol garbage, a helper message out of order) is the drain without the ack and
- * without `halting`: the host learns of it only as a power-off with no `halting`, which it must treat as uncertain.
+ * without `halting`. While the relay lives PID 1 first has it send one control-up `fault` (unmount_failed, supervisor_lost,
+ * protocol_violation or internal); a drain whose unmounts or device flush failed sends the fault AFTER its drain_ack, with the
+ * drain's nonce. Either way no `halting` follows, so the host classifies the run as uncertain (Class B).
  * Portable C11.
  */
 #ifndef WG_BOOT_H
@@ -22,6 +27,23 @@
 
 #define WG_VOLUME_DATA 0
 #define WG_VOLUME_ENVIRONMENT 1
+
+/* The conversation set the bootstrap helper hands PID 1 ('C'): the helper has already validated the host's message and built the
+ * supervisor's conversation items. Payload: u8 profile (0 tools only, 1 host-query-v1, 2 host-query-guided-v1), u8 count (1 to 16;
+ * exactly 1 with a profile), then per conversation u32 LE runtimeUid, u8 length of the logicalSessionId (1 to 128) and its bytes,
+ * then the JSON array of the items for the trusted config (the rest of the payload). PID 1 re-checks the small part it acts on. */
+#define WG_CONVERSATIONS_MAX 16u
+#define WG_SESSION_ID_MAX 128u
+struct wg_conversation_set {
+    unsigned profile;
+    unsigned count;
+    uint32_t runtime_uid[WG_CONVERSATIONS_MAX];
+    char session_id[WG_CONVERSATIONS_MAX][WG_SESSION_ID_MAX + 1];
+    const char *json;
+    size_t json_length;
+};
+/* 0 when the payload is well formed. The JSON text itself is only shape-checked later, by the config builder. */
+int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct wg_conversation_set *out);
 
 struct wg_boot_ops {
     void *ctx;
@@ -36,15 +58,20 @@ struct wg_boot_ops {
     /* 0 = replayed, mounted and unmounted again; -1 = failed and nothing is left mounted; -2 = failed and the volume may still be mounted */
     int (*replay)(void *ctx, const char *purpose);
     int (*umount_replay)(void *ctx, const char *purpose);
-    /* includes the skeleton. On failure *leftover (bit 0 data, bit 1 environment) names a volume whose rollback unmount did not succeed. */
+    /* The data volume only, and the skeleton; the environment disk is checked, not mounted. On failure *leftover (bit 0 data, bit 1
+     * environment) names a volume whose rollback unmount did not succeed. */
     int (*mount_volumes)(void *ctx, const uint8_t data_uuid[16], const uint8_t environment_uuid[16], int *leftover);
     int (*umount)(void *ctx, int volume);
     /* 0 when the volume's superblock shows the final unmount happened: this UUID, clean, no pending recovery */
     int (*verify_unmounted)(void *ctx, int volume, const uint8_t uuid[16]);
-    int (*read_conversations)(void *ctx, char *out, size_t capacity, size_t *length); /* 0 present, 1 absent, -1 unusable */
+    /* /run/winter/conversations/<id> (owner runtimeUid, 0700) and /workspace/.winter/conversations/<id> for every conversation of the set; 0 = all made */
+    int (*prepare_conversation_dirs)(void *ctx, const struct wg_conversation_set *set);
+    /* the runtime artifact pins the initramfs holds (an object), needed for a host-query profile; 0 = read */
+    int (*read_runtime_artifacts)(void *ctx, char *out, size_t capacity, size_t *length);
     int (*read_base_config)(void *ctx, char *out, size_t capacity, size_t *length);
     int (*read_boot_id)(void *ctx, char out[37]);
-    int (*start_supervisor)(void *ctx, const char *config, size_t length);
+    /* with_ports: pass --runtime-ports-fds 4,5,6 (one host-query conversation) */
+    int (*start_supervisor)(void *ctx, const char *config, size_t length, int with_ports);
     /* teardown */
     void (*stop_helper)(void *ctx, long long deadline_ms);
     void (*stop_supervisor)(void *ctx, long long deadline_ms);
@@ -55,6 +82,7 @@ struct wg_boot_ops {
     void (*power_off)(void *ctx);
 };
 
+enum wg_conv_state { WG_CONV_NONE = 0, WG_CONV_STARTING, WG_CONV_RUNNING, WG_CONV_FAILED };
 enum wg_phase { WG_PHASE_BOOTSTRAP = 0, WG_PHASE_MOUNTED, WG_PHASE_RUNNING, WG_PHASE_DRAINING, WG_PHASE_DEAD };
 
 struct wg_boot {
@@ -68,6 +96,9 @@ struct wg_boot {
     int replay_mounted[2];             /* a failed replay may have left the volume mounted under the replay root */
     uint8_t uuid[2][16];
     int supervisor_started, supervisor_alive;
+    int conv_state;                    /* WG_CONV_* */
+    unsigned conv_count, conv_profile;
+    int fault_sent, relay_gone;
     int draining;
     char nonce[33];
     uint32_t budget_ms;
@@ -81,6 +112,9 @@ void wg_boot_relay_message(struct wg_boot *boot, uint8_t tag, const uint8_t *pay
 void wg_boot_helper_message(struct wg_boot *boot, uint8_t tag, const uint8_t *payload, size_t length);
 void wg_boot_helper_exited(struct wg_boot *boot, int exit_status);
 void wg_boot_supervisor_ready(struct wg_boot *boot);
+/* The supervisor did not print its exact ready line (late, wrong, or a closed stdout): while the set is starting that is
+ * `supervisor_failed`, never a fail-stop. */
+void wg_boot_supervisor_not_ready(struct wg_boot *boot, const char *code);
 void wg_boot_supervisor_exited(struct wg_boot *boot, int exit_status);
 void wg_boot_relay_exited(struct wg_boot *boot);
 void wg_boot_fail_stop(struct wg_boot *boot, const char *code);

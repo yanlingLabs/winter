@@ -10,8 +10,11 @@
  *     for `drain_ack` and `halting`;
  *   * passes bootstrap-class payloads to PID 1 byte for byte (the bootstrap helper judges them) and frames what PID 1 sends up;
  *   * pumps the runtime class between the port and the three pipes that the supervisor receives as its RuntimeDuplexPorts
- *     (input, stdout, stderr): runtime bytes are accepted only after PID 1 says the supervisor exists ('G'), and stderr
- *     is read and dropped because the mux has no stderr stream.
+ *     (input, stdout, stderr). A runtime payload is a 4 byte prefix {conversation, stream, flags, 0} and then the stream's bytes
+ *     (section 6.2 of the contract): IN goes to the supervisor's input, OUT and ERR come back with their stream byte, and the
+ *     end flag closes a stream. Runtime frames are accepted only after PID 1 says the supervisor is ready ('G'); before that,
+ *     or for a conversation outside the delivered set, they end the stream.
+ *   * sends a control-up `fault` when PID 1 asks ('X'), and when the host's stream violates the contract (best effort).
  * Every queue is bounded; overflow, a malformed frame or a vanished peer ends the process, and PID 1 then stops the guest.
  *
  * Production reads the port with plain read(2) because the port is a character device and cannot carry descriptors; the
@@ -54,11 +57,15 @@ static uint8_t rx_payload[WMX_MAX_RUNTIME];
  * most, plus their payload bytes, which the ctl bytes already count), and the two drain frames (a few hundred bytes). 256 KiB covers it. */
 #define OUT_RESERVE (256u * 1024u)
 static uint8_t out_storage[1024u * 1024u];
-_Static_assert(sizeof out_storage >= OUT_RESERVE + WMX_HEADER_BYTES + 65536u + 65536u, "the upstream ring must hold the reserve plus a runtime chunk");
+#define RUNTIME_UP_FRAME (WMX_HEADER_BYTES + WMX_RUNTIME_PREFIX_BYTES + RUNTIME_CHUNK)
+/* OUT and ERR may both read in one iteration, after the pongs and bootstrap frames of that iteration. */
+#define RUNTIME_GATE (OUT_RESERVE + 2u * RUNTIME_UP_FRAME)
+_Static_assert(sizeof out_storage >= RUNTIME_GATE, "the upstream ring must hold the reserve plus two runtime chunks");
 static uint8_t rt_in_storage[4u * 1024u * 1024u];
 static uint8_t ctl_out_storage[128u * 1024u];
 static uint8_t ctl_payload[CTL_MAX_PAYLOAD];
-static uint8_t frame_scratch[WMX_HEADER_BYTES + CTL_MAX_PAYLOAD];
+static uint8_t frame_scratch[WMX_HEADER_BYTES + WMX_RUNTIME_PREFIX_BYTES + CTL_MAX_PAYLOAD];
+static uint8_t up_chunk[WMX_RUNTIME_PREFIX_BYTES + RUNTIME_CHUNK];
 static uint8_t ctl_scratch[CTL_HEADER_BYTES + CTL_MAX_PAYLOAD];
 
 static struct wmx_rx rx;
@@ -68,7 +75,9 @@ static struct ctl_reader ctl_reader;
 
 static int port_fd = -1, ctl_in_fd = -1, ctl_out_fd = -1, rt_in_fd = -1, rt_out_fd = -1, rt_err_fd = -1;
 static int connected_once, runtime_open, rt_in_dead, rt_out_eof, rt_err_eof;
-static int draining, drain_acked, halting;
+static int runtime_streams;            /* how many conversations' stream sets exist: 0 or 1 */
+static int in_ended, out_end_sent, err_end_sent;
+static int draining, drain_acked, halting, faulted;
 static char drain_nonce[WMX_NONCE_CHARS + 1];
 
 static long long now_ms(void) {
@@ -133,7 +142,45 @@ static void enqueue_control(const struct wmx_control *message) {
     enqueue_up(WMX_CLASS_CONTROL, body, n);
 }
 
-static void fatal_status(enum wmx_status status) { die(EXIT_WMX_BASE + (int)status, 1, status); }
+/* Pushes what is queued to the port without ever blocking for long: a violation report is best effort. */
+static void flush_port_best_effort(int milliseconds) {
+    long long deadline = now_ms() + milliseconds;
+    while (connected_once && wg_ring_used(&out_ring)) {
+        const uint8_t *run;
+        size_t n = wg_ring_peek(&out_ring, &run);
+        ssize_t written = write(port_fd, run, n);
+        if (written > 0) { wg_ring_drop(&out_ring, (size_t)written); continue; }
+        if (written < 0 && errno == EINTR) continue;
+        if (written < 0 && errno == EAGAIN) {
+            long long left = deadline - now_ms();
+            if (left <= 0) return;
+            struct pollfd p = { port_fd, POLLOUT, 0 };
+            poll(&p, 1, (int)left);
+            continue;
+        }
+        return;
+    }
+}
+
+static void enqueue_fault(enum wmx_fault_code code, int with_nonce) {
+    struct wmx_control message;
+    memset(&message, 0, sizeof message);
+    message.type = WMX_CONTROL_FAULT;
+    message.fault_code = code;
+    message.has_stop_nonce = with_nonce;
+    if (with_nonce) memcpy(message.stop_nonce, drain_nonce, sizeof drain_nonce);
+    enqueue_control(&message);
+}
+
+/* The host's stream broke the contract: say so (the worker turns it into the `guest_fault` status), then end the stream. */
+static void fatal_status(enum wmx_status status) {
+    if (!faulted && !halting) {
+        faulted = 1;
+        enqueue_fault(WMX_FAULT_PROTOCOL_VIOLATION, draining);
+        flush_port_best_effort(1000);
+    }
+    die(EXIT_WMX_BASE + (int)status, 1, status);
+}
 
 static void handle_control(const uint8_t *payload, size_t length) {
     struct wmx_control control;
@@ -175,8 +222,16 @@ static void handle_frame(void) {
     case WMX_CLASS_RUNTIME:
         /* The contract has no "runtime ready" signal, so a host may speak right after `mounted`. The bytes wait in the bounded queue and
          * reach the supervisor only after PID 1 sent 'G'; a flood with no consumer ends the stream when the queue is full. */
-        if (draining || rt_in_dead) break;
-        if (wg_ring_put(&rt_in_ring, rx.payload, rx.current.length) != 0) die(EXIT_OVERFLOW, 1, WMX_OVERSIZE);
+        if (draining) break;
+        struct wmx_runtime_prefix prefix;
+        status = wmx_parse_runtime_payload(rx.payload, rx.current.length, WMX_DOWN, &prefix);
+        if (status != WMX_OK) fatal_status(status);
+        /* Not delivered yet (the host speaks before `runtime_ready`), outside the delivered set, or after the stream's end. */
+        if (!runtime_open || (int)prefix.conversation >= runtime_streams || in_ended) fatal_status(WMX_BAD_FIELD);
+        if (prefix.end) in_ended = 1;
+        if (rt_in_dead) break;
+        size_t data = rx.current.length - WMX_RUNTIME_PREFIX_BYTES;
+        if (data && wg_ring_put(&rt_in_ring, rx.payload + WMX_RUNTIME_PREFIX_BYTES, data) != 0) die(EXIT_OVERFLOW, 1, WMX_OVERSIZE);
         break;
     default:
         fatal_status(WMX_RESERVED_CLASS); /* unreachable: the header parser refuses the provider class */
@@ -196,6 +251,26 @@ static void feed_port(const uint8_t *bytes, size_t length) {
     }
 }
 
+/* The last frame before power-off (`halting` or a `fault`): write what is queued with a BLOCKING write. The virtio-console driver
+ * returns from a blocking write only after the host consumed the buffer, which is the only acknowledgement the guest can get. */
+static void flush_blocking_and_report(void) {
+    set_nonblocking(port_fd, 0);
+    int flushed = 1;
+    while (wg_ring_used(&out_ring)) {
+        const uint8_t *run;
+        size_t n = wg_ring_peek(&out_ring, &run);
+        ssize_t written = write(port_fd, run, n);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) { flushed = 0; break; }
+        wg_ring_drop(&out_ring, (size_t)written);
+    }
+    /* If the host never took the frame, PID 1 must not be told it did: leave without the 'f' and let its wait time out. */
+    if (!flushed) die(EXIT_HOST_CLOSED, 0, WMX_OK);
+    wg_ring_clear(&out_ring);
+    set_nonblocking(port_fd, 1);
+    ctl_to_init(CTL_FLUSHED, NULL, 0);
+}
+
 static void on_ctl_message(void) {
     uint8_t tag = ctl_reader.tag;
     size_t length = ctl_reader.length;
@@ -206,7 +281,7 @@ static void on_ctl_message(void) {
         if (length != WMX_NONCE_CHARS) die(EXIT_STATE, 1, WMX_BAD_FIELD);
         memcpy(nonce, ctl_reader.payload, WMX_NONCE_CHARS);
         nonce[WMX_NONCE_CHARS] = '\0';
-        if (!draining || strcmp(nonce, drain_nonce) != 0 || (tag == CTL_DRAIN_ACK ? drain_acked : (!drain_acked || halting)))
+        if (!draining || strcmp(nonce, drain_nonce) != 0 || (tag == CTL_DRAIN_ACK ? drain_acked : (!drain_acked || halting)) || faulted)
             die(EXIT_STATE, 1, WMX_BAD_FIELD);
         struct wmx_control message;
         memset(&message, 0, sizeof message);
@@ -215,26 +290,25 @@ static void on_ctl_message(void) {
         enqueue_control(&message);
         if (tag == CTL_DRAIN_ACK) { drain_acked = 1; return; }
         halting = 1;
-        /* The last frame before power-off: write what is queued with a BLOCKING write. The virtio-console driver returns from a
-         * blocking write only after the host consumed the buffer, which is the only acknowledgement the guest can get. */
-        set_nonblocking(port_fd, 0);
-        int flushed = 1;
-        while (wg_ring_used(&out_ring)) {
-            const uint8_t *run;
-            size_t n = wg_ring_peek(&out_ring, &run);
-            ssize_t written = write(port_fd, run, n);
-            if (written < 0 && errno == EINTR) continue;
-            if (written <= 0) { flushed = 0; break; }
-            wg_ring_drop(&out_ring, (size_t)written);
-        }
-        /* If the host never took `halting`, PID 1 must not be told it did: leave without the 'f' and let its wait time out. */
-        if (!flushed) die(EXIT_HOST_CLOSED, 0, WMX_OK);
-        wg_ring_clear(&out_ring);
-        set_nonblocking(port_fd, 1);
-        ctl_to_init(CTL_FLUSHED, NULL, 0);
+        flush_blocking_and_report();
     } else if (tag == CTL_RUNTIME_GO) {
-        if (length != 0 || runtime_open || draining) die(EXIT_STATE, 1, WMX_BAD_FIELD);
+        if (length != 1 || ctl_reader.payload[0] > 1 || runtime_open || draining) die(EXIT_STATE, 1, WMX_BAD_FIELD);
         runtime_open = 1;
+        runtime_streams = ctl_reader.payload[0];
+        if (!runtime_streams) { rt_out_eof = rt_err_eof = 1; out_end_sent = err_end_sent = 1; rt_in_dead = 1; }
+    } else if (tag == CTL_FAULT) {
+        if ((length != 1 && length != 1 + WMX_NONCE_CHARS) || ctl_reader.payload[0] < WMX_FAULT_UNMOUNT_FAILED || ctl_reader.payload[0] > WMX_FAULT_INTERNAL || faulted || halting)
+            die(EXIT_STATE, 1, WMX_BAD_FIELD);
+        int with_nonce = length != 1;
+        if (with_nonce) {
+            char nonce[WMX_NONCE_CHARS + 1];
+            memcpy(nonce, ctl_reader.payload + 1, WMX_NONCE_CHARS);
+            nonce[WMX_NONCE_CHARS] = '\0';
+            if (!draining || strcmp(nonce, drain_nonce) != 0) die(EXIT_STATE, 1, WMX_BAD_FIELD);
+        }
+        faulted = 1;
+        enqueue_fault((enum wmx_fault_code)ctl_reader.payload[0], with_nonce);
+        flush_blocking_and_report();
     } else {
         die(EXIT_STATE, 1, WMX_BAD_FIELD);
     }
@@ -274,6 +348,19 @@ static void parse_arguments(int argc, char **argv) {
     }
 }
 
+/* One read of a supervisor output stream, framed with its stream byte; its end becomes an empty frame with the end flag. */
+static void pump_up(int fd, enum wmx_stream stream, int *end_sent) {
+    ssize_t n = read(fd, up_chunk + WMX_RUNTIME_PREFIX_BYTES, RUNTIME_CHUNK);
+    if (n > 0) {
+        wmx_write_runtime_prefix(up_chunk, 0, stream, 0);
+        enqueue_up(WMX_CLASS_RUNTIME, up_chunk, WMX_RUNTIME_PREFIX_BYTES + (size_t)n);
+    } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+        wmx_write_runtime_prefix(up_chunk, 0, stream, 1);
+        enqueue_up(WMX_CLASS_RUNTIME, up_chunk, WMX_RUNTIME_PREFIX_BYTES);
+        *end_sent = 1;
+    }
+}
+
 int main(int argc, char **argv) {
     parse_arguments(argc, argv);
     signal(SIGPIPE, SIG_IGN);
@@ -304,7 +391,7 @@ int main(int argc, char **argv) {
     wg_ring_init(&out_ring, out_storage, sizeof out_storage);
     wg_ring_init(&rt_in_ring, rt_in_storage, sizeof rt_in_storage);
     wg_ring_init(&ctl_out_ring, ctl_out_storage, sizeof ctl_out_storage);
-    ctl_reader_init(&ctl_reader, ctl_payload, sizeof ctl_payload, "UKHG");
+    ctl_reader_init(&ctl_reader, ctl_payload, sizeof ctl_payload, "UKHGX");
 
     long long connect_deadline = now_ms() + PORT_CONNECT_WAIT_MS;
     uint8_t buffer[65536];
@@ -316,9 +403,10 @@ int main(int argc, char **argv) {
         fds[PORT].fd = port_fd; fds[PORT].events = POLLIN | ((connected_once && wg_ring_used(&out_ring)) ? POLLOUT : 0);
         fds[CTL_IN].fd = ctl_in_fd; fds[CTL_IN].events = POLLIN;
         fds[CTL_OUT].fd = ctl_out_fd; fds[CTL_OUT].events = wg_ring_used(&ctl_out_ring) ? POLLOUT : 0;
-        if (runtime_open && !rt_in_dead && wg_ring_used(&rt_in_ring)) { fds[RT_IN].fd = rt_in_fd; fds[RT_IN].events = POLLOUT; }
-        if (runtime_open && !rt_out_eof && wg_ring_free(&out_ring) >= OUT_RESERVE + WMX_HEADER_BYTES + RUNTIME_CHUNK) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
-        if (runtime_open && !rt_err_eof) { fds[RT_ERR].fd = rt_err_fd; fds[RT_ERR].events = POLLIN; }
+        if (runtime_open && !rt_in_dead && rt_in_fd >= 0 && wg_ring_used(&rt_in_ring)) { fds[RT_IN].fd = rt_in_fd; fds[RT_IN].events = POLLOUT; }
+        int room = wg_ring_free(&out_ring) >= RUNTIME_GATE;
+        if (runtime_open && !out_end_sent && room) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
+        if (runtime_open && !err_end_sent && room) { fds[RT_ERR].fd = rt_err_fd; fds[RT_ERR].events = POLLIN; }
         long long wait = connected_once ? -1 : connect_deadline - now_ms();
         if (!connected_once && wait <= 0) die(EXIT_NEVER_CONNECTED, 0, WMX_OK);
         int ready = poll(fds, 6, connected_once ? -1 : (int)(wait > 100 ? 100 : wait));
@@ -371,19 +459,13 @@ int main(int argc, char **argv) {
             size_t n = wg_ring_peek(&rt_in_ring, &run);
             ssize_t written = write(rt_in_fd, run, n);
             if (written > 0) wg_ring_drop(&rt_in_ring, (size_t)written);
-            else if (written < 0 && errno == EPIPE) { rt_in_dead = 1; wg_ring_clear(&rt_in_ring); }
             else if (written < 0 && errno != EAGAIN && errno != EINTR) { rt_in_dead = 1; wg_ring_clear(&rt_in_ring); }
         }
-        if (fds[RT_OUT].fd >= 0 && (fds[RT_OUT].revents & (POLLIN | POLLHUP))) {
-            ssize_t n = read(rt_out_fd, buffer, RUNTIME_CHUNK);
-            if (n > 0) enqueue_up(WMX_CLASS_RUNTIME, buffer, (size_t)n);
-            else if (n == 0) rt_out_eof = 1;
-            else if (errno != EAGAIN && errno != EINTR) rt_out_eof = 1;
-        }
-        if (fds[RT_ERR].fd >= 0 && (fds[RT_ERR].revents & (POLLIN | POLLHUP))) {
-            ssize_t n = read(rt_err_fd, buffer, sizeof buffer);
-            if (n == 0) rt_err_eof = 1;
-            else if (n < 0 && errno != EAGAIN && errno != EINTR) rt_err_eof = 1;
-        }
+        /* The end of the host's IN stream closes the supervisor's input once everything before it was written. */
+        if (in_ended && rt_in_fd >= 0 && !wg_ring_used(&rt_in_ring)) { close(rt_in_fd); rt_in_fd = -1; rt_in_dead = 1; }
+        if (fds[RT_OUT].fd >= 0 && (fds[RT_OUT].revents & (POLLIN | POLLHUP)))
+            pump_up(rt_out_fd, WMX_STREAM_OUT, &out_end_sent);
+        if (fds[RT_ERR].fd >= 0 && (fds[RT_ERR].revents & (POLLIN | POLLHUP)))
+            pump_up(rt_err_fd, WMX_STREAM_ERR, &err_end_sent);
     }
 }

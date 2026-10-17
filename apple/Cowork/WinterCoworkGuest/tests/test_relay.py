@@ -23,7 +23,7 @@ NONCE = "0f" * 16
 OTHER_NONCE = "a5" * 16
 EXIT_PORT_KIND, EXIT_STRAY_FD, EXIT_ARGUMENTS = 70, 71, 64
 EXIT_WMX = 80
-STATUS = {"malformed": 1, "oversize": 2, "version": 3, "unknown_type": 4, "bad_field": 5, "reserved_class": 6, "bad_sequence": 7}
+STATUS = {"malformed": 1, "oversize": 2, "version": 3, "unknown_type": 4, "bad_field": 5, "reserved_class": 6, "bad_sequence": 7, "bad_direction": 8}
 
 
 def frame(cls, seq, payload=b"", flags=0):
@@ -32,6 +32,14 @@ def frame(cls, seq, payload=b"", flags=0):
 
 def control(seq, text):
     return frame(0, seq, text.encode())
+
+
+def rt(stream, data=b"", conversation=0, end=False, flags=None):
+    """A runtime payload: the 4 byte prefix and then the stream's bytes."""
+    return bytes([conversation, stream, (1 if end else 0) if flags is None else flags, 0]) + data
+
+
+IN, OUT, ERR = 1, 2, 3
 
 
 def ctl(tag, payload=b""):
@@ -172,9 +180,27 @@ class RelayTests(unittest.TestCase):
         self.addCleanup(harness.close)
         return harness
 
-    def open_runtime(self, harness):
-        harness.init_send("G")
+    def open_runtime(self, harness, streams=1):
+        harness.init_send("G", bytes([streams]))
         time.sleep(0.1)
+
+    def read_runtime_until(self, harness, want_bytes, want_ends=()):
+        """Collects runtime frames until `want_bytes` data bytes arrived per stream and the listed streams ended. Returns ({stream: bytes}, {stream: end seen}, seqs)."""
+        got, ended, seqs = {OUT: b"", ERR: b""}, {}, []
+        while any(len(got[k]) < want_bytes.get(k, 0) for k in got) or any(e not in ended for e in want_ends):
+            cls, seq, payload = harness.read_frame()
+            self.assertEqual(cls, 2)
+            seqs.append(seq)
+            self.assertLessEqual(len(payload), 4 + 65536)
+            self.assertEqual((payload[0], payload[3]), (0, 0))
+            stream, flags = payload[1], payload[2]
+            self.assertIn(stream, (OUT, ERR))
+            self.assertNotIn(stream, ended, "bytes after the end of a stream")
+            got[stream] += payload[4:]
+            if flags:
+                self.assertEqual(flags, 1)
+                ended[stream] = True
+        return got, ended, seqs
 
     # ---- control class
 
@@ -275,37 +301,60 @@ class RelayTests(unittest.TestCase):
 
     # ---- runtime class
 
-    def test_runtime_bytes_that_arrive_before_the_supervisor_exists_wait_for_it(self):
-        h = self.start()
-        h.send(frame(2, 1, b"early one\n"))
-        h.send(frame(2, 2, b"early two\n"))
-        h.send(control(1, '{"v":1,"t":"ping","n":1}'))
-        self.assertEqual(h.read_frame()[0:2], (0, 1))                 # the relay is alive and answering
-        ready, _, _ = select.select([h.sup_r], [], [], 0.3)
-        self.assertEqual(ready, [])                                    # and nothing reached the supervisor's input yet
-        self.open_runtime(h)
-        self.assertEqual(h.read_supervisor_input(20), b"early one\nearly two\n")
 
-    def test_a_flood_with_no_supervisor_ends_the_stream_at_the_bound(self):
-        h = self.start()
-        try:
-            for seq in range(1, 8):
-                h.send(frame(2, seq, b"z" * (1024 * 1024)))
-        except OSError:
-            pass
-        self.assertEqual(h.wait_exit(), 93)
 
-    def test_runtime_down_reaches_the_supervisor_input_and_up_is_framed(self):
+
+
+
+
+    # ---- runtime class
+
+    def test_runtime_frames_before_the_supervisor_is_ready_end_the_stream(self):
+        h = self.start()
+        h.send(frame(2, 1, rt(IN, b"early\n")))
+        self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["bad_field"])
+        self.assertEqual(h.init_read(), ("F", bytes([STATUS["bad_field"]])))
+
+    def test_runtime_down_reaches_the_supervisor_input_and_up_is_framed_with_its_stream_byte(self):
         h = self.start()
         self.open_runtime(h)
-        h.send(frame(2, 1, b'{"type":"user"}\n'))
-        h.send(frame(2, 2, b""))
-        h.send(frame(2, 3, b"second\n"))
+        h.send(frame(2, 1, rt(IN, b'{"type":"user"}\n')))
+        h.send(frame(2, 2, rt(IN, b"second\n")))
         self.assertEqual(h.read_supervisor_input(16 + 7), b'{"type":"user"}\nsecond\n')
         os.write(h.sup_out_w, b"answer-1\n")
-        cls, seq, payload = h.read_frame()
-        self.assertEqual((cls, seq), (2, 1))
-        self.assertEqual(payload, b"answer-1\n")
+        self.assertEqual(h.read_frame(), (2, 1, rt(OUT, b"answer-1\n")))
+        os.write(h.sup_err_w, b"warning\n")
+        self.assertEqual(h.read_frame(), (2, 2, rt(ERR, b"warning\n")))
+
+    def test_the_end_of_the_in_stream_closes_the_supervisor_input_after_the_bytes_before_it(self):
+        h = self.start()
+        self.open_runtime(h)
+        h.send(frame(2, 1, rt(IN, b"last words\n", end=True)))
+        self.assertEqual(h.read_supervisor_input(11), b"last words\n")
+        ready, _, _ = select.select([h.sup_r], [], [], 2)
+        self.assertEqual(ready, [h.sup_r])
+        self.assertEqual(os.read(h.sup_r, 10), b"")                         # EOF: the input was closed
+        h.send(frame(2, 2, rt(IN, b"too late")))                          # bytes after the end
+        self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["bad_field"])
+
+    def test_an_empty_end_frame_alone_closes_the_input(self):
+        h = self.start()
+        self.open_runtime(h)
+        h.send(frame(2, 1, rt(IN, end=True)))
+        ready, _, _ = select.select([h.sup_r], [], [], 2)
+        self.assertEqual((ready, os.read(h.sup_r, 10)), ([h.sup_r], b""))
+        h.send(frame(2, 2, rt(IN, end=True)))                             # a second end
+        self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["bad_field"])
+
+    def test_the_supervisor_closing_stdout_and_stderr_sends_an_end_frame_for_each(self):
+        h = self.start()
+        self.open_runtime(h)
+        os.write(h.sup_out_w, b"bye\n")
+        os.close(h.sup_out_w)
+        os.close(h.sup_err_w)
+        got, ended, seqs = self.read_runtime_until(h, {OUT: 4}, want_ends=(OUT, ERR))
+        self.assertEqual((got[OUT], got[ERR], ended), (b"bye\n", b"", {OUT: True, ERR: True}))
+        self.assertEqual(seqs, list(range(1, len(seqs) + 1)))
 
     def test_runtime_output_is_chunked_to_at_most_64_kib_and_loses_no_byte(self):
         h = self.start()
@@ -319,31 +368,84 @@ class RelayTests(unittest.TestCase):
                     view = view[os.write(h.sup_out_w, view):]
             finally:
                 os._exit(0)
-        got, seqs = b"", []
-        while len(got) < len(blob):
-            cls, seq, payload = h.read_frame()
-            self.assertEqual(cls, 2)
-            self.assertLessEqual(len(payload), 65536)
-            seqs.append(seq)
-            got += payload
+        got, _, seqs = self.read_runtime_until(h, {OUT: len(blob)})
         os.waitpid(writer, 0)
-        self.assertEqual(got, blob)
+        self.assertEqual(got[OUT], blob)
         self.assertEqual(seqs, list(range(1, len(seqs) + 1)))
 
-    def test_pongs_queued_while_the_runtime_stream_has_filled_the_ring_still_fit(self):
-        """The runtime stream stops reading the supervisor while less than a reserve is free, so a burst of pings (answered at once, never deferred)
+    def test_supervisor_stderr_is_carried_as_its_own_stream(self):
+        h = self.start()
+        self.open_runtime(h)
+        os.write(h.sup_err_w, b"diagnostic\n" * 100)
+        got, _, _ = self.read_runtime_until(h, {ERR: 1100})
+        self.assertEqual((got[ERR], got[OUT]), (b"diagnostic\n" * 100, b""))
+
+    def test_a_conversation_outside_the_delivered_set_ends_the_stream(self):
+        h = self.start()
+        self.open_runtime(h)
+        h.send(frame(2, 1, rt(IN, b"x", conversation=1)))
+        self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["bad_field"])
+
+    def test_with_no_runtime_streams_any_runtime_frame_ends_the_stream(self):
+        h = self.start()
+        self.open_runtime(h, streams=0)
+        h.send(control(1, '{"v":1,"t":"ping","n":4}'))
+        self.assertEqual(h.read_frame(), (0, 1, b'{"v":1,"t":"pong","n":4}'))
+        h.send(frame(2, 1, rt(IN, b"x")))
+        self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["bad_field"])
+
+    def test_with_no_runtime_streams_nothing_is_ever_sent_up_for_them(self):
+        h = self.start()
+        self.open_runtime(h, streams=0)
+        os.write(h.sup_out_w, b"stray\n")
+        os.close(h.sup_out_w)
+        os.close(h.sup_err_w)
+        h.send(control(1, '{"v":1,"t":"ping","n":8}'))
+        self.assertEqual(h.read_frame(), (0, 1, b'{"v":1,"t":"pong","n":8}'))     # the very first frame up is the pong: no end frames, no data
+        h.send(control(2, '{"v":1,"t":"ping","n":9}'))
+        self.assertEqual(h.read_frame(), (0, 2, b'{"v":1,"t":"pong","n":9}'))
+        self.assertIsNone(h.proc.poll())
+
+    def test_runtime_prefix_violations_end_the_stream_with_the_contract_category(self):
+        cases = ((b"\x00\x01\x00", "malformed"), (rt(IN, b"x", conversation=16), "bad_field"), (rt(0, b"x"), "bad_field"), (rt(4, b"x"), "bad_field"),
+                 (rt(IN, b"x", flags=2), "bad_field"), (b"\x00\x01\x00\x01x", "bad_field"), (rt(IN), "bad_field"),
+                 (rt(OUT, b"x"), "bad_direction"), (rt(ERR, b"x"), "bad_direction"))
+        for payload, status in cases:
+            with self.subTest(payload=payload[:6], status=status):
+                h = self.start()
+                self.open_runtime(h)
+                h.send(frame(2, 1, payload))
+                self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS[status])
+
+    def test_a_violation_is_reported_to_the_host_as_a_protocol_violation_fault(self):
+        h = self.start()
+        h.send(frame(0, 1, b"not json"))
+        cls, seq, payload = h.read_frame()
+        self.assertEqual((cls, seq, payload), (0, 1, b'{"v":1,"t":"fault","code":"protocol_violation","stopNonce":null}'))
+        self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["malformed"])
+        h = self.start()
+        h.send(control(1, self.drain_text()))
+        h.init_read()
+        h.send(frame(0, 2, b"not json"))
+        self.assertEqual(h.read_frame()[2], ('{"v":1,"t":"fault","code":"protocol_violation","stopNonce":"%s"}' % NONCE).encode())
+
+    def test_pongs_queued_while_the_runtime_streams_have_filled_the_ring_still_fit(self):
+        """The runtime streams stop reading the supervisor while less than a reserve is free, so a burst of pings (answered at once, never deferred)
         cannot overflow the upstream ring. Without the reserve the third burst below ends the stream with the overflow code."""
         h = self.start()
         self.open_runtime(h)
         blob = bytes(range(256)) * 1024 * 12  # 3 MiB: more than the ring and the socket buffer together
-        writer = os.fork()
-        if writer == 0:
-            try:
-                view = memoryview(blob)
-                while view:
-                    view = view[os.write(h.sup_out_w, view):]
-            finally:
-                os._exit(0)
+        writers = []
+        for fd in (h.sup_out_w, h.sup_err_w):
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    view = memoryview(blob)
+                    while view:
+                        view = view[os.write(fd, view):]
+                finally:
+                    os._exit(0)
+            writers.append(pid)
         time.sleep(1.0)                                    # the host reads nothing: the ring and the socket buffer fill up
         bursts, per_burst = 3, 1600                        # each burst is one 64 KiB read worth of pings (40 bytes each)
         total = bursts * per_burst
@@ -351,27 +453,21 @@ class RelayTests(unittest.TestCase):
             h.send(b"".join(control(burst * per_burst + i + 1, '{"v":1,"t":"ping","n":%d}' % (burst * per_burst + i + 1)) for i in range(per_burst)))
             time.sleep(0.2)
         self.assertIsNone(h.proc.poll(), "the relay ended the stream while pongs were queued")
-        got, pongs, runtime_seqs = b"", [], []
-        while len(pongs) < total or len(got) < len(blob):
+        got, pongs, runtime_seqs = {OUT: b"", ERR: b""}, [], []
+        while len(pongs) < total or any(len(got[k]) < len(blob) for k in got):
             cls, seq, payload = h.read_frame()
             if cls == 0:
                 pongs.append((seq, payload))
             else:
                 self.assertEqual(cls, 2)
                 runtime_seqs.append(seq)
-                got += payload
-        os.waitpid(writer, 0)
+                got[payload[1]] += payload[4:]
+        for pid in writers:
+            os.waitpid(pid, 0)
         self.assertEqual(pongs, [(i, ('{"v":1,"t":"pong","n":%d}' % i).encode()) for i in range(1, total + 1)])
-        self.assertEqual(got, blob)
+        self.assertEqual(got, {OUT: blob, ERR: blob})
         self.assertEqual(runtime_seqs, list(range(1, len(runtime_seqs) + 1)))
         self.assertIsNone(h.proc.poll())
-
-    def test_supervisor_stderr_is_drained_and_never_forwarded(self):
-        h = self.start()
-        self.open_runtime(h)
-        os.write(h.sup_err_w, b"secret diagnostic\n" * 100)
-        h.send(control(1, '{"v":1,"t":"ping","n":9}'))
-        self.assertEqual(h.read_frame(), (0, 1, b'{"v":1,"t":"pong","n":9}'))
 
     def test_a_supervisor_that_floods_stderr_never_blocks(self):
         h = self.start()
@@ -380,29 +476,20 @@ class RelayTests(unittest.TestCase):
         if writer == 0:
             try:
                 chunk = b"e" * 65536
-                for _ in range(16):          # 1 MiB into a 64 KiB pipe: blocks forever unless the relay drains it
+                for _ in range(16):          # 1 MiB into a 64 KiB pipe: blocks forever unless the relay reads it
                     os.write(h.sup_err_w, chunk)
             finally:
                 os._exit(0)
-        deadline = time.monotonic() + 10
-        finished = False
-        while time.monotonic() < deadline:
-            pid, _ = os.waitpid(writer, os.WNOHANG)
-            if pid:
-                finished = True
-                break
-            time.sleep(0.05)
-        if not finished:
-            os.kill(writer, 9)
-            os.waitpid(writer, 0)
-        self.assertTrue(finished, "stderr was not drained")
+        got, _, _ = self.read_runtime_until(h, {ERR: 16 * 65536})
+        os.waitpid(writer, 0)
+        self.assertEqual(len(got[ERR]), 16 * 65536)
 
     def test_runtime_frames_are_dropped_once_the_supervisor_input_is_gone(self):
         h = self.start()
         self.open_runtime(h)
         os.close(h.sup_r)
         h.sup_r = os.open(os.devnull, os.O_RDONLY)  # keep the harness cleanup valid
-        h.send(frame(2, 1, b"x" * 1000))
+        h.send(frame(2, 1, rt(IN, b"x" * 1000)))
         h.send(control(1, '{"v":1,"t":"ping","n":1}'))
         self.assertEqual(h.read_frame()[0], 0)
         time.sleep(0.5)                       # a SIGPIPE from the write to the closed pipe would have killed the relay by now
@@ -415,7 +502,7 @@ class RelayTests(unittest.TestCase):
         self.open_runtime(h)
         h.send(control(1, self.drain_text()))
         self.assertEqual(h.init_read()[0], "D")
-        h.send(frame(2, 1, b"late input\n"))
+        h.send(frame(2, 1, rt(IN, b"late input\n")))
         h.send(control(2, '{"v":1,"t":"ping","n":5}'))
         self.assertEqual(h.read_frame()[0:2], (0, 1))
         ready, _, _ = select.select([h.sup_r], [], [], 0.3)
@@ -424,7 +511,7 @@ class RelayTests(unittest.TestCase):
     def test_a_flood_beyond_the_bounded_queue_ends_the_stream(self):
         h = self.start()
         self.open_runtime(h)
-        chunk = b"z" * (1024 * 1024)
+        chunk = rt(IN, b"z" * (1024 * 1024 - 4))
         try:
             for seq in range(1, 8):
                 h.send(frame(2, seq, chunk))
@@ -432,15 +519,77 @@ class RelayTests(unittest.TestCase):
             pass
         self.assertEqual(h.wait_exit(), 93)
 
-    def test_go_twice_or_while_draining_is_a_state_error(self):
-        h = self.start()
-        h.init_send("G")
-        h.init_send("G")
-        self.assertEqual(h.wait_exit(), 95)
+    def test_go_twice_with_a_bad_payload_or_while_draining_is_a_state_error(self):
+        for first, second in ((b"\x01", b"\x01"), (b"", None), (b"\x02", None), (b"\x01\x01", None)):
+            h = self.start()
+            h.init_send("G", first)
+            if second is not None:
+                h.init_send("G", second)
+            self.assertEqual(h.wait_exit(), 95, (first, second))
         h = self.start()
         h.send(control(1, self.drain_text()))
         h.init_read()
-        h.init_send("G")
+        h.init_send("G", b"\x01")
+        self.assertEqual(h.wait_exit(), 95)
+
+    # ---- fault (PID 1 asks the relay to send a control-up fault)
+
+    def test_a_fault_from_pid_1_is_framed_flushed_and_reported_flushed(self):
+        h = self.start()
+        h.init_send("X", bytes([2]))
+        self.assertEqual(h.read_frame(), (0, 1, b'{"v":1,"t":"fault","code":"supervisor_lost","stopNonce":null}'))
+        self.assertEqual(h.init_read(), ("f", b""))
+        h = self.start()
+        h.send(control(1, self.drain_text()))
+        h.init_read()
+        h.init_send("K", NONCE.encode())
+        h.init_send("X", bytes([1]) + NONCE.encode())
+        self.assertEqual(h.read_frame()[2], ('{"v":1,"t":"drain_ack","stopNonce":"%s"}' % NONCE).encode())
+        self.assertEqual(h.read_frame()[2], ('{"v":1,"t":"fault","code":"unmount_failed","stopNonce":"%s"}' % NONCE).encode())
+        self.assertEqual(h.init_read(), ("f", b""))
+
+    def test_a_fault_with_trailing_bytes_after_the_nonce_is_a_state_error(self):
+        h = self.start()
+        h.send(control(1, self.drain_text()))
+        h.init_read()
+        h.init_send("X", bytes([1]) + NONCE.encode() + b"zzzzzzz")           # the nonce is right; the length is not
+        self.assertEqual(h.wait_exit(), 95)
+
+    def test_a_fault_after_halting_is_a_state_error(self):
+        h = self.start()
+        h.send(control(1, self.drain_text()))
+        h.init_read()
+        h.init_send("K", NONCE.encode())
+        h.init_send("H", NONCE.encode())
+        h.read_frame(); h.read_frame()
+        self.assertEqual(h.init_read(), ("f", b""))
+        h.init_send("X", bytes([1]) + NONCE.encode())
+        self.assertEqual(h.wait_exit(), 95)
+
+    def test_a_fault_with_a_bad_code_or_nonce_or_after_halting_is_a_state_error(self):
+        bad = [bytes([0]), bytes([5]), b"", bytes([1]) + b"ab" * 15, bytes([1]) + OTHER_NONCE.encode()]
+        for payload in bad:
+            with self.subTest(payload=payload[:4]):
+                h = self.start()
+                h.send(control(1, self.drain_text()))
+                h.init_read()
+                h.init_send("X", payload)
+                self.assertEqual(h.wait_exit(), 95)
+        h = self.start()                                                  # a nonce with no drain
+        h.init_send("X", bytes([1]) + NONCE.encode())
+        self.assertEqual(h.wait_exit(), 95)
+        h = self.start()                                                  # two faults
+        h.init_send("X", bytes([4]))
+        h.read_frame()
+        h.init_send("X", bytes([4]))
+        self.assertEqual(h.wait_exit(), 95)
+        h = self.start()                                                  # halting after a fault
+        h.send(control(1, self.drain_text()))
+        h.init_read()
+        h.init_send("K", NONCE.encode())
+        h.init_send("X", bytes([1]) + NONCE.encode())
+        h.read_frame(); h.read_frame()
+        h.init_send("H", NONCE.encode())
         self.assertEqual(h.wait_exit(), 95)
 
     # ---- violations
@@ -512,7 +661,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(h.wait_exit(), 92)
 
     def test_an_unlisted_or_malformed_ctl_message_ends_the_relay(self):
-        for raw in (ctl("X"), struct.pack("<B3xI", ord("U"), 70000), b"U\x01\x00\x00\x00\x00\x00\x00"):
+        for raw in (ctl("Z"), struct.pack("<B3xI", ord("U"), 70000), b"U\x01\x00\x00\x00\x00\x00\x00"):
             with self.subTest(raw[:8]):
                 h = self.start()
                 os.write(h.init_w, raw)

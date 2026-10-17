@@ -40,8 +40,11 @@ struct fake {
     int count;
     long long now;
     int replay_rc, mount_rc, mount_leftover, umount_data_rc, umount_env_rc, umount_data_failures_left, umount_replay_failures_left, verify_rc[2];
-    int conversations_rc;           /* 0 present, 1 absent, -1 unusable */
-    const char *conversations;
+    int dirs_rc, artifacts_rc;
+    int last_with_ports;
+    unsigned dirs_count;
+    char dirs_ids[4][130];
+    const char *artifacts;
     const char *base;
     int base_rc, boot_id_rc, supervisor_rc, wait_flushed_rc, flush_rc;
     char last_config[70000];
@@ -75,13 +78,18 @@ static void f_log(void *c, const char *code) { ev(c, "log:%s", code); }
 static void f_to_relay(void *c, uint8_t tag, const void *p, size_t n) {
     (void)p;
     if (tag == CTL_BOOTSTRAP_UP) ev(c, "relay:U:%zu", n);
-    else if (tag == CTL_RUNTIME_GO) ev(c, "relay:G");
+    else if (tag == CTL_RUNTIME_GO) ev(c, "relay:G:%u", (unsigned)((const uint8_t *)p)[0]);
+    else if (tag == CTL_FAULT) {
+        if (n > 1) ev(c, "relay:X:%u:%.*s", (unsigned)((const uint8_t *)p)[0], (int)n - 1, (const char *)p + 1);
+        else ev(c, "relay:X:%u", (unsigned)((const uint8_t *)p)[0]);
+    }
     else if (tag == CTL_DRAIN_ACK || tag == CTL_HALTING) ev(c, "relay:%c:%.*s", tag == CTL_DRAIN_ACK ? 'K' : 'H', (int)n, (const char *)p);
     else ev(c, "relay:%c", tag);
 }
 static void f_to_helper(void *c, uint8_t tag, const void *p, size_t n) {
     struct fake *f = c;
     if (tag == CTL_REPLAY_RESULT || tag == CTL_MOUNT_RESULT) { f->to_helper_byte = ((const uint8_t *)p)[0]; ev(c, "helper:%c:%u", tag, (unsigned)f->to_helper_byte); }
+    else if (tag == CTL_CONVERSATIONS_RESULT) ev(c, "helper:r:%u:%u", (unsigned)((const uint8_t *)p)[0], (unsigned)((const uint8_t *)p)[1]);
     else ev(c, "helper:%c:%zu", tag, n);
 }
 static int f_wait_flushed(void *c, unsigned ms) { ev(c, "wait-flushed:%u", ms); return ((struct fake *)c)->wait_flushed_rc; }
@@ -107,11 +115,18 @@ static int f_umount(void *c, int volume) {
     }
     return f->umount_env_rc;
 }
-static int f_read_conversations(void *c, char *out, size_t cap, size_t *len) {
+static int f_prepare_dirs(void *c, const struct wg_conversation_set *set) {
     struct fake *f = c;
-    ev(c, "read-conversations");
-    if (f->conversations_rc != 0) return f->conversations_rc;
-    snprintf(out, cap, "%s", f->conversations);
+    ev(c, "prepare-dirs:%u", set->count);
+    f->dirs_count = set->count;
+    for (unsigned i = 0; i < set->count && i < 4; i++) snprintf(f->dirs_ids[i], sizeof f->dirs_ids[i], "%s:%u", set->session_id[i], (unsigned)set->runtime_uid[i]);
+    return f->dirs_rc;
+}
+static int f_read_artifacts(void *c, char *out, size_t cap, size_t *len) {
+    struct fake *f = c;
+    ev(c, "read-artifacts");
+    if (f->artifacts_rc) return f->artifacts_rc;
+    snprintf(out, cap, "%s", f->artifacts);
     *len = strlen(out);
     return 0;
 }
@@ -124,9 +139,10 @@ static int f_read_base(void *c, char *out, size_t cap, size_t *len) {
     return 0;
 }
 static int f_boot_id(void *c, char out[37]) { ev(c, "boot-id"); if (((struct fake *)c)->boot_id_rc) return -1; strcpy(out, "66666666-6666-4666-8666-666666666666"); return 0; }
-static int f_start_supervisor(void *c, const char *config, size_t len) {
+static int f_start_supervisor(void *c, const char *config, size_t len, int with_ports) {
     struct fake *f = c;
     ev(c, "start-supervisor");
+    f->last_with_ports = with_ports;
     snprintf(f->last_config, sizeof f->last_config, "%.*s", (int)len, config);
     return f->supervisor_rc;
 }
@@ -138,14 +154,16 @@ static int f_flush(void *c, unsigned volumes) { ev(c, "flush:%u", volumes); retu
 static void f_power_off(void *c) { ev(c, "power-off"); }
 
 static struct wg_boot_ops ops_for(struct fake *f) {
-    struct wg_boot_ops ops = { f, f_now, f_pause, f_log, f_to_relay, f_to_helper, f_wait_flushed, f_replay, f_umount_replay, f_mount, f_umount, f_verify,
-                               f_read_conversations, f_read_base, f_boot_id, f_start_supervisor, f_stop_helper, f_stop_supervisor, f_kill_all, f_sync, f_flush, f_power_off };
+    struct wg_boot_ops ops = { .ctx = f, .now_ms = f_now, .pause_ms = f_pause, .log = f_log, .to_relay = f_to_relay, .to_helper = f_to_helper,
+        .wait_flushed = f_wait_flushed, .replay = f_replay, .umount_replay = f_umount_replay, .mount_volumes = f_mount, .umount = f_umount,
+        .verify_unmounted = f_verify, .prepare_conversation_dirs = f_prepare_dirs, .read_runtime_artifacts = f_read_artifacts, .read_base_config = f_read_base,
+        .read_boot_id = f_boot_id, .start_supervisor = f_start_supervisor, .stop_helper = f_stop_helper, .stop_supervisor = f_stop_supervisor,
+        .kill_all = f_kill_all, .sync_all = f_sync, .flush_devices = f_flush, .power_off = f_power_off };
     return ops;
 }
 static void fresh(struct fake *f) {
     memset(f, 0, sizeof *f);
-    f->conversations_rc = 1;
-    f->conversations = "[]";
+    f->artifacts = "{\"artifacts\":{\"launcher\":{}}}";
     f->base = "{\"artifacts\":{}}";
     f->wait_flushed_rc = 1;
 }
@@ -163,6 +181,28 @@ static void host_ready(struct wg_boot *boot) {
     wg_boot_relay_message(boot, CTL_BOOTSTRAP_DOWN, (const uint8_t *)READY_MESSAGE, sizeof READY_MESSAGE - 1);
 }
 
+#define ITEM_JSON "[{\"logicalSessionId\":\"s1\"}]"
+/* The helper's 'C' message: profile, count, per conversation uid + id, then the items array. */
+static size_t conversations_payload(uint8_t *out, unsigned profile, const char *const *ids, unsigned count, const char *json) {
+    size_t at = 0;
+    out[at++] = (uint8_t)profile;
+    out[at++] = (uint8_t)count;
+    for (unsigned i = 0; i < count; i++) {
+        uint32_t uid = 20001 + i;
+        out[at++] = (uint8_t)uid; out[at++] = (uint8_t)(uid >> 8); out[at++] = (uint8_t)(uid >> 16); out[at++] = (uint8_t)(uid >> 24);
+        out[at++] = (uint8_t)strlen(ids[i]);
+        memcpy(out + at, ids[i], strlen(ids[i])); at += strlen(ids[i]);
+    }
+    memcpy(out + at, json, strlen(json));
+    return at + strlen(json);
+}
+static void send_conversations(struct wg_boot *boot, unsigned profile) {
+    static const char *const ids[] = { "s1" };
+    uint8_t payload[512];
+    size_t n = conversations_payload(payload, profile, ids, 1, ITEM_JSON);
+    wg_boot_helper_message(boot, CTL_HELPER_CONVERSATIONS, payload, n);
+}
+
 /* drive the happy path up to a given point */
 static void to_mounted(struct wg_boot *boot) {
     host_ready(boot);
@@ -171,6 +211,13 @@ static void to_mounted(struct wg_boot *boot) {
 }
 
 static void drain(struct wg_boot *boot, const char *nonce, uint32_t budget);
+
+/* mounted, a set delivered and the supervisor ready */
+static void to_running(struct wg_boot *boot, unsigned profile) {
+    to_mounted(boot);
+    send_conversations(boot, profile);
+    wg_boot_supervisor_ready(boot);
+}
 
 /* ------------------------------------------------------------------------------------------------ boot tests */
 
@@ -233,7 +280,7 @@ static void test_the_mount_happens_once_on_request_and_is_reported_to_the_helper
     struct wg_boot boot; wg_boot_init(&boot, &ops);
     host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(has(&f, "mount-volumes") && has(&f, "helper:m:1"));
-    CHECK(boot.data_mounted && boot.environment_mounted);
+    CHECK(boot.data_mounted && !boot.environment_mounted && boot.ever_mounted[0] && !boot.ever_mounted[1]);   /* the environment disk is never mounted in N2 */
     host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     CHECK(has(&f, "log:mount-out-of-order") && has(&f, "power-off"));
 }
@@ -296,39 +343,198 @@ static void test_the_supervisor_does_not_start_without_a_conversation_set(void) 
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
     to_mounted(&boot);
-    CHECK(boot.phase == WG_PHASE_MOUNTED);
-    CHECK(!has(&f, "start-supervisor"));
-    CHECK(has(&f, "log:supervisor-not-started:no-conversation-set"));
-    CHECK(!has(&f, "power-off"));
+    CHECK(boot.phase == WG_PHASE_MOUNTED && boot.conv_state == WG_CONV_NONE);
+    CHECK(!has(&f, "start-supervisor") && !has(&f, "power-off"));
 }
 
-static void test_with_a_conversation_set_the_supervisor_starts_with_the_live_boot_id(void) {
+static void test_a_host_query_set_starts_the_supervisor_with_ports_and_the_live_boot_id(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
-    f.conversations = "[{\"logicalSessionId\":\"s1\"}]";
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
     to_mounted(&boot);
-    CHECK(has(&f, "start-supervisor"));
+    send_conversations(&boot, 1);
+    CHECK(has(&f, "start-supervisor") && f.last_with_ports && boot.conv_state == WG_CONV_STARTING && boot.phase == WG_PHASE_MOUNTED);
     CHECK(strstr(f.last_config, "\"guestBootId\":\"66666666-6666-4666-8666-666666666666\"") != NULL);
-    CHECK(strstr(f.last_config, "\"conversations\":[{\"logicalSessionId\":\"s1\"}]") != NULL);
+    CHECK(strstr(f.last_config, "\"conversations\":" ITEM_JSON) != NULL);
     CHECK(strstr(f.last_config, "\"artifacts\":{}") != NULL);
-    CHECK(index_of(&f, "mount-volumes") < index_of(&f, "start-supervisor"));
+    CHECK(strstr(f.last_config, ",\"hostQueryRuntime\":{\"artifacts\":{\"launcher\":{}}}}") != NULL);
+    CHECK(f.dirs_count == 1 && strcmp(f.dirs_ids[0], "s1:20001") == 0);
+    CHECK(index_of(&f, "mount-volumes") < index_of(&f, "prepare-dirs:1") && index_of(&f, "prepare-dirs:1") < index_of(&f, "start-supervisor"));
+    CHECK(!has(&f, "relay:G:1") && !starts(&f, "helper:r"));   /* nothing is promised before the ready line */
     wg_boot_supervisor_ready(&boot);
-    CHECK(has(&f, "relay:G") && boot.phase == WG_PHASE_RUNNING);
+    CHECK(has(&f, "relay:G:1") && has(&f, "helper:r:0:1") && boot.phase == WG_PHASE_RUNNING && boot.conv_state == WG_CONV_RUNNING);
+    CHECK(index_of(&f, "relay:G:1") < index_of(&f, "helper:r:0:1"));   /* the relay admits runtime frames before the host can hear `runtime_ready` */
+}
+
+static void test_the_guided_profile_uses_its_own_key_and_a_tools_only_set_has_no_ports_or_runtime_key(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 2);
+    CHECK(strstr(f.last_config, ",\"hostQueryGuidedRuntime\":{") != NULL && strstr(f.last_config, "\"hostQueryRuntime\"") == NULL && f.last_with_ports);
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_running(&boot, 0);
+    CHECK(!f.last_with_ports && strstr(f.last_config, "hostQuery") == NULL && !has(&f, "read-artifacts"));
+    CHECK(has(&f, "relay:G:0") && has(&f, "helper:r:0:1"));   /* no runtime streams exist */
+}
+
+static void test_a_second_or_early_conversation_set_is_a_helper_bug_and_stops_the_guest(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    send_conversations(&boot, 1);                     // before the mount
+    CHECK(has(&f, "log:conversations-out-of-order") && !has(&f, "start-supervisor") && has(&f, "power-off"));
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_running(&boot, 1);
+    send_conversations(&boot, 1);
+    CHECK(has(&f, "log:conversations-out-of-order") && has(&f, "power-off"));
+}
+
+static void test_malformed_conversation_payloads_are_refused_without_starting_anything(void) {
+    static const char *const ids[] = { "s1", "s2" };
+    uint8_t good[512], bad[512];
+    size_t n = conversations_payload(good, 1, ids, 1, ITEM_JSON);
+    CHECK(n > 10);
+    struct { size_t at; uint8_t value; } edits[] = {
+        { 0, 3 }, { 1, 0 }, { 1, 17 },                   // profile out of range, no conversations, too many
+        { 2, 0 },                                        // runtimeUid 999 or lower: first byte 0 gives 20000 & ~0xff... keep it a real change below
+    };
+    (void)edits;
+    for (int variant = 0; variant < 9; variant++) {
+        memcpy(bad, good, n);
+        size_t length = n;
+        switch (variant) {
+        case 0: bad[0] = 3; break;                       // unknown profile
+        case 1: bad[1] = 0; break;                       // no conversation
+        case 2: bad[1] = 2; break;                       // N2: a profile means exactly one
+        case 3: bad[2] = 0; bad[3] = 0; bad[4] = 0; bad[5] = 0; break;     // uid 0
+        case 4: bad[2] = 0xff; bad[3] = 0xff; bad[4] = 0xff; bad[5] = 0; break;   // uid above 65535
+        case 5: bad[6] = 0; break;                       // empty logical session id
+        case 6: bad[7] = '/'; break;                     // a path separator in the id
+        case 7: length = 6; break;                       // truncated
+        case 8: length = 6 + 2; break;                   // no json after the ids
+        }
+        struct fake f; fresh(&f);
+        struct wg_boot_ops ops = ops_for(&f);
+        struct wg_boot boot; wg_boot_init(&boot, &ops);
+        to_mounted(&boot);
+        wg_boot_helper_message(&boot, CTL_HELPER_CONVERSATIONS, bad, length);
+        CHECK(has(&f, "log:conversations-payload") && has(&f, "helper:r:1:0") && !has(&f, "start-supervisor") && !has(&f, "prepare-dirs:1"));
+        CHECK(!has(&f, "power-off") && boot.conv_state == WG_CONV_FAILED);
+    }
+    {   /* the count rules stand on their own, whatever else is in the payload */
+        struct wg_conversation_set set;
+        uint8_t big[2048];
+        const char *many[WG_CONVERSATIONS_MAX + 1];
+        char names[WG_CONVERSATIONS_MAX + 1][8];
+        for (unsigned i = 0; i <= WG_CONVERSATIONS_MAX; i++) { snprintf(names[i], sizeof names[i], "s%u", i); many[i] = names[i]; }
+        size_t n = conversations_payload(big, 0, many, 0, "[]");
+        CHECK(wg_parse_conversation_payload(big, n, &set) != 0);                          // none
+        n = conversations_payload(big, 0, many, WG_CONVERSATIONS_MAX, "[]");
+        CHECK(wg_parse_conversation_payload(big, n, &set) == 0 && set.count == WG_CONVERSATIONS_MAX);   // sixteen
+        n = conversations_payload(big, 0, many, WG_CONVERSATIONS_MAX + 1, "[]");
+        CHECK(wg_parse_conversation_payload(big, n, &set) != 0);                          // seventeen
+        n = conversations_payload(big, 1, many, 2, "[]");
+        CHECK(wg_parse_conversation_payload(big, n, &set) != 0);                          // a profile means exactly one, even when both are well formed
+        n = conversations_payload(big, 2, many, 2, "[]");
+        CHECK(wg_parse_conversation_payload(big, n, &set) != 0);
+        n = conversations_payload(big, 1, many, 1, "[]");
+        CHECK(wg_parse_conversation_payload(big, n, &set) == 0);
+    }
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    uint8_t two[512];
+    size_t m = conversations_payload(two, 0, ids, 2, "[{},{}]");
+    wg_boot_helper_message(&boot, CTL_HELPER_CONVERSATIONS, two, m);   // two tools-only conversations are fine
+    CHECK(has(&f, "start-supervisor") && has(&f, "prepare-dirs:2") && strcmp(f.dirs_ids[1], "s2:20002") == 0);
+    memcpy(bad, two, m);
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    const char *dup[] = { "s1", "s1" };
+    m = conversations_payload(two, 0, dup, 2, "[{},{}]");
+    wg_boot_helper_message(&boot, CTL_HELPER_CONVERSATIONS, two, m);
+    CHECK(has(&f, "log:conversations-payload") && !has(&f, "start-supervisor"));   // distinct ids only
+}
+
+static void test_a_set_that_cannot_start_leaves_the_guest_up_and_tells_the_helper(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    uint8_t payload[512];
+    static const char *const ids[] = { "s1" };
+    to_mounted(&boot);
+    size_t n = conversations_payload(payload, 0, ids, 1, "not json");
+    wg_boot_helper_message(&boot, CTL_HELPER_CONVERSATIONS, payload, n);
+    CHECK(has(&f, "log:config-refused") && has(&f, "helper:r:1:0") && !has(&f, "start-supervisor") && !has(&f, "power-off") && boot.conv_state == WG_CONV_FAILED);
+    fresh(&f); f.dirs_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 0);
+    CHECK(has(&f, "log:conversation-dirs-failed") && has(&f, "helper:r:2:0") && !has(&f, "start-supervisor") && !has(&f, "power-off"));
+    fresh(&f); f.supervisor_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 0);
+    CHECK(has(&f, "log:supervisor-start-failed") && has(&f, "helper:r:2:0") && !has(&f, "power-off"));
+    fresh(&f); f.artifacts_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 1);
+    CHECK(has(&f, "log:runtime-artifacts-missing") && has(&f, "helper:r:2:0") && !has(&f, "start-supervisor") && !has(&f, "power-off"));
+    fresh(&f); f.base_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 0);
+    CHECK(has(&f, "log:base-config-missing") && has(&f, "power-off") && has(&f, "relay:X:4"));   // an image fault, not the host's: fail-stop with an internal fault
+    fresh(&f); f.boot_id_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 0);
+    CHECK(has(&f, "log:boot-id-unreadable") && !has(&f, "start-supervisor") && has(&f, "power-off"));
+}
+
+static void test_a_failed_attempt_still_counts_as_the_one_attempt(void) {
+    struct fake f; fresh(&f);
+    f.supervisor_rc = -1;
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 0);
+    CHECK(boot.conv_state == WG_CONV_FAILED && !has(&f, "power-off"));
+    f.supervisor_rc = 0;
+    send_conversations(&boot, 0);                 // the helper must answer a second set itself; PID 1 treats one as a helper bug
+    CHECK(has(&f, "log:conversations-out-of-order") && has(&f, "power-off"));
+}
+
+static void test_a_supervisor_that_is_not_ready_fails_the_set_but_not_the_guest(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 1);
+    wg_boot_supervisor_not_ready(&boot, "supervisor-ready-timeout");
+    CHECK(has(&f, "log:supervisor-ready-timeout") && has(&f, "stop-supervisor:0") && has(&f, "helper:r:2:0") && !has(&f, "power-off") && boot.conv_state == WG_CONV_FAILED);
+    wg_boot_supervisor_exited(&boot, 137);                      // the stopped supervisor's exit is not news
+    CHECK(!has(&f, "power-off") && !starts(&f, "relay:X"));
+    wg_boot_supervisor_ready(&boot);                             // a ready line that comes too late changes nothing
+    CHECK(!has(&f, "relay:G:1") && boot.phase == WG_PHASE_MOUNTED);
+    drain(&boot, NONCE, 1000);
+    CHECK(starts(&f, "relay:H"));                                // and the guest can still stop in order
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 1);
+    wg_boot_supervisor_exited(&boot, 3);                        // died before its ready line
+    CHECK(has(&f, "log:supervisor-exited-before-ready") && has(&f, "helper:r:2:0") && !has(&f, "power-off"));
 }
 
 static void test_a_helper_that_dies_after_the_mount_without_saying_done_stops_the_guest(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
     host_ready(&boot); wg_boot_helper_message(&boot, CTL_HELPER_MOUNT, (const uint8_t *)MOUNT_PAYLOAD, 73);
     wg_boot_helper_exited(&boot, 1);   /* no 'E': the host may never have been told `mounted` */
     CHECK(has(&f, "log:helper-ended-after-mount"));
     CHECK(!has(&f, "start-supervisor"));
-    CHECK(has(&f, "umount:data") && has(&f, "umount:env") && has(&f, "power-off"));
-    CHECK(!starts(&f, "relay:"));
+    CHECK(has(&f, "umount:data") && !has(&f, "umount:env") && has(&f, "power-off"));
+    CHECK(has(&f, "relay:X:4") && !starts(&f, "relay:K") && !starts(&f, "relay:H"));   /* an internal fault, never an ack or halting */
 }
 
 static void test_a_helper_that_finishes_normally_and_exits_changes_nothing(void) {
@@ -352,45 +558,21 @@ static void test_a_helper_that_ends_before_any_mount_leaves_the_guest_up_for_the
 
 static void test_the_supervisor_never_starts_before_the_mount_is_confirmed(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
     wg_boot_helper_exited(&boot, 0);   /* the helper ended without ever mounting */
-    CHECK(!has(&f, "start-supervisor") && !has(&f, "read-conversations"));
+    CHECK(!has(&f, "start-supervisor") && !has(&f, "prepare-dirs:1"));
 }
 
-static void test_a_refused_config_or_a_failed_start_stops_the_guest(void) {
+static void test_the_supervisor_exiting_after_ready_stops_the_guest_with_a_supervisor_lost_fault(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
-    f.conversations = "not json";
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    CHECK(has(&f, "log:config-refused") && !has(&f, "start-supervisor") && has(&f, "power-off"));
-    fresh(&f); f.conversations_rc = 0; f.supervisor_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    CHECK(has(&f, "log:supervisor-start-failed") && has(&f, "power-off"));
-    fresh(&f); f.conversations_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    CHECK(has(&f, "log:conversation-set-unusable"));
-    fresh(&f); f.conversations_rc = 0; f.base_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    CHECK(has(&f, "log:base-config-missing"));
-    fresh(&f); f.conversations_rc = 0; f.boot_id_rc = -1; ops = ops_for(&f); wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    CHECK(has(&f, "log:boot-id-unreadable") && !has(&f, "start-supervisor"));
-}
-
-static void test_the_supervisor_exiting_stops_the_guest_unless_it_was_asked_to(void) {
-    struct fake f; fresh(&f);
-    f.conversations_rc = 0;
-    struct wg_boot_ops ops = ops_for(&f);
-    struct wg_boot boot; wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    wg_boot_supervisor_ready(&boot);
+    to_running(&boot, 1);
     wg_boot_supervisor_exited(&boot, 78);
     CHECK(has(&f, "log:supervisor-exited-retained-debt") && has(&f, "power-off"));
-    CHECK(!starts(&f, "relay:K") && !starts(&f, "relay:H"));
+    CHECK(has(&f, "relay:X:2") && !starts(&f, "relay:K") && !starts(&f, "relay:H"));
+    CHECK(index_of(&f, "relay:X:2") < index_of(&f, "umount:data"));   /* the host hears of it before the unmounts */
 }
 
 static void test_the_relay_exiting_stops_the_guest_without_frames(void) {
@@ -400,7 +582,7 @@ static void test_the_relay_exiting_stops_the_guest_without_frames(void) {
     to_mounted(&boot);
     wg_boot_relay_exited(&boot);
     CHECK(has(&f, "log:relay-exited") && has(&f, "power-off") && !starts(&f, "relay:"));
-    CHECK(index_of(&f, "umount:env") >= 0 && index_of(&f, "umount:data") >= 0);
+    CHECK(index_of(&f, "umount:data") >= 0);
 }
 
 /* ---- drain */
@@ -413,17 +595,15 @@ static void drain(struct wg_boot *boot, const char *nonce, uint32_t budget) {
 
 static void test_a_full_drain_runs_in_the_documented_order(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    wg_boot_supervisor_ready(&boot);
+    to_running(&boot, 1);
     drain(&boot, NONCE, 30000);
     int ack = index_of(&f, "relay:K:" NONCE), helper = index_of(&f, "stop-helper:15000"), sup = index_of(&f, "stop-supervisor:22500");
-    int kill = index_of(&f, "kill-all"), sync1 = index_of(&f, "sync"), env = index_of(&f, "umount:env"), data = index_of(&f, "umount:data");
+    int kill = index_of(&f, "kill-all"), sync1 = index_of(&f, "sync"), data = index_of(&f, "umount:data");
     int halting = index_of(&f, "relay:H:" NONCE), flushed = index_of(&f, "wait-flushed:3000"), off = index_of(&f, "power-off");
-    CHECK(ack >= 0 && helper > ack && sup > helper && kill > sup && sync1 > kill && env > sync1 && data > sync1);
-    CHECK(halting > env && halting > data && flushed > halting && off > flushed);
+    CHECK(ack >= 0 && helper > ack && sup > helper && kill > sup && sync1 > kill && data > sync1 && !has(&f, "umount:env"));
+    CHECK(halting > data && flushed > halting && off > flushed);
     CHECK(f.events[f.count - 2][0] == 's');   /* a final sync directly precedes the power-off */
     CHECK(strcmp(f.events[f.count - 1], "power-off") == 0);
     CHECK(boot.phase == WG_PHASE_DEAD && boot.halting_sent);
@@ -440,6 +620,8 @@ static void test_halting_is_withheld_when_a_unmount_fails_and_the_guest_still_po
     CHECK(has(&f, "relay:K:" NONCE));
     CHECK(!starts(&f, "relay:H"));
     CHECK(has(&f, "log:unmount-failed") && has(&f, "power-off") && !boot.halting_sent);
+    CHECK(has(&f, "relay:X:1:" NONCE));   /* unmount_failed, after the drain_ack, with the drain's nonce */
+    CHECK(index_of(&f, "relay:K:" NONCE) < index_of(&f, "relay:X:1:" NONCE));
 }
 
 static void test_a_busy_unmount_is_retried_after_killing_the_holders(void) {
@@ -536,8 +718,9 @@ static void test_the_fail_stop_unmounts_and_syncs_but_sends_no_frames(void) {
     struct wg_boot boot; wg_boot_init(&boot, &ops);
     to_mounted(&boot);
     wg_boot_fail_stop(&boot, "because");
-    CHECK(has(&f, "log:because") && has(&f, "sync") && has(&f, "umount:data") && has(&f, "umount:env") && has(&f, "power-off"));
-    CHECK(!starts(&f, "relay:"));
+    CHECK(has(&f, "log:because") && has(&f, "sync") && has(&f, "umount:data") && has(&f, "power-off"));
+    CHECK(has(&f, "relay:X:4") && !starts(&f, "relay:K") && !starts(&f, "relay:H") && !starts(&f, "relay:G"));   /* an internal fault is the only frame */
+    CHECK(index_of(&f, "relay:X:4") < index_of(&f, "umount:data"));
     CHECK(index_of(&f, "sync") < index_of(&f, "umount:data"));
 }
 
@@ -599,16 +782,25 @@ static void test_a_leftover_environment_volume_is_tracked_and_verified_too(void)
 }
 
 static void test_halting_needs_a_verified_clean_superblock_on_every_mounted_volume(void) {
-    for (int which = 0; which < 2; which++) {
+    {
         struct fake f; fresh(&f);
-        f.verify_rc[which] = -1;
+        f.verify_rc[0] = -1;
         struct wg_boot_ops ops = ops_for(&f);
         struct wg_boot boot; wg_boot_init(&boot, &ops);
         to_mounted(&boot);
         drain(&boot, NONCE, 1000);
-        CHECK(has(&f, "verify:data:11") && (which == 0 || has(&f, "verify:env:66")));   /* the first failure ends the check */
+        CHECK(has(&f, "verify:data:11"));
         CHECK(index_of(&f, "umount:data") < index_of(&f, "verify:data:11"));
-        CHECK(!starts(&f, "relay:H") && has(&f, "power-off"));
+        CHECK(!starts(&f, "relay:H") && has(&f, "power-off") && has(&f, "relay:X:1:" NONCE));
+    }
+    {   /* the environment disk was never mounted: its superblock is not part of what `halting` claims */
+        struct fake f; fresh(&f);
+        f.verify_rc[1] = -1;
+        struct wg_boot_ops ops = ops_for(&f);
+        struct wg_boot boot; wg_boot_init(&boot, &ops);
+        to_mounted(&boot);
+        drain(&boot, NONCE, 1000);
+        CHECK(!has(&f, "verify:env:66") && starts(&f, "relay:H"));
     }
 }
 
@@ -670,10 +862,11 @@ static void test_mount_flags_options_and_order(void) {
     int leftover = -1;
     CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) == 0 && leftover == 0);
     CHECK(mhas(&m, "mount /dev/vda /workspace ext4 1030 noinit_itable,errors=remount-ro"));       /* nosuid|nodev|noatime = 2|4|1024 */
-    CHECK(mhas(&m, "mount /dev/vdb /opt/winter/environment/disk ext4 1030 noinit_itable,errors=remount-ro"));
+    CHECK(!mhas(&m, "mount /dev/vdb /opt/winter/environment/disk ext4 1030 noinit_itable,errors=remount-ro"));   /* the environment disk is not mounted in N2 */
+    for (int i = 0; i < m.count; i++) CHECK(strncmp(m.events[i], "mount /dev/vdb", 14) != 0);
     CHECK(midx(&m, "check /dev/vda 11") < midx(&m, "mount /dev/vda /workspace ext4 1030 noinit_itable,errors=remount-ro"));
     CHECK(midx(&m, "check /dev/vdb 66") < midx(&m, "mount /dev/vda /workspace ext4 1030 noinit_itable,errors=remount-ro"));   /* both checked before any mount */
-    CHECK(midx(&m, "skeleton") > midx(&m, "mount /dev/vdb /opt/winter/environment/disk ext4 1030 noinit_itable,errors=remount-ro"));
+    CHECK(midx(&m, "skeleton") > midx(&m, "mount /dev/vda /workspace ext4 1030 noinit_itable,errors=remount-ro"));
     CHECK((WG_WORKING_FLAGS & WG_MS_NOEXEC) == 0 && (WG_WORKING_FLAGS & WG_MS_RDONLY) == 0);
 }
 
@@ -690,42 +883,36 @@ static void test_a_failed_check_mounts_nothing(void) {
     }
 }
 
-static void test_a_failed_second_mount_unmounts_the_first(void) {
+static void test_a_failed_data_mount_mounts_nothing_else_and_skips_the_skeleton(void) {
     struct mfake m; memset(&m, 0, sizeof m);
-    m.mount_rc[1] = -1;
+    m.mount_rc[0] = -1;
     struct wg_mount_ops ops = mops(&m);
     const uint8_t du[16] = { 0 }, eu[16] = { 0 };
     int leftover = -1;
-    CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) != 0);
-    CHECK(mhas(&m, "umount /workspace") && !mhas(&m, "skeleton"));
+    CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) != 0 && leftover == 0);
+    CHECK(!mhas(&m, "skeleton") && !mhas(&m, "umount /workspace"));
+    for (int i = 0; i < m.count; i++) CHECK(strncmp(m.events[i], "mount /dev/vdb", 14) != 0);
 }
 
-static void test_a_failed_skeleton_unmounts_both(void) {
+static void test_a_failed_skeleton_unmounts_the_data_volume(void) {
     struct mfake m; memset(&m, 0, sizeof m);
     m.skeleton_rc = -1;
     struct wg_mount_ops ops = mops(&m);
     const uint8_t du[16] = { 0 }, eu[16] = { 0 };
     int leftover = -1;
-    CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) != 0);
-    CHECK(mhas(&m, "umount /workspace") && mhas(&m, "umount /opt/winter/environment/disk"));
-    CHECK(midx(&m, "umount /opt/winter/environment/disk") < midx(&m, "umount /workspace"));
+    CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) != 0 && leftover == 0);
+    CHECK(mhas(&m, "umount /workspace"));
 }
 
-static void test_rollback_unmount_failures_are_reported_per_volume(void) {
+static void test_a_rollback_unmount_failure_is_reported_for_the_data_volume(void) {
     struct mfake m; memset(&m, 0, sizeof m);
-    m.mount_rc[1] = -1;
+    m.skeleton_rc = -1;
     m.umount_rc = -1;
     struct wg_mount_ops ops = mops(&m);
     const uint8_t du[16] = { 0 }, eu[16] = { 0 };
     int leftover = 0;
     CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) != 0);
     CHECK(leftover == 1);   /* the data volume is still mounted */
-    memset(&m, 0, sizeof m);
-    m.skeleton_rc = -1;
-    m.umount_rc = -1;
-    leftover = 0;
-    CHECK(wg_mount_volumes(&ops, "/dev/vda", du, "/dev/vdb", eu, &leftover) != 0);
-    CHECK(leftover == 3);   /* both */
 }
 
 static void test_journal_replay_is_mount_flush_unmount_and_never_executable(void) {
@@ -796,27 +983,24 @@ static void test_a_ready_that_arrives_after_the_helper_is_gone_does_not_unlock_t
 
 static void test_the_devices_are_flushed_after_the_last_unmount_and_before_halting(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    wg_boot_supervisor_ready(&boot);
+    to_running(&boot, 1);
     drain(&boot, NONCE, 30000);
-    int env = index_of(&f, "umount:env"), data = index_of(&f, "umount:data"), flush = index_of(&f, "flush:3"), halting = index_of(&f, "relay:H:" NONCE);
-    CHECK(env >= 0 && data >= 0 && flush > env && flush > data && halting > flush);
+    int data = index_of(&f, "umount:data"), flush = index_of(&f, "flush:1"), halting = index_of(&f, "relay:H:" NONCE);
+    CHECK(data >= 0 && flush > data && halting > flush);   /* only the data volume was ever mounted: only it is flushed */
     CHECK(boot.halting_sent);
 }
 
 static void test_a_failed_flush_withholds_halting_but_still_powers_off(void) {
     struct fake f; fresh(&f);
-    f.conversations_rc = 0;
     f.flush_rc = -1;
     struct wg_boot_ops ops = ops_for(&f);
     struct wg_boot boot; wg_boot_init(&boot, &ops);
-    to_mounted(&boot);
-    wg_boot_supervisor_ready(&boot);
+    to_running(&boot, 1);
     drain(&boot, NONCE, 30000);
     CHECK(has(&f, "relay:K:" NONCE) && !has(&f, "relay:H:" NONCE) && !boot.halting_sent);
+    CHECK(has(&f, "relay:X:4:" NONCE));   /* internal: the unmounts worked, the flush did not */
     CHECK(has(&f, "log:flush-failed") && has(&f, "power-off"));
 }
 
@@ -835,6 +1019,72 @@ static void test_no_flush_is_asked_for_a_volume_that_was_never_mounted_and_none_
     CHECK(!starts(&g, "flush") && !has(&g, "relay:H:" NONCE));
 }
 
+static void test_fail_stop_faults_name_what_failed(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    uint8_t p[CTL_DRAIN_PAYLOAD_BYTES];
+    drain_payload(p, NONCE, 120001, 0);
+    wg_boot_relay_message(&boot, CTL_DRAIN, p, sizeof p);
+    CHECK(has(&f, "relay:X:3") && !starts(&f, "relay:K"));                    // protocol_violation: the host's drain was malformed
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    wg_boot_relay_message(&boot, CTL_DRAIN, p, 36);
+    CHECK(has(&f, "relay:X:3"));
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    wg_boot_relay_message(&boot, 'Z', NULL, 0);                                  // a tag the relay never sends
+    CHECK(has(&f, "log:relay-message") && has(&f, "relay:X:3"));
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    wg_boot_helper_message(&boot, 'Z', NULL, 0);                                 // a helper that says something it may not: PID 1's own affair
+    CHECK(has(&f, "log:helper-message") && has(&f, "relay:X:4") && !has(&f, "relay:X:3"));
+}
+
+static void test_a_fault_is_flushed_before_anything_else_happens_and_an_unconfirmed_one_is_logged(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_running(&boot, 1);
+    wg_boot_supervisor_exited(&boot, 1);
+    CHECK(index_of(&f, "relay:X:2") >= 0 && index_of(&f, "wait-flushed:3000") > index_of(&f, "relay:X:2") && index_of(&f, "stop-helper:5000") > index_of(&f, "wait-flushed:3000"));
+    CHECK(!has(&f, "log:fault-unconfirmed"));
+    fresh(&f); f.wait_flushed_rc = 0; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_running(&boot, 1);
+    wg_boot_supervisor_exited(&boot, 1);
+    CHECK(has(&f, "log:fault-unconfirmed") && has(&f, "power-off"));
+}
+
+static void test_a_late_not_ready_event_changes_nothing(void) {
+    struct fake f; fresh(&f);
+    f.supervisor_rc = -1;
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 0);
+    int before = f.count;
+    wg_boot_supervisor_not_ready(&boot, "supervisor-ready-timeout");        // the set already failed: no second answer, no second stop
+    CHECK(f.count == before);
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_running(&boot, 1);
+    before = f.count;
+    wg_boot_supervisor_not_ready(&boot, "supervisor-ready-line");           // already running
+    CHECK(f.count == before && boot.conv_state == WG_CONV_RUNNING);
+}
+
+static void test_the_helper_gets_the_hosts_messages_in_every_live_phase_and_not_while_draining(void) {
+    static const uint8_t body[] = "{\"v\":1}";
+    for (int stage = 0; stage < 4; stage++) {
+        struct fake f; fresh(&f);
+        struct wg_boot_ops ops = ops_for(&f);
+        struct wg_boot boot; wg_boot_init(&boot, &ops);
+        if (stage == 1) to_mounted(&boot);
+        if (stage >= 2) to_running(&boot, 1);
+        if (stage == 3) { drain(&boot, NONCE, 1000); }
+        int before = f.count;
+        wg_boot_relay_message(&boot, CTL_BOOTSTRAP_DOWN, body, sizeof body - 1);
+        if (stage == 3) CHECK(f.count == before);
+        else CHECK(has(&f, "helper:b:7"));
+    }
+}
+
 int main(void) {
     static const struct test_case tests[] = {
         T(test_bootstrap_payloads_flow_both_ways), T(test_a_bootstrap_payload_with_no_helper_is_dropped),
@@ -843,15 +1093,15 @@ int main(void) {
         T(test_a_failed_mount_is_reported_and_leaves_nothing_mounted), T(test_a_malformed_mount_payload_stops_the_guest_without_mounting),
         T(test_done_without_a_mount_stops_the_guest), T(test_unknown_helper_and_relay_messages_stop_the_guest),
         T(test_a_relay_fatal_stops_the_guest_without_any_frame), T(test_the_supervisor_does_not_start_without_a_conversation_set),
-        T(test_with_a_conversation_set_the_supervisor_starts_with_the_live_boot_id), T(test_a_helper_that_dies_after_the_mount_without_saying_done_stops_the_guest), T(test_a_helper_that_finishes_normally_and_exits_changes_nothing), T(test_a_helper_that_ends_before_any_mount_leaves_the_guest_up_for_the_host), T(test_the_supervisor_never_starts_before_the_mount_is_confirmed),
-        T(test_a_refused_config_or_a_failed_start_stops_the_guest), T(test_the_supervisor_exiting_stops_the_guest_unless_it_was_asked_to),
+        T(test_a_host_query_set_starts_the_supervisor_with_ports_and_the_live_boot_id), T(test_the_guided_profile_uses_its_own_key_and_a_tools_only_set_has_no_ports_or_runtime_key), T(test_a_second_or_early_conversation_set_is_a_helper_bug_and_stops_the_guest), T(test_malformed_conversation_payloads_are_refused_without_starting_anything), T(test_a_set_that_cannot_start_leaves_the_guest_up_and_tells_the_helper), T(test_a_supervisor_that_is_not_ready_fails_the_set_but_not_the_guest), T(test_a_failed_attempt_still_counts_as_the_one_attempt), T(test_fail_stop_faults_name_what_failed), T(test_a_fault_is_flushed_before_anything_else_happens_and_an_unconfirmed_one_is_logged), T(test_a_late_not_ready_event_changes_nothing), T(test_the_helper_gets_the_hosts_messages_in_every_live_phase_and_not_while_draining), T(test_a_helper_that_dies_after_the_mount_without_saying_done_stops_the_guest), T(test_a_helper_that_finishes_normally_and_exits_changes_nothing), T(test_a_helper_that_ends_before_any_mount_leaves_the_guest_up_for_the_host), T(test_the_supervisor_never_starts_before_the_mount_is_confirmed),
+        T(test_the_supervisor_exiting_after_ready_stops_the_guest_with_a_supervisor_lost_fault),
         T(test_the_relay_exiting_stops_the_guest_without_frames), T(test_a_full_drain_runs_in_the_documented_order),
         T(test_halting_is_withheld_when_a_unmount_fails_and_the_guest_still_powers_off), T(test_a_busy_unmount_is_retried_after_killing_the_holders),
         T(test_the_unmount_attempts_are_bounded), T(test_a_drain_before_any_mount_has_nothing_to_unmount_and_is_still_orderly),
         T(test_a_zero_budget_still_ends_in_a_power_off), T(test_a_malformed_drain_stops_the_guest_without_an_ack),
         T(test_events_after_the_power_off_are_ignored), T(test_a_second_stop_cannot_start_while_the_first_runs),
         T(test_the_fail_stop_unmounts_and_syncs_but_sends_no_frames), T(test_a_failed_replay_that_left_the_volume_mounted_is_unmounted_before_halting), T(test_a_replay_volume_that_cannot_be_unmounted_withholds_halting), T(test_a_clean_replay_failure_leaves_nothing_to_unmount), T(test_a_mount_rollback_that_failed_is_tracked_and_verified), T(test_a_leftover_environment_volume_is_tracked_and_verified_too), T(test_halting_needs_a_verified_clean_superblock_on_every_mounted_volume), T(test_a_volume_that_was_never_mounted_is_not_verified), T(test_an_unconfirmed_halting_is_logged), T(test_mount_flags_options_and_order),
-        T(test_a_failed_check_mounts_nothing), T(test_a_failed_second_mount_unmounts_the_first), T(test_a_failed_skeleton_unmounts_both), T(test_rollback_unmount_failures_are_reported_per_volume),
+        T(test_a_failed_check_mounts_nothing), T(test_a_failed_data_mount_mounts_nothing_else_and_skips_the_skeleton), T(test_a_failed_skeleton_unmounts_the_data_volume), T(test_a_rollback_unmount_failure_is_reported_for_the_data_volume),
         T(test_journal_replay_is_mount_flush_unmount_and_never_executable), T(test_a_replay_that_cannot_flush_or_unmount_does_not_succeed),
         T(test_replay_refuses_unknown_purposes_and_failed_directories), T(test_a_mount_request_before_the_hosts_ready_stops_the_guest), T(test_a_ready_that_arrives_after_the_helper_is_gone_does_not_unlock_the_mount), T(test_the_devices_are_flushed_after_the_last_unmount_and_before_halting), T(test_a_failed_flush_withholds_halting_but_still_powers_off), T(test_no_flush_is_asked_for_a_volume_that_was_never_mounted_and_none_when_unmounting_failed),
     };

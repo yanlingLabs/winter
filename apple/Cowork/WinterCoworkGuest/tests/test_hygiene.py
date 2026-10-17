@@ -90,6 +90,14 @@ class GuestSourceHygiene(unittest.TestCase):
             self.assertNotIn("\"plan\"", code, path.name)
             self.assertNotIn("operationId", code, path.name)
 
+    def test_the_supervisor_command_line_is_the_sdks_exact_form(self):
+        init = strip_comments((ROOT / "init/init_linux.c").read_text())
+        self.assertIn('"--trusted-config-fd", "3", "--runtime-ports-fds", "4,5,6", NULL', init)
+        self.assertIn('"--trusted-config-fd", "3", NULL', init)
+        self.assertIn("exec_child(sources, with_ports ? 4 : 1, stdin_pipe[0], stdout_pipe[1], with_ports ? with : without)", init)
+        self.assertNotIn("conversations.json", init)
+        self.assertNotIn("WG_ENVIRONMENT_PATH", init)
+
     def test_the_supervisor_ready_line_is_compared_by_length_and_bytes(self):
         init = strip_comments((ROOT / "init/init_linux.c").read_text())
         self.assertNotIn("strcmp(G.ready_line", init)

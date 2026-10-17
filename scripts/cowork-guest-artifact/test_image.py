@@ -255,7 +255,6 @@ class GuestFilesTests(unittest.TestCase):
         self.assertEqual(tree.nodes['opt/winter/libexec/winter-guest-relay']['mode'],0o555)
         self.assertEqual(tree.nodes['opt/winter/libexec/guest_bootstrap.py']['mode'],0o444)
         self.assertEqual(tree.nodes['opt/winter/etc/supervisor-base.json']['mode'],0o444)
-        self.assertEqual(tree.nodes['opt/winter/environment/disk']['kind'],'directory')
         for path in ('winter-guest-relay','guest_bootstrap.py'):self.assertIn('opt/winter/libexec/'+path,tree.nodes)
     def test_the_added_init_passes_exactly_the_pinned_check(self):
         image.check_startup(self.tree(),sha(self.PROGRAMS['init']))

@@ -53,11 +53,13 @@ static const char *control_name(enum wmx_control_type type) {
     case WMX_CONTROL_DRAIN_ACK: return "drain_ack";
     case WMX_CONTROL_HALTING: return "halting";
     case WMX_CONTROL_PONG: return "pong";
+    case WMX_CONTROL_FAULT: return "fault";
     default: return "none";
     }
 }
 static void print_control(const struct wmx_control *c) {
     printf("%s|%s|%u|%d|%u", control_name(c->type), c->stop_nonce, (unsigned)c->budget_ms, (int)c->origin, (unsigned)c->n);
+    if (c->type == WMX_CONTROL_FAULT) printf("|%s|%d", wmx_fault_code_name(c->fault_code), c->has_stop_nonce);
 }
 
 /* name direction hex, one per line -> name|status|class|seq|length|control fields */
@@ -82,13 +84,21 @@ static int cmd_vectors(void) {
             if (status != WMX_OK) { printf("%s|%s\n", name, wmx_status_name(status)); free(bytes); continue; }
             printf("%s|ok|%u|%u|%u|", name, header.class_value, (unsigned)header.seq, (unsigned)header.length);
             print_control(&control);
-            if (control.type == WMX_CONTROL_DRAIN_ACK || control.type == WMX_CONTROL_HALTING || control.type == WMX_CONTROL_PONG) {
+            if (control.type == WMX_CONTROL_DRAIN_ACK || control.type == WMX_CONTROL_HALTING || control.type == WMX_CONTROL_PONG || control.type == WMX_CONTROL_FAULT) {
                 uint8_t rebuilt[512], body[256];
                 size_t body_length = wmx_encode_control(&control, body, sizeof body);
                 size_t frame = wmx_build_frame(rebuilt, sizeof rebuilt, WMX_CLASS_CONTROL, header.seq, body, body_length);
                 printf("|%s", frame == length && memcmp(rebuilt, bytes, length) == 0 ? "reencode-same" : "reencode-DIFFERENT");
             }
             printf("\n");
+        } else if (header.class_value == WMX_CLASS_RUNTIME) {
+            struct wmx_runtime_prefix prefix;
+            status = wmx_parse_runtime_payload(payload, header.length, dir, &prefix);
+            if (status != WMX_OK) { printf("%s|%s\n", name, wmx_status_name(status)); free(bytes); continue; }
+            uint8_t rebuilt[WMX_RUNTIME_PREFIX_BYTES];
+            wmx_write_runtime_prefix(rebuilt, prefix.conversation, prefix.stream, prefix.end);
+            printf("%s|ok|%u|%u|%u|runtime|%u|%u|%d|%s\n", name, header.class_value, (unsigned)header.seq, (unsigned)header.length, prefix.conversation, (unsigned)prefix.stream,
+                   prefix.end, memcmp(rebuilt, payload, WMX_RUNTIME_PREFIX_BYTES) == 0 ? "prefix-same" : "prefix-DIFFERENT");
         } else {
             printf("%s|ok|%u|%u|%u|-\n", name, header.class_value, (unsigned)header.seq, (unsigned)header.length);
         }
@@ -148,6 +158,12 @@ static int cmd_encode(int argc, char **argv) {
         control.type = strcmp(argv[2], "halting") == 0 ? WMX_CONTROL_HALTING : WMX_CONTROL_DRAIN_ACK;
         if (strlen(argv[3]) > WMX_NONCE_CHARS) { printf("refused\n"); return 0; }
         strcpy(control.stop_nonce, argv[3]);
+    } else if (strcmp(argv[2], "fault") == 0 && argc >= 6) {
+        control.type = WMX_CONTROL_FAULT;
+        control.fault_code = (enum wmx_fault_code)strtoul(argv[3], NULL, 10);
+        control.has_stop_nonce = strlen(argv[5]) > 0;
+        if (strlen(argv[5]) > WMX_NONCE_CHARS) { printf("refused\n"); return 0; }
+        strcpy(control.stop_nonce, argv[5]);
     } else if (strcmp(argv[2], "pong") == 0) {
         control.type = WMX_CONTROL_PONG;
         control.n = (uint32_t)strtoul(argv[3], NULL, 10);

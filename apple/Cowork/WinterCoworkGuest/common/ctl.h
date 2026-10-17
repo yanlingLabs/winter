@@ -28,16 +28,19 @@
 #define CTL_BOOTSTRAP_UP 'U'   /* one bootstrap-class payload to frame and send */
 #define CTL_DRAIN_ACK 'K'      /* 32 hex nonce chars */
 #define CTL_HALTING 'H'        /* 32 hex nonce chars */
-#define CTL_RUNTIME_GO 'G'     /* empty: the runtime FIFOs have a consumer, runtime frames are now admitted */
+#define CTL_RUNTIME_GO 'G'     /* one byte: how many conversations' runtime streams exist (0 = tools only, 1 = one host-query conversation). Runtime frames are admitted from now on */
+#define CTL_FAULT 'X'          /* a control-up `fault`: u8 code (1 unmount_failed, 2 supervisor_lost, 3 protocol_violation, 4 internal), then the 32 char drain nonce (omit it for null). The relay flushes it, then sends 'f' */
 /* bootstrap helper -> init */
 #define CTL_HELPER_UP 'B'      /* a bootstrap-class payload for the host */
 #define CTL_HELPER_REPLAY 'Q'  /* "data" or "environment": replay this volume's journal by a kernel mount */
 #define CTL_HELPER_MOUNT 'M'   /* 36 char data UUID, 36 char environment UUID: mount both now */
-#define CTL_HELPER_DONE 'E'    /* empty: the exchange finished, exit follows */
+#define CTL_HELPER_DONE 'E'    /* empty: the plan exchange finished (the data volume is mounted). The helper stays up for the conversation set */
+#define CTL_HELPER_CONVERSATIONS 'C' /* the validated conversation set to start the supervisor with: see boot.h wg_conversation_set */
 /* init -> bootstrap helper */
 #define CTL_HELPER_DOWN 'b'    /* a bootstrap-class payload from the host */
 #define CTL_REPLAY_RESULT 'q'  /* one byte, 1 = the replay mounted, flushed and unmounted cleanly */
-#define CTL_MOUNT_RESULT 'm'   /* one byte, 1 = both filesystems are mounted */
+#define CTL_MOUNT_RESULT 'm'   /* one byte, 1 = the data filesystem is mounted */
+#define CTL_CONVERSATIONS_RESULT 'r' /* two bytes: status (0 the supervisor is ready, 1 bad_conversations, 2 supervisor_failed), conversation count */
 
 #define CTL_DRAIN_PAYLOAD_BYTES 37u
 

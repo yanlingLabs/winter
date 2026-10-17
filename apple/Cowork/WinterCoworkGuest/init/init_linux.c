@@ -49,7 +49,9 @@ _Static_assert(WG_MS_RDONLY == MS_RDONLY && WG_MS_NOSUID == MS_NOSUID && WG_MS_N
 #define SUPERVISOR_PATH "/opt/winter/libexec/linux-supervisor.py"
 #define PYTHON_PATH "/usr/bin/python3"
 #define BASE_CONFIG_PATH "/opt/winter/etc/supervisor-base.json"
-#define CONVERSATIONS_PATH "/run/winter/trusted/conversations.json"
+#define RUNTIME_ARTIFACTS_PATH "/opt/winter/etc/supervisor-runtime-artifacts.json"
+#define WORKSPACE_CONVERSATIONS "/workspace/.winter/conversations"
+#define RUN_CONVERSATIONS "/run/winter/conversations"
 #define TRUSTED_DIR "/run/winter/trusted"
 #define TRUSTED_NAME "config.json"
 #define SUPERVISOR_READY_LINE "{\"fullGuestExecutionEnabled\":false,\"ready\":true}"
@@ -338,16 +340,39 @@ static int op_verify_unmounted(void *ctx, int volume, const uint8_t uuid[16]) {
 }
 static int op_umount(void *ctx, int volume) {
     (void)ctx;
-    return umount2(volume == WG_VOLUME_DATA ? WG_WORKSPACE_PATH : WG_ENVIRONMENT_PATH, 0);
+    return volume == WG_VOLUME_DATA ? umount2(WG_WORKSPACE_PATH, 0) : -1;   /* the environment disk is never mounted in N2 */
 }
 
-static int op_read_conversations(void *ctx, char *out, size_t capacity, size_t *length) {
+static int op_read_runtime_artifacts(void *ctx, char *out, size_t capacity, size_t *length) {
     (void)ctx;
-    struct stat st;
-    if (lstat(CONVERSATIONS_PATH, &st) != 0) return errno == ENOENT ? 1 : -1;
-    long n = wg_read_small_file(CONVERSATIONS_PATH, out, capacity, 0);
+    long n = wg_read_small_file(RUNTIME_ARTIFACTS_PATH, out, capacity, 0);
     if (n < 0) return -1;
     *length = (size_t)n;
+    return 0;
+}
+
+/* One private directory per conversation: created or adopted below a root-held descriptor, never by path through a link. Ownership and
+ * mode are set on the open descriptor. The supervisor refuses a store that is not empty (N2 starts fresh conversations only). */
+static int make_private_dir(const char *parent_path, const char *name, uid_t uid) {
+    int parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0) return -1;
+    if (mkdirat(parent, name, 0700) != 0 && errno != EEXIST) { close(parent); return -1; }
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    close(parent);
+    if (fd < 0) return -1;
+    struct stat st;
+    int rc = fchown(fd, uid, (gid_t)uid);
+    if (rc == 0) rc = fchmod(fd, 0700);
+    if (rc == 0 && (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != uid || (st.st_mode & 07777) != 0700)) rc = -1;
+    close(fd);
+    return rc;
+}
+static int op_prepare_conversation_dirs(void *ctx, const struct wg_conversation_set *set) {
+    (void)ctx;
+    for (unsigned i = 0; i < set->count; i++) {
+        if (make_private_dir(WORKSPACE_CONVERSATIONS, set->session_id[i], (uid_t)set->runtime_uid[i]) != 0) return -1;
+        if (make_private_dir(RUN_CONVERSATIONS, set->session_id[i], (uid_t)set->runtime_uid[i]) != 0) return -1;
+    }
     return 0;
 }
 static int op_read_base_config(void *ctx, char *out, size_t capacity, size_t *length) {
@@ -371,7 +396,7 @@ static int op_read_boot_id(void *ctx, char out[37]) {
     return 0;
 }
 
-static int op_start_supervisor(void *ctx, const char *config, size_t length) {
+static int op_start_supervisor(void *ctx, const char *config, size_t length, int with_ports) {
     (void)ctx;
     int config_fd = wg_write_trusted_config(TRUSTED_DIR, TRUSTED_NAME, config, length);
     if (config_fd < 0) return -1;
@@ -380,21 +405,24 @@ static int op_start_supervisor(void *ctx, const char *config, size_t length) {
     if (make_pipe(stdout_pipe) != 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); return -1; }
     /* The supervisor's ends of the runtime pipes are non-blocking file descriptions, root-owned, single-link: exactly what
      * RuntimeDuplexPorts demands of its input/stdout/stderr descriptors. */
-    fcntl(G.rt_in_r, F_SETFL, fcntl(G.rt_in_r, F_GETFL) | O_NONBLOCK);
-    fcntl(G.rt_out_w, F_SETFL, fcntl(G.rt_out_w, F_GETFL) | O_NONBLOCK);
-    fcntl(G.rt_err_w, F_SETFL, fcntl(G.rt_err_w, F_GETFL) | O_NONBLOCK);
+    if (with_ports) {
+        fcntl(G.rt_in_r, F_SETFL, fcntl(G.rt_in_r, F_GETFL) | O_NONBLOCK);
+        fcntl(G.rt_out_w, F_SETFL, fcntl(G.rt_out_w, F_GETFL) | O_NONBLOCK);
+        fcntl(G.rt_err_w, F_SETFL, fcntl(G.rt_err_w, F_GETFL) | O_NONBLOCK);
+    }
     pid_t pid = fork();
     if (pid < 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); close(stdout_pipe[0]); close(stdout_pipe[1]); return -1; }
     if (pid == 0) {
         setsid();
         int sources[4] = { config_fd, G.rt_in_r, G.rt_out_w, G.rt_err_w };
-        char *argv[] = { PYTHON_PATH, "-I", "-S", "-B", SUPERVISOR_PATH, "--trusted-config-fd", "3", "--runtime-ports-fds", "4,5,6", NULL };
-        exec_child(sources, 4, stdin_pipe[0], stdout_pipe[1], argv);
+        char *with[] = { PYTHON_PATH, "-I", "-S", "-B", SUPERVISOR_PATH, "--trusted-config-fd", "3", "--runtime-ports-fds", "4,5,6", NULL };
+        char *without[] = { PYTHON_PATH, "-I", "-S", "-B", SUPERVISOR_PATH, "--trusted-config-fd", "3", NULL };
+        exec_child(sources, with_ports ? 4 : 1, stdin_pipe[0], stdout_pipe[1], with_ports ? with : without);
     }
     close(config_fd);
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
-    close_fd(&G.rt_in_r);
+    close_fd(&G.rt_in_r);       /* with no host-query conversation these ends were never handed to anyone */
     close_fd(&G.rt_out_w);
     close_fd(&G.rt_err_w);
     G.supervisor = pid;
@@ -515,17 +543,19 @@ static void pump_supervisor_ready(void) {
     for (int round = 0; round < 8; round++) {   /* bounded: other events must not starve behind a chatty child */
         ssize_t n = read(G.sup_out_r, chunk, sizeof chunk);
         if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
-        if (n <= 0) { close_fd(&G.sup_out_r); return; }
+        if (n <= 0) { close_fd(&G.sup_out_r); if (!G.ready_seen) { supervisor_deadline = 0; wg_boot_supervisor_not_ready(&boot, "supervisor-ready-eof"); } return; }
         for (ssize_t i = 0; i < n; i++) {
             if (G.ready_seen) break;                 /* anything after the first line is discarded unread */
             if (chunk[i] == '\n') {
                 G.ready_line[G.ready_have] = '\0';
-                if (G.ready_have != sizeof SUPERVISOR_READY_LINE - 1 || memcmp(G.ready_line, SUPERVISOR_READY_LINE, G.ready_have) != 0) { wg_boot_fail_stop(&boot, "supervisor-ready-line"); return; }
+                if (G.ready_have != sizeof SUPERVISOR_READY_LINE - 1 || memcmp(G.ready_line, SUPERVISOR_READY_LINE, G.ready_have) != 0) { G.ready_seen = 1; supervisor_deadline = 0; wg_boot_supervisor_not_ready(&boot, "supervisor-ready-line"); return; }
                 G.ready_seen = 1;
                 supervisor_deadline = 0;
                 wg_boot_supervisor_ready(&boot);
             } else if (G.ready_have + 1 >= sizeof G.ready_line) {
-                wg_boot_fail_stop(&boot, "supervisor-ready-line");
+                G.ready_seen = 1;
+                supervisor_deadline = 0;
+                wg_boot_supervisor_not_ready(&boot, "supervisor-ready-line");
                 return;
             } else {
                 G.ready_line[G.ready_have++] = chunk[i];
@@ -606,12 +636,12 @@ int main(void) {
     boot_ops.now_ms = op_now; boot_ops.pause_ms = op_pause; boot_ops.log = op_log; boot_ops.to_relay = op_to_relay; boot_ops.to_helper = op_to_helper;
     boot_ops.wait_flushed = op_wait_flushed; boot_ops.replay = op_replay; boot_ops.umount_replay = op_umount_replay;
     boot_ops.mount_volumes = op_mount_volumes; boot_ops.umount = op_umount; boot_ops.verify_unmounted = op_verify_unmounted;
-    boot_ops.read_conversations = op_read_conversations; boot_ops.read_base_config = op_read_base_config; boot_ops.read_boot_id = op_read_boot_id;
+    boot_ops.prepare_conversation_dirs = op_prepare_conversation_dirs; boot_ops.read_runtime_artifacts = op_read_runtime_artifacts; boot_ops.read_base_config = op_read_base_config; boot_ops.read_boot_id = op_read_boot_id;
     boot_ops.start_supervisor = op_start_supervisor; boot_ops.stop_helper = op_stop_helper; boot_ops.stop_supervisor = op_stop_supervisor;
     boot_ops.kill_all = op_kill_all; boot_ops.sync_all = op_sync_all; boot_ops.flush_devices = op_flush_devices; boot_ops.power_off = op_power_off;
     wg_boot_init(&boot, &boot_ops);
     ctl_reader_init(&relay_reader, relay_payload, sizeof relay_payload, "PDFf");
-    ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQME");
+    ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQMEC");
 
     G.relay = spawn_relay(port_fd, r2p, p2r, rt_in, rt_out, rt_err);
     if (G.relay < 0) die_early("relay-spawn");
@@ -642,7 +672,7 @@ int main(void) {
         int timeout = -1;
         if (supervisor_deadline) {
             long long left = supervisor_deadline - clock_ms();
-            if (left <= 0) { supervisor_deadline = 0; wg_boot_fail_stop(&boot, "supervisor-ready-timeout"); continue; }
+            if (left <= 0) { supervisor_deadline = 0; wg_boot_supervisor_not_ready(&boot, "supervisor-ready-timeout"); continue; }
             timeout = (int)(left > 1000 ? 1000 : left);
         }
         if (poll(fds, 4, timeout) < 0) { if (errno == EINTR) continue; wg_boot_fail_stop(&boot, "poll"); }

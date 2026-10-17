@@ -79,17 +79,17 @@
     "zig": "0.14.1",
     "programs": {
       "init": {
-        "binarySha256": "4b44feea8794164c10cc96495c925de640d5be9efb12f4800ff1fa2d92bb81ad",
-        "sourceSha256": "5e509e0f1d074220ced98d114ae5754e5957391c1f5562473394d286890144ac"
+        "binarySha256": "84bdf745cb0db4991a7c99429dd5532a26cc42a076582146cf946d993a02595b",
+        "sourceSha256": "41495bb7400c1d4afb04c015b7474f8bcb0da491b8a460153bdb6017d8df7275"
       },
       "winter-guest-relay": {
-        "binarySha256": "1737a2757ea5b93100d4bcaa17341f567e1086515bb7e89d43ec9b30474b1511",
-        "sourceSha256": "d0da2b9bd360b76a3f95818f081aeb0e87ca45751fbbcb4d5b859eff01b3e36c"
+        "binarySha256": "a97bc86117429beefd1dbf936de79e4b7a516cc14c52c2b9bbdbe56acd34d445",
+        "sourceSha256": "35b6f1300dba4400701db0cfbea1f66a91b80cd9e88e853319db9613d5a27a52"
       }
     },
     "scripts": {
       "guest_bootstrap.py": {
-        "sha256": "cdf08039d844cb2f5ae15c3d9d9d8f17b887074e62d644d44cc3cdfb5c2286f5"
+        "sha256": "278c10e4fb1fa8b4f2d3eb3eb51dc48beafb7c1b6b98ff130994b99d369b5ad5"
       }
     },
     "scriptPaths": {

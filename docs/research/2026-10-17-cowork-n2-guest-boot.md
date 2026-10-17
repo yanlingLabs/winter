@@ -6,8 +6,9 @@ owner's approval. The programs were compiled (natively on macOS with the sanitiz
 Zig 0.14.1) and unit-tested; the Linux-only paths were never executed.
 
 The contract this implements is S1's: `docs/cowork-native-worker.md`, `protocol.ts` and the golden vectors on
-`cowork/n2-host-adapter` (PR #56, the controller-final review round at `e384c5c6`, which added the two BOM vectors), copied here byte for byte and pinned
-by SHA-256 (`apple/Cowork/WinterCoworkGuest/vectors/`). The guest copies the contract; nothing here edits it.
+`cowork/n2-host-adapter` (PR #56), now at **`86a0629f`** (contract round 3: the conversation set, the runtime streams, the control-up `fault`, the layered stop timeline;
+`mux-frames.json` is byte-identical to the one at `1313040a`), copied here byte for byte and pinned by SHA-256 (`apple/Cowork/WinterCoworkGuest/vectors/`). The guest copies the contract; nothing here edits it.
+Sections 1 to 10 describe the first round; **section 12 is the round-3 re-pin and supersedes every statement below that it contradicts** (the conversation set, the environment mount, the single runtime stream, the missing fault frame).
 
 ## 1. What is in the change
 
@@ -57,13 +58,13 @@ The task brief says "the relay owns the virtio port"; the consequence is that PI
    nonce-bound `receipt` after checking it against its own port of `matchesFilesystemReceipt`.
 4. host `ready` (must echo operation and nonce). The helper re-reads both superblocks (UUID, features, size, no pending recovery, clean),
    closes its descriptors, and asks PID 1 to mount.
-5. PID 1 checks both superblocks again in C, mounts the data volume at `/workspace` and the environment volume at
-   `/opt/winter/environment/disk` (`nosuid,nodev,noatime`, `noinit_itable,errors=remount-ro`), creates the protected skeleton
+5. PID 1 checks both superblocks again in C, mounts the data volume at `/workspace` (round 3: the environment disk is checked, never mounted)
+   (`nosuid,nodev,noatime`, `noinit_itable,errors=remount-ro`), creates the protected skeleton
    (`/workspace/.winter/{conversations,scratch,memory}`, `repos`, `folders`, `outputs`; `/run/winter/{control,conversations,shared-instructions,trusted}`),
    and only then answers the helper, which sends `mounted`.
-6. The supervisor starts **only when** a root-only conversation set exists (section 6, item 1). When it does, PID 1 writes the trusted config
+6. Round 3: after `mounted` the helper stays up for the host's `conversations` message (section 12). PID 1 then writes the trusted config
    (live `guestBootId` spliced into the static part from the initramfs) and starts `python3 -I -S -B linux-supervisor.py --trusted-config-fd 3
-   --runtime-ports-fds 4,5,6`, waits for its ready line, and sends the relay `G` (runtime frames are now delivered).
+   [--runtime-ports-fds 4,5,6]`, waits for its ready line, and sends the relay `G`; the helper answers `runtime_ready`.
 
 ### Drain and fail-stop
 
@@ -73,8 +74,8 @@ holders in between); **read both superblocks again and require the final unmount
 wait for the relay to confirm the host consumed it; `sync` again; `reboot(RB_POWER_OFF)`.
 `halting` is therefore a claim that every filesystem this boot mounted is unmounted and verified clean. If any step fails the guest still
 powers off but sends no `halting`. Fail-stop (relay or supervisor gone, protocol garbage, an out-of-order helper message) is the same
-sequence with neither `drain_ack` nor `halting`: the host sees a power-off with no `halting` and must treat it as uncertain (the contract has no
-control-up fault frame).
+sequence with neither `drain_ack` nor `halting`, preceded by one control-up `fault` while the relay lives (round 3): the host sees the fault and a
+power-off with no `halting` and treats the run as uncertain.
 
 ## 3. Decision D9 and the behaviour differences from `bootstrap.py`
 
@@ -142,6 +143,8 @@ Every difference from the spike (the host-side oracle), nothing omitted:
   output digests are `null`. The builder scripts live on the hvf lineage (D7) and need three small edits for a fragment-less build, listed in `RECIPE.md`; they were not made.
 
 ## 6. REVIEW NEEDED: contract gaps and judgement calls
+
+**Round 3 closed items 1 to 4 and 6 below (see section 12); they are kept as the record of the first round.**
 
 1. **No way to deliver a conversation set (headline).** The merged supervisor refuses an empty `conversations` list (`conversation_limit`), and no bootstrap-class message carries uids, gids, roots or runtime config.
    PID 1 therefore completes the boot through `mounted` and starts the supervisor only when `/run/winter/trusted/conversations.json` (root-only, size and shape checked) exists; **nothing writes it.**
@@ -233,3 +236,55 @@ written by the party being judged, so it is forgeable by the guest. The one fact
 - PID 1 refuses the helper's mount request until it has forwarded a canonical `ready` down message (defence in depth; the helper still judges the message).
 - The supervisor's ready line is compared by length and bytes against the SDK's exact canonical line.
 - Mutation checks for the new guards: 18 more removals or inversions, all killed (the two C-side ready-gate mutations are killed by the native boot driver as a whole). The earlier totals are unchanged: 13 equivalent and the 2 Linux-only survivors.
+
+## 12. Contract round 3: the re-pin to `86a0629f` (this PR's second fold)
+
+What S1 added and what the guest now does. Pins: contract `86a0629f70935d6392442f5f2fc0672de1d5ec19`; the mux vectors (`mux-frames.json`, sha256 `1304b955...f141f76`) are the ones S1 shipped at `1313040a`
+and did not change after.
+
+**Conversation set (contract section 6.1).**
+* The helper stays up after `mounted` and waits for the host's `conversations` message. It judges it with a port of `conversationsOf` / `checkConversationsMessage` (every field rule, the supervisor-mirroring rules,
+  the 20,480 byte cap, at most ONE host-query conversation per guest) and binds it: `operationId` and `nonce` are the plan's, `incarnationId` is the plan's `owner.incarnationId`, every item's workspace, incarnation and lease epoch are
+  the plan's own, and a runtime's provider `bootId` is this guest's own boot id. A message that fails is answered with the bootstrap `fault` `bad_conversations`; **one attempt per incarnation**, so a second set (valid or not,
+  also one that arrives while PID 1 is busy) gets `second_conversations` and changes nothing.
+* The helper builds the supervisor's items (the wire's own fields, plus under `hostQueryRuntime` / `hostQueryGuidedRuntime` the members `_configure_runtime` reads: `storeDirectory`, `runhomeDirectory`, `provider`, `model`, `timeoutMs`,
+  `toolClasses`, and for the guided profile `requiredRuntimeContext` and `generation`) and hands PID 1 a small private message ('C': profile, count, uid and id per conversation, then the items).
+  PID 1 re-checks only what it acts on (profile, count, uid range, id characters and uniqueness), makes `/workspace/.winter/conversations/<id>` and `/run/winter/conversations/<id>` (owner `runtimeUid`, 0700; an existing
+  store is adopted and left for the supervisor to refuse if it is not empty), writes the trusted config (adding `guestBootId`, the static pins from the initramfs and, for a host-query profile, the runtime artifact pins under the
+  profile's key) and starts the supervisor as `--trusted-config-fd 3 [--runtime-ports-fds 4,5,6]`. The ready line is compared by length and bytes against `{"fullGuestExecutionEnabled":false,"ready":true}`. Only then does the helper
+  answer `runtime_ready` (with the count the supervisor serves); a supervisor that cannot start, dies before its ready line, or does not print it within 30 s is `supervisor_failed` and the guest stays up for the drain.
+* **No `conversations.json` anymore.**
+
+**Runtime streams (section 6.2).** The relay maps the 4 byte prefix {conversation, stream, flags, 0} onto the three FIFOs: IN to the supervisor's input (the end flag closes it after the bytes before it), OUT and ERR back with their stream byte;
+EOF on either becomes an empty frame with the end flag. A runtime frame before `G`, for a conversation outside the delivered set (a tools-only set delivers none), after an IN end, with a bad prefix or the wrong stream for its direction ends the stream with the
+contract's category. The upstream ring is 1 MiB with a 256 KiB reserve (see section 11); OUT and ERR together are read only while two chunks plus the reserve are free.
+
+**Control-up `fault`.** PID 1 asks the relay ('X') to send exactly one `fault` per run: `supervisor_lost` when the supervisor dies after it was ready, `unmount_failed` (after the `drain_ack`, with the drain's nonce) when the unmounts or the superblock check fail,
+`internal` for a failed device flush or any other guest failure, and the relay itself sends `protocol_violation` (with the drain's nonce during a drain) when the host's stream breaks the contract. No `halting` is ever sent after a fault, so the run is Class B.
+A fail-stop sends its fault first, before the unmounts. Faults that mean the relay is already gone cannot be sent.
+
+**Environment disk.** Still discovered by serial, probed, formatted and held to its plan (the helper re-reads its superblock before the mount, PID 1 checks it again), but **not mounted**; `/opt/winter/environment/disk` is no longer in the image.
+
+**Not done / REVIEW NEEDED.**
+1. **The image has no runtime launcher, executable or owner library.** PID 1 reads their pins from `/opt/winter/etc/supervisor-runtime-artifacts.json` (an object, spliced under the profile's key); `image.py` does not write that file yet, so a host-query set
+   is answered `supervisor_failed` until a build provides it. A tools-only set needs nothing more.
+2. The `previousBootTermination` position is unchanged (section 10).
+3. Timeouts (30 s to the supervisor's ready line) are guesses until G1.
+4. Nothing here ran as PID 1, on Linux, or against the real supervisor.
+
+**Codec differential against the TypeScript contract.** A scratch harness mutates every vector (bit flips, truncation, inserts, deletes, swaps, JSON-aware edits; both directions, ten seeds, 33,989 inputs after the guest-local 20 KiB bootstrap ceiling
+is set aside) and compares `parseCoworkNativeMuxFrame` (Bun, `protocol.ts` at the pinned commit) with the guest (the C header/control/runtime code and the Python bootstrap code). **Zero accept/reject disagreements.** Every bootstrap and runtime input
+gets the same category as TypeScript (the harness found two real gaps in the Python port, both fixed: a DEL byte is not printable ASCII, and JavaScript lists integer-like keys first). 504 control-class inputs with two or more defects (for example an unknown type
+AND a corrupted byte) get a different category from the C control parser, which reports the first defect it meets where TypeScript reports a malformed text before it looks at the type. Both end the stream; the category is a diagnostic only.
+
+**Mutation checks of round 3.** The whole guard list was run again over the new sources (619 distinct removals or inversions, each run against the owning suite in a scratch copy; the earlier list was updated where the code moved):
+589 killed, 28 equivalent (a guard that a second guard or the input grammar makes redundant, so no test can tell the changed program apart), and the same 2 survivors as before
+(`relay-halting-flush-check`, `relay-halting-flush-flag`, which only a Linux socket test distinguishes; it runs in the Linux CI job, the two mutations were not run there). The round found about forty real gaps in the first
+pass, all closed with tests (the count rules of PID 1's conversation message, the set-level rules of the Python port, an unparsed fault code, the relay's fault length and ordering rules, the forwarding phases, the late not-ready event, and more).
+The equivalents of this round, with the reason:
+* `py3-printable`, `py3-path-absolute`, `py3-view-workspace`, `py3-meta-depth`, `py3-tools-length`: each guard is already enforced earlier or by a stricter neighbour (the printable-ASCII text check and the nesting bound of 8 dominate them; the workspace prefix check implies the others; strict ordering implies at most three tool classes).
+* `py3-msg-boot-ids`: with at most one host-query conversation per guest there is no second boot id to differ from.
+* `py-msg-utf8`: a latin-1 fallback is refused by the printable-ASCII check that follows it.
+* `w3-ready-state` / `w3-ready-alive`, `w3-fault-relay-fatal` / `w3-relay-gone-fatal` / `w3-relay-gone-exit` / `w3-fault-relay-gone` / `w3-fault-none` / `w3-fault-once`: pairs of guards of which either alone suffices (a stopped supervisor is not alive; a relay-originated failure maps to no fault and also sets the relay-gone flag; the fault is sent at most once by construction).
+* `w3-conv-one-attempt`: every path that returns after the pre-set already sets the same state or fail-stops.
+* `w3-relay-fault-nonce-needs-drain`, `w3-relay-not-open`: an all-zero drain nonce never equals a real one; with no streams delivered the outside-the-set rule already refuses the frame.

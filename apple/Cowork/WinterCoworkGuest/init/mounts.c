@@ -7,14 +7,11 @@ int wg_mount_volumes(const struct wg_mount_ops *ops, const char *data_node, cons
                      const uint8_t environment_uuid[16], int *leftover) {
     *leftover = 0;
     if (ops->check_volume(ops->ctx, data_node, data_uuid) != 0) return -1;
+    /* The environment disk is attached, probed and formatted but NOT mounted in N2: nothing consumes it (the supervisor's environment
+     * root is a static base inside the initramfs). It is still held to its plan here, so a swapped or dirty disk is refused. */
     if (ops->check_volume(ops->ctx, environment_node, environment_uuid) != 0) return -1;
     if (ops->mount(ops->ctx, data_node, WG_WORKSPACE_PATH, "ext4", WG_WORKING_FLAGS, WG_EXT4_DATA) != 0) return -1;
-    if (ops->mount(ops->ctx, environment_node, WG_ENVIRONMENT_PATH, "ext4", WG_WORKING_FLAGS, WG_EXT4_DATA) != 0) {
-        if (ops->umount(ops->ctx, WG_WORKSPACE_PATH) != 0) *leftover |= 1;
-        return -1;
-    }
     if (ops->skeleton(ops->ctx) != 0) {
-        if (ops->umount(ops->ctx, WG_ENVIRONMENT_PATH) != 0) *leftover |= 2;
         if (ops->umount(ops->ctx, WG_WORKSPACE_PATH) != 0) *leftover |= 1;
         return -1;
     }

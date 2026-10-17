@@ -149,7 +149,10 @@ class VectorTests(unittest.TestCase):
     def test_every_bootstrap_positive_vector_parses_and_reencodes_to_the_same_bytes(self):
         for name, direction, kind in (("bootstrap-up-hello", "up", "hello"), ("bootstrap-down-plan", "down", "plan"),
                                       ("bootstrap-up-receipt", "up", "receipt"), ("bootstrap-up-fault", "up", "fault"),
-                                      ("bootstrap-down-ready", "down", "ready"), ("bootstrap-up-mounted", "up", "mounted")):
+                                      ("bootstrap-down-ready", "down", "ready"), ("bootstrap-up-mounted", "up", "mounted"),
+                                      ("bootstrap-down-conversations-guided", "down", "conversations"), ("bootstrap-down-conversations-tools-only", "down", "conversations"),
+                                      ("bootstrap-up-runtime-ready", "up", "runtime_ready"), ("bootstrap-up-fault-bad-conversations", "up", "fault"),
+                                      ("bootstrap-up-fault-supervisor-failed", "up", "fault"), ("bootstrap-up-fault-second-conversations", "up", "fault")):
             with self.subTest(name):
                 payload = payload_of(POSITIVE[name])
                 message = gb.parse_bootstrap_message(payload, direction)
@@ -160,8 +163,28 @@ class VectorTests(unittest.TestCase):
                 else:
                     self.assertEqual(gb.canonical_text(message).encode(), payload)
 
+    def test_every_bootstrap_positive_vector_is_covered(self):
+        names = [v["name"] for v in VECTOR_DATA["positive"] if bytes.fromhex(v["hex"])[5] == 1]
+        self.assertEqual(len(names), 12)
+        for name in names:
+            with self.subTest(name):
+                direction = next(v["direction"] for v in VECTOR_DATA["positive"] if v["name"] == name)
+                gb.parse_bootstrap_message(payload_of(POSITIVE[name]), direction)
+
+    def bootstrap_negatives(self):
+        """Every negative vector whose frame is a well-formed bootstrap-class frame: the payload is this helper's to judge."""
+        out = []
+        for name, vector in NEGATIVE.items():
+            raw = bytes.fromhex(vector["hex"])
+            if len(raw) >= 16 and raw[:4] == b"WMX1" and raw[4] == 1 and raw[5] == 1 and raw[6:8] == b"\0\0" and int.from_bytes(raw[12:16], "little") == len(raw) - 16 \
+                    and int.from_bytes(raw[8:12], "little") >= 1:
+                out.append(name)
+        return out
+
     def test_bootstrap_negative_vectors_are_refused_with_the_contract_category(self):
-        for name in ("plan-travelling-up", "plan-protocol-2", "plan-unsorted-nested-keys", "hello-wrong-serial", "bootstrap-invalid-utf8", "bom-mux-bootstrap"):
+        names = self.bootstrap_negatives()
+        self.assertGreaterEqual(len(names), 70)
+        for name in names:
             with self.subTest(name):
                 vector = NEGATIVE[name]
                 frame = bytes.fromhex(vector["hex"])
@@ -1473,6 +1496,395 @@ class RealE2fsprogsOracle(TempDirTest):
         subprocess.run(["debugfs", "-w", "-R", "feature needs_recovery", str(path)], check=True, capture_output=True)
         features, transient = gb.probe(disk.fd, target, time_now() + 60, plan, gb.Tools())
         self.assertEqual((features, transient), (gb.EXT4_FEATURES, ["needs_recovery"]))
+
+
+# ---------------------------------------------------------------------------------------------------- the conversation set
+
+def conversations_vector(name="bootstrap-down-conversations-guided"):
+    return json.loads(payload_of(POSITIVE[name]))
+
+
+def conversations_body(message):
+    return gb.canonical_text(message).encode("ascii")
+
+
+class ConversationSetTests(unittest.TestCase):
+    BOOT = "66666666-6666-4666-8666-666666666666"
+
+    def parsed(self, name="bootstrap-down-conversations-guided"):
+        return gb.parse_bootstrap_message(payload_of(POSITIVE[name]), "down")
+
+    def test_the_vector_set_is_bound_to_the_vector_plan(self):
+        plan = vector_plan_message()
+        for name in ("bootstrap-down-conversations-guided", "bootstrap-down-conversations-tools-only"):
+            self.assertTrue(gb.conversations_bound(self.parsed(name), plan, self.BOOT), name)
+
+    def test_each_binding_field_is_compared(self):
+        plan = vector_plan_message()
+        for label, edit in (("operation", lambda m, p: m.__setitem__("operationId", "filesystem_other")),
+                            ("nonce", lambda m, p: m.__setitem__("nonce", "ab" * 16)),
+                            ("incarnation in the message", lambda m, p: m.__setitem__("incarnationId", "inc-other")),
+                            ("workspace", lambda m, p: p["plan"].__setitem__("workspaceId", "workspace_other")),
+                            ("plan incarnation", lambda m, p: p["plan"]["owner"].__setitem__("incarnationId", "inc-other")),
+                            ("lease epoch", lambda m, p: p["plan"]["owner"].__setitem__("leaseEpoch", 4)),
+                            ("item incarnation", lambda m, p: m["conversations"][0]["authority"].__setitem__("incarnationId", "inc-other")),
+                            ("item workspace", lambda m, p: m["conversations"][0]["authority"].__setitem__("workspaceId", "workspace_other")),
+                            ("item lease", lambda m, p: m["conversations"][0]["authority"].__setitem__("leaseEpoch", 9)),
+                            ("boot id", lambda m, p: m["conversations"][0]["runtime"]["provider"]["scope"].__setitem__("bootId", "77777777-7777-4777-8777-777777777777"))):
+            with self.subTest(label):
+                message, mutated_plan = copy.deepcopy(self.parsed()), copy.deepcopy(plan)
+                edit(message, mutated_plan)
+                self.assertFalse(gb.conversations_bound(message, mutated_plan, self.BOOT))
+        self.assertFalse(gb.conversations_bound(self.parsed(), plan, "77777777-7777-4777-8777-777777777777"))   # not this guest's own boot
+
+    def test_the_supervisor_items_carry_the_directories_the_runtime_members_and_the_guided_context(self):
+        items = gb.supervisor_items(self.parsed())
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(list(item), ["logicalSessionId", "authority", "runtimeUid", "toolUid", "workspaceGid", "policy", "roots", "hostQueryGuidedRuntime"])
+        runtime = item["hostQueryGuidedRuntime"]
+        self.assertEqual(runtime["storeDirectory"], "/workspace/.winter/conversations/conv-0001")
+        self.assertEqual(runtime["runhomeDirectory"], "/run/winter/conversations/conv-0001")
+        self.assertEqual((runtime["model"], runtime["timeoutMs"], runtime["toolClasses"]), ("model-alpha", 600000, ["read", "write", "execute"]))
+        self.assertEqual(runtime["requiredRuntimeContext"], {"version": 1, "bindingId": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"})
+        self.assertEqual(runtime["generation"], 1)
+        self.assertEqual(set(runtime), {"storeDirectory", "runhomeDirectory", "provider", "model", "timeoutMs", "toolClasses", "requiredRuntimeContext", "generation"})
+        plain = self.parsed("bootstrap-down-conversations-guided")
+        plain = copy.deepcopy(plain)
+        plain["profile"] = "host-query-v1"
+        plain["conversations"][0]["runtime"]["guided"] = None
+        runtime = gb.supervisor_items(plain)[0]["hostQueryRuntime"]
+        self.assertNotIn("requiredRuntimeContext", runtime)
+        self.assertNotIn("generation", runtime)
+
+    def test_a_tools_only_set_has_no_runtime_member_at_all(self):
+        items = gb.supervisor_items(self.parsed("bootstrap-down-conversations-tools-only"))
+        self.assertEqual(len(items), 2)
+        for item in items:
+            self.assertEqual(list(item), ["logicalSessionId", "authority", "runtimeUid", "toolUid", "workspaceGid", "policy", "roots"])
+
+    def test_the_message_to_pid_1_has_the_documented_layout(self):
+        payload = gb.conversations_payload(self.parsed())
+        self.assertEqual(payload[:2], bytes([2, 1]))
+        self.assertEqual(payload[2:6], (20000).to_bytes(4, "little"))
+        self.assertEqual((payload[6], payload[7:16]), (9, b"conv-0001"))
+        items = json.loads(payload[16:])
+        self.assertEqual(items[0]["logicalSessionId"], "conv-0001")
+        payload = gb.conversations_payload(self.parsed("bootstrap-down-conversations-tools-only"))
+        self.assertEqual(payload[:2], bytes([0, 2]))
+        self.assertTrue(payload.isascii())
+
+    def test_the_items_are_printable_ascii_and_within_the_config_budget(self):
+        for name in ("bootstrap-down-conversations-guided", "bootstrap-down-conversations-tools-only"):
+            text = gb.canonical_text(gb.supervisor_items(self.parsed(name)))
+            self.assertTrue(all(0x20 <= ord(c) <= 0x7e for c in text))
+            self.assertLess(len(text), 49152)
+
+    def refused(self, edit, code="bad_field", vector="bootstrap-down-conversations-guided"):
+        message = conversations_vector(vector)
+        edit(message)
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(conversations_body(message), "down")
+        self.assertEqual(caught.exception.code, code)
+
+    def accepted(self, edit, vector="bootstrap-down-conversations-guided"):
+        message = conversations_vector(vector)
+        edit(message)
+        return gb.parse_bootstrap_message(conversations_body(message), "down")
+
+    def test_identifiers_follow_the_sdks_grammar_exactly(self):
+        item = lambda m: m["conversations"][0]
+        for label, value in (("space", "bad id"), ("leading dot", ".x"), ("a newline escape", "root\n"), ("129 characters", "a" * 129), ("not a string", 7), ("empty", "")):
+            with self.subTest(label):                                          # a root id has no other rule tying it to anything
+                self.refused(lambda m, v=value: item(m)["roots"][0].__setitem__("id", v))
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("id", "a" * 128))
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("id", "a.b_c-d"))
+        for key in ("homeId", "taskId"):                                     # provider ids are held to the same grammar
+            self.refused(lambda m, k=key: item(m)["runtime"]["provider"]["scope"].__setitem__(k, "bad id"))
+        for key in ("accountRevision", "modelRevision", "leaseEpoch", "grantRevision"):
+            for value in (-1, "1", True, 1 << 53):
+                with self.subTest(key=key, value=value):
+                    self.refused(lambda m, k=key, v=value: item(m)["runtime"]["provider"]["scope"].__setitem__(k, v))
+
+    def test_numbers_are_numbers_not_booleans_and_stay_in_range(self):
+        item = lambda m: m["conversations"][0]
+        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", True))
+        self.refused(lambda m: item(m)["authority"].__setitem__("configRevision", True))
+        self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("generation", True))
+        self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("generation", 0))
+        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 0))
+        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 600001))
+        self.accepted(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 1))
+        self.accepted(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 600000))
+        for key in ("runtimeUid", "toolUid", "workspaceGid"):
+            self.refused(lambda m, k=key: item(m).__setitem__(k, 999))
+            self.refused(lambda m, k=key: item(m).__setitem__(k, 65536))
+        def epoch(m, value):
+            item(m)["authority"]["leaseEpoch"] = value
+            item(m)["runtime"]["provider"]["scope"]["leaseEpoch"] = value           # the two must agree, so only the range can refuse it
+        self.refused(lambda m: epoch(m, 0))
+        self.refused(lambda m: epoch(m, 1 << 32))
+        self.accepted(lambda m: epoch(m, 1))
+        self.accepted(lambda m: epoch(m, 0xFFFFFFFF))
+
+    def test_every_object_has_exactly_its_keys(self):
+        item = lambda m: m["conversations"][0]
+        for label, target in (("item", lambda m: item(m)), ("authority", lambda m: item(m)["authority"]), ("root", lambda m: item(m)["roots"][0]),
+                              ("runtime", lambda m: item(m)["runtime"]), ("guided", lambda m: item(m)["runtime"]["guided"])):
+            with self.subTest(label + " missing"):
+                self.refused(lambda m, t=target: t(m).pop(next(iter(t(m)))))
+            with self.subTest(label + " extra"):
+                self.refused(lambda m, t=target: t(m).__setitem__("zzz", 1))
+
+    def test_guest_paths_are_canonical_absolute_workspace_paths(self):
+        item = lambda m: m["conversations"][0]
+        for label, path in (("a dot component", "/workspace/folders/./x"), ("a dotdot", "/workspace/folders/../x"), ("an empty component", "/workspace/folders//x"),
+                            ("a control character", "/workspace/folders/\u0001x"), ("over 1024 bytes", "/workspace/folders/" + "a" * 1100), ("outside the workspace", "/etc/x"), ("relative", "workspace/folders/x")):
+            with self.subTest(label):
+                self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * 1000))
+
+    def test_the_supervisors_view_rules(self):
+        tools = "bootstrap-down-conversations-tools-only"
+        item = lambda m: m["conversations"][0]
+        def set_roots(m, *roots):
+            item(m)["roots"] = [{"id": "root-%d" % i, "guestPath": g, "source": g, "readOnly": False} for i, g in enumerate(roots)]
+        sid = "conv-0001"
+        for label, roots in (("memory", ["/workspace/.winter/memory"]), ("scratch of this session", ["/workspace/.winter/scratch/" + sid]), ("outputs of this session", ["/workspace/outputs/" + sid]),
+                             ("a folder", ["/workspace/folders/a"]), ("a repo subfolder", ["/workspace/repos/a/b"]), ("two separate", ["/workspace/folders/a", "/workspace/folders/b"])):
+            with self.subTest("accepts " + label):
+                self.accepted(lambda m, r=roots: set_roots(m, *r), tools)
+        for label, roots in (("below memory", ["/workspace/.winter/memory/x"]), ("scratch of another session", ["/workspace/.winter/scratch/other"]), ("below scratch", ["/workspace/.winter/scratch/" + sid + "/x"]),
+                             ("outputs of another session", ["/workspace/outputs/other"]), ("below outputs", ["/workspace/outputs/" + sid + "/x"]), ("the tree itself", ["/workspace/.winter"]),
+                             ("folders without a name", ["/workspace/folders"]), ("one view inside another", ["/workspace/folders/a", "/workspace/folders/a/b"]),
+                             ("the same view twice", ["/workspace/folders/a", "/workspace/folders/a"]), ("the same prefix is not nesting", None)):
+            if roots is None:
+                continue
+            with self.subTest("refuses " + label):
+                self.refused(lambda m, r=roots: set_roots(m, *r), vector=tools)
+        self.accepted(lambda m: set_roots(m, "/workspace/folders/a", "/workspace/folders/ab"), tools)    # a shared prefix is not nesting
+        self.refused(lambda m: item(m)["roots"].append(dict(item(m)["roots"][0])), vector=tools)         # the same id and view twice
+        two = lambda m: item(m)["roots"].append({**item(m)["roots"][0], "id": "other"})                   # the same view under another id
+        self.refused(two, vector=tools)
+        self.refused(lambda m: set_roots(m, *["/workspace/folders/r%d" % i for i in range(17)]), vector=tools)   # 17 roots
+        self.accepted(lambda m: set_roots(m, *["/workspace/folders/r%d" % i for i in range(16)]), vector=tools)
+        self.refused(lambda m: item(m).__setitem__("roots", []), vector=tools)
+        self.refused(lambda m: item(m)["roots"][0].__setitem__("readOnly", 1), vector=tools)
+
+    def test_a_host_query_conversation_has_a_narrower_view_and_plan_is_read_only(self):
+        item = lambda m: m["conversations"][0]
+        self.refused(lambda m: item(m)["roots"].__setitem__(0, {"id": "m", "guestPath": "/workspace/.winter/memory", "source": "/workspace/.winter/memory", "readOnly": False}))
+        self.refused(lambda m: item(m).__setitem__("policy", "plan"))                                      # a writable root under plan
+        self.accepted(lambda m: (item(m).__setitem__("policy", "plan"), [r.__setitem__("readOnly", True) for r in item(m)["roots"]]))
+
+    def test_provider_metadata_is_public_and_bounded(self):
+        item = lambda m: m["conversations"][0]
+        provider = lambda m: item(m)["runtime"]["provider"]
+        for key in ("authRef", "AuthRefId", "myHeader", "Secret", "credentialId", "TokenKind", "baseUrl"):
+            with self.subTest(key):
+                self.refused(lambda m, k=key: provider(m)["selection"].__setitem__("capabilities", [{k: 1}]))
+        self.accepted(lambda m: provider(m)["selection"].__setitem__("capabilities", [{"flag": True, "n": 3, "none": None, "notes": "fine"}]))
+        self.refused(lambda m: provider(m)["selection"].__setitem__("capabilities", [10**16]))             # not a safe integer
+        self.refused(lambda m: provider(m).__setitem__("zextra", 1))                                       # exactly scope and selection
+        self.refused(lambda m: provider(m)["selection"].pop("family"))
+        self.refused(lambda m: provider(m)["selection"].__setitem__("extra", 1))
+        self.accepted(lambda m: (provider(m)["selection"].__setitem__("continuationDomain", "d"), provider(m).__setitem__("selection", dict(sorted(provider(m)["selection"].items())))))
+        self.refused(lambda m: provider(m)["scope"].pop("taskId"))
+        self.refused(lambda m: provider(m)["scope"].__setitem__("bootId", "not-a-uuid"))
+        self.refused(lambda m: provider(m)["selection"].__setitem__("capabilities", ["x" * 5000]), "oversize")
+
+    def test_models_and_tool_classes(self):
+        item = lambda m: m["conversations"][0]
+        def model(m, value):
+            item(m)["runtime"]["model"] = value
+            item(m)["runtime"]["provider"]["selection"]["modelKey"] = value
+        for label, value in (("empty", ""), ("257 characters", "m" * 257), ("a control character", "m\u0001")):
+            with self.subTest(label):
+                self.refused(lambda m, v=value: model(m, v))
+        self.accepted(lambda m: model(m, "m" * 256))
+        self.refused(lambda m: item(m)["runtime"].__setitem__("model", "other-model"))                      # the provider selects another model
+        for classes in (["write", "read"], ["read", "read"], ["read", "bogus"], ["read", "write", "execute", "execute"], "read"):
+            with self.subTest(classes=classes):
+                self.refused(lambda m, c=classes: item(m)["runtime"].__setitem__("toolClasses", c))
+        for classes in ([], ["read"], ["write"], ["execute"], ["read", "execute"], ["read", "write", "execute"]):
+            self.accepted(lambda m, c=classes: item(m)["runtime"].__setitem__("toolClasses", c))
+        self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("bindingId", "3f2b8c1e-5d4a-1e6f-9a7b-1c2d3e4f5a6b"))   # not version 4
+
+    def test_the_provider_must_describe_this_conversation(self):
+        item = lambda m: m["conversations"][0]
+        scope = lambda m: item(m)["runtime"]["provider"]["scope"]
+        for key, value in (("workspaceId", "ws-other"), ("sessionId", "conv-other"), ("backendSessionId", "backend-other"), ("incarnationId", "inc-other"),
+                           ("leaseEpoch", 9), ("grantRevision", 99)):
+            with self.subTest(key):
+                self.refused(lambda m, k=key, v=value: scope(m).__setitem__(k, v))
+
+    def test_set_level_rules(self):
+        tools = "bootstrap-down-conversations-tools-only"
+        two = lambda m: m["conversations"]
+        self.refused(lambda m: m.__setitem__("conversations", []), vector=tools)
+        self.refused(lambda m: m.__setitem__("conversations", [two(m)[0]] * 17), vector=tools)
+        self.refused(lambda m: two(m)[1].__setitem__("logicalSessionId", two(m)[0]["logicalSessionId"]), vector=tools)
+        self.refused(lambda m: two(m)[1]["authority"].__setitem__("sessionId", two(m)[0]["authority"]["sessionId"]), vector=tools)
+        self.refused(lambda m: two(m)[1].__setitem__("toolUid", two(m)[0]["toolUid"]), vector=tools)
+        self.refused(lambda m: two(m)[1].__setitem__("workspaceGid", two(m)[0]["runtimeUid"]), vector=tools)
+        self.refused(lambda m: two(m)[1]["authority"].__setitem__("workspaceId", "ws-other"), vector=tools)
+        self.refused(lambda m: two(m)[1]["authority"].__setitem__("leaseEpoch", 9), vector=tools)
+        self.refused(lambda m: two(m)[1]["authority"].__setitem__("incarnationId", "inc-other"), vector=tools)
+        self.refused(lambda m: m.__setitem__("incarnationId", "inc-other"), vector=tools)
+        self.refused(lambda m: m.__setitem__("profile", "host-query-v1"), vector=tools)                       # a profile needs a runtime in every item
+        self.refused(lambda m: m.__setitem__("profile", "host-query-v2"), vector=tools)
+        self.refused(lambda m: (m.__setitem__("profile", "host-query-v2"), m["conversations"][0]["runtime"].__setitem__("guided", None)))   # an unknown profile is no profile
+        self.refused(lambda m: m.__setitem__("profile", "host-query-v1"))                                    # the guided vector is not the plain profile
+        self.refused(lambda m: m.__setitem__("profile", None))
+        self.refused(lambda m: m.__setitem__("conversations", m["conversations"] * 2), vector="bootstrap-down-conversations-guided")   # N2: one host-query conversation
+        self.accepted(lambda m: None, tools)
+        self.accepted(lambda m: m.update(profile="host-query-v1") or m["conversations"][0]["runtime"].__setitem__("guided", None))
+        self.refused(lambda m: m["conversations"][0]["runtime"].__setitem__("guided", None))                  # plain runtime under the guided profile
+
+    def test_key_order_is_the_schemas_at_every_level(self):
+        """A message whose keys are right but spelled in another order is `malformed` (protocol.ts re-serialises and compares)."""
+        def swap(path):
+            def edit(m):
+                node = m
+                for key in path:
+                    node = node[key]
+                first, second = list(node)[:2]
+                items = list(node.items())
+                items[0], items[1] = items[1], items[0]
+                node.clear()
+                node.update(items)
+            return edit
+        for label, path in (("message", ()), ("item", ("conversations", 0)), ("authority", ("conversations", 0, "authority")), ("root", ("conversations", 0, "roots", 0)),
+                            ("runtime", ("conversations", 0, "runtime")), ("guided", ("conversations", 0, "runtime", "guided")),
+                            ("provider", ("conversations", 0, "runtime", "provider")), ("scope", ("conversations", 0, "runtime", "provider", "scope"))):
+            with self.subTest(label):
+                self.refused(swap(path), "malformed")
+
+    def test_integer_like_keys_are_spelled_first_by_javascript(self):
+        ready = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(ready[:-1].encode() + b',"4":1}', "down")
+        self.assertEqual(caught.exception.code, "malformed")                  # not bad_field: JSON.parse would have listed "4" first
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(ready[:-1].encode() + b',"zz":1}', "down")
+        self.assertEqual(caught.exception.code, "bad_field")
+
+    def test_the_supervisor_items_keep_the_wire_values(self):
+        message = copy.deepcopy(self.parsed())
+        message["conversations"][0]["runtime"]["guided"]["generation"] = 7
+        message["conversations"][0]["runtime"]["timeoutMs"] = 4321
+        message["conversations"][0]["runtime"]["toolClasses"] = ["read", "execute"]
+        runtime = gb.supervisor_items(message)[0]["hostQueryGuidedRuntime"]
+        self.assertEqual((runtime["generation"], runtime["timeoutMs"], runtime["toolClasses"]), (7, 4321, ["read", "execute"]))
+        self.assertEqual(runtime["provider"], message["conversations"][0]["runtime"]["provider"])
+
+    def test_a_message_above_the_cap_is_oversize_before_anything_else(self):
+        body = payload_of(POSITIVE["bootstrap-down-conversations-guided"]) + b" " * (20480 - len(payload_of(POSITIVE["bootstrap-down-conversations-guided"])) + 1)
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(body, "down")
+        self.assertIn(caught.exception.code, ("oversize", "malformed"))
+        exact = payload_of(POSITIVE["bootstrap-down-conversations-guided"])
+        self.assertLessEqual(len(exact), 20480)
+        gb.parse_bootstrap_message(exact, "down")
+
+    def test_fractions_are_read_the_way_javascript_reads_them(self):
+        base = payload_of(POSITIVE["bootstrap-down-conversations-guided"]).decode()
+        for spelling, code in (('"timeoutMs":600000', None), ('"timeoutMs":600000.0', "malformed"), ('"timeoutMs":6e5', "malformed"), ('"timeoutMs":1.5', "bad_field"),
+                               ('"timeoutMs":1e999', "malformed")):
+            with self.subTest(spelling):
+                body = base.replace('"timeoutMs":600000', spelling).encode()
+                if code is None:
+                    gb.parse_bootstrap_message(body, "down")
+                else:
+                    with self.assertRaises(gb.ProtocolError) as caught:
+                        gb.parse_bootstrap_message(body, "down")
+                    self.assertEqual(caught.exception.code, code)
+
+
+class ConversationSessionTests(unittest.TestCase):
+    BOOT = "66666666-6666-4666-8666-666666666666"
+
+    def run_session(self, after_mounted, tail=()):
+        incoming = [down("bootstrap-down-plan"), down("bootstrap-down-ready"), (gb.TAG_MOUNT_RESULT, b"\x01"), *after_mounted, *tail]
+
+        class D:
+            def close(self):
+                pass
+
+        channel = FakeChannel(incoming)
+        session = gb.Session(channel, FakeEngine(), lambda plan: [D(), D()], self.BOOT, verify=lambda disks, plan: [UUID_A, UUID_B])
+        return session.run(), channel
+
+    def ups(self, channel):
+        return [gb.parse_bootstrap_message(body, "up") for tag, body in channel.sent if tag == gb.TAG_UP]
+
+    def kinds(self, channel):
+        return [chr(tag) if tag != gb.TAG_UP else gb.parse_bootstrap_message(body, "up")["t"] + (":" + gb.parse_bootstrap_message(body, "up").get("code", "") if gb.parse_bootstrap_message(body, "up")["t"] == "fault" else "")
+                for tag, body in channel.sent]
+
+    def test_a_valid_set_goes_to_pid_1_and_a_ready_supervisor_is_answered_with_runtime_ready(self):
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.kinds(channel), ["hello", "receipt", "M", "mounted", "E", "C", "runtime_ready"])
+        self.assertEqual(channel.sent[5][1], gb.conversations_payload(gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-guided"]), "down")))
+        self.assertEqual(channel.sent[-1][1], payload_of(POSITIVE["bootstrap-up-runtime-ready"]))
+
+    def test_a_tools_only_set_reports_how_many_conversations_the_supervisor_serves(self):
+        status, channel = self.run_session([down("bootstrap-down-conversations-tools-only"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 2]))])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.ups(channel)[-1]["conversations"], 2)
+
+    def test_pid_1s_refusals_become_the_two_bootstrap_faults(self):
+        for result, code, vector in ((1, "bad_conversations", "bootstrap-up-fault-bad-conversations"), (2, "supervisor_failed", "bootstrap-up-fault-supervisor-failed")):
+            with self.subTest(code):
+                status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([result, 0]))])
+                self.assertEqual(status, 0)
+                self.assertEqual(channel.sent[-1][1], payload_of(POSITIVE[vector]))
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 5]))])   # a count that is not the set's
+        self.assertEqual(self.ups(channel)[-1]["code"], "bad_conversations")
+
+    def test_a_second_set_is_answered_with_second_conversations_and_changes_nothing(self):
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1])), down("bootstrap-down-conversations-guided")])
+        self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:second_conversations"])
+        self.assertEqual(channel.sent[-1][1], payload_of(POSITIVE["bootstrap-up-fault-second-conversations"]))
+        self.assertEqual([k for k in self.kinds(channel) if k == "C"], ["C"])
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
+        self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:second_conversations"])   # one that arrived while PID 1 was busy
+
+    def test_an_unbound_or_invalid_set_is_refused_without_bothering_pid_1(self):
+        wrong_nonce = conversations_vector()
+        wrong_nonce["nonce"] = "ab" * 16
+        wrong_boot = conversations_vector()
+        wrong_boot["conversations"][0]["runtime"]["provider"]["scope"]["bootId"] = "77777777-7777-4777-8777-777777777777"
+        broken = payload_of(POSITIVE["bootstrap-down-conversations-guided"]).replace(b'"policy":"auto"', b'"policy":"nope"')
+        for label, body in (("nonce", conversations_body(wrong_nonce)), ("boot", conversations_body(wrong_boot)), ("broken", broken)):
+            with self.subTest(label):
+                status, channel = self.run_session([(gb.TAG_DOWN, body)])
+                self.assertEqual(status, 0)
+                self.assertEqual(self.kinds(channel)[-1], "fault:bad_conversations")
+                self.assertNotIn("C", self.kinds(channel))
+
+    def test_other_messages_after_mounted_are_ignored_and_unreadable_ones_get_no_answer(self):
+        status, channel = self.run_session([down("bootstrap-down-ready"), (gb.TAG_DOWN, b"not json at all"), down("bootstrap-down-plan")])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.kinds(channel), ["hello", "receipt", "M", "mounted", "E"])
+
+    def test_a_broken_second_message_is_answered_as_a_second_set_not_a_bad_one(self):
+        broken = payload_of(POSITIVE["bootstrap-down-conversations-guided"]).replace(b'"policy":"auto"', b'"policy":"nope"')
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1])), (gb.TAG_DOWN, broken)])
+        self.assertEqual(self.kinds(channel)[-1], "fault:second_conversations")
+
+    def test_a_refused_set_still_counts_as_the_one_set(self):
+        broken = payload_of(POSITIVE["bootstrap-down-conversations-guided"]).replace(b'"policy":"auto"', b'"policy":"nope"')
+        status, channel = self.run_session([(gb.TAG_DOWN, broken), down("bootstrap-down-conversations-guided")])
+        self.assertEqual(self.kinds(channel)[-2:], ["fault:bad_conversations", "fault:second_conversations"])
+
+    def test_a_broken_channel_while_waiting_for_pid_1_ends_the_helper(self):
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided")])
+        self.assertEqual(status, 2)
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_MOUNT_RESULT, b"\x01")])
+        self.assertEqual(status, 2)
+
 
 
 def time_now():

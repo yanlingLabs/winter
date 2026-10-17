@@ -37,6 +37,11 @@ MAX_BYTES = 256 * 1024**3
 DATA_SERIAL = "winter-data"
 ENVIRONMENT_SERIAL = "winter-environment"
 MAX_BOOTSTRAP_PAYLOAD = 262_144
+MAX_CONVERSATIONS_BYTES = 20_480      # the `conversations` message; the relay refuses anything above it before it reaches this process
+MAX_CONVERSATIONS = 16
+MAX_ROOTS = 16
+MAX_PROVIDER_BYTES = 4096
+MAX_SAFE_INTEGER = 2**53 - 1
 MAX_NESTING = 8
 SERVICE_BUDGET_SECONDS = 60
 TOOL_BUDGET_SECONDS = 20
@@ -52,7 +57,7 @@ TOKEN = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 UUID = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z")
 NONCE = re.compile(r"[a-f0-9]{32}\Z")
 MESSAGE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}\Z")
-FAULT_CODES = ("bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal")
+FAULT_CODES = ("bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations")
 DANGEROUS_KEYS = ("__proto__", "constructor", "prototype")
 
 # ext4 superblock feature bits that the pinned contract allows (compat, incompat, ro_compat) and the one transient bit.
@@ -135,7 +140,28 @@ def _reject_pairs(pairs):
 
 
 def _reject_number(text):
-    raise ValueError("non-integer number")
+    raise ValueError("non-finite number")
+
+
+def _js_key_order(value):
+    """JavaScript lists the keys that are array indexes ("0", "17", up to 2**32-2) first, in numeric order, and the rest in insertion order, so
+    `JSON.stringify(JSON.parse(text))` differs from a text that spells such a key anywhere else (protocol.ts strictLine then says `malformed`)."""
+    if isinstance(value, list):
+        return [_js_key_order(item) for item in value]
+    if isinstance(value, dict):
+        indexes = sorted((k for k in value if k.isascii() and k.isdigit() and (k == "0" or not k.startswith("0")) and int(k) < 2**32 - 1), key=int)
+        rest = [k for k in value if k not in set(indexes)]
+        return {k: _js_key_order(value[k]) for k in indexes + rest}
+    return value
+
+
+def _json_number(text):
+    """A fraction or exponent spelling, as JavaScript's JSON.parse sees it: an integral value IS that integer (so the canonical re-serialisation
+    differs from the text and the message is `malformed`), anything else stays a float that no field accepts (`bad_field`)."""
+    value = float(text)
+    if value == value and abs(value) < 2**53 and value == int(value):
+        return int(value)
+    return value
 
 
 def _clean_data(value):
@@ -167,16 +193,20 @@ def strict_object(payload):
         text = bytes(payload).decode("utf-8")
     except UnicodeDecodeError:
         raise ProtocolError("malformed") from None
-    if not text.isascii():
-        raise ProtocolError("malformed")  # every legal string is a token, a digest or a UUID: ASCII only
+    if not all(0x20 <= ord(ch) <= 0x7E for ch in text):
+        raise ProtocolError("malformed")  # printable ASCII only, as protocol.ts jsonPayload demands (0x7f is outside it)
     if not nests_within(text, MAX_NESTING):
         raise ProtocolError("malformed")
     try:
-        parsed = json.loads(text, object_pairs_hook=_reject_pairs, parse_float=_reject_number, parse_constant=_reject_number)
+        parsed = json.loads(text, object_pairs_hook=_reject_pairs, parse_float=_json_number, parse_constant=_reject_number)
         _clean_data(parsed)
     except (ValueError, RecursionError):
         raise ProtocolError("malformed") from None
-    if not isinstance(parsed, dict) or canonical_text(parsed) != text:
+    try:
+        round_trips = isinstance(parsed, dict) and canonical_text(_js_key_order(parsed)) == text
+    except ValueError:   # an infinity (1e999) has no spelling
+        round_trips = False
+    if not round_trips:
         raise ProtocolError("malformed")
     return parsed, text
 
@@ -201,19 +231,230 @@ def _plain_object(value):
     return isinstance(value, dict)
 
 
+# ---------------------------------------------------------------------------------------------------- conversation set
+# Port of protocol.ts (round 3) conversationsOf / checkConversationsMessage. The helper is the judge of this message: PID 1 only
+# receives the finished result (boot.h wg_conversation_set).
+
+SDK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+POLICIES = ("auto", "plan", "ask", "accept-edits", "dont-ask", "bypass")
+RUNTIME_PROFILES = ("host-query-v1", "host-query-guided-v1")
+RUNTIME_KEYS = {"host-query-v1": "hostQueryRuntime", "host-query-guided-v1": "hostQueryGuidedRuntime"}
+TOOL_CLASSES = ("read", "write", "execute")
+PRIVATE_WORDS = ("authref", "url", "header", "secret", "token", "credential")
+SCOPE_KEYS = ["accountRevision", "backendSessionId", "bootId", "grantRevision", "homeId", "incarnationId", "leaseEpoch", "modelRevision", "sessionId", "taskId", "workspaceId"]
+SELECTION_REQUIRED = {"capabilities", "family", "modelKey", "protocol", "providerId", "providerModelId"}
+SELECTION_ALLOWED = SELECTION_REQUIRED | {"continuationDomain"}
+AUTHORITY_KEYS = ("workspaceId", "sessionId", "incarnationId", "leaseEpoch", "configRevision", "grantRevision", "policyRevision")
+
+
+def _sdk_id(value):
+    return type(value) is str and bool(SDK_ID.match(value))
+
+
+def _printable(text):
+    return all(0x20 <= ord(ch) <= 0x7E for ch in text)
+
+
+def _uint(value, minimum=0, maximum=MAX_SAFE_INTEGER):
+    return type(value) is int and minimum <= value <= maximum
+
+
+def _exact(value, keys):
+    return type(value) is dict and list(value) is not None and set(value) == set(keys)
+
+
+def _guest_path(value):
+    if type(value) is not str or len(value) > 1024 or not _printable(value) or not value.startswith("/"):
+        return False
+    return not any(part in ("", ".", "..") for part in value[1:].split("/"))
+
+
+def _workspace_path(value):
+    return _guest_path(value) and value.startswith("/workspace/")
+
+
+def _allowed_view(path, session_id):
+    parts = path[1:].split("/")
+    if parts[0] != "workspace":
+        return False
+    return ((len(parts) >= 3 and parts[1] in ("folders", "repos"))
+            or (len(parts) == 3 and parts[1] == ".winter" and parts[2] == "memory")
+            or (len(parts) == 4 and parts[1] == ".winter" and parts[2] == "scratch" and parts[3] == session_id)
+            or (len(parts) == 3 and parts[1] == "outputs" and parts[2] == session_id))
+
+
+def _public_metadata(node, depth):
+    if depth > 6:
+        return False
+    if node is None or type(node) in (str, bool):
+        return True
+    if type(node) is int:
+        return -MAX_SAFE_INTEGER <= node <= MAX_SAFE_INTEGER
+    if type(node) is list:
+        return all(_public_metadata(child, depth + 1) for child in node)
+    if type(node) is not dict:
+        return False
+    for key, child in node.items():
+        if any(word in key.lower() for word in PRIVATE_WORDS) or not _public_metadata(child, depth + 1):
+            return False
+    return True
+
+
+def _provider(value):
+    if type(value) is not dict:
+        return False
+    provider = sorted_canonical(value)
+    if len(canonical_text(provider).encode("utf-8")) > MAX_PROVIDER_BYTES:
+        raise ProtocolError("oversize")
+    if not _public_metadata(provider, 0) or list(provider) != ["scope", "selection"] or type(provider["scope"]) is not dict or type(provider["selection"]) is not dict:
+        return False
+    scope, selection = provider["scope"], provider["selection"]
+    if list(scope) != SCOPE_KEYS:
+        return False
+    if not all(_sdk_id(scope[k]) for k in ("backendSessionId", "homeId", "incarnationId", "sessionId", "taskId", "workspaceId")):
+        return False
+    if not all(_uint(scope[k]) for k in ("accountRevision", "grantRevision", "leaseEpoch", "modelRevision")) or not _boot_id(scope["bootId"]):
+        return False
+    return SELECTION_REQUIRED <= set(selection) <= SELECTION_ALLOWED
+
+
+def _tool_classes(value):
+    if type(value) is not list or len(value) > len(TOOL_CLASSES) or not all(type(entry) is str and entry in TOOL_CLASSES for entry in value):
+        return False
+    indexes = [TOOL_CLASSES.index(entry) for entry in value]
+    return all(indexes[i] > indexes[i - 1] for i in range(1, len(indexes)))
+
+
+def _runtime(value):
+    if value is None:
+        return True
+    if not _exact(value, ("model", "timeoutMs", "toolClasses", "provider", "guided")):
+        return False
+    model = value["model"]
+    if type(model) is not str or not 1 <= len(model) <= 256 or not _printable(model) or not _uint(value["timeoutMs"], 1, 600_000):
+        return False
+    if not _tool_classes(value["toolClasses"]) or not _provider(value["provider"]):
+        return False
+    guided = value["guided"]
+    return guided is None or (_exact(guided, ("bindingId", "generation")) and type(guided["bindingId"]) is str and bool(UUID4.match(guided["bindingId"]))
+                              and _uint(guided["generation"], 1))
+
+
+def _roots(value, session_id):
+    if type(value) is not list or not 1 <= len(value) <= MAX_ROOTS:
+        return False
+    for root in value:
+        if not _exact(root, ("id", "guestPath", "source", "readOnly")) or not _sdk_id(root["id"]) or not _workspace_path(root["guestPath"]) \
+                or not _workspace_path(root["source"]) or type(root["readOnly"]) is not bool:
+            return False
+    views = [root["guestPath"] for root in value]
+    if len({root["id"] for root in value}) != len(value) or len(set(views)) != len(views):
+        return False
+    if any(a != b and b.startswith(a + "/") for a in views for b in views):
+        return False
+    return all(_allowed_view(view, session_id) for view in views)
+
+
+def _conversation(item):
+    if not _exact(item, ("logicalSessionId", "authority", "runtimeUid", "toolUid", "workspaceGid", "policy", "roots", "runtime")):
+        return False
+    session_id, authority = item["logicalSessionId"], item["authority"]
+    if not _sdk_id(session_id) or not _exact(authority, AUTHORITY_KEYS):
+        return False
+    if not (_sdk_id(authority["workspaceId"]) and _sdk_id(authority["sessionId"]) and _sdk_id(authority["incarnationId"]) and _uint(authority["leaseEpoch"], 1, 0xFFFFFFFF)
+            and all(_uint(authority[k]) for k in ("configRevision", "grantRevision", "policyRevision"))):
+        return False
+    if not all(_uint(item[k], 1000, 65535) for k in ("runtimeUid", "toolUid", "workspaceGid")) or item["policy"] not in POLICIES:
+        return False
+    # The nested checks run in the order protocol.ts runs them, so that a value with several defects names the same category.
+    if not _roots(item["roots"], session_id) or not _runtime(item["runtime"]):
+        return False
+    runtime = item["runtime"]
+    if runtime is not None:
+        for root in item["roots"]:
+            if root["guestPath"] == "/workspace/.winter" or root["guestPath"].startswith("/workspace/.winter/") or (item["policy"] == "plan" and not root["readOnly"]):
+                return False
+        scope, selection = runtime["provider"]["scope"], runtime["provider"]["selection"]
+        if (scope["workspaceId"] != authority["workspaceId"] or scope["sessionId"] != session_id or scope["backendSessionId"] != authority["sessionId"]
+                or scope["incarnationId"] != authority["incarnationId"] or scope["leaseEpoch"] != authority["leaseEpoch"]
+                or scope["grantRevision"] != authority["grantRevision"] or selection["modelKey"] != runtime["model"]):
+            return False
+    return True
+
+
+def _conversations(value):
+    return type(value) is list and 1 <= len(value) <= MAX_CONVERSATIONS and all(_conversation(item) for item in value)
+
+
+def _profile(value):
+    return value is None or (type(value) is str and value in RUNTIME_PROFILES)
+
+
+def _check_conversations_message(message):
+    profile, items = message["profile"], message["conversations"]
+    first = items[0]["authority"]
+    for item in items:
+        authority = item["authority"]
+        if authority["workspaceId"] != first["workspaceId"] or authority["leaseEpoch"] != first["leaseEpoch"] or authority["incarnationId"] != message["incarnationId"]:
+            return False
+        if (profile is None) != (item["runtime"] is None):
+            return False
+        if item["runtime"] is not None and (item["runtime"]["guided"] is not None) != (profile == "host-query-guided-v1"):
+            return False
+    if profile is not None and len(items) != 1:
+        return False   # N2: ONE host-query conversation per guest
+    if len({i["logicalSessionId"] for i in items}) != len(items) or len({i["authority"]["sessionId"] for i in items}) != len(items):
+        return False
+    uids = [uid for i in items for uid in (i["runtimeUid"], i["toolUid"])]
+    if len(set(uids)) != len(uids) or any(a["workspaceGid"] == b["runtimeUid"] for a in items for b in items):
+        return False
+    return len({i["runtime"]["provider"]["scope"]["bootId"] for i in items if i["runtime"]}) <= 1
+
+
+def _ordered(value, keys):
+    return {key: value[key] for key in keys}
+
+
+def _normalize_conversations(items):
+    """The schema's key order for every nested object (the provider is the one free-form object and stays recursively sorted)."""
+    out = []
+    for item in items:
+        runtime = item["runtime"]
+        if runtime is not None:
+            guided = runtime["guided"]
+            runtime = {"model": runtime["model"], "timeoutMs": runtime["timeoutMs"], "toolClasses": runtime["toolClasses"],
+                       "provider": sorted_canonical(runtime["provider"]),
+                       "guided": None if guided is None else _ordered(guided, ("bindingId", "generation"))}
+        out.append({"logicalSessionId": item["logicalSessionId"], "authority": _ordered(item["authority"], AUTHORITY_KEYS),
+                    "runtimeUid": item["runtimeUid"], "toolUid": item["toolUid"], "workspaceGid": item["workspaceGid"], "policy": item["policy"],
+                    "roots": [_ordered(root, ("id", "guestPath", "source", "readOnly")) for root in item["roots"]], "runtime": runtime})
+    return out
+
+
+def _runtime_ready_count(value):
+    return _uint(value, 1, MAX_CONVERSATIONS)
+
+
 # message type -> ordered (key, validator). Insertion order IS the wire order, exactly as in protocol.ts BOOTSTRAP_SPECS.
 BOOTSTRAP_SPECS = {
     "down": {
         "plan": (("operationId", _token), ("nonce", _nonce), ("plan", _plan_object)),
         "ready": (("operationId", _token), ("nonce", _nonce)),
+        "conversations": (("operationId", _token), ("nonce", _nonce), ("incarnationId", _token), ("profile", _profile), ("conversations", _conversations)),
     },
     "up": {
         "hello": (("guestBootId", _boot_id), ("dataSerial", lambda v: v == DATA_SERIAL), ("environmentSerial", lambda v: v == ENVIRONMENT_SERIAL)),
         "receipt": (("operationId", _token), ("nonce", _nonce), ("receipt", _plain_object)),
         "fault": (("operationId", _token), ("nonce", _nonce), ("code", lambda v: v in FAULT_CODES)),
         "mounted": (("operationId", _token), ("nonce", _nonce)),
+        "runtime_ready": (("operationId", _token), ("nonce", _nonce), ("conversations", _runtime_ready_count)),
     },
 }
+# Per-type cross-field rules (run after every field validated), size caps tighter than the class ceiling, and key normalisers.
+MESSAGE_CHECKS = {("down", "conversations"): _check_conversations_message}
+MESSAGE_CAPS = {("down", "conversations"): MAX_CONVERSATIONS_BYTES}
+NORMALIZERS = {("down", "conversations", "conversations"): _normalize_conversations}
 
 
 def parse_bootstrap_message(payload, direction):
@@ -227,6 +468,8 @@ def parse_bootstrap_message(payload, direction):
     if not isinstance(kind, str) or kind not in specs:
         raise ProtocolError("unknown_type")
     spec = specs[kind]
+    if len(payload) > MESSAGE_CAPS.get((direction, kind), MAX_BOOTSTRAP_PAYLOAD):
+        raise ProtocolError("oversize")
     if set(parsed) != {"v", "t"} | {key for key, _ in spec}:
         raise ProtocolError("bad_field")
     if type(parsed["v"]) is not int or parsed["v"] != 1:
@@ -235,7 +478,11 @@ def parse_bootstrap_message(payload, direction):
     for key, check in spec:
         if not check(parsed[key]):
             raise ProtocolError("bad_field")
-        typed[key] = sorted_canonical(parsed[key]) if isinstance(parsed[key], dict) else parsed[key]
+        normalize = NORMALIZERS.get((direction, kind, key))
+        typed[key] = normalize(parsed[key]) if normalize else sorted_canonical(parsed[key]) if isinstance(parsed[key], dict) else parsed[key]
+    rule = MESSAGE_CHECKS.get((direction, kind))
+    if rule is not None and not rule(typed):
+        raise ProtocolError("bad_field")
     if canonical_text(typed) != text:
         raise ProtocolError("malformed")  # key order, or an unsorted nested object
     return typed
@@ -761,6 +1008,9 @@ TAG_DONE = ord("E")
 TAG_DOWN = ord("b")
 TAG_REPLAY_RESULT = ord("q")
 TAG_MOUNT_RESULT = ord("m")
+TAG_CONVERSATIONS = ord("C")
+TAG_CONVERSATIONS_RESULT = ord("r")
+RESULT_READY, RESULT_BAD_CONVERSATIONS, RESULT_SUPERVISOR_FAILED = 0, 1, 2
 
 
 def ctl_encode(tag, payload=b""):
@@ -816,6 +1066,53 @@ def salvage_ids(payload):
         return None
     operation, nonce = SALVAGE_OPERATION.search(payload), SALVAGE_NONCE.search(payload)
     return (operation.group(1).decode("ascii"), nonce.group(1).decode("ascii")) if operation and nonce else None
+
+
+def conversations_bound(message, plan_message, boot_id):
+    """What a receiver compares against the plan and its own boot id before it starts anything (protocol.ts coworkNativeConversationsAreBound).
+    The guest holds the plan of the exchange, so the workspace, the incarnation and the lease epoch are the plan's own."""
+    plan = plan_message["plan"]
+    owner = plan["owner"]
+    if message["operationId"] != plan_message["operationId"] or message["nonce"] != plan_message["nonce"] or message["incarnationId"] != owner["incarnationId"]:
+        return False
+    for item in message["conversations"]:
+        authority = item["authority"]
+        if authority["workspaceId"] != plan["workspaceId"] or authority["incarnationId"] != owner["incarnationId"] or authority["leaseEpoch"] != owner["leaseEpoch"]:
+            return False
+        if item["runtime"] is not None and item["runtime"]["provider"]["scope"]["bootId"] != boot_id:
+            return False
+    return True
+
+
+def supervisor_items(message):
+    """The supervisor's conversation items for a validated, bound message: the wire's own fields, plus under the profile's key what only the
+    guest knows (the two directories PID 1 creates) and the runtime members the supervisor's `_configure_runtime` reads."""
+    key = RUNTIME_KEYS.get(message["profile"])
+    items = []
+    for item in message["conversations"]:
+        out = {k: item[k] for k in ("logicalSessionId", "authority", "runtimeUid", "toolUid", "workspaceGid", "policy", "roots")}
+        runtime = item["runtime"]
+        if runtime is not None:
+            sid = item["logicalSessionId"]
+            config = {"storeDirectory": "/workspace/.winter/conversations/" + sid, "runhomeDirectory": "/run/winter/conversations/" + sid,
+                      "provider": runtime["provider"], "model": runtime["model"], "timeoutMs": runtime["timeoutMs"], "toolClasses": runtime["toolClasses"]}
+            if runtime["guided"] is not None:
+                config["requiredRuntimeContext"] = {"version": 1, "bindingId": runtime["guided"]["bindingId"]}
+                config["generation"] = runtime["guided"]["generation"]
+            out[key] = config
+        items.append(out)
+    return items
+
+
+def conversations_payload(message):
+    """The 'C' message to PID 1 (boot.h wg_conversation_set): profile, count, per conversation uid and id, then the items as JSON."""
+    profile = {None: 0, "host-query-v1": 1, "host-query-guided-v1": 2}[message["profile"]]
+    out = bytearray([profile, len(message["conversations"])])
+    for item in message["conversations"]:
+        sid = item["logicalSessionId"].encode("ascii")
+        out += struct.pack("<IB", item["runtimeUid"], len(sid)) + sid
+    out += canonical_text(supervisor_items(message)).encode("ascii")
+    return bytes(out)
 
 
 class Session:
@@ -906,7 +1203,70 @@ class Session:
         except Exception as error:
             return fault(error)
         self.channel.send(TAG_DONE)
-        return 0
+        return self.serve_conversations(first, operation, nonce)
+
+    def _fault(self, operation, nonce, code):
+        self._send_up({"t": "fault", "operationId": operation, "nonce": nonce, "code": code})
+
+    def serve_conversations(self, plan_message, operation, nonce):
+        """After `mounted` the helper stays up for the one conversation set of the incarnation (contract section 6.1). A valid, bound set goes
+        to PID 1, which makes the directories, writes the trusted config and starts the supervisor; this process answers `runtime_ready` or
+        a bootstrap fault. A second set is `second_conversations`. The guest stays up after a fault, waiting for the drain, which shows here
+        as the end of the channel. Returns 0 at that end, 2 when the channel breaks."""
+        seen = False
+        self.pending = []
+        while True:
+            try:
+                item = (TAG_DOWN, self.pending.pop(0)) if self.pending else self.channel.receive()
+            except Refused:
+                return 2
+            if item is None:
+                return 0
+            tag, body = item
+            if tag != TAG_DOWN:
+                return 2
+            try:
+                message = parse_bootstrap_message(body, "down")
+            except ProtocolError:
+                # A broken `conversations` message (and only that) is answered, under the exchange's own ids; anything else unreadable gets no answer.
+                if re.search(rb'"t":"conversations"', body[:96]) and len(body) <= MAX_BOOTSTRAP_PAYLOAD:
+                    self._fault(operation, nonce, "second_conversations" if seen else "bad_conversations")
+                    seen = True
+                continue
+            if message["t"] != "conversations":
+                continue
+            if seen:
+                self._fault(operation, nonce, "second_conversations")
+                continue
+            seen = True
+            if not conversations_bound(message, plan_message, self.boot_id):
+                self._fault(operation, nonce, "bad_conversations")
+                continue
+            self.channel.send(TAG_CONVERSATIONS, conversations_payload(message))
+            result = self._await_conversations_result()
+            if result is None:
+                return 2
+            status, count = result
+            if status == RESULT_READY and count == len(message["conversations"]):
+                self._send_up({"t": "runtime_ready", "operationId": operation, "nonce": nonce, "conversations": count})
+            else:
+                self._fault(operation, nonce, "supervisor_failed" if status == RESULT_SUPERVISOR_FAILED else "bad_conversations")
+
+    def _await_conversations_result(self):
+        """PID 1's answer to 'C'. Host messages that arrive meanwhile are kept, in order, for the loop in serve_conversations."""
+        while True:
+            try:
+                item = self.channel.receive()
+            except Refused:
+                return None
+            if item is None:
+                return None
+            tag, body = item
+            if tag == TAG_CONVERSATIONS_RESULT and len(body) == 2:
+                return body[0], body[1]
+            if tag != TAG_DOWN:
+                return None
+            self.pending.append(body)
 
 
 # ---------------------------------------------------------------------------------------------------- entry point

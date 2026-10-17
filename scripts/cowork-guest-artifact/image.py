@@ -304,7 +304,6 @@ def add_guest_files(tree,programs,scripts,helper_digests):
     tree.add('opt/winter/libexec/winter-guest-relay','file',programs['winter-guest-relay'],True,'winter-guest:relay')
     for name,data in scripts.items():tree.add('opt/winter/libexec/'+name,'file',data,False,'winter-guest:'+name)
     tree.add('opt/winter/etc/supervisor-base.json','file',supervisor_base_config(helper_digests)+b'\n',False,'derived:supervisor-static-config')
-    tree.add('opt/winter/environment/disk','directory')
 
 def refuse_blkid(tree):
     """The probe is `dumpe2fs -h` plus a direct superblock read (decision D9); the image must not grow a blkid for anything to lean on."""
