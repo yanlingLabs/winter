@@ -69,13 +69,16 @@
   "productionProfile": {
     "candidate": "production-profile-candidate.json",
     "build": "cargo rustc -p libkrun --release --locked --offline --no-default-features --features blk --crate-type staticlib, then ZERO_AR_DATE=1 strip -S",
-    "strippedArchiveSha256": "f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38",
-    "exportCount": 66,
+    "strippedArchiveSha256": "9dbc0474ff9e409b7bfa4dfeaf5c0ad51e23c58490e931a39c015b3aa92faa73",
+    "exportCount": 69,
     "productionExports": [
-      "krun_cowork_create_runtime_port",
-      "krun_cowork_enable_production_profile",
-      "krun_cowork_set_workspace_disks",
-      "krun_cowork_validate_production_profile"
+      "krun_cowork_create_runtime_port_v1",
+      "krun_cowork_enable_profile_v1",
+      "krun_cowork_get_flush_counters_v1",
+      "krun_cowork_get_pin_counters_v1",
+      "krun_cowork_set_exit_hook_v1",
+      "krun_cowork_set_workspace_disks_v1",
+      "krun_cowork_validate_profile_v1"
     ],
     "fixtureOracleOnlyExports": [
       "krun_create_cowork_bootstrap_stream",

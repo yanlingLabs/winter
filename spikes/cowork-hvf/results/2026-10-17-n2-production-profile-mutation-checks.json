@@ -1,270 +1,907 @@
 {
-  "mutations": [
+  "cargoMutations": [
     {
-      "id": "mem-ceiling-lifted",
-      "description": "production memory ceiling lifted to 2048 MiB in the production check AND the reviewed generic check",
+      "id": "A01-mem-ceiling-lifted",
+      "description": "production memory ceiling lifted in the production check AND the reviewed generic check",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "compiled": true,
       "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
+        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 2.7
+    },
+    {
+      "id": "A02-mem-ceiling-constant-only",
+      "description": "production memory ceiling constant raised (reviewed generic check untouched)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 3.0
     },
     {
-      "id": "mem-ceiling-constant-only",
-      "description": "production memory ceiling constant raised to 2048 (reviewed generic check untouched)",
+      "id": "A03-vcpu-ceiling-lifted",
+      "description": "production vCPU count lifted in the production check AND the reviewed generic check",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
-      "observedFailingTests": [
-        "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
-        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
-      ],
       "compiled": true,
-      "killed": true,
-      "seconds": 1.0
-    },
-    {
-      "id": "vcpu-ceiling-lifted",
-      "description": "production vCPU count lifted to 3 in the production check AND the reviewed generic check",
-      "file": "src/libkrun/src/lib.rs",
-      "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
       "observedFailingTests": [
+        "cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected_by_validator_without_any_start",
+        "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start",
+        "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null",
+        "cowork_production_gate_matrix_tests::every_context_field_is_classified",
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_gate_matrix_tests::non_device_setters_leave_a_production_context_admissible",
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
         "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals",
         "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
         "cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches",
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
         "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile",
-        "cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers"
+        "cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers",
+        "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts",
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight",
+        "cowork_workspace_disks_tests::workspace_disks_api_context_free_closes_duplicates_only_and_duplicate_setter_is_atomic",
+        "cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_rejects_pair_from_another_admission",
+        "cowork_workspace_disks_tests::workspace_disks_startup_postvalidation_requires_exact_owned_pair_order_and_provenance",
+        "cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.4
     },
     {
-      "id": "mem-floor-removed",
-      "description": "production memory floor dropped to 1 MiB",
+      "id": "A04-mem-floor-removed",
+      "description": "production memory floor dropped",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "compiled": true,
       "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 3.2
     },
     {
-      "id": "pair-rule-ignores-production",
-      "description": "workspace pair memory rule ignores the production range (768 only)",
+      "id": "A05-pair-rule-ignores-production",
+      "description": "workspace pair memory rule ignores the production range",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.7
     },
     {
-      "id": "fixture-pair-range-leak",
+      "id": "A06-fixture-pair-range-leak",
       "description": "fixture workspace pair accepts the production memory range",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.6
     },
     {
-      "id": "shutdown-device-allowed",
-      "description": "production gate stops refusing the shutdown eventfd (PL061 GPIO)",
+      "id": "A07-shutdown-device-allowed",
+      "description": "production gate stops refusing the shutdown eventfd",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+      "compiled": true,
       "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
         "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 3.3
     },
     {
-      "id": "fixture-trace-allowed",
+      "id": "A08-fixture-trace-allowed",
       "description": "production gate stops refusing the runtime-port fixture trace",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+      "compiled": true,
       "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
         "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.9
     },
     {
-      "id": "hvc-stream-allowed",
-      "description": "HVC bootstrap stream variant accepted: the runtime-port requirement removed from the production check AND the reviewed pair condition",
+      "id": "A09-hvc-stream-allowed",
+      "description": "HVC bootstrap stream accepted: runtime-port requirement removed from the production check AND the reviewed pair condition",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
-      "observedFailingTests": [
-        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
-      ],
       "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+        "cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction"
+      ],
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.9
     },
     {
-      "id": "enable-not-virgin-only",
+      "id": "A10-enable-not-virgin-only",
       "description": "production enable accepted after a fixture opt-in",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "compiled": true,
       "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::production_enable_refuses_every_partial_fixture_state",
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.2
+      "seconds": 2.1
     },
     {
-      "id": "fixture-enable-ignores-production",
+      "id": "A11-fixture-enable-ignores-production",
       "description": "fixture block opt-in accepted on a production context",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.7
     },
     {
-      "id": "runtime-port-profile-mismatch",
+      "id": "A12-runtime-port-profile-mismatch",
       "description": "runtime-port factory serves either profile",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.8
     },
     {
-      "id": "pair-setter-profile-mismatch",
+      "id": "A13-pair-setter-profile-mismatch",
       "description": "workspace pair setter serves either profile",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.6
     },
     {
-      "id": "trace-fixture-enable-ignores-production",
-      "description": "fixture runtime trace accepted on a production context",
+      "id": "A14-trace-enable-ignores-production",
+      "description": "fixture trace enable accepted on a production context",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 3.5
     },
     {
-      "id": "preflight-ignores-marker",
+      "id": "A15-preflight-ignores-marker",
       "description": "preflight succeeds for a context without the production marker",
       "file": "src/libkrun/src/lib.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 0.9
+      "seconds": 2.2
     },
     {
-      "id": "header-fixture-outside-ifdef",
+      "id": "A16-header-fixture-outside-ifdef",
       "description": "a fixture declaration moved outside the oracle macro",
       "file": "include/libkrun.h",
       "expectedFailingTest": "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.0
+      "seconds": 2.8
     },
     {
-      "id": "header-limit-mismatch",
+      "id": "A17-header-limit-mismatch",
       "description": "header states a different memory ceiling than the gate",
       "file": "include/libkrun.h",
       "expectedFailingTest": "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 0.8
+      "seconds": 2.2
     },
     {
-      "id": "pin-budget-changed",
+      "id": "A18-pin-budget-changed",
       "description": "pin count budget changed from 48 to 64",
       "file": "src/devices/src/workspace_disks.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory",
+      "compiled": true,
       "observedFailingTests": [
+        "cowork_production_counters_tests::pin_counters_report_the_admitted_budget_and_the_high_water_marks",
         "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.6
+      "seconds": 4.1
     },
     {
-      "id": "device-attach-added",
+      "id": "A19-device-attach-added",
       "description": "a device attach site is added to build_microvm (as a comment, so it compiles)",
       "file": "src/vmm/src/builder.rs",
       "expectedFailingTest": "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.6
+      "seconds": 4.1
     },
     {
-      "id": "block-trace-compiled-in",
+      "id": "A20-block-trace-compiled-in",
       "description": "fixture block trace (60,000-row fatal cap) compiled into production builds",
       "file": "src/devices/src/block_trace.rs",
       "expectedFailingTest": "cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped",
+      "compiled": true,
       "observedFailingTests": [
         "cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped"
       ],
-      "compiled": true,
       "killed": true,
-      "seconds": 1.9
+      "seconds": 5.0
+    },
+    {
+      "id": "A21-preflight-not-mandatory",
+      "description": "krun_start_enter admission no longer requires the mandatory preflight",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 5.1
+    },
+    {
+      "id": "A22-preflight-record-not-cleared",
+      "description": "a failed preflight leaves the previous success recorded",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 3.2
+    },
+    {
+      "id": "A23-production-only-not-enforced",
+      "description": "cowork-production-only build admits a plain context at start",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts"
+      ],
+      "killed": true,
+      "seconds": 3.1
+    },
+    {
+      "id": "A24-completion-hold-in-production",
+      "description": "the 25 ms fixture completion hold is live in production builds",
+      "file": "src/devices/src/block_trace.rs",
+      "expectedFailingTest": "cowork_production_quiet_tests::production_block_requests_have_no_completion_hold",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_quiet_tests::production_block_requests_have_no_completion_hold"
+      ],
+      "killed": true,
+      "seconds": 4.1
+    },
+    {
+      "id": "A25-reclaim-rows-in-production",
+      "description": "the reclaim rows (host virtual addresses) are written to stderr in production builds",
+      "file": "src/vmm/src/cowork_fixture.rs",
+      "expectedFailingTest": "cowork_production_quiet_tests::production_reclaim_rows_are_compiled_out",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_quiet_tests::production_reclaim_rows_are_compiled_out"
+      ],
+      "killed": true,
+      "seconds": 4.6
+    },
+    {
+      "id": "A26-oracle-drops-reclaim-rows",
+      "description": "cowork-fixture-oracle no longer enables the vmm reclaim rows",
+      "file": "src/libkrun/Cargo.toml",
+      "expectedFailingTest": "cowork_production_quiet_tests::production_reclaim_rows_are_compiled_out",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_quiet_tests::production_reclaim_rows_are_compiled_out"
+      ],
+      "killed": true,
+      "seconds": 7.3
+    },
+    {
+      "id": "A27-flush-request-not-counted",
+      "description": "a captured Flush is not counted as requested",
+      "file": "src/devices/src/block_bounce.rs",
+      "expectedFailingTest": "flush_requests_and_successful_completions_are_counted",
+      "compiled": true,
+      "observedFailingTests": [
+        "block_bounce::tests::flush_requests_and_successful_completions_are_counted"
+      ],
+      "killed": true,
+      "seconds": 3.0
+    },
+    {
+      "id": "A28-failed-flush-counted-completed",
+      "description": "a failed backing flush is counted as completed",
+      "file": "src/devices/src/block_bounce.rs",
+      "expectedFailingTest": "flush_requests_and_successful_completions_are_counted",
+      "compiled": true,
+      "observedFailingTests": [
+        "block_bounce::tests::flush_requests_and_successful_completions_are_counted"
+      ],
+      "killed": true,
+      "seconds": 2.2
+    },
+    {
+      "id": "A29-pin-high-water-not-fed",
+      "description": "accepted pins do not feed the high-water counters",
+      "file": "src/devices/src/reclaim_access.rs",
+      "expectedFailingTest": "cowork_production_counters_tests::the_access_pin_path_feeds_the_counters",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_counters_tests::the_access_pin_path_feeds_the_counters"
+      ],
+      "killed": true,
+      "seconds": 4.4
+    },
+    {
+      "id": "A30-pin-refusal-not-counted",
+      "description": "a pin refused for the budget is not counted",
+      "file": "src/devices/src/reclaim_access.rs",
+      "expectedFailingTest": "cowork_production_counters_tests::the_access_pin_path_feeds_the_counters",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_counters_tests::the_access_pin_path_feeds_the_counters"
+      ],
+      "killed": true,
+      "seconds": 3.2
+    },
+    {
+      "id": "A31-counter-getter-accepts-short-size",
+      "description": "the flush counter getter accepts a structure smaller than the ABI",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_counters_tests::counter_getters_validate_the_caller_structure",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_counters_tests::counter_getters_validate_the_caller_structure"
+      ],
+      "killed": true,
+      "seconds": 3.9
+    },
+    {
+      "id": "A32-exit-hook-on-any-context",
+      "description": "the exit hook is accepted on a non-production context",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null"
+      ],
+      "killed": true,
+      "seconds": 2.5
+    },
+    {
+      "id": "A33-exit-hook-twice",
+      "description": "the exit hook can be replaced",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null"
+      ],
+      "killed": true,
+      "seconds": 2.2
+    },
+    {
+      "id": "A34-hook-not-last",
+      "description": "another observer is registered after the exit hook",
+      "file": "src/vmm/src/builder.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::the_exit_hook_is_registered_last_and_the_list_is_published_before_the_vcpus_start",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_exit_hook_is_registered_last_and_the_list_is_published_before_the_vcpus_start"
+      ],
+      "killed": true,
+      "seconds": 3.2
+    },
+    {
+      "id": "A35-fatal-bypasses-exit-path",
+      "description": "fatal() exits directly again, skipping the observers and the hook",
+      "file": "src/vmm/src/cowork_fixture.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::only_the_exit_module_and_the_crash_handlers_call_underscore_exit",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::only_the_exit_module_and_the_crash_handlers_call_underscore_exit"
+      ],
+      "killed": true,
+      "seconds": 3.6
+    },
+    {
+      "id": "A36-stop-bypasses-exit-path",
+      "description": "Vmm::stop exits directly, skipping the observers",
+      "file": "src/vmm/src/lib.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::only_the_exit_module_and_the_crash_handlers_call_underscore_exit",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::only_the_exit_module_and_the_crash_handlers_call_underscore_exit"
+      ],
+      "killed": true,
+      "seconds": 3.6
+    },
+    {
+      "id": "A37-reset-recorded-as-off",
+      "description": "PSCI SYSTEM_RESET is recorded as an orderly power-off",
+      "file": "src/vmm/src/macos/vstate.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::psci_off_and_reset_are_different_exits_with_different_reasons",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::psci_off_and_reset_are_different_exits_with_different_reasons"
+      ],
+      "killed": true,
+      "seconds": 3.5
+    },
+    {
+      "id": "A38-reset-maps-to-shutdown",
+      "description": "PSCI SYSTEM_RESET is a Shutdown exit again",
+      "file": "src/hvf/src/lib.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::psci_off_and_reset_are_different_exits_with_different_reasons",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::psci_off_and_reset_are_different_exits_with_different_reasons"
+      ],
+      "killed": true,
+      "seconds": 5.3
+    },
+    {
+      "id": "A39-final-flush-skipped",
+      "description": "the exit observer of a guarded block device does nothing",
+      "file": "src/devices/src/virtio/block/device.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::guarded_block_devices_do_a_final_flush_at_exit",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::guarded_block_devices_do_a_final_flush_at_exit"
+      ],
+      "killed": true,
+      "seconds": 4.7
+    },
+    {
+      "id": "A40-final-flush-before-join",
+      "description": "the final flush runs before the worker is stopped and joined",
+      "file": "src/devices/src/virtio/block/device.rs",
+      "expectedFailingTest": "cowork_production_exit_tests::the_final_flush_joins_the_worker_before_it_syncs",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_final_flush_joins_the_worker_before_it_syncs"
+      ],
+      "killed": true,
+      "seconds": 4.9
+    },
+    {
+      "id": "A41-last-reason-wins",
+      "description": "a later exit reason overwrites the first",
+      "file": "src/vmm/src/cowork_exit.rs",
+      "expectedFailingTest": "the_first_recorded_reason_wins",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_exit::tests::the_first_recorded_reason_wins"
+      ],
+      "killed": true,
+      "seconds": 4.5
+    },
+    {
+      "id": "A42-clean-stop-keeps-fault-status",
+      "description": "a late fault after a clean guest stop changes the exit status",
+      "file": "src/vmm/src/cowork_exit.rs",
+      "expectedFailingTest": "a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_exit::tests::a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status"
+      ],
+      "killed": true,
+      "seconds": 2.8
+    },
+    {
+      "id": "A43-two-finishers",
+      "description": "more than one thread can run the exit sequence",
+      "file": "src/vmm/src/cowork_exit.rs",
+      "expectedFailingTest": "exactly_one_caller_claims_the_exit_sequence",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_exit::tests::exactly_one_caller_claims_the_exit_sequence"
+      ],
+      "killed": true,
+      "seconds": 2.7
+    },
+    {
+      "id": "A44-resource-field-unclassified",
+      "description": "a new VmResources field is added without classification",
+      "file": "src/vmm/src/resources.rs",
+      "expectedFailingTest": null,
+      "compiled": false,
+      "observedFailingTests": [],
+      "killed": true,
+      "seconds": 2.0
+    },
+    {
+      "id": "A45-context-field-unclassified",
+      "description": "a new ContextConfig field is added without classification",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": false,
+      "observedFailingTests": [],
+      "killed": true,
+      "seconds": 3.4
+    },
+    {
+      "id": "R01-phase-skip-beforevmm",
+      "description": "production admission runs only in the BeforeConstruction phase (skipped at BeforeVmm)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission"
+      ],
+      "killed": true,
+      "seconds": 2.9
+    },
+    {
+      "id": "R02-phase-skip-beforeconstruction",
+      "description": "production admission runs only in the BeforeVmm phase",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
+      ],
+      "killed": true,
+      "seconds": 2.6
+    },
+    {
+      "id": "R03-ceiling-exclusive",
+      "description": "memory ceiling off by one (1024 excluded)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
+      ],
+      "killed": true,
+      "seconds": 2.6
+    },
+    {
+      "id": "R04-floor-plus-one",
+      "description": "memory floor off by one (768 excluded)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null",
+        "cowork_production_gate_matrix_tests::every_context_field_is_classified",
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_gate_matrix_tests::non_device_setters_leave_a_production_context_admissible",
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
+        "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals",
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+        "cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+        "cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers",
+        "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts",
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 2.5
+    },
+    {
+      "id": "R05-enable-no-machinery-switches",
+      "description": "production enable sets the marker but not the two reduced-device switches",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null",
+        "cowork_production_gate_matrix_tests::every_context_field_is_classified",
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_gate_matrix_tests::non_device_setters_leave_a_production_context_admissible",
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
+        "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals",
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+        "cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches",
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+        "cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers",
+        "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts",
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 2.4
+    },
+    {
+      "id": "R06-production-vcpu-check-only",
+      "description": "production vCPU check alone removed (reviewed gate untouched; masked by design)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own"
+      ],
+      "killed": true,
+      "seconds": 2.5
+    },
+    {
+      "id": "R07-reviewed-normalized-gpu-removed",
+      "description": "reviewed gate stops checking the NORMALIZED vmr.gpu_* resources",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_admission_tests::cowork_admission_normalized_gpu_resources_rejected_by_validator_without_any_start",
+        "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start"
+      ],
+      "killed": true,
+      "seconds": 2.1
+    },
+    {
+      "id": "R08-reviewed-public-gpu-removed",
+      "description": "reviewed gate stops checking the PUBLIC cfg.gpu_* fields",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start"
+      ],
+      "killed": true,
+      "seconds": 2.3
+    },
+    {
+      "id": "R09-reviewed-vsock-removed",
+      "description": "reviewed gate stops requiring VsockConfig::Disabled",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals"
+      ],
+      "killed": true,
+      "seconds": 2.3
+    },
+    {
+      "id": "R10-reviewed-fs-removed",
+      "description": "reviewed gate stops requiring r.fs.is_empty()",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 2.2
+    },
+    {
+      "id": "R11-reviewed-virtio-consoles-removed",
+      "description": "reviewed gate stops requiring r.virtio_consoles.is_empty()",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context"
+      ],
+      "killed": true,
+      "seconds": 2.5
+    },
+    {
+      "id": "R12-reviewed-kernel-bundle-firmware-removed",
+      "description": "reviewed gate stops refusing kernel_bundle and firmware_config",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context"
+      ],
+      "killed": true,
+      "seconds": 2.6
+    },
+    {
+      "id": "R13-reviewed-block-cfgs-removed",
+      "description": "workspace-pair branch stops refusing path-backed block_cfgs / root / data / block_root",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction"
+      ],
+      "killed": true,
+      "seconds": 2.5
+    },
+    {
+      "id": "R14-oracle-feature-drops-trace",
+      "description": "cowork-fixture-oracle no longer enables devices/cowork-fixture-trace",
+      "file": "src/libkrun/Cargo.toml",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_quiet_tests::production_block_requests_have_no_completion_hold",
+        "cowork_production_trace_tests::fixture_oracle_keeps_the_block_trace_compiled_in"
+      ],
+      "killed": true,
+      "seconds": 6.0
+    },
+    {
+      "id": "R15-shutdown-check-inverted",
+      "description": "production gate admits ONLY contexts WITH the shutdown eventfd",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null",
+        "cowork_production_gate_matrix_tests::every_context_field_is_classified",
+        "cowork_production_gate_matrix_tests::every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert",
+        "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context",
+        "cowork_production_gate_matrix_tests::non_device_setters_leave_a_production_context_admissible",
+        "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission",
+        "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own",
+        "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals",
+        "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device",
+        "cowork_production_profile_tests::production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches",
+        "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate",
+        "cowork_production_profile_tests::production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers",
+        "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts",
+        "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
+      ],
+      "killed": true,
+      "seconds": 2.5
+    },
+    {
+      "id": "R16-enable-skips-virgin-guard-guarded-only",
+      "description": "production enable ignores a context that already has the guarded-block switch only (unreachable state)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_gate_matrix_tests::production_enable_refuses_every_partial_fixture_state"
+      ],
+      "killed": true,
+      "seconds": 2.3
+    },
+    {
+      "id": "R17-fixture-reclaim-only-ignores-production",
+      "description": "reclaim-only fixture opt-in accepted on a production context",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "killed": true,
+      "seconds": 2.9
+    },
+    {
+      "id": "R18-bootstrap-factory-ignores-production",
+      "description": "HVC bootstrap-stream factory accepted on a production context",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "compiled": true,
+      "observedFailingTests": [
+        "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
+      ],
+      "killed": true,
+      "seconds": 2.8
+    },
+    {
+      "id": "R19-blk-feature-includes-oracle",
+      "description": "the libkrun blk feature silently enables cowork-fixture-oracle (archive audit)",
+      "file": "src/libkrun/Cargo.toml",
+      "expectedFailingTest": null,
+      "archiveFixtureSymbols": null,
+      "archiveBuildFailed": true,
+      "compiled": true,
+      "observedFailingTests": [],
+      "killed": true,
+      "seconds": 15.7
+    },
+    {
+      "id": "R20-fixture-export-cfg-removed",
+      "description": "cfg gate removed from krun_enable_cowork_block_fixture_reclaim (archive audit)",
+      "file": "src/libkrun/src/lib.rs",
+      "expectedFailingTest": null,
+      "archiveFixtureSymbols": [
+        "_krun_enable_cowork_block_fixture_reclaim"
+      ],
+      "archiveBuildFailed": false,
+      "compiled": true,
+      "observedFailingTests": [],
+      "killed": true,
+      "seconds": 38.8
     }
   ],
-  "pythonGuards": [
+  "pythonMutations": [
     {
-      "id": "ignore-removed-vm-test",
-      "description": "the #[ignore] on the test that creates a Hypervisor.framework VM is removed",
-      "offenders": [
-        "src/vmm/src/macos/vstate.rs:661"
-      ],
+      "id": "P01-repro-root-nonempty-allowed",
+      "description": "build_production_profile.py stops refusing a non-empty --repro-root",
+      "file": "build_production_profile.py",
+      "expectedFailingTest": "test_a_non_empty_directory_is_refused_and_survives",
       "killed": true
     },
     {
-      "id": "ignore-removed-start-enter-test",
-      "description": "the #[ignore] on a test that calls krun_start_enter is removed",
-      "offenders": [
-        "src/libkrun/src/lib.rs:3354"
-      ],
+      "id": "P02-repro-root-protected-allowed",
+      "description": "build_production_profile.py stops refusing protected directories as --repro-root",
+      "file": "build_production_profile.py",
+      "expectedFailingTest": "test_protected_directories_are_refused",
+      "killed": true
+    },
+    {
+      "id": "P03-vm-reach-regex-narrowed",
+      "description": "the VM-reach audit forgets the HvfGicV3 and hv_* calls",
+      "file": "prepare_production_profile.py",
+      "expectedFailingTest": "test_widened_hvf_and_query_calls_are_found",
+      "killed": true
+    },
+    {
+      "id": "P04-vm-reach-query-calls-dropped",
+      "description": "the VM-reach audit forgets the max-vcpu and nested-virt queries",
+      "file": "prepare_production_profile.py",
+      "expectedFailingTest": "test_widened_hvf_and_query_calls_are_found",
+      "killed": true
+    },
+    {
+      "id": "P05-scope-device-attach-unchecked",
+      "description": "the patch scope check stops applying the device-attach patterns",
+      "file": "prepare_production_profile.py",
+      "expectedFailingTest": "test_device_attach_calls_are_found_in_any_non_test_file",
       "killed": true
     }
   ],

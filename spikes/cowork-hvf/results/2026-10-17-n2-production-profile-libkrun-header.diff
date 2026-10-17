@@ -1,8 +1,8 @@
 diff --git a/include/libkrun.h b/include/libkrun.h
-index ea0673c..f60c3af 100644
+index ea0673c..7a708cd 100644
 --- a/include/libkrun.h
 +++ b/include/libkrun.h
-@@ -283,6 +283,66 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+@@ -283,6 +283,116 @@ int32_t krun_add_disk2(uint32_t ctx_id,
                         bool direct_io,
                         uint32_t sync_mode);
  
@@ -19,8 +19,8 @@ index ea0673c..f60c3af 100644
 + *
 + * Call order: krun_create_ctx, the usual non-device setters (kernel, console, krun_set_vm_config
 + * with exactly KRUN_COWORK_PRODUCTION_VCPUS and a memory size in range),
-+ * krun_cowork_enable_production_profile, krun_cowork_create_runtime_port,
-+ * krun_cowork_set_workspace_disks, optionally krun_cowork_validate_production_profile, and last
++ * krun_cowork_enable_profile_v1, krun_cowork_create_runtime_port_v1,
++ * krun_cowork_set_workspace_disks_v1, krun_cowork_validate_profile_v1 (mandatory), and last
 + * krun_start_enter. Every function returns zero (or a descriptor >= 3) or a negative errno.
 + */
 +#define KRUN_COWORK_PRODUCTION_VCPUS 2
@@ -38,14 +38,14 @@ index ea0673c..f60c3af 100644
 +/** Opt in to the production profile. Accepted once, only on a context that carries no fixture opt-in
 + * (-EINVAL otherwise, including after any fixture entry point). It also switches on the reduced-device
 + * machinery the profile shares with the fixture; nothing else is enabled. */
-+int32_t krun_cowork_enable_production_profile(uint32_t ctx_id);
++int32_t krun_cowork_enable_profile_v1(uint32_t ctx_id);
 +
 +/** Production runtime port: the one generic non-console virtio port, no keys and no authority.
 + * Returns only the opposite PEER fd (>= 3, CLOEXEC); the caller owns it and must close it. The device
 + * endpoint and every alias stay internal. A duplicate call, a context without the production profile
 + * and the fixture factories all refuse (-EINVAL), publishing no fd. The caller's sandbox must deny
 + * process fork/exec BEFORE this call and never fork afterwards: CLOEXEC covers exec only. */
-+int32_t krun_cowork_create_runtime_port(uint32_t ctx_id);
++int32_t krun_cowork_create_runtime_port_v1(uint32_t ctx_id);
 +
 +/** Production admitted workspace RAW pair, otherwise the same contract as the fixture oracle's pair
 + * setter documented in the fixture section. Descriptors are BORROWED for the synchronous call, duplicated
@@ -54,13 +54,63 @@ index ea0673c..f60c3af 100644
 + * descriptors are never closed. Expected identities corroborate host admission, they authenticate
 + * no daemon, home, workspace, worker, incarnation or lease. FD closure is never a native stop or
 + * disk-release proof. */
-+int32_t krun_cowork_set_workspace_disks(uint32_t ctx_id,
++int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id,
 +    int32_t data_fd, const struct krun_cowork_volume_identity *data,
 +    int32_t environment_fd, const struct krun_cowork_volume_identity *environment);
 +
-+/** Preflight of the production gate's first phase. Zero when krun_start_enter would pass the same
-+ * admission; -EINVAL otherwise (-ENOENT for an unknown context). Starts nothing and opens nothing. */
-+int32_t krun_cowork_validate_production_profile(uint32_t ctx_id);
++/** MANDATORY preflight of the production gate's first (pre-construction) phase. Zero when that phase
++ * of the start-time admission passes; -EINVAL otherwise (-ENOENT for an unknown context). The later
++ * phases (after the block devices are built, and again before the VMM) run inside krun_start_enter and
++ * are not previewed. A successful call is recorded on the context and krun_start_enter refuses a
++ * production context that never had one. Starts nothing and opens nothing. */
++int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id);
++
++/** Exit reasons delivered to the exit hook. */
++#define KRUN_COWORK_EXIT_NONE 0           /* unknown (never delivered in practice) */
++#define KRUN_COWORK_EXIT_OFF 1            /* guest PSCI SYSTEM_OFF: an orderly power-off */
++#define KRUN_COWORK_EXIT_RESET 2          /* guest PSCI SYSTEM_RESET: NOT an orderly power-off */
++#define KRUN_COWORK_EXIT_VCPU_ERROR 3     /* a vCPU stopped on an emulation error */
++#define KRUN_COWORK_EXIT_TERMINAL_FAULT 4 /* a pin, lease, reclaim or lifecycle fault stopped the VMM (status 77) */
++
++/** Called once, on the exiting thread, after every other exit observer (the final flush of both volumes
++ * included) and immediately before the process _exit()s. It must not block, and must not call any
++ * krun_* function except the counter getters. The whole exit sequence is bounded (20 s); if an
++ * observer cannot finish, the process exits without calling the hook. Hard crashes (SIGSEGV, SIGBUS,
++ * SIGILL, SIGSYS, an abort) exit from a signal handler without observers or the hook. A guest that
++ * already stopped cleanly (off or reset) exits with status 0 even if a late fault fires. */
++typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason);
++/** Register the exit hook. Optional; accepted once, only on a production context, with a non-NULL hook. */
++int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data);
++
++/** Flush accounting for one admitted disk. */
++struct krun_cowork_flush_device_v1 {
++    uint64_t requested;            /* guest FLUSH requests captured from the queue */
++    uint64_t completed;            /* ... whose backing-file flush and sync_all returned success */
++    uint64_t final_sync_attempted; /* final flush at VMM exit (0 or 1) */
++    uint64_t final_sync_completed; /* ... that succeeded */
++};
++struct krun_cowork_flush_counters_v1 {
++    uint32_t size;                 /* in: sizeof(struct); out: bytes written */
++    uint32_t device_count;         /* out: 2 */
++    struct krun_cowork_flush_device_v1 device[2]; /* [0] winter-data, [1] winter-environment */
++};
++/** Process-global flush counters (not per context: the context leaves the library's table when the VM
++ * starts, and one VM runs per process). Readable at any time, including from the exit hook and after
++ * it. -EINVAL for NULL or a size smaller than the structure. */
++int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_flush_counters_v1 *out);
++
++/** The pin budget and its high-water marks since process start (the production replacement for the
++ * fixture's trace rows). */
++struct krun_cowork_pin_counters_v1 {
++    uint32_t size;                 /* in: sizeof(struct); out: bytes written */
++    uint32_t reserved;
++    uint64_t max_pins;             /* 48 */
++    uint64_t max_pinned_bytes;     /* 8 MiB */
++    uint64_t high_water_pins;
++    uint64_t high_water_bytes;
++    uint64_t budget_refusals;      /* pins refused for the budget; the worker stops after one */
++};
++int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out);
 +
 +#ifdef KRUN_COWORK_FIXTURE_ORACLE
 +/* ====== Fixture oracle: present only when built with `cowork-fixture-oracle` ======
@@ -69,7 +119,7 @@ index ea0673c..f60c3af 100644
  /** Developer-only admitted workspace RAW pair; Apple Silicon/macOS + blk only.
   * Requires reduced guarded reclaim opt-in; launch additionally requires the generic runtime port,
   * exactly two admitted disks, 2 vCPUs/768MiB and no path-backed/extra devices.
-@@ -298,16 +358,10 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+@@ -298,16 +408,10 @@ int32_t krun_add_disk2(uint32_t ctx_id,
   */
  /* Existing developer-only reduced-profile opt-in, also required for this pair API. */
  int32_t krun_enable_cowork_block_fixture_reclaim(uint32_t ctx_id);
@@ -87,7 +137,7 @@ index ea0673c..f60c3af 100644
  
  /* Supported virtio-fs permission semantics */
  
-@@ -1426,6 +1480,7 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
+@@ -1426,6 +1530,7 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
   */
  int32_t krun_start_enter(uint32_t ctx_id);
  
@@ -95,7 +145,7 @@ index ea0673c..f60c3af 100644
  /* TEST-ONLY closed single-port bootstrap/runtime stream factory; blk/macOS only.
   * Call after krun_enable_cowork_block_fixture_reclaim. Returns only the opposite PEER fd
   * (>=3, CLOEXEC) on success; caller owns it and must close it. Device endpoint and all
-@@ -1444,6 +1499,7 @@ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
+@@ -1444,6 +1549,7 @@ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
  int32_t krun_enable_cowork_runtime_port_fixture_trace(uint32_t ctx_id);
  /* DEPRECATED TEST API: caller-supplied descriptors are always refused (-EINVAL). */
  int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);

@@ -1,7 +1,7 @@
 {
   "candidate": {
     "status": "native-source-only-independent-review-required",
-    "fullSourceDiffSha256": "e067b60ec68919f85588125475101e63993fb43e4c720561be1f5d9c62da537b",
+    "fullSourceDiffSha256": "505a68e38b3415e6b503ea06ddc68f15d313ce91066cbb50f69cfc09b9bcbe29",
     "patches": {
       "patches/0004-proposed-guarded-block-reviewed-fixes.patch": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
       "patches/0005-proposed-guarded-block-producer-progress.patch": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",
@@ -15,7 +15,13 @@
       "patches/0013-proposed-workspace-disks-startup-phases.patch": "f70c5b11586211c81b88a0acc27bdc357ed4437418bdffbf8cae0a2217c152ae",
       "patches/0014-proposed-krun-vmm-unit-harness.patch": "b5bda53c97f86c1b130639340f3d97c9a96d37765a63820a6ca9c86664c88844",
       "patches/0015-proposed-cowork-production-profile.patch": "e3c6c42ab5e30f33586f8d07e5a6c5e6fcc38e5a5e20393c824d08edf5f90daf",
-      "patches/0016-proposed-production-block-trace-off.patch": "97708943e9ac82db658fe0c322d5140f66966cab201bae4b33e3e56e334fbdf8"
+      "patches/0016-proposed-production-block-trace-off.patch": "97708943e9ac82db658fe0c322d5140f66966cab201bae4b33e3e56e334fbdf8",
+      "patches/0017-proposed-production-abi-v1-names.patch": "628c88a57fbb7216132eba089d1fd028ea706d7a1658ba3fe4c7765950d8a529",
+      "patches/0018-proposed-production-gate-matrix-tests.patch": "311e58b4695d91703519c6173a484077b15977a5930eef453510cf7111a84d45",
+      "patches/0019-proposed-production-start-admission.patch": "805356bdf1f74146b0daa92d7c502107702d6b0520c9eb814fdf6c3bef30c82a",
+      "patches/0020-proposed-production-quiet-block-and-reclaim-paths.patch": "8f395ba2db2cec9b7ba0551e3497ce5664c62ee85a76597ded93e52abb418590",
+      "patches/0021-proposed-production-flush-and-pin-counters.patch": "f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a",
+      "patches/0022-proposed-production-exit-path-final-flush-and-hook.patch": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a"
     }
   },
   "vmStarted": false,
@@ -38,7 +44,7 @@
   "recipe": {
     "command": "cargo rustc -p libkrun --release --locked --offline --no-default-features --features <features> --jobs 4 --crate-type staticlib",
     "features": {
-      "production": "blk",
+      "production": "blk,cowork-production-only",
       "oracle": "blk,cowork-fixture-oracle"
     },
     "profileEnvironment": {
@@ -63,14 +69,17 @@
     "nativeStaticLibs": "-framework Hypervisor -liconv -lSystem -lc -lm"
   },
   "production": {
-    "rawArchiveSha256": "460c3829cd79333ed8bbc556e2ca41ac0ea907e0dcfe7c6d87df24b93aaf1d0b",
-    "strippedArchiveSha256": "f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38",
-    "strippedSizeBytes": 7269944,
+    "rawArchiveSha256": "6050978681a3e525b3e815419cdc59845833f1104c9df11e0a8dd3e42c747713",
+    "strippedArchiveSha256": "9dbc0474ff9e409b7bfa4dfeaf5c0ad51e23c58490e931a39c015b3aa92faa73",
+    "strippedSizeBytes": 7267480,
     "cowork": [
-      "_krun_cowork_create_runtime_port",
-      "_krun_cowork_enable_production_profile",
-      "_krun_cowork_set_workspace_disks",
-      "_krun_cowork_validate_production_profile"
+      "_krun_cowork_create_runtime_port_v1",
+      "_krun_cowork_enable_profile_v1",
+      "_krun_cowork_get_flush_counters_v1",
+      "_krun_cowork_get_pin_counters_v1",
+      "_krun_cowork_set_exit_hook_v1",
+      "_krun_cowork_set_workspace_disks_v1",
+      "_krun_cowork_validate_profile_v1"
     ],
     "fixtureSymbolsExported": [],
     "blockTraceRowStrings": [],
@@ -78,17 +87,20 @@
       "<RUST-TOOLCHAIN-CI-XCODE>/Contents/"
     ],
     "strippedArchivePathFindings": [],
-    "exportCount": 66
+    "exportCount": 69
   },
   "fixtureOracle": {
-    "rawArchiveSha256": "db9cd2e7171f1a6f01ffb4ce7b1a4c54ff56563e377224d9c607dac3d031f7ee",
-    "strippedArchiveSha256": "b29cc765dbf0b52cb58dd670d512e78bf473b3386d05e23f72a27f63069123f4",
-    "strippedSizeBytes": 7282904,
+    "rawArchiveSha256": "4cd15c581e0367271185dfcb3df0ee31def50551c4597e510e8d21a3b64ee023",
+    "strippedArchiveSha256": "a30347cd6a07b8fa63d3eb9ff57b9fb6c1042d18e146d6a11fb66ffaf55fdf22",
+    "strippedSizeBytes": 7297112,
     "cowork": [
-      "_krun_cowork_create_runtime_port",
-      "_krun_cowork_enable_production_profile",
-      "_krun_cowork_set_workspace_disks",
-      "_krun_cowork_validate_production_profile",
+      "_krun_cowork_create_runtime_port_v1",
+      "_krun_cowork_enable_profile_v1",
+      "_krun_cowork_get_flush_counters_v1",
+      "_krun_cowork_get_pin_counters_v1",
+      "_krun_cowork_set_exit_hook_v1",
+      "_krun_cowork_set_workspace_disks_v1",
+      "_krun_cowork_validate_profile_v1",
       "_krun_create_cowork_bootstrap_stream",
       "_krun_create_cowork_runtime_stream",
       "_krun_enable_cowork_block_fixture_reclaim",
@@ -108,29 +120,39 @@
     ],
     "blockTraceRowStrings": [
       "block_freeze_pin",
+      "block_owned_completion_hold",
       "block_owned_io_begin",
       "block_owned_io_end",
       "block_request_capture",
       "block_ring_pin",
       "block_trace_overflow",
-      "block_used_ack"
+      "block_used_ack",
+      "reclaim_disposition",
+      "reclaim_exclusion",
+      "reclaim_failure",
+      "reclaim_map",
+      "reclaim_parked",
+      "reclaim_replace",
+      "reclaim_resumed",
+      "reclaim_unmap",
+      "reclaim_used_ack"
     ],
     "rawArchivePathFindings": [
       "<RUST-TOOLCHAIN-CI-XCODE>/Contents/"
     ],
     "strippedArchivePathFindings": [],
-    "exportCount": 73
+    "exportCount": 76
   },
   "reproduction": {
     "firstSourceRoot": "out/libkrun-production-profile",
     "secondLocation": "<SCRATCH>/n2-s4/repro-b",
     "rawArchiveSha256": [
-      "460c3829cd79333ed8bbc556e2ca41ac0ea907e0dcfe7c6d87df24b93aaf1d0b",
-      "460c3829cd79333ed8bbc556e2ca41ac0ea907e0dcfe7c6d87df24b93aaf1d0b"
+      "6050978681a3e525b3e815419cdc59845833f1104c9df11e0a8dd3e42c747713",
+      "6050978681a3e525b3e815419cdc59845833f1104c9df11e0a8dd3e42c747713"
     ],
     "strippedArchiveSha256": [
-      "f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38",
-      "f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38"
+      "9dbc0474ff9e409b7bfa4dfeaf5c0ad51e23c58490e931a39c015b3aa92faa73",
+      "9dbc0474ff9e409b7bfa4dfeaf5c0ad51e23c58490e931a39c015b3aa92faa73"
     ],
     "rawIdentical": true,
     "strippedIdentical": true
@@ -143,6 +165,8 @@
   "probes": {
     "production": {
       "productionAbiVerified": true,
+      "countersVerified": true,
+      "exitHookRegistrationVerified": true,
       "limitsVerified": true,
       "shutdownDeviceRefused": true,
       "ownedFdCleanupVerified": true,
@@ -171,7 +195,7 @@
       "/usr/lib/libiconv.2.dylib",
       "/usr/lib/libSystem.B.dylib"
     ],
-    "productionProbeSha256": "872bde196361acc0b7538984ca34a019a57b60f40d03961458603dfd6b30bc50",
+    "productionProbeSha256": "b828f7abd126ca07e04133f4f70aae34d6f778bc26125a6e558c869ea01015c0",
     "linkScanSha256": "ccc3156cb6a32b9b4ffba16221034210e3029d85df36d5389a78746e25e37214"
   }
 }
