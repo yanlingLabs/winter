@@ -122,6 +122,8 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testHappyPathFromHelloToAnOrderlyStopAndRetire() throws {
         let rig = try RuntimeRig()
         XCTAssertTrue(rig.hello())
+        // A descriptor WITHOUT close-on-exec, open in the launcher's process across the spawn: only POSIX_SPAWN_CLOEXEC_DEFAULT keeps it from the worker.
+        let stray = open("/dev/null", O_RDONLY); XCTAssertEqual(lc_has_cloexec(stray), 0); defer { close(stray) }
         let (pid, token) = try XCTUnwrap(rig.begin())
         XCTAssertNotNil(rig.daemon.next { if case .workerState(.sandboxed) = $0 { true } else { nil } })
 

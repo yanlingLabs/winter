@@ -339,6 +339,15 @@ final class SessionTests: XCTestCase {
         guard case .uncertain(let b)? = try? h.store.load(ReceiptScope(Fixture.scope)) else { return XCTFail() }
         XCTAssertEqual(b.reason, .daemonLost)
     }
+    func testOwnerLossWhileTheDisksAreBeingTransferredLetsTheDrainBudgetJudgeIt() throws {
+        let h = harness(); h.begin(); h.status(.sandboxed)
+        try volumesLine(h, try DiskPair()); XCTAssertEqual(h.ports.armed[.volumes], 10_000)
+        h.session.daemonChannelClosed()
+        XCTAssertNil(h.ports.armed[.volumes], "the transfer timer no longer applies")
+        XCTAssertEqual(h.ports.armed[.drain], 30_000)
+        h.session.timerFired(.drain)
+        XCTAssertEqual(h.ports.uncertain.map(\.reason), [.drainTimeout]); XCTAssertTrue(h.ports.uncertain[0].attachedVolumes)
+    }
     func testOwnerLossDuringAHostStopCapsALongerBudgetAtThirtySecondsAndKeepsAShorterOne() throws {
         let long = harness(); try long.bringUp(); long.stop(budget: 120_000); long.session.daemonChannelClosed()
         XCTAssertEqual(long.ports.armed[.drain], 30_000)

@@ -191,7 +191,6 @@ public final class LauncherSession {
         case .begun: break
         default: refuse(id, .busy); return
         }
-        guard !evidence.volumesSent else { refuse(id, .busy); return }
         guard digest == scopeDigest, descriptors.count == WireLimits.volumeRights else { refuse(id, .volumes_rejected); return }
         for (descriptor, identity) in zip(descriptors, volumes) {
             do { try VolumeDescriptorCheck.verify(descriptor, against: identity) } catch { refuse(id, .volumes_rejected); return }
@@ -362,6 +361,8 @@ public final class LauncherSession {
     private func startDrain(origin: DrainOrigin, nonce: String, budgetMs: Int, requestId: String?) {
         phase = .draining
         drainRequestId = requestId
+        // A drain replaces the start-up deadlines: an unacknowledged transfer is judged by the drain budget, not by its own timer.
+        ports.disarm(.ready); ports.disarm(.volumes)
         // Only a DRAIN the worker was actually handed is evidence that a drain was requested.
         guard sendEnvelope({ .drain(seq: $0, stopNonce: nonce, budgetMs: budgetMs, origin: origin) }) else { killAndCommit(reason: .launcherFault, refusal: nil); return }
         evidence.drain = DrainRecord(nonce: nonce, origin: origin == .hostStop ? .hostStop : .ownerLossDrain)
