@@ -23,6 +23,8 @@ export interface FakeBehavior {
   guestHello?: "ok" | "silent";
   bootstrap?: "ok" | "fault" | "silent" | "wrong-nonce" | "wrong-operation" | "tampered-receipt" | "duplicate-receipt" | "runtime-frame";
   mounted?: "ok" | "silent";
+  /** What the guest does with the conversation set: answer, stay silent, fault, echo wrongly, or announce readiness before it was sent anything / twice. */
+  conversations?: "ok" | "silent" | "bad" | "supervisor-failed" | "second" | "wrong-count" | "wrong-nonce" | "wrong-operation" | "duplicate-ready" | "early-ready";
   /** What the launcher does when asked to stop. */
   stop?: "orderly" | "late-orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault" | "other-request-id" | "other-launcher" | "denies-attach" | "denies-boot";
   /** Hello with another boot id. */
@@ -66,6 +68,8 @@ export class FakeSession implements CoworkLauncherSession {
   private readonly closers: (() => void)[] = [];
   private readonly down = new CoworkNativeMuxSequence();
   private upSeq = 0;
+  /** Every conversation set the guest received (the host must send at most one). */
+  readonly conversationSets: { operationId: string; nonce: string; incarnationId: string; profile: string | null; conversations: readonly unknown[] }[] = [];
   private plan: { operationId: string; nonce: string; plan: Record<string, unknown> } | null = null;
   private confirmCounter = 0;
   constructor(private readonly owner: FakeLauncher, readonly request: { workspaceId: string; incarnationId: string; leaseEpoch: number }) {
@@ -154,7 +158,23 @@ export class FakeSession implements CoworkLauncherSession {
       if (this.behavior.bootstrap === "duplicate-receipt") this.muxUp({ t: "receipt", operationId, nonce, receipt: receipt as unknown as Record<string, unknown> });
       return;
     }
+    if (message.t === "ready" && this.behavior.conversations === "early-ready") this.muxUp({ t: "runtime_ready", operationId: message.operationId, nonce: message.nonce, conversations: 1 });
     if (message.t === "ready" && this.behavior.mounted !== "silent") this.muxUp({ t: "mounted", operationId: message.operationId, nonce: message.nonce });
+    if (message.t === "conversations") {
+      this.conversationSets.push(message);
+      const { operationId, nonce } = message, count = message.conversations.length;
+      switch (this.behavior.conversations ?? "ok") {
+        case "silent": return;
+        case "bad": return this.muxUp({ t: "fault", operationId, nonce, code: "bad_conversations" });
+        case "supervisor-failed": return this.muxUp({ t: "fault", operationId, nonce, code: "supervisor_failed" });
+        case "second": return this.muxUp({ t: "fault", operationId, nonce, code: "second_conversations" });
+        case "wrong-count": return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count + 1 });
+        case "wrong-nonce": return this.muxUp({ t: "runtime_ready", operationId, nonce: "ee".repeat(16), conversations: count });
+        case "wrong-operation": return this.muxUp({ t: "runtime_ready", operationId: "filesystem_other", nonce, conversations: count });
+        case "duplicate-ready": this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
+        default: return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
+      }
+    }
   }
 
   private orderly(overrides: Partial<CoworkNativeOrderlyReceipt> = {}, stopNonce: string): CoworkNativeOrderlyReceipt {

@@ -23,6 +23,8 @@ export const STOP_PHASES = ["drain-requested", "stop-receipt-received", "volumes
 export interface HarnessOptions {
   readonly behavior?: FakeBehavior; readonly crashAt?: string; readonly timeouts?: Partial<CoworkNativeHostTimeouts>;
   readonly volumeCheckpoint?: (phase: string) => void;
+  /** The conversation set the host sends after `mounted` (contract 6.1). */
+  readonly conversations?: CoworkNativeHostDeps["conversations"];
   /** Runs at every host checkpoint, before a crash is raised: lets a test change the world between two steps of a start. */
   readonly onCheckpoint?: (phase: string, harness: Harness) => void;
 }
@@ -141,8 +143,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     harness.daemon = daemon;
     const deps: CoworkNativeHostDeps = {
       records: harness.records, volumes: harness.volumes, admission: harness.ledger, authority: harness.authority, power: harness.power, recovery: harness.recovery, registry: harness.registry, hostBoot,
-      launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, stopGraceMs: 150, exitAllowanceMs: 0, drainBudgetMs: 150, ...boot.timeouts },
-      now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
+      launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, runtimeReadyMs: 400, stopGraceMs: 150, exitAllowanceMs: 0, drainBudgetMs: 150, ...boot.timeouts },
+      conversations: options.conversations, now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
     };
     harness.deps = deps;
     harness.host = new CoworkNativeHost(deps);

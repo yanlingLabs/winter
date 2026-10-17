@@ -4,7 +4,7 @@ import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumeRequest, CoworkVolumes } from "../volumes";
 import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-filesystem";
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
-import { CoworkNativeMuxSequence, COWORK_NATIVE_LIMITS, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
+import { CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
 import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
 import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeObserved, type CoworkNativeStopRegistry } from "./stop-proof";
@@ -52,10 +52,16 @@ export interface CoworkLauncherPort { spawn(request: { readonly workspaceId: str
  * of the pinned runtime image; a missing or malformed pin refuses. */
 export interface CoworkNativeImagePins { runtimeImageDigest(workspaceId: string): string }
 
-export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; /** The VMM exit allowance after the guest budget (libkrun's exit watchdog plus the launcher's margin): the launcher kills no sooner. */ readonly exitAllowanceMs: number; readonly drainBudgetMs: number }
-export const COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: COWORK_NATIVE_LIMITS.hostStopMarginMs, exitAllowanceMs: coworkNativeLauncherKillMs(0), drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
+export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; /** The VMM exit allowance after the guest budget (libkrun's exit watchdog plus the launcher's margin): the launcher kills no sooner. */ readonly exitAllowanceMs: number; /** From the conversation set's send to `runtime_ready`: the guest starts the tool supervisor and waits for its ready line. */ readonly runtimeReadyMs: number; readonly drainBudgetMs: number }
+export const COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: COWORK_NATIVE_LIMITS.hostStopMarginMs, exitAllowanceMs: coworkNativeLauncherKillMs(0), runtimeReadyMs: 60_000, drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
 
+/** What the host decides for the guest's tool supervisor (contract 6.1): `profile` null = tools only. */
+export interface CoworkNativeConversationSet { readonly profile: CoworkNativeRuntimeProfile | null; readonly conversations: readonly CoworkNativeConversation[] }
+/** The facts a conversation set must be bound to; the guest's boot id is the one from its `hello`. */
+export interface CoworkNativeConversationContext { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly guestBootId: string }
 export interface CoworkNativeHostDeps {
+  /** Supplies the incarnation's conversation set after `mounted`, or null for none (no supervisor is started and there is no `runtime_ready`). Unwired: no implementation exists in src/. */
+  readonly conversations?: (context: CoworkNativeConversationContext) => CoworkNativeConversationSet | null;
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly authority: CoworkNativeAuthority;
   readonly power: CoworkNativePower; readonly recovery: CoworkNativeRecovery; readonly registry: CoworkNativeStopRegistry; readonly hostBoot: CoworkNativeHostBoot;
   readonly launcher: CoworkLauncherPort; readonly images: CoworkNativeImagePins;
@@ -90,6 +96,8 @@ interface Run {
   /** What this process saw happen on the channel: a stop receipt cannot say less. */
   observed: { volumesAccepted: boolean; vmRunning: boolean; guestHello: boolean; guestFault: boolean };
   stopHeartbeat: (() => void) | null;
+  /** True once the conversation set went out: a `runtime_ready` before that is out of order. */
+  conversationsSent: boolean; earlyReady: boolean;
 }
 
 const isCrash = (error: unknown): boolean => error instanceof CoworkNativeSimulatedCrash;
@@ -194,7 +202,7 @@ export class CoworkNativeHost {
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
     const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
-      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null };
+      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false };
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
     try {
@@ -236,6 +244,7 @@ export class CoworkNativeHost {
       if (message.t === "worker_state" && message.state === "vm_running") run.observed.vmRunning = true;
       else if (message.t === "worker_state" && message.state === "guest_fault") run.observed.guestFault = true;
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "hello") run.observed.guestHello = true;
+      else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "runtime_ready" && !run.conversationsSent) run.earlyReady = true;
     }));
     const binding = authority.adopt(session, { workspaceId, homeId: run.homeId, admissionId: reserved.admissionId, owner });
     run.binding = binding;
@@ -305,10 +314,35 @@ export class CoworkNativeHost {
     this.sendBootstrap(run, { t: "ready", operationId: plan.operationId, nonce });
     this.hook("ready-sent");
     const mounted = await run.inbox.expect(message => message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "mounted" && message.frame.message.operationId === plan.operationId && message.frame.message.nonce === nonce ? message.frame : undefined, this.timeouts.mountedMs, "mounted");
+    if (run.earlyReady) throw new CoworkNativeHostError("protocol", "runtime_ready before the conversation set");
     run.upSeq.accept(mounted, "up");
+    await this.deliverConversations(run, { workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, guestBootId: hello.message.t === "hello" ? hello.message.guestBootId : "" }, plan.operationId, nonce);
     binding.advance("ready");
     this.deps.power.transition(run.key, "starting", "running");
     this.moveAdmission(run, "running");
+  }
+
+  /** Contract 6.1: the conversation set goes out ONCE, after `mounted`, bound to the plan's operation and nonce; `running` waits for `runtime_ready`.
+   * A refusal to bind or to serialize means nothing was sent. A bootstrap fault, a wrong echo or a wrong count fails the start (and the stop that follows is orderly). */
+  private async deliverConversations(run: Run, context: CoworkNativeConversationContext, operationId: string, nonce: string): Promise<void> {
+    const set = this.deps.conversations?.(context) ?? null;
+    if (set === null) return;
+    const message = { t: "conversations" as const, operationId, nonce, incarnationId: context.incarnationId, profile: set.profile, conversations: set.conversations };
+    if (set.profile !== null && set.conversations.length !== 1) throw new CoworkNativeHostError("protocol", "a host-query profile carries exactly one conversation");
+    if (!coworkNativeConversationsAreBound(message, { operationId, nonce, workspaceId: context.workspaceId, incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch, guestBootId: context.guestBootId })) throw new CoworkNativeHostError("protocol", "conversation set is not bound to this incarnation");
+    run.downSeq += 1;
+    // The strict serializer refuses an oversized or malformed set before anything is sent (a throw leaves the sequence number used, and the start fails).
+    const frame = { class: "bootstrap" as const, seq: run.downSeq, message };
+    try { serializeCoworkNativeMuxFrame(frame, "down"); } catch { throw new CoworkNativeHostError("protocol", "conversation set refused by the contract"); }
+    run.session!.send({ t: "mux_down", frame });
+    run.conversationsSent = true;
+    this.hook("conversations-sent");
+    const reply = await run.inbox!.expect(item => item.t === "mux_up" && item.frame.class === "bootstrap" && (item.frame.message.t === "runtime_ready" || item.frame.message.t === "fault") ? item.frame : undefined, this.timeouts.runtimeReadyMs, "runtime_ready");
+    run.upSeq.accept(reply, "up");
+    const answer = (reply as Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>).message;
+    if (answer.t === "fault") throw new CoworkNativeHostError("guest_fault", answer.code);
+    if (answer.t !== "runtime_ready" || answer.operationId !== operationId || answer.nonce !== nonce || answer.conversations !== set.conversations.length) throw new CoworkNativeHostError("protocol", "runtime_ready does not answer this set");
+    this.hook("runtime-ready");
   }
 
   /** Move the admission to `to` from whatever state it REALLY is in. A row the ledger marked `uncertain` only because the heartbeat lapsed is

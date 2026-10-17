@@ -240,6 +240,8 @@ exactly for the guided profile). The `fresh` profile is not carried: it has no d
 more); the runtime class has a single duplex stream set, and the guest's supervisor (agent SDK PR 30, `cowork/n2-guest-relay`, head `ed228f39`) exits 64 on a second host-query conversation. The runtime stream
 index is therefore always 0 (`CoworkNativeRuntimeStreams` takes exactly 1). The prefix keeps the index byte so a later version can lift the limit without changing the frame.
 
+**Host behavior (clarification, no wire change).** The host adapter sends the set through an injected provider, once, after `mounted`; a host-query profile with other than one conversation, a set not bound to the incarnation and guest boot id, and a set the strict serializer refuses (including one above 20,480 bytes) are refused BEFORE anything is sent and fail the start. The host's `running` (power `running`, admission `running`) waits for `runtime_ready`, for at most 60 seconds from the send (`runtimeReadyMs`, pinned by a test). A bootstrap `fault`, a `runtime_ready` that does not echo the plan's operation and nonce or does not count the delivered conversations, a `runtime_ready` that arrives BEFORE the set was sent (out of order), and the timeout all fail the start; the stop that follows is the ordinary orderly failed-start stop. A duplicate `runtime_ready` after the first is ignored (the first stands, as a second DRAIN is). With no set there is no supervisor and nothing waits.
+
 **Authentication and binding.** There is no signature: the channel is the authority (the mux link is the guest's only host path, and its far end is the launcher's worker). The message is accepted only if it echoes the
 `operationId` and `nonce` of the plan the guest holds, and only after `ready` was answered by `mounted`, so a guest that never received a plan, or a replay of an older set, cannot be started. The acknowledgement is
 `runtime_ready` (below) bound to the same pair, or a bootstrap `fault`.
@@ -409,7 +411,6 @@ drain completed it writes a Class A with `origin = owner-loss-drain`. Either way
 * The `allocate` action of `CoworkVolumeAuthority` is refused by the native authority: provisioning is not on the launch path.
 * Authentication of a retained receipt that is read back from the launcher's durable store is the launcher slice's design (S2). The
   adapter accepts such a receipt only through a port that must attest it; file presence alone is never proof.
-* Whether the host's `running` waits for `runtime_ready`: the contract defines the signal and the host adapter does not send the conversation set yet (REVIEW NEEDED; a host decision).
 * A conversation set is fixed for the incarnation. Re-sending, adding or replacing conversations while the guest runs is not in N2.
 * The `fresh` runtime profile is not carried by the conversation set (no duplex transport for it).
 * Sleep and wake have NO L1 line in this version (controller ruling): the launcher records power events and sends nothing. Free-space admission and the guest side are other slices.
