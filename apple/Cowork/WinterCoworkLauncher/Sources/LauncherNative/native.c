@@ -58,6 +58,29 @@ int lc_is_unnamed_unix_socket(int fd, int type) {
     return local.sun_path[0] == 0 && remote.sun_path[0] == 0 ? 1 : 0;
 }
 
+/* What a received message means: the descriptors it carried (all of them closed again on ANY refusal), exactly one SCM_RIGHTS item of whole
+ * descriptors or none, and the truncation flags. Separate from the syscall so the decision can be exercised with hand-made control buffers. */
+static ssize_t classify(struct msghdr *message, lc_recv_info *info) {
+    int seen[LC_MAX_RIGHTS], count = 0, items = 0, bad = 0;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(message); c != NULL; c = CMSG_NXTHDR(message, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS || c->cmsg_len < CMSG_LEN(0)) { bad = 1; continue; }
+        items++;
+        size_t payload = c->cmsg_len - CMSG_LEN(0);
+        if (payload % sizeof(int)) bad = 1;
+        for (size_t at = 0; at + sizeof(int) <= payload && count < LC_MAX_RIGHTS; at += sizeof(int)) memcpy(&seen[count++], CMSG_DATA(c) + at, sizeof(int));
+    }
+    /* Everything below closes what arrived before it reports: the caller never holds a descriptor it was refused. */
+    if (message->msg_flags & MSG_CTRUNC) { close_all(seen, count); return LC_E_RIGHTS_TRUNCATED; }
+    if (bad || items > 1) { close_all(seen, count); return LC_E_BAD_CONTROL; }
+    if (message->msg_flags & MSG_TRUNC) { close_all(seen, count); return LC_E_DATA_TRUNCATED; }
+    for (int i = 0; i < count; i++) {
+        if (set_cloexec(seen[i])) { int saved = errno; close_all(seen, count); return -saved; }
+    }
+    for (int i = 0; i < count; i++) info->rights[i] = seen[i];
+    info->rights_count = count; info->flags = message->msg_flags;
+    return 0;
+}
+
 ssize_t lc_recvmsg(int fd, void *buffer, size_t capacity, lc_recv_info *info) {
     info->rights_count = 0; info->flags = 0;
     for (int i = 0; i < LC_MAX_RIGHTS; i++) info->rights[i] = -1;
@@ -69,24 +92,16 @@ ssize_t lc_recvmsg(int fd, void *buffer, size_t capacity, lc_recv_info *info) {
     ssize_t received;
     do { received = recvmsg(fd, &message, MSG_DONTWAIT); } while (received < 0 && errno == EINTR);
     if (received < 0) return -errno;
-    int seen[LC_MAX_RIGHTS], count = 0, items = 0, bad = 0;
-    for (struct cmsghdr *c = CMSG_FIRSTHDR(&message); c != NULL; c = CMSG_NXTHDR(&message, c)) {
-        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS || c->cmsg_len < CMSG_LEN(0)) { bad = 1; continue; }
-        items++;
-        size_t payload = c->cmsg_len - CMSG_LEN(0);
-        if (payload % sizeof(int)) bad = 1;
-        for (size_t at = 0; at + sizeof(int) <= payload && count < LC_MAX_RIGHTS; at += sizeof(int)) memcpy(&seen[count++], CMSG_DATA(c) + at, sizeof(int));
-    }
-    /* Everything below closes what arrived before it reports: the caller never holds a descriptor it was refused. */
-    if (message.msg_flags & MSG_CTRUNC) { close_all(seen, count); return LC_E_RIGHTS_TRUNCATED; }
-    if (bad || items > 1) { close_all(seen, count); return LC_E_BAD_CONTROL; }
-    if (message.msg_flags & MSG_TRUNC) { close_all(seen, count); return LC_E_DATA_TRUNCATED; }
-    for (int i = 0; i < count; i++) {
-        if (set_cloexec(seen[i])) { int saved = errno; close_all(seen, count); return -saved; }
-    }
-    for (int i = 0; i < count; i++) info->rights[i] = seen[i];
-    info->rights_count = count; info->flags = message.msg_flags;
-    return received;
+    ssize_t verdict = classify(&message, info);
+    return verdict < 0 ? verdict : received;
+}
+
+int lc_test_classify_control(const void *control, size_t length, int flags, lc_recv_info *info) {
+    info->rights_count = 0; info->flags = 0;
+    for (int i = 0; i < LC_MAX_RIGHTS; i++) info->rights[i] = -1;
+    struct msghdr message; memset(&message, 0, sizeof message);
+    message.msg_control = (void *)control; message.msg_controllen = (socklen_t)length; message.msg_flags = flags;
+    return (int)classify(&message, info);
 }
 
 ssize_t lc_sendmsg(int fd, const void *buffer, size_t length, const int *rights, int count) {

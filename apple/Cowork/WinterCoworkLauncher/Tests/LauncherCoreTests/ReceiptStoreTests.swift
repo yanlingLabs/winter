@@ -67,6 +67,36 @@ final class ReceiptStoreTests: XCTestCase {
             XCTAssertThrowsError(try DirectoryReceiptStore(directory: refused), refused) { XCTAssertEqual($0 as? ReceiptStoreFailure, .unsafeDirectory) }
         }
     }
+    func testWinterHomesAreRefusedInAnyCaseAndThroughAnySymlinkedAncestorBeforeAnythingIsCreated() throws {
+        let base = BuiltProducts.canonical(directory.path)
+        for refused in [base + "/.WINTER-x", base + "/.Winter/receipts", base + "/ok/.wInTeR-dev/receipts"] {
+            XCTAssertThrowsError(try DirectoryReceiptStore(directory: refused), refused) { XCTAssertEqual($0 as? ReceiptStoreFailure, .unsafeDirectory) }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: base + "/.WINTER-x"), "nothing was created for a refused name")
+        // A symlinked ANCESTOR that lands inside a Winter home: the real location is vetted before a directory is made in it.
+        let home = base + "/.winter-real"
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createSymbolicLink(atPath: base + "/innocent-link", withDestinationPath: home)
+        XCTAssertThrowsError(try DirectoryReceiptStore(directory: base + "/innocent-link/receipts")) { XCTAssertEqual($0 as? ReceiptStoreFailure, .unsafeDirectory) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: home), [], "no directory was created inside the Winter home")
+        // The final component as a symlink into a Winter home is refused by O_NOFOLLOW (and, were it followed, by the resolved-path check).
+        try FileManager.default.createSymbolicLink(atPath: base + "/last-link", withDestinationPath: home)
+        XCTAssertThrowsError(try DirectoryReceiptStore(directory: base + "/last-link"))
+        // A symlinked ancestor that lands somewhere harmless is fine (the real location is what is vetted).
+        let harmless = base + "/harmless"
+        try FileManager.default.createDirectory(atPath: harmless, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createSymbolicLink(atPath: base + "/fine-link", withDestinationPath: harmless)
+        XCTAssertNoThrow(try DirectoryReceiptStore(directory: base + "/fine-link/receipts"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: harmless + "/receipts"))
+    }
+    func testAHardLinkedReceiptFileIsNotTheLaunchersReceipt() throws {
+        let s = try store()
+        try s.persist(orderly(), scope: scope)
+        let file = directory.appendingPathComponent(DirectoryReceiptStore.fileName(scope)).path
+        XCTAssertEqual(Darwin.link(file, directory.path + "/second-name"), 0)
+        XCTAssertThrowsError(try s.load(scope), "two names for one receipt: st_nlink is not 1")
+        XCTAssertThrowsError(try s.persist(orderly("confirm-2"), scope: scope))
+    }
     func testAnUnwritableDirectoryFailsLoudlyNotSilently() throws {
         let s = try store()
         chmod(directory.path, 0o500); defer { chmod(directory.path, 0o700) }

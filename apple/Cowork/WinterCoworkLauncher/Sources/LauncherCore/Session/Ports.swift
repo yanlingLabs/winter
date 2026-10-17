@@ -103,6 +103,11 @@ public enum SessionTimer: Hashable, Sendable {
     case drain
     /// A worker that reported a fault gets a short grace to exit by itself before it is killed.
     case faultGrace
+    /// The kernel announced the worker's exit but it was not yet waitable (a single WNOHANG at the event missed 0.3 to 0.65 % of exits):
+    /// probe again shortly, a bounded number of times.
+    case exitProbe
+    /// A coarse probe, re-armed while a worker exists, so an exit whose event never arrived is still judged.
+    case backstop
 }
 
 /// Everything the session asks of its surroundings. The real one is `LauncherRuntime`.
@@ -117,6 +122,9 @@ public protocol SessionPorts: AnyObject {
     func sendToWorker(_ datagram: [UInt8], descriptors: [OwnedFD]) -> Bool
     /// One whole frame on L3, relayed from the daemon. False if the worker is not keeping up (the bounded backlog is full).
     func relayToWorker(_ frame: [UInt8]) -> Bool
+    /// Read everything the worker has already written on L2 and L3 and hand it to the session NOW. Called right before an exit is
+    /// judged: what the worker said before it ended is still queued in the kernel and must not be missed.
+    func drainWorkerInputs()
     func arm(_ timer: SessionTimer, afterMs: Int)
     func disarm(_ timer: SessionTimer)
     /// The session reached a point where the process may end (the verdict is durable and no daemon is waiting on it).

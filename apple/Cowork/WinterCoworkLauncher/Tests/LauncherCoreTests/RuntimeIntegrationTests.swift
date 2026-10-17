@@ -75,27 +75,33 @@ final class RuntimeRig {
     let scope: Scope
     let config: SessionConfig
 
-    init(mode: String = "ok", workerRequirement: String? = nil, tune: (inout SessionConfig) -> Void = { _ in }) throws {
+    let artifacts: GuestArtifactVerifying
+
+    /// `guest`: run against a scratch worker directory with REAL guest artifacts and the real verifier (default: a double that accepts).
+    init(mode: String = "ok", workerRequirement: String? = nil, guest: GuestWorkerDirectory? = nil, artifacts: GuestArtifactVerifying? = nil,
+         relayLimits: (soft: Int, hard: Int, stallMs: Int)? = nil, tune: (inout SessionConfig) -> Void = { _ in }) throws {
         let (d, l) = try Sock.pair(.stream)
         let launcherEnd = try Sock.relocate(l, above: 5)
         try Sock.setNonBlocking(launcherEnd)
         daemon = FakeDaemon(d)
         storeDirectory = makeTemporaryDirectory("rig-receipts")
         store = try DirectoryReceiptStore(directory: BuiltProducts.canonical(storeDirectory.path))
-        let requirement = try CodeRequirement(workerRequirement ?? WinterCodeIdentity.cdhashRequirement(try CodeHash.ofFile(BuiltProducts.fakeWorker)))
-        let image = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: requirement)
+        let workerPath = guest?.workerPath ?? BuiltProducts.fakeWorker
+        let requirement = try CodeRequirement(workerRequirement ?? cdhashRequirementText(try CodeHash.ofFile(workerPath)))
+        let image = try WorkerImage(path: workerPath, requirement: requirement)
+        self.artifacts = artifacts ?? (guest != nil ? GuestArtifactVerifier(workerPath: workerPath) : FakeArtifacts())
         let semaphore = finished
         runtime = LauncherRuntime(l1: launcherEnd, spawner: NativeWorkerSpawner(verifier: image), onFinish: { semaphore.signal() })
         var cfg = Fixture.config(); tune(&cfg); config = cfg
-        scope = Fixture.scope(mode: mode)
-        runtime.start(config: config, dependencies: SessionDependencies(store: store, power: power), observePower: false)
+        scope = guest?.scope(mode: mode) ?? Fixture.scope(mode: mode)
+        runtime.start(config: config, dependencies: SessionDependencies(store: store, artifacts: self.artifacts, power: power), observePower: false, relayLimits: relayLimits)
     }
     deinit { try? FileManager.default.removeItem(at: storeDirectory) }
 
     func hello() -> Bool { daemon.next { if case .hello = $0 { true } else { nil } } != nil }
     /// begin, and the worker's pid from `begun` (nil when the begin was refused or never answered).
     func begin(id: String = "req-begin") -> (pid: Int, token: String)? {
-        daemon.send(.begin(id: id, scope: scope))
+        daemon.send(.begin(id: id, homeId: Fixture.homeId, scope: scope))
         return daemon.next { (line: LineToDaemon) -> (pid: Int, token: String)?? in
             if case .begun(let i, _, let pid, let token) = line, i == id { return .some((pid, token)) }
             if case .refused(let i, _) = line, i == id { return .some(nil) }
@@ -209,7 +215,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testAWorkerThatNeverReportsReadyIsKilled() throws {
         let rig = try RuntimeRig(mode: "silent") { $0.readyTimeoutMs = 300 }
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
         XCTAssertEqual(rig.refusal(), .sandbox_failed)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertEqual(b.workerExit, .signal)
@@ -217,9 +223,9 @@ final class RuntimeIntegrationTests: XCTestCase {
     }
 
     func testAnImageThatFailsItsRequirementIsKilledWhileStillSuspended() throws {
-        let rig = try RuntimeRig(workerRequirement: WinterCodeIdentity.cdhashRequirement(String(repeating: "00", count: 20)))
+        let rig = try RuntimeRig(workerRequirement: cdhashRequirementText(String(repeating: "00", count: 20)))
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
         XCTAssertEqual(rig.refusal(), .code_identity_mismatch)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertEqual(b.workerExit, .signal, "killed by SIGKILL while stopped: it never ran")
@@ -265,7 +271,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testTheWorkerSendingDescriptorsToTheLauncherIsAViolationAndTheyAreClosed() throws {
         let rig = try RuntimeRig(mode: "rightsback")
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
         XCTAssertEqual(rig.refusal(), .internal)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled)
@@ -286,7 +292,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testAGarbageDatagramFromTheWorkerKillsIt() throws {
         let rig = try RuntimeRig(mode: "garbage")
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
         XCTAssertEqual(rig.refusal(), .internal)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertTrue(rig.processGone(b.workerPid))

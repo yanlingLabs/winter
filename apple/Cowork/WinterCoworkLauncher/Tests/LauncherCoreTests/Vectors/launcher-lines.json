@@ -13,7 +13,7 @@
       "name": "begin",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "t": "begin"
     },
     {
@@ -141,77 +141,77 @@
       "name": "no-newline",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}",
       "error": "malformed"
     },
     {
       "name": "crlf",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\r\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\r\n",
       "error": "malformed"
     },
     {
       "name": "two-lines-in-one",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "whitespace-after-colon",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\": \"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\": \"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "reordered-keys",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"t\":\"begin\",\"v\":1,\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"t\":\"begin\",\"v\":1,\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "duplicate-key",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "extra-key",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768,\"x\":1}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768,\"x\":1}\n",
       "error": "bad_field"
     },
     {
       "name": "missing-key",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2}\n",
       "error": "bad_field"
     },
     {
       "name": "version-two",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":2,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":2,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "version"
     },
     {
       "name": "unknown-type",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"detonate\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"detonate\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "unknown_type"
     },
     {
       "name": "daemon-only-type-on-to-daemon",
       "direction": "to-daemon",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "bad_direction"
     },
     {
@@ -225,77 +225,119 @@
       "name": "id-too-long",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "bad_field"
     },
     {
       "name": "id-bad-character",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req.0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req.0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "bad_field"
     },
     {
       "name": "epoch-zero",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "bad_field"
     },
     {
       "name": "epoch-float",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3.0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3.0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "epoch-exponent",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3e0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3e0,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "vcpus-four",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":4,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":4,\"memoryMiB\":768}\n",
       "error": "bad_field"
+    },
+    {
+      "name": "memory-under-floor",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":767}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "memory-far-under-floor",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":256}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "begin-without-home",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "begin-home-too-long",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "bad_field"
+    },
+    {
+      "name": "begin-home-after-scope",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768,\"homeId\":\"home_99999999-9999-4999-8999-999999999999\"}\n",
+      "error": "malformed"
+    },
+    {
+      "name": "bom-line",
+      "direction": "to-launcher",
+      "rights": 0,
+      "line": "﻿{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "error": "malformed"
     },
     {
       "name": "memory-over-gate",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":2048}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":2048}\n",
       "error": "bad_field"
     },
     {
       "name": "digest-uppercase",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "bad_field"
     },
     {
       "name": "escaped-spelling",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"\\u0062egin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"\\u0062egin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "lone-surrogate-escape",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"\\ud800\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"\\ud800\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
       "name": "proto-key",
       "direction": "to-launcher",
       "rights": 0,
-      "line": "{\"__proto__\":1,\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"__proto__\":1,\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "malformed"
     },
     {
@@ -330,7 +372,7 @@
       "name": "begin-with-descriptors",
       "direction": "to-launcher",
       "rights": 2,
-      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
+      "line": "{\"v\":1,\"t\":\"begin\",\"id\":\"req-0001\",\"homeId\":\"home_99999999-9999-4999-8999-999999999999\",\"workspaceId\":\"workspace_11111111-1111-4111-8111-111111111111\",\"incarnationId\":\"inc-22222222-2222-4222-8222-222222222222\",\"leaseEpoch\":3,\"admissionId\":\"adm-33333333-3333-4333-8333-333333333333\",\"controllerInstanceId\":\"ctl-0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b-a1b2c3d4\",\"workerInstanceId\":\"wrk-44444444-4444-4444-8444-444444444444\",\"runtimeImageDigest\":\"abababababababababababababababababababababababababababababababab\",\"vcpus\":2,\"memoryMiB\":768}\n",
       "error": "bad_rights"
     },
     {

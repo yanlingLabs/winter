@@ -74,6 +74,23 @@ final class StopAuthorityTests: XCTestCase {
         XCTAssertEqual(reason(decide(evidence(attached: false, sent: true))), .flushUncertain, "descriptors were handed over and never acknowledged")
         XCTAssertEqual(reason(decide(evidence(attached: false, booted: true, sent: false))), .guestFault, "a VM without disks")
     }
+    func testAnAttachedVMThatNeverRanMustShowNoFlushAtAllInAnyStatus() {
+        // Counters on the LAST status (guest_halted / exiting) …
+        XCTAssertEqual(reason(decide(evidence(booted: false, acked: false, halted: true, counters: CounterPair(data: one, environment: FlushCounters())))), .flushUncertain)
+        // … and counters carried by ANY earlier status (here only `latestCounters` knows), which the last-status check alone would miss.
+        var earlier = evidence(booted: false, acked: false, halted: false)
+        earlier.latestCounters = CounterPair(data: FlushCounters(requested: 1, completed: 1), environment: FlushCounters())
+        XCTAssertNil(earlier.finalCounters)
+        XCTAssertEqual(reason(decide(earlier)), .flushUncertain)
+        // All zero is a clean never-booted stop.
+        var clean = evidence(booted: false, acked: false, halted: false); clean.latestCounters = CounterPair()
+        guard case .orderly = decide(clean) else { return XCTFail("zero counters are the honest story of a VM that never ran") }
+    }
+    func testBootedMeansTheWorkerSentVMRunningAndNothingElseImpliesIt() {
+        var e = WorkerEvidence(); XCTAssertFalse(e.booted)
+        for status in [WorkerStatus.sandboxed, .volumesAccepted, .guestHello, .draining, .drainAcked, .guestHalted, .exiting] { e.statuses = [status]; XCTAssertFalse(e.booted, "\(status)") }
+        e.statuses = [.vmRunning]; XCTAssertTrue(e.booted)
+    }
     func testClassBCarriesWhatTheLauncherSawAndNothingThatCouldReleaseAnything() throws {
         guard case .uncertain(let b) = decide(evidence(), exit: .signal(SIGKILL), killSent: true, killReason: .drainTimeout) else { return XCTFail() }
         XCTAssertEqual(b.workerExit, .signal); XCTAssertEqual(b.workerStatus, Int(SIGKILL)); XCTAssertTrue(b.attachedVolumes)

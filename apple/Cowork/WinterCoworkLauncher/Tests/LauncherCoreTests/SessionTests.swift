@@ -14,11 +14,30 @@ final class SessionTests: XCTestCase {
     }
     func testBeginValidatesTheSuspendedImageBeforeResumeThenSendsTheScopeAndArmsReady() throws {
         let h = harness(); h.begin()
-        XCTAssertEqual(h.log.all.filter { !$0.hasPrefix("send") }, ["spawn", "validate#1", "resume", "env:scope", "arm:ready"], "spawn suspended, validate, resume, only THEN the scope")
+        XCTAssertEqual(h.log.all.filter { !$0.hasPrefix("send") }, ["spawn", "validate#1", "resume", "env:scope", "arm:ready", "arm:backstop"], "spawn suspended, validate, resume, only THEN the scope")
         XCTAssertEqual(h.ports.datagrams, [.scope(seq: 1, scope: Fixture.scope)])
         XCTAssertEqual(h.ports.armed[.ready], 10_000)
         XCTAssertFalse(lastBegun(h), "`begun` waits for the worker's READY")
         XCTAssertEqual(h.session.phase, .starting)
+    }
+    func testTheHomeIdentityComesFromBeginAndOnlyFromBegin() throws {
+        let h = harness(); try h.bringUp(scope: Fixture.scope) // default home
+        let other = harness(); other.begin(homeId: "home_other"); other.status(.sandboxed)
+        let disks = try DiskPair()
+        other.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(Fixture.scope), volumes: disks.identities), descriptors: disks.reopen())
+        other.status(.volumesAccepted); other.status(.vmRunning); other.stop(); other.cleanHalt(); other.workerExits(.code(0))
+        XCTAssertEqual(other.ports.stopped.first?.homeId, "home_other")
+        h.stop(); h.cleanHalt(); h.workerExits(.code(0))
+        XCTAssertEqual(h.ports.stopped.first?.homeId, Fixture.homeId)
+    }
+    func testAScopeNamingAnotherRuntimeImageIsRefusedBeforeAnythingIsReservedSpawnedOrSent() {
+        let h = harness(); h.artifacts.accept = false
+        h.begin(id: "req-1")
+        XCTAssertEqual(h.ports.refusals, [.code_identity_mismatch]); XCTAssertEqual(h.ports.spawnCalls, 0)
+        XCTAssertTrue(h.ports.datagrams.isEmpty); XCTAssertEqual(h.session.phase, .awaitingBegin); XCTAssertTrue(h.store.records.isEmpty)
+        XCTAssertEqual(h.artifacts.asked, [Fixture.scope.runtimeImageDigest], "it was asked about the digest the daemon stated")
+        h.artifacts.accept = true; h.begin(id: "req-2")
+        XCTAssertEqual(h.session.phase, .starting, "the refusal consumed nothing: the right digest still starts")
     }
     func testReadyValidatesTheRunningImageAgainThenReportsBegun() {
         let h = harness(); h.begin(); h.status(.sandboxed)
@@ -427,6 +446,55 @@ final class SessionTests: XCTestCase {
         let h = harness(); h.send(.ping(id: "req-1")); try h.bringUp(); h.send(.ping(id: "req-2")); h.stop(); h.cleanHalt(); h.workerExits(.code(0)); h.send(.ping(id: "req-3"))
         XCTAssertEqual(h.ports.lines.filter { if case .pong = $0 { true } else { false } }.count, 3)
     }
+    // MARK: an exit the kernel announced but the child was not yet waitable for
+
+    func testAnExitThatIsNotWaitableYetIsProbedAgainOnAShortTimerUntilItIsJudged() throws {
+        let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt()
+        h.ports.process.probeSequence = [.running, .running, .code(0)]
+        h.session.workerProcessEnded()
+        XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.armed[.exitProbe], 10, "retry soon, not never")
+        h.fire(.exitProbe); XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.armed[.exitProbe], 10)
+        h.fire(.exitProbe)
+        XCTAssertEqual(h.ports.stopped.count, 1, "the third probe saw the exit: it is judged (Class A, the chain was complete)")
+        XCTAssertNil(h.ports.armed[.exitProbe]); XCTAssertEqual(h.session.phase, .finished)
+    }
+    func testTheRetriesAreBoundedAndTheBackstopCoversWhatTheyMiss() throws {
+        var config = Fixture.config(); config.exitProbeAttempts = 3
+        let h = SessionHarness(config: config); try h.bringUp()
+        h.ports.process.probeResult = .running
+        h.session.workerProcessEnded()
+        for _ in 0..<3 { h.fire(.exitProbe) }
+        XCTAssertNil(h.ports.armed[.exitProbe], "after the bound the short retries stop")
+        XCTAssertEqual(h.ports.armed[.backstop], 1_000, "the coarse backstop is armed while a worker exists")
+        h.fire(.backstop)
+        XCTAssertEqual(h.ports.armed[.backstop], 1_000, "and re-armed every time it fires"); XCTAssertNil(h.ports.armed[.exitProbe], "a backstop probe that finds the worker running starts no retries")
+        XCTAssertNil(h.session.verdict)
+        h.ports.process.probeResult = .code(79)   // the exit event never came; the backstop finds it
+        h.fire(.backstop)
+        XCTAssertEqual(h.ports.uncertain.map(\.reason), [.workerCrashed]); XCTAssertNil(h.ports.armed[.backstop], "the verdict disarms it")
+    }
+    func testWhatTheWorkerSaidBeforeItEndedIsReadBeforeTheExitIsJudged() throws {
+        let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt()
+        h.workerExits(.code(0))
+        let drained = try XCTUnwrap(h.log.index(of: "drain-inputs")), persisted = try XCTUnwrap(h.log.index(of: "persist:A"))
+        XCTAssertLessThan(drained, persisted)
+        XCTAssertEqual(h.ports.drainCalls, 1)
+    }
+    func testInputsDrainedAtTheExitCanStillCondemnIt() throws {
+        // Something the worker wrote just before it ended turns out to break the contract: the exit is then judged Class B, not A.
+        let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt()
+        h.ports.onDrain = { h.session.receiveWorkerDatagram([1, 2, 3], descriptors: []) }
+        h.workerExits(.code(0))
+        XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.uncertain.count, 1, "judged exactly once")
+    }
+    func testASecondDrainFaultFromTheWorkerIsAFaultLikeAnyOther() throws {
+        let h = harness(); try h.bringUp(); h.stop()
+        XCTAssertEqual(h.ports.datagrams.filter { if case .drain = $0 { true } else { false } }.count, 1, "the launcher sends exactly one DRAIN")
+        h.workerFault(.secondDrain)
+        h.cleanHalt(); h.workerExits(.code(0))
+        XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.guestFault])
+    }
+
     func testPowerEventsAreReportedUpwardAndChangeNothing() throws {
         let h = harness(); try h.bringUp(); let phase = h.session.phase
         h.session.powerEvent(.willSleep); h.session.powerEvent(.didWake)

@@ -98,6 +98,10 @@ int lc_random(void *out, size_t length);
 /* The host boot session uuid exactly as the kernel spells it (kern.bootsessionuuid). Length written, or -1. */
 int lc_boot_session_uuid(char *out, size_t capacity);
 
+/* The decision lc_recvmsg takes about a received message, applied to a HAND-MADE control buffer (no socket): 0 and the descriptors in `info`,
+ * or one of LC_E_* after closing every descriptor in the buffer. Lets a test build what a hostile peer cannot send on macOS (two rights items). */
+int lc_test_classify_control(const void *control, size_t length, int flags, lc_recv_info *info);
+
 /* Deterministic syscall doubles for the kill/reap algorithm (no real process, no real signal): the matrix runs in
  * `swift test` and returns 1 when the scenario behaves as specified. */
 int lc_test_wait_scenario(int scenario);

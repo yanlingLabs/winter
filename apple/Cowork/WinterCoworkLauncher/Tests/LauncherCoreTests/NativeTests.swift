@@ -97,6 +97,44 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(rights.count, 3, "an extra descriptor is SEEN (so it can be refused and closed), never silently truncated")
     }
 
+    /// What a hostile peer cannot send on macOS (two rights items in one message) is built by hand and handed to the same decision.
+    private func cmsg(level: Int32 = SOL_SOCKET, type: Int32 = SCM_RIGHTS, payload: [Int32]) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: 12 + 4 * payload.count)
+        func put(_ v: UInt32, _ at: Int) { for i in 0..<4 { bytes[at + i] = UInt8(truncatingIfNeeded: v >> (8 * UInt32(i))) } }
+        put(UInt32(bytes.count), 0); put(UInt32(bitPattern: level), 4); put(UInt32(bitPattern: type), 8)
+        for (i, v) in payload.enumerated() { put(UInt32(bitPattern: v), 12 + 4 * i) }
+        return bytes
+    }
+    private func classify(_ control: [UInt8], flags: Int32 = 0) -> (code: Int, rights: [Int32]) {
+        var info = lc_recv_info()
+        let code = control.withUnsafeBytes { lc_test_classify_control($0.baseAddress, $0.count, flags, &info) }
+        let count = Int(info.rights_count)
+        let rights = withUnsafeBytes(of: &info.rights) { raw in (0..<count).map { raw.load(fromByteOffset: 4 * $0, as: Int32.self) } }
+        return (Int(code), rights)
+    }
+    func testOneRightsItemIsAcceptedAndTwoAreRefusedWithEveryDescriptorClosed() {
+        let a = dup(0), b = dup(0), c = dup(0)
+        let one = classify(cmsg(payload: [a]))
+        XCTAssertEqual(one.code, 0); XCTAssertEqual(one.rights, [a]); XCTAssertEqual(lc_has_cloexec(a), 1, "an accepted descriptor is close-on-exec")
+        close(a)
+        let two = classify(cmsg(payload: [b]) + cmsg(payload: [c]))
+        XCTAssertEqual(two.code, Int(LC_E_BAD_CONTROL), "a second rights item is refused (macOS will not send two, but the receiver does not rely on that)")
+        XCTAssertEqual(fcntl(b, F_GETFD), -1); XCTAssertEqual(fcntl(c, F_GETFD), -1, "everything the buffer held was closed")
+    }
+    func testAnythingButRightsInTheControlBufferIsRefusedAndTheRightsClosed() {
+        let a = dup(0)
+        let mixed = classify(cmsg(payload: [a]) + cmsg(type: 2 /* SCM_TIMESTAMP */, payload: [0]))
+        XCTAssertEqual(mixed.code, Int(LC_E_BAD_CONTROL)); XCTAssertEqual(fcntl(a, F_GETFD), -1)
+        let b = dup(0)
+        var ragged = cmsg(payload: [b, 0]); ragged[0] -= 2   // a length that is not a whole number of descriptors (18 = 12 + 4 + 2)
+        XCTAssertEqual(classify(ragged).code, Int(LC_E_BAD_CONTROL)); XCTAssertEqual(fcntl(b, F_GETFD), -1)
+    }
+    func testTruncationFlagsOutrankEverythingAndStillCloseWhatWasSeen() {
+        let a = dup(0)
+        XCTAssertEqual(classify(cmsg(payload: [a]), flags: MSG_CTRUNC).code, Int(LC_E_RIGHTS_TRUNCATED)); XCTAssertEqual(fcntl(a, F_GETFD), -1)
+        let b = dup(0)
+        XCTAssertEqual(classify(cmsg(payload: [b]), flags: MSG_TRUNC).code, Int(LC_E_DATA_TRUNCATED)); XCTAssertEqual(fcntl(b, F_GETFD), -1)
+    }
     func testTruncatedDatagramClosesItsDescriptors() throws {
         let (a, b) = try Sock.pair(.datagram)
         let source = try DiskPair()
@@ -219,7 +257,7 @@ final class NativeTests: XCTestCase {
         let directory = makeTemporaryDirectory("pin"); defer { try? FileManager.default.removeItem(at: directory) }
         let path = BuiltProducts.canonical(directory.appendingPathComponent("worker").path)
         try FileManager.default.copyItem(atPath: BuiltProducts.fakeWorker, toPath: path)
-        let requirement = try CodeRequirement(WinterCodeIdentity.cdhashRequirement(try CodeHash.ofFile(path)))
+        let requirement = try CodeRequirement(cdhashRequirementText(try CodeHash.ofFile(path)))
         let image = try WorkerImage(path: path, requirement: requirement)
         try image.validatePath()
         // Swap the contents (same name, new bytes): the pinned digest no longer matches.

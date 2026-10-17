@@ -17,7 +17,7 @@ enum Fixture {
     static let launcherInstanceId = "launcher-88888888"
     static let bootId = "0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B"
 
-    static func config() -> SessionConfig { SessionConfig(homeId: homeId, launcherInstanceId: launcherInstanceId, hostBootId: bootId) }
+    static func config() -> SessionConfig { SessionConfig(launcherInstanceId: launcherInstanceId, hostBootId: bootId) }
 }
 
 /// Two real sparse image files in a private temp directory, opened read-write, with the identities the daemon would state for them.
@@ -59,6 +59,9 @@ func makeTemporaryDirectory(_ label: String = "launcher") -> URL {
     try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     return url
 }
+
+/// A requirement that pins one exact code directory hash. Tests only: the launcher's own copy exists only under -DWINTER_COWORK_TEST_BUILD.
+func cdhashRequirementText(_ hex: String) -> String { "cdhash H\"\(hex)\"" }
 
 func hex(_ bytes: [UInt8]) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
 func bytes(fromHex text: String) -> [UInt8] {
@@ -103,13 +106,16 @@ final class FakeProcess: WorkerProcess {
     var resumeCalls = 0
     var resumeFails = false
     var probeResult: WorkerExit = .running
+    /// When non-empty, each probe consumes the next answer first (a probe that says "running" at the exit event, then the real exit).
+    var probeSequence: [WorkerExit] = []
+    var probeCalls = 0
     var killResult = KillOutcome(exit: .signal(9), killSent: true)
     var killCalls = 0
     let log: EventLog
     init(log: EventLog) { self.log = log }
     func validateExecutedImage() throws { validateCalls += 1; log.add("validate#\(validateCalls)"); if !validateOK { throw IdentityFailure("image") } }
     func resume() throws { resumeCalls += 1; log.add("resume"); if resumeFails { throw SpawnFailure.failed(EPERM) } }
-    func probe() -> WorkerExit { probeResult }
+    func probe() -> WorkerExit { probeCalls += 1; return probeSequence.isEmpty ? probeResult : probeSequence.removeFirst() }
     func kill() -> KillOutcome { killCalls += 1; log.add("kill"); return killResult }
 }
 
@@ -161,6 +167,9 @@ final class FakePorts: SessionPorts {
         }
         return true
     }
+    var drainCalls = 0
+    var onDrain: (() -> Void)?
+    func drainWorkerInputs() { drainCalls += 1; log.add("drain-inputs"); onDrain?() }
     func relayToWorker(_ frame: [UInt8]) -> Bool { relayed.append(frame); return relayOK }
     func arm(_ timer: SessionTimer, afterMs: Int) { armed[timer] = afterMs; log.add("arm:\(timer)") }
     func disarm(_ timer: SessionTimer) { armed[timer] = nil; disarmed.append(timer) }
@@ -169,6 +178,13 @@ final class FakePorts: SessionPorts {
     var refusals: [RefusalCode] { lines.compactMap { if case .refused(_, let code) = $0 { code } else { nil } } }
     var stopped: [OrderlyReceipt] { lines.compactMap { if case .stopped(_, let r) = $0 { r } else { nil } } }
     var uncertain: [UncertainReceipt] { lines.compactMap { if case .uncertain(let r) = $0 { r } else { nil } } }
+}
+
+/// The guest-artifact check as a double: accepts the scope's digest unless told otherwise, and remembers what it was asked.
+final class FakeArtifacts: GuestArtifactVerifying, @unchecked Sendable {
+    var accept = true
+    private(set) var asked: [String] = []
+    func verify(runtimeImageDigest stated: String) throws { asked.append(stated); if !accept { throw IdentityFailure("not the pinned runtime image") } }
 }
 
 final class FixedRandom: Randomness, @unchecked Sendable {
@@ -185,11 +201,12 @@ final class SessionHarness {
     let store: InMemoryReceiptStore
     let power = RecordingPower()
     let session: LauncherSession
+    let artifacts = FakeArtifacts()
     init(config: SessionConfig = Fixture.config()) {
         ports = FakePorts(log: log); store = InMemoryReceiptStore(log: log)
         let box = ClockBox()
         clockBox = box
-        session = LauncherSession(config: config, ports: ports, dependencies: SessionDependencies(store: store, random: FixedRandom(), clock: FixedClock(), monotonicMs: { box.value }, power: power))
+        session = LauncherSession(config: config, ports: ports, dependencies: SessionDependencies(store: store, artifacts: artifacts, random: FixedRandom(), clock: FixedClock(), monotonicMs: { box.value }, power: power))
     }
     var clockBox: ClockBox!
     final class ClockBox { var value: Int64 = 1_000 }
@@ -199,8 +216,11 @@ final class SessionHarness {
         let line = try! LauncherLineCodec.serialize(message)
         session.receiveLine(FramedLine(bytes: line, rights: descriptors))
     }
-    func begin(id: String = "req-begin", scope: Scope = Fixture.scope) { send(.begin(id: id, scope: scope)) }
+    func begin(id: String = "req-begin", homeId: String = Fixture.homeId, scope: Scope = Fixture.scope) { send(.begin(id: id, homeId: homeId, scope: scope)) }
     func sendRaw(_ text: String, descriptors: [OwnedFD] = []) { session.receiveLine(FramedLine(bytes: Array(text.utf8), rights: descriptors)) }
+
+    /// A timer firing, as the runtime does it: a one-shot is gone from the armed set before its handler runs.
+    func fire(_ timer: SessionTimer) { ports.armed[timer] = nil; session.timerFired(timer) }
 
     // ---- driving the worker side
     var workerSeq: UInt32 = 0
@@ -277,4 +297,33 @@ enum BuiltProducts {
 func vectorURL(_ name: String) -> URL { Bundle.module.resourceURL!.appendingPathComponent("Vectors").appendingPathComponent(name) }
 func loadVector(_ name: String) throws -> [String: Any] {
     try JSONSerialization.jsonObject(with: Data(contentsOf: vectorURL(name))) as! [String: Any]
+}
+
+
+/// A scratch directory shaped like the shipped worker's: the FakeWorker copied in, next to `cowork-guest/{kernel,initramfs.cpio}`.
+final class GuestWorkerDirectory {
+    let root: URL
+    let workerPath: String
+    let guestDirectory: String
+    let kernelBytes: [UInt8]
+    let initramfsBytes: [UInt8]
+    init(kernel: [UInt8] = Array("kernel-bytes".utf8), initramfs: [UInt8] = Array("initramfs-bytes".utf8)) throws {
+        root = makeTemporaryDirectory("worker-dir")
+        let canonicalRoot = BuiltProducts.canonical(root.path)
+        workerPath = canonicalRoot + "/winter-cowork-worker"
+        try FileManager.default.copyItem(atPath: BuiltProducts.fakeWorker, toPath: workerPath)
+        guestDirectory = canonicalRoot + "/cowork-guest"
+        try FileManager.default.createDirectory(atPath: guestDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
+        kernelBytes = kernel; initramfsBytes = initramfs
+        try Data(kernel).write(to: URL(fileURLWithPath: guestDirectory + "/kernel"))
+        try Data(initramfs).write(to: URL(fileURLWithPath: guestDirectory + "/initramfs.cpio"))
+        for name in ["kernel", "initramfs.cpio"] { chmod(guestDirectory + "/" + name, 0o644) }
+    }
+    deinit { try? FileManager.default.removeItem(at: root) }
+    /// The digest the contract defines, computed here independently of the launcher's code.
+    var expectedDigest: String {
+        let k = SHA256.hash(data: Data(kernelBytes)), i = SHA256.hash(data: Data(initramfsBytes))
+        return SHA256.hash(data: Data(Array(k) + Array(i))).map { String(format: "%02x", $0) }.joined()
+    }
+    func scope(mode: String) -> Scope { var s = Fixture.scope(mode: mode); s.runtimeImageDigest = expectedDigest; return s }
 }

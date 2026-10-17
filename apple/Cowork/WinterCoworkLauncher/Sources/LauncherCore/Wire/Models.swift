@@ -43,7 +43,7 @@ public enum WorkerStatus: Int, CaseIterable, Sendable {
     case sandboxed = 1, volumesAccepted, vmRunning, guestHello, draining, drainAcked, guestHalted, exiting
 }
 public enum WorkerFault: Int, CaseIterable, Sendable {
-    case badScope = 1, badVolumes, sandboxFailed, vmFailed, muxViolation, truncatedRights, `internal`
+    case badScope = 1, badVolumes, sandboxFailed, vmFailed, muxViolation, truncatedRights, `internal`, secondDrain
 }
 
 /// What the daemon tells the launcher to start (`begin`), what the launcher gives the worker (the SCOPE envelope) and what every

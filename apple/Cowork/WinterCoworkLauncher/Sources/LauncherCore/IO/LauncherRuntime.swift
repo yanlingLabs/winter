@@ -48,7 +48,17 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private var l3WriteArmed = false
     private var l3Reader = MuxStreamReader()
     private var l3Backlog: [UInt8] = []
-    private static let l3BacklogLimit = 8 << 20
+    /// Back-pressure: above `l3SoftLimit` the launcher STOPS READING L1 (the daemon's sends then wait in its own socket) and resumes below
+    /// half of it. The kill is for a HARD cap only (a worker that is not draining L3 at all): either `l3HardLimit` bytes, or `relayStallMs`
+    /// without a single byte accepted by the worker while paused.
+    private var l3SoftLimit = 4 << 20
+    private var l3HardLimit = 32 << 20
+    private var relayStallMs = 30_000
+    private var l1ReadSuspended = false
+    /// How many times L1 was paused for the relay's sake (diagnostics and tests).
+    public private(set) var backpressurePauses = 0
+    private var l3BytesWritten = 0
+    private var stallTimer: DispatchSourceTimer?
     private var process: WorkerProcess?
     private var processSource: DispatchSourceProcess?
     private var timers: [SessionTimer: DispatchSourceTimer] = [:]
@@ -63,8 +73,11 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     }
 
     /// Builds the session and starts reading L1. Call once; everything after runs on `queue`.
-    public func start(config: SessionConfig, dependencies: SessionDependencies, observePower: Bool, handleTerminationSignals: Bool = false) {
+    /// `relayLimits` is for tests (small numbers); production uses the defaults.
+    public func start(config: SessionConfig, dependencies: SessionDependencies, observePower: Bool, handleTerminationSignals: Bool = false,
+                      relayLimits: (soft: Int, hard: Int, stallMs: Int)? = nil) {
         queue.async { [self] in
+            if let relayLimits { l3SoftLimit = relayLimits.soft; l3HardLimit = relayLimits.hard; relayStallMs = relayLimits.stallMs }
             session = LauncherSession(config: config, ports: self, dependencies: dependencies)
             let read = DispatchSource.makeReadSource(fileDescriptor: l1.raw, queue: queue)
             read.setEventHandler { [weak self] in self?.l1Readable() }
@@ -91,8 +104,9 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     // ============================================================================================ L1
 
     private func l1Readable() {
-        guard !l1Gone, !l1Closing else { return }
+        guard !l1Gone, !l1Closing, !l1ReadSuspended else { return }
         for _ in 0..<64 {
+            if l1ReadSuspended { return } // the relay backlog filled while this chunk was being worked
             switch Sock.receive(l1, capacity: 64 * 1024) {
             case .data(let bytes, let rights):
                 do {
@@ -107,10 +121,17 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
         }
     }
 
+    /// A suspended dispatch source must be resumed before it is cancelled.
+    private func cancelL1Read() {
+        if l1ReadSuspended, let source = l1Read { l1ReadSuspended = false; source.resume() }
+        l1Read?.cancel(); l1Read = nil
+        stallTimer?.cancel(); stallTimer = nil
+    }
+
     private func l1Ended() {
         guard !l1Gone else { return }
         l1Gone = true
-        l1Read?.cancel(); l1Read = nil
+        cancelL1Read()
         cancelL1Write()
         session.daemonChannelClosed()
     }
@@ -158,7 +179,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     public func closeDaemonChannel() {
         guard !l1Closing else { return }
         l1Closing = true
-        l1Read?.cancel(); l1Read = nil
+        cancelL1Read()
         flushL1() // delivers what is queued (the fault line), then closes
     }
 
@@ -221,11 +242,13 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private func resumeL3Reads() { if l3ReadSuspended, let source = l3Read { l3ReadSuspended = false; source.resume() } }
 
     private func workerExited() {
-        // Whatever the worker said before it ended is still queued in the kernel: read it all before judging the exit.
-        l2Readable(); l3Readable()
+        // The session reads what the worker said before it ended (`drainWorkerInputs`) before it judges the exit, and re-probes on a
+        // short timer if the child is not waitable yet; the process source has said all it will say.
         session.workerProcessEnded()
         processSource?.cancel(); processSource = nil
     }
+
+    public func drainWorkerInputs() { l2Readable(); l3Readable() }
 
     public func sendToWorker(_ datagram: [UInt8], descriptors: [OwnedFD]) -> Bool {
         guard let l2 else { return false }
@@ -236,16 +259,42 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     }
 
     public func relayToWorker(_ frame: [UInt8]) -> Bool {
-        guard l3 != nil, l3Backlog.count + frame.count <= Self.l3BacklogLimit else { return false }
+        guard l3 != nil, l3Backlog.count + frame.count <= l3HardLimit else { return false }
         l3Backlog.append(contentsOf: frame)
         flushL3()
+        if l3Backlog.count >= l3SoftLimit { pauseL1ForBackpressure() }
         return true
+    }
+
+    private func pauseL1ForBackpressure() {
+        guard !l1ReadSuspended, let source = l1Read, !l1Gone, !l1Closing else { return }
+        source.suspend(); l1ReadSuspended = true; backpressurePauses += 1
+        armStallTimer()
+    }
+    private func resumeL1AfterBackpressure() {
+        guard l1ReadSuspended else { return }
+        l1ReadSuspended = false
+        stallTimer?.cancel(); stallTimer = nil
+        l1Read?.resume()
+    }
+    /// While L1 is paused for the worker's sake, a worker that accepts NOT ONE BYTE for `relayStallMs` is not draining L3 at all. A
+    /// stalled relay also starves `stop` and the notice of an EOF behind the bulk, so this is bounded in time.
+    private func armStallTimer() {
+        stallTimer?.cancel()
+        let written = l3BytesWritten
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + .milliseconds(relayStallMs))
+        source.setEventHandler { [weak self] in
+            guard let self, self.l1ReadSuspended else { return }
+            if self.l3BytesWritten == written { self.stallTimer = nil; self.session.workerNotDraining() } else { self.armStallTimer() }
+        }
+        stallTimer = source; source.resume()
     }
     private func flushL3() {
         guard let l3 else { return }
         while !l3Backlog.isEmpty {
             switch Sock.send(l3, l3Backlog[...]) {
-            case .success(let sent): l3Backlog.removeFirst(sent)
+            case .success(let sent): l3Backlog.removeFirst(sent); l3BytesWritten += sent
             case .failure(.errno(EAGAIN)):
                 if !l3WriteArmed {
                     let source = DispatchSource.makeWriteSource(fileDescriptor: l3.raw, queue: queue)
@@ -257,6 +306,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
             }
         }
         l3Write?.cancel(); l3Write = nil; l3WriteArmed = false
+        if l3Backlog.count < l3SoftLimit / 2 { resumeL1AfterBackpressure() }
     }
 
     // ============================================================================================ timers and the end
@@ -293,7 +343,9 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
         power?.stop(); power = nil
         signalSources.forEach { $0.cancel() }; signalSources.removeAll()
         timers.values.forEach { $0.cancel() }; timers.removeAll()
-        [l1Read, l2Read, l3Read].forEach { $0?.cancel() }
+        cancelL1Read()
+        resumeL3Reads()
+        [l2Read, l3Read].forEach { $0?.cancel() }
         processSource?.cancel()
         onFinish()
     }

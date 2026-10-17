@@ -50,6 +50,34 @@ final class CodecTests: XCTestCase {
         XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n".utf8), rights: 1) }, .bad_rights)
     }
 
+    func testBeginCarriesTheHomeIdAfterIdAndNothingElseDoes() throws {
+        let line = try LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "home_x", scope: Fixture.scope))
+        XCTAssertTrue(String(decoding: line, as: UTF8.self).hasPrefix(#"{"v":1,"t":"begin","id":"req-1","homeId":"home_x","workspaceId":"#))
+        guard case .begin(_, let homeId, let scope) = try LauncherLineCodec.parseToLauncher(line) else { return XCTFail() }
+        XCTAssertEqual(homeId, "home_x"); XCTAssertEqual(scope, Fixture.scope)
+        // The old shape (no homeId) and a begin with homeId out of order are not begins.
+        let old = String(decoding: line, as: UTF8.self).replacingOccurrences(of: #","homeId":"home_x""#, with: "")
+        XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array(old.utf8)) }, .bad_field)
+        let reordered = String(decoding: line, as: UTF8.self).replacingOccurrences(of: #""id":"req-1","homeId":"home_x""#, with: #""homeId":"home_x","id":"req-1""#)
+        XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array(reordered.utf8)) }, .malformed)
+        XCTAssertThrowsError(try LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "has space", scope: Fixture.scope)))
+    }
+    func testTheMemoryFloorIs768() throws {
+        var scope = Fixture.scope
+        for (memory, ok) in [(767, false), (768, true), (1024, true), (1025, false), (256, false)] {
+            scope.memoryMiB = memory
+            XCTAssertEqual((try? LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "home_x", scope: scope))) != nil, ok, "\(memory) MiB")
+            XCTAssertEqual((try? EnvelopeFormat.encodeScopePayload(scope)) != nil, ok, "\(memory) MiB in the envelope")
+        }
+    }
+    func testWorkerFaultCodeEightIsSecondDrain() throws {
+        XCTAssertEqual(WorkerFault(rawValue: 8), .secondDrain)
+        XCTAssertNil(WorkerFault(rawValue: 9)); XCTAssertNil(WorkerFault(rawValue: 0))
+        let bytes = try EnvelopeFormat.serialize(.fault(seq: 1, code: .secondDrain))
+        XCTAssertEqual(EnvelopeFormat.get32(bytes, 16), 8)
+        XCTAssertEqual(try EnvelopeFormat.parse(bytes, rights: 0, direction: .toLauncher), .fault(seq: 1, code: .secondDrain))
+    }
+
     // MARK: the L1 framer
 
     private func fd() throws -> OwnedFD { OwnedFD(open("/dev/null", O_RDONLY | O_CLOEXEC)) }

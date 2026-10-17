@@ -34,7 +34,9 @@ public struct WorkerEvidence: Equatable, Sendable {
     public var drain: DrainRecord?
 
     public init() {}
-    public var booted: Bool { statuses.contains(.vmRunning) || statuses.contains(.guestHello) || statuses.contains(.drainAcked) || statuses.contains(.guestHalted) }
+    /// "Booted" is the contract's own definition: the worker sent a `vm_running` status. (The session refuses every later guest status that
+    /// does not follow one, so nothing else can imply a boot.)
+    public var booted: Bool { statuses.contains(.vmRunning) }
 }
 
 public struct StopContext: Sendable {
@@ -102,9 +104,10 @@ public enum OrderlyStopAuthority {
                                   flushRequested: pair.1.requested, flushCompleted: pair.1.completed, finalFlush: .completed)
                 }
             } else {
-                // Attached, but the VM never ran: it wrote nothing, so there is nothing to flush. A worker that reports flushes without a
-                // VM is not telling a consistent story.
-                if let final = e.finalCounters, final.data != FlushCounters() || final.environment != FlushCounters() { return uncertain(.flushUncertain) }
+                // Attached, but the VM never ran: it wrote nothing, so there is nothing to flush. A worker that reports a flush without a VM
+                // (in ANY status, not only the last) is not telling a consistent story.
+                let zero = CounterPair()
+                if e.latestCounters != zero || (e.finalCounters.map { $0 != zero } ?? false) { return uncertain(.flushUncertain) }
                 volumes = zip(identities, purposes).map { identity, purpose in
                     OrderlyVolume(purpose: purpose, device: identity.device, inode: identity.inode, capacityBytes: identity.capacityBytes, attached: true,
                                   flushRequested: 0, flushCompleted: 0, finalFlush: .completed)

@@ -19,7 +19,7 @@ final class GoldenVectorTests: XCTestCase {
         XCTAssertEqual(pins["sourceBranch"] as? String, "cowork/n2-host-adapter")
         XCTAssertEqual((pins["lastCommitTouchingVectors"] as? String)?.count, 40)
         let hashes = try XCTUnwrap(pins["sha256"] as? [String: String])
-        XCTAssertEqual(Set(hashes.keys), ["envelopes.json", "launcher-lines.json", "mux-frames.json", "stop-receipts.json"])
+        XCTAssertEqual(Set(hashes.keys), ["envelopes.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"])
         for (name, expected) in hashes {
             let actual = SHA256.hash(data: try Data(contentsOf: vectorURL(name))).map { String(format: "%02x", $0) }.joined()
             XCTAssertEqual(actual, expected, "\(name) differs from the S1 copy it is pinned to")
@@ -31,7 +31,7 @@ final class GoldenVectorTests: XCTestCase {
     func testEnvelopeVectorsByteForByte() throws {
         let document = try loadVector("envelopes.json")
         let positives = try XCTUnwrap(document["positive"] as? [[String: Any]])
-        XCTAssertEqual(positives.count, 7)
+        XCTAssertEqual(positives.count, 8)
         for vector in positives {
             let name = vector["name"] as! String
             let raw = bytes(fromHex: vector["hex"] as! String)
@@ -42,7 +42,7 @@ final class GoldenVectorTests: XCTestCase {
             XCTAssertEqual(parsed.wantedRights, vector["rights"] as! Int, name)
         }
         let negatives = try XCTUnwrap(document["negative"] as? [[String: Any]])
-        XCTAssertEqual(negatives.count, 27)
+        XCTAssertEqual(negatives.count, 30)
         for vector in negatives {
             let name = vector["name"] as! String
             let direction: EnvelopeDirection = (vector["direction"] as! String) == "to-worker" ? .toWorker : .toLauncher
@@ -88,12 +88,22 @@ final class GoldenVectorTests: XCTestCase {
     /// inside), so it is not the endpoint that can refuse them: the daemon and the guest are. Everything else must match exactly.
     private static let payloadLevelLauncherLines: Set<String> = ["mux-down-line-carrying-up-only-bootstrap-type"]
 
+    /// Foundation's JSON reader drops a U+FEFF that opens a string value, which is exactly the byte-order mark the `bom-*` vectors are about.
+    /// The file holds it as the three bytes EF BB BF right after `"line": "`, so they are put back from the file's own bytes.
+    private func lineBytes(_ vector: [String: Any], rawFile: Data) -> [UInt8] {
+        let name = vector["name"] as! String, bytes = Array((vector["line"] as! String).utf8)
+        guard name.hasPrefix("bom-") else { return bytes }
+        XCTAssertNotNil(rawFile.range(of: Data(Array("\"line\": \"".utf8) + [0xef, 0xbb, 0xbf] + Array("{".utf8))), "the vector file still opens \(name) with a byte-order mark")
+        return [0xef, 0xbb, 0xbf] + bytes
+    }
+
     func testLauncherLineNegativeVectorsFailWithTheContractsCodes() throws {
+        let rawFile = try Data(contentsOf: vectorURL("launcher-lines.json"))
         let negatives = try XCTUnwrap(try loadVector("launcher-lines.json")["negative"] as? [[String: Any]])
-        XCTAssertEqual(negatives.count, 48)
+        XCTAssertEqual(negatives.count, 54)
         var blind = 0
         for vector in negatives {
-            let name = vector["name"] as! String, line = Array((vector["line"] as! String).utf8), rights = vector["rights"] as! Int
+            let name = vector["name"] as! String, line = lineBytes(vector, rawFile: rawFile), rights = vector["rights"] as! Int
             let got = failure { if (vector["direction"] as! String) == "to-daemon" { _ = try LauncherLineCodec.parseToDaemon(line, rights: rights) } else { _ = try LauncherLineCodec.parseToLauncher(line, rights: rights) } }
             if Self.payloadLevelLauncherLines.contains(name) { XCTAssertNil(got, "\(name) is payload-level: a blind relay accepts it"); blind += 1; continue }
             XCTAssertEqual(got, vector["error"] as? String, name)
@@ -117,21 +127,35 @@ final class GoldenVectorTests: XCTestCase {
             XCTAssertEqual(MuxFormat.frame(header.muxClass, seq: header.seq, payload: Array(raw[WireLimits.headerBytes...])), raw, "\(name): frame encoder and decoder must agree byte for byte")
         }
         let negatives = try XCTUnwrap(document["negative"] as? [[String: Any]])
-        XCTAssertEqual(negatives.count, 25)
+        XCTAssertEqual(negatives.count, 27)
         var headerLevel = 0, payloadLevel: [String] = []
         for vector in negatives {
             let name = vector["name"] as! String
             let got = failure { _ = try MuxFormat.parseFrame(bytes(fromHex: vector["hex"] as! String)) }
             if let got { XCTAssertEqual(got, vector["error"] as? String, name); headerLevel += 1 } else { payloadLevel.append(name) }
         }
-        XCTAssertEqual(headerLevel + payloadLevel.count, 25)
+        XCTAssertEqual(headerLevel + payloadLevel.count, 27)
         // The split is part of the contract between the relay and its endpoints: pin it so a drift in either direction is visible.
         XCTAssertEqual(payloadLevel.sorted(), Self.expectedPayloadLevelMux.sorted(), "these are refused by the endpoints, not by the relay")
     }
     static let expectedPayloadLevelMux: [String] = [
-        "bootstrap-invalid-utf8", "control-duplicate-key", "control-extra-key", "control-float-number", "control-not-json", "control-reordered-keys", "control-unknown-type",
+        "bom-mux", "bom-mux-bootstrap", "bootstrap-invalid-utf8", "control-duplicate-key", "control-extra-key", "control-float-number", "control-not-json", "control-reordered-keys", "control-unknown-type",
         "control-whitespace", "drain-travelling-up", "hello-wrong-serial", "plan-protocol-2", "plan-travelling-up", "plan-unsorted-nested-keys",
     ]
+
+    // MARK: the runtime image digest (the launcher recomputes it)
+
+    func testRuntimeImageDigestVectors() throws {
+        let document = try loadVector("runtime-image.json")
+        let positives = try XCTUnwrap(document["positive"] as? [[String: Any]])
+        XCTAssertEqual(positives.count, 2)
+        for vector in positives {
+            XCTAssertEqual(RuntimeImageDigest.combine(kernelSha256: vector["kernelSha256"] as! String, initramfsSha256: vector["initramfsSha256"] as! String), vector["runtimeImageDigest"] as? String, vector["name"] as! String)
+        }
+        // Order matters, and a part that is not a lowercase hex digest is not a digest.
+        XCTAssertNotEqual(positives[0]["runtimeImageDigest"] as? String, positives[1]["runtimeImageDigest"] as? String)
+        XCTAssertNil(RuntimeImageDigest.combine(kernelSha256: "AB", initramfsSha256: positives[0]["initramfsSha256"] as! String))
+    }
 
     // MARK: stop receipts
 
@@ -149,7 +173,7 @@ final class GoldenVectorTests: XCTestCase {
             }
         }
         let notOrderly = try XCTUnwrap(document["parsesButNotOrderly"] as? [[String: Any]])
-        XCTAssertEqual(notOrderly.count, 7)
+        XCTAssertEqual(notOrderly.count, 9)
         for vector in notOrderly {
             let name = vector["name"] as! String, text = Array((vector["text"] as! String).utf8)
             guard case .orderly(let receipt) = try StopReceipt.parse(text) else { return XCTFail("\(name) is a Class A text") }

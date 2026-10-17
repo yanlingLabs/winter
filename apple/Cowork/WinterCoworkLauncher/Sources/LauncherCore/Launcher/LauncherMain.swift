@@ -34,11 +34,13 @@ public enum LauncherMain {
             _ = setsockopt(l1.raw, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         } catch { return ExitCode.badChannel }
 
-        var parentText = parsed.profile.parentRequirementText
-        var workerText = parsed.profile.workerRequirementText
+        // Which daemon this launcher serves comes from its OWN signature, never from an argument.
+        let profile = LauncherProfile.ofRunningProcess()
+        var parentText = profile.parentRequirementText
+        var workerText = profile.workerRequirementText
         #if WINTER_COWORK_TEST_BUILD
-        if let hash = parsed.testParentCDHash { parentText = WinterCodeIdentity.cdhashRequirement(hash) }
-        if let hash = parsed.testWorkerCDHash { workerText = WinterCodeIdentity.cdhashRequirement(hash) }
+        if let hash = parsed.testParentCDHash { parentText = "cdhash H\"\(hash)\"" }
+        if let hash = parsed.testWorkerCDHash { workerText = "cdhash H\"\(hash)\"" }
         #endif
         let parentRequirement: CodeRequirement, workerRequirement: CodeRequirement
         do { parentRequirement = try CodeRequirement(parentText); workerRequirement = try CodeRequirement(workerText) } catch { return ExitCode.identity }
@@ -62,10 +64,11 @@ public enum LauncherMain {
         guard V.isLabel(bootId) else { return ExitCode.identity }
 
         let random = SystemRandomness()
-        let config = SessionConfig(homeId: parsed.homeId, launcherInstanceId: "launcher-" + random.bytes(8).map { String(format: "%02x", $0) }.joined(), hostBootId: bootId)
+        let config = SessionConfig(launcherInstanceId: "launcher-" + random.bytes(8).map { String(format: "%02x", $0) }.joined(), hostBootId: bootId)
         let ledger = PowerLedger()
         let runtime = LauncherRuntime(l1: l1, spawner: NativeWorkerSpawner(verifier: image), onFinish: { exit(0) })
-        runtime.start(config: config, dependencies: SessionDependencies(store: store, power: ledger), observePower: true, handleTerminationSignals: true)
+        let artifacts = GuestArtifactVerifier(workerPath: parsed.workerPath)
+        runtime.start(config: config, dependencies: SessionDependencies(store: store, artifacts: artifacts, power: ledger), observePower: true, handleTerminationSignals: true)
         dispatchMain()
     }
 }

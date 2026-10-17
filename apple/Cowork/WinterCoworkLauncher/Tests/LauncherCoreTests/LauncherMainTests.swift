@@ -42,26 +42,27 @@ final class LauncherProcess {
 }
 
 final class LauncherMainTests: XCTestCase {
-    private func arguments(receipts: URL, extra: [String] = []) -> [String] {
-        ["--home-id", Fixture.homeId, "--worker-path", BuiltProducts.fakeWorker, "--receipt-dir", BuiltProducts.canonical(receipts.path)] + extra
+    private func arguments(receipts: URL, extra: [String] = [], workerPath: String = BuiltProducts.fakeWorker) -> [String] {
+        ["--worker-path", workerPath, "--receipt-dir", BuiltProducts.canonical(receipts.path)] + extra
     }
     private var receipts: URL!
-    override func setUp() { receipts = makeTemporaryDirectory("main-receipts") }
-    override func tearDown() { try? FileManager.default.removeItem(at: receipts) }
+    private var guest: GuestWorkerDirectory!
+    override func setUpWithError() throws { receipts = makeTemporaryDirectory("main-receipts"); guest = try GuestWorkerDirectory() }
+    override func tearDown() { try? FileManager.default.removeItem(at: receipts); guest = nil }
 
     // MARK: arguments
 
     func testArgumentsAreClosed() throws {
         let ok = try LauncherArguments.parse(arguments(receipts: receipts))
-        XCTAssertEqual(ok.homeId, Fixture.homeId); XCTAssertEqual(ok.profile, .production)
-        XCTAssertEqual(try LauncherArguments.parse(arguments(receipts: receipts, extra: ["--profile", "dev"])).profile, .dev)
-        for bad in [[], ["--home-id", Fixture.homeId], ["--bogus"], ["--profile", "staging"], ["--home-id"],
-                    ["--home-id", "has space", "--worker-path", "/w", "--receipt-dir", "/r"],
-                    ["--home-id", Fixture.homeId, "--worker-path", "relative", "--receipt-dir", "/r"],
-                    ["--home-id", Fixture.homeId, "--worker-path", "/w", "--receipt-dir", "relative"]] {
+        XCTAssertEqual(ok.workerPath, BuiltProducts.fakeWorker)
+        for bad in [[], ["--worker-path", "/w"], ["--bogus"], ["--worker-path"],
+                    ["--worker-path", "relative", "--receipt-dir", "/r"], ["--worker-path", "/w", "--receipt-dir", "relative"],
+                    // The home identity arrives in `begin` and nowhere else; which daemon the launcher serves comes from its own signature.
+                    ["--home-id", Fixture.homeId, "--worker-path", "/w", "--receipt-dir", "/r"], ["--profile", "dev", "--worker-path", "/w", "--receipt-dir", "/r"]] {
             XCTAssertThrowsError(try LauncherArguments.parse(bad), "\(bad)")
         }
     }
+
     #if WINTER_COWORK_TEST_BUILD
     func testTheTestPinExistsOnlyInATestBuild() throws {
         let parsed = try LauncherArguments.parse(arguments(receipts: receipts, extra: ["--WINTER_COWORK_TEST_PARENT_CDHASH", String(repeating: "ab", count: 20)]))
@@ -97,14 +98,14 @@ final class LauncherMainTests: XCTestCase {
 
     #if WINTER_COWORK_TEST_BUILD
     private func pinned(_ parent: String? = nil, worker: String? = nil) throws -> [String] {
-        arguments(receipts: receipts, extra: ["--WINTER_COWORK_TEST_PARENT_CDHASH", try parent ?? CodeHash.ofSelf(), "--WINTER_COWORK_TEST_WORKER_CDHASH", try worker ?? CodeHash.ofFile(BuiltProducts.fakeWorker)])
+        arguments(receipts: receipts, extra: ["--WINTER_COWORK_TEST_PARENT_CDHASH", try parent ?? CodeHash.ofSelf(), "--WINTER_COWORK_TEST_WORKER_CDHASH", try worker ?? CodeHash.ofFile(guest.workerPath)], workerPath: guest.workerPath)
     }
     func testAPinnedParentIsVerifiedAndTheWholeLifecycleRunsInTheRealBinary() throws {
         let p = try LauncherProcess(arguments: try pinned())
         let hello = try XCTUnwrap(p.daemon.next { if case .hello(let instance, let boot) = $0 { (instance, boot) } else { nil } })
         XCTAssertTrue(hello.0.hasPrefix("launcher-")); XCTAssertEqual(hello.1.count, 36, "kern.bootsessionuuid, verbatim")
-        let scope = Fixture.scope(mode: "ok")
-        p.daemon.send(.begin(id: "req-begin", scope: scope))
+        let scope = guest.scope(mode: "ok")
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
         let pid = try XCTUnwrap(p.daemon.next { if case .begun(_, _, let pid, _) = $0 { pid } else { nil } })
         let disks = try DiskPair()
         p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))
@@ -118,6 +119,19 @@ final class LauncherMainTests: XCTestCase {
         XCTAssertEqual(p.exitCode(), 0)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: receipts.path), [], "retired")
     }
+    func testAScopeNamingAnotherRuntimeImageIsRefusedBeforeAnythingIsSpawned() throws {
+        let p = try LauncherProcess(arguments: try pinned())
+        XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
+        var scope = guest.scope(mode: "ok"); scope.runtimeImageDigest = String(repeating: "cd", count: 32)
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
+        XCTAssertEqual(p.daemon.refusal("req-begin"), .code_identity_mismatch)
+        XCTAssertFalse(p.daemon.sees(timeout: 0.3) { if case .begun = $0 { true } else { false } })
+        XCTAssertFalse(p.daemon.sees(timeout: 0.1) { if case .uncertain = $0 { true } else { false } }, "no worker was ever made, so there is no verdict")
+        p.daemon.send(.begin(id: "req-again", homeId: Fixture.homeId, scope: guest.scope(mode: "ok")))
+        XCTAssertNotNil(p.daemon.next { if case .begun = $0 { true } else { nil } }, "the right digest still starts: nothing was consumed by the refusal")
+        p.daemon.end.close()
+        XCTAssertEqual(p.exitCode(), 0)
+    }
     func testAPinnedParentWithTheWrongHashIsStillRefused() throws {
         let p = try LauncherProcess(arguments: try pinned(String(repeating: "00", count: 20)))
         XCTAssertEqual(p.exitCode(), LauncherMain.ExitCode.parentRefused)
@@ -126,7 +140,7 @@ final class LauncherMainTests: XCTestCase {
     func testAWorkerThatDoesNotMatchItsPinIsNeverResumed() throws {
         let p = try LauncherProcess(arguments: try pinned(worker: String(repeating: "11", count: 20)))
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
-        p.daemon.send(.begin(id: "req-begin", scope: Fixture.scope(mode: "ok")))
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: guest.scope(mode: "ok")))
         XCTAssertEqual(p.daemon.refusal("req-begin"), .code_identity_mismatch)
         XCTAssertNotNil(p.daemon.next { if case .uncertain = $0 { true } else { nil } })
         p.daemon.end.close()
@@ -135,8 +149,8 @@ final class LauncherMainTests: XCTestCase {
     func testASigtermMakesTheRealBinaryDrainTheWorkerLeaveAReceiptAndExit() throws {
         let p = try LauncherProcess(arguments: try pinned())
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
-        let scope = Fixture.scope(mode: "ok")
-        p.daemon.send(.begin(id: "req-begin", scope: scope))
+        let scope = guest.scope(mode: "ok")
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
         let pid = try XCTUnwrap(p.daemon.next { if case .begun(_, _, let pid, _) = $0 { pid } else { nil } })
         let disks = try DiskPair()
         p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))
@@ -152,8 +166,8 @@ final class LauncherMainTests: XCTestCase {
     func testLosingTheDaemonMakesTheRealBinaryDrainLeaveAReceiptAndExit() throws {
         let p = try LauncherProcess(arguments: try pinned())
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
-        let scope = Fixture.scope(mode: "ok")
-        p.daemon.send(.begin(id: "req-begin", scope: scope))
+        let scope = guest.scope(mode: "ok")
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
         XCTAssertNotNil(p.daemon.next { if case .begun = $0 { true } else { nil } })
         let disks = try DiskPair()
         p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))

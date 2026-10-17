@@ -9,13 +9,25 @@ final class IdentityTests: XCTestCase {
     // MARK: the stated requirements
 
     func testTheRequirementsAreTheStatedOnesAndAllCompile() throws {
-        XCTAssertEqual(LauncherProfile.production.parentRequirementText, "identifier \"com.winter.core\" and anchor apple generic and certificate leaf[subject.OU] = \"37N77U9RSZ\"")
+        // The SHIPPED daemon is signed without --identifier, so it carries the file's name (apple/ComputerUse/PROTOCOL.md section 2.2).
+        XCTAssertEqual(LauncherProfile.production.parentRequirementText, "identifier \"winter-core\" and anchor apple generic and certificate leaf[subject.OU] = \"37N77U9RSZ\"")
         XCTAssertEqual(LauncherProfile.dev.parentRequirementText, "identifier \"com.winter.core.dev\" and anchor apple generic and certificate leaf[subject.OU] = \"37N77U9RSZ\"")
         XCTAssertEqual(LauncherProfile.production.workerRequirementText, "identifier \"com.winter.cowork.worker\" and anchor apple generic and certificate leaf[subject.OU] = \"37N77U9RSZ\"")
         for text in [LauncherProfile.production.parentRequirementText, LauncherProfile.dev.parentRequirementText, LauncherProfile.production.workerRequirementText] {
             XCTAssertNoThrow(try CodeRequirement(text))
         }
         XCTAssertThrowsError(try CodeRequirement("identifier \"unterminated")) // a requirement that does not compile stops the launcher
+    }
+
+    func testWhichDaemonTheLauncherServesComesFromItsOwnSigningIdentityNeverFromAnArgument() throws {
+        XCTAssertEqual(LauncherProfile.resolve(signingIdentifier: "com.winter.cowork.launcher.dev"), .dev)
+        for production in [nil, "com.winter.cowork.launcher", "winter-cowork-launcher", "com.winter.cowork.launcher.dev ", "com.winter.cowork.launcher.DEV", ""] as [String?] {
+            XCTAssertEqual(LauncherProfile.resolve(signingIdentifier: production), .production, "\(String(describing: production)) fails closed to production")
+        }
+        // The test host is not signed as a dev launcher.
+        XCTAssertEqual(LauncherProfile.ofRunningProcess(), .production)
+        XCTAssertEqual(WinterCodeIdentity.distDaemonIdentifier, "winter-core")
+        XCTAssertEqual(WinterCodeIdentity.devDaemonIdentifier, "com.winter.core.dev")
     }
 
     // MARK: the rule, with fakes
@@ -49,29 +61,39 @@ final class IdentityTests: XCTestCase {
 
     func testRealAuthenticationAcceptsThePeerWhosCdhashIsPinned() throws {
         let (a, _b) = try Sock.pair(.stream)
-        let requirement = try CodeRequirement(WinterCodeIdentity.cdhashRequirement(try CodeHash.ofSelf()))
+        let requirement = try CodeRequirement(cdhashRequirementText(try CodeHash.ofSelf()))
         XCTAssertEqual(CodeSigningParent.authenticator(requirement: requirement, expectedParentPid: getpid()).authenticate(socket: a.raw), .accept(pid: getpid()))
     }
     func testRealAuthenticationRefusesAnotherCodeAnotherPidAndTheProductionRequirement() throws {
         let (a, _b) = try Sock.pair(.stream)
-        let wrong = try CodeRequirement(WinterCodeIdentity.cdhashRequirement(String(repeating: "00", count: 20)))
+        let wrong = try CodeRequirement(cdhashRequirementText(String(repeating: "00", count: 20)))
         guard case .reject = CodeSigningParent.authenticator(requirement: wrong, expectedParentPid: getpid()).authenticate(socket: a.raw) else { return XCTFail("a different cdhash") }
-        let right = try CodeRequirement(WinterCodeIdentity.cdhashRequirement(try CodeHash.ofSelf()))
+        let right = try CodeRequirement(cdhashRequirementText(try CodeHash.ofSelf()))
         guard case .reject = CodeSigningParent.authenticator(requirement: right, expectedParentPid: getpid() &+ 1).authenticate(socket: a.raw) else { return XCTFail("a different pid") }
         let production = try CodeRequirement(LauncherProfile.production.parentRequirementText)
         guard case .reject = CodeSigningParent.authenticator(requirement: production, expectedParentPid: getpid()).authenticate(socket: a.raw) else { return XCTFail("the test host is not the Winter daemon") }
         let dev = try CodeRequirement(LauncherProfile.dev.parentRequirementText)
         guard case .reject = CodeSigningParent.authenticator(requirement: dev, expectedParentPid: getpid()).authenticate(socket: a.raw) else { return XCTFail() }
     }
+    func testTheDefaultExpectedParentIsTheParentProcessNotNobody() throws {
+        // `authenticator(requirement:)` is what the launcher calls: with NO explicit pid it must compare the peer with getppid(). This test
+        // process is its own socketpair's peer, not its own parent, so even a peer whose code satisfies the requirement is refused.
+        let (a, _b) = try Sock.pair(.stream)
+        let requirement = try CodeRequirement(cdhashRequirementText(try CodeHash.ofSelf()))
+        XCTAssertNotEqual(getpid(), getppid())
+        guard case .reject(let reason) = CodeSigningParent.authenticator(requirement: requirement).authenticate(socket: a.raw) else { return XCTFail("the default pid check is the parent's") }
+        XCTAssertTrue(reason.contains("spawned"), reason)
+        XCTAssertEqual(CodeSigningParent.authenticator(requirement: requirement).expectedParentPid, getppid())
+    }
     func testRealAuthenticationRefusesADatagramSocketAndANamedOne() throws {
         let (d, _e) = try Sock.pair(.datagram)
-        let right = try CodeRequirement(WinterCodeIdentity.cdhashRequirement(try CodeHash.ofSelf()))
+        let right = try CodeRequirement(cdhashRequirementText(try CodeHash.ofSelf()))
         guard case .reject = CodeSigningParent.authenticator(requirement: right, expectedParentPid: getpid()).authenticate(socket: d.raw) else { return XCTFail("L1 is a stream socketpair") }
     }
 
     // MARK: the worker image
 
-    private func requirementForFakeWorker() throws -> CodeRequirement { try CodeRequirement(WinterCodeIdentity.cdhashRequirement(try CodeHash.ofFile(BuiltProducts.fakeWorker))) }
+    private func requirementForFakeWorker() throws -> CodeRequirement { try CodeRequirement(cdhashRequirementText(try CodeHash.ofFile(BuiltProducts.fakeWorker))) }
 
     func testThePinnedImageIsAcceptedWhenExecutedAndRefusedUnderAnotherRequirement() throws {
         let image = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: try requirementForFakeWorker())
@@ -80,7 +102,7 @@ final class IdentityTests: XCTestCase {
         let child = try NativeWorkerProcess(verifier: image, l2Child: try Sock.relocate(c2, above: 5), l3Child: try Sock.relocate(c3, above: 5))
         defer { _ = child.kill() }
         XCTAssertNoThrow(try child.validateExecutedImage(), "the executed, still SUSPENDED image satisfies its requirement")
-        let strict = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: try CodeRequirement(WinterCodeIdentity.cdhashRequirement(String(repeating: "11", count: 20))))
+        let strict = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: try CodeRequirement(cdhashRequirementText(String(repeating: "11", count: 20))))
         XCTAssertThrowsError(try strict.validateExecuted(pid: child.pid), "an image under the wrong requirement is not accepted")
         _ = (p2, p3)
     }
@@ -109,7 +131,7 @@ final class IdentityTests: XCTestCase {
         let directory = makeTemporaryDirectory("image"); defer { try? FileManager.default.removeItem(at: directory) }
         let copy = BuiltProducts.canonical(directory.appendingPathComponent("w").path)
         try FileManager.default.copyItem(atPath: BuiltProducts.fakeWorker, toPath: copy)
-        let requirement = try CodeRequirement(WinterCodeIdentity.cdhashRequirement(try CodeHash.ofFile(copy)))
+        let requirement = try CodeRequirement(cdhashRequirementText(try CodeHash.ofFile(copy)))
         let link = directory.appendingPathComponent("link").path
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: copy)
         XCTAssertThrowsError(try WorkerImage(path: BuiltProducts.canonical(directory.path) + "/link", requirement: requirement), "a symlink is not a canonical path")

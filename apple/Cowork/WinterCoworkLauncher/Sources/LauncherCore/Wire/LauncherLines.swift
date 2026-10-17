@@ -22,7 +22,8 @@ public enum LineToDaemon: Equatable, Sendable {
 }
 
 public enum LineToLauncher: Equatable, Sendable {
-    case begin(id: String, scope: Scope)
+    /// `homeId` is the ONE source of the home identity: the launcher stamps it into every receipt. It does not travel on L2.
+    case begin(id: String, homeId: String, scope: Scope)
     /// Arrives with exactly two descriptors (data, environment); the descriptors travel beside this value, never inside it.
     case volumes(id: String, scopeDigest: String, volumes: [VolumeIdentity])
     case muxDown(frame: [UInt8])
@@ -45,7 +46,7 @@ public enum LauncherLineCodec {
         "fault": ["code"],
     ]
     private static let toLauncherKeys: [String: [String]] = [
-        "begin": ["id"] + Scope.keys,
+        "begin": ["id", "homeId"] + Scope.keys,
         "volumes": ["id", "scopeDigest", "volumes"],
         "mux_down": ["frame"],
         "stop": ["id", "stopNonce", "reason", "budgetMs"],
@@ -63,7 +64,7 @@ public enum LauncherLineCodec {
         let f = try Fields(members, keys: ["v", "t"] + toLauncherKeys[type]!)
         let typed: LineToLauncher
         switch type {
-        case "begin": typed = .begin(id: try V.token(f["id"]), scope: try Scope.decode(f))
+        case "begin": typed = .begin(id: try V.token(f["id"]), homeId: try V.token(f["homeId"]), scope: try Scope.decode(f))
         case "volumes": typed = .volumes(id: try V.token(f["id"]), scopeDigest: try V.digest(f["scopeDigest"]), volumes: try VolumeIdentity.readPair(f["volumes"]))
         case "mux_down": typed = .muxDown(frame: try muxField(f["frame"]))
         case "stop":
@@ -160,9 +161,9 @@ public enum LauncherLineCodec {
         var w = JSONWriter()
         w.beginObject(); w.key("v"); w.integer(1); w.key("t")
         switch message {
-        case .begin(let id, let scope):
-            try require(V.isToken(id)); try scope.validate()
-            w.string("begin"); w.key("id"); w.string(id); scope.write(&w)
+        case .begin(let id, let homeId, let scope):
+            try require(V.isToken(id) && V.isToken(homeId)); try scope.validate()
+            w.string("begin"); w.key("id"); w.string(id); w.key("homeId"); w.string(homeId); scope.write(&w)
         case .volumes(let id, let digest, let volumes):
             try require(V.isToken(id) && V.isLowerHex(digest, count: 64) && volumes.count == 2)
             try VolumeIdentity.requireDistinctFiles(volumes)

@@ -73,7 +73,8 @@ final class StaticChecksTests: XCTestCase {
     // MARK: every read of a descriptor-bearing socket is recvmsg
 
     func testNoPlainReadReceiveOrFileHandleTouchesASocket() {
-        let swift = Self.sources.filter { $0.path.hasSuffix(".swift") && $0.path != "LauncherCore/Session/DirectoryReceiptStore.swift" }
+        // Two files read REGULAR files by descriptor (the receipt store and the guest-artifact hash); neither touches a socket.
+        let swift = Self.sources.filter { $0.path.hasSuffix(".swift") && $0.path != "LauncherCore/Session/DirectoryReceiptStore.swift" && $0.path != "LauncherCore/Identity/GuestArtifacts.swift" }
         XCTAssertEqual(hits(#"(^|[^_.\w])(?<!func )(read|recv|recvfrom|readv)\("#, in: swift), [], "a plain read() installs SCM_RIGHTS descriptors")
         XCTAssertEqual(hits(#"FileHandle|DispatchIO|NWConnection|URLSession|InputStream|\.fileDescriptor"#, in: swift), [])
         let native = Self.sources.first { $0.path == "LauncherNative/native.c" }!
@@ -92,7 +93,7 @@ final class StaticChecksTests: XCTestCase {
                 if trimmed.hasPrefix("#if") { inside.append(trimmed == "#if WINTER_COWORK_TEST_BUILD"); depth += 1 }
                 else if trimmed.hasPrefix("#else") && !inside.isEmpty { inside[inside.count - 1] = false }
                 else if trimmed.hasPrefix("#endif") && !inside.isEmpty { inside.removeLast(); depth -= 1 }
-                else if line.contains("WINTER_COWORK_TEST_"), !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///"), !trimmed.hasPrefix("*"), !inside.contains(true) { violations.append("\(source.path):\(index + 1)") }
+                else if line.contains("WINTER_COWORK_TEST_") || line.contains("cdhash H"), !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///"), !trimmed.hasPrefix("*"), !inside.contains(true) { violations.append("\(source.path):\(index + 1)") }
             }
         }
         XCTAssertEqual(violations, [], "test hooks exist only under -DWINTER_COWORK_TEST_BUILD")
@@ -100,14 +101,15 @@ final class StaticChecksTests: XCTestCase {
     #if !WINTER_COWORK_TEST_BUILD
     func testTheBuiltLauncherOfANormalBuildCarriesNoTestHookAtAll() throws {
         let data = try Data(contentsOf: URL(fileURLWithPath: BuiltProducts.launcher))
-        for marker in ["WINTER_COWORK_TEST_", "TEST_PARENT_CDHASH", "TEST_WORKER_CDHASH"] {
+        for marker in ["WINTER_COWORK_TEST_", "TEST_PARENT_CDHASH", "TEST_WORKER_CDHASH", "cdhash H"] {
             XCTAssertNil(data.range(of: Data(marker.utf8)), "\(marker) must not exist in a normal build")
         }
     }
     #endif
     func testTheProductionRequirementsAreNamedOnceEach() {
-        XCTAssertEqual(hits(#"com\.winter\.core\""#).count, 1)
-        XCTAssertEqual(hits(#"com\.winter\.core\.dev\""#).count, 1)
+        XCTAssertEqual(hits(#""winter-core""#).count, 1, "the shipped daemon signs as winter-core, and the constant is named once")
+        XCTAssertEqual(hits(#""com\.winter\.core\.dev""#).count, 1)
+        XCTAssertEqual(hits(#""com\.winter\.core""#).count, 0, "not the identifier the shipped daemon carries")
         XCTAssertEqual(hits(#"37N77U9RSZ"#).count, 1)
     }
 }

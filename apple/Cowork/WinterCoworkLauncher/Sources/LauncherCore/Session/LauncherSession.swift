@@ -1,9 +1,6 @@
 import Foundation
 
 public struct SessionConfig: Sendable {
-    /// The Winter home identity every Class A receipt names (`homeId`). The contract's `begin` carries none, so the daemon states it
-    /// when it spawns the launcher (REVIEW NEEDED in the research note: S1 should either add it to `begin` or bless this).
-    public var homeId: String
     public var launcherInstanceId: String
     public var hostBootId: String
     /// From the spawn to the worker's `sandboxed` status (READY). The daemon waits 15 s for `begun`, so this is shorter.
@@ -14,18 +11,24 @@ public struct SessionConfig: Sendable {
     public var ownerLossBudgetMs = WireLimits.drainBudgetMs
     /// A worker that declared a fault gets this long to exit by itself before it is killed.
     public var faultGraceMs = 5_000
-    public init(homeId: String, launcherInstanceId: String, hostBootId: String) { self.homeId = homeId; self.launcherInstanceId = launcherInstanceId; self.hostBootId = hostBootId }
+    /// When the kernel says the worker exited but the child is not yet waitable: probe again every `exitProbeIntervalMs`, at most
+    /// `exitProbeAttempts` times; the backstop probe (every `backstopMs` while a worker exists) covers anything beyond that.
+    public var exitProbeIntervalMs = 10
+    public var exitProbeAttempts = 200
+    public var backstopMs = 1_000
+    public init(launcherInstanceId: String, hostBootId: String) { self.launcherInstanceId = launcherInstanceId; self.hostBootId = hostBootId }
 }
 
 /// Confined to the launcher's one serial queue (the store and the power sink are classes); never shared across threads.
 public struct SessionDependencies: @unchecked Sendable {
     public var store: DurableReceiptStore
+    public var artifacts: GuestArtifactVerifying
     public var random: Randomness
     public var clock: WallClock
     public var monotonicMs: () -> Int64
     public var power: PowerReporting
-    public init(store: DurableReceiptStore, random: Randomness = SystemRandomness(), clock: WallClock = SystemClock(), monotonicMs: @escaping () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000) }, power: PowerReporting) {
-        self.store = store; self.random = random; self.clock = clock; self.monotonicMs = monotonicMs; self.power = power
+    public init(store: DurableReceiptStore, artifacts: GuestArtifactVerifying, random: Randomness = SystemRandomness(), clock: WallClock = SystemClock(), monotonicMs: @escaping () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000) }, power: PowerReporting) {
+        self.store = store; self.artifacts = artifacts; self.random = random; self.clock = clock; self.monotonicMs = monotonicMs; self.power = power
     }
 }
 
@@ -60,6 +63,8 @@ public final class LauncherSession {
     private var scope: Scope?
     private var scopeDigest: String?
     private var beginId: String?
+    private var homeId: String?
+    private var exitProbeAttempts = 0
     private var beginAnswered = false
     private var process: WorkerProcess?
     private var volumesRequestId: String?
@@ -93,7 +98,7 @@ public final class LauncherSession {
         let message: LineToLauncher
         do { message = try LauncherLineCodec.parseToLauncher(line.bytes, rights: line.rights.count) } catch { channelViolation(); return }
         switch message {
-        case .begin(let id, let scope): handleBegin(id: id, scope: scope)
+        case .begin(let id, let homeId, let scope): handleBegin(id: id, homeId: homeId, scope: scope)
         case .volumes(let id, let digest, let volumes): handleVolumes(id: id, scopeDigest: digest, volumes: volumes, descriptors: line.rights)
         case .muxDown(let frame): handleMuxDown(frame)
         case .stop(let id, let nonce, _, let budget): handleStop(id: id, nonce: nonce, budgetMs: budget)
@@ -151,8 +156,11 @@ public final class LauncherSession {
 
     // ---------------------------------------------------------------------------------------------- begin
 
-    private func handleBegin(id: String, scope: Scope) {
+    private func handleBegin(id: String, homeId: String, scope: Scope) {
         guard phase == .awaitingBegin else { refuse(id, .busy); return }
+        // NEW SECURITY LOGIC: the launcher recomputes `runtimeImageDigest` from the guest boot artifacts next to the worker and refuses a
+        // scope that names another image, BEFORE it reserves, spawns or sends anything. (See GuestArtifacts.swift for what this does not close.)
+        do { try deps.artifacts.verify(runtimeImageDigest: scope.runtimeImageDigest) } catch { refuse(id, .code_identity_mismatch); return }
         do { try reservation.acquire() } catch { refuse(id, .busy); return }
         guard let digest = try? EnvelopeFormat.scopeDigest(scope) else { try? reservation.abort(didConstruct: false); refuse(id, .bad_request); return }
         let worker: WorkerProcess
@@ -162,7 +170,7 @@ public final class LauncherSession {
             return
         }
         reservation.markConstructed()
-        self.process = worker; self.scope = scope; self.scopeDigest = digest; self.beginId = id
+        self.process = worker; self.scope = scope; self.scopeDigest = digest; self.beginId = id; self.homeId = homeId
         phase = .starting
         // 1. The executed image, while it is still SUSPENDED: nothing of it has run and nothing has been sent to it.
         do { try worker.validateExecutedImage() } catch { killAndCommit(reason: .workerKilled, refusal: .code_identity_mismatch); return }
@@ -170,6 +178,7 @@ public final class LauncherSession {
         // 2. Only now does the worker get its scope.
         guard sendEnvelope({ .scope(seq: $0, scope: scope) }) else { killAndCommit(reason: .launcherFault, refusal: .internal); return }
         ports.arm(.ready, afterMs: config.readyTimeoutMs)
+        ports.arm(.backstop, afterMs: config.backstopMs)
     }
 
     /// The worker's READY (status `sandboxed`): validate the running image AGAIN, then tell the daemon.
@@ -246,6 +255,12 @@ public final class LauncherSession {
         defer { relayGate.finish() }
         relayedUp += 1
         ports.sendToDaemon(.muxUp(frame: bytes))
+    }
+
+    /// The runtime paused L1 for the worker's sake and the worker has accepted not one byte of L3 for the whole stall window.
+    public func workerNotDraining() {
+        guard process != nil, phase != .finished else { return }
+        workerProtocolViolation("the worker is not draining L3")
     }
 
     /// L3 stopped being a sequence of valid frames (a bad header, a refused class, an oversize payload).
@@ -388,16 +403,38 @@ public final class LauncherSession {
             killAndCommit(reason: .drainTimeout, refusal: nil)
         case .faultGrace:
             killAndCommit(reason: .guestFault, refusal: nil)
+        case .exitProbe:
+            judgeExit(eventDriven: true)
+        case .backstop:
+            ports.arm(.backstop, afterMs: config.backstopMs)
+            judgeExit(eventDriven: false)
         }
     }
 
     // =============================================================================================== the worker's end
 
     /// The worker process ended (the I/O layer has already delivered everything still queued on L2 and L3).
-    public func workerProcessEnded() {
+    public func workerProcessEnded() { judgeExit(eventDriven: true) }
+
+    /// `eventDriven`: the kernel said the process exited. If the child is not waitable yet (measured: a single WNOHANG at the event
+    /// returned "running" for 0.3 to 0.65 % of exits) the exit would go unjudged until some other event, so it is probed again on a
+    /// short bounded timer. The coarse backstop (`eventDriven: false`) catches an exit whose event was lost altogether.
+    private func judgeExit(eventDriven: Bool) {
         guard let worker = process, phase != .finished else { return }
         let exit = worker.probe()
-        guard exit != .running else { return }
+        guard exit != .running else {
+            if eventDriven {
+                exitProbeAttempts += 1
+                if exitProbeAttempts <= config.exitProbeAttempts { ports.arm(.exitProbe, afterMs: config.exitProbeIntervalMs) }
+            }
+            return
+        }
+        exitProbeAttempts = 0
+        ports.disarm(.exitProbe)
+        // Whatever the worker said before it ended is still queued: read it all before judging the exit. (What it says can end the
+        // session right here, hence the second look at the phase.)
+        ports.drainWorkerInputs()
+        guard phase != .finished else { return }
         let refusal: RefusalCode? = phase == .starting ? .sandbox_failed : nil
         commit(exit: exit, killSent: false, killReason: nil, refusal: refusal, stopId: drainRequestId)
     }
@@ -411,9 +448,9 @@ public final class LauncherSession {
 
     private func commit(exit: WorkerExit, killSent: Bool, killReason: UncertainReason?, refusal: RefusalCode?, stopId: String?) {
         guard phase != .finished, let worker = process, let scope else { return }
-        [SessionTimer.ready, .volumes, .drain, .faultGrace].forEach(ports.disarm)
+        [SessionTimer.ready, .volumes, .drain, .faultGrace, .exitProbe, .backstop].forEach(ports.disarm)
         relayGate.close()
-        let context = StopContext(scope: scope, homeId: config.homeId, launcherInstanceId: config.launcherInstanceId, hostBootId: config.hostBootId, workerPid: worker.pid, workerStartToken: worker.startToken)
+        let context = StopContext(scope: scope, homeId: homeId ?? "", launcherInstanceId: config.launcherInstanceId, hostBootId: config.hostBootId, workerPid: worker.pid, workerStartToken: worker.startToken)
         let key = ReceiptScope(scope)
         func decide(demote: UncertainReason?) -> StopReceipt {
             OrderlyStopAuthority.decide(context: context, exit: exit, evidence: evidence, killSent: killSent, killReason: killReason, issuedAtMs: deps.clock.nowMs,

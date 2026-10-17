@@ -26,9 +26,9 @@ public enum WireLimits {
     public static let receiptBytes = 8192
     /// Identifier fields in the fixed-layout envelope are NUL padded to 64 bytes, so a token is at most 63 characters.
     public static let tokenChars = 63
-    /// Guest sizing (D8): 2 vCPU and at most 1024 MiB inside the reviewed device gate.
+    /// Guest sizing (D8 and the controller's ruling): 2 vCPU, and 768 to 1024 MiB inside the reviewed device gate (768 is the floor the library admits).
     public static let vcpus = 2
-    public static let minMemoryMiB = 256
+    public static let minMemoryMiB = 768
     public static let maxMemoryMiB = 1024
     /// The documented graceful budget, and the most an explicit stop may ask for.
     public static let drainBudgetMs = 30_000

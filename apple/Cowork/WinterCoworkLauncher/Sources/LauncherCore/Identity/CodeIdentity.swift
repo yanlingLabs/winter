@@ -8,32 +8,44 @@ public enum WinterCodeIdentity {
     /// Winter's Apple team (the signing certificate's OU).
     public static let teamID = "37N77U9RSZ"
 
-    /// The daemon's signing identifier in the production requirement, as the owner's brief for this slice states it.
-    ///
-    /// REVIEW NEEDED: the Computer Use helper (`HelperIdentity.swift`, `scripts/computer-helper-lib.ts` DAEMON_IDENTIFIER) records that
-    /// the SHIPPED daemon is signed WITHOUT `--identifier` and so carries the file's name, `winter-core`, and that changing it would
-    /// change the daemon's designated requirement, which every Keychain access list names. If that still holds, this launcher refuses
-    /// the shipped daemon. One constant; nothing else depends on it.
-    public static let distDaemonIdentifier = "com.winter.core"
+    /// The SHIPPED daemon's signing identifier. The release signs the embedded `winter-core` without `--identifier`, so codesign names
+    /// it after the file (apple/ComputerUse/PROTOCOL.md section 2.2; `WinterCodeIdentity.distDaemonIdentifier` in the Computer Use
+    /// helper, pinned by its tests). Changing it would change the daemon's designated requirement, which every Keychain item's
+    /// access list names. The signed dev daemon (`bun run dev:daemon`) is `com.winter.core.dev`.
+    public static let distDaemonIdentifier = "winter-core"
     public static let devDaemonIdentifier = "com.winter.core.dev"
     /// From the plan (section 4); the worker's signing identity is S3's to confirm.
     public static let workerIdentifier = "com.winter.cowork.worker"
     public static let launcherIdentifier = "com.winter.cowork.launcher"
+    /// The launcher the owner's dev flow signs. The profile comes from THIS (the launcher's own code identity), never from an argument.
+    public static let devLauncherIdentifier = "com.winter.cowork.launcher.dev"
 
     /// A stated designated requirement: the identifier and Winter's team under Apple's anchor.
     public static func requirement(identifier: String, team: String = teamID) -> String {
         "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
     }
-    /// A requirement that pins one exact code directory hash (test builds only ever construct this from launcher-main).
-    public static func cdhashRequirement(_ hex: String) -> String { "cdhash H\"\(hex)\"" }
 }
 
+/// Which daemon this launcher serves. Derived from the launcher's OWN signing identifier (the pattern of the Computer Use helper, which
+/// reads its bundle id), so no argument of a production launcher can make it accept the dev daemon: a launcher signed as
+/// `com.winter.cowork.launcher.dev` is a dev launcher, and every other launcher, signed or not, is production.
 public enum LauncherProfile: String, Sendable {
     case production, dev
     public var parentRequirementText: String {
         WinterCodeIdentity.requirement(identifier: self == .production ? WinterCodeIdentity.distDaemonIdentifier : WinterCodeIdentity.devDaemonIdentifier)
     }
     public var workerRequirementText: String { WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.workerIdentifier) }
+
+    public static func resolve(signingIdentifier: String?) -> LauncherProfile { signingIdentifier == WinterCodeIdentity.devLauncherIdentifier ? .dev : .production }
+
+    /// The profile of the running process, from its own code signature. Fails closed to production.
+    public static func ofRunningProcess() -> LauncherProfile {
+        var me: SecCode?, staticCode: SecStaticCode?, information: CFDictionary?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me, SecCodeCopyStaticCode(me, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+              let dictionary = information as? [String: Any] else { return .production }
+        return resolve(signingIdentifier: dictionary[kSecCodeInfoIdentifier as String] as? String)
+    }
 }
 
 public struct IdentityFailure: Error, Equatable, CustomStringConvertible, Sendable {
