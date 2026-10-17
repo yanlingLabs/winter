@@ -435,11 +435,12 @@ class SkeletonTests(InitModuleCase):
 class TrustedConfigTests(InitModuleCase):
     BOOT = "66666666-6666-4666-8666-666666666666"
 
-    def build_config(self, base, conversations, boot=None):
+    def build_config(self, base, conversations, boot=None, capacity=None):
         base_path, conv_path = self.dir / "base.json", self.dir / "conv.json"
         base_path.write_text(base)
         conv_path.write_text(conversations)
-        code, _, text = self.run_tool("config", self.BOOT if boot is None else boot, base_path, conv_path).partition("|")
+        extra = [] if capacity is None else [str(capacity)]
+        code, _, text = self.run_tool("config", self.BOOT if boot is None else boot, base_path, conv_path, *extra).partition("|")
         return int(code), text
 
     def test_the_boot_id_and_conversations_are_spliced_into_the_static_part(self):
@@ -499,6 +500,14 @@ class TrustedConfigTests(InitModuleCase):
         self.assertEqual(self.build_config("{}", many)[0], 4)
         within = "[" + ",".join(['"' + "b" * 90 + '"'] * 500) + "]"
         self.assertEqual(self.build_config("{}", within)[0], 0)
+
+    def test_a_buffer_too_small_for_the_whole_config_is_refused_before_anything_is_copied(self):
+        whole = len('{"guestBootId":"' + self.BOOT + '","conversations":[]}')
+        self.assertEqual(self.build_config("{}", "[]", capacity=whole + 1)[0], 0)
+        # long enough for the opening text that snprintf writes first, too short for the rest: only the up-front size check stops the copy
+        for capacity in (whole, whole - 1, len('{"guestBootId":"' + self.BOOT + '","conversations":') + 1):
+            with self.subTest(capacity=capacity):
+                self.assertEqual(self.build_config("{}", "[]", capacity=capacity)[0], 5)
 
     def test_the_written_file_is_root_readable_only_and_returned_as_a_fresh_read_only_descriptor(self):
         text = self.dir / "text.json"

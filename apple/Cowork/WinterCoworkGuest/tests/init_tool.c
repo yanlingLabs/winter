@@ -125,12 +125,13 @@ int main(int argc, char **argv) {
         printf("rc=%d\n", wg_skeleton_apply(root, &entry, 1, &ops));
         return 0;
     }
-    if (strcmp(argv[1], "config") == 0 && argc == 5) {
+    if (strcmp(argv[1], "config") == 0 && (argc == 5 || argc == 6)) {
         size_t base_length = 0, conv_length = 0;
         char *base = slurp(argv[3], &base_length), *conv = slurp(argv[4], &conv_length);
         static char out[70000];
         size_t out_length = 0;
-        enum wg_config_result r = wg_build_trusted_config(argv[2], base, base_length, conv, conv_length, out, sizeof out, &out_length);
+        enum wg_config_result r = wg_build_trusted_config(argv[2], base, base_length, conv, conv_length, out,
+                                                                 argc == 6 && strtoul(argv[5], NULL, 10) < sizeof out ? strtoul(argv[5], NULL, 10) : sizeof out, &out_length);
         printf("%d|%s\n", (int)r, r == WG_CONFIG_OK ? out : "");
         free(base);
         free(conv);
