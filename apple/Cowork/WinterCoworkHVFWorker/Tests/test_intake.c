@@ -160,7 +160,7 @@ static void happy_path(void) {
     CHECK(queued(r.pair[1]) > 0);
     cw_intake_run(&config, r.pair[1], &result);
     CHECK(r.h.calls == 1);
-    CHECK(r.h.unread_at_hook > 0); /* ORDER: when the sandbox was installed, the SCOPE datagram had not been read */
+    CHECK(r.h.unread_at_hook == (int)(CW_ENV_HEADER + CW_ENV_SCOPE_BYTES)); /* ORDER: when the sandbox was installed, the SCOPE datagram (not the VOLUMES one behind it) was still the next thing queued */
     CHECK(result.outcome == CW_INTAKE_OK);
     CHECK(result.scope_accepted && result.volumes_accepted && result.next_seq == 3);
     CHECK(result.scope.memory_mib == 768 && result.scope.vcpus == 2 && result.scope.lease_epoch == 3);
@@ -199,7 +199,7 @@ static void sandbox_first(void) {
     cw_intake_run(&config, r.pair[1], &result);
     CHECK(result.outcome == CW_INTAKE_FAULT && result.fault == CW_FAULT_SANDBOX_FAILED && result.exit_code == CW_EXIT_SANDBOX);
     CHECK(r.h.calls == 1);
-    CHECK(queued(r.pair[1]) > 0);                 /* nothing was read ... */
+    CHECK(queued(r.pair[1]) == (int)(CW_ENV_HEADER + CW_ENV_SCOPE_BYTES)); /* nothing was read: the SCOPE datagram is still first in the queue ... */
     CHECK(cw_test_open_descriptors() == before);  /* ... and no descriptor was installed */
     CHECK(result.fds[0] == -1 && result.fds[1] == -1 && !result.scope_accepted);
     rig_close(&r);
@@ -231,10 +231,35 @@ static void gate_and_scope(void) {
     }
 }
 
+static void gate_is_independent_of_the_parser(void) {
+    /* The S1 parser caps memory at 1024 MiB and fixes 2 vCPUs. The gate is a separate, later check against the library's limits: prove
+     * it refuses on its own by handing it a narrower gate than the parser. */
+    const struct { cw_gate gate; const char *what; int ok; } cases[] = {
+        { { 2, 768, 900 }, "ceiling below the scope", 0 }, { { 2, 768, 1024 }, "the production gate", 1 }, { { 4, 768, 1024 }, "vCPU count", 0 }, { { 2, 800, 1024 }, "floor above the scope", 0 } };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        rig r;
+        rig_open(&r, "gate2");
+        send_scope_and_volumes(&r, 768 + (cases[i].gate.max_memory_mib == 900 ? 232 : 0)); /* 1000 MiB against the 900 ceiling, else 768 */
+        cw_intake_config config = config_for(&r.h);
+        config.gate = cases[i].gate;
+        cw_intake_result result;
+        cw_intake_run(&config, r.pair[1], &result);
+        if (cases[i].ok) {
+            CHECK(result.outcome == CW_INTAKE_OK);
+            if (result.outcome == CW_INTAKE_OK) { close(result.fds[0]); close(result.fds[1]); }
+        } else {
+            CHECK(result.outcome == CW_INTAKE_FAULT && result.fault == CW_FAULT_BAD_SCOPE);
+            CHECK_STR(result.reason, "outside the production gate");
+        }
+        rig_close(&r);
+    }
+}
+
 static void scope_refusals(void) {
     uint8_t bytes[CW_ENV_MAX_BYTES];
     size_t length;
-    struct { const char *name; int mode; } modes[] = { { "seq2", 0 }, { "truncated", 1 }, { "magic", 2 }, { "volumes-first", 3 }, { "status-first", 4 } };
+    struct { const char *name; int mode; const char *reason; } modes[] = { { "seq2", 0, "scope sequence" }, { "truncated", 1, "scope envelope refused" }, { "magic", 2, "scope envelope refused" },
+        { "volumes-first", 3, "descriptor with the scope" }, { "status-first", 4, "scope envelope refused" } };
     for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
         rig r;
         rig_open(&r, modes[i].name);
@@ -251,6 +276,7 @@ static void scope_refusals(void) {
         cw_intake_run(&config, r.pair[1], &result);
         if (modes[i].mode == 3) CHECK(result.outcome == CW_INTAKE_SILENT_EXIT); /* descriptors with a non-SCOPE first datagram: unexpected, silent */
         else CHECK(result.outcome == CW_INTAKE_FAULT && result.fault == CW_FAULT_BAD_SCOPE);
+        CHECK_STR(result.reason, modes[i].reason); /* which guard refused it, not just that something did */
         rig_close(&r);
     }
 }
@@ -463,6 +489,7 @@ int main(void) {
     happy_path();
     sandbox_first();
     gate_and_scope();
+    gate_is_independent_of_the_parser();
     scope_refusals();
     unexpected_descriptors();
     volumes_refusals();

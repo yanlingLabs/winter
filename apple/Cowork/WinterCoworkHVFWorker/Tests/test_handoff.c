@@ -224,6 +224,19 @@ static int intake_exercise(void) {
     return cw_test_failures != 0 ? 1 : (result.outcome == CW_INTAKE_SILENT_EXIT ? CTRUNC_EXIT : 0); /* the worker exits 79 here in both builds */
 }
 
+/* A valid unnamed datagram socketpair end that happens to sit at descriptor 0, 1 or 2 is still refused: the launcher owns those. */
+static int low_descriptor_exercise(void) {
+    cw_test_failures = 0;
+    int pair[2];
+    CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) == 0);
+    CHECK(fcntl(pair[1], F_SETFD, FD_CLOEXEC) == 0);
+    CHECK(cw_channel_admit(pair[1], SOCK_DGRAM) == 0);   /* admitted where it is ... */
+    CHECK(dup2(pair[1], 2) == 2);
+    CHECK(fcntl(2, F_SETFD, FD_CLOEXEC) == 0);
+    CHECK(cw_channel_admit(2, SOCK_DGRAM) == -1);        /* ... refused as descriptor 2 */
+    return cw_test_failures != 0 ? 1 : 0;
+}
+
 static int run_child(int (*body)(void)) {
     fflush(NULL);
     pid_t child = fork();
@@ -239,6 +252,7 @@ int main(void) {
     channel_admission();
     if (cw_test_failures != 0) return cw_test_finish("test_handoff(admission)");
     int expected = CW_FD_CAPACITY < 20 ? CTRUNC_EXIT : 0;
+    CHECK(run_child(low_descriptor_exercise) == 0);
     int datagram = run_child(exercise), stream = run_child(stream_exercise), intake = run_child(intake_exercise);
     if (intake != CTRUNC_EXIT) fprintf(stderr, "intake child exited %d, wanted %d\n", intake, CTRUNC_EXIT);
     CHECK(intake == CTRUNC_EXIT);

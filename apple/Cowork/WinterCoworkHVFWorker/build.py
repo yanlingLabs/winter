@@ -47,9 +47,10 @@ TESTS_TO_RUN = [
     ("test_handoff_256", ["AdmittedVolumes", "Envelope", "Mux"], ["-DCW_FD_CAPACITY=256"]),
     ("test_handoff_16", ["AdmittedVolumes", "Envelope", "Mux"], ["-DCW_FD_CAPACITY=16"]),
     ("test_relay", ["Relay", "OwnedStop", "Mux", "Envelope"], []),
+    ("test_relay_16", ["Relay", "OwnedStop", "Mux", "Envelope"], ["-DCW_FD_CAPACITY=16"]),
     ("test_sandbox_profile", ["Sandbox"], []),
 ]
-TEST_SOURCE = {"test_handoff_256": "test_handoff", "test_handoff_16": "test_handoff"}
+TEST_SOURCE = {"test_handoff_256": "test_handoff", "test_handoff_16": "test_handoff", "test_relay_16": "test_relay"}
 
 # The only libkrun entry points the worker may reference (the contract's names, the generic setters, and nothing else).
 ALLOWED_KRUN = {

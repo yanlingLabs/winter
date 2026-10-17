@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 typedef struct {
     int l2[2], l3[2], l4[2]; /* [0] the test's end (launcher / guest), [1] the relay's */
@@ -512,6 +513,49 @@ static void pings(void) {
     rig_down();
 }
 
+/* Only meaningful with a 16 slot control buffer: twenty descriptors on L2 or on L3 AFTER intake are a truncated control buffer, which
+ * ends the worker with exit 79 and acknowledges nothing. Runs in a child; the parent checks the status. */
+static void send_rights(int fd, int count) {
+    int victim = open("/dev/null", O_RDONLY);
+    uint8_t byte = 'W';
+    union { struct cmsghdr alignment; unsigned char bytes[CMSG_SPACE(40 * sizeof(int))]; } rights;
+    memset(&rights, 0, sizeof rights);
+    struct iovec io = { &byte, 1 };
+    struct msghdr message;
+    memset(&message, 0, sizeof message);
+    message.msg_iov = &io; message.msg_iovlen = 1; message.msg_control = rights.bytes; message.msg_controllen = CMSG_SPACE((size_t)count * sizeof(int));
+    struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+    header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS; header->cmsg_len = CMSG_LEN((size_t)count * sizeof(int));
+    for (int i = 0; i < count; i++) memcpy((unsigned char *)CMSG_DATA(header) + (size_t)i * sizeof victim, &victim, sizeof victim);
+    CHECK(sendmsg(fd, &message, 0) == 1);
+    close(victim);
+}
+static int truncated_rights_child(int on_l2) {
+    cw_test_failures = 0;
+    rig_up(getppid(), 3);
+    send_rights(on_l2 ? rig.l2[0] : rig.l3[0], 20);
+    int done = pump(5);
+    l2_event events[4];
+    CHECK(collect_l2(events, 4) == 0); /* nothing is acknowledged */
+    return cw_test_failures != 0 ? 1 : (done && relay.exit_code == CW_EXIT_RIGHTS ? 0 : 3);
+}
+static int on_l2_child(void) { return truncated_rights_child(1); }
+static int on_l3_child(void) { return truncated_rights_child(0); }
+static void truncated_control_buffer(void) {
+    if (CW_FD_CAPACITY >= 20) return;
+    int (*bodies[2])(void) = { on_l2_child, on_l3_child };
+    for (int i = 0; i < 2; i++) {
+        fflush(NULL);
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (child == 0) _exit(bodies[i]());
+        int status = 0;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status));
+        if (WEXITSTATUS(status) != 0) fprintf(stderr, "truncated-rights child %d exited %d\n", i, WEXITSTATUS(status));
+        CHECK(WEXITSTATUS(status) == 0);
+    }
+}
+
 int main(void) {
     int before = cw_test_open_descriptors();
     relays_bootstrap_and_runtime_blind();
@@ -529,6 +573,7 @@ int main(void) {
     before_the_vm();
     descriptors_after_intake();
     pings();
+    truncated_control_buffer();
     CHECK(cw_test_open_descriptors() == before);
-    return cw_test_finish("test_relay");
+    return cw_test_finish(CW_FD_CAPACITY == 256 ? "test_relay[256]" : "test_relay[16]");
 }
