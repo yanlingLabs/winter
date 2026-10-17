@@ -1,0 +1,309 @@
+"""Source guards for the production Cowork worker (N2 slice S3). Pure Python over the source text; nothing is compiled or run.
+
+Run as `python3 -I Tests/test_guards.py <repository root>`.
+
+These pin the properties no VM-free C test can reach: the ORDER of main (sandbox before the first read), the APIs the worker must
+never call (no network, no fork or exec outside the sandbox probe, no alarm, no argv layout, no fixture symbol), the HARD receive
+rule (recvmsg with a control buffer only), the exact entitlement set, the pinned golden vectors, and the anti-wiring pin.
+"""
+import hashlib
+import json
+import os
+import plistlib
+import re
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+REPO = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[4]
+PACKAGE = REPO / "apple" / "Cowork" / "WinterCoworkHVFWorker"
+SOURCES = PACKAGE / "Sources" / "WorkerNative"
+TESTS = PACKAGE / "Tests"
+
+# Only these paths may mention the package or the binary. S2 (launcher) and S7 (integration) will each have to extend this
+# list in the commit that first wires the worker; until then nothing outside the package refers to it.
+ANTI_WIRING_ALLOWED = ("apple/Cowork/WinterCoworkHVFWorker/", "docs/research/2026-10-17-cowork-n2-worker.md")
+ANTI_WIRING_NEEDLES = ("WinterCoworkHVFWorker", "winter-cowork-worker", "WorkerNative", "com.winter.cowork.worker")
+
+ALLOWED_KRUN = {
+    "krun_init_log", "krun_create_ctx", "krun_set_vm_config", "krun_disable_implicit_vsock", "krun_set_env", "krun_disable_implicit_console",
+    "krun_add_serial_console_default", "krun_set_kernel", "krun_start_enter",
+    "krun_cowork_enable_production_profile", "krun_cowork_set_workspace_disks", "krun_cowork_create_runtime_port", "krun_cowork_validate_production_profile",
+    "krun_cowork_enable_profile_v1", "krun_cowork_set_workspace_disks_v1", "krun_cowork_create_mux_stream_v1", "krun_cowork_get_flush_counters_v1", "krun_cowork_set_exit_hook_v1",
+}
+S4_NAMES = ("krun_cowork_enable_production_profile", "krun_cowork_set_workspace_disks", "krun_cowork_create_runtime_port", "krun_cowork_validate_production_profile")
+# COWORK_LIBKRUN_FORBIDDEN_SYMBOLS of the contract, and the fixture entry points that have no production equivalent.
+FORBIDDEN_KRUN = ("krun_get_shutdown_eventfd", "krun_add_vsock", "krun_add_vsock_port", "krun_add_vsock_port2", "krun_add_virtiofs", "krun_add_virtiofs2", "krun_add_virtiofs3",
+                  "krun_add_virtiofs4", "krun_set_port_map", "krun_set_gpu_options", "krun_set_gpu_options2", "krun_add_display", "krun_add_input_device", "krun_add_input_device_fd",
+                  "krun_enable_cowork_block_fixture_reclaim", "krun_create_cowork_runtime_stream", "krun_set_cowork_workspace_disks", "krun_enable_cowork_runtime_port_fixture_trace",
+                  "krun_create_cowork_bootstrap_stream", "krun_set_cowork_bootstrap_stream", "krun_enable_cowork_fixture_reclaim", "krun_add_net", "krun_set_passt_fd", "krun_set_gvproxy_path")
+
+
+def strip_c(text: str) -> str:
+    """Remove comments, keep string and character literals."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"' or c == "'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def code(path: Path) -> str:
+    return strip_c(path.read_text())
+
+
+def function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for i in range(brace, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:i + 1]
+    raise AssertionError(f"unbalanced braces after {signature}")
+
+
+def source_files():
+    return sorted(SOURCES.glob("*.[ch]"))
+
+
+def repo_files():
+    if (REPO / ".git").exists():
+        names = subprocess.run(["/usr/bin/git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others", "--exclude-standard"], capture_output=True, check=True).stdout.split(b"\0")
+        return [REPO / name.decode() for name in names if name]
+    return [Path(root) / name for root, dirs, files in os.walk(REPO) if ".git" not in Path(root).parts for name in files]
+
+
+class MainOrder(unittest.TestCase):
+    def test_the_sandbox_is_installed_before_the_first_read(self):
+        main = function_body(code(SOURCES / "WorkspaceWorker.c"), "int main(int argc")
+        self.assertLess(main.index("cw_intake_run("), main.index("configure_vm("), "intake must precede the VM")
+        self.assertLess(main.index("cw_channel_admit("), main.index("cw_intake_run("))
+        self.assertLess(main.index("resolve_artifacts("), main.index("cw_intake_run("), "artifact paths are resolved before the sandbox: they cannot be after it")
+        step = function_body(code(SOURCES / "WorkspaceWorker.c"), "static int install_sandbox_step")
+        self.assertLess(step.index("cw_sandbox_install("), step.index("cw_sandbox_probe("))
+        self.assertLess(step.index("cw_sandbox_probe("), step.index("CW_STATUS_SANDBOXED"), "'sandboxed' is reported only after the sandbox and its probes")
+
+    def test_intake_installs_the_sandbox_before_it_reads(self):
+        body = function_body(code(SOURCES / "AdmittedVolumes.c"), "void cw_intake_run(")
+        self.assertLess(body.index("config->install_sandbox("), body.index("next_datagram("), "the sandbox hook must precede the first receive")
+        self.assertEqual(body.count("config->install_sandbox("), 1)
+        self.assertFalse("cw_env_recv(" in body, "intake receives only through next_datagram")
+
+    def test_only_intake_and_the_relay_receive_envelopes(self):
+        for path in source_files():
+            if path.suffix != ".c":
+                continue
+            text = code(path)
+            if path.name not in ("AdmittedVolumes.c", "Relay.c", "Envelope.c"):
+                self.assertFalse("cw_env_recv(" in text, f"{path.name} must not read L2")
+        self.assertNotIn("cw_env_recv(", code(SOURCES / "WorkspaceWorker.c"))
+
+    def test_the_vm_is_configured_after_the_volumes_and_the_relay_starts_before_krun_start_enter(self):
+        main = function_body(code(SOURCES / "WorkspaceWorker.c"), "int main(int argc")
+        self.assertLess(main.index("configure_vm("), main.index("cw_relay_init("))
+        self.assertLess(main.index("cw_relay_init("), main.index("pthread_create(&pump"))
+        self.assertLess(main.index("pthread_create(&pump"), main.index("krun_start_enter("), "everything that must keep running starts before krun_start_enter, which never returns")
+        self.assertLess(main.index("cw_relay_vm_started("), main.index("pthread_create(&pump"))
+        self.assertEqual(code(SOURCES / "WorkspaceWorker.c").count("krun_start_enter("), 1)
+
+    def test_check_mode_creates_no_libkrun_context(self):
+        main = function_body(code(SOURCES / "WorkspaceWorker.c"), "int main(int argc")
+        check = main[main.index("if (check_only) {"):main.index("pthread_t console;")]
+        self.assertFalse("krun_" in check)
+        self.assertFalse("configure_vm" in check)
+        self.assertIn("worker_exit(CW_EXIT_OK)", check)
+        self.assertLess(main.index("if (check_only) {"), main.index("configure_vm("), "--sandbox-check leaves before any libkrun call")
+
+
+class ForbiddenApis(unittest.TestCase):
+    def test_no_alarm_no_argv_layout_no_environment_no_fixture(self):
+        for path in source_files():
+            text = code(path)
+            self.assertNotRegex(text, r"\balarm\s*\(", f"{path.name}: the fixture's alarm(120) must stay removed")
+            for needle in ("getenv(", "setenv(", "putenv(", "system(", "popen(", "posix_spawn", "dlopen(", "dlsym(", "NSBundle", "generic_sampler", "sampler"):
+                self.assertFalse(needle in text, f"{path.name}: {needle}")
+            if path.name != "Sandbox.c": # the denial probe is the one place a process image is ever asked for
+                self.assertIsNone(re.search(r"\bexec[lv]\w*\s*\(", text), f"{path.name}: exec")
+            self.assertIsNone(re.search(r"\benviron\b", text), f"{path.name}: environ (the worker takes nothing from its environment)")
+            self.assertNotRegex(text, r"(?i)fixture", f"{path.name}: no fixture opt-in, trace or name in code")
+        worker = code(SOURCES / "WorkspaceWorker.c")
+        self.assertEqual(sorted(set(re.findall(r"argv\[\d+\]", worker))), ["argv[1]"], "the only argv use is the --sandbox-check mode switch")
+        self.assertIn('strcmp(argv[1], "--sandbox-check")', worker)
+        self.assertTrue("argc != 1" in worker, "no argument layout: anything but the one flag is refused")
+
+    def test_no_baked_in_fixture_limits(self):
+        worker = code(SOURCES / "WorkspaceWorker.c")
+        self.assertNotRegex(worker, r"\b768\b", "the 2 vCPU / 768 MiB fixture constants came from the SCOPE envelope, not the source")
+        self.assertNotRegex(worker, r"krun_set_vm_config\([^;]*\b2\s*,", "vCPUs come from SCOPE")
+        self.assertTrue("intake->scope.vcpus" in worker)
+        self.assertTrue("intake->scope.memory_mib" in worker)
+        self.assertTrue("CW_GATE_VCPUS" in worker)
+
+    def test_process_creation_and_network_exist_only_in_the_sandbox_probe(self):
+        for path in source_files():
+            if path.suffix != ".c" or path.name == "Sandbox.c":
+                continue
+            text = code(path)
+            for call in ("fork", "execve", "socket", "connect", "bind", "listen", "accept", "sendto", "getaddrinfo", "gethostbyname"):
+                self.assertIsNone(re.search(rf"(?<![A-Za-z0-9_]){call}\s*\(", text), f"{path.name}: {call}()")
+            self.assertFalse("AF_INET" in text, f"{path.name}: AF_INET")
+        # socketpair and getsockopt on inherited descriptors are allowed; opening a socket is not.
+        self.assertTrue("fork()" in code(SOURCES / "Sandbox.c"))
+
+    def test_libkrun_references_are_the_reviewed_inventory(self):
+        not_functions = {"krun_check", "krun_cowork_volume_identity", "krun_cowork_volume_identity_v1", "krun_cowork_flush_counters_v1"}
+        for path in source_files():
+            text = code(path)
+            for name in FORBIDDEN_KRUN:
+                self.assertNotRegex(text, rf"\b{name}\b", f"{path.name}: {name} is not admitted")
+            used = set(re.findall(r"\bkrun_[a-z0-9_]+\b", text)) - not_functions
+            self.assertLessEqual(used, ALLOWED_KRUN, f"{path.name}: {sorted(used - ALLOWED_KRUN)}")
+            if path.name != "CoworkAbi.h":
+                for name in S4_NAMES:
+                    self.assertIsNone(re.search(rf"\b{name}\b", text), f"{path.name}: S4's names appear only in CoworkAbi.h, the one rename point")
+
+    def test_the_vm_refuses_to_start_without_flush_evidence(self):
+        worker = code(SOURCES / "WorkspaceWorker.c")
+        configure = function_body(worker, "static int configure_vm(")
+        self.assertIn("krun_cowork_set_exit_hook_v1(", configure)
+        self.assertRegex(configure, r"krun_check\(krun_cowork_set_exit_hook_v1\(")
+        abi = code(SOURCES / "CoworkAbi.h")
+        self.assertEqual(abi.count("return -ENOSYS;"), 2, "both missing symbols are inline refusals, never an atexit() stand-in")
+        self.assertFalse("atexit" in abi + worker)
+
+    def test_the_hard_receive_rule(self):
+        for path in source_files():
+            if path.suffix != ".c":
+                continue
+            text = code(path)
+            for needle in (r"\brecv\s*\(", r"\brecvfrom\s*\(", r"\breadv\s*\(", r"\bpread\s*\("):
+                self.assertNotRegex(text, needle, f"{path.name}: sockets are read with recvmsg and a control buffer only")
+            if path.name != "WorkspaceWorker.c":
+                self.assertNotRegex(text, r"\bread\s*\(", f"{path.name}: plain read() installs rights on macOS")
+        worker = code(SOURCES / "WorkspaceWorker.c")
+        self.assertEqual(re.findall(r"\bread\s*\(([^,]*),", worker), ["console_read_fd"], "the only plain read() is the console PIPE")
+        for name in ("Envelope.c", "Mux.c"):
+            text = code(SOURCES / name)
+            self.assertEqual(len(re.findall(r"\brecvmsg\s*\(", text)), len(re.findall(r"MSG_CTRUNC", text)), f"{name}: every recvmsg judges MSG_CTRUNC")
+            self.assertTrue("msg_control" in text)
+        for name in ("Relay.c", "AdmittedVolumes.c", "ConsoleRing.c", "OwnedStop.c", "Sandbox.c", "WorkspaceWorker.c"):
+            self.assertFalse("recvmsg" in code(SOURCES / name), f"{name} reads through Envelope.c or Mux.c only")
+
+    def test_silent_exit_is_79(self):
+        common = (SOURCES / "WorkerCommon.h").read_text()
+        self.assertRegex(common, r"#define CW_EXIT_RIGHTS 79\b")
+        volumes = code(SOURCES / "AdmittedVolumes.c")
+        self.assertTrue("CW_EXIT_RIGHTS" in volumes)
+        self.assertTrue("CW_RECV_CTRUNC" in volumes)
+        self.assertTrue("CW_EXIT_RIGHTS" in code(SOURCES / "Relay.c"))
+
+    def test_the_lock_is_flock_and_never_release_evidence(self):
+        text = code(SOURCES / "AdmittedVolumes.c")
+        self.assertIn("flock(fd, LOCK_EX | LOCK_NB)", text)
+        self.assertFalse("F_SETLK" in text, "a POSIX lock is dropped by any close in the process")
+        for path in source_files():
+            self.assertNotRegex(code(path), r"\b(release|released)\w*\s*=", f"{path.name}")
+
+    def test_the_status_never_claims_more_than_it_saw(self):
+        relay = code(SOURCES / "Relay.c")
+        self.assertEqual(relay.count("CW_STATUS_DRAIN_ACKED"), 1)
+        self.assertTrue("CW_STOP_REPORT_ACKED" in relay)
+        self.assertEqual(relay.count("CW_STATUS_GUEST_HALTED"), 1)
+        # guest_halted comes from the exit hook only
+        self.assertTrue("cw_relay_guest_halted" in code(SOURCES / "WorkspaceWorker.c"))
+
+
+class Package(unittest.TestCase):
+    def test_entitlements_are_exactly_the_hypervisor(self):
+        self.assertEqual(plistlib.loads((PACKAGE / "worker.entitlements").read_bytes()), {"com.apple.security.hypervisor": True})
+
+    def test_the_fixtures_are_the_pinned_s1_vectors(self):
+        pins = json.loads((TESTS / "fixtures" / "PINS.json").read_text())
+        self.assertEqual(sorted(pins["files"]), ["envelopes.json", "mux-frames.json"])
+        for name, expected in pins["files"].items():
+            self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
+        self.assertEqual(pins["source"]["head"], "eeb7618f9d016284bfd5eae37e4a1df9af3791df")
+        self.assertEqual(len(pins["relayBlind"]["vectors"]), 5)
+
+    def test_every_test_source_is_run_and_none_touches_the_sandbox_or_a_vm(self):
+        build = (PACKAGE / "build.py").read_text()
+        run = {re.sub(r"_(256|16)$", "", name) for name in re.findall(r'\("(test_[a-z_0-9]+)",', build)}
+        self.assertEqual(run, {p.stem for p in TESTS.glob("test_*.c")}, "build.py runs exactly the C tests that exist")
+        for path in TESTS.glob("test_*.c"):
+            text = code(path)
+            for needle in ("krun_", "hv_vm", "hv_vcpu", "Hypervisor", "cw_sandbox_install", "cw_sandbox_probe", "execv", "posix_spawn", "system(", "popen(", "dlopen("):
+                self.assertFalse(needle in text, f"{path.name}: {needle}")
+            if path.name != "test_sandbox_profile.c":
+                self.assertFalse("sandbox_init" in text, f"{path.name}")
+        profile = code(TESTS / "test_sandbox_profile.c")
+        self.assertEqual(profile.count("_exit(99)"), 3, "the profile test replaces all three SPI entry points with poisoned stubs")
+        # The contract-name stub refuses everything: every definition in it returns -ENOSYS, and it names no Hypervisor call.
+        stub = code(TESTS / "stubs" / "krun_contract_stub.c")
+        self.assertFalse("hv_" in stub)
+        definitions = re.findall(r"^int32_t (krun_\w+)\([^;{]*\)\s*\{([^}]*)\}", stub, re.M)
+        self.assertGreaterEqual(len(definitions), 14)
+        for name, body in definitions:
+            self.assertTrue("return -ENOSYS;" in body, name)
+
+    def test_the_build_is_offline_and_isolated(self):
+        build = (PACKAGE / "build.py").read_text()
+        for needle in ("import urllib", "import socket", "http.client", "import requests", "import ssl", "pip install", "curl ", "wget ", "git clone", "cargo build", "npm install"):
+            self.assertNotIn(needle, build, needle)
+        for needle in ('"-Werror"', "-ffile-prefix-map", '"-Wl,-dead_strip"', "/usr/bin/strip", "--out must be outside the repository", '"-I", TESTS / "gen_vectors.py"'.replace('"-I", ', "")):
+            self.assertIn(needle, build, needle)
+        self.assertEqual(build.count('"--sign"'), 1)
+        self.assertIn('"--sign", "-"', build, "ad-hoc signing only")
+        for needle in ("/usr/bin/security", "stapler", "notarytool", "altool", "Developer ID Application", "find-identity"):
+            self.assertNotIn(needle, build, needle)
+        self.assertIn('sys.executable, "-I"', build, "child Python runs isolated")
+
+    def test_no_personal_paths_or_names_in_the_package(self):
+        for path in list(PACKAGE.rglob("*")):
+            if path.is_file() and path.suffix in (".c", ".h", ".py", ".json", ".md", ".entitlements"):
+                text = path.read_text()
+                for needle in ("/Us" + "ers/", "/ho" + "me/", "@" + "gmail", "kar" + "im", "Kar" + "im", "Norma" + " v2"):
+                    self.assertFalse(needle in text, f"{path.relative_to(REPO)}: {needle}")
+
+
+class AntiWiring(unittest.TestCase):
+    def test_nothing_outside_the_package_refers_to_it(self):
+        offenders = []
+        for path in repo_files():
+            relative = path.relative_to(REPO).as_posix()
+            if relative.startswith(ANTI_WIRING_ALLOWED) or not path.is_file():
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            offenders += [f"{relative}: {needle}" for needle in ANTI_WIRING_NEEDLES if needle in text]
+        self.assertEqual(offenders, [], "the worker is unwired: no source, script, project file or workflow outside the package may name it")
+
+    def test_the_worker_package_imports_nothing_from_the_daemon_or_the_launcher(self):
+        for path in source_files():
+            for include in re.findall(r'#include\s+"([^"]+)"', path.read_text()):
+                self.assertTrue((SOURCES / include).exists() or include == "libkrun.h" or include == "vectors.h", f"{path.name}: {include}")
+
+
+if __name__ == "__main__":
+    unittest.main(argv=[sys.argv[0]], verbosity=1)

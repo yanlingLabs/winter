@@ -1,0 +1,14 @@
+{
+  "note": "The libkrun inputs the worker is built and checked against. build.py refuses to build unless both hashes match. The archive is S4's STRIPPED production archive (the raw one carries the Rust project's own CI Xcode path in its debug stabs and would trip the release name scan). S3 did not rebuild it: S4 built it from its recipe (rustc 1.90.0, offline crate cache, --remap-path-prefix, ZERO_AR_DATE=1 strip) and recorded that it is bit-identical when produced twice at different absolute paths.",
+  "libkrun": {
+    "archiveSha256": "f6e7beec1a11a3abb23007bbfc70354ad3dbe14fd8c8ded85cb887acee810f38",
+    "headerSha256": "af65994a309fedc9918e6197b27271ee85d3b4eb957ec5a40503b85c10e8e7b5",
+    "fromPullRequest": 55,
+    "fromBranch": "cowork/n2-libkrun-profile",
+    "fromCommit": "2221528b9a0e43be290e2e962f02d1284e57319e",
+    "recipe": "spikes/cowork-hvf/N2-PRODUCTION-PROFILE.md, section 'Reproducible build'",
+    "libkrunSource": "v1.19.6 227b2de6ed323fe180e02f871c5f325a90c13cc2 plus patch queue 0004-0016"
+  },
+  "linkLibraries": ["-framework", "Hypervisor", "-liconv", "-lSystem", "-lc", "-lm"],
+  "allowedDylibs": ["/usr/lib/libSystem.B.dylib", "/usr/lib/libiconv.2.dylib", "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor"]
+}
