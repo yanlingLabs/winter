@@ -158,3 +158,21 @@ test("the neighbour scanner sees bare imports, export-from, dynamic import() and
   const allowedFixture = new Set(["node:crypto", "bun:ffi", "../admission"]);
   for (const planted of ['import "node:net";', 'export { a } from "../daemon";', 'await import("../ipc/server");', "await import(name);"]) expect(astSpecifiers(planted).every(target => allowedFixture.has(target))).toBe(false);
 });
+
+/** Every identifier, property name and string literal in a source that spells `name` (an AST scan, so a comment does not count and a computed or quoted spelling does). */
+export function spellsToken(source: string, name: string): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node) || ts.isPrivateIdentifier(node)) && node.text.includes(name)) found = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true));
+  return found;
+}
+test("the test-only `unsafeTestTimeouts` switch is spelled nowhere under packages/*/src except cowork/native/host.ts", () => {
+  const holders = allSources.filter(file => spellsToken(readFileSync(file, "utf8"), "unsafeTestTimeouts")).map(file => relative(packages, file).split(sep).join("/"));
+  expect(holders).toEqual(["core/src/cowork/native/host.ts"]);
+  // The scanner itself: it sees an identifier, a property key, a quoted spelling and a template-free string, and ignores a comment.
+  for (const planted of ["const unsafeTestTimeouts = true;", "x({ unsafeTestTimeouts: true });", 'x({ "unsafeTestTimeouts": true });', 'const k = "unsafeTestTimeouts";']) expect(spellsToken(planted, "unsafeTestTimeouts")).toBe(true);
+  expect(spellsToken("// unsafeTestTimeouts is mentioned only here\nconst a = 1;", "unsafeTestTimeouts")).toBe(false);
+});

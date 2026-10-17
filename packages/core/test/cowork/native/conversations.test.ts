@@ -60,6 +60,29 @@ test("a duplicate runtime_ready is ignored: the first stands, as a second DRAIN 
   expect(h.launcher.last.conversationSets.length).toBe(1);
   expect(await running.stop()).toEqual({ released: true, evidence: "orderly-receipt" });
 });
+test("a duplicate runtime_ready still passes the up-sequence check: no gap for a later bootstrap-up consumer, and nothing else moves", async () => {
+  const single = createHarness({ behavior: { conversations: "ok" }, conversations: guidedSet }), doubled = createHarness({ behavior: { conversations: "duplicate-ready" }, conversations: guidedSet });
+  const first = await single.host.start(single.workspaceId), second = await doubled.host.start(doubled.workspaceId);
+  await Bun.sleep(20);
+  // hello, receipt, mounted, runtime_ready = 4 frames; the duplicate is the fifth.
+  expect(single.host.nextBootstrapUpSequence(single.workspaceId)).toBe(5);
+  expect(doubled.host.nextBootstrapUpSequence(doubled.workspaceId)).toBe(6);
+  expect(doubled.records.get(doubled.workspaceId).power).toBe("running");
+  expect(doubled.ledger.listActive().map(record => record.state)).toEqual(["running"]);
+  expect(owners(doubled).every(owner => owner !== null)).toBe(true);
+  await first.stop(); await second.stop();
+});
+test("a duplicate runtime_ready that arrives after the start is counted in the up sequence too, and changes nothing", async () => {
+  const h = createHarness({ conversations: guidedSet });
+  const running = await h.host.start(h.workspaceId);
+  const set = h.launcher.last.conversationSets[0]!;
+  expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  await Bun.sleep(10);
+  expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(6);
+  expect(h.records.get(h.workspaceId).power).toBe("running");
+  await running.stop();
+});
 
 const GUEST_FAILURES: [string, FakeBehavior, string][] = [
   ["bad_conversations", { conversations: "bad" }, "guest_fault"],
