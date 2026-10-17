@@ -8,12 +8,12 @@
 //
 // WHAT: this module, imported FIRST by every package's test preload, creates ONE fresh directory under the
 // real temp folder, points `process.env.TMPDIR` at it (Bun's `os.tmpdir()` reads the variable on every call,
-// verified on bun 1.3.14), and removes the whole tree when the run ends. Every `tmpdir()` caller in the
+// verified on bun 1.3.14 and 1.4.2), and removes the whole tree when the run ends. Every `tmpdir()` caller in the
 // process, every `startDaemon` home, every `sessionTmpDir` and every child that inherits `process.env` then
 // lands inside it.
 //
 // HOW IT IS REMOVED — measured, not assumed. `bun test` ends by exiting natively: neither `process.on("exit")`
-// nor `beforeExit` fires at the end of a run (bun 1.3.14), so an exit handler alone removes NOTHING. And a
+// nor `beforeExit` fires at the end of a run (bun 1.3.14 and 1.4.2), so an exit handler alone removes NOTHING. And a
 // preload `afterAll` that removes the tree itself is worse than nothing: a full core run leaves ~3,600
 // directories (~150 MB), `rmSync` blocks for ~6 s, and bun's 5 s hook timeout turns that into a failed
 // "(unnamed)" test and a red run. So the removal is never done by the test process. A tiny DETACHED
@@ -27,8 +27,10 @@
 // when something calls `process.exit()`, the one exit path that fires it).
 //
 // KNOWN LIMITS, stated rather than hidden:
-//   - Bun 1.3.14's `Bun.spawn`/`child_process.spawn` with NO `env` option hand the child the environment the
-//     process STARTED with, not later `process.env` writes. A child spawned that way keeps the starting
+//   - `Bun.spawn`/`Bun.spawnSync` with NO `env` option hand the child the environment the process STARTED
+//     with, not later `process.env` writes (measured on 1.3.14 and 1.4.2). Bun 1.3.14's `child_process.spawnSync`/
+//     `execFileSync` did the same (only async `child_process.spawn` re-read it); Bun 1.4.2 re-reads for all of
+//     `child_process`, so nothing leaks that did not before. A child spawned the leaking way keeps the starting
 //     `$TMPDIR` (the real one). Every spawn site in this repo that matters to temp hygiene (test daemons,
 //     workers) passes `env: { ...process.env, … }`; a bare spawn that leaks is a bug in that test.
 //   - Things that ask the C library instead of the environment (`confstr(_CS_DARWIN_USER_TEMP_DIR)`: macOS
