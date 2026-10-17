@@ -114,14 +114,14 @@ test("the stream prefix is four fixed bytes in the payload: conversation, stream
 });
 test("the runtime stream tracker refuses a conversation outside the delivered set and anything after a stream's end", () => {
   const frame = (conversation: number, stream: "in" | "out" | "err", end = false) => ({ class: "runtime" as const, seq: 1, conversation, stream, end, payload: new Uint8Array([1]) });
-  const streams = new CoworkNativeRuntimeStreams(2);
-  streams.accept(frame(0, "out")); streams.accept(frame(1, "err")); streams.accept(frame(0, "out", true));
+  const streams = new CoworkNativeRuntimeStreams(1);
+  streams.accept(frame(0, "out")); streams.accept(frame(0, "err")); streams.accept(frame(0, "out", true));
   expect(code(() => streams.accept(frame(0, "out")))).toBe("bad_field"); // data after the end
   expect(code(() => streams.accept(frame(0, "out", true)))).toBe("bad_field"); // a second end
   streams.accept(frame(0, "err")); // another stream of the same conversation is independent
-  expect(code(() => streams.accept(frame(2, "out")))).toBe("bad_field"); // not in the delivered set
+  expect(code(() => streams.accept(frame(1, "out")))).toBe("bad_field"); // not in the delivered set (N2: one host-query conversation)
   expect(code(() => streams.accept({ class: "bootstrap", seq: 1, message: { t: "mounted", operationId: "x", nonce: "0f".repeat(16) } } as never))).toBe("bad_field");
-  for (const count of [0, 17, 1.5]) expect(code(() => new CoworkNativeRuntimeStreams(count))).toBe("bad_field");
+  for (const count of [0, 2, 17, 1.5]) expect(code(() => new CoworkNativeRuntimeStreams(count))).toBe("bad_field");
 });
 test("the largest legal mux frame fits the largest legal carrier line", () => {
   const frame = { class: "runtime" as const, seq: 1, conversation: 0, stream: "in" as const, end: false, payload: new Uint8Array(COWORK_NATIVE_LIMITS.muxPayloadBytes.runtime - COWORK_NATIVE_LIMITS.runtimePrefixBytes).fill(0xff) };
@@ -299,7 +299,7 @@ test("the conversation message is bounded below the bootstrap class ceiling, and
   expect(COWORK_NATIVE_LIMITS.conversationsBytes).toBeLessThan(COWORK_NATIVE_LIMITS.muxPayloadBytes.bootstrap);
   expect(COWORK_NATIVE_LIMITS.conversationsBytes).toBe(20_480); // the guest relay's payload cap as built
   for (const entry of mux.positive.filter(item => item.class === "bootstrap" || item.class === "control")) expect(Buffer.from(entry.hex, "hex").subarray(16).every(byte => byte >= 0x20 && byte <= 0x7e)).toBe(true);
-  expect(mux.negative.map(entry => entry.name)).toEqual(expect.arrayContaining(["conversations-over-the-message-cap", "conversations-non-ascii-model", "conversations-provider-over-4k"]));
+  expect(mux.negative.map(entry => entry.name)).toEqual(expect.arrayContaining(["conversations-over-the-message-cap", "conversations-non-ascii-model", "conversations-provider-over-4k", "conversations-two-host-query-conversations"]));
 });
 test("every conversation negative is covered by a vector, and the set rules are each exercised", () => {
   const names = mux.negative.map(entry => entry.name).filter(name => name.startsWith("conversations-"));

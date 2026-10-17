@@ -234,7 +234,25 @@ reach ready), `second_conversations` (a second set arrived: it is ignored and th
 cannot be re-sent, extended or replaced while the guest runs. A host that wants another conversation stops the workspace and starts the next incarnation.
 
 `profile` is `null` (tools only: every conversation has `runtime: null`), `host-query-v1` or `host-query-guided-v1` (every conversation has a `runtime`; `guided` is non-null
-exactly for the guided profile). The `fresh` profile is not carried: it has no duplex transport. The message holds at most 16 conversations and is at most 20 KiB.
+exactly for the guided profile). The `fresh` profile is not carried: it has no duplex transport. The message holds at most 16 conversations and is at most 20 KiB (20,480 bytes).
+
+**N2 limit (D10): at most ONE host-query conversation per guest.** A message with a non-null `profile` holds exactly one conversation (`coworkNativeConversationsAreBound` and the parser refuse
+more); the runtime class has a single duplex stream set, and the guest's supervisor (agent SDK PR 30, `cowork/n2-guest-relay`, head `ed228f39`) exits 64 on a second host-query conversation. The runtime stream
+index is therefore always 0 (`CoworkNativeRuntimeStreams` takes exactly 1). The prefix keeps the index byte so a later version can lift the limit without changing the frame.
+
+**Authentication and binding.** There is no signature: the channel is the authority (the mux link is the guest's only host path, and its far end is the launcher's worker). The message is accepted only if it echoes the
+`operationId` and `nonce` of the plan the guest holds, and only after `ready` was answered by `mounted`, so a guest that never received a plan, or a replay of an older set, cannot be started. The acknowledgement is
+`runtime_ready` (below) bound to the same pair, or a bootstrap `fault`.
+
+**The supervisor's command line and ready line are the SDK's, not a second spelling:** PID 1 starts `linux-supervisor.py --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR]` in that order and no other,
+the numbers canonical decimals at least 3 and distinct (anything else exits 64); `IN` is a FIFO the supervisor reads, `OUT` and `ERR` FIFOs it writes, the relay owning the virtio-console port is their far end. With no
+host-query conversation the port descriptors are not passed. The supervisor's ready line is exactly `{"fullGuestExecutionEnabled":false,"ready":true}`; the guest sends `runtime_ready` only after reading it.
+
+**The environment disk is NOT mounted in N2.** It is attached, probed and formatted like the data disk, and its flushes and final sync are in the receipt, so a Class A covers both disks; but nothing consumes it under D10
+(the supervisor's `/opt/winter/environment/base` is a static read-only base inside the initramfs, not this disk), so PID 1 mounts nothing at `/opt/winter/environment/disk`. The mount is added in the slice that has a consumer.
+
+**Payload ceiling.** The guest's relay refuses a bootstrap-down payload above 20,480 bytes (guest-local); the class ceiling stays 262,144 for the guest's own receipts. A plan is about 1.7 KiB and its schema caps it at 16 KiB,
+so the conversation set is the only message with a cap of its own.
 
 | Conversation key | Value |
 | --- | --- |
@@ -271,7 +289,7 @@ frames without reading them, change nothing.
 | 2 | 1 | flags: bit 0 = this is the end of that stream after these bytes; every other bit zero |
 | 3 | 1 | reserved, zero |
 
-A conversation's three streams are the supervisor's `RuntimeDuplexPorts` input, stdout and stderr. IN travels only down; OUT and ERR only up (anything else is `bad_direction`). An empty data section
+A conversation's three streams are the supervisor's `RuntimeDuplexPorts` input, stdout and stderr (ERR is carried, not dropped). IN travels only down; OUT and ERR only up (anything else is `bad_direction`). An empty data section
 is valid only with the end flag. After a stream's end nothing more may arrive on it, and a conversation index outside the delivered set is refused (`CoworkNativeRuntimeStreams` is that state). Data is
 limited by the payload bound, 1 MiB minus 4 bytes; a sender uses chunks of at most 256 KiB (the host's own chunk limit). Frames of this class are delivered only after `runtime_ready`.
 
@@ -296,7 +314,7 @@ a live receipt that says the opposite (`not_orderly`): the receipt cannot know l
 all of this emits Class B instead.
 
 **`halting` and the guest's part of a stop (round 3).** `guest.drain = acked` means the guest's control-up `drain_ack` AND `halting` both arrived, in that order, carrying the drain's nonce;
-`guest.halting = observed` is the second of them on its own, so a receipt cannot claim an acknowledgement it did not see. **A bare power-off is Class B**: a guest that powers off without
+`guest.halting = observed` is the second of them on its own, so a receipt cannot claim an acknowledgement it did not see. **A bare power-off is Class B** (an uncertain disk state: ownership is retained and nothing is released, as for every Class B): a guest that powers off without
 `halting` could not prove its filesystems unmounted clean (S5: any failed step, a dirty superblock, a mount that would not go) and is `guest-fault`; so is a `guest_fault` status at any time
 (after one, no Class A can exist for the run), a power-off after `drain_ack` but before `halting`, a power-off with no `drain_ack`, and an exit reason of `reset` or `vcpu-error`. A drain that never
 reached `drain_ack` is `drain-timeout`. A worker that exited without reporting `guest_halted` (the exit watchdog skipped the hook), a `terminal-fault` or `none` reason are `flush-uncertain`. The one

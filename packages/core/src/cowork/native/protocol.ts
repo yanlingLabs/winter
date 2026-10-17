@@ -455,6 +455,8 @@ function checkConversationsMessage(message: Record<string, unknown>): void {
     if (authority.workspaceId !== first.workspaceId || authority.leaseEpoch !== first.leaseEpoch || authority.incarnationId !== message.incarnationId) return fail();
     if ((profile === null) !== (item.runtime === null) || (item.runtime !== null && (item.runtime.guided !== null) !== (profile === "host-query-guided-v1"))) return fail();
   }
+  // D10 scope, pinned by the guest relay (SDK #30 exits 64 on more): ONE host-query conversation per guest, because the runtime class has one duplex stream set.
+  if (profile !== null && items.length !== 1) return fail();
   if (new Set(items.map(item => item.logicalSessionId)).size !== items.length || new Set(items.map(item => item.authority.sessionId)).size !== items.length) return fail();
   const uids = items.flatMap(item => [item.runtimeUid, item.toolUid]);
   if (new Set(uids).size !== uids.length || items.some(item => items.some(other => other.runtimeUid === item.workspaceGid))) return fail();
@@ -503,6 +505,7 @@ const BOOTSTRAP_SPECS: Record<CoworkNativeMuxDirection, Record<string, Spec>> = 
 };
 /** Cross-field rules of one message type, run after its fields validated; and a tighter size cap than the class ceiling. */
 const MESSAGE_CHECKS: Record<string, (message: Record<string, unknown>) => void> = { conversations: checkConversationsMessage };
+/** The guest's relay refuses a bootstrap-DOWN payload above 20,480 bytes (guest-local; the class ceiling stays 262,144 for the guest's own receipts). A plan is about 1.7 KiB and its own schema caps it at 16 KiB, so only the conversation set needs a cap of its own. */
 const MESSAGE_CAPS: Record<string, number> = { conversations: COWORK_NATIVE_LIMITS.conversationsBytes };
 function jsonPayload(bytes: Uint8Array, specs: Record<string, Spec>, maxBytes: number, depth: number): Record<string, unknown> {
   if (bytes.length > maxBytes) return fail("oversize");
@@ -611,7 +614,8 @@ export class CoworkNativeMuxSequence {
 export class CoworkNativeRuntimeStreams {
   private readonly ended = new Set<string>();
   constructor(private readonly conversations: number) {
-    if (!Number.isInteger(conversations) || conversations < 1 || conversations > COWORK_NATIVE_LIMITS.runtimeConversations) fail("bad_field");
+    // N2 (D10): the runtime class serves exactly one host-query conversation, index 0.
+    if (conversations !== 1) fail("bad_field");
   }
   accept(frame: CoworkNativeMuxFrame): void {
     if (frame.class !== "runtime") return fail("bad_field");
