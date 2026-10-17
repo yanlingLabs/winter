@@ -13,7 +13,7 @@ A Dynamic-Island-style surface at the Mac's camera housing, in Winter.app. Phase
 
 ## Routing (`IslandRouter`, pure; `IslandRoutingTests`)
 
-1. **Dispatch, or a Dispatch-spawned child** (mode `dispatch` — Dispatch's own cards, now that it respects its approval policy —, origin `dispatch-child`, a coordinator among the known Dispatch sessions, or a card mirrored onto one): through the Dispatch pill while it is visible (its floating cards, as before); on top while it is not. The pill's visibility change re-routes.
+1. **Dispatch, or a Dispatch-spawned child** (mode `dispatch` — Dispatch's own cards, now that it respects its approval policy —, origin `dispatch-child`, a coordinator among the known Dispatch sessions, or a card mirrored onto one): through the Dispatch pill while it is visible (the pill morphs into the card — [dispatch-and-messaging](./dispatch-and-messaging.md#the-mac-pills-cards-approvals-questions-link-requests)); on top while it is not. The pill's visibility change re-routes.
 2. **Any other session**: HIDDEN on top while that session's host is in front; on top otherwise.
    - Winter.app: the app window or a detached window showing the session is key or main AND Winter is frontmost (`AppWindowController.isKeyOrMain`, `DetachedWindowController.isKeyOrMain`).
    - A terminal (the CLI/TUI): only its EXACT terminal window/tab, through its tty (below). No exact match → shown. A phone host (role `remote`) never hides anything.

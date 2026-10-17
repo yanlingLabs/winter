@@ -2,8 +2,10 @@ import SwiftUI
 
 /// ↗ — the pill grown to the screen: a header (working status, the child sessions, a small close
 /// button), the dispatch session's transcript (`TranscriptView`, the same one the app's windows
-/// draw — pending asks render there inline as live cards, which is why the floating overlay hides
-/// here) — and NO composer: full screen is for reading. A draft typed before ↗ waits in the adapter
+/// draw — pending asks render there inline as live cards, which is why the pill never morphs into
+/// a card here: with no composer to morph from, the ask's home is where it was asked, in the
+/// transcript; leaving full screen with an ask still pending morphs the pill into its card) — and
+/// NO composer: full screen is for reading. A draft typed before ↗ waits in the adapter
 /// and is back in the typing pill when this closes. The 4-finger tap or Esc collapses it back to the
 /// pill; so does the close button.
 struct FullScreenPillView: View {

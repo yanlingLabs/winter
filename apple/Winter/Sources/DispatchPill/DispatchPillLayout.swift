@@ -73,17 +73,32 @@ enum DispatchPillMetrics {
     /// The narrowest a child pill gets before the row stops splitting and shows "+n" instead —
     /// its stop circle plus room for a few letters of its title.
     static let minChildPillWidth: CGFloat = 72
-    /// The approval cards' width — wider than the compact pill, because a card has a summary and two
-    /// buttons to fit.
+    /// The width the pill morphs to when it becomes a card (an approval, a question, a link request) — wider than
+    /// the compact pill, because a card has a summary, rows and two circles to fit. A TYPING pill that becomes a
+    /// card keeps its own width (`expandedWidth`): a card never narrows what the user was looking at.
     static let cardWidth: CGFloat = 440
-    /// How many pending cards float at once; the rest wait behind a "+n more" line.
-    static let maxFloatingCards = 2
+    /// The tallest the pill grows as a card. Its content is bounded well inside this (line limits), so it is a
+    /// guard, not a layout.
+    static let maxCardHeight: CGFloat = 520
+    /// The card's height before its content has measured itself (the first frame of a morph — blurred anyway).
+    static let cardEstimatedHeight: CGFloat = 132
+    /// The card's insets inside the shell — the pill's own leading inset on the sides.
+    static var cardHorizontalPadding: CGFloat { leadingPadding }
+    static let cardVerticalPadding: CGFloat = 14
+    /// What a card spends outside its scrolling body: the header line, the pinned answer row (a 30 pt circle), the gaps
+    /// between them and the insets — generous, so the whole card stays under its ceiling.
+    static let cardChromeAllowance: CGFloat = 112
     /// Inset of the full-screen surface from the visible frame's sides and top.
     static let fullScreenInset: CGFloat = 28
     /// The most the content blurs mid-change of shape (`dispatchPillMorphBlur`).
     static let maxMorphBlur: CGFloat = 8
     /// Points of remaining spring travel per point of blur.
     static let morphBlurFalloff: CGFloat = 12
+    /// A content swap (pill ↔ card): the share of the shape's travel during which the new content stays hidden —
+    /// it fades and sharpens in over the last 38 %.
+    static let contentRevealStart: CGFloat = 0.62
+    /// A content swap: how long the OLD content takes to fade out before the shape starts to move.
+    static let contentFadeOut: TimeInterval = 0.12
     /// The rounded-rect radius a tall pill settles on — a capsule's radius at `pillHeight`.
     static let maxCornerRadius: CGFloat = 22
     /// The main pill's width while `/permissions` has turned it into the mode picker — the five chips,
@@ -137,6 +152,40 @@ func dispatchPillMainSize(
     }
 }
 
+/// PURE: the main pill's TARGET size while it IS a card (`DispatchPillCardQueue.front`). Full screen never morphs
+/// into a card (its transcript draws every pending ask inline), so the caller asks this only for compact and
+/// expanded. `measuredHeight` is the card content's own measured height at this width (0 until it has reported).
+func dispatchPillCardSize(presentation: DispatchPillPresentation, measuredHeight: CGFloat,
+                          visibleFrame: CGRect) -> CGSize {
+    let width = presentation == .expanded ? DispatchPillMetrics.expandedWidth : DispatchPillMetrics.cardWidth
+    let content = measuredHeight > 0 ? measuredHeight : DispatchPillMetrics.cardEstimatedHeight
+    return CGSize(width: width,
+                  height: ceil(min(max(content, DispatchPillMetrics.pillHeight),
+                                   dispatchPillCardCeiling(visibleFrame: visibleFrame))))
+}
+
+/// PURE: the tallest the card gets — `maxCardHeight`, never more than the screen leaves room for (the child row and
+/// a margin above it).
+func dispatchPillCardCeiling(visibleFrame: CGRect) -> CGFloat {
+    min(DispatchPillMetrics.maxCardHeight, max(DispatchPillMetrics.pillHeight, visibleFrame.height * 0.7))
+}
+
+/// PURE: the most the card's BODY shows before it scrolls — the ceiling less the header, the pinned answer row and
+/// the insets (`cardChromeAllowance`), so the ✓ row is never cut off.
+func dispatchPillCardBodyCap(visibleFrame: CGRect) -> CGFloat {
+    max(DispatchPillMetrics.pillHeight,
+        dispatchPillCardCeiling(visibleFrame: visibleFrame) - DispatchPillMetrics.cardChromeAllowance)
+}
+
+/// What Esc does while the pill IS a card: it lets go of the keyboard (back to the app the user was in) and the
+/// card stays — Esc never answers, and never denies. A running turn is not interrupted from a card: the card is
+/// the level Esc backs out of first.
+func dispatchPillEscAction(cardFront: Bool, presentation: DispatchPillPresentation, previewing: Bool,
+                           escConsumed: () -> Bool) -> DispatchPillEscAction {
+    if cardFront, presentation != .fullScreen { return .rest }
+    return dispatchPillEscAction(presentation: presentation, previewing: previewing, escConsumed: escConsumed)
+}
+
 /// PURE: how much the pill's content (text, icons, the plume) blurs while its shape is changing —
 /// by how far the spring still has to go, so a change of shape softens everything inside and it
 /// sharpens back as the shape settles. Nothing at rest: within `morphBlurFalloff` of the target the
@@ -144,6 +193,25 @@ func dispatchPillMainSize(
 func dispatchPillMorphBlur(size: CGSize, target: CGSize) -> CGFloat {
     let remaining = max(abs(target.width - size.width), abs(target.height - size.height))
     let radius = min(DispatchPillMetrics.maxMorphBlur, remaining / DispatchPillMetrics.morphBlurFalloff)
+    return radius < 0.25 ? 0 : radius
+}
+
+/// PURE: how much of a content swap's NEW content shows as its shape springs from `origin` to `target` — the island's
+/// open morph: nothing (and fully blurred, `dispatchPillContentBlur`) until the shape has covered
+/// `contentRevealStart` of the way, then fading and sharpening in over the rest, so content is never seen spilling
+/// out of, or cut by, a shape still growing round it. A swap with nowhere to go shows at once.
+func dispatchPillContentReveal(origin: CGSize, size: CGSize, target: CGSize) -> CGFloat {
+    let total = max(abs(target.width - origin.width), abs(target.height - origin.height))
+    guard total > 0.5 else { return 1 }
+    let remaining = max(abs(target.width - size.width), abs(target.height - size.height))
+    let progress = 1 - remaining / total
+    let start = DispatchPillMetrics.contentRevealStart
+    return min(1, max(0, (progress - start) / (1 - start)))
+}
+
+/// PURE: the content's blur for how much of it shows (`reveal` × `fade`): the most at nothing, none when whole.
+func dispatchPillContentBlur(visibility: CGFloat) -> CGFloat {
+    let radius = (1 - min(1, max(0, visibility))) * DispatchPillMetrics.maxMorphBlur
     return radius < 0.25 ? 0 : radius
 }
 
