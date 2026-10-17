@@ -79,6 +79,8 @@ struct IslandOpenMorph: Equatable {
     @Published var hovered = false
 
     var isClosing: Bool { closing != nil }
+    /// Fully open and at rest: its contents are in (what a view request's ack waits for).
+    var isRestingOpen: Bool { still && closing == nil && openedAt != nil }
 
     /// The seconds into the opening to draw at `now`.
     func seconds(at now: Date) -> Double {
@@ -132,19 +134,19 @@ struct IslandOpenRoot: View {
     var tabModels: IslandTabModels?
     var pointer: DispatchPillPointer?
     var reduceMotion = false
-    let onClose: () -> Void
+    /// A click on the top band, x from the island's centre (the strip's own coordinates): the controller maps it to the
+    /// strip's parts — a wing switches to its tab, anything else closes.
+    let onTopBand: (CGPoint) -> Void
 
     var morph: IslandOpenMorph {
         IslandOpenMorph(source: source, target: target, sourceCorner: IslandLayout.stripCorner, targetCorner: IslandLayout.islandCorner)
     }
 
     var body: some View {
-        Group {
-            if model.still {
-                frameView(at: Date())
-            } else {
-                TimelineView(.animation) { context in frameView(at: context.date) }
-            }
+        // ONE timeline, paused at rest (frames only while it moves): switching between a timeline and a plain view would
+        // rebuild the island's contents when the morph settles, resetting their scroll and focus.
+        TimelineView(.animation(minimumInterval: nil, paused: model.still)) { context in
+            frameView(at: model.still ? Date() : context.date)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .coordinateSpace(name: DispatchPillView.canvasSpace)
@@ -160,7 +162,7 @@ struct IslandOpenRoot: View {
             f = IslandOpenMorph.Frame(rect: target, corner: IslandLayout.islandCorner, content: on, blur: 0)
         }
         return IslandOpenFrame(frame: f, target: target, shape: shape, hovered: model.hovered,
-                               interactive: f.content > 0.9 && !model.isClosing, onClose: onClose) {
+                               interactive: f.content > 0.9 && !model.isClosing, onTopBand: onTopBand) {
             IslandExpandedContent(store: store, shape: shape, size: target.size, tabModels: tabModels)
         }
     }
@@ -175,7 +177,8 @@ struct IslandOpenFrame<Content: View>: View {
     let shape: IslandScreenShape
     var hovered = false
     var interactive = true
-    var onClose: () -> Void = {}
+    /// A click on the top band (the housing's height), x from the shape's centre.
+    var onTopBand: (CGPoint) -> Void = { _ in }
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -184,14 +187,17 @@ struct IslandOpenFrame<Content: View>: View {
         ZStack(alignment: .top) {
             content()
                 .frame(width: target.width, height: target.height, alignment: .top)
+                .islandPanelSpace()
                 .blur(radius: frame.blur)
                 .opacity(frame.content)
                 .allowsHitTesting(interactive)
-            // A tap on the top band (the housing's height) closes it.
+            // A click on the top band (the housing's height, where the strip is): a wing's tab, or close.
             Color.clear
                 .frame(width: frame.rect.width, height: shape.topInset)
                 .contentShape(Rectangle())
-                .onTapGesture(perform: onClose)
+                .onTapGesture(coordinateSpace: .local) { location in
+                    onTopBand(CGPoint(x: location.x - frame.rect.width / 2, y: location.y))
+                }
         }
         .frame(width: frame.rect.width, height: frame.rect.height, alignment: .top)
         .clipShape(outline)
@@ -217,6 +223,35 @@ enum IslandHover {
     static let rowGlowFar: Double = 0.05
 }
 
+extension IslandHover {
+    /// PURE: `rect` grown by the hover from its top edge — what a hovered panel covers, and so its hit area while
+    /// hovered (it leaves the hover only when the pointer leaves the GROWN shape: no flicker at the edge).
+    static func grown(_ rect: CGRect) -> CGRect {
+        CGRect(x: rect.midX - rect.width * scale / 2, y: rect.minY, width: rect.width * scale, height: rect.height * scale)
+    }
+
+    /// PURE: hovering with this hysteresis — inside the shape, or inside the grown one while already hovered.
+    static func isOver(_ point: CGPoint?, _ rect: CGRect, wasHovered: Bool) -> Bool {
+        guard let point, !rect.isEmpty else { return false }
+        return (wasHovered ? grown(rect) : rect).contains(point)
+    }
+
+    /// PURE: a point over a panel resting at `rect` (grown from its top edge when `grown`) → the panel's OWN unscaled
+    /// space, origin at its top-left: where its rows and buttons are laid out, so their hover sits under the pointer
+    /// whether or not the panel has grown.
+    static func unscaled(_ point: CGPoint, in rect: CGRect, grown: Bool) -> CGPoint {
+        let s = grown ? scale : 1
+        return CGPoint(x: (point.x - rect.midX) / s + rect.width / 2, y: (point.y - rect.minY) / s)
+    }
+}
+
+/// The top panel's hover state, decided by the controller (with `IslandHover.isOver`'s hysteresis) so the hit area, the
+/// hold and the grow all agree. Changes only when the pointer enters or leaves.
+@MainActor final class IslandPanelHover: ObservableObject {
+    @Published var card = false
+    @Published var waiting = false
+}
+
 extension View {
     /// Grows by `IslandHover.scale` from the top edge while `hovered`; the animation is scoped to the scale alone.
     func islandHoverGrow(_ hovered: Bool) -> some View {
@@ -225,35 +260,9 @@ extension View {
         }
     }
 
-    /// Grows by `IslandHover.scale` from the top edge while the island's pointer (`dispatchPillPointer`) is over this
-    /// view — for a panel whose hover nothing else tracks (the waiting pill). No pointer (the gallery): at rest.
-    func islandPointerHoverGrow() -> some View {
-        modifier(IslandPointerHoverGrow())
-    }
-}
-
-private struct IslandPointerHoverGrow: ViewModifier {
-    @Environment(\.dispatchPillPointer) private var pointer
-
-    func body(content: Content) -> some View {
-        if let pointer {
-            content.modifier(IslandPointerHoverGrowTracking(pointer: pointer))
-        } else {
-            content
-        }
-    }
-}
-
-private struct IslandPointerHoverGrowTracking: ViewModifier {
-    @ObservedObject var pointer: DispatchPillPointer
-    @State private var frame: CGRect = .zero
-
-    func body(content: Content) -> some View {
-        let hovered = pointer.location.map { frame.contains($0) } ?? false
-        content
-            .onGeometryChange(for: CGRect.self) { proxy in
-                proxy.frame(in: .named(DispatchPillView.canvasSpace))
-            } action: { frame = $0 }
-            .islandHoverGrow(hovered)
+    /// The panel's own space for the pointer-reading views inside it (rows, buttons): the controller publishes the
+    /// pointer already mapped into it (`IslandHover.unscaled`), so a hover sits under the pointer at any grow.
+    func islandPanelSpace() -> some View {
+        coordinateSpace(name: DispatchPillView.canvasSpace)
     }
 }

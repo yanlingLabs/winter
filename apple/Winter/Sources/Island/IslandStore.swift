@@ -195,7 +195,7 @@ final class IslandStore: ObservableObject {
         for card in next where placed[card.id] == .top && !queue.ids.contains(card.id)
             && !(answeredHere.contains(card.id) && !inFlight.contains(card.id)) {
             if everOnTop.contains(card.id) {
-                queue.addCompacted(card.id, selfCompacts: card.kind.selfCompacts)
+                queue.addCompacted(card.id, selfCompacts: card.kind.selfCompacts, now: now)
             } else {
                 queue.arrive(card.id, selfCompacts: card.kind.selfCompacts, now: now)
                 everOnTop.insert(card.id)
@@ -206,11 +206,12 @@ final class IslandStore: ObservableObject {
         changed()
     }
 
-    /// The view requests the queue holds on top (expanded, waiting or compacted): what the controller acks to the
-    /// daemon (`island.shown`) once its panel is actually on screen.
+    /// The view requests DRAWN on top (expanded, or waiting under it — never one in line): what the controller acks to
+    /// the daemon (`island.shown`) once they are actually visible. One in line stays unacked, so the helper's own prompt
+    /// shows it.
     var viewRequestsOnTop: [IslandCard] {
-        let held = queue.ids
-        return cards.filter { $0.kind == .viewRequest && held.contains($0.id) }
+        let drawn = Set([queue.current?.id, queue.waiting?.id].compactMap { $0 })
+        return cards.filter { $0.kind == .viewRequest && drawn.contains($0.id) }
     }
 
     // MARK: The queue's inputs

@@ -391,25 +391,29 @@ struct IslandRectShell: View {
     let geometry: DesktopIslandGeometry
     @ObservedObject var state: DesktopIslandState
     @ObservedObject var store: IslandStore
+    /// Hovered, as the controller judged it (the grown shape while hovered): its grow.
+    var hovered = false
+    /// The pointer in the card's own unscaled space, for its buttons' glow and options' highlight.
+    var pointer: DispatchPillPointer?
     var reduceMotion = false
 
     var body: some View {
-        Group {
-            if state.still || state.bornAt == nil {
-                frameView(at: Date())
-            } else {
-                TimelineView(.animation) { context in frameView(at: context.date) }
-            }
+        // ONE timeline, paused at rest: the card's contents (a question's typed "Other") keep their identity when the
+        // birth settles.
+        let paused = state.still || state.bornAt == nil
+        TimelineView(.animation(minimumInterval: nil, paused: paused)) { context in
+            frameView(at: paused ? Date() : context.date)
         }
         .frame(width: geometry.panelSize.width, height: geometry.panelSize.height, alignment: .topLeading)
     }
 
     private func frameView(at date: Date) -> some View {
         let frame = reduceMotion ? restFrame(date) : DesktopIslandFluid(geometry: geometry).frame(at: state.seconds(at: date))
-        let hovered = state.pointer.map { geometry.pill.contains($0) } ?? false
         return CUIslandLiquidFrame(frame: frame, geometry: geometry, hovered: hovered && frame.content > 0.9 && state.returningAt == nil,
                                    interactive: frame.content > 0.9 && state.returningAt == nil) {
             IslandRectContent(card: card, store: store)
+                .islandPanelSpace()
+                .environment(\.dispatchPillPointer, pointer)
         }
     }
 
@@ -429,6 +433,8 @@ struct IslandRectShell: View {
 /// grows a little under the pointer, like every island panel.
 struct IslandWaitingPill: View {
     let card: IslandCard
+    /// Hovered, as the controller judged it (the grown shape while hovered).
+    var hovered = false
     let action: () -> Void
 
     var body: some View {
@@ -451,7 +457,7 @@ struct IslandWaitingPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(IslandPressStyle())
-        .islandPointerHoverGrow()
+        .islandHoverGrow(hovered)
         .accessibilityLabel("Waiting: \(islandWaitingLine(card)). Show it.")
     }
 }

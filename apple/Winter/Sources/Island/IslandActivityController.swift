@@ -312,8 +312,10 @@ final class IslandActivityController {
         let frame = fullFrame
         let local = CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y)
         let point: CGPoint? = panel.frame.contains(mouse) ? local : nil
-        pointer.set(point)
-        let over = point.map { contentRect.insetBy(dx: -4, dy: -4).contains($0) } ?? false
+        // The hit area IS the drawn shell: its own shape, and the grown one while hovered.
+        let over = IslandHover.isOver(point, contentRect, wasHovered: shown?.hovered ?? false)
+        // Into the shell's own unscaled space, where its buttons measure themselves.
+        pointer.set(point.map { IslandHover.unscaled($0, in: contentRect, grown: over) })
         if let shown {
             let own = point.map { CGPoint(x: $0.x - (frame.width - shown.geometry.panelSize.width) / 2, y: $0.y) }
             if shown.state.pointer != own { shown.state.pointer = own }

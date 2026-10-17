@@ -165,6 +165,7 @@ struct IslandMorphShell<Content: View>: View {
         let shape = CUIslandShellShape(cornerRadius: cornerRadius)
         content
             .frame(width: size.width, height: size.height)
+            .islandPanelSpace()
             .clipShape(shape)
             .background(shape.fill(Color.black))
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))

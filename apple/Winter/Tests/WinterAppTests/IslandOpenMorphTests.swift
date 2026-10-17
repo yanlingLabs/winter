@@ -157,4 +157,29 @@ final class IslandOpenMorphTests: XCTestCase {
             }
         }
     }
+
+    /// The hit area is the drawn shape: the resting one, and the grown one while hovered (so no flicker at the edge);
+    /// the pointer is mapped into the panel's own unscaled space, where its rows and buttons sit.
+    func testTheHitAreaAndThePointerFollowTheGrownShape() {
+        let rect = CGRect(x: 100, y: 40, width: 400, height: 200)
+        let grown = IslandHover.grown(rect)
+        XCTAssertEqual(grown.minY, rect.minY, "it grows from its top edge")
+        XCTAssertEqual(grown.midX, rect.midX, accuracy: 0.001)
+        XCTAssertEqual(grown.width, 400 * IslandHover.scale, accuracy: 0.001)
+        XCTAssertEqual(grown.height, 200 * IslandHover.scale, accuracy: 0.001)
+        let band = CGPoint(x: rect.maxX + 3, y: rect.midY) // outside the resting shape, inside the grown one
+        XCTAssertFalse(IslandHover.isOver(band, rect, wasHovered: false), "not hovered yet: the resting shape")
+        XCTAssertTrue(IslandHover.isOver(band, rect, wasHovered: true), "hovered: the grown shape still holds it")
+        XCTAssertFalse(IslandHover.isOver(CGPoint(x: grown.maxX + 1, y: rect.midY), rect, wasHovered: true))
+        XCTAssertFalse(IslandHover.isOver(nil, rect, wasHovered: true))
+        // The grown shape's corners map onto the resting panel's own corners.
+        let topRight = IslandHover.unscaled(CGPoint(x: grown.maxX, y: grown.minY), in: rect, grown: true)
+        XCTAssertEqual(topRight.x, rect.width, accuracy: 0.001)
+        XCTAssertEqual(topRight.y, 0, accuracy: 0.001)
+        let bottomLeft = IslandHover.unscaled(CGPoint(x: grown.minX, y: grown.maxY), in: rect, grown: true)
+        XCTAssertEqual(bottomLeft.x, 0, accuracy: 0.001)
+        XCTAssertEqual(bottomLeft.y, rect.height, accuracy: 0.001)
+        // At rest the mapping is just the panel's origin.
+        XCTAssertEqual(IslandHover.unscaled(CGPoint(x: 150, y: 60), in: rect, grown: false), CGPoint(x: 50, y: 20))
+    }
 }
