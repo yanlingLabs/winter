@@ -6,7 +6,7 @@
 //     allowed under every code and Dispatch policy, `plan` included; no per-app card (no app is involved).
 //   - Every hop — the first and each redirect, at most 5 — is checked before anything is sent to it: http(s) only, no
 //     user name or password, the DANGEROUS-DOMAIN floor exactly as for tabs (`site-policy.ts`: a site card under
-//     ask/accept-edits/plan, a hard block elsewhere and in Dispatch; the time a card waits is not the read's), and the
+//     ask/accept-edits/plan, a hard block elsewhere; Dispatch by its policy too; the time a card waits is not the read's), and the
 //     ADDRESS RULE. A hop is LOCAL only when its host is literally this Mac (`localhost`, `*.localhost` — dialled at
 //     127.0.0.1 and ::1 without asking DNS —, 127/8, ::1): every address it dials is then loopback. Any other host is a
 //     public NAME or address, and every address it resolves to must be public — a name answering loopback or a private

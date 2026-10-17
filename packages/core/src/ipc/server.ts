@@ -3719,7 +3719,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions have a fixed policy and cannot be changed — chat never asks permissions");
         }
         if (targetMode === "dispatch" && p.policy === "plan") {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "plan policy is not available for dispatch sessions — dispatch never asks permissions");
+          throw new RpcFailure(ERR.INVALID_PARAMS, "plan policy is not available for dispatch sessions — Dispatch cannot present a plan (exit_plan_mode is code-only)");
         }
         // The policy this session is on RIGHT NOW, read before the write, because the write may have
         // to be undone below. `meta()` throws for an unknown id exactly as `setApprovalPolicy` does,

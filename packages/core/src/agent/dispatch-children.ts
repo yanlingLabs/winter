@@ -45,7 +45,8 @@
 //     daemon-global, keyed by session + call). Loop-safe by construction: a mirrored copy is appended
 //     under the coordinator's id, which is never a child. The child raises the card at all because
 //     `runtime-sdk/approval-bridge.ts` relays a dispatch child's "ask" instead of refusing it (approvals
-//     and questions alike auto-deny after 10 minutes), and Dispatch's OWN calls still never prompt.
+//     and questions alike auto-deny after 10 minutes). Dispatch's OWN cards (it respects its approval policy
+//     like code — user ruling 2026-10-17) are raised on its own log, so no mirror is involved.
 //   - **Wake** — a finished child queues a `<child_update>` for its coordinator. The queue is flushed
 //     as ONE message (so several children finishing together wake Dispatch once — the old coalescing)
 //     on a macrotask, and only while the coordinator is idle; a coordinator mid-turn gets it when that

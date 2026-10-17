@@ -212,7 +212,8 @@ export interface ToolExposure {
 }
 
 /**
- * The bare allow rules the two web built-ins need in code mode, and nowhere else.
+ * The bare allow rules the two web built-ins need in code and dispatch (which respects its policy like code
+ * since the user ruling of 2026-10-17), and never in chat, whose policy is fixed.
  *
  * WHY THEY ARE NEEDED (measured in the pinned SDK's `permissions/evaluator.ts`): neither tool is in
  * `isBuiltInReadOnly` or `TASK_MODE_CLASS_SILENT_ALLOW`, so the mode stage answers `unresolved` for
@@ -256,8 +257,9 @@ export interface WinterOptionsInput {
   mode: SessionMode;
   /** Seven-valued in practice — chat sessions persist the internal `"chat"` policy. */
   policy: SessionApprovalPolicy;
-  /** `SessionMeta.origin`; `"dispatch-child"` keeps a code-mode child's private-address `WebFetch` at
-   *  `"deny"` (P8b-26) — its approval cards are relayed to its coordinator, but this one stays refused. */
+  /** `SessionMeta.origin` (`"dispatch-child"` for a code session Dispatch spawned). Its private-address
+   *  `WebFetch` is `"ask"` like any code session's since the user ruling of 2026-10-17 — the card is
+   *  relayed to its coordinator and bounded, like the child's other cards. */
   origin?: string;
   /** The pre-allocated BACKEND uuid from 8a's creation transaction (surface map §6.1) — not
    *  Winter's own `s_<hex>` session id. */
@@ -713,10 +715,13 @@ export function permissionDenyRulesFor(home: string, userDeny: readonly string[]
  *
  * Bare tool names, deliberately: `Read` means every use of the tool. A path-scoped form
  * (`Read(//**)`) would say the same thing less clearly and tie this to one runtime's glob dialect.
- * Only ever attached where these tools EXIST — chat's and dispatch's toolsets exclude them through
- * `disallowedToolsFor`, and a rule for an absent tool is noise, so the callers gate on code mode.
+ * Only ever attached where these tools EXIST — chat's toolset excludes them all and dispatch's keeps only
+ * `Read` (`DISPATCH_READ_ALLOW_RULES`), through `disallowedToolsFor`; a rule for an absent tool is noise.
  */
 export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep"];
+
+/** Dispatch's slice of `GLOBAL_READ_ALLOW_RULES`: the one read tool its allowed list names (`Read`). */
+export const DISPATCH_READ_ALLOW_RULES: readonly string[] = ["Read"];
 
 /**
  * **The user's SAVED allow rules, as the runtimes read them** (lane B, 2026-09-22, lane C's finding).
@@ -1232,7 +1237,8 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // `canUseTool`, and Winter's gate has always answered `allow` for the web class).
       //
       // …then the user's SAVED rules (`persistedAllowRulesFor` → `sdkAllowRulesFor`), code mode only:
-      // they are answers to code-mode cards, chat's policy is fixed and dispatch never cards. Deny
+      // they are answers to code-mode cards, chat's policy is fixed, and a dispatch card offers no rule
+      // to remember (`approval-bridge.ts`'s `plainCard`) — a saved rule never applies to it. Deny
       // still comes first in the runtime, so none of them can open the fence stated just below.
       //
       // Two consequences, DOCUMENTED rather than changed (whole-branch review minors a/b):
@@ -1243,6 +1249,10 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // WS-21: on a run-home incarnation the SAVED rules reach the child through the run folder's own
       // settings tiers (user, trusted project, local), so only Winter's fixed rules are stated here.
       ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])] } : {}),
+      // Dispatch respects its policy like code (user ruling 2026-10-17), so its `dont-ask` must not lose the
+      // reads and web reads code keeps under that mode: the same fixed rules, for the one read tool it HAS
+      // (`Read`; Glob/Grep are not dispatch's) and the two web built-ins. Never the user's saved rules.
+      ...(input.mode === "dispatch" ? { allow: [...DISPATCH_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES] } : {}),
       deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
@@ -1390,19 +1400,21 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
  *    wants the tool advertised-but-dead. (The two per-call BOUNDS are left at the SDK's defaults:
  *    they are the backend's own economics, not a Winter policy.)
  *  - `fetch.digestModel` / `fetch.authRef` — `pins.research` (see `WinterOptionsInput.digestModel`).
- *  - `fetch.privateAddressPolicy` — `"ask"` in CODE, `"deny"` in chat and dispatch, and `"deny"` for
- *    a dispatch CHILD (P8b-26; kept when the `session_spawn` rebuild began relaying a child's other cards to
- *    its coordinator: a local-network reach from unattended delegated work stays refused, not relayed). `WebFetch` is the only
- *    door a Winter child has to a local service — its Bash sandbox has no network at all — so silent
- *    reach would ADD power claude's own design does not grant.
+ *  - `fetch.privateAddressPolicy` — `"ask"` in CODE and DISPATCH (a dispatch child included), `"deny"` in
+ *    chat, which never prompts. Until the user ruling of 2026-10-17 ("Dispatch respects its approval
+ *    mode") dispatch and a dispatch child were `"deny"` (P8b-26); now their card is raised like code's —
+ *    a child's relayed to its coordinator — and auto-denied after 10 minutes when nobody typed the turn
+ *    (`approval-bridge.ts`'s `dispatchCardTimeoutMs`). `WebFetch` is the only door a Winter child has to a
+ *    local service — its Bash sandbox has no network at all — so silent reach would ADD power claude's
+ *    own design does not grant; a card is the consent.
  *
  *    **`"ask"` MEANS A CARD BECAUSE THE BRIDGE MAKES IT ONE** (whole-branch review B1, 2026-09-18).
  *    The runtime's private-address ask arrives at `canUseTool` with no machine-readable signal, and
  *    Winter's gate answers the web class `allow` under every policy — so for one release this option
  *    resolved to a SILENT YES and the child reached `192.168.x.x`/`127.0.0.1`/`*.local` with no card
  *    at all. `approval-bridge.ts`'s `privateWebFetchTarget` is what makes the word true: it escalates
- *    such a call to a real card in code mode (every policy, `bypass` and `plan` included) and to a
- *    typed deny wherever nobody can answer one. Do not read this field as self-enforcing — it is one
+ *    such a call to a real card in code and dispatch (every policy but `dont-ask`, `bypass` and `plan`
+ *    included) and to a typed deny in chat and under `dont-ask`. Do not read this field as self-enforcing — it is one
  *    half of a two-part arrangement.
  *  - `blockedDomains` — the dangerous-domain floor, verbatim (see `dangerousDomains`). This is an
  *    EXECUTOR-level refusal in the child, not an approval: a floor domain is refused even in code
@@ -1411,7 +1423,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
  *    have always had.
  */
 function webOptionsFor(input: WinterOptionsInput): WebToolsConfig {
-  const privateAddressPolicy = input.mode === "code" && input.origin !== "dispatch-child" ? "ask" : "deny";
+  const privateAddressPolicy = input.mode === "code" || input.mode === "dispatch" ? "ask" : "deny";
   const digest = digestOptionsFor(input);
   return {
     ...(input.exaKeyPresent === false ? {} : { search: { authRef: exaAuthRefFor(input.home) } }),

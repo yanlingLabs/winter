@@ -852,8 +852,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     let liveCapabilityKeys: ReadonlySet<string> = new Set<string>();
     const canUseTool = canUseToolFor({
       sessionId, mode, origin: meta.origin, home, cwd,
-      // Who started the running turn — read per card, and only for a dispatch child: a card from a turn the
-      // USER typed into the child is not bounded by the relay's 10 minutes (`dispatchChildCardTimeoutMs`).
+      // Who started the running turn — read per card, and only for a dispatch session or a dispatch child: a
+      // card from a turn the USER typed is not bounded by the dispatch family's 10 minutes (`dispatchCardTimeoutMs`).
       turnOrigin: () => runningTurnOrigin(deps.store.read(sessionId)),
       capabilityKeys: () => liveCapabilityKeys,
       // WS-21: "in this project" is offered only for a trusted project (live — trusting it reaches the next card).

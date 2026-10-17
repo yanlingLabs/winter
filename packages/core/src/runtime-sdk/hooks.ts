@@ -147,7 +147,7 @@ export interface SessionHooksDeps {
 
   /**
    * WS-21 (spec §7.1, §7.2) — the path fence (`pathFenceHook`). THIS session's mode (a protected write
-   * is a card in code and a typed deny in chat and dispatch), its working directory (a relative target
+   * is a card in code and dispatch and a typed deny in chat), its working directory (a relative target
    * resolves against it) and, read LIVE per call, its TRUSTED project root (`projectScopeRootFor(cwd)` — the
    * root the run home loads the project tier from, R.3 I-1 — when `projectScopeTrusted(cwd)`, else `null`:
    * an untrusted project has no project tier to protect). Absent `mode`:
@@ -978,8 +978,8 @@ function segmentWriteTargets(seg: string): string[] {
   return targets;
 }
 
-/** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
- *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy. */
+/** The ASK a protected-path Bash write gets (fix round 2) — a card in code and dispatch (a dispatch child's
+ *  relayed to its coordinator); the bridge turns it into the typed deny in chat. Every policy. */
 function bashProtectedWriteHook(home?: string): HookCallback {
   return async (input) => {
     const { command } = bashEscapeInput(input);
@@ -1172,7 +1172,7 @@ export function escapeFloorDenial(hit: string): string {
 //     so it binds where the bridge is never consulted (a matching allow rule, bypass);
 //  2. `sdk/projects/**` outside each project's `memory/` (`storeWriteDenial`) — deny;
 //  3. the read row (`protectedReadDenial`) — deny;
-//  4. a protected write (`protectedWriteDecision`) — ask in code, deny in chat and dispatch. The bridge
+//  4. a protected write (`protectedWriteDecision`) — ask in code and dispatch, deny in chat. The bridge
 //     (5e) independently refuses to auto-allow one, and the router pins the same set as flag-layer ask
 //     rules (a runtime's own sensitive-file check could otherwise swallow this hook's ask — F16).
 function pathFenceHook(deps: SessionHooksDeps): HookCallback {
@@ -1523,8 +1523,7 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
 //
 // **WHY DENY AND NEVER ASK.** The spine lane measured that a Winter child's executor-level
 // `blockedDomains` refuses a listed host even after an approved `ask` — so an `ask` here would raise
-// a card whose approval provably cannot take effect, and
-// chat/dispatch never prompt in the first place. A floor hit is a hard refusal in every mode; that is
+// a card whose approval provably cannot take effect (and chat never prompts in the first place). A floor hit is a hard refusal in every mode; that is
 // the ruling ("dangerous domains are hard-blocked"), and `mode-options.ts`'s `webOptionsFor` says the
 // same thing about the same list.
 

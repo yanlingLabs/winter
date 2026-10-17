@@ -250,7 +250,10 @@ describe("the site floor", () => {
   test("the rows: ask, accept-edits and plan card; auto, bypass, dont-ask, Dispatch and chat block", () => {
     for (const p of ["ask", "accept-edits", "plan"] as const) expect(siteRow({ policy: p, mode: "code" })).toBe("card");
     for (const p of ["auto", "bypass", "dont-ask"] as const) expect(siteRow({ policy: p, mode: "code" })).toBe("block");
-    expect(siteRow({ policy: "ask", mode: "dispatch" })).toBe("block");
+    // Dispatch respects its approval mode (user ruling 2026-10-17): its policy's row, like code; chat still blocks.
+    for (const p of ["ask", "accept-edits"] as const) expect(siteRow({ policy: p, mode: "dispatch" })).toBe("card");
+    for (const p of ["auto", "bypass", "dont-ask"] as const) expect(siteRow({ policy: p, mode: "dispatch" })).toBe("block");
+    expect(siteRow({ policy: "ask", mode: "chat" })).toBe("block");
     expect(siteCardSummary("evil.example", "Google Chrome")).toBe("Allow Winter to use evil.example in Google Chrome? It is on the dangerous-domains list.");
   });
   test("a standing WebFetch(domain:…) rule matches its host and subdomains; nothing else does", () => {
