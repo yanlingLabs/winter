@@ -1,8 +1,13 @@
-"""Deterministic readonly guest root/cpio. No mount, chown, install, init or guest execution."""
-import argparse, hashlib, io, json, os, posixpath, shutil, stat, struct, subprocess, tarfile, zlib
+"""Deterministic readonly guest root/cpio. No mount, chown, install or guest execution.
+
+The only startup program is the pinned `/init` built from apple/Cowork/WinterCoworkGuest (N2 slice S5); every other startup
+path is still refused. Nothing here runs it."""
+import argparse, hashlib, io, json, os, posixpath, re, shutil, stat, struct, subprocess, sys, tarfile, zlib
 from pathlib import Path, PurePosixPath
 from packages import sha, bounded_file, bounded_read, xz_chunks
 HERE=Path(__file__).resolve().parent
+GUEST=HERE.parents[1]/'apple/Cowork/WinterCoworkGuest'
+SDK_GUEST_RELAY_NOTE='the in-guest relay presents FIFOs to a supervisor that accepts them only after the agent-SDK relay change merges'
 
 class Tree:
     def __init__(self): self.nodes={}
@@ -242,6 +247,83 @@ def verify_elfs(tree):
         records['/'+name]=info|{'resolvedDependencies':resolved,'sha256':sha(node['data'])}
     return records
 
+
+# ---- N2 slice S5: the one startup program, the guest-side files, the tool-device inventory ------------------------------
+
+STARTUP_PATHS=['sbin/init','usr/sbin/init','linuxrc','etc/inittab']
+TOOL_DEVICES_EXPECTED=['/dev/null','/dev/zero','/dev/full','/dev/random','/dev/urandom']
+
+def check_startup(tree,expected_sha256):
+    """Exactly one startup program may exist: the pinned `/init`, a regular 0555 file. No other init, linuxrc or inittab, whether
+    spelled directly or reachable through a root alias."""
+    node=tree.nodes.get('init')
+    if node is None:raise ValueError('pinned init missing')
+    if node['kind']!='file' or node['mode']!=0o555 or sha(node['data'])!=expected_sha256:raise ValueError('init is not the pinned program')
+    for name in STARTUP_PATHS:
+        if name in tree.nodes:raise ValueError('unpinned startup program '+name)
+        try:target,found=tree.resolve('/'+name)
+        except ValueError:continue
+        if found['kind']=='file':raise ValueError('unpinned startup program reachable as /'+name)
+
+def tool_device_inventory(source_text):
+    """The `/dev` entries the process-tool compartment mounts, read from its C source: tool_devices[]={{"/dev/null",3},...}."""
+    match=re.search(r'tool_devices\[\]\s*=\s*\{(.*?)\};',source_text,re.S)
+    if match is None:raise ValueError('tool device inventory not found')
+    return re.findall(r'\{\s*"([^"]+)"\s*,\s*\d+\s*\}',match.group(1))
+
+def check_tool_devices(source_text):
+    """Tools get five character devices and nothing else: no virtio port, block device, kmsg or whole /dev tree."""
+    found=tool_device_inventory(source_text)
+    if found!=TOOL_DEVICES_EXPECTED:raise ValueError('tool device inventory changed: '+','.join(found))
+    return found
+
+def supervisor_base_config(helper_digests):
+    """The static part of the supervisor's trusted config (PID 1 adds guestBootId and the conversation set). Paths are where
+    this image puts the helpers; digests are of the exact bytes in the cpio. Canonical, one line."""
+    names={'launcher':'linux-tool-compartment','fileWorker':'file-worker','processWorker':'process-worker'}
+    config={'artifacts':{key:{'path':'/opt/winter/helpers/'+name,'sha256':helper_digests[name]} for key,name in names.items()},
+            'controlDirectory':'/run/winter/control','environment':'/opt/winter/environment/base','protectedStoreDirectories':[]}
+    return json.dumps(config,sort_keys=True,separators=(',',':')).encode()
+
+def check_expected(receipt,expected):
+    """None = the expected digests are not pinned yet (the first build after a re-pin); otherwise any mismatch refuses."""
+    if expected is None:return ['expectedArtifact is not pinned']
+    problems=[]
+    for key in ['runtimeSha256','cpioSha256','rootManifestSha256']:
+        if receipt[key]!=expected[key]:problems.append('artifact reproducibility mismatch: '+key)
+    for source,digest in expected['helperBinarySha256'].items():
+        if receipt['sourceHelpers'][source]['binarySha256']!=digest:problems.append('native helper reproducibility mismatch: '+source)
+    return problems
+
+REQUIRED_PROGRAMS=['/opt/winter/runtime/winter','/usr/bin/python3.11','/bin/bash','/usr/bin/git','/sbin/mke2fs','/sbin/e2fsck','/sbin/dumpe2fs']
+
+def add_guest_files(tree,programs,scripts,helper_digests):
+    """Everything slice S5 puts in the root: the pinned PID 1, the relay, the bootstrap helper, the static part of the supervisor's
+    trusted config, and the mount point of the environment volume."""
+    tree.add('init','file',programs['init'],True,'winter-guest:init')
+    tree.add('opt/winter/libexec/winter-guest-relay','file',programs['winter-guest-relay'],True,'winter-guest:relay')
+    for name,data in scripts.items():tree.add('opt/winter/libexec/'+name,'file',data,False,'winter-guest:'+name)
+    tree.add('opt/winter/etc/supervisor-base.json','file',supervisor_base_config(helper_digests)+b'\n',False,'derived:supervisor-static-config')
+    tree.add('opt/winter/environment/disk','directory')
+
+def refuse_blkid(tree):
+    """The probe is `dumpe2fs -h` plus a direct superblock read (decision D9); the image must not grow a blkid for anything to lean on."""
+    if any(name.endswith('/blkid') or name=='blkid' for name in tree.nodes):raise ValueError('blkid is not part of the image')
+
+def build_guest(zig,out,pins):
+    """Cross-builds init and the relay twice with the pinned Zig (apple/Cowork/WinterCoworkGuest/build.py), then holds the
+    result to the digests pinned in pins.json. Returns {name: bytes} plus the receipt."""
+    result=subprocess.run([sys.executable,'-I','-S','-B',str(GUEST/'build.py'),'--zig',str(zig),'--out',str(out)],capture_output=True,text=True)
+    if result.returncode:raise ValueError('guest build failed: '+result.stderr[-2000:])
+    receipt=json.loads((out/'receipt.json').read_text());pinned=pins['guest']
+    for name,entry in pinned['programs'].items():
+        built=receipt['programs'][name]
+        if built['binarySha256']!=entry['binarySha256']:raise ValueError('guest program '+name+' is not the pinned build')
+        if built['sourceSha256']!=entry['sourceSha256']:raise ValueError('guest program '+name+' source drifted from the pin')
+    for name,entry in pinned['scripts'].items():
+        if receipt['scripts'][name]['sha256']!=entry['sha256']:raise ValueError('guest script '+name+' is not the pinned one')
+    return {name:(out/name).read_bytes() for name in pinned['programs']},{name:(GUEST/path).read_bytes() for name,path in pinned['scriptPaths'].items()},receipt
+
 def source_snapshot(sdk,commit,destination):
     actual=subprocess.check_output(['git','-C',str(sdk),'rev-parse',commit],text=True).strip()
     if actual!=commit: raise ValueError('SDK commit')
@@ -286,6 +368,7 @@ def main():
     (out/'runtime-build.log').write_text(result.stdout+result.stderr)
     tree.add('opt/winter/runtime/winter','file',runtime.read_bytes(),True,'sdk:'+pins['sdkCommit'])
     helper_dir=sdkcopy/'packages/runtime/src/guest'; helper_receipts={}
+    tool_devices=check_tool_devices((helper_dir/'linux-tool-compartment.c').read_text())
     for source in ['file-worker.c','process-worker.c','linux-tool-compartment.c']:
         binary=out/source.removesuffix('.c');native_env=env|{'ZIG_GLOBAL_CACHE_DIR':str(out/'zig-global-cache'),'ZIG_LOCAL_CACHE_DIR':str(out/'zig-local-cache')}
         command=[str(zig),'cc','-target','aarch64-linux-musl','-static','-std=c11','-O2','-Wall','-Wextra','-Werror','-pthread','-s','-Wl,--build-id=none','-ffile-prefix-map='+str(sdkcopy)+'=/winter-sdk',str(helper_dir/source),'-o',str(binary)]
@@ -295,14 +378,19 @@ def main():
         helper_receipts[source]={'sourceSha256':sha((helper_dir/source).read_bytes()),'binarySha256':sha(data),'compileFlags':[flag.replace(str(sdkcopy),'<SDK_SOURCE>') for flag in command[2:-3]]}
         tree.add('opt/winter/helpers/'+binary.name,'file',data,True,'sdk:'+pins['sdkCommit'])
     supervisor=helper_dir/'linux-supervisor.py';tree.add('opt/winter/libexec/linux-supervisor.py','file',supervisor.read_bytes(),False,'sdk:'+pins['sdkCommit'])
+    # N2 slice S5: the pinned PID 1, the relay, the bootstrap helper and the static part of the supervisor's trusted config.
+    helper_digests={source.removesuffix('.c'):record['binarySha256'] for source,record in helper_receipts.items()}
+    programs,scripts,guest_receipt=build_guest(zig,out/'guest',pins)
+    add_guest_files(tree,programs,scripts,helper_digests)
     certificates=[n['data'].rstrip()+b'\n' for name,n in sorted(tree.nodes.items()) if name.startswith(base+'/usr/share/ca-certificates/mozilla/') and name.endswith('.crt') and n['kind']=='file']
     if not certificates: raise ValueError('CA provenance missing')
     tree.add(base+'/etc/ssl/certs/ca-certificates.crt','file',b''.join(certificates),origin='derived:verified-mozilla-package-certificates')
     if base+'/bin/sh' not in tree.nodes:tree.add(base+'/bin/sh','symlink',b'dash',origin='derived:explicit-dash-shell')
     for path in ['opt/winter','workspace','proc','dev','sys','run','tmp']:tree.add(path,'directory')
-    if 'init' in tree.nodes or 'sbin/init' in tree.nodes:raise ValueError('startup must remain absent')
+    check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
     records=verify_elfs(tree)
-    required=['/opt/winter/runtime/winter','/usr/bin/python3.11','/bin/bash','/usr/bin/git','/sbin/mke2fs','/sbin/e2fsck']
+    refuse_blkid(tree)
+    required=REQUIRED_PROGRAMS
     for path in required:
         target,node=tree.resolve(path)
         if '/'+target not in records or node['mode']!=0o555:raise ValueError('required program missing')
@@ -310,14 +398,16 @@ def main():
         if node['kind']=='file' and any(value in node['data'] for value in [str(args.sdk.resolve()).encode(),str(args.builder.resolve()).encode(),str(out).encode(),str(Path.home()).encode(),b'winter-build-runtime-']):raise ValueError('private/random build path in payload '+name)
     tree.materialize(out/'root');tree.cpio(out/'immutable-root.cpio')
     manifest=tree.manifest();(out/'root.manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n');(out/'elf-dependencies.json').write_text(json.dumps(records,sort_keys=True,indent=2)+'\n')
-    receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':False,'vmAdmitted':False}
-    expected=pins['expectedArtifact']
-    for key in ['runtimeSha256','cpioSha256','rootManifestSha256']:
-        if receipt[key]!=expected[key]:raise ValueError('artifact reproducibility mismatch: '+key)
-    for source,digest in expected['helperBinarySha256'].items():
-        if receipt['sourceHelpers'][source]['binarySha256']!=digest:raise ValueError('native helper reproducibility mismatch')
+    receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'vmAdmitted':False}
+    problems=check_expected(receipt,pins['expectedArtifact'])
+    if pins['expectedArtifact'] is not None and problems:raise ValueError('; '.join(problems))
+    receipt['reproducibilityPinned']=not problems
     (out/'receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')
     from metrics import finish
     finish(out)
     print((out/'receipt.json').read_text(),flush=True)
+    if problems:
+        # The re-pin changed the SDK source, so the old digests no longer apply. Every output is written; the build still ends
+        # non-zero until a reviewer copies the receipt values into pins.json, so an unpinned artifact is never mistaken for a pinned one.
+        print('UNPINNED: '+'; '.join(problems),file=sys.stderr);raise SystemExit(3)
 if __name__=='__main__':main()

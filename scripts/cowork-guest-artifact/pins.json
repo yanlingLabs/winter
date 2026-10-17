@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+  "sdkCommit": "7796dff913a9ec0810060099984c605215135d19",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -61,14 +61,53 @@
   ],
   "builderCommit": "180d3effd7ddbb9406aeea0912f76c78ef20cf75",
   "packageLockSha256": "b0127b7a8f1fa2f8b2a06236cef26e1f1b297bacf9d70e800440df8747d93252",
-  "expectedArtifact": {
-    "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
-    "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
-    "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
-    "helperBinarySha256": {
-      "file-worker.c": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2",
-      "linux-tool-compartment.c": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1",
-      "process-worker.c": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156"
+  "expectedArtifact": null,
+  "sdkPin": {
+    "previousCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+    "mainAt": "7796dff913a9ec0810060099984c605215135d19",
+    "mergedPullRequests": [
+      27
+    ],
+    "doesNotContain": [
+      "agent-sdk #28 (cowork/root-guided-bootstrap), not merged when this pin was written",
+      "the supervisor change that accepts the relay's pipes (N2 slice S5, SDK part)"
+    ],
+    "note": "Re-pinned from the 21-commit-old artifact commit to SDK main. The supervisor still has to move once more, to a commit that contains both changes above, before the runtime transport can work. Nothing was rebuilt: expectedArtifact is therefore unpinned."
+  },
+  "guest": {
+    "target": "aarch64-linux-musl",
+    "zig": "0.14.1",
+    "programs": {
+      "init": {
+        "binarySha256": "0f59b5b5ab7a6bc51ede9ca95e4c1acea5d934ca7c19bcd06276771812fedd82",
+        "sourceSha256": "5dde26384c3c51b2c4804514c647756ee1b2c9621a8699e049b9589fab6cea3d"
+      },
+      "winter-guest-relay": {
+        "binarySha256": "ff3862bdcf5adcf871d4d40d2454972a4b87ea315d6c92b8f1668924bcc836cb",
+        "sourceSha256": "69bee7b8ce5464d6675590a7f079a493cf89773066867b9580e910cc21749b81"
+      }
+    },
+    "scripts": {
+      "guest_bootstrap.py": {
+        "sha256": "cdf08039d844cb2f5ae15c3d9d9d8f17b887074e62d644d44cc3cdfb5c2286f5"
+      }
+    },
+    "scriptPaths": {
+      "guest_bootstrap.py": "bootstrap/guest_bootstrap.py"
+    },
+    "buildCommand": "python3 -I -S -B apple/Cowork/WinterCoworkGuest/build.py --zig <pinned zig> --out <fresh directory>"
+  },
+  "previousExpectedArtifact": {
+    "sdkCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+    "expectedArtifact": {
+      "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
+      "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+      "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+      "helperBinarySha256": {
+        "file-worker.c": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2",
+        "linux-tool-compartment.c": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1",
+        "process-worker.c": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156"
+      }
     }
   }
 }

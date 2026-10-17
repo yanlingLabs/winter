@@ -2,8 +2,17 @@
 import argparse, hashlib, json, stat
 from pathlib import Path, PurePosixPath
 
-def verify(root):
+HERE=Path(__file__).resolve().parent
+# Every other way a kernel or a package could start something in an initramfs root. Only `init` is allowed, and only the pinned one.
+STARTUP_NAMES={'sbin/init','usr/sbin/init','linuxrc','etc/inittab','init.sh','rdinit'}
+
+def verify(root,pinned_init=None,require_init=True):
+    """Read the cpio back. With `require_init` the root must carry exactly one startup program: `init`, a regular 0555 file of
+    uid/gid 0 whose bytes hash to the digest pinned in pins.json (or `pinned_init`). `require_init=False` is for roots built
+    before slice S5, which must still have NO startup program."""
     receipt=json.loads((root/'receipt.json').read_text());manifest=json.loads((root/'root.manifest.json').read_text())
+    if pinned_init is None and require_init:pinned_init=json.loads((HERE/'pins.json').read_text())['guest']['programs']['init']['binarySha256']
+    startup={}
     expected={entry['path'].lstrip('/'):entry for entry in manifest};seen=set();inodes=set();count=0
     with (root/'immutable-root.cpio').open('rb') as stream:
         while True:
@@ -31,12 +40,17 @@ def verify(root):
                 if not data:raise ValueError('cpio truncated content')
                 digest.update(data);remaining-=len(data)
             if digest.hexdigest()!=entry['sha256']:raise ValueError('cpio content digest')
+            if name=='init' or name in STARTUP_NAMES:startup[name]=(kind,stat.S_IMODE(mode),digest.hexdigest())
             stream.read((-size)%4);count+=1
     if seen!=set(expected):raise ValueError('cpio missing entries')
     digest=hashlib.sha256()
     with (root/'immutable-root.cpio').open('rb') as stream:
         while data:=stream.read(1024*1024):digest.update(data)
     if digest.hexdigest()!=receipt['cpioSha256']:raise ValueError('cpio receipt')
-    return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':False}
+    if require_init:
+        if set(startup)!={'init'} or startup['init']!=('file',0o555,pinned_init):raise ValueError('cpio startup program is not exactly the pinned init')
+        if receipt.get('initSha256')!=pinned_init or receipt.get('initPresent') is not True:raise ValueError('receipt does not describe the pinned init')
+    elif startup:raise ValueError('cpio carries a startup program')
+    return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None}
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);args=parser.parse_args();print(json.dumps(verify(args.root),sort_keys=True))
+    parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init),sort_keys=True))
