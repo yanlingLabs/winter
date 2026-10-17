@@ -125,6 +125,9 @@ class GuestStartupTests(unittest.TestCase):
         with self.assertRaises(ValueError):image.check_startup(tree,sha(self.INIT))
         # a symlink whose target bytes happen to hash to the pinned digest is still not a regular file
         with self.assertRaises(ValueError):image.check_startup(tree,sha(b'opt/winter/x'))
+        # a directory is 0555 too, and empty bytes hash to whatever digest is pinned for them: only the kind check refuses it
+        tree=Tree();tree.add('init','directory')
+        with self.assertRaises(ValueError):image.check_startup(tree,sha(b''))
     def test_every_other_startup_path_is_still_refused(self):
         for name in image.STARTUP_PATHS:
             for kind,data in (('file',b'#!/bin/sh'),('symlink',b'nowhere'),('directory',b'')):
@@ -278,7 +281,7 @@ class CpioReadbackTests(unittest.TestCase):
         tree.cpio(folder/'immutable-root.cpio');(folder/'root.manifest.json').write_text(json.dumps(tree.manifest()))
         (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':init_digest or sha(self.INIT),'initPresent':present}))
     def tree(self,init=None):
-        tree=Tree();tree.add('bin/tool','file',b'x',True);tree.add('proc','directory')
+        tree=Tree();tree.add('bin/tool','file',b'tool-content-0123456789',True);tree.add('proc','directory')
         if init is not None:tree.add('init','file',init,True)
         return tree
     def test_a_root_with_exactly_the_pinned_init_verifies(self):
@@ -315,6 +318,13 @@ class CpioReadbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
+            receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+    def test_a_changed_member_other_than_init_is_caught_by_its_own_digest(self):
+        # init is also held to the pinned digest by the startup rule, so only a member the rule does not cover shows that each member is read back
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.write(root,self.tree(self.INIT))
+            data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(b'tool-content')]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
             receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
             with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
     def test_a_tampered_cpio_byte_is_caught(self):
