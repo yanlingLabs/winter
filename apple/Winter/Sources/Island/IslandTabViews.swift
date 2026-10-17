@@ -3,7 +3,7 @@ import WinterCUPresentation
 
 // The Winter island's phase-2 tab plumbing (`docs/claude/island.md`): the models each tab reads (`IslandTabModels`,
 // held by the controller and handed to the open island), the shared pieces every tab draws with — a row surface that
-// grows 3 % and lightens under the pointer, an empty state, a ring and a bar — and the relative-time words.
+// lightens and glows under the pointer, an empty state, a ring and a bar — and the relative-time words.
 
 /// The tabs' models, one per tab (kept out of `IslandStore`, which stays the cards' state).
 @MainActor
@@ -36,38 +36,23 @@ final class IslandTabModels {
     }
 }
 
-/// A row's surface: a soft fill that lightens, and a 3 % grow, while the island's pointer is over it (the pill's
-/// pointer, `dispatchPillPointer`; no pointer — the offscreen gallery — draws it at rest).
+/// A row's surface: a soft fill that lightens and glows softly (the pills' `pillHoverGlow`, white and gentler) while the
+/// island's pointer is over it — never a grow: the open island itself grows under the pointer, and a row inside it must
+/// not add a second scale. No pointer (the offscreen gallery): at rest.
 struct IslandHoverSurface<Content: View>: View {
-    var corner: CGFloat = 16
+    var corner: CGFloat = IslandLayout.rowCorner
     @ViewBuilder let content: (Bool) -> Content
-    @Environment(\.dispatchPillPointer) private var pointer
 
     var body: some View {
-        if let pointer {
-            IslandHoverTracking(pointer: pointer, corner: corner, content: content)
-        } else {
-            content(false).background(RoundedRectangle(cornerRadius: corner, style: .continuous).fill(Color.white.opacity(0.06)))
+        IslandPointerReader { hovered in
+            content(hovered)
+                .background(RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .fill(Color.white.opacity(hovered ? 0.11 : 0.06)))
+                .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                .shadow(color: Color.white.opacity(hovered ? IslandHover.rowGlowNear : 0), radius: PillHoverGlowMetrics.nearRadius)
+                .shadow(color: Color.white.opacity(hovered ? IslandHover.rowGlowFar : 0), radius: PillHoverGlowMetrics.farRadius)
+                .animation(.easeOut(duration: 0.15), value: hovered)
         }
-    }
-}
-
-private struct IslandHoverTracking<Content: View>: View {
-    @ObservedObject var pointer: DispatchPillPointer
-    let corner: CGFloat
-    let content: (Bool) -> Content
-    @State private var frame: CGRect = .zero
-
-    var body: some View {
-        let hovered = pointer.location.map { frame.contains($0) } ?? false
-        content(hovered)
-            .background(RoundedRectangle(cornerRadius: corner, style: .continuous).fill(Color.white.opacity(hovered ? 0.11 : 0.06)))
-            .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-            .onGeometryChange(for: CGRect.self) { proxy in
-                proxy.frame(in: .named(DispatchPillView.canvasSpace))
-            } action: { frame = $0 }
-            .scaleEffect(hovered ? 1.03 : 1)
-            .animation(.easeOut(duration: 0.15), value: hovered)
     }
 }
 

@@ -53,7 +53,7 @@ final class IslandStore: ObservableObject {
     private(set) var answeredHere: Set<String> = []
 
     /// Cards that have been on top before: when one comes back after being hidden (its host was in front), it goes
-    /// straight to the badge instead of popping out again.
+    /// straight to the compacted set (the strip's waiting count and Needs you) instead of popping out again.
     private var everOnTop: Set<String> = []
     /// What the routing last judged each terminal (tty) to be; refreshed before each apply that needs it.
     private(set) var terminalFrontness: [String: TerminalFrontness] = [:]
@@ -190,7 +190,7 @@ final class IslandStore: ObservableObject {
         for id in queue.ids where placed[id] != .top && !(queue.currentTyping && queue.current?.id == id) {
             queue.resolve(id, now: now)
         }
-        // Onto the top: new ones arrive (oldest first, so the newest ends up expanded); ones seen before go to the badge.
+        // Onto the top: new ones arrive (oldest first, so the newest ends up expanded); ones seen before go straight to compacted.
         // (A card answered from here is not brought back by a list fetched before the answer landed.)
         for card in next where placed[card.id] == .top && !queue.ids.contains(card.id)
             && !(answeredHere.contains(card.id) && !inFlight.contains(card.id)) {
@@ -238,12 +238,6 @@ final class IslandStore: ObservableObject {
 
     func clickWaiting() {
         queue.clickWaiting(now: clock())
-        changed()
-    }
-
-    func hoverBadge() {
-        guard queue.current == nil else { return }
-        queue.expandNewestCompacted(now: clock())
         changed()
     }
 
@@ -344,6 +338,3 @@ struct IslandStripModel: Equatable {
         }
     }
 }
-
-/// The badge hugging the housing: "2 waiting".
-func islandBadgeLabel(_ count: Int) -> String { "\(count) waiting" }

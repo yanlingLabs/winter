@@ -1,7 +1,8 @@
 import XCTest
 @testable import Winter
 
-/// The Winter island's queue: replace, hover-defer, click-swap, self-compact into the badge and the list.
+/// The Winter island's queue: replace, hover-defer, click-swap, self-compact into the strip's count and the list (no
+/// badge: nothing else is drawn for a compacted card, and nothing brings one back on top but a new arrival's turn).
 final class IslandQueueTests: XCTestCase {
     func testANewCardReplacesTheCurrentOneWhichCompacts() {
         var q = IslandQueue()
@@ -11,7 +12,6 @@ final class IslandQueueTests: XCTestCase {
         XCTAssertEqual(q.current?.id, "b")
         XCTAssertNil(q.waiting)
         XCTAssertEqual(q.compacted.map(\.id), ["a"])
-        XCTAssertEqual(q.badgeCount, 1)
     }
 
     func testWhileTheCurrentCardIsHoveredTheNewcomerWaitsBelow() {
@@ -58,7 +58,7 @@ final class IslandQueueTests: XCTestCase {
         XCTAssertEqual(q.current?.id, "a")
         q.tick(now: IslandQueue.selfCompactAfter)
         XCTAssertNil(q.current)
-        XCTAssertEqual(q.compacted.map(\.id), ["a"], "into the badge (and, being pending, the Needs-you list)")
+        XCTAssertEqual(q.compacted.map(\.id), ["a"], "into the strip's count (and, being pending, the Needs-you list)")
         XCTAssertNil(q.nextDeadline, "nothing due: no wake-up")
     }
 
@@ -73,18 +73,23 @@ final class IslandQueueTests: XCTestCase {
         XCTAssertEqual(q.nextDeadline, 100 + IslandQueue.hoverLeaveGrace)
         q.tick(now: 100 + IslandQueue.hoverLeaveGrace)
         XCTAssertNil(q.current)
-        XCTAssertEqual(q.badgeCount, 1)
+        XCTAssertEqual(q.compacted.count, 1)
     }
 
-    func testHoveringTheBadgeReExpandsTheNewest() {
+    func testCompactedCardsStayCompactedWithNothingOnTopAndNoWakeUp() {
         var q = IslandQueue()
         for (i, id) in ["a", "b", "c"].enumerated() { q.arrive(id, selfCompacts: true, now: Double(i)) }
         q.tick(now: 100)
         XCTAssertEqual(q.compacted.map(\.id), ["a", "b", "c"])
-        q.expandNewestCompacted(now: 200)
-        XCTAssertEqual(q.current?.id, "c")
-        XCTAssertEqual(q.compacted.map(\.id), ["a", "b"])
-        XCTAssertEqual(q.nextDeadline, 200 + IslandQueue.selfCompactAfter, "it compacts again if left alone")
+        XCTAssertNil(q.current, "nothing expanded: only the strip's count (and Needs you) says they wait")
+        XCTAssertNil(q.waiting)
+        XCTAssertNil(q.nextDeadline, "nothing due while only compacted cards are held: an idle island runs no timer")
+        q.tick(now: 10_000)
+        XCTAssertEqual(q.compacted.map(\.id), ["a", "b", "c"], "the clock never brings one back")
+        // A new card is born on top as usual; the compacted ones stay where they are.
+        q.arrive("d", selfCompacts: true, now: 10_001)
+        XCTAssertEqual(q.current?.id, "d")
+        XCTAssertEqual(q.compacted.map(\.id), ["a", "b", "c"])
     }
 
     func testCardsStayUntilAnsweredAnywhere() {
@@ -156,7 +161,7 @@ final class IslandQueueTests: XCTestCase {
         XCTAssertNil(q.nextDeadline, "no wake-up while typing")
         q.tick(now: 1_000)
         XCTAssertEqual(q.current?.id, "a")
-        XCTAssertEqual(q.badgeCount, 0)
+        XCTAssertTrue(q.compacted.isEmpty)
         // The keyboard given back (Esc): the card compacts only after the grace.
         q.typingCurrent(false, now: 1_000)
         XCTAssertEqual(q.nextDeadline, 1_000 + IslandQueue.hoverLeaveGrace)

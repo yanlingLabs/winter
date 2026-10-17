@@ -4,13 +4,13 @@ import Foundation
 // injected clock — `IslandQueueTests` drives it; the store schedules ONE wake-up at `nextDeadline` (none while nothing
 // is due, so an idle island runs no timer).
 //
-//   - Cards do not stack: a new card REPLACES the current one, which compacts (badge + Needs-you list).
+//   - Cards do not stack: a new card REPLACES the current one, which compacts (the strip's waiting count + Needs you).
 //   - …unless the current one is HOVERED (or is a view request, whose countdown must stay visible): the newcomer
 //     waits as a small compact pill just below it, and expands when the current one clears or self-compacts, or when
 //     the user CLICKS it — which tucks the current one away (compacted).
-//   - Approvals and questions SELF-COMPACT after `selfCompactAfter` when not hovered: into the badge pill hugging the
-//     housing ("2 waiting") AND the Needs-you list. Hovering the badge re-expands the newest. They stay pending until
-//     answered anywhere (`resolve`).
+//   - Approvals and questions SELF-COMPACT after `selfCompactAfter` when not hovered: into the strip's left wing (the
+//     amber symbol and its count — nothing else is drawn for them) AND the Needs-you list, where a click on that wing
+//     opens the island. They stay pending until answered anywhere (`resolve`).
 //   - View requests keep their own countdown: they never self-compact.
 
 struct IslandQueue: Equatable {
@@ -30,7 +30,7 @@ struct IslandQueue: Equatable {
     private(set) var current: Entry?
     /// The compact pill waiting just below the current card.
     private(set) var waiting: Entry?
-    /// Compacted cards, oldest first (the badge's count; its hover re-expands the LAST).
+    /// Compacted cards, oldest first (counted on the strip's left wing, listed in Needs you).
     private(set) var compacted: [Entry] = []
     /// The pointer is over the current card.
     private(set) var currentHovered = false
@@ -40,7 +40,6 @@ struct IslandQueue: Equatable {
     /// Hovered or typed into: the current card stays.
     var currentHeld: Bool { currentHovered || currentTyping }
 
-    var badgeCount: Int { compacted.count }
     var isEmpty: Bool { current == nil && waiting == nil && compacted.isEmpty }
 
     /// Every card the queue holds.
@@ -124,25 +123,6 @@ struct IslandQueue: Equatable {
         if let cur = current { compact(cur) }
         waiting = nil
         current = entry(w.id, selfCompacts: w.selfCompacts, now: now)
-        currentHovered = false
-        currentTyping = false
-    }
-
-    /// The pointer is on the badge: the NEWEST compacted card expands again (the current one, if any, compacts).
-    mutating func expandNewestCompacted(now: TimeInterval) {
-        guard let newest = compacted.popLast() else { return }
-        if let cur = current { compact(cur) }
-        current = entry(newest.id, selfCompacts: newest.selfCompacts, now: now)
-        currentHovered = false
-        currentTyping = false
-    }
-
-    /// Expand this compacted card (a click on it in a list, say). No-op for one not compacted.
-    mutating func expand(_ id: String, now: TimeInterval) {
-        guard let i = compacted.firstIndex(where: { $0.id == id }) else { return }
-        let e = compacted.remove(at: i)
-        if let cur = current { compact(cur) }
-        current = entry(e.id, selfCompacts: e.selfCompacts, now: now)
         currentHovered = false
         currentTyping = false
     }

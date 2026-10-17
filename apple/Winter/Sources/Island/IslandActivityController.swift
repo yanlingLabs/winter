@@ -82,10 +82,9 @@ final class IslandActivityController {
     private func layoutOnce(_ island: IslandController) {
         let cards = island.store
         let cardOnTop = cards.currentCard != nil || cards.waitingCard != nil
-        let badgeUp = cards.currentCard == nil && cards.queue.badgeCount > 0
         store.setCardOnTop(cardOnTop)
         let cu = store.cuPresentation
-        decision = IslandActivityArbiter.decide(cardOnTop: cardOnTop, badgeUp: badgeUp, islandOpen: island.isOpen,
+        decision = IslandActivityArbiter.decide(cardOnTop: cardOnTop, islandOpen: island.isOpen,
                                                 result: store.currentResult?.id, computerUse: cu?.sessionId,
                                                 mirrorOpen: store.mirrorOpen, realMouse: store.usingRealMouse)
         // The in-island mirror's pictures flow only while it is on screen.
@@ -116,16 +115,9 @@ final class IslandActivityController {
         case .result(let id): "result|\(id)"
         case .computerUse: "cu"
         }
-        if shown?.key != key || shown?.belowBadge != decision.belowBadge || shown?.compact != decision.compact {
-            // A slot that only moved under (or out from under) the badge keeps its state, re-laid out in place.
-            if let old = shown, old.key == key, let next = makeShown(key: key, island: island) {
-                next.state.bornAt = old.state.bornAt
-                next.state.still = old.state.still
-                shown = next
-            } else {
-                if let old = shown, !reduceMotion { beginLeaving(old) }
-                shown = makeShown(key: key, island: island)
-            }
+        if shown?.key != key {
+            if let old = shown, !reduceMotion { beginLeaving(old) }
+            shown = makeShown(key: key, island: island)
         }
         if let shown, case .computerUse = decision.slot, let cu { shown.lastCU = cu }
         draw(island)
@@ -134,7 +126,7 @@ final class IslandActivityController {
     private func makeShown(key: String?, island: IslandController) -> IslandActivityShown? {
         guard let key else { return nil }
         let shape = island.screenShape
-        var geometry: DesktopIslandGeometry
+        let geometry: DesktopIslandGeometry
         var result: IslandResultItem?
         switch decision.slot {
         case .result:
@@ -142,15 +134,10 @@ final class IslandActivityController {
             result = item
             geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
         case .computerUse:
-            let width = decision.compact ? IslandActivityLayout.cuPillCompactWidth : IslandActivityLayout.cuPillWidth
-            geometry = IslandLayout.cardGeometry(shape, size: CGSize(width: width, height: DesktopIslandGeometry.pillHeight), rounded: false)
+            geometry = IslandLayout.cardGeometry(shape, size: CGSize(width: IslandActivityLayout.cuPillWidth,
+                                                                      height: DesktopIslandGeometry.pillHeight), rounded: false)
         case .none:
             return nil
-        }
-        if decision.belowBadge {
-            let shift = IslandActivityLayout.belowBadgeShift
-            geometry.pill.origin.y += shift
-            geometry.panelSize.height += shift
         }
         let state = DesktopIslandState(secondsLeft: 0)
         state.bornAt = Date()
@@ -161,8 +148,7 @@ final class IslandActivityController {
                 self?.layout()
             }
         }
-        return IslandActivityShown(key: key, geometry: geometry, state: state, result: result, lastCU: store.cuPresentation,
-                                   belowBadge: decision.belowBadge, compact: decision.compact)
+        return IslandActivityShown(key: key, geometry: geometry, state: state, result: result, lastCU: store.cuPresentation)
     }
 
     private func measure(_ item: IslandResultItem) -> CGSize {
@@ -367,22 +353,18 @@ final class IslandActivityShown: ObservableObject {
     let geometry: DesktopIslandGeometry
     let state: DesktopIslandState
     let result: IslandResultItem?
-    let belowBadge: Bool
-    let compact: Bool
     /// The computer-use pill's last words (kept while it goes back up, when the store has none any more).
     @Published var lastCU: IslandCUPresentation?
     @Published var expanded = false
     @Published var hovered = false
 
     init(key: String, geometry: DesktopIslandGeometry, state: DesktopIslandState, result: IslandResultItem?,
-         lastCU: IslandCUPresentation?, belowBadge: Bool, compact: Bool) {
+         lastCU: IslandCUPresentation?) {
         self.key = key
         self.geometry = geometry
         self.state = state
         self.result = result
         self.lastCU = lastCU
-        self.belowBadge = belowBadge
-        self.compact = compact
     }
 }
 
@@ -491,7 +473,7 @@ struct IslandActivitySlotView: View {
         let expanded = shown.expanded && shown.key == "cu"
         let size = expanded ? IslandActivityLayout.mirrorSize : g.pill.size
         return IslandMorphShell(size: size, cornerRadius: expanded ? IslandActivityLayout.mirrorCorner : g.bodyCornerRadius,
-                                hovered: shown.hovered && !expanded) {
+                                hovered: shown.hovered) {
             content(expanded: expanded)
         }
         .offset(x: g.pill.midX - size.width / 2, y: g.pill.minY)
@@ -508,7 +490,7 @@ struct IslandActivitySlotView: View {
                     IslandMirrorContent(presentation: p, model: mirrorModel, onDetach: onDetach, onCollapse: onCollapse)
                         .transition(.islandBlurFade)
                 } else {
-                    Button(action: onPill) { IslandCUPillContent(presentation: p, compact: shown.compact) }
+                    Button(action: onPill) { IslandCUPillContent(presentation: p) }
                         .buttonStyle(IslandPressStyle())
                         .transition(.islandBlurFade)
                 }

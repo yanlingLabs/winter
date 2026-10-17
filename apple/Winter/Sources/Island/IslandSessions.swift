@@ -261,13 +261,13 @@ struct IslandSessionsList: View {
     }
 
     private var list: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: IslandLayout.rowGap) {
             ForEach(model.rows) { row in
                 IslandSessionRowView(row: row) { onOpen(row) }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 14)
+        .padding(.horizontal, IslandLayout.listInset)
+        .padding(.bottom, IslandLayout.listInset)
     }
 }
 
@@ -285,7 +285,7 @@ struct IslandSessionRowView: View {
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(row.title)
-                            .font(Typography.body(.light))
+                            .font(Typography.composerField())
                             .foregroundStyle(Color.white)
                             .lineLimit(1)
                             .truncationMode(.tail)

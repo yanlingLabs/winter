@@ -20,8 +20,9 @@ struct IslandFocusSources {
 /// Esc closes it; a two-finger swipe over it changes tabs).
 ///
 /// IDLE: the strip is a static view; no timer, no display link, no monitor runs. Pointer monitors exist only while a
-/// card, the badge or the open island is on screen; display-rate frames only while a shape moves; the queue's
-/// self-compaction is ONE one-shot wake-up while a card is expanded.
+/// card or the open island is on screen (compacted cards draw nothing but the strip's count); display-rate frames only
+/// while a shape moves (a card's birth, the island's open/close morph); the queue's self-compaction is ONE one-shot
+/// wake-up while a card is expanded.
 ///
 /// SCREEN: the island lives on the screen with a camera housing, else the main screen (`IslandLayout.islandScreen`),
 /// re-read when the displays change.
@@ -54,7 +55,6 @@ final class IslandController {
     private var leaving: (shown: Shown, card: IslandCard)?
     private var topHitRects: [CGRect] = []
     private var cardRect: CGRect = .zero
-    private var badgeRect: CGRect = .zero
     private var waitingRect: CGRect = .zero
 
     private let openModel = IslandOpenModel()
@@ -224,6 +224,8 @@ final class IslandController {
         removePointerMonitors()
         removeOpenMonitors()
         wake?.cancel()
+        settleWake?.cancel()
+        settleWake = nil
         openRefresh?.cancel()
         openRefresh = nil
         pendingReroute?.cancel()
@@ -331,8 +333,10 @@ final class IslandController {
             stripPanel.orderOut(nil)
             return
         }
-        let view = IslandStripRoot(store: store, size: strip.size, housingWidth: shape.housing?.width) { [weak self] in
-            self?.toggle()
+        let view = IslandStripRoot(store: store, size: strip.size, housingWidth: shape.housing?.width) { [weak self] point in
+            self?.stripClicked(at: point)
+        } onPart: { [weak self] part in
+            self?.stripPartChosen(part)
         }
         if let host = stripPanel.contentView as? IslandHostingView<IslandStripRoot> {
             host.rootView = view
@@ -344,6 +348,24 @@ final class IslandController {
         }
         stripPanel.setFrame(panelFrame(for: strip), display: true)
         if !stripPanel.isVisible { stripPanel.orderFrontRegardless() }
+    }
+
+    /// A click on the strip at `point` (x from the centre): the waiting wing opens the island on Needs you, the working
+    /// wing on Sessions, the housing toggles it (`IslandStripPart.action`).
+    private func stripClicked(at point: CGPoint) {
+        stripPartChosen(IslandLayout.stripPart(at: point, shape, model: store.strip) ?? .housing)
+    }
+
+    private func stripPartChosen(_ part: IslandStripPart) {
+        switch part.action(isOpen: isOpen, selectedTab: store.tabs.selected?.id) {
+        case .open(let tab):
+            if let tab { store.tabs.select(tab) }
+            open()
+        case .select(let tab):
+            store.tabs.select(tab)
+        case .close:
+            close()
+        }
     }
 
     /// A rect measured from the island's centre and the screen's top → a screen frame.
@@ -428,10 +450,8 @@ final class IslandController {
 
     private func drawTop() {
         defer { onTopChanged?() }
-        let queue = store.queue
         let currentCard = store.currentCard
         let waitingCard = store.waitingCard
-        let showBadge = currentCard == nil && queue.badgeCount > 0 && !isOpen
         // Everything is centred on the panel's midline; the panel is as wide and tall as the widest and lowest part.
         var width: CGFloat = 0
         var height: CGFloat = 0
@@ -443,18 +463,10 @@ final class IslandController {
             waiting = r
             height = max(height, r.maxY + DesktopIslandGeometry.margin)
         }
-        let badgeWidth = IslandBadge.width(for: queue.badgeCount)
-        var badge: CGRect?
-        if showBadge {
-            let r = IslandLayout.badge(shape, width: badgeWidth)
-            badge = r
-            width = max(width, badgeWidth + 2 * DesktopIslandGeometry.margin)
-            height = max(height, r.maxY + DesktopIslandGeometry.margin)
-        }
         guard width > 0, height > 0, !isOpen else {
             topPanel.orderOut(nil)
             topPanel.rest()
-            cardRect = .zero; badgeRect = .zero; waitingRect = .zero
+            cardRect = .zero; waitingRect = .zero
             updatePointerMonitors(active: false)
             watchTerminalsIfNeeded()
             return
@@ -463,14 +475,12 @@ final class IslandController {
         func centred(_ w: CGFloat) -> CGFloat { (width - w) / 2 }
         cardRect = shown.map { $0.geometry.pill.offsetBy(dx: centred($0.geometry.panelSize.width), dy: 0) } ?? .zero
         waitingRect = waiting.map { $0.offsetBy(dx: centred(shown!.geometry.panelSize.width), dy: 0) } ?? .zero
-        badgeRect = badge.map { CGRect(x: centred($0.width), y: $0.minY, width: $0.width, height: $0.height) } ?? .zero
 
         let root = IslandTopRoot(
             store: store, panelSize: CGSize(width: width, height: height), pointer: pointer,
             current: shown.flatMap { s in currentCard.map { IslandShownPair(shown: s, card: $0) } },
             leaving: leaving.map { IslandShownPair(shown: $0.shown, card: $0.card) },
             waiting: waitingCard.map { ($0, waitingRect) },
-            badge: showBadge ? (queue.badgeCount, badgeRect) : nil,
             reduceMotion: reduceMotion,
             onWaitingClick: { [weak self] in
                 self?.explicitDismiss = true
@@ -523,8 +533,8 @@ final class IslandController {
         pointerMonitors = []
     }
 
-    /// Where the pointer is over the top panel: the card grows and its buttons glow under it, the hover holds the card,
-    /// the badge brings the newest back, and outside what is drawn the panel lets clicks through.
+    /// Where the pointer is over the top panel: the card (or the waiting pill) grows and its buttons glow under it, the
+    /// hover holds the card, and outside what is drawn the panel lets clicks through.
     private func pointerMoved() {
         guard topPanel.isVisible else { return }
         let mouse = NSEvent.mouseLocation
@@ -540,10 +550,8 @@ final class IslandController {
         }
         let overCard = point.map { cardRect.insetBy(dx: -4, dy: -4).contains($0) } ?? false
         let overWaiting = point.map { waitingRect.contains($0) } ?? false
-        let overBadge = point.map { badgeRect.insetBy(dx: -4, dy: -4).contains($0) } ?? false
-        topPanel.ignoresMouseEvents = !(overCard || overWaiting || overBadge)
+        topPanel.ignoresMouseEvents = !(overCard || overWaiting)
         store.hoverCurrent(overCard || overWaiting)
-        if overBadge { store.hoverBadge() }
     }
 
     // MARK: - The wake-up
@@ -570,19 +578,30 @@ final class IslandController {
     func open() {
         guard !isOpen else { return }
         isOpen = true
+        // The morph grows out of the strip as it is drawn NOW (the housing alone while nothing waits or works).
+        morphSource = IslandLayout.strip(shape, waiting: store.strip.showsWings) ?? IslandLayout.strip(shape)
         layoutIsland()
-        openModel.open = false
+        openModel.beginOpening(instant: reduceMotion)
         islandPanel.orderFrontRegardless()
         ackShownViewRequests()
-        DispatchQueue.main.async { [openModel, reduceMotion] in
-            if reduceMotion { openModel.open = true } else {
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { openModel.open = true }
+        settleWake?.cancel()
+        if !reduceMotion {
+            // ONE wake-up when the shape has grown: the frame driver stops (frames only while it moves).
+            let item = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated { self?.openModel.settled() }
             }
+            settleWake = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + IslandOpenMorph.settle + 0.05, execute: item)
         }
         drawTop()
         installOpenMonitors()
         restartOpenRefresh()
     }
+
+    /// What the open island grew out of (x from the centre), kept for its way back.
+    private var morphSource: CGRect = .zero
+    /// The open/close morph's one wake-up (settled, or gone back into the strip).
+    private var settleWake: DispatchWorkItem?
 
     /// Closes the island. `outsideClick`: the user clicked another app or window — the keyboard is dropped WITHOUT
     /// giving it back to the app it came from, so the app the user clicked keeps it.
@@ -595,14 +614,24 @@ final class IslandController {
         openPointer.set(nil)
         tabModels.shelf.dropTargeted = false
         if outsideClick { islandPanel.letGo() } else { islandPanel.rest() }
+        settleWake?.cancel()
+        settleWake = nil
         if reduceMotion {
             islandPanel.orderOut(nil)
+            openModel.reset()
         } else {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { openModel.open = false }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
-                guard let self, !self.isOpen else { return }
-                self.islandPanel.orderOut(nil)
+            // Back into the strip: the contents go first, then the mass shrinks (the opening played backwards).
+            let back = openModel.beginClosing()
+            let item = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.isOpen else { return }
+                    self.settleWake = nil
+                    self.islandPanel.orderOut(nil)
+                    self.openModel.reset()
+                }
             }
+            settleWake = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + back + 0.05, execute: item)
         }
         drawTop()
     }
@@ -610,9 +639,15 @@ final class IslandController {
     private func layoutIsland() {
         let contentHeight = islandContentHeight()
         let r = IslandLayout.island(shape, contentHeight: contentHeight)
-        let root = IslandOpenRoot(store: store, model: openModel, shape: shape, size: r.size,
-                                  stripSize: IslandLayout.strip(shape).size, tabModels: tabModels,
-                                  pointer: openPointer) { [weak self] in self?.close() }
+        // Room for the shadow (and the hover grow) below and at the sides; panel-local rects from here.
+        let pad = Self.islandPad
+        let target = CGRect(x: pad, y: 0, width: r.width, height: r.height)
+        let source = morphSource.offsetBy(dx: r.width / 2 + pad, dy: 0)
+        islandRect = target
+        let root = IslandOpenRoot(store: store, model: openModel, shape: shape, target: target, source: source,
+                                  tabModels: tabModels, pointer: openPointer, reduceMotion: reduceMotion) { [weak self] in
+            self?.close()
+        }
         if let host = islandPanel.contentView as? IslandHostingView<IslandOpenRoot> {
             host.rootView = root
         } else {
@@ -621,15 +656,18 @@ final class IslandController {
             host.fileDrop = fileDrop
             islandPanel.contentView = host
         }
-        // Room for the shadow below and at the sides.
-        let pad: CGFloat = 30
         islandPanel.setFrame(panelFrame(for: CGRect(x: r.minX - pad, y: 0, width: r.width + 2 * pad, height: r.height + pad)), display: true)
     }
+
+    /// Around the open island inside its panel: its shadow (18 pt, 6 down) and its hover grow (3 % of 560 is under 17 pt).
+    static let islandPad: CGFloat = 36
+    /// The open island's resting rect in its panel (its hover is judged against it).
+    private var islandRect: CGRect = .zero
 
     /// The open island's content height: its header and each listed card, measured at the island's width (the list
     /// scrolls past the island's maximum).
     private func islandContentHeight() -> CGFloat {
-        let header: CGFloat = 46
+        let header = IslandOpenHeader.height
         if store.tabs.selected?.id == IslandTabRegistry.watches.id {
             // The Watches tab (phase 2, lane B): its rows measured at the island's width.
             return islandWatchesHeight(store.activity, header: header)
@@ -644,11 +682,11 @@ final class IslandController {
         var rows: CGFloat = 0
         for card in store.cards.reversed() {
             let host = NSHostingView(rootView: IslandNeedsYouRow(card: card, store: store)
-                .frame(width: IslandLayout.islandWidth - 28).environment(\.colorScheme, .dark))
-            rows += ceil(host.fittingSize.height) + 10
+                .frame(width: IslandLayout.islandWidth - 2 * IslandLayout.listInset).environment(\.colorScheme, .dark))
+            rows += ceil(host.fittingSize.height) + IslandNeedsYouList.gap
             if header + rows > IslandLayout.islandMaxHeight { break }
         }
-        return header + rows + 14
+        return header + rows - IslandNeedsYouList.gap + IslandLayout.listInset
     }
 
     private func installOpenMonitors() {
@@ -673,12 +711,15 @@ final class IslandController {
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
             MainActor.assumeIsolated { if event.keyCode == 53 { self?.close() } }
         }) { openMonitors.append(m) }
-        // The pointer over the open island: its rows grow and its buttons glow under it.
+        // The pointer over the open island: it grows a little, its rows lighten and its buttons glow under it.
         let movedOpen: (NSEvent?) -> Void = { [weak self] _ in
             guard let self, self.isOpen else { return }
             let mouse = NSEvent.mouseLocation
             let frame = self.islandPanel.frame
-            self.openPointer.set(frame.contains(mouse) ? CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y) : nil)
+            let local: CGPoint? = frame.contains(mouse) ? CGPoint(x: mouse.x - frame.minX, y: frame.maxY - mouse.y) : nil
+            self.openPointer.set(local)
+            let hovered = local.map { self.islandRect.contains($0) } ?? false
+            if self.openModel.hovered != hovered, !self.openModel.isClosing { self.openModel.hovered = hovered }
         }
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: { event in
             MainActor.assumeIsolated { movedOpen(event) }
@@ -705,25 +746,28 @@ final class IslandController {
 
 // MARK: - Roots
 
-/// Whether the island is open (its spring).
-@MainActor final class IslandOpenModel: ObservableObject {
-    @Published var open = false
-}
-
+/// The strip's panel content. A click is told WHERE it landed (x from the centre): the waiting wing opens Needs you,
+/// the working wing Sessions, the housing toggles (`IslandStripPart`); VoiceOver gets the same as named actions.
 struct IslandStripRoot: View {
     @ObservedObject var store: IslandStore
     let size: CGSize
     let housingWidth: CGFloat?
-    let onClick: () -> Void
+    let onClick: (CGPoint) -> Void
+    let onPart: (IslandStripPart) -> Void
 
     var body: some View {
         IslandStripView(model: store.strip, size: size, housingWidth: housingWidth)
-            .onTapGesture(perform: onClick)
+            .onTapGesture(coordinateSpace: .local) { location in
+                onClick(CGPoint(x: location.x - size.width / 2, y: location.y))
+            }
+            .accessibilityAction { onPart(.housing) }
+            .accessibilityAction(named: "Show what needs you") { onPart(.waitingWing) }
+            .accessibilityAction(named: "Show sessions") { onPart(.workingWing) }
             .environment(\.colorScheme, .dark)
     }
 }
 
-/// The top panel's content: the card on top (and the one going back up), the waiting pill under it, or the badge.
+/// The top panel's content: the card on top (and the one going back up), and the waiting pill under it.
 struct IslandTopRoot: View {
     @ObservedObject var store: IslandStore
     let panelSize: CGSize
@@ -731,7 +775,6 @@ struct IslandTopRoot: View {
     let current: IslandShownPair?
     let leaving: IslandShownPair?
     let waiting: (IslandCard, CGRect)?
-    let badge: (Int, CGRect)?
     let reduceMotion: Bool
     let onWaitingClick: () -> Void
 
@@ -744,18 +787,12 @@ struct IslandTopRoot: View {
                     .offset(x: rect.minX, y: rect.minY)
                     .transition(.scale(scale: 0.6, anchor: .top).combined(with: .opacity))
             }
-            if let (count, rect) = badge {
-                IslandBadge(count: count, width: rect.width)
-                    .offset(x: rect.minX, y: rect.minY)
-                    .transition(.scale(scale: 0.5, anchor: .top).combined(with: .opacity))
-            }
         }
         .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
         .coordinateSpace(name: DispatchPillView.canvasSpace)
         .environment(\.dispatchPillPointer, pointer)
         .environment(\.colorScheme, .dark)
         .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: waiting?.0.id)
-        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: badge?.0)
     }
 
     @ViewBuilder
@@ -784,39 +821,6 @@ struct IslandShownCard {
 struct IslandShownPair {
     let shown: IslandShownCard
     let card: IslandCard
-}
-
-/// The open island's panel content: the island growing out of the strip, a tap on its top band closing it.
-struct IslandOpenRoot: View {
-    @ObservedObject var store: IslandStore
-    @ObservedObject var model: IslandOpenModel
-    let shape: IslandScreenShape
-    let size: CGSize
-    let stripSize: CGSize
-    var tabModels: IslandTabModels?
-    var pointer: DispatchPillPointer?
-    let onClose: () -> Void
-
-    var body: some View {
-        let sx = model.open ? 1 : stripSize.width / size.width
-        let sy = model.open ? 1 : stripSize.height / max(size.height, 1)
-        VStack(spacing: 0) {
-            ZStack(alignment: .top) {
-                IslandExpandedView(store: store, shape: shape, size: size, tabModels: tabModels)
-                    .opacity(model.open ? 1 : 0.0)
-                Color.clear
-                    .frame(width: size.width, height: shape.topInset)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: onClose)
-            }
-            .scaleEffect(x: sx, y: sy, anchor: .top)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .coordinateSpace(name: DispatchPillView.canvasSpace)
-        .environment(\.dispatchPillPointer, pointer)
-        .environment(\.colorScheme, .dark)
-    }
 }
 
 /// PURE: the view requests to ack now — those on screen not acked before.

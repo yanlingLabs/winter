@@ -4,7 +4,8 @@ import WinterKit
 
 // The Winter island's activity views (phase 2, `docs/claude/island.md`): the computer-use pill and its mirror, the
 // turn-result card, and the Watches tab. Same look as phase 1: black shells, the house type (`Typography` only —
-// `TypographyTests` sweeps this folder), white ✕ / blue ✓ circles with the pills' hover glow, a 3 % hover grow.
+// `TypographyTests` sweeps this folder), white ✕ / blue ✓ circles with the pills' hover glow, the island's hover grow
+// (`IslandHover`).
 
 enum IslandCUColors {
     /// Winter's blue (the island's ✓): the computer-use pill's mark.
@@ -12,16 +13,13 @@ enum IslandCUColors {
 }
 
 enum IslandActivityLayout {
-    /// The computer-use pill's width, and its compact width under the badge.
+    /// The computer-use pill's width.
     static let cuPillWidth: CGFloat = 340
-    static let cuPillCompactWidth: CGFloat = 250
     /// The mirror in the island: its outer size and corner.
     static let mirrorSize = CGSize(width: 380, height: 300)
     static let mirrorCorner: CGFloat = 24
     /// Room kept around a resting slot for its shadow and hover grow (the panel is cut to it).
     static let shadowRoom: CGFloat = 22
-    /// Below the badge: how far the slot moves down so it hangs under it.
-    static var belowBadgeShift: CGFloat { IslandLayout.badgeHeight - IslandLayout.badgeTuck + 6 }
 }
 
 /// The text cross-fade the Dispatch pill's rows use: the old words blur out as the new ones sharpen in.
@@ -41,7 +39,7 @@ extension AnyTransition {
 /// A line that cross-fades (with the morph blur) whenever its words change. Animates only on a change.
 struct IslandCrossfadeText: View {
     let text: String
-    var font: Font = Typography.body(.light)
+    var font: Font = Typography.composerField()
     var color: Color = .white
 
     var body: some View {
@@ -83,14 +81,13 @@ struct IslandSmallCircleButton: View {
 /// The pill's row: the computer-use mark, what is being done now (cross-fading), and how many sessions are at it.
 struct IslandCUPillContent: View {
     let presentation: IslandCUPresentation
-    var compact = false
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "cursorarrow.motionlines")
                 .font(Typography.label(.semibold))
                 .foregroundStyle(IslandCUColors.accent)
-            IslandCrossfadeText(text: presentation.line, font: compact ? Typography.label(.medium) : Typography.body(.light))
+            IslandCrossfadeText(text: presentation.line)
             if let count = presentation.countLabel {
                 Text(count)
                     .font(Typography.captionDigits(.semibold))
@@ -101,7 +98,7 @@ struct IslandCUPillContent: View {
                     .accessibilityHidden(true)
             }
         }
-        .padding(.leading, compact ? 14 : 18)
+        .padding(.leading, 18)
         .padding(.trailing, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .opacity(presentation.lingering ? 0.7 : 1)
@@ -144,7 +141,7 @@ struct IslandMirrorContent: View {
                     .truncationMode(.middle)
             }
         }
-        .padding(12)
+        .padding(IslandMirrorPicture.inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -173,9 +170,7 @@ struct IslandMorphShell<Content: View>: View {
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
             .compositingGroup()
             .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
-                view.scaleEffect(hovered ? DesktopIslandGeometry.hoverScale : 1, anchor: .top)
-            }
+            .islandHoverGrow(hovered)
     }
 }
 
@@ -202,7 +197,7 @@ struct IslandResultContent: View {
             }
             HStack(alignment: .bottom, spacing: 8) {
                 Text(item.summary)
-                    .font(Typography.body(.light))
+                    .font(Typography.composerField())
                     .foregroundStyle(Color.white)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -231,16 +226,7 @@ struct IslandWatchesList: View {
 
     var body: some View {
         if activity.watches.isEmpty {
-            VStack(spacing: 6) {
-                Image(systemName: "eye")
-                    .font(Typography.heading(.light))
-                    .foregroundStyle(Theme.textMuted)
-                Text("Nothing is being watched")
-                    .font(Typography.label())
-                    .foregroundStyle(Theme.textMuted)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 18)
+            IslandEmptyTab(symbol: "eye", line: "Nothing is being watched")
         } else if scrolls {
             ScrollView(.vertical) { rows }
                 .scrollIndicators(.never)
@@ -252,14 +238,14 @@ struct IslandWatchesList: View {
 
     private var rows: some View {
         let now = nowMs()
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: IslandLayout.rowGap) {
             ForEach(activity.watches, id: \.wakeId) { watch in
                 IslandWatchRow(watch: watch, nowMs: now, stopping: activity.disarming.contains(watch.wakeId),
                                error: activity.disarmErrors[watch.wakeId]) { activity.disarmWatch(watch) }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 14)
+        .padding(.horizontal, IslandLayout.listInset)
+        .padding(.bottom, IslandLayout.listInset)
     }
 }
 
@@ -271,6 +257,10 @@ struct IslandWatchRow: View {
     let onStop: () -> Void
 
     var body: some View {
+        IslandHoverSurface { _ in row }
+    }
+
+    private var row: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: islandWatchSymbol(watch.condition))
                 .font(Typography.label(.semibold))
@@ -279,7 +269,7 @@ struct IslandWatchRow: View {
                 .background(Circle().fill(Color.white.opacity(0.08)))
             VStack(alignment: .leading, spacing: 3) {
                 Text(islandWatchConditionLine(watch))
-                    .font(Typography.body(.light))
+                    .font(Typography.composerField())
                     .foregroundStyle(Color.white)
                     .lineLimit(2)
                 Text("\(islandWatchSessionLine(watch)) · \(watch.targetLabel)")
@@ -297,7 +287,6 @@ struct IslandWatchRow: View {
                 .accessibilityLabel("Stop waiting")
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.08)))
     }
 }
 
@@ -309,8 +298,8 @@ func islandWatchesHeight(_ activity: IslandActivityStore, header: CGFloat) -> CG
     let now = Int(Date().timeIntervalSince1970 * 1000)
     for watch in activity.watches {
         let host = NSHostingView(rootView: IslandWatchRow(watch: watch, nowMs: now, stopping: false, error: nil, onStop: {})
-            .frame(width: IslandLayout.islandWidth - 28).environment(\.colorScheme, .dark))
-        rows += ceil(host.fittingSize.height) + 10
+            .frame(width: IslandLayout.islandWidth - 2 * IslandLayout.listInset).environment(\.colorScheme, .dark))
+        rows += ceil(host.fittingSize.height) + IslandLayout.rowGap
         if header + rows > IslandLayout.islandMaxHeight { break }
     }
     return header + rows + 14

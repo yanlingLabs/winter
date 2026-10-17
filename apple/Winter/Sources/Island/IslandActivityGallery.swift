@@ -6,7 +6,7 @@ import WinterCUPresentation
 import WinterKit
 
 /// The island's phase-2 activity rendered OFFSCREEN (no window, nothing on screen, no capture): the computer-use pill
-/// (alone, with a count, compact under the badge, its birth), its mirror and the detached mirror (with a drawn stand-in
+/// (alone, with a count, under a strip counting compacted cards, its birth), its mirror and the detached mirror (with a drawn stand-in
 /// picture — `ImageRenderer` cannot draw the live canvas, and nothing is captured), a turn-result card and the Watches
 /// tab. Written by `IslandActivityGalleryTests` into `WINTER_ISLAND_RENDER_DIR` (a temporary folder otherwise).
 @MainActor
@@ -21,23 +21,24 @@ enum IslandActivityGallery {
         let two = IslandCUPresentation(sessionId: "s1", line: "Waiting for “Status: Published”", count: 2,
                                        title: "List the extension", lingering: false)
 
-        out.append(try write(pill(one, shape: notched, compact: false, t: DesktopIslandFluid.settle), directory, "island-cu-pill@2x.png"))
-        out.append(try write(pill(two, shape: notched, compact: false, t: DesktopIslandFluid.settle), directory, "island-cu-pill-count@2x.png"))
-        out.append(try write(pill(one, shape: plain, compact: false, t: DesktopIslandFluid.settle), directory, "island-cu-pill-no-housing@2x.png"))
+        out.append(try write(pill(one, shape: notched, t: DesktopIslandFluid.settle), directory, "island-cu-pill@2x.png"))
+        out.append(try write(pill(two, shape: notched, t: DesktopIslandFluid.settle), directory, "island-cu-pill-count@2x.png"))
+        out.append(try write(pill(one, shape: plain, t: DesktopIslandFluid.settle), directory, "island-cu-pill-no-housing@2x.png"))
         let typing = IslandCUPresentation(sessionId: "s1", line: "Typing in Notes", count: 1, title: nil, lingering: true)
-        out.append(try write(pill(typing, shape: notched, compact: false, t: DesktopIslandFluid.settle), directory, "island-cu-pill-lingering@2x.png"))
-        let frames = try stride(from: 0.0, through: 1.2, by: 0.1).map { try renderImage(pill(one, shape: notched, compact: false, t: $0)) }
+        out.append(try write(pill(typing, shape: notched, t: DesktopIslandFluid.settle), directory, "island-cu-pill-lingering@2x.png"))
+        let frames = try stride(from: 0.0, through: 1.2, by: 0.1).map { try renderImage(pill(one, shape: notched, t: $0)) }
         out.append(try write(try filmstrip(frames), directory, "island-cu-pill-birth-filmstrip@2x.png"))
 
-        // Under the badge: compact.
-        let badgeWidth = IslandBadge.width(for: 2)
-        let underBadge = scene(notched, width: 520, height: 150) {
+        // Two cards compacted: only the strip's count says so; the pill hangs from the housing as always.
+        let stripModel = IslandStripModel(waitingCount: 2)
+        let strip = IslandLayout.strip(notched)
+        let withCompacted = scene(notched, width: 520, height: 150) {
             ZStack(alignment: .top) {
-                pillFrame(one, shape: notched, compact: true, belowBadge: true, t: DesktopIslandFluid.settle)
-                IslandBadge(count: 2, width: badgeWidth).padding(.top, notched.topInset - IslandLayout.badgeTuck)
+                pillFrame(one, shape: notched, t: DesktopIslandFluid.settle)
+                IslandStripView(model: stripModel, size: strip.size, housingWidth: notched.housing?.width)
             }
         }
-        out.append(try write(underBadge, directory, "island-cu-pill-under-badge@2x.png"))
+        out.append(try write(withCompacted, directory, "island-cu-pill-with-compacted@2x.png"))
 
         // The mirror, in the island and detached, with a drawn stand-in picture.
         let picture = Image(decorative: try renderImage(standInWindow()), scale: 2)
@@ -54,7 +55,8 @@ enum IslandActivityGallery {
         let detached = ZStack {
             LinearGradient(colors: [Color(nsColor: .systemTeal).opacity(0.55), Color(nsColor: .systemIndigo).opacity(0.35)],
                            startPoint: .top, endPoint: .bottom)
-            IslandDetachedMirrorViewForGallery(title: "List the extension", picture: picture)
+            IslandDetachedMirrorView(title: "List the extension", model: nil, placeholder: picture, onClose: {})
+                .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
                 .frame(width: IslandDetachedMirrorPanel.defaultSize.width, height: IslandDetachedMirrorPanel.defaultSize.height)
         }
         .frame(width: IslandDetachedMirrorPanel.defaultSize.width + 80, height: IslandDetachedMirrorPanel.defaultSize.height + 80)
@@ -101,28 +103,22 @@ enum IslandActivityGallery {
 
     // MARK: Pieces
 
-    private static func pillGeometry(_ shape: IslandScreenShape, compact: Bool, belowBadge: Bool) -> DesktopIslandGeometry {
-        let width = compact ? IslandActivityLayout.cuPillCompactWidth : IslandActivityLayout.cuPillWidth
-        var g = IslandLayout.cardGeometry(shape, size: CGSize(width: width, height: DesktopIslandGeometry.pillHeight), rounded: false)
-        if belowBadge {
-            g.pill.origin.y += IslandActivityLayout.belowBadgeShift
-            g.panelSize.height += IslandActivityLayout.belowBadgeShift
-        }
-        return g
+    private static func pillGeometry(_ shape: IslandScreenShape) -> DesktopIslandGeometry {
+        IslandLayout.cardGeometry(shape, size: CGSize(width: IslandActivityLayout.cuPillWidth, height: DesktopIslandGeometry.pillHeight),
+                                  rounded: false)
     }
 
-    private static func pillFrame(_ p: IslandCUPresentation, shape: IslandScreenShape, compact: Bool, belowBadge: Bool = false,
-                                  t: Double) -> some View {
-        let g = pillGeometry(shape, compact: compact, belowBadge: belowBadge)
+    private static func pillFrame(_ p: IslandCUPresentation, shape: IslandScreenShape, t: Double) -> some View {
+        let g = pillGeometry(shape)
         return CUIslandLiquidFrame(frame: DesktopIslandFluid(geometry: g).frame(at: t), geometry: g, hovered: false, interactive: true) {
-            IslandCUPillContent(presentation: p, compact: compact)
+            IslandCUPillContent(presentation: p)
         }
     }
 
-    private static func pill(_ p: IslandCUPresentation, shape: IslandScreenShape, compact: Bool, t: Double) -> some View {
-        let g = pillGeometry(shape, compact: compact, belowBadge: false)
+    private static func pill(_ p: IslandCUPresentation, shape: IslandScreenShape, t: Double) -> some View {
+        let g = pillGeometry(shape)
         return scene(shape, width: g.panelSize.width + 120, height: g.panelSize.height + 20) {
-            pillFrame(p, shape: shape, compact: compact, t: t)
+            pillFrame(p, shape: shape, t: t)
         }
     }
 
@@ -205,33 +201,6 @@ enum IslandActivityGallery {
     }
 }
 
-/// The detached mirror's look with a stand-in picture (the gallery's).
-private struct IslandDetachedMirrorViewForGallery: View {
-    let title: String
-    let picture: Image
-
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "cursorarrow.motionlines")
-                    .font(Typography.caption(.semibold))
-                    .foregroundStyle(IslandCUColors.accent)
-                Text(title)
-                    .font(Typography.label(.medium))
-                    .foregroundStyle(Color.white)
-                    .lineLimit(1)
-                Spacer(minLength: 6)
-                IslandSmallCircleButton(symbol: "xmark", action: {})
-            }
-            IslandMirrorPicture(model: nil, placeholder: picture)
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.black))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
-        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
-    }
-}
-
 /// The open island laid out flat on the Watches tab at a fixed "now" (the gallery's).
 private struct IslandExpandedViewForGallery: View {
     @ObservedObject var store: IslandStore
@@ -240,25 +209,16 @@ private struct IslandExpandedViewForGallery: View {
     let nowMs: Int
 
     var body: some View {
-        let outline = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: IslandLayout.islandCorner,
-                                                                bottomTrailing: IslandLayout.islandCorner), style: .continuous)
-        VStack(spacing: 0) {
-            Color.clear.frame(height: shape.topInset)
-            HStack(spacing: 8) {
-                Text(store.tabs.selected?.title ?? "")
-                    .font(Typography.body(.semibold))
-                    .foregroundStyle(Color.white)
-                Spacer()
-                IslandTabDots(state: store.tabs) { _ in }
+        let target = CGRect(origin: .zero, size: size)
+        IslandOpenFrame(frame: IslandOpenMorph.Frame(rect: target, corner: IslandLayout.islandCorner, content: 1, blur: 0),
+                        target: target, shape: shape) {
+            VStack(spacing: 0) {
+                Color.clear.frame(height: shape.topInset)
+                IslandOpenHeader(store: store)
+                IslandWatchesList(activity: store.activity, scrolls: false, nowMs: { nowMs })
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-            IslandWatchesList(activity: store.activity, scrolls: false, nowMs: { nowMs })
+            .frame(width: size.width, height: size.height, alignment: .top)
         }
-        .frame(width: size.width, height: size.height, alignment: .top)
-        .background(outline.fill(Color.black))
-        .overlay(outline.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
-        .clipShape(outline)
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 }

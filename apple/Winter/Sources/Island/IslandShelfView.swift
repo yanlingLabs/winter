@@ -38,9 +38,9 @@ struct IslandShelfTab: View {
 
     private var grid: some View {
         let items = shelf.items
-        return VStack(spacing: 8) {
+        return VStack(spacing: IslandLayout.rowGap) {
             ForEach(Array(stride(from: 0, to: items.count, by: Self.columns)), id: \.self) { start in
-                HStack(spacing: 8) {
+                HStack(spacing: IslandLayout.rowGap) {
                     ForEach(start..<min(start + Self.columns, items.count), id: \.self) { i in
                         IslandShelfTile(item: items[i], shelf: shelf, thumbnails: thumbnails)
                     }
@@ -64,7 +64,7 @@ struct IslandShelfTile: View {
     var body: some View {
         let url = shelf.url(of: item.id)
         let selected = shelf.selectedId == item.id
-        IslandHoverSurface(corner: 14) { hovered in
+        IslandHoverSurface { hovered in
             VStack(spacing: 6) {
                 ZStack {
                     if let url {
@@ -106,10 +106,10 @@ struct IslandShelfTile: View {
                     .padding(5)
                 }
             }
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .overlay(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous)
                 .strokeBorder(Color.white.opacity(selected ? 0.55 : 0), lineWidth: 1.5))
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous))
         .gesture(TapGesture(count: 2).onEnded { shelf.open(item.id) }
             .exclusively(before: TapGesture().onEnded { shelf.select(item.id) }))
         .onDrag {
