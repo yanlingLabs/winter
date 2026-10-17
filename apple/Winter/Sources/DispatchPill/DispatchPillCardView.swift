@@ -322,7 +322,6 @@ private struct DispatchPillApprovalBody: View {
                     .lineLimit(draft.wrappedValue.isSummaryExpanded ? nil : 4)
                     .truncationMode(.middle)
                     .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
                 if mightOverflow {
                     Button(draft.wrappedValue.isSummaryExpanded ? "Show less" : "Show more") {
                         draft.wrappedValue.isSummaryExpanded.toggle()
@@ -539,7 +538,6 @@ private struct DispatchPillElicitationBody: View {
                 .font(Typography.composerField())
                 .foregroundStyle(Color.white)
                 .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Image(systemName: "lock.fill")
@@ -621,7 +619,6 @@ private struct DispatchPillPlanBody: View {
                     .font(Typography.composerField())
                     .foregroundStyle(Color.white)
                     .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
                 if requesting {
                     DispatchPillCardField(placeholder: "What should change?", text: draft.feedback, enabled: !isInFlight) {
                         sendChanges(draft.wrappedValue.feedback)

@@ -452,4 +452,64 @@ final class DispatchPillCardTests: XCTestCase {
         waitUntil { !sent().isEmpty }
         XCTAssertEqual(sent(), ["now it can go"])
     }
+
+    // MARK: - Which keys under a card are writing
+
+    func testWhichKeysUnderACardAreWriting() {
+        func typing(_ chars: String?, _ mods: NSEvent.ModifierFlags = [], editing: Bool = false, fka: Bool = false) -> Bool {
+            dispatchPillKeyIsTyping(characters: chars, modifiers: mods, editingText: editing, fullKeyboardAccess: fka)
+        }
+        XCTAssertTrue(typing("w"))
+        XCTAssertTrue(typing("W", .shift))
+        XCTAssertTrue(typing("é", .option), "an option character is text")
+        XCTAssertTrue(typing(""), "a dead key (no characters yet) starts a composition in the composer")
+        XCTAssertTrue(typing(nil), "an input method's first key, likewise")
+        XCTAssertFalse(typing("\r"), "Return never sends or answers")
+        XCTAssertFalse(typing("\t"))
+        XCTAssertFalse(typing("\u{7F}"), "Delete")
+        XCTAssertFalse(typing("\u{F702}"), "an arrow")
+        XCTAssertFalse(typing("c", .command))
+        XCTAssertFalse(typing("a", .control))
+        XCTAssertFalse(typing("w", editing: true), "the card's own Other/note field is being typed in")
+        XCTAssertTrue(typing(" "), "Space is text without Full Keyboard Access")
+        XCTAssertFalse(typing(" ", fka: true), "with it, Space presses the focused card control")
+    }
+
+    private func keyDown(_ characters: String, ignoringModifiers: String, keyCode: UInt16, window: NSWindow?) -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                         windowNumber: window?.windowNumber ?? 0, context: nil, characters: characters,
+                         charactersIgnoringModifiers: ignoringModifiers, isARepeat: false, keyCode: keyCode)!
+    }
+
+    func testAKeyUnderACardSetsItAsideAndLandsInTheComposer() {
+        let (p, session, _) = shownPill()
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [self.approvalItem("a1")])]
+        }
+        waitUntil { p.cardShowsOnPill }
+        waitUntil { p.composerTextViewForTesting != nil }
+        let window = p.composerTextViewForTesting?.window
+        XCTAssertFalse(p.typeAsideCard(keyDown("\r", ignoringModifiers: "\r", keyCode: 36, window: window)),
+                       "Return is not writing")
+        XCTAssertNotNil(p.cardQueue.front)
+        XCTAssertTrue(p.typeAsideCard(keyDown("w", ignoringModifiers: "w", keyCode: 13, window: window)))
+        XCTAssertNil(p.cardQueue.front, "the card stepped aside")
+        waitUntil { p.adapter.composerDraft == "w" }
+        XCTAssertEqual(p.adapter.composerDraft, "w", "and the key landed in the composer")
+    }
+
+    func testADeadKeyUnderACardIsNotDropped() {
+        let (p, session, _) = shownPill()
+        session.applyForTesting { s in
+            s.exchanges = [Exchange(prompt: "ship", reply: "", activity: [self.approvalItem("a1")])]
+        }
+        waitUntil { p.cardShowsOnPill }
+        waitUntil { p.composerTextViewForTesting != nil }
+        let window = p.composerTextViewForTesting?.window
+        // ⌥E: no characters yet — the composer's input context starts the composition.
+        XCTAssertTrue(p.typeAsideCard(keyDown("", ignoringModifiers: "e", keyCode: 14, window: window)),
+                      "the dead key is taken, not swallowed by the card")
+        XCTAssertNil(p.cardQueue.front)
+        XCTAssertFalse(p.composerKeyboardBlocked, "the composer may hold the keyboard at once, to compose")
+    }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WinterProtocol
 
@@ -142,6 +143,22 @@ func dispatchPillCountdownCardIds(_ records: [InteractionRecord]) -> Set<String>
         if case .approval(_, _, _, _, let defaultAllowAt?) = record.ask, defaultAllowAt > 0 { return record.callId }
         return nil
     })
+}
+
+/// PURE: whether a key pressed while a card holds the pill is the user going back to WRITING — which sets the cards
+/// aside and goes to the composer (`DispatchPillController.typeAsideCard`):
+/// - never a ⌘/⌃ shortcut, and never while a field of the card is being typed in (`editingText`: its Other/note);
+/// - YES for a key with no characters yet — a dead key (⌥E) or an input method starting a composition — which the
+///   composer then composes as any text field would;
+/// - never Return, Tab, Esc, Delete, arrows or function keys (control and private-use characters): they are not text;
+/// - never Space while Full Keyboard Access is on: Space then presses the focused card control.
+func dispatchPillKeyIsTyping(characters: String?, modifiers: NSEvent.ModifierFlags, editingText: Bool,
+                             fullKeyboardAccess: Bool) -> Bool {
+    guard modifiers.intersection([.command, .control]).isEmpty, !editingText else { return false }
+    guard let scalar = characters?.unicodeScalars.first else { return true }
+    if scalar.value < 0x20 || scalar.value == 0x7F || (0xF700...0xF8FF).contains(scalar.value) { return false }
+    if scalar.value == 0x20, fullKeyboardAccess { return false }
+    return true
 }
 
 // MARK: - What the card says (pure — `DispatchPillCardTests`)
