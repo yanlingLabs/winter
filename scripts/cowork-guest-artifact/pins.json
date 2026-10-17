@@ -85,12 +85,12 @@
     "zig": "0.14.1",
     "programs": {
       "init": {
-        "binarySha256": "84bdf745cb0db4991a7c99429dd5532a26cc42a076582146cf946d993a02595b",
-        "sourceSha256": "41495bb7400c1d4afb04c015b7474f8bcb0da491b8a460153bdb6017d8df7275"
+        "binarySha256": "7158d034dcf2784b8bf6d443ee9e160357e6dcf6994583e292dfc64086c48b48",
+        "sourceSha256": "ad661c61244364813baeea76acfeb99892f4c7ab2366cc48b2f335bb1d01dfa6"
       },
       "winter-guest-relay": {
-        "binarySha256": "a97bc86117429beefd1dbf936de79e4b7a516cc14c52c2b9bbdbe56acd34d445",
-        "sourceSha256": "35b6f1300dba4400701db0cfbea1f66a91b80cd9e88e853319db9613d5a27a52"
+        "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",
+        "sourceSha256": "bbb01d107b7b69bcecbeebba165b27d241f9e41e197064a7a9b9c7265b1747df"
       }
     },
     "scripts": {

@@ -66,6 +66,29 @@ static char *slurp(const char *path, size_t *length) {
     return buffer;
 }
 
+static int fsync_calls;
+static int counting_fsync(int fd) { fsync_calls++; return fsync(fd); }
+static int failing_fsync(int fd) { (void)fd; fsync_calls++; return -1; }
+static const char *race_mode, *race_path_extra;
+static void race(const char *path) {
+    if (strcmp(race_mode, "link") == 0) {
+        char other[700];
+        snprintf(other, sizeof other, "%s.second-link", path);
+        if (link(path, other) != 0) abort();
+    } else if (strcmp(race_mode, "chmod") == 0) {
+        if (chmod(path, 0644) != 0) abort();
+    } else if (strcmp(race_mode, "grow") == 0 || strcmp(race_mode, "shrink") == 0) {
+        if (chmod(path, 0600) != 0) abort();
+        int fd = open(path, O_WRONLY | O_APPEND);
+        if (fd < 0) abort();
+        if (strcmp(race_mode, "grow") == 0 && write(fd, "x", 1) != 1) abort();
+        if (strcmp(race_mode, "shrink") == 0 && ftruncate(fd, 1) != 0) abort();
+        close(fd);
+        if (chmod(path, 0400) != 0) abort();
+    }
+    (void)race_path_extra;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     char why[64] = "";
@@ -166,6 +189,24 @@ int main(int argc, char **argv) {
         char back[64] = { 0 };
         ssize_t n = read(fd, back, sizeof back - 1);
         printf("fd=%d mode=%o size=%lld first=%.*s cloexec=%d\n", fd >= 3, (unsigned)(st.st_mode & 0777), (long long)st.st_size, (int)(n > 8 ? 8 : n), back, (fcntl(fd, F_GETFD) & FD_CLOEXEC) != 0);
+        return 0;
+    }
+    /* writecfgx DIR NAME FILE FSYNC RACE: the same call with the two seams: the fsync result (ok|fail) and what happens between the close of the
+     * written file and the verification of the read-only descriptor (none|link|chmod|grow|shrink). */
+    if (strcmp(argv[1], "writecfgx") == 0 && argc == 7) {
+        size_t length = 0;
+        char *text = slurp(argv[4], &length);
+        fsync_calls = 0;
+        wg_trusted_fsync_fn = strcmp(argv[5], "fail") == 0 ? failing_fsync : counting_fsync;
+        race_path_extra = argv[2];
+        race_mode = argv[6];
+        wg_trusted_race_hook = strcmp(argv[6], "none") == 0 ? NULL : race;
+        int fd = wg_write_trusted_config(argv[2], argv[3], text, length);
+        free(text);
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s", argv[2], argv[3]);
+        struct stat st;
+        printf("%s fsync=%d exists=%d\n", fd >= 0 ? "ok" : "fail", fsync_calls, stat(path, &st) == 0);
         return 0;
     }
     if (strcmp(argv[1], "readsmall") == 0 && argc == 4) {

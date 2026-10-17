@@ -180,9 +180,16 @@ class RelayTests(unittest.TestCase):
         self.addCleanup(harness.close)
         return harness
 
-    def open_runtime(self, harness, streams=1):
+    READY = b'{"conversations":1,"nonce":"0123456789abcdef0123456789abcdef","operationId":"op-1","t":"runtime_ready","v":1}'
+
+    def open_runtime(self, harness, streams=1, ready=True):
+        """PID 1's order: `G`, then the helper's `runtime_ready` through the relay. The runtime streams are read only after that frame went up,
+        so the test takes it off the port first (it is the first bootstrap-class frame)."""
         harness.init_send("G", bytes([streams]))
         time.sleep(0.1)
+        if ready:
+            harness.init_send("U", self.READY)
+            self.assertEqual(harness.read_frame(), (1, 1, self.READY))
 
     def read_runtime_until(self, harness, want_bytes, want_ends=()):
         """Collects runtime frames until `want_bytes` data bytes arrived per stream and the listed streams ended. Returns ({stream: bytes}, {stream: end seen}, seqs)."""
@@ -314,6 +321,51 @@ class RelayTests(unittest.TestCase):
         h.send(frame(2, 1, rt(IN, b"early\n")))
         self.assertEqual(h.wait_exit(), EXIT_WMX + STATUS["bad_field"])
         self.assertEqual(h.init_read(), ("F", bytes([STATUS["bad_field"]])))
+
+    def quiet(self, harness, seconds=0.4):
+        """Nothing at all arrives on the port within `seconds`."""
+        harness.host.settimeout(seconds)
+        try:
+            data = harness.host.recv(1)
+        except socket.timeout:
+            return
+        finally:
+            harness.host.settimeout(5)
+        self.fail("unexpected bytes on the port: %r" % data)
+
+    def test_output_written_before_g_is_not_read_or_framed(self):
+        """The poll for OUT and ERR needs `runtime_open`: bytes sitting in the FIFOs before PID 1 said `G` stay there."""
+        h = self.start()
+        os.write(h.sup_out_w, b"too early\n")
+        os.write(h.sup_err_w, b"too early\n")
+        self.quiet(h)
+        h.init_send("G", b"\x01")
+        self.quiet(h)                                    # open, but runtime_ready has not been framed yet
+
+    def test_a_runtime_ready_without_g_does_not_open_the_output_streams(self):
+        h = self.start()
+        h.init_send("U", self.READY)
+        self.assertEqual(h.read_frame(), (1, 1, self.READY))
+        os.write(h.sup_out_w, b"no g yet\n")
+        os.write(h.sup_err_w, b"no g yet\n")
+        self.quiet(h)
+
+    def test_runtime_output_is_held_until_runtime_ready_has_gone_up_and_follows_it(self):
+        h = self.start()
+        self.open_runtime(h, ready=False)
+        os.write(h.sup_out_w, b"out-before-ready\n")
+        os.write(h.sup_err_w, b"err-before-ready\n")
+        self.quiet(h)
+        h.init_send("U", b'{"t":"mounted","v":1}')      # another bootstrap-up message is not runtime_ready
+        self.assertEqual(h.read_frame(), (1, 1, b'{"t":"mounted","v":1}'))
+        self.quiet(h)
+        h.init_send("U", b'{"t":"runtime_readyish","v":1}')   # only the exact type token counts
+        self.assertEqual(h.read_frame(), (1, 2, b'{"t":"runtime_readyish","v":1}'))
+        self.quiet(h)
+        h.init_send("U", self.READY)
+        self.assertEqual(h.read_frame(), (1, 3, self.READY))                  # the host sees runtime_ready first ...
+        got, _, _ = self.read_runtime_until(h, {OUT: 17, ERR: 16})            # ... and then every byte that was waiting
+        self.assertEqual(got, {OUT: b"out-before-ready\n", ERR: b"err-before-ready\n"})
 
     def test_runtime_down_reaches_the_supervisor_input_and_up_is_framed_with_its_stream_byte(self):
         h = self.start()

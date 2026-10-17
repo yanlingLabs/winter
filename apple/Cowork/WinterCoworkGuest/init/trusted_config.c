@@ -106,6 +106,9 @@ enum wg_config_result wg_build_trusted_config(const char *boot_id, const char *b
     return WG_CONFIG_OK;
 }
 
+int (*wg_trusted_fsync_fn)(int) = fsync;
+void (*wg_trusted_race_hook)(const char *path) = NULL;
+
 int wg_write_trusted_config(const char *directory, const char *name, const char *text, size_t length) {
     char path[512];
     if (snprintf(path, sizeof path, "%s/%s", directory, name) >= (int)sizeof path) return -1;
@@ -118,8 +121,9 @@ int wg_write_trusted_config(const char *directory, const char *name, const char 
         if (n <= 0) { close(fd); unlink(path); return -1; }
         done += (size_t)n;
     }
-    if (fchmod(fd, 0400) != 0 || fsync(fd) != 0) { close(fd); unlink(path); return -1; }
+    if (fchmod(fd, 0400) != 0 || wg_trusted_fsync_fn(fd) != 0) { close(fd); unlink(path); return -1; }
     close(fd);
+    if (wg_trusted_race_hook) wg_trusted_race_hook(path);
     int reader = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (reader < 0) return -1;
     struct stat st;

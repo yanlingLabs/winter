@@ -48,6 +48,11 @@ int wg_boot_id_ok(const char *text);
  * NEW read-only descriptor for it (>= 3, close-on-exec), or -1. The writing descriptor is closed. */
 int wg_write_trusted_config(const char *directory, const char *name, const char *text, size_t length);
 
+/* Test seams, left at their defaults by PID 1: the fsync of the written config, and a hook that runs between the close of the written
+ * file and the read-only descriptor's verification (a test plants a second link, a different mode or a longer file there). */
+extern int (*wg_trusted_fsync_fn)(int);
+extern void (*wg_trusted_race_hook)(const char *path);
+
 /* Reads a whole small regular file (root-owned, no group/other write bits unless `any_owner`) into `out`; returns its length or -1. */
 long wg_read_small_file(const char *path, char *out, size_t capacity, int any_owner);
 

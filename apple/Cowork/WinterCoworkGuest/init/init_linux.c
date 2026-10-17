@@ -46,13 +46,21 @@ _Static_assert(WG_MS_RDONLY == MS_RDONLY && WG_MS_NOSUID == MS_NOSUID && WG_MS_N
 
 #define RELAY_PATH "/opt/winter/libexec/winter-guest-relay"
 #define HELPER_PATH "/opt/winter/libexec/guest_bootstrap.py"
+#ifndef SUPERVISOR_PATH
 #define SUPERVISOR_PATH "/opt/winter/libexec/linux-supervisor.py"
+#endif
+/* The three paths below may be overridden only by the native test build (tests/linux_init_tool.c), which runs the real fork / descriptor
+ * plumbing against a script in a temporary directory. The production build (build.py) defines none of them. */
+#ifndef PYTHON_PATH
 #define PYTHON_PATH "/usr/bin/python3"
+#endif
 #define BASE_CONFIG_PATH "/opt/winter/etc/supervisor-base.json"
 #define RUNTIME_ARTIFACTS_PATH "/opt/winter/etc/supervisor-runtime-artifacts.json"
 #define WORKSPACE_CONVERSATIONS "/workspace/.winter/conversations"
 #define RUN_CONVERSATIONS "/run/winter/conversations"
+#ifndef TRUSTED_DIR
 #define TRUSTED_DIR "/run/winter/trusted"
+#endif
 #define TRUSTED_NAME "config.json"
 #define SUPERVISOR_READY_LINE "{\"fullGuestExecutionEnabled\":false,\"ready\":true}"
 #define DISCOVERY_WAIT_MS 10000
@@ -61,6 +69,14 @@ _Static_assert(WG_MS_RDONLY == MS_RDONLY && WG_MS_NOSUID == MS_NOSUID && WG_MS_N
 static long long supervisor_deadline;   /* 0 = no supervisor waiting for its ready line */
 
 static char *const CHILD_ENV[] = { "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", NULL };
+
+/* The system calls whose results the private-directory and flush code checks. The native test replaces them to make a refusal observable
+ * (a non-root test process cannot chown to another user and no regular file's fsync fails); PID 1 never changes them. */
+static struct {
+    int (*fchown_fn)(int, uid_t, gid_t);
+    int (*fchmod_fn)(int, mode_t);
+    int (*fsync_fn)(int);
+} sys_calls = { fchown, fchmod, fsync };
 
 static struct wg_boot boot;
 static struct wg_boot_ops boot_ops;
@@ -361,8 +377,8 @@ static int make_private_dir(const char *parent_path, const char *name, uid_t uid
     close(parent);
     if (fd < 0) return -1;
     struct stat st;
-    int rc = fchown(fd, uid, (gid_t)uid);
-    if (rc == 0) rc = fchmod(fd, 0700);
+    int rc = sys_calls.fchown_fn(fd, uid, (gid_t)uid);
+    if (rc == 0) rc = sys_calls.fchmod_fn(fd, 0700);
     if (rc == 0 && (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != uid || (st.st_mode & 07777) != 0700)) rc = -1;
     close(fd);
     return rc;
@@ -396,6 +412,22 @@ static int op_read_boot_id(void *ctx, char out[37]) {
     return 0;
 }
 
+static int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 ? 0 : -1;
+}
+/* The supervisor's ends of the runtime pipes are non-blocking file descriptions (RuntimeDuplexPorts demands it). */
+static int runtime_ends_nonblocking(void) {
+    return set_nonblocking(G.rt_in_r) == 0 && set_nonblocking(G.rt_out_w) == 0 && set_nonblocking(G.rt_err_w) == 0 ? 0 : -1;
+}
+/* After the fork PID 1 keeps none of them: a copy left here would keep the pipes open after the supervisor and the relay are gone
+ * (no EOF, no EPIPE). With no host-query conversation these ends were never handed to anyone. */
+static void release_runtime_ends(void) {
+    close_fd(&G.rt_in_r);
+    close_fd(&G.rt_out_w);
+    close_fd(&G.rt_err_w);
+}
+
 static int op_start_supervisor(void *ctx, const char *config, size_t length, int with_ports) {
     (void)ctx;
     int config_fd = wg_write_trusted_config(TRUSTED_DIR, TRUSTED_NAME, config, length);
@@ -405,11 +437,7 @@ static int op_start_supervisor(void *ctx, const char *config, size_t length, int
     if (make_pipe(stdout_pipe) != 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); return -1; }
     /* The supervisor's ends of the runtime pipes are non-blocking file descriptions, root-owned, single-link: exactly what
      * RuntimeDuplexPorts demands of its input/stdout/stderr descriptors. */
-    if (with_ports) {
-        fcntl(G.rt_in_r, F_SETFL, fcntl(G.rt_in_r, F_GETFL) | O_NONBLOCK);
-        fcntl(G.rt_out_w, F_SETFL, fcntl(G.rt_out_w, F_GETFL) | O_NONBLOCK);
-        fcntl(G.rt_err_w, F_SETFL, fcntl(G.rt_err_w, F_GETFL) | O_NONBLOCK);
-    }
+    if (with_ports && runtime_ends_nonblocking() != 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); close(stdout_pipe[0]); close(stdout_pipe[1]); return -1; }
     pid_t pid = fork();
     if (pid < 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); close(stdout_pipe[0]); close(stdout_pipe[1]); return -1; }
     if (pid == 0) {
@@ -422,9 +450,7 @@ static int op_start_supervisor(void *ctx, const char *config, size_t length, int
     close(config_fd);
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
-    close_fd(&G.rt_in_r);       /* with no host-query conversation these ends were never handed to anyone */
-    close_fd(&G.rt_out_w);
-    close_fd(&G.rt_err_w);
+    release_runtime_ends();
     G.supervisor = pid;
     supervisor_deadline = clock_ms() + SUPERVISOR_READY_DEADLINE_MS;
     G.sup_stdin_w = stdin_pipe[1];
@@ -495,7 +521,7 @@ static int op_flush_devices(void *ctx, unsigned volumes) {
         if (!(volumes & (1u << v))) continue;
         int fd = open(v == WG_VOLUME_DATA ? G.data.node : G.environment.node, O_RDONLY | O_CLOEXEC);
         if (fd < 0) { result = -1; continue; }
-        if (fsync(fd) != 0) result = -1;
+        if (sys_calls.fsync_fn(fd) != 0) result = -1;
         if (close(fd) != 0) result = -1;
     }
     return result;

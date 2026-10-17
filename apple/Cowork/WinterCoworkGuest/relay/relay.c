@@ -13,7 +13,8 @@
  *     (input, stdout, stderr). A runtime payload is a 4 byte prefix {conversation, stream, flags, 0} and then the stream's bytes
  *     (section 6.2 of the contract): IN goes to the supervisor's input, OUT and ERR come back with their stream byte, and the
  *     end flag closes a stream. Runtime frames are accepted only after PID 1 says the supervisor is ready ('G'); before that,
- *     or for a conversation outside the delivered set, they end the stream.
+ *     or for a conversation outside the delivered set, they end the stream. OUT and ERR are read only after the bootstrap-up
+ *     `runtime_ready` has been framed, so the host never sees runtime output before it.
  *   * sends a control-up `fault` when PID 1 asks ('X'), and when the host's stream violates the contract (best effort).
  * Every queue is bounded; overflow, a malformed frame or a vanished peer ends the process, and PID 1 then stops the guest.
  *
@@ -74,7 +75,7 @@ static struct wg_ring out_ring, rt_in_ring, ctl_out_ring;
 static struct ctl_reader ctl_reader;
 
 static int port_fd = -1, ctl_in_fd = -1, ctl_out_fd = -1, rt_in_fd = -1, rt_out_fd = -1, rt_err_fd = -1;
-static int connected_once, runtime_open, rt_in_dead, rt_out_eof, rt_err_eof;
+static int connected_once, runtime_open, runtime_ready_framed, rt_in_dead, rt_out_eof, rt_err_eof;
 static int runtime_streams;            /* how many conversations' stream sets exist: 0 or 1 */
 static int in_ended, out_end_sent, err_end_sent;
 static int draining, drain_acked, halting, faulted;
@@ -220,8 +221,8 @@ static void handle_frame(void) {
         if (!draining) ctl_to_init(CTL_BOOTSTRAP_DOWN, rx.payload, rx.current.length);
         break;
     case WMX_CLASS_RUNTIME:
-        /* The contract has no "runtime ready" signal, so a host may speak right after `mounted`. The bytes wait in the bounded queue and
-         * reach the supervisor only after PID 1 sent 'G'; a flood with no consumer ends the stream when the queue is full. */
+        /* A host that speaks before PID 1 sent 'G' (before `runtime_ready` could have been framed) violates the contract: nothing is
+         * queued for the supervisor, the check below ends the stream. */
         if (draining) break;
         struct wmx_runtime_prefix prefix;
         status = wmx_parse_runtime_payload(rx.payload, rx.current.length, WMX_DOWN, &prefix);
@@ -276,6 +277,9 @@ static void on_ctl_message(void) {
     size_t length = ctl_reader.length;
     if (tag == CTL_BOOTSTRAP_UP) {
         enqueue_up(WMX_CLASS_BOOTSTRAP, ctl_reader.payload, length);
+        /* From here on the ring holds `runtime_ready` ahead of anything the runtime streams add, so the host never sees runtime output
+         * before it. The helper's JSON is compact and its type field is a fixed token no other message carries. */
+        if (memmem(ctl_reader.payload, length, "\"t\":\"runtime_ready\"", 19) != NULL) runtime_ready_framed = 1;
     } else if (tag == CTL_DRAIN_ACK || tag == CTL_HALTING) {
         char nonce[WMX_NONCE_CHARS + 1];
         if (length != WMX_NONCE_CHARS) die(EXIT_STATE, 1, WMX_BAD_FIELD);
@@ -405,8 +409,8 @@ int main(int argc, char **argv) {
         fds[CTL_OUT].fd = ctl_out_fd; fds[CTL_OUT].events = wg_ring_used(&ctl_out_ring) ? POLLOUT : 0;
         if (runtime_open && !rt_in_dead && rt_in_fd >= 0 && wg_ring_used(&rt_in_ring)) { fds[RT_IN].fd = rt_in_fd; fds[RT_IN].events = POLLOUT; }
         int room = wg_ring_free(&out_ring) >= RUNTIME_GATE;
-        if (runtime_open && !out_end_sent && room) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
-        if (runtime_open && !err_end_sent && room) { fds[RT_ERR].fd = rt_err_fd; fds[RT_ERR].events = POLLIN; }
+        if (runtime_open && runtime_ready_framed && !out_end_sent && room) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
+        if (runtime_open && runtime_ready_framed && !err_end_sent && room) { fds[RT_ERR].fd = rt_err_fd; fds[RT_ERR].events = POLLIN; }
         long long wait = connected_once ? -1 : connect_deadline - now_ms();
         if (!connected_once && wait <= 0) die(EXIT_NEVER_CONNECTED, 0, WMX_OK);
         int ready = poll(fds, 6, connected_once ? -1 : (int)(wait > 100 ? 100 : wait));

@@ -98,6 +98,14 @@ class GuestSourceHygiene(unittest.TestCase):
         self.assertNotIn("conversations.json", init)
         self.assertNotIn("WG_ENVIRONMENT_PATH", init)
 
+    def test_the_test_path_overrides_exist_only_for_the_native_test_build(self):
+        init = (ROOT / "init/init_linux.c").read_text()
+        for name, value in (("PYTHON_PATH", "/usr/bin/python3"), ("SUPERVISOR_PATH", "/opt/winter/libexec/linux-supervisor.py"), ("TRUSTED_DIR", "/run/winter/trusted")):
+            self.assertIn(f'#ifndef {name}\n#define {name} "{value}"\n#endif', init)
+        build = (ROOT / "build.py").read_text()
+        self.assertNotRegex(build, r"-D\s*(PYTHON_PATH|SUPERVISOR_PATH|TRUSTED_DIR)")
+        self.assertNotIn("sys_calls.", (ROOT / "relay/relay.c").read_text())
+
     def test_the_supervisor_ready_line_is_compared_by_length_and_bytes(self):
         init = strip_comments((ROOT / "init/init_linux.c").read_text())
         self.assertNotIn("strcmp(G.ready_line", init)

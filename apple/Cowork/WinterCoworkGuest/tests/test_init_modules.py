@@ -605,6 +605,22 @@ class TrustedConfigTests(InitModuleCase):
         os.symlink(self.dir / "taken.json", self.dir / "link.json")
         self.assertEqual(self.run_tool("writecfg", self.dir, "link.json", text), "fail")
 
+    def write_with_seams(self, name, fsync, race):
+        text = self.dir / "text.json"
+        text.write_text('{"guestBootId":"x"}')
+        return self.run_tool("writecfgx", self.dir, name, text, fsync, race)
+
+    def test_the_config_is_synced_once_and_a_failed_sync_leaves_no_file(self):
+        self.assertEqual(self.write_with_seams("a.json", "ok", "none"), "ok fsync=1 exists=1")
+        self.assertEqual(self.write_with_seams("b.json", "fail", "none"), "fail fsync=1 exists=0")
+
+    def test_the_read_only_descriptor_is_verified_against_a_second_link_a_changed_mode_and_a_changed_size(self):
+        """Planted between the close of the written file and the verification: each one must be refused (the supervisor trusts the descriptor)."""
+        for race in ("link", "chmod", "grow", "shrink"):
+            with self.subTest(race=race):
+                self.assertEqual(self.write_with_seams(f"{race}.json", "ok", race), "fail fsync=1 exists=1")
+        self.assertEqual(self.write_with_seams("clean.json", "ok", "none"), "ok fsync=1 exists=1")
+
     def test_small_file_reads_demand_a_safe_regular_file(self):
         path = self.dir / "small"
         path.write_text('{"a":1}\n')
