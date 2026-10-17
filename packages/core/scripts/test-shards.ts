@@ -72,7 +72,7 @@ export function verdict(results: ShardResult[], total: number, minFiles: number)
     }
     if (r.exitCode !== 0) problems.push(`shard ${s}/${total} failed (exit ${r.exitCode ?? "none"}, signal ${r.signal ?? "none"})`);
     if (r.files === null || r.tests === null) problems.push(`shard ${s}/${total} printed no "Ran N tests across M files" summary`);
-    else if (r.files <= 0) problems.push(`shard ${s}/${total} ran 0 files`);
+    else if (r.files === 0) problems.push(`shard ${s}/${total} ran 0 files`);
   }
   const counted = results.filter((r) => r.files !== null);
   if (counted.length === total) {

@@ -20,6 +20,11 @@ describe("test-shards aggregation", () => {
   test("a shard that ran 0 files fails", () => {
     expect(verdict([ok(1), ok(2, 0), ok(3, 153)], 3, 307)).not.toEqual([]);
   });
+  test("exit 0 without a summary reports the specific 'printed no summary' problem, not '0 files'", () => {
+    const problems = verdict([ok(1), { shard: 2, exitCode: 0, tests: null, files: null }, ok(3, 153)], 3, 461);
+    expect(problems.some((p) => p.includes('shard 2/3 printed no "Ran N tests across M files" summary'))).toBe(true);
+    expect(problems.some((p) => p.includes("ran 0 files"))).toBe(false);
+  });
   test("dropped files (sum below the glob's count) fail", () => expect(verdict(good, 3, 500)).not.toEqual([]));
   test("an uneven split fails", () => expect(verdict([ok(1, 300), ok(2, 5), ok(3, 156)], 3, 461)).not.toEqual([]));
   test("parseSummary reads bun's line and ignores the rest", () => {
