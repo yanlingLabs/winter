@@ -103,12 +103,11 @@ describe("protectedWriteDecision", () => {
     }
   });
 
-  test("chat and dispatch → a typed deny naming the path", () => {
-    for (const mode of ["chat", "dispatch"] as const) {
-      const d = protectedWriteDecision("Write", { file_path: `${root}/.winter/rules/a.md` }, { mode, protected: set, cwd: root });
-      expect(d?.decision).toBe("deny");
-      expect((d as { reason: string }).reason).toContain(".winter/rules/a.md");
-    }
+  test("chat → a typed deny naming the path; dispatch → ask, like code (user ruling 2026-10-17)", () => {
+    const d = protectedWriteDecision("Write", { file_path: `${root}/.winter/rules/a.md` }, { mode: "chat", protected: set, cwd: root });
+    expect(d?.decision).toBe("deny");
+    expect((d as { reason: string }).reason).toContain(".winter/rules/a.md");
+    expect(protectedWriteDecision("Write", { file_path: `${root}/.winter/rules/a.md` }, { mode: "dispatch", protected: set, cwd: root })).toEqual({ decision: "ask" });
   });
 
   test("an .envrc-named protected file is still an ask (claude's own sensitive-file check must not swallow it — F16)", () => {
