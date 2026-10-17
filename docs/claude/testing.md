@@ -17,7 +17,7 @@ Every daemon tees stdout/stderr into `<WINTER_HOME>/logs/daemon.log` (`packages/
 
 `packages/core/test/per-process-tmp.ts` is the FIRST import of every package's preload (core/cli `preload.ts`; protocol/plugin-sdk via `bunfig.toml`): one `<real tmpdir>/winter-test-XXXXXX` per test process, `$TMPDIR` pointed at it, the tree removed by a detached watcher once the process is gone, whatever the end (SIGKILL included). Never in-process: `bun test` exits natively (`process.on("exit")` never fires) and an `afterAll` rm blocks ~6 s into bun's 5 s hook timeout.
 
-- A child gets the root only when the spawn passes `env: {...process.env}` — Bun 1.3.14 hands a spawn with NO `env` the STARTING environment; a bare spawn that leaks is a bug.
+- A child gets the root only when the spawn passes `env: {...process.env}` — `Bun.spawn`/`Bun.spawnSync` with NO `env` hand the child the STARTING environment (measured on 1.3.14 and 1.4.2; 1.3.14's sync `child_process` calls did too, 1.4.2's re-read it); a bare spawn that leaks is a bug.
 - `confstr`/macOS `mktemp` still answer the real per-user temp dir BY DESIGN (`agent/sandbox.ts` depends on it).
 - Never leave temp dirs outside the root. Swift: `addTeardownBlock`/`defer` (WinterKit: `removeAtTeardown`); `RealDaemon` runs its daemon on its own `$TMPDIR`, removed by `stop()`. SwiftPM itself leaves `TemporaryDirectory.*` + `.lock` files in `$TMPDIR` on every `swift build/test/package` — for a bulk Swift run point `TMPDIR` at a scratch dir you delete.
 
