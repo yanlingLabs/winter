@@ -14,7 +14,8 @@ import { sandboxConfigFor } from "../runtime-sdk/mode-options";
 import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
+import { isHumanTurnOrigin } from "../sessions/turn-origins";
+import { turnOriginIndexFor } from "../sessions/turn-origin-index";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
   computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWakesFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
@@ -298,7 +299,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       const mode = meta.mode === "chat" || meta.mode === "dispatch" ? meta.mode : "code";
       return { policy: meta.approvalPolicy, mode, ...(meta.origin === undefined ? {} : { origin: meta.origin }), ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }) };
     },
-    turnOrigin: (sessionId) => { try { return runningTurnOrigin(deps.store.read(sessionId)); } catch { return undefined; } },
+    turnOrigin: (sessionId) => turnOriginIndexFor(deps.hub, deps.store).origin(sessionId),
     // Someone at the MAC is looking at THIS session (the controller's ruling for rung 4): a Mac window or a terminal
     // attached to the session itself. The phone never counts (its gateway connects as the remote role), and a
     // Dispatch coordinator never does: the Mac's Dispatch pill is attached to it all the time, under the same

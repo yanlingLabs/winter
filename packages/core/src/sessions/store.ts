@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
@@ -663,6 +663,31 @@ export class SessionStore {
     const path = this.logPath(row.scope, sessionId);
     if (!existsSync(path)) return [];
     return this.readGoodLines(path).parsed.filter((e) => e.seq > fromSeq);
+  }
+
+  /** The session's LAST events, from at most the final `maxBytes` of its log — one bounded read for a
+   *  caller that needs only the recent past (`turn-origin-index.ts`'s seeding), never the whole file. A
+   *  line cut by the window's start and any unparseable line are skipped; oldest first. Throws on an
+   *  unknown session, like `read`. */
+  readTail(sessionId: string, maxBytes: number): SessionEvent[] {
+    const row = this.db.query("SELECT scope FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    const path = this.logPath(row.scope, sessionId);
+    if (!existsSync(path)) return [];
+    const size = statSync(path).size;
+    const start = Math.max(0, size - Math.max(0, maxBytes));
+    const buf = Buffer.alloc(size - start);
+    const fd = openSync(path, "r");
+    try { readSync(fd, buf, 0, buf.length, start); } finally { closeSync(fd); }
+    const lines = buf.toString("utf8").split("\n");
+    if (start > 0) lines.shift();   // the first line may be cut by the window
+    const out: SessionEvent[] = [];
+    for (const line of lines) {
+      if (line.length === 0) continue;
+      try { out.push(SessionEvent.parse(JSON.parse(line))); } catch { /* skipped, as readGoodLines does */ }
+    }
+    return out;
   }
 
   list(): SessionRow[] {

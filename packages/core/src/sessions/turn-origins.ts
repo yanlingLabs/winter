@@ -52,25 +52,39 @@ export class TurnOriginPairer<T> {
   }
 }
 
-/** The clientName of the message that started the session's LATEST turn, from its log (undefined: none). */
-export function runningTurnOrigin(events: readonly SessionEvent[]): string | undefined {
-  const pairer = new TurnOriginPairer<string>();
-  let origin: string | undefined;
-  let open = false;
-  for (const e of events) {
-    if ((e as { threadId?: string }).threadId !== "main") continue;
+/** `runningTurnOrigin`, fed one event at a time — so a caller can keep the answer up to date from the
+ *  events it sees appended instead of re-reading the whole log (`turn-origin-index.ts`). */
+export class TurnOriginTracker {
+  private readonly pairer = new TurnOriginPairer<string>();
+  private origin: string | undefined;
+  private open = false;
+  /** The highest `seq` fed so far (0: none). */
+  lastSeq = 0;
+
+  feed(e: SessionEvent): void {
+    if (typeof (e as { seq?: unknown }).seq === "number") this.lastSeq = Math.max(this.lastSeq, e.seq);
+    if ((e as { threadId?: string }).threadId !== "main") return;
     if (e.type === "user_message") {
-      if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) continue;
-      pairer.message(e.clientName ?? "session");
+      if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) return;
+      this.pairer.message(e.clientName ?? "session");
     } else if (e.type === "turn_started") {
-      origin = pairer.turnStarted(open);
-      open = true;
+      this.origin = this.pairer.turnStarted(this.open);
+      this.open = true;
     } else {
-      if (e.type === "turn_completed") open = false;
-      pairer.other();
+      if (e.type === "turn_completed") this.open = false;
+      this.pairer.other();
     }
   }
-  return origin;
+
+  /** The clientName of the message that started the LATEST turn fed (undefined: none). */
+  get current(): string | undefined { return this.origin; }
+}
+
+/** The clientName of the message that started the session's LATEST turn, from its log (undefined: none). */
+export function runningTurnOrigin(events: readonly SessionEvent[]): string | undefined {
+  const tracker = new TurnOriginTracker();
+  for (const e of events) tracker.feed(e);
+  return tracker.current;
 }
 
 /**

@@ -1238,7 +1238,8 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       //
       // …then the user's SAVED rules (`persistedAllowRulesFor` → `sdkAllowRulesFor`), code mode only:
       // they are answers to code-mode cards, chat's policy is fixed, and a dispatch card offers no rule
-      // to remember (`approval-bridge.ts`'s `plainCard`) — a saved rule never applies to it. Deny
+      // to remember (`approval-bridge.ts`'s `plainCard`) — a saved rule never reaches its runtime (the
+      // daemon's own saved-rule checks, e.g. `site-policy.ts`'s dangerous-domain floor, still read them). Deny
       // still comes first in the runtime, so none of them can open the fence stated just below.
       //
       // Two consequences, DOCUMENTED rather than changed (whole-branch review minors a/b):

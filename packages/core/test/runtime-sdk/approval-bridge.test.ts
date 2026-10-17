@@ -745,6 +745,38 @@ test("chat is unchanged: it never prompts — its own policy denies, and a stale
   expect(stale.events).toEqual([]);
 });
 
+test("dispatch's OWN AskUserQuestion: bounded at 10 minutes in a daemon-started turn (resolves unanswered by timeout); a person's turn waits", async () => {
+  const QUESTION = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "A" }, { label: "B" }] }] };
+  const run = (origin: string | undefined, shorten: boolean) => {
+    const questions = new QuestionBroker();
+    const seen: number[] = [];
+    const realWait = questions.wait.bind(questions);
+    questions.wait = ((sid: string, cid: string, ms: number) => { seen.push(ms); return realWait(sid, cid, shorten ? 5 : ms); }) as typeof questions.wait;
+    const h = harness({ mode: "dispatch", policy: "ask", questions, turnOrigin: () => origin });
+    return { h, seen, pending: h.canUse("AskUserQuestion", QUESTION, requestCtx()) };
+  };
+  for (const origin of ["dispatch-wake", "messaging", undefined]) {
+    const { h, seen, pending } = run(origin, true);
+    expect({ origin, seen }).toEqual({ origin, seen: [DISPATCH_CHILD_APPROVAL_TIMEOUT_MS] });
+    const res = (await pending)! as { behavior: string; message: string; decisionClassification?: string };
+    expect(res).toMatchObject({ behavior: "deny", message: "AskUserQuestion was not answered — no response was given." });
+    expect(res.decisionClassification).toBeUndefined();
+    expect(h.events.map((e) => e.type)).toEqual(["question_asked", "question_resolved"]);
+    expect(h.events[1]).toMatchObject({ answers: {}, by: "timeout" });
+  }
+  const human = run("winter-mac", false);
+  expect(human.seen).toEqual([NO_PARK_TIMEOUT_MS]);
+  human.h.questions.respond(SESSION, "tu1", { Which: "A" }, "orb");
+  await human.pending;
+  // A plain code session's question is not bounded, whoever started the turn.
+  const codeQ = new QuestionBroker();
+  const codeSeen: number[] = [];
+  const codeWait = codeQ.wait.bind(codeQ);
+  codeQ.wait = ((sid: string, cid: string, ms: number) => { codeSeen.push(ms); return codeWait(sid, cid, 5); }) as typeof codeQ.wait;
+  await harness({ mode: "code", policy: "ask", questions: codeQ, turnOrigin: () => "messaging" }).canUse("AskUserQuestion", QUESTION, requestCtx());
+  expect(codeSeen).toEqual([NO_PARK_TIMEOUT_MS]);
+});
+
 test("a dispatch child's card is unchanged: raised on its own log with its rule options, bounded when Dispatch started the turn", async () => {
   const h = harness({ mode: "code", policy: "ask", origin: "dispatch-child", turnOrigin: () => "dispatch" });
   const p = h.canUse("Bash", { command: "rm -rf x" }, requestCtx());

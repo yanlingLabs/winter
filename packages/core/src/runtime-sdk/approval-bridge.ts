@@ -449,9 +449,10 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     emit: deps.emit,
     log,
     now,
-    // A dispatch child's question is relayed to its coordinator and bounded like its approvals — decided
-    // per question, since a turn the USER started in the child waits for its human (2026-10-02).
-    ...(cardsRelayedToDispatch(deps) ? { timeoutMs: () => dispatchChildCardTimeoutMs(deps) } : {}),
+    // A dispatch-family question — a child's (relayed to its coordinator) or Dispatch's OWN — is bounded
+    // like its approvals: decided per question, since a turn a PERSON started waits for its human
+    // (2026-10-02; Dispatch's own, 2026-10-17). It then resolves unanswered (`by: "timeout"`).
+    ...(cardsRelayedToDispatch(deps) || deps.mode === "dispatch" ? { timeoutMs: () => dispatchCardTimeoutMs(deps) } : {}),
   });
 
   const withdrawPending = (callId: string): boolean => {
@@ -770,10 +771,11 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     }
 
     // A card offers Allow / Deny and no rule wherever a rule would not do what it says (WS-26's precedent):
-    // EVERY dispatch card (user ruling 2026-10-17) — and chat's connector cards — since saved allow rules
-    // reach code sessions only (`mode-options.ts`; the router strips them from dispatch's run folder), so
-    // "Allow everywhere" would never apply to the session that asked, and would silently widen every
-    // code session instead; and a connector action with a stored connector permission (a stored "Always
+    // EVERY dispatch card (user ruling 2026-10-17) — and chat's connector cards — since a saved allow rule
+    // never reaches a dispatch child RUNTIME (`mode-options.ts` states them for code only; the router strips
+    // them from dispatch's run folder), so "Allow everywhere" would never apply to the call that asked here,
+    // only to code sessions (and to the daemon's own saved-rule checks, e.g. the browser's dangerous-domain
+    // floor, `site-policy.ts`, which honour a `WebFetch(domain:…)` rule in dispatch as in code); and a connector action with a stored connector permission (a stored "Always
     // ask" outranks a saved allow rule, so remembering one would change nothing).
     const plainCard = deps.mode !== "code"
       || isConnectorToolName(toolName, liveKeys) && connector?.setting !== undefined;
