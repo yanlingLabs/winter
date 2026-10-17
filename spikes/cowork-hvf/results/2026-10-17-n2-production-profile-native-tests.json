@@ -4,7 +4,7 @@
   "krunStartEnterCalled": false,
   "ignoredTestsRun": false,
   "productionReady": false,
-  "fullSourceDiffSha256": "5aa45e285112e8b52eaf192686d179694aef14f5fe07c66259ff46a8395bbf35",
+  "fullSourceDiffSha256": "3826aa68ee08b23ed046f8ec5a8df7f6271969747364dd63b0bd12f27013ec01",
   "patches": {
     "patches/0014-proposed-krun-vmm-unit-harness.patch": "b5bda53c97f86c1b130639340f3d97c9a96d37765a63820a6ca9c86664c88844",
     "patches/0015-proposed-cowork-production-profile.patch": "e3c6c42ab5e30f33586f8d07e5a6c5e6fcc38e5a5e20393c824d08edf5f90daf",
@@ -15,7 +15,7 @@
     "patches/0020-proposed-production-quiet-block-and-reclaim-paths.patch": "8f395ba2db2cec9b7ba0551e3497ce5664c62ee85a76597ded93e52abb418590",
     "patches/0021-proposed-production-flush-and-pin-counters.patch": "f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a",
     "patches/0022-proposed-production-exit-path-final-flush-and-hook.patch": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a",
-    "patches/0023-proposed-production-exit-and-final-flush-pins.patch": "fdf42d0dc80d784865166771e12af9806fe2f8adb932e9a77efee23be7db6ccb"
+    "patches/0023-proposed-production-exit-and-final-flush-pins.patch": "0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc"
   },
   "toolchain": {
     "rustc": "1.90.0 1159e78c4747b02ef996e55082b704c09b970588",

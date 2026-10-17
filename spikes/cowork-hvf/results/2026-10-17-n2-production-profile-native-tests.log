@@ -69,15 +69,16 @@ test vmm_config::machine_config::tests::test_display_vm_config_error ... ok
 test vmm_config::vsock::tests::test_error_messages ... ok
 test vmm_config::vsock::tests::test_vsock_insert ... ok
 
-test result: ok. 66 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.40s
+test result: ok. 66 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.43s
 
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
    Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.47s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.40s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_vmm-ca439622efe6fb04)
 
 thread '<unnamed>' panicked at src/vmm/src/cowork_exit.rs:213:13:
@@ -101,9 +102,10 @@ test workspace_raw_storage::tests::workspace_disks_fixed_capacity_refuses_oob_ov
 test workspace_raw_storage::tests::workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths ... ok
 test workspace_raw_storage::tests::workspace_disks_storage_sync_is_a_validated_sync_all ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.10s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.05s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 runtime_port -- --test-threads=1 --nocapture
@@ -138,7 +140,7 @@ test virtio::console::runtime_port_fixture_trace::tests::runtime_port_fixture_tr
 test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_nonready_fails_terminal_without_poison ... ok
 test virtio::mmio::runtime_port_mmio_tests::runtime_port_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
 
-test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.12s
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.13s
 
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
@@ -161,7 +163,7 @@ test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_eintr_keep
 running 1 test
 test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 156 filtered out; finished in 0.12s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 156 filtered out; finished in 0.14s
 
 ok
 test stream_io::lifecycle_wait_tests::cowork_stream_scoped_event_wait_interrupted_child ... ok
@@ -184,9 +186,9 @@ test virtio::console::cowork_stream::tests::cowork_stream_reset_retires_but_hold
 test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_nonready_fails_terminal_without_poison ... ok
 test virtio::mmio::cowork_stream_mmio_tests::cowork_stream_actual_mmio_ready_cross_region_fails_terminal_without_poison ... ok
 
-test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.26s
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.29s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_rng -- --test-threads=1 --nocapture
@@ -196,7 +198,7 @@ test virtio::rng::device::cowork_rng_tests::cowork_rng_bounded_allocation_valid_
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 156 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 reclaim_access::tests -- --test-threads=1 --nocapture
@@ -214,9 +216,9 @@ test reclaim_access::tests::stopped_or_stale_generation_never_reenters_ram ... o
 test reclaim_access::tests::timeout_stops_gate_and_preserves_outstanding_lease ... ok
 test reclaim_access::tests::waiting_completion_wakes_on_resume_and_stop ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 146 filtered out; finished in 0.01s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 146 filtered out; finished in 0.02s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_frq -- --test-threads=1 --nocapture
@@ -231,7 +233,7 @@ test virtio::queue::cowork_frq_tests::cowork_frq_zero_length_payload_is_structur
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 151 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_block -- --test-threads=1 --nocapture
@@ -256,48 +258,48 @@ test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_rejects_regressio
 
 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.09s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 {"kind":"block_ring_pin","clockMicros":0,"row":0,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":1976,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":2054,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":2058,"row":3,"request":1 }
-{"kind":"block_owned_io_end","clockMicros":2062,"row":4,"request":1,"success":true,"dataBytes":512 }
-{"kind":"block_owned_completion_hold","clockMicros":2064,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
-{"kind":"block_used_ack","clockMicros":27381,"row":6,"request":1,"head":0,"success":true }
-{"kind":"block_ring_pin","clockMicros":27486,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":27563,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":27566,"row":9,"request":2 }
-{"kind":"block_owned_io_end","clockMicros":27569,"row":10,"request":2,"success":true,"dataBytes":512 }
-{"kind":"block_owned_completion_hold","clockMicros":27572,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
-{"kind":"block_used_ack","clockMicros":52654,"row":12,"request":2,"head":0,"success":true }
-{"kind":"block_ring_pin","clockMicros":52803,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":52878,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":52882,"row":15,"request":3 }
-{"kind":"block_owned_io_end","clockMicros":52901,"row":16,"request":3,"success":true,"dataBytes":512 }
-{"kind":"block_owned_completion_hold","clockMicros":52904,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
-{"kind":"block_ring_pin","clockMicros":52999,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":53045,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":53119,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":53158,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":53162,"row":22,"request":4 }
-{"kind":"block_owned_io_end","clockMicros":53183,"row":23,"request":4,"success":true,"dataBytes":512 }
-{"kind":"block_completion_deferred","clockMicros":53188,"row":24,"request":4 }
-{"kind":"block_used_ack","clockMicros":84455,"row":25,"request":4,"head":0,"success":true }
-{"kind":"block_ring_pin","clockMicros":84635,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":84690,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":84694,"row":28,"request":5 }
-{"kind":"block_owned_io_end","clockMicros":84712,"row":29,"request":5,"success":true,"dataBytes":512 }
-{"kind":"block_ring_pin","clockMicros":84785,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":84852,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":84870,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":84930,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":84958,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":85056,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":85144,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":85201,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":85309,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":85361,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":177,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":239,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":243,"row":3,"request":1 }
+{"kind":"block_owned_io_end","clockMicros":246,"row":4,"request":1,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":252,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":26525,"row":6,"request":1,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":26663,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":26722,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":26726,"row":9,"request":2 }
+{"kind":"block_owned_io_end","clockMicros":26729,"row":10,"request":2,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":26732,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":53016,"row":12,"request":2,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":53233,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":53309,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":53313,"row":15,"request":3 }
+{"kind":"block_owned_io_end","clockMicros":53330,"row":16,"request":3,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":53333,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_ring_pin","clockMicros":53420,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":53469,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":53542,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":53578,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":53582,"row":22,"request":4 }
+{"kind":"block_owned_io_end","clockMicros":53606,"row":23,"request":4,"success":true,"dataBytes":512 }
+{"kind":"block_completion_deferred","clockMicros":53609,"row":24,"request":4 }
+{"kind":"block_used_ack","clockMicros":85566,"row":25,"request":4,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":85750,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":85804,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":85808,"row":28,"request":5 }
+{"kind":"block_owned_io_end","clockMicros":85821,"row":29,"request":5,"success":true,"dataBytes":512 }
+{"kind":"block_ring_pin","clockMicros":85908,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":85998,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86020,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86098,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86132,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86192,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86256,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86323,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86432,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":86492,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 block_bounce::tests -- --test-threads=1 --nocapture
 
@@ -325,7 +327,7 @@ test cowork_counters::tests::pin_high_water_only_rises ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 workspace_fd_tests -- --test-threads=1 --nocapture
@@ -336,9 +338,9 @@ test virtio::block::device::workspace_fd_tests::the_final_flush_syncs_the_admitt
 test virtio::block::device::workspace_fd_tests::the_final_flush_wakes_the_worker_through_the_stop_fd_and_joins_it_before_syncing ... ok
 test virtio::block::device::workspace_fd_tests::workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.10s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.06s
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun_devices-196ba91e2a52c433)
 
 $ cargo test --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p libkrun --jobs 2 -- --test-threads=1 --nocapture
@@ -401,16 +403,17 @@ test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclus
 test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
 test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
 
-test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.17s
 
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+   Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
    Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.07s
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.57s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun-fe8b317545a4d4ac)
    Doc-tests krun
 
@@ -474,7 +477,7 @@ test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclus
 test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
 test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
 
-test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.14s
 
 
 running 0 tests
@@ -482,7 +485,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.28s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun-8b1322e7ef5823cb)
    Doc-tests krun
 
@@ -546,17 +549,17 @@ test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclus
 test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
 test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
 
-test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.14s
 
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
    Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
    Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
+   Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.08s
      Running unittests src/lib.rs (out/libkrun-production-profile/target/debug/deps/krun-c72e12db33d2e0be)
    Doc-tests krun
 
@@ -620,17 +623,18 @@ test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclus
 test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
 test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
 
-test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.25s
 
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
    Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
    Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
    Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
-    Finished `release` profile [optimized] target(s) in 37.60s
+    Finished `release` profile [optimized] target(s) in 33.13s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun-38a6f2387d9986fc)
    Doc-tests krun
 
@@ -694,7 +698,7 @@ test runtime_port_api_tests::runtime_port_public_factory_is_closed_opt_in_exclus
 test runtime_port_trace_api_tests::runtime_port_fixture_trace_requires_exact_opt_in ... ok
 test test_shutdown_eventfd::test_shutdown_eventfd_is_opt_in ... ok
 
-test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.17s
 
 
 running 0 tests
@@ -702,7 +706,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Compiling libkrun v1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/libkrun)
-    Finished `release` profile [optimized] target(s) in 22.53s
+    Finished `release` profile [optimized] target(s) in 20.46s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun-845ccdcb0ef2d998)
    Doc-tests krun
 
@@ -784,9 +788,10 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
    Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
    Compiling krun-vmm v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/vmm)
-    Finished `release` profile [optimized] target(s) in 21.28s
+    Finished `release` profile [optimized] target(s) in 17.82s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_vmm-57b944ed26940964)
 
 thread '<unnamed>' panicked at src/vmm/src/cowork_exit.rs:213:13:
@@ -819,49 +824,50 @@ test virtio::queue::cowork_pop_tests::cowork_block_checked_pop_rejects_regressio
 
 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.09s
 
+   Compiling krun-hvf v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/hvf)
    Compiling krun-devices v0.1.0-1.19.6 (<WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/src/devices)
-    Finished `release` profile [optimized] target(s) in 17.80s
+    Finished `release` profile [optimized] target(s) in 14.89s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)
 {"kind":"block_ring_pin","clockMicros":0,"row":0,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":112,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":166,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":169,"row":3,"request":1 }
-{"kind":"block_owned_io_end","clockMicros":172,"row":4,"request":1,"success":true,"dataBytes":512 }
-{"kind":"block_owned_completion_hold","clockMicros":174,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
-{"kind":"block_used_ack","clockMicros":25192,"row":6,"request":1,"head":0,"success":true }
-{"kind":"block_ring_pin","clockMicros":25256,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":25299,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":25302,"row":9,"request":2 }
-{"kind":"block_owned_io_end","clockMicros":25305,"row":10,"request":2,"success":true,"dataBytes":512 }
-{"kind":"block_owned_completion_hold","clockMicros":25307,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
-{"kind":"block_used_ack","clockMicros":50732,"row":12,"request":2,"head":0,"success":true }
-{"kind":"block_ring_pin","clockMicros":50875,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":50914,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":50917,"row":15,"request":3 }
-{"kind":"block_owned_io_end","clockMicros":50929,"row":16,"request":3,"success":true,"dataBytes":512 }
-{"kind":"block_owned_completion_hold","clockMicros":50933,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
-{"kind":"block_ring_pin","clockMicros":51008,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":51026,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":51080,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":51115,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":51118,"row":22,"request":4 }
-{"kind":"block_owned_io_end","clockMicros":51133,"row":23,"request":4,"success":true,"dataBytes":512 }
-{"kind":"block_completion_deferred","clockMicros":51137,"row":24,"request":4 }
-{"kind":"block_used_ack","clockMicros":86153,"row":25,"request":4,"head":0,"success":true }
-{"kind":"block_ring_pin","clockMicros":86270,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_request_capture","clockMicros":86316,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
-{"kind":"block_owned_io_begin","clockMicros":86319,"row":28,"request":5 }
-{"kind":"block_owned_io_end","clockMicros":86330,"row":29,"request":5,"success":true,"dataBytes":512 }
-{"kind":"block_ring_pin","clockMicros":86395,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86468,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86477,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86527,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86535,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86567,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86601,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86647,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86754,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
-{"kind":"block_ring_pin","clockMicros":86789,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":88,"row":1,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":140,"row":2,"request":1,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":144,"row":3,"request":1 }
+{"kind":"block_owned_io_end","clockMicros":147,"row":4,"request":1,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":149,"row":5,"request":1,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":26402,"row":6,"request":1,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":26445,"row":7,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":26473,"row":8,"request":2,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":26476,"row":9,"request":2 }
+{"kind":"block_owned_io_end","clockMicros":26479,"row":10,"request":2,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":26481,"row":11,"request":2,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_used_ack","clockMicros":52729,"row":12,"request":2,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":52809,"row":13,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":52837,"row":14,"request":3,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":52841,"row":15,"request":3 }
+{"kind":"block_owned_io_end","clockMicros":52851,"row":16,"request":3,"success":true,"dataBytes":512 }
+{"kind":"block_owned_completion_hold","clockMicros":52854,"row":17,"request":3,"millis":25,"osSyscallBlocked":false }
+{"kind":"block_ring_pin","clockMicros":52923,"row":18,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":52934,"row":19,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":52980,"row":20,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":53010,"row":21,"request":4,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":53013,"row":22,"request":4 }
+{"kind":"block_owned_io_end","clockMicros":53023,"row":23,"request":4,"success":true,"dataBytes":512 }
+{"kind":"block_completion_deferred","clockMicros":53027,"row":24,"request":4 }
+{"kind":"block_used_ack","clockMicros":93037,"row":25,"request":4,"head":0,"success":true }
+{"kind":"block_ring_pin","clockMicros":93128,"row":26,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_request_capture","clockMicros":93171,"row":27,"request":5,"pin":2,"head":0,"generation":1,"command":"Read","sector":0,"length":512,"leaseReleased":true,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70},{"gpa":16384,"len":16},{"gpa":20480,"len":512},{"gpa":24576,"len":1}] }
+{"kind":"block_owned_io_begin","clockMicros":93174,"row":28,"request":5 }
+{"kind":"block_owned_io_end","clockMicros":93186,"row":29,"request":5,"success":true,"dataBytes":512 }
+{"kind":"block_ring_pin","clockMicros":93251,"row":30,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93290,"row":31,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93298,"row":32,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93340,"row":33,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93349,"row":34,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93381,"row":35,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93415,"row":36,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93456,"row":37,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93557,"row":38,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
+{"kind":"block_ring_pin","clockMicros":93596,"row":39,"pin":1,"ranges":[{"gpa":4096,"len":128},{"gpa":8192,"len":22},{"gpa":12288,"len":70}] }
 
 $ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 block_bounce::tests -- --test-threads=1 --nocapture
 
@@ -878,7 +884,7 @@ test block_bounce::tests::stop_blocks_completion_without_guest_access ... ok
 
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.00s
 
-    Finished `release` profile [optimized] target(s) in 0.41s
+    Finished `release` profile [optimized] target(s) in 0.03s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)
 
 $ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 workspace_disks -- --test-threads=1 --nocapture
@@ -894,9 +900,9 @@ test workspace_raw_storage::tests::workspace_disks_fixed_capacity_refuses_oob_ov
 test workspace_raw_storage::tests::workspace_disks_positional_partial_interrupted_zero_error_and_overflow_paths ... ok
 test workspace_raw_storage::tests::workspace_disks_storage_sync_is_a_validated_sync_all ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.05s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 148 filtered out; finished in 0.03s
 
-    Finished `release` profile [optimized] target(s) in 0.10s
+    Finished `release` profile [optimized] target(s) in 0.03s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)
 
 $ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 cowork_counters -- --test-threads=1 --nocapture
@@ -907,7 +913,7 @@ test cowork_counters::tests::pin_high_water_only_rises ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.00s
 
-    Finished `release` profile [optimized] target(s) in 0.05s
+    Finished `release` profile [optimized] target(s) in 0.03s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)
 
 $ cargo test --release --manifest-path <WORKTREE>/spikes/cowork-hvf/out/libkrun-production-profile/Cargo.toml --locked --offline --no-default-features --features blk -p krun-devices --jobs 2 workspace_fd_tests -- --test-threads=1 --nocapture
@@ -918,7 +924,7 @@ test virtio::block::device::workspace_fd_tests::the_final_flush_syncs_the_admitt
 test virtio::block::device::workspace_fd_tests::the_final_flush_wakes_the_worker_through_the_stop_fd_and_joins_it_before_syncing ... ok
 test virtio::block::device::workspace_fd_tests::workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.04s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.08s
 
-    Finished `release` profile [optimized] target(s) in 0.05s
+    Finished `release` profile [optimized] target(s) in 0.03s
      Running unittests src/lib.rs (out/production-profile/target-release-tests/release/deps/krun_devices-e528aa44b26e995c)

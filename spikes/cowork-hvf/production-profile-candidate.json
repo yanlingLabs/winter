@@ -171,10 +171,10 @@
         "src/vmm/src/cowork_exit.rs"
       ],
       "purpose": "tests that run the exit sequence for real in a child process (watchdog over a hung observer, status by reason, one claimant), the final flush on the real admitted-storage path (sync_all counted and failed through a test seam, real result, stop-fd wake), and the terminal-fault notifier; finish takes its budget as a parameter (production passes 20 s)",
-      "patchSha256": "fdf42d0dc80d784865166771e12af9806fe2f8adb932e9a77efee23be7db6ccb"
+      "patchSha256": "0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc"
     }
   ],
-  "fullSourceDiffSha256": "5aa45e285112e8b52eaf192686d179694aef14f5fe07c66259ff46a8395bbf35",
+  "fullSourceDiffSha256": "3826aa68ee08b23ed046f8ec5a8df7f6271969747364dd63b0bd12f27013ec01",
   "allAddedFiles": [
     "src/devices/src/block_bounce.rs",
     "src/devices/src/block_trace.rs",

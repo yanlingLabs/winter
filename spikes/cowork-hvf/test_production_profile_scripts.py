@@ -157,6 +157,41 @@ class ReproRoot(unittest.TestCase):
                 self.build.check_repro_root(Path(directory) / 'a' / 'b', self.source)
 
 
+class DocumentHashes(unittest.TestCase):
+    """Every hash the document states must be the one the candidate pin and the build receipt carry."""
+
+    def setUp(self):
+        self.pin = json.loads((ROOT / 'production-profile-candidate.json').read_text())
+        self.text = (ROOT / 'N2-PRODUCTION-PROFILE.md').read_text()
+
+    def test_the_composed_diff_hash_line_is_the_pin(self):
+        lines = [l for l in self.text.splitlines() if l.startswith('Composed full source diff')]
+        self.assertEqual(len(lines), 1)
+        last = max(int(Path(p['patchFile']).name[:4]) for p in self.pin['newPatches'])
+        self.assertIn(f'(0004-{last:04d} on pristine)', lines[0])
+        self.assertEqual(re.findall(r'`([0-9a-f]{64})`', lines[0])[0], self.pin['fullSourceDiffSha256'])
+
+    def test_the_cargo_lock_hash_is_the_upstream_pin(self):
+        lock = json.loads((ROOT / 'pins.json').read_text())['libkrun']['lockSha256']
+        self.assertIn(lock, self.text)
+
+    def test_every_patch_row_carries_its_pinned_hash(self):
+        for entry in self.pin['newPatches']:
+            name = Path(entry['patchFile']).name
+            rows = [l for l in self.text.splitlines() if l.startswith(f'| `{name}`')]
+            self.assertEqual(len(rows), 1, name)
+            self.assertIn(entry['patchSha256'], rows[0], name)
+
+    def test_the_archive_hashes_are_the_build_receipt(self):
+        receipt = json.loads((ROOT / 'results/2026-10-17-n2-production-profile-build.json').read_text())['reproduction']
+        raw, stripped = receipt['rawArchiveSha256'], receipt['strippedArchiveSha256']
+        self.assertEqual(raw[0], raw[1])
+        self.assertEqual(stripped[0], stripped[1])
+        match = re.search(r'The raw archive `([0-9a-f]{64})` and the stripped archive `([0-9a-f]{64})`', self.text)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groups(), (raw[0], stripped[0]))
+
+
 class Candidate(unittest.TestCase):
     def setUp(self):
         self.pin = json.loads((ROOT / 'production-profile-candidate.json').read_text())

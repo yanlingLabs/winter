@@ -1025,7 +1025,7 @@
       "id": "D12b-helper-no-sync_all",
       "killed": true,
       "firstFailingTests": [
-        "workspace_raw_storage::tests::workspace_disks_storage_sync_is_a_validated_sync_all"
+        "virtio::block::device::workspace_fd_tests::a_disk_flush_reaches_sync_all_on_the_admitted_volume_and_a_failing_sync_fails_it"
       ]
     },
     {
@@ -1033,6 +1033,13 @@
       "killed": true,
       "firstFailingTests": [
         "cowork_exit::tests::a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status"
+      ]
+    },
+    {
+      "id": "D12c-storage-passes-noop-sync",
+      "killed": true,
+      "firstFailingTests": [
+        "virtio::block::device::workspace_fd_tests::a_disk_flush_reaches_sync_all_on_the_admitted_volume_and_a_failing_sync_fails_it"
       ]
     }
   ],

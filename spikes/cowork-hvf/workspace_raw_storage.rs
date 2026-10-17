@@ -65,33 +65,51 @@ impl PinnedRawStorage {
         )
     }
 }
-/// The one full-sync call of the admitted storage (`sync_all`, as imago's `SyncMode::Full`). Test builds can
-/// count the calls made on one inode and fail the next ones, which is how the tests pin that a guest FLUSH and
-/// the final flush at exit really reach it.
+/// The one full-sync call of the admitted storage (`sync_all`, as imago's `SyncMode::Full`). The call is passed
+/// in so test builds can see which function the storage hands over, count the calls on one inode and swap in a
+/// failing one; production always passes `File::sync_all` and calls it.
+type SyncCall = fn(&File) -> io::Result<()>;
 fn full_sync(file: &File) -> io::Result<()> {
+    full_sync_with(file, File::sync_all)
+}
+fn full_sync_with(file: &File, call: SyncCall) -> io::Result<()> {
     #[cfg(test)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        use std::sync::atomic::Ordering;
-        if file.metadata()?.ino() == sync_seam::WATCH_INODE.load(Ordering::Acquire) {
-            sync_seam::CALLS.fetch_add(1, Ordering::AcqRel);
-            if sync_seam::FAIL.load(Ordering::Acquire) {
-                return Err(io::Error::from_raw_os_error(libc::EIO));
-            }
-        }
-    }
-    file.sync_all()
+    let call = sync_seam::wrap(file, call);
+    call(file)
 }
 #[cfg(test)]
 pub(crate) mod sync_seam {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use super::SyncCall;
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
     /// Inode whose full syncs are counted (0: none).
     pub static WATCH_INODE: AtomicU64 = AtomicU64::new(0);
     pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    /// Address of the function the storage handed over on the last watched call.
+    pub static LAST_CALL: AtomicUsize = AtomicUsize::new(0);
     pub static FAIL: AtomicBool = AtomicBool::new(false);
     /// Serializes the tests that use the seam.
     pub static LOCK: Mutex<()> = Mutex::new(());
+    fn failing(_: &File) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::EIO))
+    }
+    /// For the watched inode: count, remember which function was passed, and substitute a failing one on request.
+    pub(super) fn wrap(file: &File, call: SyncCall) -> SyncCall {
+        match file.metadata() {
+            Ok(m) if m.ino() == WATCH_INODE.load(Ordering::Acquire) => {
+                CALLS.fetch_add(1, Ordering::AcqRel);
+                LAST_CALL.store(call as usize, Ordering::Release);
+                if FAIL.load(Ordering::Acquire) { failing } else { call }
+            }
+            _ => call,
+        }
+    }
+    pub fn is_sync_all(address: usize) -> bool {
+        address == (File::sync_all as SyncCall) as usize
+    }
 }
 fn transfer(
     offset: u64,
@@ -273,6 +291,9 @@ mod tests {
         assert!(first < call && call < last);
         let helper = &source[source.find("fn full_sync(file: &File)").unwrap()..];
         let helper = &helper[..helper.find("\n}\n").unwrap()];
-        assert!(helper.trim_end().ends_with("file.sync_all()"), "{helper}");
+        assert!(helper.contains("full_sync_with(file, File::sync_all)"), "{helper}");
+        let with = &source[source.find("fn full_sync_with(").unwrap()..];
+        let with = &with[..with.find("\n}\n").unwrap()];
+        assert!(with.trim_end().ends_with("call(file)"), "{with}");
     }
 }

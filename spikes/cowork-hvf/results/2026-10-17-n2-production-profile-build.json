@@ -1,7 +1,7 @@
 {
   "candidate": {
     "status": "native-source-only-independent-review-required",
-    "fullSourceDiffSha256": "5aa45e285112e8b52eaf192686d179694aef14f5fe07c66259ff46a8395bbf35",
+    "fullSourceDiffSha256": "3826aa68ee08b23ed046f8ec5a8df7f6271969747364dd63b0bd12f27013ec01",
     "patches": {
       "patches/0004-proposed-guarded-block-reviewed-fixes.patch": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
       "patches/0005-proposed-guarded-block-producer-progress.patch": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",
@@ -22,7 +22,7 @@
       "patches/0020-proposed-production-quiet-block-and-reclaim-paths.patch": "8f395ba2db2cec9b7ba0551e3497ce5664c62ee85a76597ded93e52abb418590",
       "patches/0021-proposed-production-flush-and-pin-counters.patch": "f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a",
       "patches/0022-proposed-production-exit-path-final-flush-and-hook.patch": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a",
-      "patches/0023-proposed-production-exit-and-final-flush-pins.patch": "fdf42d0dc80d784865166771e12af9806fe2f8adb932e9a77efee23be7db6ccb"
+      "patches/0023-proposed-production-exit-and-final-flush-pins.patch": "0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc"
     }
   },
   "vmStarted": false,
@@ -70,8 +70,8 @@
     "nativeStaticLibs": "-framework Hypervisor -liconv -lSystem -lc -lm"
   },
   "production": {
-    "rawArchiveSha256": "3d7739a7c62a2d47c91f43d575fcce3acdee640bbef6e1623a0ae43f82e75955",
-    "strippedArchiveSha256": "d9d06a17c6f3c5cc48933b7eb540baf23fec75a07159b7b11c4c4891b848c825",
+    "rawArchiveSha256": "ca876b1268696c39a97f9591727ad7f818354a08a5b837fe589c22823809a40c",
+    "strippedArchiveSha256": "e4433efe447fd123bb72989d024013d9c913d380d2a1190bc3e181d1f69a89b3",
     "strippedSizeBytes": 7267624,
     "cowork": [
       "_krun_cowork_create_runtime_port_v1",
@@ -91,8 +91,8 @@
     "exportCount": 69
   },
   "fixtureOracle": {
-    "rawArchiveSha256": "5e2b07f7779834e24f29dae6322bc448037a5feefdfbcff5ec46162dd84d3d5f",
-    "strippedArchiveSha256": "cf54c45870f95cc817d58989c86612573f99ff4656c0c90d6f5182c5f0cbc14c",
+    "rawArchiveSha256": "4e945c245134f26e9daa874cd65c75c8e45685dfcaa12586422992aad5500e0e",
+    "strippedArchiveSha256": "eae1f3c6410a00a8118a8509e59012c95035e3354e5fd101a07ea8a1b7c4dcd1",
     "strippedSizeBytes": 7297256,
     "cowork": [
       "_krun_cowork_create_runtime_port_v1",
@@ -148,12 +148,12 @@
     "firstSourceRoot": "out/libkrun-production-profile",
     "secondLocation": "<WORKTREE>/spikes/cowork-hvf/out/repro-b",
     "rawArchiveSha256": [
-      "3d7739a7c62a2d47c91f43d575fcce3acdee640bbef6e1623a0ae43f82e75955",
-      "3d7739a7c62a2d47c91f43d575fcce3acdee640bbef6e1623a0ae43f82e75955"
+      "ca876b1268696c39a97f9591727ad7f818354a08a5b837fe589c22823809a40c",
+      "ca876b1268696c39a97f9591727ad7f818354a08a5b837fe589c22823809a40c"
     ],
     "strippedArchiveSha256": [
-      "d9d06a17c6f3c5cc48933b7eb540baf23fec75a07159b7b11c4c4891b848c825",
-      "d9d06a17c6f3c5cc48933b7eb540baf23fec75a07159b7b11c4c4891b848c825"
+      "e4433efe447fd123bb72989d024013d9c913d380d2a1190bc3e181d1f69a89b3",
+      "e4433efe447fd123bb72989d024013d9c913d380d2a1190bc3e181d1f69a89b3"
     ],
     "rawIdentical": true,
     "strippedIdentical": true
@@ -196,7 +196,7 @@
       "/usr/lib/libiconv.2.dylib",
       "/usr/lib/libSystem.B.dylib"
     ],
-    "productionProbeSha256": "92aa4b86146a9a094cbfad354b1be331021454e7b9cc269759244b260f9748da",
+    "productionProbeSha256": "bf3263809713789ae8f04be1d14f6cde0b7a2b41a0e8a18f627bdecf27de53b3",
     "linkScanSha256": "ccc3156cb6a32b9b4ffba16221034210e3029d85df36d5389a78746e25e37214"
   }
 }

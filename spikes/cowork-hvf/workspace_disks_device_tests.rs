@@ -180,6 +180,7 @@ fn a_disk_flush_reaches_sync_all_on_the_admitted_volume_and_a_failing_sync_fails
     watch(inodes[0], false);
     assert_eq!(disk.flush(), Ok(()));
     assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 1, "one flush, one sync_all");
+    assert!(sync_seam::is_sync_all(sync_seam::LAST_CALL.load(Ordering::Acquire)), "the storage hands over File::sync_all");
     assert_eq!(disk.flush(), Ok(()));
     assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 2);
     sync_seam::FAIL.store(true, Ordering::Release);

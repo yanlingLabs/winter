@@ -19,10 +19,10 @@ index 7a708cd..669d9bd 100644
  /** Register the exit hook. Optional; accepted once, only on a production context, with a non-NULL hook. */
  int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data);
 diff --git a/src/devices/src/virtio/block/workspace_fd_tests.rs b/src/devices/src/virtio/block/workspace_fd_tests.rs
-index 8834c94..bf7544c 100644
+index 8834c94..30382f6 100644
 --- a/src/devices/src/virtio/block/workspace_fd_tests.rs
 +++ b/src/devices/src/virtio/block/workspace_fd_tests.rs
-@@ -132,3 +132,129 @@ fn workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen()
+@@ -132,3 +132,130 @@ fn workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen()
      );
      fs::remove_dir_all(root).unwrap();
  }
@@ -74,6 +74,7 @@ index 8834c94..bf7544c 100644
 +    watch(inodes[0], false);
 +    assert_eq!(disk.flush(), Ok(()));
 +    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 1, "one flush, one sync_all");
++    assert!(sync_seam::is_sync_all(sync_seam::LAST_CALL.load(Ordering::Acquire)), "the storage hands over File::sync_all");
 +    assert_eq!(disk.flush(), Ok(()));
 +    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 2);
 +    sync_seam::FAIL.store(true, Ordering::Release);
@@ -153,45 +154,63 @@ index 8834c94..bf7544c 100644
 +    unwatch();
 +}
 diff --git a/src/devices/src/workspace_raw_storage.rs b/src/devices/src/workspace_raw_storage.rs
-index 0298405..4a843de 100644
+index 0298405..91bdbfe 100644
 --- a/src/devices/src/workspace_raw_storage.rs
 +++ b/src/devices/src/workspace_raw_storage.rs
-@@ -65,6 +65,34 @@ impl PinnedRawStorage {
+@@ -65,6 +65,52 @@ impl PinnedRawStorage {
          )
      }
  }
-+/// The one full-sync call of the admitted storage (`sync_all`, as imago's `SyncMode::Full`). Test builds can
-+/// count the calls made on one inode and fail the next ones, which is how the tests pin that a guest FLUSH and
-+/// the final flush at exit really reach it.
++/// The one full-sync call of the admitted storage (`sync_all`, as imago's `SyncMode::Full`). The call is passed
++/// in so test builds can see which function the storage hands over, count the calls on one inode and swap in a
++/// failing one; production always passes `File::sync_all` and calls it.
++type SyncCall = fn(&File) -> io::Result<()>;
 +fn full_sync(file: &File) -> io::Result<()> {
++    full_sync_with(file, File::sync_all)
++}
++fn full_sync_with(file: &File, call: SyncCall) -> io::Result<()> {
 +    #[cfg(test)]
-+    {
-+        use std::os::unix::fs::MetadataExt;
-+        use std::sync::atomic::Ordering;
-+        if file.metadata()?.ino() == sync_seam::WATCH_INODE.load(Ordering::Acquire) {
-+            sync_seam::CALLS.fetch_add(1, Ordering::AcqRel);
-+            if sync_seam::FAIL.load(Ordering::Acquire) {
-+                return Err(io::Error::from_raw_os_error(libc::EIO));
-+            }
-+        }
-+    }
-+    file.sync_all()
++    let call = sync_seam::wrap(file, call);
++    call(file)
 +}
 +#[cfg(test)]
 +pub(crate) mod sync_seam {
-+    use std::sync::atomic::{AtomicBool, AtomicU64};
++    use super::SyncCall;
++    use std::fs::File;
++    use std::io;
++    use std::os::unix::fs::MetadataExt;
++    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 +    use std::sync::Mutex;
 +    /// Inode whose full syncs are counted (0: none).
 +    pub static WATCH_INODE: AtomicU64 = AtomicU64::new(0);
 +    pub static CALLS: AtomicU64 = AtomicU64::new(0);
++    /// Address of the function the storage handed over on the last watched call.
++    pub static LAST_CALL: AtomicUsize = AtomicUsize::new(0);
 +    pub static FAIL: AtomicBool = AtomicBool::new(false);
 +    /// Serializes the tests that use the seam.
 +    pub static LOCK: Mutex<()> = Mutex::new(());
++    fn failing(_: &File) -> io::Result<()> {
++        Err(io::Error::from_raw_os_error(libc::EIO))
++    }
++    /// For the watched inode: count, remember which function was passed, and substitute a failing one on request.
++    pub(super) fn wrap(file: &File, call: SyncCall) -> SyncCall {
++        match file.metadata() {
++            Ok(m) if m.ino() == WATCH_INODE.load(Ordering::Acquire) => {
++                CALLS.fetch_add(1, Ordering::AcqRel);
++                LAST_CALL.store(call as usize, Ordering::Release);
++                if FAIL.load(Ordering::Acquire) { failing } else { call }
++            }
++            _ => call,
++        }
++    }
++    pub fn is_sync_all(address: usize) -> bool {
++        address == (File::sync_all as SyncCall) as usize
++    }
 +}
  fn transfer(
      offset: u64,
      length: usize,
-@@ -116,7 +144,7 @@ impl Storage for PinnedRawStorage {
+@@ -116,7 +162,7 @@ impl Storage for PinnedRawStorage {
      async fn sync(&self) -> io::Result<()> {
          validate(&self.file, self.expected)?;
          // Same full-sync primitive as imago::File's SyncMode::Full; no relaxed fsync override.
@@ -200,7 +219,7 @@ index 0298405..4a843de 100644
          validate(&self.file, self.expected)
      }
      async unsafe fn invalidate_cache(&self) -> io::Result<()> {
-@@ -231,4 +259,20 @@ mod tests {
+@@ -231,4 +277,23 @@ mod tests {
          .is_err());
          assert_eq!(calls, 0);
      }
@@ -218,7 +237,10 @@ index 0298405..4a843de 100644
 +        assert!(first < call && call < last);
 +        let helper = &source[source.find("fn full_sync(file: &File)").unwrap()..];
 +        let helper = &helper[..helper.find("\n}\n").unwrap()];
-+        assert!(helper.trim_end().ends_with("file.sync_all()"), "{helper}");
++        assert!(helper.contains("full_sync_with(file, File::sync_all)"), "{helper}");
++        let with = &source[source.find("fn full_sync_with(").unwrap()..];
++        let with = &with[..with.find("\n}\n").unwrap()];
++        assert!(with.trim_end().ends_with("call(file)"), "{with}");
 +    }
  }
 diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
