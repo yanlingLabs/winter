@@ -162,6 +162,51 @@ final class LiveGateFinderTests: XCTestCase {
         XCTAssertTrue(core.newWindows(target).isEmpty, "said once")
     }
 
+    /// The open panel (2026-10-14): a sheet on the bound window is a window to the server but in this state already —
+    /// never "useWindow(id)", which bound Chrome's Open panel with no accessibility.
+    func testASheetOnTheBoundWindowIsNotAnnouncedAsAWindowToSwitchTo() throws {
+        finder()
+        target.knownWindows = [77]
+        let sheet = fakeElement(99_700)
+        ax.put(window, [kAXChildrenAttribute: [group, trash, sheet]])
+        ax.add(sheet, role: kAXSheetRole, title: "open", frame: CGRect(x: 110, y: 128, width: 880, height: 448),
+               extra: [kAXParentAttribute: window])
+        var open = FakeSystem.window(157_511, pid: pid, CGRect(x: 110, y: 128, width: 880, height: 448), owner: "Finder")
+        open.title = "Open"
+        sys.windows[157_511] = open
+        let notes = core.newWindows(target)
+        XCTAssertEqual(notes, ["Finder's “Open” opened as a sheet on the bound window — it is in this state (its sheet), so act on its refs here; useWindow(157511) would bind it with no accessibility"])
+        // A window elsewhere, not the sheet's frame, is still a new window.
+        var other = FakeSystem.window(157_600, pid: pid, CGRect(x: 400, y: 200, width: 700, height: 500), owner: "Finder")
+        other.title = "Report"
+        sys.windows[157_600] = other
+        XCTAssertEqual(core.newWindows(target), ["new Finder window “Report” (157600) — this state is still the bound window; useWindow(157600) to work in it"])
+        // By the sheet's own window id too, wherever its frame reads.
+        let sheet2 = fakeElement(99_701)
+        ax.put(window, [kAXChildrenAttribute: [group, trash, sheet, sheet2]])
+        ax.add(sheet2, role: kAXSheetRole, title: "save", frame: CGRect(x: 0, y: 0, width: 10, height: 10), extra: [kAXParentAttribute: window])
+        ax.windowIDs[AXIdentity(element: sheet2)] = 157_700
+        var save = FakeSystem.window(157_700, pid: pid, CGRect(x: 120, y: 140, width: 600, height: 300), owner: "Finder")
+        save.title = "Save"
+        sys.windows[157_700] = save
+        XCTAssertEqual(core.newWindows(target).first?.hasPrefix("Finder's “Save” opened as a sheet on the bound window"), true)
+    }
+
+    /// A sheet on a browser bound as an app (a page's file chooser, most often): the tab route is named.
+    func testASheetOnABrowserBoundAsAnAppNamesTheTabUpload() throws {
+        finder()
+        core.isWebBrowserOverride = { _ in true }
+        target.knownWindows = [77]
+        let sheet = fakeElement(99_710)
+        ax.put(window, [kAXChildrenAttribute: [group, trash, sheet]])
+        ax.add(sheet, role: kAXSheetRole, title: "open", frame: CGRect(x: 110, y: 128, width: 880, height: 448), extra: [kAXParentAttribute: window])
+        var open = FakeSystem.window(157_511, pid: pid, CGRect(x: 110, y: 128, width: 880, height: 448), owner: "Finder")
+        open.title = "Open"
+        sys.windows[157_511] = open
+        let note = try XCTUnwrap(core.newWindows(target).first)
+        XCTAssertTrue(note.hasSuffix("; if it is a web page's file chooser, a tab does it with no dialog: bind the page with browsers.tab({ url }) and call upload(ref, paths) on its file input (copy a file from outside the working folder into $TMPDIR first — never a key, credential or dotfile)"), note)
+    }
+
     func testAWindowIsAnnouncedOnceEverAndOnlyADocumentWindow() throws {
         finder()
         target.knownWindows = [77]

@@ -110,6 +110,14 @@ func composerStripSurfaceHeight(_ band: CGFloat) -> CGFloat {
     newChatComposerHeight + band
 }
 
+/// What a surface hands the composer card for its attachments (2026-10-13): whether the "+" picker is live (a
+/// code session) — with the reason it is not, for its tooltip. The chips themselves are IN the text
+/// (`ComposerChipAttachmentCell`), so the composer never grows for them.
+struct ComposerAttachmentsControl {
+    let isEnabled: Bool
+    let disabledReason: String
+}
+
 // MARK: - The model/effort chip (mac-chat-parity Task 7, spec §5)
 
 /// What a surface hands the composer so its model/effort chip can BE a control rather than a
@@ -470,9 +478,14 @@ struct WinterComposerCard: View {
     /// Code-mode image input: handed straight to the text field (`ComposerTextView.imageIntake`).
     /// `nil` — the new-chat page, which only ever creates chat sessions — leaves paste/drop as AppKit
     /// does them. Whether it is LIVE is the intake's own call-time question, never a mode check here.
-    var imageIntake: ComposerImageIntake? = nil
+    var imageIntake: ComposerAttachmentIntake? = nil
+    /// Composer attachments: the "+" button's state. `nil` — the new-chat page, which only ever creates chat
+    /// sessions — leaves "+" off, with its reason on hover.
+    var attachments: ComposerAttachmentsControl? = nil
 
     @State private var isHovered = false
+    /// The "+" button's handle on the text view, which registers itself when built.
+    @State private var attachPicker = ComposerAttachPicker()
 
     /// The chrome THIS card renders, derived from its own inputs.
     ///
@@ -563,7 +576,8 @@ struct WinterComposerCard: View {
                             stop?.onStop()
                             return true
                         },
-                        imageIntake: imageIntake
+                        imageIntake: imageIntake,
+                        attachPicker: attachPicker
                     )
                     // The component has no placeholder parameter, so this is an overlay that steps
                     // aside the moment there is text. Non-hit-testing, or it would eat the click
@@ -695,7 +709,12 @@ struct WinterComposerCard: View {
     /// written once, and this shell still knows nothing about modes.
     private func controlRow(accessory: AnyView?, modelRow: ComposerModelRow) -> some View {
         HStack(spacing: 8) {
-            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", font: Typography.composerPlusGlyph)
+            NewChatControlButton(systemImage: "plus",
+                                 label: attachments?.isEnabled == true ? "Attach files or images"
+                                                                        : (attachments?.disabledReason ?? FieldStateAdapter.composerAttachDisabledReason),
+                                 font: Typography.composerPlusGlyph,
+                                 action: { attachPicker.pick() },
+                                 isDisabled: attachments?.isEnabled != true)
             accessory
             Spacer(minLength: 12)
             if chrome.showsModelControl {

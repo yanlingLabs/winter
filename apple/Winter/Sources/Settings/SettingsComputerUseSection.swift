@@ -35,6 +35,9 @@ let settingsComputerUseHeadlessDescription =
 let settingsComputerUseWebMcpDescription =
     "When a website offers its own tools for AI agents, Winter can use them directly instead of clicking through "
     + "the page. Each use counts as an action on that site, like a click."
+let settingsComputerUseWakesDescription =
+    "When you have a step to do first — submit a form, approve something — Winter can wait for it and carry on by "
+    + "itself when you do. It shows what it is waiting for, and you can stop it. Turning this off ends every wait."
 let settingsComputerUseLegacyNote =
     "The previous computer tool is in use (computerUse.legacyComputer is set in settings.json), so "
     + "the helper, the mirror and the app settings below do not apply to new sessions."
@@ -70,6 +73,7 @@ struct SettingsComputerUseSection: View {
                     .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
                 SettingsBrowsersGroup(status: status)
                 if status.headlessEnabled != nil || status.webmcp != nil { webGroup(status) }
+                if let wakes = status.wakes { wakesGroup(wakes) }
                 if let actionError = model.actionError {
                     SettingsGroup {
                         SettingsNoteRow(actionError, isError: true)
@@ -148,6 +152,17 @@ struct SettingsComputerUseSection: View {
                     SettingsToggle(isOn: toggle(webmcp) { value in await model.setWebMcp(value) })
                         .disabled(model.isSavingSettings)
                 }
+            }
+        }
+    }
+
+    /// Wake triggers (2026-10-12), shown only when the daemon reports the switch (an older daemon has none).
+    @ViewBuilder
+    private func wakesGroup(_ wakes: Bool) -> some View {
+        SettingsGroup {
+            SettingsRow("Wake triggers", description: settingsComputerUseWakesDescription) {
+                SettingsToggle(isOn: toggle(wakes) { value in await model.setWakes(value) })
+                    .disabled(model.isSavingSettings)
             }
         }
     }

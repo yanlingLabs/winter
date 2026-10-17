@@ -39,6 +39,9 @@ const fixtures: Record<string, unknown> = {
   // it. Two entries, out of order and with distinct n, so a Swift decode that drops or reorders
   // them fails this fixture's content check.
   "user_message_with_images": { ...base, type: "user_message", threadId: "main", text: "compare [Image #2] with [Image #1]", clientName: "orb", images: [{ n: 2, path: "/tmp/winter-session-s_1/images/image_2.png" }, { n: 1, path: "/tmp/winter-session-s_1/images/image_1.jpg" }] },
+  // Code-mode file attachments (2026-10-13): `files` beside `images` — two out-of-order entries, one a
+  // folder, so a Swift decode that drops or reorders them fails this fixture's content check.
+  "user_message_with_files": { ...base, type: "user_message", threadId: "main", text: "[Image #1] [File #2] [File #1]\nread these", clientName: "orb", images: [{ n: 1, path: "/Users/me/Desktop/shot.png" }], files: [{ n: 2, path: "/Users/me/Documents/My Report.pdf" }, { n: 1, path: "/Users/me/Projects/app" }] },
   "turn_started": { ...base, threadId: "main", type: "turn_started" },
   "assistant_message": { ...base, threadId: "main", type: "assistant_message", text: "done ✓" },
   "assistant_delta": { ...base, threadId: "main", type: "assistant_delta", delta: "wor" },
@@ -167,6 +170,13 @@ const fixtures: Record<string, unknown> = {
   tool_review_progress: { type: "tool_review_progress", sessionId: "s_1", threadId: "main", seq: 39, ts: 1700000000030, callId: "toolu_01", phase: "started" },
   tool_review_progress_ended: { type: "tool_review_progress", sessionId: "s_1", threadId: "toolu_agent_7", seq: 39, ts: 1700000000031, callId: "toolu_02", phase: "ended", verdict: "escalated" },
   "child_update": { ...base, threadId: "main", type: "child_update", childSessionId: "s_child000001", status: "completed", title: "Fix login bug", resultSummary: "Fixed the null token check; tests pass." },
+  // ComputerV2 wake triggers (2026-10-12): a NEW persisted SessionEvent variant PAIR, full switch-trap discipline. The
+  // armed fixture carries the optional `elementLabel`; a second one omits it (a page-level condition), so the Swift
+  // round-trip exercises the field present and absent.
+  // `elementLabel` as the producer emits it: the element's quoted NAME, never its role (`registry.ts`'s `labelsFor`).
+  "wake_armed": { ...base, threadId: "main", type: "wake_armed", wakeId: "wk_1a2b3c4d5e6f", condition: "clicked", targetLabel: "Chrome — Developer Dashboard", elementLabel: "“Submit for review”", expiresAt: 1781273600000 },
+  "wake_armed_page": { ...base, threadId: "main", type: "wake_armed", wakeId: "wk_0f9e8d7c6b5a", condition: "navigated", targetLabel: "Safari — Checkout", expiresAt: 1781273600000 },
+  "wake_ended": { ...base, threadId: "main", type: "wake_ended", wakeId: "wk_1a2b3c4d5e6f", reason: "fired", at: 1781270460000, woken: true },
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring
   // approval_requested_with_reviewer_reason's with/without pattern.

@@ -34,8 +34,10 @@ final class SidebarBrandTests: XCTestCase {
         // `docs/brand.md` § 3.6 / § 3.7. + the ChatGPT text inks (`TextPrimary`/`TextSecondary`/
         // `TextPlaceholder`, 2026-09-17) = 28. + the chrome pair (`ChromeHover`/`ChromeSelected`) = 30.
         // − the six retired panel-kind tints (2026-09-17) = 24.
-        XCTAssertEqual(Theme.assetColorNames.count, 26)
-        XCTAssertEqual(Set(Theme.assetColorNames).count, 26, "no duplicates")
+        // + the Dispatch pill's command mode (`CommandPurple`) and its terminal's sixteen ANSI colours
+        // (`docs/brand.md` § 3.9) = 43.
+        XCTAssertEqual(Theme.assetColorNames.count, 43)
+        XCTAssertEqual(Set(Theme.assetColorNames).count, 43, "no duplicates")
     }
 
     /// The plane mapping (`docs/brand.md`): the content card and the sidebar base must differ in

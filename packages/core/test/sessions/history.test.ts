@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolResultEvent, FileDiffSummary, THINKING_ID_MAX_LENGTH, THINKING_TEXT_MAX_LENGTH, THINKING_TITLE_MAX_LENGTH, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
-import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
+import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, phoneViewOf, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
+import { createRemoteStreamFilter, filterRemoteStreamEvent } from "../../src/sessions/remote-stream";
+import { renderWakeMessage } from "../../src/computer-use/wakes/delivery";
 
 describe("readHistoryPage", () => {
   let home: string | undefined;
@@ -24,7 +26,7 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 18 persisted content/control types", () => {
+  test("the allowlist is exactly the 20 persisted content/control types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
@@ -39,6 +41,8 @@ describe("readHistoryPage", () => {
         // The thinking pill (2026-10-05): the persisted block only; its live half is transient.
         "thinking_block",
         "workspace_sources_changed", "workspace_policy_changed", "workspace_operation_changed", "workspace_metadata_changed", "workspace_instructions_changed",
+        // ComputerV2 wake triggers (2026-10-12): the armed/ended pair (flat, bounded strings; never the model's note).
+        "wake_armed", "wake_ended",
       ].sort(),
     );
     expect(HISTORY_EVENT_TYPES.has("thinking_delta" as SessionEvent["type"])).toBe(false);
@@ -61,6 +65,39 @@ describe("readHistoryPage", () => {
     const [notice, warning] = page.events;
     expect(notice).toMatchObject({ type: "hook_notice", text: "a hook stopped this turn", level: "warning", stopsTurn: true });
     expect(warning).toMatchObject({ type: "continuity_warning", warning: "model_switch_lossy", text: "reasoning state did not carry over" });
+  });
+
+  test("ComputerV2 wake triggers: the phone never gets a computer-wake message's text — one daemon line from the pair instead, the same bytes live and re-read", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "get the listing out", clientName: "orb" });
+    store.append(sessionId, { type: "wake_armed", sessionId, threadId: "main", wakeId: "wk_1a2b3c4d5e6f", condition: "clicked", targetLabel: "Chrome — Developer Dashboard", elementLabel: "“Submit for review”", expiresAt: 9 });
+    store.append(sessionId, { type: "wake_armed", sessionId, threadId: "main", wakeId: "wk_0f9e8d7c6b5a", condition: "appeared", targetLabel: "Mail — Inbox", elementLabel: "“Sent”", expiresAt: 9 });
+    store.append(sessionId, { type: "wake_ended", sessionId, threadId: "main", wakeId: "wk_1a2b3c4d5e6f", reason: "fired", at: 5, woken: true });
+    store.append(sessionId, { type: "wake_ended", sessionId, threadId: "main", wakeId: "wk_0f9e8d7c6b5a", reason: "lost", at: 5, woken: true });
+    // The model's message as the daemon writes it: the note and the fence markup in it.
+    const text = renderWakeMessage([
+      { wakeId: "wk_1a2b3c4d5e6f", outcome: "fired", at: 5, armedAt: 1, kind: "clicked", targetLabel: "Chrome — Developer Dashboard", elementLabel: "“Submit for review”", elementRole: "button", note: "SECRET-NOTE publish the listing" },
+      { wakeId: "wk_0f9e8d7c6b5a", outcome: "lost", at: 5, armedAt: 1, kind: "appeared", targetLabel: "Mail — Inbox", elementLabel: "“Sent”", reason: "the app quit" },
+    ]);
+    expect(text).toContain("SECRET-NOTE");
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text, clientName: "computer-wake" });
+    const line = "Winter continued: 2 wake triggers ended (you clicked “Submit for review” in Chrome — Developer Dashboard; Mail — Inbox went away while Winter waited)";
+    const page = readHistoryPage(store, { sessionId });
+    const fromHistory = page.events.at(-1) as { type: string; text: string; clientName: string };
+    expect(fromHistory).toMatchObject({ type: "user_message", clientName: "computer-wake", text: line });
+    expect(fromHistory.text).not.toContain("SECRET-NOTE");
+    expect(fromHistory.text).not.toContain("<screen-data");
+    // The live/replay stream: the same bytes (its facts read from the LOG, so a replay that starts after the pair agrees).
+    const log = store.read(sessionId, 0);
+    const msg = log.at(-1)!;
+    const live = createRemoteStreamFilter({ log: (sid) => store.read(sid, 0) })(msg);
+    expect(JSON.stringify(live)).toBe(JSON.stringify(fromHistory));
+    // With no log at all, still never the note: the line without its facts.
+    const bare = filterRemoteStreamEvent(msg) as { text: string };
+    expect(bare.text).toBe("Winter continued: 2 wake triggers ended");
+    // The session log keeps the model's text; any other user_message is untouched.
+    expect((log.at(-1) as { text: string }).text).toBe(text);
+    expect(phoneViewOf(log[0]!)).toBe(log[0]!);
   });
 
   test("the thinking pill: a thinking_block comes back WITHOUT its text (the phone's view); the log keeps it", () => {

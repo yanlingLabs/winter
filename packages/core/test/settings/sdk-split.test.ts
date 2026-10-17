@@ -156,7 +156,7 @@ describe("live reads: an on-disk edit shows up; a torn edit keeps the last good 
     }
     expect(applied.at(-1)).toEqual(want);
     expect(sdkDenyRules(home)).toEqual(["Skill(two)"]);
-  });
+  }, 15_000); // the wait on the watcher is bounded at 8 s: the test's own timeout must sit above it
 
   // Round 6 — the ROOT CAUSE of the flake: after an atomic replace, macOS reported the parent-directory
   // event under the TEMP file's name only (measured in the shared-process run: `rename settings.json.tmp`,

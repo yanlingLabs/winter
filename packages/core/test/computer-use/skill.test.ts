@@ -176,6 +176,14 @@ describe("the computer-use skill file", () => {
     for (const label of ["freshness unknown", "live", "stale since", "likely current", "capture only"]) expect(body).toContain(label);
   });
 
+  test("the wake-trigger recipe: arm, END THE TURN telling the user, waitForUser for what must happen now", () => {
+    const wake = sections.find((s) => s.text.includes("wakeWhen("))!;
+    expect(wake.text).toContain("END YOUR TURN");
+    expect(wake.text).toContain("<computer-wake>");
+    expect(wake.text).toContain("waitForUser()");
+    expect(wake.text).toContain("wakes.list()");
+  });
+
   test("the browser recipes: a tab, console and network debugging, a download, the sign-in hand-off, history", () => {
     for (const m of ["browsers.open", "console(", "network(", "networkBody(", "download(", "waitForUser(", "browsers.history("]) expect(body).toContain(m);
     // The hand-off recipe says never to handle a password, and what to do when the user does not take over.
@@ -345,6 +353,7 @@ function mac(mode: "happy" | "escalate" | "refused", seen: Call_[]): (m: Call_) 
         return { ok: true, value: [{ ref: 7, role: "button", name: "Found" }] };
       }
       case "state": return { ok: true, value: "App — window \"W\" · settled 20 ms\n[1] window" };
+      case "wakeWhen": return { ok: true, value: { id: "wk_0123456789ab", expiresAt: 3_600_000 } };
       default: return { ok: true };
     }
   };

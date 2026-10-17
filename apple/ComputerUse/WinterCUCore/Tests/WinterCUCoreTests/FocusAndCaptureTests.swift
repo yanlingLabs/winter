@@ -233,8 +233,11 @@ final class FocusAndCaptureTests: XCTestCase {
         XCTAssertTrue(again.detail?.hasPrefix("likely current:") ?? false, "no input since: the same picture is no news — \(again.detail ?? "")")
         target.lastActionMs = CUSystemClock().nowMs() + 1  // input sent after the last shot
         let after = try await core.targetScreenshot(shotParams())
-        XCTAssertTrue(after.detail?.hasPrefix("stale since 0 s ago: captured Code's window on another desktop (another Space or full screen), unchanged although input was sent since") ?? false,
-                      after.detail ?? "")
+        // (Taken again for up to 700 ms first, waiting for the act's picture: "0 s" or "1 s" ago.)
+        let d = after.detail ?? ""
+        XCTAssertTrue(["stale since 0 s ago: ", "stale since 1 s ago: "].contains { d.hasPrefix($0) }, d)
+        XCTAssertTrue(d.contains("captured Code's window on another desktop (another Space or full screen), unchanged although input was sent since"), d)
+        XCTAssertTrue(d.hasSuffix("this picture may predate the last action: Code may not redraw a window on another desktop until it is seen; screenshot({ live: true, reason }) takes one where the window is (the user is asked first)"), d)
     }
 
     func testAnOffScreenImageThatChangedIsLive() async throws {

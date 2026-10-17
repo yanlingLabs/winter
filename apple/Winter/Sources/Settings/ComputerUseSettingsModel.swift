@@ -238,6 +238,8 @@ final class ComputerUseSettingsModel: ObservableObject {
         await write(ComputerUseSettingsPatch(headlessEnabled: value), what: "change the headless browser")
     }
     func setWebMcp(_ value: Bool) async { await write(ComputerUseSettingsPatch(webmcp: value), what: "change site tools") }
+    /// Wake triggers (2026-10-12): off ends every armed trigger (the daemon ends them at once).
+    func setWakes(_ value: Bool) async { await write(ComputerUseSettingsPatch(wakes: value), what: "change wake triggers") }
 
     private func write(_ patch: ComputerUseSettingsPatch, what: String) async {
         guard let client, let before = status, !isSavingSettings, !patch.isEmpty else { return }

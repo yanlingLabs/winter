@@ -11,6 +11,8 @@ import SwiftUI
 /// The blue the `/` menu marks its closest match with, and the composer draws a fully typed command in.
 let dispatchPillCommandBlue = Color(red: 0.42, green: 0.64, blue: 1.0)
 let dispatchPillCommandBlueNS = NSColor(red: 0.42, green: 0.64, blue: 1.0, alpha: 1)
+/// The colour a shell line the pill will RUN is drawn in (command mode) — the catalog's `CommandPurple`.
+let dispatchPillCommandPurpleNS = NSColor(named: "CommandPurple") ?? .systemPurple
 /// The closest match's row fill in the `/` menu.
 let dispatchPillCommandMatchFill = Color(red: 0.20, green: 0.42, blue: 0.95).opacity(0.42)
 

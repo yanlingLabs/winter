@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Review form</title></head>
+<body>
+<h1>Submit your listing</h1>
+<form id="f" action="/wake.html">
+  <label>Email <input id="email" name="email"></label>
+  <button id="submit" type="submit">Submit for review</button>
+</form>
+<p id="status"></p>
+<!-- A form that really submits: the page navigates away as the user presses its button. -->
+<form id="g" aria-label="Continue" action="/wake.html" method="get">
+  <input type="hidden" name="step" value="3">
+  <button id="go" type="submit">Send and continue</button>
+</form>
+<a id="next" href="/wake.html?step=2">Next step</a>
+<button id="nextButton" type="button">Next button</button>
+<script>
+  // The page's own answer after the user's submit (a moment later), and its second step's.
+  document.getElementById("f").addEventListener("submit", (e) => {
+    e.preventDefault();
+    setTimeout(() => { document.getElementById("status").textContent = "Submitted for review"; }, 300);
+  });
+  if (location.search.includes("step=2")) document.getElementById("status").textContent = "Thanks, all done";
+</script>
+</body></html>

@@ -91,6 +91,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// without exposing `window` itself past this seam (same convention as
     /// `OrbWindowController.panelFrameForTesting`/`windowForTesting`-style accessors elsewhere).
     var windowForTesting: NSWindow? { window }
+    /// The Winter island's routing: this window is key or main (a card of its session is then in front).
+    var isKeyOrMain: Bool { window.isKeyWindow || window.isMainWindow }
 
     /// Task 5 (2e-iii): this window's current on-screen frame — legitimate PRODUCTION use (unlike
     /// `windowForTesting` above), read by `AppDelegate.registerDetachedWindow`'s
@@ -135,7 +137,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // Read off the lease at each call: the window's feed changes when it moves between sessions.
         let sessionDirectory = SessionDirectory(lister: { [lease] in
             try await lease.feed.client.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId, wakesArmed: $0.wakesArmed)
             }
         })
         directory = sessionDirectory
@@ -176,6 +178,16 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
         // The pill-themed composer's stop circle — the same interrupt Esc performs.
         adapter.onInterrupt = { [weak self] in self?.stopTurn() }
+        // ComputerV2 wake triggers: the "Waiting for you" pill's [Stop waiting], on this window's pinned session.
+        adapter.onStopWaiting = { [weak self] wakeId in
+            guard let self else { return "this window closed" }
+            do {
+                _ = try await self.feed.client.cancelWake(sessionId: self.sessionId, wakeId: wakeId)
+                return nil
+            } catch {
+                return wakeStopFailure(error)
+            }
+        }
         // A stop that nothing confirmed in time: this window is behind the stream, or lost the terminal.
         // Re-attach so it shows what the daemon says.
         adapter.onStopStalled = { [weak self] in self?.resyncSession() }
@@ -695,6 +707,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Attachments alone are a message too: each chip is a character of the draft (a marker, its
+        // placeholder on the wire), so a draft of chips is never empty.
         guard !trimmed.isEmpty else { return }
         let wasRunning = session.state.turnRunning
         let sid = sessionId
@@ -711,20 +725,23 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             // Whether this daemon announced (hello) that it takes a FILE's own path in `images`: if not, the path
             // goes in the text, as it always did for an older daemon.
             let originalPaths = await client.supportsOriginalImagePaths
-            guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: originalPaths, stage: stage) else { return }
+            // Likewise for `files` (`attachment-files`): an older daemon is sent each file's path in the text.
+            let attachmentFiles = await client.supportsAttachmentFiles
+            guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: originalPaths,
+                                                                   attachmentFiles: attachmentFiles, stage: stage) else { return }
             // A FILE attachment is never staged, so the daemon's checks of it (its model backstop, a file that
             // vanished or sits where macOS keeps it from the daemon) answer HERE, on the send. An unreadable file is
             // read by this app instead and staged (`composerSend`); any other refusal's sentence lands on the
             // composer's notice line, beside the draft that stays put.
             let ok = await adapter.composerSend(outgoing, send: { out in
                 if wasRunning {
-                    _ = try await client.steer(sessionId: sid, text: out.text, images: out.images)
+                    _ = try await client.steer(sessionId: sid, text: out.text, images: out.images, files: out.files)
                 } else {
-                    _ = try await client.send(sessionId: sid, text: out.text, images: out.images)
+                    _ = try await client.send(sessionId: sid, text: out.text, images: out.images, files: out.files)
                 }
             }, stage: stage)
             // Clears only what was sent — edits made during the round trip stay.
-            if ok { adapter.composerSendSucceeded(sentDraft: text) }
+            if ok { adapter.composerSendSucceeded(sentDraft: text, sentAttachments: outgoing.sentAttachmentIDs) }
             // failure: text stays in the composer — the draft is never lost (spec §6 parity)
         }
     }

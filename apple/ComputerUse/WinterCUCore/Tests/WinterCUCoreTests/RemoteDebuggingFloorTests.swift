@@ -96,6 +96,28 @@ final class RemoteDebuggingFloorTests: XCTestCase {
         XCTAssertFalse(CUCore.isInspectPage("https://inspect.example.com"))
     }
 
+    /// The leftover probes (2026-10-13): with the page absent from the tree (the browser built none), a key went
+    /// through while chrome://inspect was shown. With no page URL to read, the window's title or its selected tab's
+    /// naming the inspect page refuses it; an ordinary page's title does not.
+    func testWithNoPageInTheTreeTheInspectPageIsKnownByItsTitles() {
+        world()
+        let strip = fakeElement(99_020), tab = fakeElement(99_021), otherTab = fakeElement(99_022)
+        ax.put(window, [kAXChildrenAttribute: [toolbarButton, strip], kAXTitleAttribute: ""])   // no web area: the page not in the tree
+        ax.add(strip, role: kAXTabGroupRole, extra: [kAXParentAttribute: window, kAXChildrenAttribute: [otherTab, tab]])
+        ax.add(otherTab, role: kAXRadioButtonRole, subrole: "AXTabButton", title: "Material Probe", extra: [kAXParentAttribute: strip, kAXValueAttribute: false])
+        ax.add(tab, role: kAXRadioButtonRole, subrole: "AXTabButton", title: "Inspect with Chrome Developer Tools", extra: [kAXParentAttribute: strip, kAXValueAttribute: true])
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "tab"))), target)) {
+            XCTAssertTrue(isRemoteDebuggingRefusal($0), "\($0)")
+        }
+        // The window server's title alone does it too ("… – Google Chrome for Testing", a localized dash).
+        ax.put(tab, [kAXValueAttribute: false])
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "tab"))), target), "an ordinary tab selected")
+        sys.windows[77]?.title = "Inspect with Chrome Developer Tools – Google Chrome for Testing"
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "tab"))), target)) {
+            XCTAssertTrue(isRemoteDebuggingRefusal($0), "\($0)")
+        }
+    }
+
     func testTheBrowsersOwnUIStaysUsableToLeaveThePage() {
         world()
         XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target))
@@ -123,6 +145,7 @@ final class RemoteDebuggingFloorTests: XCTestCase {
     /// Review of round 11, MEDIUM #8: any Chromium-based app (Edge Canary is in no list), any non-web scheme's `inspect`.
     func testEveryChromiumAppAndAnyNonWebSchemeAreCovered() {
         world(bundle: "com.microsoft.edgemac.Canary", url: "edge://inspect/#devices", chromium: true)
+        core.isWebBrowserOverride = { _ in true }  // it declares http/https: a browser
         XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(checkbox)))), target))
         XCTAssertTrue(CUCore.isInspectPage("comet://inspect/#remote-debugging"))
         XCTAssertFalse(CUCore.isInspectPage("https://inspect.example.com/"))
@@ -145,5 +168,51 @@ final class RemoteDebuggingFloorTests: XCTestCase {
         XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target)) {
             XCTAssertTrue(isRemoteDebuggingRefusal($0))
         }
+    }
+
+    /// Review of round 12, MEDIUM #5: an Electron or CEF app (no browser) is never covered — its own `<scheme>://inspect`
+    /// route is its business.
+    func testANonBrowserChromiumAppIsNotCovered() {
+        world(bundle: "com.tinyspeck.slackmacgap", url: "slack://inspect/x", chromium: true)
+        core.isWebBrowserOverride = { _ in false }
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(checkbox)))), target))
+    }
+
+    /// Review of round 12, MEDIUM #5: a standard window whose walk is cut short (a deep page) is no dialog candidate —
+    /// a tab titled "how to allow remote debugging" never refuses every act.
+    func testADeepPageWindowIsNoDialogCandidate() {
+        world(url: "https://example.com", standardTitled: "how to allow remote debugging – Google Search")
+        var parent = other
+        var chain: [AXUIElement] = []
+        for i in 0..<230 {
+            let g = fakeElement(Int32(99_100 + i))
+            ax.add(g, role: kAXGroupRole, extra: [kAXParentAttribute: parent])
+            ax.put(parent, [kAXChildrenAttribute: [g]])
+            chain.append(g)
+            parent = g
+        }
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target))
+    }
+
+    /// Review of round 13, MEDIUM #8: the walk tells a page (more nodes than a dialog has: no candidate) from a walk out
+    /// of time (unknown: still a candidate, its text checked, the scan not cached).
+    func testTheWalkTellsALargeWindowFromAnUnfinishedOne() {
+        world(url: "https://example.com", standardTitled: "Settings")
+        let small = fakeElement(99_400)
+        ax.add(small, role: kAXWindowRole, extra: [kAXChildrenAttribute: [fakeElement(99_401)]])
+        XCTAssertEqual(core.webAreaWalk(small), .absent)
+        XCTAssertEqual(core.webAreaWalk(small, maxMs: 0), .unknown, "out of time: unknown, never a no")
+        XCTAssertEqual(core.webAreaWalk(small, maxNodes: 0), .large)
+        XCTAssertTrue(CUCore.isInspectPageTitle("Inspect with Chrome Developer Tools - Work"), "a profile's title tail")
+        XCTAssertFalse(CUCore.isInspectPageTitle("How to Inspect with Chrome Developer Tools - Work"))
+    }
+
+    /// Review of round 12, LOW: the capture-only title rule is anchored.
+    func testTheInspectTitleRuleIsAnchored() {
+        XCTAssertTrue(CUCore.isInspectPageTitle("Inspect with Chrome Developer Tools"))
+        XCTAssertFalse(CUCore.isInspectPageTitle("How to Inspect with Chrome Developer Tools"))
+        XCTAssertTrue(CUCore.isInspectPageTitle("chrome://inspect/#devices"))
+        XCTAssertFalse(CUCore.isInspectPageTitle("https://inspect.example.com"))
+        XCTAssertFalse(CUCore.isInspectPageTitle("chrome://inspection-notes"))
     }
 }

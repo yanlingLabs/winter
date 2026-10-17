@@ -26,7 +26,11 @@ import Foundation
 ///     child target's), because their ids are. And within a session a context is matched by the
 ///     browser's `uniqueId` wherever it reported one: a process-local `contextId` can be handed out
 ///     again after a cross-process navigation, so an id the gate once saw as "winter" is "winter" only
-///     while the LATEST context the browser reported under that id is the winter one.
+///     while the LATEST context the browser reported under that id is the winter one. A command naming a
+///     winter world that has ENDED (its document went, its id now names another context, or every
+///     context was cleared) is refused with a message beginning with the browser's own words,
+///     `contextGone` — what the daemon retries on — and one naming a context that never was winter gets
+///     the plain refusal.
 ///  3. **The events** — only subscribed, allowlisted ones leave, and an event `CDPAllowlist.eventParams`
 ///     lists leaves reduced by `CDPEventReducer` (the twin of the daemon's `cdp-reduce.ts`): no header,
 ///     cookie, post data or page object.
@@ -55,6 +59,20 @@ public final class CDPTabGate {
     /// clears its contexts and so its objects long before this; the cap only bounds a pathological run.
     static let objectCap = 50_000
 
+    /// Ended winter worlds remembered per session (`World.ended`).
+    static let endedCap = 256
+
+    /// The browser's own words for a context that is gone. A command naming a winter world that has
+    /// ENDED is refused with a message beginning with them: the daemon may send one before it sees the
+    /// ending, and it reads exactly this sentence as "make a fresh world and try again" — as it would
+    /// the browser's own answer (Winter for Chrome's guard and the daemon's test transport say the same).
+    /// A context that never was winter gets the plain refusal.
+    public static let contextGone = "Cannot find context with specified id"
+
+    private static func gone(_ method: String) -> Refusal {
+        Refusal("\(contextGone) (\(method): that \"\(CDPAllowlist.worldName)\" world ended with its document)")
+    }
+
     private struct ObjectOrigin {
         var context: Int?
         var group: String?
@@ -76,6 +94,11 @@ public final class CDPTabGate {
         var latestUnique: [Int: String] = [:]
         var objects: [String: ObjectOrigin] = [:]
         var objectOrder: [String] = []
+        /// Winter worlds that ENDED lately, as `i:<contextId>` and `u:<uniqueId>` (oldest first, at most
+        /// `CDPTabGate.endedCap`): naming one again is answered in the browser's own words
+        /// (`CDPTabGate.contextGone`), never as a world that was not winter.
+        var ended: Set<String> = []
+        var endedOrder: [String] = []
 
         /// A context id names a winter world — and, where the browser said which context the id
         /// belongs to now, that context is still the winter one.
@@ -85,19 +108,50 @@ public final class CDPTabGate {
             return uniqueIds[latest] == id
         }
 
+        /// The id named a winter world that has ended — its document went, or the id now belongs to
+        /// another context.
+        func hasEnded(id: Int) -> Bool {
+            ended.contains("i:\(id)") || (contexts.contains(id) && !isWinter(id))
+        }
+
+        func hasEnded(unique: String) -> Bool { ended.contains("u:\(unique)") }
+
+        mutating func markEnded(_ key: String) {
+            if ended.contains(key) { endedOrder.removeAll { $0 == key } }
+            ended.insert(key)
+            endedOrder.append(key)
+            while endedOrder.count > CDPTabGate.endedCap { ended.remove(endedOrder.removeFirst()) }
+        }
+
+        /// The id (and its unique id) is a winter world again: this link made it anew.
+        mutating func unmarkEnded(id: Int, unique: String?) {
+            for key in ["i:\(id)"] + (unique.map { ["u:\($0)"] } ?? []) where ended.remove(key) != nil {
+                endedOrder.removeAll { $0 == key }
+            }
+        }
+
         /// The id no longer names a winter world: forget it, its unique id and every object minted in it.
+        /// A winter world it named has ENDED.
         mutating func invalidate(_ id: Int) {
+            if contexts.contains(id) {
+                markEnded("i:\(id)")
+                for (unique, context) in uniqueIds where context == id { markEnded("u:\(unique)") }
+            }
             contexts.remove(id)
             uniqueIds = uniqueIds.filter { $0.value != id }
             objects = objects.filter { $0.value.context != id }
         }
 
-        /// Every context is gone (`Runtime.executionContextsCleared`); the frames this link made worlds
-        /// in are not.
+        /// Every context is gone (`Runtime.executionContextsCleared`): every winter world has ended. The
+        /// frames this link made worlds in have not.
         mutating func clearContexts() {
-            let frames = madeFrames
-            self = World()
-            madeFrames = frames
+            var next = World()
+            next.madeFrames = madeFrames
+            next.ended = ended
+            next.endedOrder = endedOrder
+            for id in contexts.sorted() { next.markEnded("i:\(id)") }
+            for unique in uniqueIds.keys.sorted() { next.markEnded("u:\(unique)") }
+            self = next
         }
     }
 
@@ -162,18 +216,30 @@ public final class CDPTabGate {
             return Refusal("\(method) is not on the CDP method allowlist")
         }
         let world = worlds[Self.key(cdpSessionId)] ?? World()
+        // A context that WAS a winter world and has ended gets the browser's own words; any other, `plain`.
+        func notWinter(id raw: JSONValue, _ plain: String) -> Refusal {
+            if let id = raw.intValue, world.hasEnded(id: id) { return Self.gone(method) }
+            return Refusal(plain)
+        }
+        func notWinter(unique raw: JSONValue, _ plain: String) -> Refusal {
+            if let unique = raw.stringValue, world.hasEnded(unique: unique) { return Self.gone(method) }
+            return Refusal(plain)
+        }
         switch method {
         case "Runtime.evaluate":
             if case .some(let raw) = params["contextId"] {
                 guard let context = raw.intValue, world.isWinter(context) else {
-                    return Refusal("Runtime.evaluate: contextId is not a \"winter\" world")
+                    return notWinter(id: raw, "Runtime.evaluate: contextId is not a \"winter\" world")
                 }
                 if let unique = params["uniqueContextId"], world.uniqueIds[unique.stringValue ?? ""] == nil {
-                    return Refusal("Runtime.evaluate: uniqueContextId is not a \"winter\" world")
+                    return notWinter(unique: unique, "Runtime.evaluate: uniqueContextId is not a \"winter\" world")
                 }
                 return nil
             }
-            if let unique = params["uniqueContextId"]?.stringValue, world.uniqueIds[unique] != nil { return nil }
+            if let unique = params["uniqueContextId"] {
+                if let u = unique.stringValue, world.uniqueIds[u] != nil { return nil }
+                return notWinter(unique: unique, "Runtime.evaluate runs only in a \"winter\" world — name its contextId")
+            }
             return Refusal("Runtime.evaluate runs only in a \"winter\" world — name its contextId")
         case "Runtime.callFunctionOn":
             var anchored = false
@@ -185,13 +251,13 @@ public final class CDPTabGate {
             }
             if let raw = params["executionContextId"] {
                 guard let context = raw.intValue, world.isWinter(context) else {
-                    return Refusal("Runtime.callFunctionOn: executionContextId is not a \"winter\" world")
+                    return notWinter(id: raw, "Runtime.callFunctionOn: executionContextId is not a \"winter\" world")
                 }
                 anchored = true
             }
             if let raw = params["uniqueContextId"] {
                 guard let unique = raw.stringValue, world.uniqueIds[unique] != nil else {
-                    return Refusal("Runtime.callFunctionOn: uniqueContextId is not a \"winter\" world")
+                    return notWinter(unique: raw, "Runtime.callFunctionOn: uniqueContextId is not a \"winter\" world")
                 }
                 anchored = true
             }
@@ -208,7 +274,8 @@ public final class CDPTabGate {
             return nil
         case "DOM.resolveNode":
             guard let context = params["executionContextId"]?.intValue, world.isWinter(context) else {
-                return Refusal("DOM.resolveNode resolves only into a \"winter\" world — name its executionContextId")
+                return notWinter(id: params["executionContextId"] ?? .null,
+                                 "DOM.resolveNode resolves only into a \"winter\" world — name its executionContextId")
             }
             return nil
         case "Page.createIsolatedWorld":
@@ -287,10 +354,14 @@ public final class CDPTabGate {
                 let frame = params["frameId"]?.stringValue
                 if let frame { world.madeFrames.insert(frame) }
                 world.contexts.insert(context)
+                world.unmarkEnded(id: context, unique: nil)
                 if let candidate = world.candidates.removeValue(forKey: context),
                    frame == nil || candidate.frame == nil || candidate.frame == frame {
                     // Its context was announced before the answer: that announcement is this world.
-                    if let unique = candidate.unique { world.uniqueIds[unique] = context }
+                    if let unique = candidate.unique {
+                        world.uniqueIds[unique] = context
+                        world.unmarkEnded(id: context, unique: unique)
+                    }
                 } else if let latest = world.latestUnique[context], world.uniqueIds[latest] != context {
                     // The id is the winter world's NOW; which unique context it is arrives with its event.
                     world.latestUnique[context] = nil
@@ -358,6 +429,7 @@ public final class CDPTabGate {
                 world.candidates[id] = nil
                 world.contexts.insert(id)
                 if let unique { world.uniqueIds[unique] = id }
+                world.unmarkEnded(id: id, unique: unique)
             } else {
                 // The page's own world, someone else's, or a winter-named world in a frame this link
                 // never made one in. If the id was a winter world's, it is not any more (a cross-process
@@ -372,7 +444,9 @@ public final class CDPTabGate {
             if let unique = params["executionContextUniqueId"]?.stringValue {
                 // By unique id: only the context that really went. A late "destroyed" for an older
                 // context that once had this id must not take a newer winter world with it.
-                let id = world.uniqueIds.removeValue(forKey: unique) ?? params["executionContextId"]?.intValue
+                let winterId = world.uniqueIds.removeValue(forKey: unique)
+                if winterId != nil { world.markEnded("u:\(unique)") }
+                let id = winterId ?? params["executionContextId"]?.intValue
                 if let id, world.latestUnique[id] == unique {
                     world.latestUnique[id] = nil
                     world.candidates[id] = nil

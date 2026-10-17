@@ -155,6 +155,19 @@ final class ActGateTests: XCTestCase {
         XCTAssertEqual(poster.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown, .leftMouseUp], "arriving by the hover path")
     }
 
+    /// Round 13 (dogfood): an action the app answers "not supported" that took effect anyway (an open panel closed after
+    /// AXOpen) is said as done — no pointer fallback onto whatever was under it.
+    func testARefusedActionThatTookEffectIsDoneAndNotClickedAgain() async throws {
+        world()
+        ax.setActions(button, [kAXPressAction, "AXOpen"])
+        ax.performErrorAfterActing = CUError(code: "unsupported", message: "AXOpen is not supported by this element",
+                                             data: ["axError": .int(Int(AXError.actionUnsupported.rawValue))])
+        ax.onPerform = { [ax, button] _ in ax!.dead.insert(AXIdentity(element: button)) }
+        let r = try await act(.action(CUAXAction(ref: ref(button), name: "open")))
+        XCTAssertTrue(r.detail?.contains("but it took effect (the element is gone)") == true, r.detail ?? "-")
+        XCTAssertTrue(poster.entries.isEmpty, "no pointer fallback")
+    }
+
     // MARK: cancel (I2)
 
     func testCancelReachesAnActWaitingInTheQueue() async throws {
@@ -375,6 +388,24 @@ final class ActGateTests: XCTestCase {
         XCTAssertEqual(sys.frontmostPid(), 1)
         // Not held any more: the next one needs consent again.
         await expect("needs_foreground") { try await self.act(.click(CUClickAction(point: [50, 60], shotId: s))) }
+    }
+
+    /// Review of round 9, MEDIUM #3 (`held` per target, the exemption per app): two sessions holding the same app — the
+    /// first one's end neither gives the front back nor ends the exemption under the other's hold; the last one's does.
+    func testTwoHoldsOfOneAppGiveTheFrontBackOnlyAtTheLastEnd() async throws {
+        world(bundle: "org.blenderfoundation.blender")
+        sys.running = [pid, 1]
+        sys.stack = [sys.windows[77]!]
+        let t2 = CUTarget(id: "t2", sessionId: "s2", pid: pid, bundleId: "org.blenderfoundation.blender", appName: "Blender",
+                          isChromium: false, mirror: false, windowID: 77, windowTitle: "Doc")
+        core.registerForTesting(t2, windowElement: window)
+        _ = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))
+        _ = try await core.targetForeground(TargetForegroundParams(targetId: "t2"))
+        XCTAssertEqual(sys.frontmostPid(), pid)
+        core.scriptActivity(sessionId: "s", active: false)
+        XCTAssertEqual(sys.frontmostPid(), pid, "the other session's hold goes on")
+        core.scriptActivity(sessionId: "s2", active: false)
+        XCTAssertEqual(sys.frontmostPid(), 1, "the last hold's end gives the front back")
     }
 
     /// User ruling 2026-10-10: an app is never HELD in front on another desktop (that would keep the user there

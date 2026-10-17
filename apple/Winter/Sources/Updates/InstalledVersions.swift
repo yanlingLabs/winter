@@ -75,16 +75,13 @@ func winterInstalledVersion(bundle: Bundle = .main) -> String? {
 /// `Bundle(path:)` on the embedded framework reads its `Info.plist` off disk and touches nothing
 /// else — no `dlopen`, no CEF symbols, no helper processes.
 ///
-/// `Contents/Frameworks/Chromium Embedded Framework.framework` is where the app's own loader looks
-/// (`cef_scoped_library_loader_mac.mm`'s `kPathFromMainExe`, mirrored in `WinterCEF.mm`), so this
-/// reads exactly the framework that would be loaded. Measured on a Release build: `151.3.16.0`.
+/// Winter's one Chromium lives in the nested Winter Headless helper (`WinterChromium`): this reads exactly the framework
+/// Winter.app's own CEF loads. Measured on a Release build: `151.3.16.0`.
 ///
-/// nil is a real answer, not a failure: Debug app builds embed no runtimes at all.
+/// nil is a real answer, not a failure: a build that embedded no helper has no Chromium to report.
 func embeddedChromiumVersion(appBundleURL: URL = Bundle.main.bundleURL) -> String? {
-    let framework = appBundleURL
-        .appendingPathComponent("Contents/Frameworks", isDirectory: true)
-        .appendingPathComponent("Chromium Embedded Framework.framework", isDirectory: true)
-    guard let bundle = Bundle(path: framework.path) else { return nil }
+    guard let location = WinterChromium.location(appBundle: appBundleURL),
+          let bundle = Bundle(path: location.framework.path) else { return nil }
     return bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
 }
 

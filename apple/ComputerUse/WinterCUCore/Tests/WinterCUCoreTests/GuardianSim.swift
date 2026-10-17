@@ -38,6 +38,15 @@ enum SimPid {
     /// CoreServicesUIAgent: a dialog the agent's AppleScript raises (the agent's indirect effect).
     static let coreServices: pid_t = 760
     static let dock: pid_t = 900
+    /// Spotlight's panel process: the keys the user types into it go to it, not to the app in front (R17-d (ii), the
+    /// controller's ruling — an interactive launcher's Return is the world's own fact; PROTOCOL §4.12 I6, 1.10.0: a key
+    /// into Spotlight's panel is no work in the app in front).
+    static let spotlight: pid_t = 780
+    /// T's content process (a web view's): an event posted to it reaches T (round 18 — I6 in flight watches it).
+    static let targetContent: pid_t = 5253
+    /// Finder, when T is another app (round 19): a click on the empty desktop brings FINDER forward (PROTOCOL §4.12: "A
+    /// click on the empty desktop: Finder's") — with Finder as T, that is T itself.
+    static let finder: pid_t = 5300
     static let own: pid_t = getpid()
 
     static func name(_ pid: pid_t) -> String {
@@ -56,6 +65,8 @@ enum SimPid {
         case pip: return "PiP"
         case coreServices: return "CSUIA"
         case dock: return "Dock"
+        case spotlight: return "SPL"
+        case finder: return "F"
         case own: return "helper"
         default: return pid >= 800 && pid < 900 ? "L\(pid)" : "pid \(pid)"
         }
@@ -149,7 +160,7 @@ indirect enum SimCause: CustomStringConvertible {
 enum SimClickWhat: String { case field = "a field", link = "a link (an AX link)", opener = "a button that opens Safari" }
 
 /// What becomes of an app the agent never touched coming forward.
-enum SimUntouched: String { case adopt = "the user's place (I1)", undone = "undone (the agent's indirect effect)", leftAlone = "left in front (a system dialog), not their place" }
+enum SimUntouched: String { case adopt = "the user's place (I1)", undone = "undone (the agent's indirect effect)", leftAlone = "left in front, not their place" }
 
 /// One input of the user's that can switch apps or desktops, and where they meant to go with it.
 struct SimSwitch {
@@ -173,6 +184,9 @@ struct SimSwitch {
     var countlessUntil: Double?
     /// A ⌘-Tab whose ⌘ is still down: it switches (and explains anything) only from its release.
     var pending = false
+    /// A ⌘-Tab whose Tab the tap saw: a SEEN switch that lands on what comes forward (R17-d's targeted-switch ruling, the
+    /// controller, 2026-10-12 — under the launch rule's never-adopt gate only a seen, targeted switch adopts).
+    var tabSeen = false
     /// The engine sees it at all.
     var visible: Bool { secureFlags != false }
 }
@@ -189,6 +203,8 @@ struct SimStats {
     /// had heard of a change, they decide nothing between that change's answers.
     /// Acts refused because the user was working in the app (round 10).
     var handsOff = 0
+    /// The user started working in T while an act on it ran (round 18 — the in-flight invariant had a chance to fail).
+    var inFlightChances = 0
     var activationsOpen = 0
     var activationsOpenWhy: [String: Int] = [:]
     var settleChecks = 0
@@ -205,6 +221,7 @@ struct SimStats {
         settleChecks += o.settleChecks; restoresChecked += o.restoresChecked; keysChecked += o.keysChecked
         userKeysRerouted += o.userKeysRerouted; undone += o.undone; userMovesKept += o.userMovesKept; leftAlone += o.leftAlone
         agentActs += o.agentActs; s2Ops += o.s2Ops; activationsOpen += o.activationsOpen; handsOff += o.handsOff
+        inFlightChances += o.inFlightChances
         for (k, v) in o.activationsOpenWhy { activationsOpenWhy[k, default: 0] += v }
         for (k, v) in o.ambiguousWhy { ambiguousWhy[k, default: 0] += v }
         for (k, v) in o.uncheckedWhy { uncheckedWhy[k, default: 0] += v }
@@ -219,7 +236,7 @@ struct SimStats {
             \(restoresChecked) engine activations checked (\(activationsOpen) of them against several answers: \(activationsOpenWhy.sorted { $0.value > $1.value }.map { "\($0.value) \($0.key)" }.joined(separator: "; "))), \(keysChecked) user keys checked (\(userKeysRerouted) through the \
             reroute); \(agentActs) agent operations, \(s2Ops) of session s2 (visits, holds, rung 4); \(undone) thefts undone, \
             \(userMovesKept) user moves kept, \(leftAlone) changes left alone (neither adopted nor undone), \(handsOff) acts refused while the \
-            user worked in the app
+            user worked in the app, \(inFlightChances) times the user began working in T during an act
             """
     }
     func pct(_ n: Int) -> String { changes == 0 ? "0%" : String(format: "%.1f%%", 100 * Double(n) / Double(changes)) }
@@ -288,8 +305,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var startedAt: [pid_t: Double] = [:]
     var bundles: [pid_t: String] = [SimPid.target: "com.apple.finder", SimPid.user: "com.apple.Terminal", SimPid.third: "sim.third",
                                     SimPid.safari: "com.apple.Safari", SimPid.preview: "com.apple.Preview", SimPid.side: "sim.side",
-                                    SimPid.visited: "sim.visited", SimPid.held: "sim.held", SimPid.coreServices: "com.apple.coreservices.uiagent"]
+                                    SimPid.visited: "sim.visited", SimPid.held: "sim.held", SimPid.coreServices: "com.apple.coreservices.uiagent",
+                                    SimPid.spotlight: "com.apple.Spotlight"]
     var front: pid_t = SimPid.user
+    /// The Finder process: T when T is Finder, else its own (round 19 — the empty desktop's app).
+    var finderPid: pid_t = SimPid.target
     var space1: UInt64 = 100
     var focusDisplay = 1
     var space: UInt64 { focusDisplay == 2 ? 400 : space1 }
@@ -300,11 +320,23 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var mainWin: [pid_t: UInt32] = [SimPid.user: 31, SimPid.target: 77, SimPid.third: 71, SimPid.safari: 81, SimPid.preview: 91,
                                     SimPid.side: 41, SimPid.visited: 61, SimPid.held: 66, SimPid.coreServices: 761]
     var onMainWindow: ((pid_t, UInt32) -> Void)?
+    /// The act's first event to T (round 18): the run may have the user click into T a moment later.
+    var onMidAct: (() -> Void)?
     /// The desktop changed: accessibility lists each app's windows on the desktops shown now (not those on another Space).
     var onDesktop: (() -> Void)?
     /// U's Secure Keyboard Entry: Secure Event Input is on while U is in front.
     var secureEntry = false
     var secure: Bool { secureEntry && front == SimPid.user }
+    /// When Secure Event Input last went off (R17-a, the user's ruling: on at ANY moment of the 2.5 s quiet window is
+    /// never quiet — the contract 82f8caece wrote; the oracle read it only at the instant).
+    var secureEndedAt: Double = -.infinity
+    var wasSecure = false
+    /// Called wherever `secure` can change (U's front, Secure Keyboard Entry): records when it went off.
+    func noteSecureChange() {
+        let s = secure
+        if wasSecure, !s { secureEndedAt = now }
+        wasSecure = s
+    }
     var held: CGEventFlags = []
     /// The app the banner on screen is about, how long the AppleScript running takes, and when an indirect effect of
     /// the agent's came forward (for the report it owes).
@@ -315,6 +347,38 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// process start, and whether it was clearly the agent's then (the world's own record: no input of the user's in the
     /// 2.5 s before it, an opener act within 1.5 s before it, no Secure Event Input).
     var agentColdLaunches: [pid_t: (start: Double, clearly: Touch)] = [:]
+    /// Per launched process: whether input of the user's the tap saw came between the agent's last opener act before its
+    /// start (any reach) and the start — the ruling's (1), round 16: then it is THEIRS.
+    var inputAfterOpener: [pid_t: Bool] = [:]
+    /// Whether an opener act (any reach) came within the causal window before `start`.
+    func openerBefore(_ start: Double) -> Double? {
+        guard let o = openers.last(where: { $0.at <= start })?.at, start - o <= 1_500 else { return nil }
+        return o
+    }
+    func noteLaunchStart(_ pid: pid_t) {
+        // (R17-d (i), the controller's ruling: LAUNCH-CAPABLE input only — a click, Return/Enter, a chord with ⌘/⌃/⌥, a
+        // function key; never plain typing, a key-up or a scroll.)
+        // (R18 L1, the controller's ruling: input AT or after the start is not "between" — strictly before it.)
+        if let o = openerBefore(now) { inputAfterOpener[pid] = lastLaunchCapableAt > o && lastLaunchCapableAt < now } else { inputAfterOpener[pid] = nil }
+        // (R17-d (ii), the controller's ruling: an INTERACTIVE LAUNCHER — a Return or click whose destination is
+        // Spotlight, the Dock, Launchpad or a Finder double-click — within the causal window before the start: theirs.
+        // Read off the world's own record of the user's launcher input, written where it launches (`userLaunches`).
+        // R18-a, the controller's ruling: only a destination that LAUNCHES (recorded only there), and only AFTER the
+        // agent's latest opener act that reaches the app — else its latest act of any reach — and before the start.)
+        let bundle = bundles[pid]
+        let inReach = openers.last { $0.at < now && now - $0.at <= 1_500 && ($0.scope.map { s in bundle.map(s.contains) ?? false } ?? true) }?.at
+        let after = inReach ?? openerBefore(now) ?? -.infinity
+        launcherBefore[pid] = launcherInputs.contains { $0 > after && $0 < now && now - $0 <= 1_500 }
+    }
+    /// The user's interactive-launcher input (a Return in Spotlight), as the world made it: R17-d (ii).
+    var launcherInputs: [Double] = []
+    /// Per launched process: whether such input came within the causal window before its start.
+    var launcherBefore: [pid_t: Bool] = [:]
+    /// The launch rule's (1) — THEIRS, adopted — for this process (R17-d (i) or (ii)).
+    func theirLaunch(_ pid: pid_t) -> Bool { inputAfterOpener[pid] == true || launcherBefore[pid] == true }
+    /// The apps the world left in front (an untouched app judged left): the user's own typing in one makes it their place.
+    var leftApps: Set<pid_t> = []
+    var leftOnly: Set<pid_t> = []
     var backgroundOpens = 0
     /// An untouched app's coming forward the engine must SAY (sent back, or a system dialog left in front): owed from
     /// the change, due once its notification found it still in front.
@@ -340,17 +404,38 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// once its activation lands (within 0.5 s).
     var userWorkingIn: pid_t?
     var pendingWork: (app: pid_t, until: Double)?
+    /// The app their work ended in by LEAVING THE FRONT, and whether the engine could have seen it leave: an activation
+    /// notification heard while another app was in front (round 19 — the mid-act seeds 1069 and, with an ordinary target,
+    /// 60: T left the front for a moment and was back before any notification was heard; §4.12, what can't be attributed:
+    /// "the guardian hears of an activation only when told, with no time on it"). A new mark forgets it.
+    /// Bounded (the review of round 19, LOW 3): it counts only for a departure that lasted no longer than NSWorkspace's
+    /// notification can be late in this world ("measured: within 13 ms of the change, run108; the world allows 120 ms, a
+    /// stress sweep 400 ms" — §4.12) — `back`: when T came to the front again.
+    var workLeft: (app: pid_t, at: Double, seen: Bool, back: Double?)?
+    /// Whether their work in `pid` ended only by a departure from the front too short for any notification to show it.
+    func unseenWorkLeave(_ pid: pid_t) -> Bool {
+        guard let l = workLeft, l.app == pid, !l.seen, let b = l.back, front == pid else { return false }
+        return b - l.at <= (Self.stress ? 400 : 120)
+    }
     /// The world's answer: is the user working in `pid` now?
     func userWorks(in pid: pid_t) -> Bool {
         lock.withLock {
-            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
+            if let p = pendingWork, front == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
             return userWorkingIn == pid && front == pid
         }
     }
     func userInteracted(_ app: pid_t) {
         lock.withLock {
             guard SimPid.agentTargets.contains(app) else { return }
-            if front == app { userWorkingIn = app; pendingWork = nil } else { pendingWork = (app, now + 500) }
+            // (A pending click into ANOTHER target stays pending: the user's key into the app in front, between their click
+            // into T and T's activation, does not take the click back — §4.12 I6, a click counts once its own activation
+            // lands; round 18, found by the in-flight exercise's mid-act click, seed 1.)
+            if front == app {
+                userWorkingIn = app; workLeft = nil; workBegan(app)
+                if pendingWork?.app == app { pendingWork = nil }
+            } else {
+                pendingWork = (app, now + 500)
+            }
         }
     }
     /// The world's own record of the agent: operations running per app, the last thing it did to each app (a cause, or
@@ -366,8 +451,21 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The user's hardware input: any, and what the session tap could see.
     var lastHardwareAt: Double = -.infinity
     var lastObservableHardwareAt: Double = -.infinity
+    /// The user's last input that can launch an app (R17-d (i)): a click, Return/Enter, a chord with ⌘/⌃/⌥, a function key
+    /// — seen by the tap.
+    var lastLaunchCapableAt: Double = -.infinity
+    func launchCapable() { lock.withLock { lastLaunchCapableAt = now } }
     /// The agent's last action that can open apps (a click, a press, an AppleScript, a launch, an open): round 10.
     var lastOpenerAt: Double = -.infinity
+    /// Every such action and WHICH apps (bundle ids) it can open — nil: any (round 14's queue item 1).
+    var openers: [(at: Double, scope: Set<String>?)] = []
+    /// What an act on T (or an AppleScript to it) can open: nil (any) while T is Finder; else T, the default browser and
+    /// mail app (`SimPlan.targetBundle`).
+    var targetScope: Set<String>?
+    func noteOpener(_ scope: Set<String>?) {
+        lastOpenerAt = now
+        openers.append((now, scope))
+    }
     var visiting = false
     var visitStartedAt: Double = -.infinity
     /// The app in front when the visit began (the visit's way back is the agent's too).
@@ -376,7 +474,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The engine judges a change when it HEARS of it (NSWorkspace, up to ~0.4 s here): facts that arrive in between (the
     /// agent's next cause, the user's input) can rightly change its answer for an app the agent never touched — the other
     /// answer, added if such a fact arrives before the change is heard.
-    enum LateFact { case agentCause, hardware }
+    enum LateFact { case agentCause, hardware, switchInput }
     var widen: (episode: Int, until: Double, fact: LateFact, alt: Set<SimCand>, why: String)?
     /// Changes the engine has not heard of yet: a restore issued meanwhile may go to the place from before them.
     var unheard: [(until: Double, places: Set<SPlace>, from: SPlace)] = []
@@ -385,6 +483,19 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     var actEpisode = 0
     var actStartFront: pid_t = 0
     var agentEventsAfterFront = 0
+    /// An act of the agent's on T is running (it began while the user was not working in T): from the moment they start
+    /// working in T, nothing of it may reach T — no key or click posted to it, no accessibility write or action on its
+    /// elements (round 17, the review of round 16's H1: I6 was checked only at an act's start).
+    var actOnT = false
+    /// The user started working in T during the running act (the world's own moment). Sticky for the rest of the act —
+    /// leaving T afterwards does not reopen it (the review of round 17, M1).
+    var actWorkSeen = false
+    /// T became the app the user works in (called wherever the world's mark is set).
+    func workBegan(_ app: pid_t) {
+        guard app == SimPid.target, actOnT else { return }
+        if !actWorkSeen { stats.inFlightChances += 1 }
+        actWorkSeen = true
+    }
     var stepsRetiredAtStart = 0
     var targetForwardDuringOp = false
     var ctx: [SimCtx] = []
@@ -613,13 +724,27 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     }
 
     /// A key: the tap sees none under Secure Event Input.
-    func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0) {
+    func key(_ type: CGEventType, flags f: CGEventFlags = [], keycode: Int64 = 0, rerouteDecides: Bool = false, to panel: pid_t? = nil) {
         hardware(observable: !secure)
         guard !secure else { return }
+        let fKeys: Set<Int64> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
+        if type == .keyDown, keycode == 36 || keycode == 76 || fKeys.contains(keycode)
+            || f.contains(.maskCommand) || f.contains(.maskControl) || f.contains(.maskAlternate) { launchCapable() }
         // A key the tap sees (typing — no ⌘/⌃ chord) while an agent target is in front: the contract counts it as work in
-        // it (round 10's I6), wherever the key lands (Spotlight's panel too: the engine can't tell).
-        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(lock.withLock { front }) }
-        core?.noteTapEvent(type: type, sourcePid: 0, userData: 0, flags: f, keycode: keycode, now: now / 1000)
+        // it (round 10's I6) — unless it goes to a panel's own process (Spotlight's: `panel`, R17-d (ii); PROTOCOL §4.12
+        // I6, 1.10.0 — the tap names the process the key is delivered to).
+        let receiver = panel ?? lock.withLock { front }
+        // (A key the focus blip's reroute takes decides by where it sends it — PROTOCOL §4.12 I6, 1.15.0/1.16.0: a key it
+        // sends to the user's place is no work in the target in front; `userKey` marks the one it lets through.)
+        let reroutes = rerouteDecides && lock.withLock { keyFocus == SimPid.target && receiver == SimPid.target && installer?.isInstalled == true }
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), !reroutes { userInteracted(receiver) }
+        // Their typing in an app left in front: it is their place now — no restore may pull them out of it (the ruling,
+        // round 16: STRICT, every answer moves there).
+        if type == .keyDown, !f.contains(.maskCommand), !f.contains(.maskControl), keycode != 53 { usedLeftApp("typing") }
+        // The process the key goes to, as the real tap reads it (`kCGEventTargetUnixProcessID`; review of round 12, LOW —
+        // the engine's receiver check was never exercised): the front app, or Spotlight's panel for the keys typed into it
+        // (R17-d (ii)).
+        core?.noteTapEvent(type: type, sourcePid: 0, userData: 0, flags: f, keycode: keycode, targetPid: Int64(receiver), now: now / 1000)
     }
 
     func gesture(_ raw: UInt32) {
@@ -627,15 +752,51 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         core?.noteTapEvent(type: CGEventType(rawValue: raw)!, sourcePid: 0, userData: 0, now: now / 1000)
     }
 
+    /// The user USED the app left in front — typing in it, or scrolling in its window (round 18, the controller's ruling:
+    /// a scroll is work per I6, so it counts as using it too): it is their place now.
+    func usedLeftApp(_ how: String) {
+        lock.withLock {
+            guard leftApps.contains(front), !visiting else { return }
+            let cur = SPlace(app: front, space: space)
+            // (Strict once the engine can have heard of the app's coming forward; input that beats the hearing is a race
+            // the engine can't see — then either place is right.)
+            let heard = !unheard.contains { now <= $0.until }
+            if leftOnly.contains(front), heard {
+                cands = Set(cands.map { c in c.expected == cur ? SimCand(place: cur, expected: cur, held: nil) : c })
+            } else {
+                cands.formUnion(cands.filter { $0.expected == cur }.map { _ in SimCand(place: cur, expected: cur, held: nil) })
+            }
+            // (Round 19 — the mid-act seed 1026: input that beat the hearing leaves the app LEFT, so their next use of it,
+            // heard, makes it their place — §4.12: "a restore never pulls the user out of an app left in front once they
+            // have typed, clicked or scrolled in it: their input there makes it their place". The engine, which took the old
+            // place on the race, adopted it at that next use, and the oracle had already forgotten the app was left.)
+            if heard { leftApps.remove(front) }
+            log("  (their \(how) in \(SimPid.name(front)), left in front: their place now\(heard ? "" : " — or not yet, the engine had not heard of it"))")
+        }
+    }
+
+    /// A scroll: over the front app's main window when it is on screen (round 18 — the tap reads where the pointer is), else
+    /// over the empty desktop. In the front app's own window: work in it (I6 — an agent target's), and USE of an app left in
+    /// front (the controller's ruling).
     func scrollTap() {
         hardware(observable: true)
+        let (at, inFront) = lock.withLock { () -> (CGPoint, pid_t?) in
+            guard let m = mainWin[front], let w = wins[m], onScreen(w), w.layer == 0 else { return (CGPoint(x: 300, y: 860), nil) }
+            let p = CGPoint(x: w.frame.midX, y: w.frame.midY)
+            return (p, clickTarget(at: p)?.pid == front ? front : nil)
+        }
         core?.noteTapEvent(type: CGEventType(rawValue: 29)!, sourcePid: 0, userData: 0, now: now / 1000)
-        core?.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, now: now / 1000)
+        if let a = inFront {
+            userInteracted(a)
+            usedLeftApp("scrolling")
+        }
+        core?.noteTapEvent(type: .scrollWheel, sourcePid: 0, userData: 0, location: at, now: now / 1000)
     }
 
     @discardableResult
     func addSwitch(_ s: SimSwitch) -> Int {
         lock.withLock {
+            lateFact(.switchInput)
             switches.append(s)
             return switches.count - 1
         }
@@ -655,14 +816,25 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// A user's switch input that may explain a change of `pid` (an app change and/or a desktop change) now, as far as the
     /// engine can tell: visible to it, alive, not used in truth by the change it was for (it has not landed, or changed
     /// nothing, or landed only just now), fitting.
-    func competingSwitch(for pid: pid_t, app: Bool, desktop: Bool, excluding: Int? = nil) -> SimSwitch? {
+    func competingSwitch(for pid: pid_t, app: Bool, desktop: Bool, excluding: Int? = nil, targeted: Bool = false) -> SimSwitch? {
         let t = now
         let fits = { (i: Int) -> Bool in
             let s = self.switches[i]
+            // (R17-d's targeted-switch ruling, the controller, 2026-10-12: under the launch rule's never-adopt gate only a
+            // SEEN, TARGETED switch adopts the just-launched app — a click on its window or its Dock tile, or a ⌘-Tab whose
+            // Tab the tap saw, landing on it. A swipe, a ⌃-arrow, a click on a status item, a banner or a panel, a ⌘ release
+            // with no Tab seen: none.)
+            if targeted, !(s.target == pid || (s.tabSeen && s.app && s.secureFlags == nil)) { return false }
             // A click into a window that activated nothing (a drag out of a background window) still claims that app's
             // activation for the claim's window (the contract: the engine can't tell a drag at the mouse-down).
             let dragClaim = s.claim && s.dest == nil && s.target == pid && t - s.at <= 1_500 + self.nextHearing()
-            guard i != excluding, s.visible, !s.claim || dragClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs, t >= s.at else { return false }
+            // (Round 19 — the mid-act survey's ordinary seed 56: a click on THIS app's window or Dock tile whose own landing
+            // has not come yet still explains it coming forward — §4.12: "A click on another app's window: ONE input, an
+            // app switch for THAT app"; "a Dock click is input for the tile's app, claimed" (1.9.8). The app came forward
+            // 69 ms after their click on its tile, before the Dock's own landing; the engine can't tell the two apart.)
+            let pendingClaim = s.claim && s.dest == pid && s.target == pid && s.landedAt == nil
+            guard i != excluding, s.visible, !s.claim || dragClaim || pendingClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs,
+                  t >= s.at else { return false }
             if let target = s.target, target != pid { return false }
             return (s.app && app) || (s.desktop && desktop)
         }
@@ -682,9 +854,17 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// An app the agent never touched coming forward now: the contract's rule on the world's facts (I1 and its indirect
     /// effects, round 9).
     /// "Clearly the agent's" now, from the world's own record (round 10's rule).
-    func clearlyNow() -> Touch {
-        let quiet = now - lastObservableHardwareAt, opener = now - lastOpenerAt
-        return secure ? .no : (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+    func clearlyNow(for pid: pid_t?, anyReach: Bool = false) -> Touch {
+        // Only an action that can open THIS app counts (round 14's queue item 1: a third party's app is never the agent's)
+        // — but a COLD launch is judged with any opener's reach (review of round 14, HIGH #1).
+        let bundle = pid.flatMap { bundles[$0] }
+        let last = openers.last { o in anyReach || (o.scope.map { s in bundle.map(s.contains) ?? false } ?? true) }?.at ?? -.infinity
+        let quiet = now - lastObservableHardwareAt, opener = now - last
+        // Secure Event Input on at any moment of the 2.5 s window: never quiet (R17-a) — at its edge, either answer.
+        let sinceSecure = secure ? 0 : now - secureEndedAt
+        if sinceSecure <= 2_400 { return .no }
+        let base: Touch = (quiet > 2_600 && opener <= 1_400) ? .yes : (quiet < 2_400 || opener > 1_600) ? .no : .edge
+        return sinceSecure <= 2_600 && base == .yes ? .edge : base
     }
 
     func untouchedCause(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
@@ -693,23 +873,52 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // start was not clearly the agent's; when it was, and no input of the user's came since, sent back like any
         // indirect effect (during a visit, the visit's — the ordinary rule).
         guard let c = agentColdLaunches[pid], now - c.start < 60_000, !(cands.allSatisfy { $0.place == n } && !cands.isEmpty) else {
+            // The world's own indirect effect (a running app the agent's click or AppleScript brought forward): never
+            // ADOPTED as the user's place (review of round 14, MEDIUM #3) — left in front is acceptable, or theirs when a
+            // switch input of theirs explains it.
+            if indirect, case .untouched(_, .adopt, _, _) = generic {
+                let left = SimCause.untouched(pid, .leftAlone, indirect: true, why + " (the agent's indirect effect — never adopted)")
+                return widenedLeft(competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
+                    ? .either([left, generic], "a switch input of the user's it may have been") : left, adopt: generic)
+            }
             return generic
         }
         let adopt = SimCause.untouched(pid, .adopt, indirect: indirect, why)
+        // Not clearly the agent's: never ADOPTED either (review of round 14, HIGH #1 and MEDIUM #3 — the world's own log
+        // says the agent's action started it): left in front and said, or the user's when a switch input of theirs explains it.
+        let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (the agent's action started it — never adopted)")
+        // (Under the never-adopt gate only a SEEN, TARGETED switch of theirs adopts it — R17-d's targeted-switch ruling.)
+        let neverAdopted: SimCause = visiting ? generic
+            : competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop, targeted: true) != nil
+                ? .either([left, adopt], "a seen, targeted switch input of the user's it may have been") : left
+        // (Where the generic rule would adopt it — input of the user's since the process start — it is left instead.)
+        let notAdopted: SimCause = { if case .untouched(_, .adopt, _, _) = generic { return neverAdopted }; return generic }()
         let clearlyCase: SimCause = {
-            if visiting || secure { return generic }
+            if visiting || secure { return notAdopted }
             let since = lastObservableHardwareAt - c.start
-            if since > 30 { return generic }
+            if since > 30 { return notAdopted }
             let back = SimCause.untouched(pid, .undone, indirect: true, why + " (the agent's action started it)")
-            let sentBack: SimCause = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil
-                ? .either([back, adopt], "a switch input of the user's it may have been") : back
-            return since < -30 ? sentBack : .either([sentBack, generic], "input of the user's right at the process start")
+            let sentBack: SimCause = competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop, targeted: true) != nil
+                ? .either([back, adopt], "a seen, targeted switch input of the user's it may have been") : back
+            return since < -30 ? sentBack : .either([sentBack, notAdopted], "input of the user's right at the process start")
         }()
+        // (1) launch-capable input of the user's between the opener act and the start, or an interactive launcher within the
+        // causal window before it: THEIRS — adopted (the ruling, round 16; R17-d (i) and (ii)).
+        if theirLaunch(pid), !visiting { return adopt }
         switch c.clearly {
-        case .no: return adopt
+        case .no: return widenedLeft(neverAdopted, adopt: adopt)
         case .yes: return clearlyCase
-        case .edge: return .either([adopt, clearlyCase], "at the edge of 'clearly the agent's' at the process start")
+        case .edge: return .either([neverAdopted, clearlyCase], "at the edge of 'clearly the agent's' at the process start")
         }
+    }
+
+    /// A verdict of "left in front": input of the user's arriving before the engine heard of the change (a ⌘-Tab released
+    /// a few ms after the app came forward) can make it theirs — the same race the other verdicts already widen for.
+    func widenedLeft(_ c: SimCause, adopt: SimCause) -> SimCause {
+        if case .untouched(_, .leftAlone, _, _) = c {
+            nextWiden = (.switchInput, adopt, "a switch input of the user's arrived before the engine heard of an app's coming forward")
+        }
+        return c
     }
 
     func untouchedCauseNow(_ pid: pid_t, indirect: Bool, why: String, newPlace n: SPlace) -> SimCause {
@@ -720,7 +929,23 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         let systemUI = isRegularApp(pid) == false
         let notTheirs = SimCause.untouched(pid, systemUI ? .leftAlone : .undone, indirect: indirect, why)
         // The first activation after a launch of the user's own: theirs.
-        if let l = userLaunches[pid], now - l < 60_000 { return adopt }
+        if let l = userLaunches[pid], now - l < 60_000 {
+            // Started right after an opener act of the agent's (any reach): the engine can't tell it from the agent's own
+            // cold launch — left in front and said, never adopted (review of round 14, HIGH #1).
+            let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (started right after the agent's action)")
+            let start = startedAt[pid] ?? l
+            let gap = start - (openers.last { $0.at <= start }?.at ?? -.infinity)
+            // (1) their launch-capable input between the agent's act and the start (a click, Return, a chord — R17-d (i)), or
+            // an interactive launcher within the causal window before the start (their Return in Spotlight — R17-d (ii)):
+            // theirs.
+            if gap > 1_600 || theirLaunch(pid) { return adopt }
+            let base: SimCause = gap <= 1_400 ? left : .either([adopt, left], "at the edge of the causal window before the process start")
+            // (A switch input of theirs that fits explains it as theirs — the engine's I1 asks that first.)
+            if competingSwitch(for: pid, app: movedSinceHeard(n).app, desktop: movedSinceHeard(n).desktop) != nil {
+                return .either([base, adopt], "a switch input of the user's it may have been")
+            }
+            return widenedLeft(base, adopt: adopt)
+        }
         // During a desktop visit an app coming forward is the visit's (left in front until it ends) — unless a switch input
         // of the user's since the visit began explains it.
         if visiting {
@@ -735,7 +960,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         // last 2.5 s, an action of the agent's that can open apps within 1.5 s, no Secure Event Input; otherwise, with the
         // agent active, left in front (never adopted — only their switch input does that), said.
         let left = SimCause.untouched(pid, .leftAlone, indirect: indirect, why + " (not clearly the agent's)")
-        let clearly = clearlyNow()
+        let clearly = clearlyNow(for: pid)
         switch agentRecent(at: now) {
         case .no:
             base = clearly == .yes ? notTheirs : adopt
@@ -861,9 +1086,24 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     /// The front app or desktop changes to `n`, for `cause`.
     func change(to n: SPlace, cause: SimCause, why: String) {
         lock.withLock {
+            // An app left in front: the user's own typing in it will make it their place — STRICTLY when "left" is the one
+            // right answer, as one of several otherwise (the engine may have taken another, an undo not landed yet).
+            func hasLeft(_ c: SimCause) -> Bool {
+                switch c {
+                case .untouched(_, .leftAlone, _, _): return true
+                case .either(let cs, _): return cs.contains(where: hasLeft)
+                default: return false
+                }
+            }
+            // (R17-c, the controller's ruling: a desktop visit's return to an app left in front keeps it left — their typing
+            // there still makes it their place.)
+            let visitBack: Bool = { if case .engine(.visitReturn) = cause { return true }; return false }()
+            if hasLeft(cause) || (visitBack && leftApps.contains(n.app)) { leftApps.insert(n.app) } else { leftApps.remove(n.app) }
+            if case .untouched(_, .leftAlone, _, _) = cause { leftOnly.insert(n.app) } else if !visitBack { leftOnly.remove(n.app) }
             let oldFront = front, oldSpace = space
-            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; pendingWork = nil }
-            if let w = userWorkingIn, n.app != w { userWorkingIn = nil }  // they left the app they were working in
+            if let p = pendingWork, n.app == p.app, now <= p.until { userWorkingIn = p.app; workLeft = nil; workBegan(p.app); pendingWork = nil }
+            if let l = workLeft, l.back == nil, n.app == l.app { workLeft?.back = now }
+            if let w = userWorkingIn, n.app != w { userWorkingIn = nil; workLeft = (w, now, false, nil) }  // they left the app they were working in
             if n.space == 400 { focusDisplay = 2 } else { focusDisplay = 1; space1 = n.space }
             if let w = appWindow(n.app, onSpace: n.space), mainWin[n.app] != w.id {
                 mainWin[n.app] = w.id
@@ -876,6 +1116,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
             zOrder.insert(n.app, at: 0)
             FocusSPI.frontPid = n.app
             core?.secureInputOverride = secure
+            noteSecureChange()
             if space != oldSpace { onDesktop?() }
             guard n.app != oldFront || space != oldSpace else { nextWiden = nil; return }
             if case .engine(.consented(let h)) = cause, space1 != oldSpace1 {
@@ -985,6 +1226,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func notifyActivation(_ pid: pid_t) {
         lock.withLock {
             pendingNotes -= 1
+            if let l = workLeft, !l.seen, front != l.app { workLeft?.seen = true }
             if let o = owedNote, o.pid == pid, o.episode == episode, front == pid { dueNotes.append((pid, o.at)); owedNote = nil }
         }
         core?.onActivation(pid: pid)
@@ -1190,7 +1432,9 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     // MARK: the user's keys (I3)
 
     func userKey(flags f: CGEventFlags = []) {
-        key(.keyDown, flags: f)
+        key(.keyDown, flags: f, rerouteDecides: true)
+        var throughToT = false
+        defer { if throughToT, !f.contains(.maskCommand), !f.contains(.maskControl) { userInteracted(SimPid.target) } }
 
         lock.withLock {
             let to = keyFocus
@@ -1199,6 +1443,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
                 lastReroute = nil
                 let e = keyEvent(stamped: false)
                 landed = h(e) != nil ? to : (lastReroute ?? -1)
+                throughToT = landed == SimPid.target && front == SimPid.target
                 stats.userKeysRerouted += 1
                 stats.keysChecked += 1
                 // During a visit, what is in front may be the visit's or a theft it leaves be: the key may go there too.
@@ -1258,7 +1503,7 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     }
 
     func spacesFollowActivation() -> Bool? { true }
-    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { false }
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { pid == SimPid.targetContent && appPid == SimPid.target }
     func stageManagerEnabled() -> Bool { false }
     func windowOnAnySpace(_ id: UInt32) -> Bool? { true }
     func windowSpaces(_ id: UInt32) -> Set<UInt64>? {
@@ -1274,7 +1519,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
     func runningPid(bundleId: String) -> pid_t? { lock.withLock { bundles.first { $0.value == bundleId }?.key } }
     /// The Dock tile under the pointer: the app the user is clicking in the Dock (the world knows its own Dock).
     var dockTileApp: pid_t?
+    /// What a click on the Dock where no RUNNING app's tile is would do (R18-a): true — a tile that launches its app (or
+    /// Launchpad); false — the Trash, a stack, a separator; nil — the tile can't be read.
+    var dockLaunches: Bool?
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { lock.withLock { dockLaunches } }
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { lock.withLock { dockTileApp } }
+    /// What the item under a Finder double-click would do (R18-a; round 19, the Finder legs): true — an application or a
+    /// document (it launches); false — a folder (it opens in Finder, nothing launches); nil — it can't be read.
+    var finderLaunches: Bool?
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? { lock.withLock { finderLaunches } }
 }
 
 extension SimPid {

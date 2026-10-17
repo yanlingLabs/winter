@@ -269,6 +269,12 @@ struct WindowContentView<Accessory: View>: View {
             // flow would just move the hard edge up by their height.
             .modifier(ComposerClusterPlacement(floats: topBleed > 0, height: $composerClusterHeight) {
                 VStack(spacing: 10) {
+                    // ComputerV2 wake triggers (2026-10-12): Winter is waiting for the user — always in sight
+                    // while a trigger is armed, with the way to stop it.
+                    if !adapter.armedWakes.isEmpty {
+                        WakeWaitingPills(wakes: adapter.armedWakes, onStop: adapter.onStopWaiting)
+                            .frame(maxWidth: newChatCardWidth)
+                    }
                     // The task list FLOATS just above the composer (2026-09-17), as its own card at
                     // the composer's width.
                     if !adapter.pinnedTasks.isEmpty {
@@ -327,8 +333,8 @@ struct WindowContentView<Accessory: View>: View {
                             text: adapter.draftBinding,
                             onSubmit: { adapter.onSubmit(adapter.composerDraft) },
                             usesAdaptiveColors: true,
-                            // Code-mode image input — live only while the adapter's wired session
-                            // row is a code session (the detached window wires it; the orb does not).
+                            // Composer attachments, inline chips — live only while the adapter's wired
+                            // session row is a code session (the detached window wires it; the orb does not).
                             imageIntake: adapter.composerImageIntake
                         )
                         .frame(height: 88)
@@ -458,10 +464,12 @@ struct WindowContentView<Accessory: View>: View {
             model: composerModelControl,
             stripEdge: .above,
             workingDirectory: currentSidebarSessionSummary?.cwd,
+            // Attachments alone are sendable: each chip is a character of the draft (its placeholder on the wire).
             sendBlockedReason: adapter.composerDraft
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil,
             stop: composerStopControl,
-            imageIntake: adapter.composerImageIntake
+            imageIntake: adapter.composerImageIntake,
+            attachments: adapter.composerAttachmentsControl
         )
     }
 

@@ -90,6 +90,71 @@ final class CDPTabGateTests: XCTestCase {
         XCTAssertEqual(cleared.knownContexts(), [])
     }
 
+    /// The daemon may name a winter world after it ended and before it saw the ending (a click that
+    /// navigated, then its follow-up read): that is answered in the browser's own words, which the
+    /// daemon retries on in a fresh world. A context that never was winter keeps the plain refusal.
+    func testAnEndedWinterWorldIsAnsweredInTheBrowsersWords() {
+        let gone = { (r: CDPTabGate.Refusal?) -> Bool in r?.message.hasPrefix(CDPTabGate.contextGone) == true }
+        let call = { (context: JSONValue) -> JSONValue in
+            self.obj(["functionDeclaration": .string("f"), "executionContextId": context])
+        }
+
+        // Destroyed (by id, then by unique id): every door that names it.
+        let gate = gateWithWinterWorld()
+        gate.noteEvent(method: "Runtime.executionContextDestroyed",
+                       params: obj(["executionContextId": .number(7)]), cdpSessionId: nil)
+        XCTAssertTrue(gone(gate.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil)))
+        XCTAssertTrue(gone(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil)))
+        XCTAssertTrue(gone(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("u7")]), cdpSessionId: nil)))
+        XCTAssertTrue(gone(gate.check(method: "DOM.resolveNode", params: obj(["executionContextId": .number(7)]), cdpSessionId: nil)))
+        XCTAssertEqual(gate.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil)?.message,
+                       "Cannot find context with specified id (Runtime.callFunctionOn: that \"winter\" world ended with its document)")
+        // Never winter: the page's own world, an id never seen, another session's winter id, a non-number.
+        XCTAssertFalse(gone(gate.check(method: "Runtime.callFunctionOn", params: call(.number(1)), cdpSessionId: nil)))
+        XCTAssertFalse(gone(gate.check(method: "Runtime.callFunctionOn", params: call(.number(99)), cdpSessionId: nil)))
+        XCTAssertFalse(gone(gate.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: "child")))
+        XCTAssertFalse(gone(gate.check(method: "Runtime.callFunctionOn", params: call(.string("7")), cdpSessionId: nil)))
+        // Made again under the same id: winter again.
+        made(7, into: gate)
+        XCTAssertNil(gate.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil))
+
+        let byUnique = gateWithWinterWorld()
+        byUnique.noteEvent(method: "Runtime.executionContextDestroyed",
+                           params: obj(["executionContextId": .number(7), "executionContextUniqueId": .string("u7")]),
+                           cdpSessionId: nil)
+        XCTAssertTrue(gone(byUnique.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil)))
+        XCTAssertTrue(gone(byUnique.check(method: "Runtime.callFunctionOn",
+                                          params: obj(["functionDeclaration": .string("f"), "uniqueContextId": .string("u7")]),
+                                          cdpSessionId: nil)))
+
+        // Every context cleared (a new document): every winter world has ended; a winter context in a frame
+        // this link made one in is winter again at once.
+        let cleared = gateWithWinterWorld()
+        cleared.noteEvent(method: "Runtime.executionContextsCleared", params: obj([:]), cdpSessionId: nil)
+        XCTAssertTrue(gone(cleared.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil)))
+        XCTAssertFalse(gone(cleared.check(method: "Runtime.callFunctionOn", params: call(.number(1)), cdpSessionId: nil)))
+        created(7, name: "winter", unique: "u7b", frame: "F", into: cleared)
+        XCTAssertNil(cleared.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil))
+
+        // The id handed out again to the page's own world (a cross-process navigation): the winter world ended.
+        let reused = gateWithWinterWorld()
+        created(7, name: "", unique: "page", into: reused)
+        XCTAssertTrue(gone(reused.check(method: "Runtime.callFunctionOn", params: call(.number(7)), cdpSessionId: nil)))
+        XCTAssertTrue(gone(reused.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("u7")]), cdpSessionId: nil)))
+
+        // Bounded: only the latest `endedCap` ended worlds are remembered; the oldest falls back to the plain refusal.
+        let many = CDPTabGate()
+        for id in 1...(CDPTabGate.endedCap + 1) {
+            made(id, into: many)
+            many.noteEvent(method: "Runtime.executionContextDestroyed", params: obj(["executionContextId": .number(Double(id))]),
+                           cdpSessionId: nil)
+        }
+        XCTAssertFalse(gone(many.check(method: "Runtime.callFunctionOn", params: call(.number(1)), cdpSessionId: nil)))
+        XCTAssertTrue(gone(many.check(method: "Runtime.callFunctionOn", params: call(.number(2)), cdpSessionId: nil)))
+        XCTAssertTrue(gone(many.check(method: "Runtime.callFunctionOn",
+                                      params: call(.number(Double(CDPTabGate.endedCap + 1))), cdpSessionId: nil)))
+    }
+
     func testCallFunctionOnNeedsAWinterContextOrAnObjectMintedInOne() {
         let gate = gateWithWinterWorld()
         // An object minted by an evaluate in the winter world.

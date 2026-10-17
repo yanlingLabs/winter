@@ -25,6 +25,8 @@ public final class RPCDispatcher: @unchecked Sendable {
     private let coordinator: HelperCoordinator
     private let viewHub: ViewHub
     private let inFlight: InFlightRegistry
+    /// The wake triggers' watches (`watch.arm`, `watch.cancel`, PROTOCOL.md §4.13); nil: none (the routes are absent).
+    private let watches: WatchService?
     private var routes: [String: Handler] = [:]
 
     /// `liveTest`: the helper is a live-test instance (`HelperIdentity.liveTest` — a dev helper serving a
@@ -33,17 +35,33 @@ public final class RPCDispatcher: @unchecked Sendable {
     /// (whether an app may already be scripted, never asking).
     public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry,
                 liveTest: Bool = false, activator: (@Sendable (Int32) async -> TestActivateResult)? = nil,
-                capturer: TestCapturing? = nil) {
+                capturer: TestCapturing? = nil, watches: WatchService? = nil,
+                userClicker: (@Sendable (TestUserClickParams) async -> TestUserClickResult)? = nil) {
         self.core = core
         self.coordinator = coordinator
         self.viewHub = viewHub
         self.inFlight = inFlight
+        self.watches = watches
         buildRoutes()
+        if let watches { buildWatchRoutes(watches) }
         if liveTest {
+            // The wake triggers' live scenario: a real, pointer-moving click stamped as the live suite's own, which a
+            // live-test instance's watches count as the user's (`CUWatcher.countsTestInput`).
+            if watches != nil {
+                // Off the main actor: its element search walks another app's accessibility tree (review L8).
+                let click = userClicker ?? { p in await Task.detached(priority: .userInitiated) { TestUserClicker.click(p) }.value }
+                routes["test.userClick"] = { params, _ in
+                    AnyEncodable(await click(try RPCDispatcher.decode(TestUserClickParams.self, params)))
+                }
+            }
             let activate = activator ?? { pid in await MainActor.run { TestActivator.activate(pid: pid) } }
             routes["test.activate"] = { [core] params, _ in
                 let p = try RPCDispatcher.decode(TestActivateParams.self, params)
                 if p.asUser == true { core.testUserInput(pid: p.pid, switching: true) }
+                // A named window (1.17.0): that one raised and made main, not just the app's front one.
+                if let window = p.window, activator == nil {
+                    return AnyEncodable(await MainActor.run { TestActivator.activate(pid: p.pid, window: window) })
+                }
                 return AnyEncodable(await activate(p.pid))
             }
             routes["test.userInput"] = { [core] params, _ in
@@ -194,11 +212,61 @@ public final class RPCDispatcher: @unchecked Sendable {
         }
     }
 
+    /// The watches' two methods, and Winter's own input around every request that can send some: a change landing
+    /// while one is in flight (or within 500 ms after) is never taken for the user's (§4.13).
+    private func buildWatchRoutes(_ watches: WatchService) {
+        routes["watch.arm"] = { params, context in
+            let p = try RPCDispatcher.decode(WatchArmParams.self, params)
+            return AnyEncodable(try await watches.arm(p, connection: context.connectionID))
+        }
+        routes["watch.cancel"] = { params, _ in
+            let p = try RPCDispatcher.decode(WatchCancelParams.self, params)
+            watches.cancel(watchId: p.watchId)
+            return AnyEncodable(WatchCancelResult())
+        }
+        // Input to one target's app.
+        for method in ["target.act", "target.applescript", "target.foreground", "target.useWindow"] {
+            countsAsOwnInput(method, watches) { params in params?["targetId"]?.stringValue.map { .some($0) } }
+        }
+        // Requests whose app is known only once they answer (a bind may launch or reopen an app; an open opens a
+        // document): every app meanwhile.
+        for method in ["target.bind", "apps.openDocument"] {
+            countsAsOwnInput(method, watches) { _ in .some(nil) }
+        }
+    }
+
+    /// Wraps `method`'s route: `target(params)` is nil to count nothing, `.some(nil)` for every app, `.some(id)` for one.
+    private func countsAsOwnInput(_ method: String, _ watches: WatchService, target: @escaping (JSONValue?) -> String??) {
+        guard let route = routes[method] else { return }
+        routes[method] = { params, context in
+            guard let which = target(params) else { return try await route(params, context) }
+            let token = watches.ownInputBegan(targetId: which)
+            defer { watches.ownInputEnded(token) }
+            return try await route(params, context)
+        }
+    }
+
+    /// The daemon connection `id` closed: the watches it armed end silently (it reads the close as the helper gone).
+    public func connectionClosed(_ id: Int) {
+        watches?.connectionClosed(id)
+    }
+
     static func sessionId(_ params: JSONValue?) throws -> String {
         guard let id = params?["sessionId"]?.stringValue, !id.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
         return id
     }
 }
+
+/// The wake triggers' watches as the dispatcher drives them (`CUWatcher`; tests use a fake).
+public protocol WatchService: AnyObject {
+    func arm(_ p: WatchArmParams, connection: Int) async throws -> WatchArmResult
+    func cancel(watchId: String)
+    func connectionClosed(_ connection: Int)
+    func ownInputBegan(targetId: String?) -> CUOwnInputToken
+    func ownInputEnded(_ token: CUOwnInputToken)
+}
+
+extension CUWatcher: WatchService {}
 
 /// `prompt.desktopVisit` — the shell's own method (the desktop-switch prompt is drawn by the presentation layer).
 /// `callId` equals `promptId`: it is what the daemon's `cancel` names.

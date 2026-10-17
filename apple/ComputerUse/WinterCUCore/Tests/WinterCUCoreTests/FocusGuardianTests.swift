@@ -208,9 +208,12 @@ final class FocusGuardianTests: XCTestCase {
         // (The user's own starts come with their click — a Dock tile: a launch with no input of theirs before it, while the
         // agent's launch is pending, is clearly the agent's — round 11.)
         g.noteHardwareAction(now: 10.45)
+        g.noteLaunchCapableInput(now: 10.45)  // a click can launch an app (R17-d (i), the controller's ruling)
         g.appLaunched(800, startedAt: 10.5, bundle: "com.example.new", now: 10.55)  // NSWorkspace: launched — nothing named yet
+        // (The ruling, round 16, as R17-d (i) narrowed it: LAUNCH-CAPABLE input of the user's between the agent's launch
+        // beginning and this process start — their click at 10.45 — makes it theirs.)
         XCTAssertTrue(g.judge(CUMoveQuery(app: 800, space: 100, appStartedAt: 10.5, appBundle: "com.example.new"), now: 11).isUsers,
-                      "nothing launched yet: theirs")
+                      "their input after the agent's act: theirs")
         g.setLaunchBundle(launch, "com.example.new")
         g.appLaunched(801, startedAt: 10.6, bundle: "com.example.new", now: 10.65)  // the agent's own: not recorded as theirs
         XCTAssertFalse(g.judge(CUMoveQuery(app: 801, space: 100, appStartedAt: 10.6, appBundle: "com.example.new"), now: 11.1).isUsers)
@@ -605,11 +608,22 @@ final class FocusGuardianTests: XCTestCase {
         let (core, sys) = clickWorld()
         defer { core.stopGuardian() }
         XCTAssertEqual(core.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, now: 10), 500)
+        XCTAssertEqual(sys.activated, [], "nothing until the button comes up — it may be a drag (review of round 9, #8)")
+        core.onPhysicalMouseUp(at: CGPoint(x: 101, y: 100), userData: 0, now: 10.1)
         XCTAssertEqual(sys.activated, [500], "activated so the user's click works normally")
         // The activation that follows is the user's: nothing put back, nothing said.
         core.onActivation(pid: 500)
         XCTAssertEqual(sys.activated, [500], "the guardian did not fight the user")
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
+    }
+
+    /// Review of round 9, #8: a drag out of a bound target's background window brings nothing forward.
+    func testADragOutOfABoundTargetsWindowBringsNothingForward() {
+        let (core, sys) = clickWorld()
+        defer { core.stopGuardian() }
+        _ = core.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: 0, now: 10)
+        core.onPhysicalMouseUp(at: CGPoint(x: 400, y: 300), userData: 0, now: 10.6)
+        XCTAssertEqual(sys.activated, [], "a drag: nothing brought forward")
     }
 
     func testAHelperStampedClickIsIgnoredAndTheActivationIsStillPutBack() {

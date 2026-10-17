@@ -921,6 +921,9 @@ export function selfGrantDenyWrite(home: string, options?: HostStorageFenceOptio
     trustRecordFile(home), join(home, "agents"),
     join(sdkHomeFor(home), "settings.json"), join(sdkHomeFor(home), ".winter.json"),
     join(sdkHomeFor(home), "agents"), join(sdkHomeFor(home), "plugins"),
+    // ComputerV2's own records (`computer-use/`): the wake triggers' restart file (`wakes/persist.ts` — a forged record
+    // would put daemon-worded text into another session's turn) and the recently-used apps.
+    join(home, "computer-use"),
     ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
     ...hostStorageWriteRoots(home, options),
   ];

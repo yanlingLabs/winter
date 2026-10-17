@@ -22,6 +22,8 @@ final class PasteAndQueueTests: XCTestCase {
         func readString() -> String? {
             items.first?[NSPasteboard.PasteboardType.string.rawValue].flatMap { String(data: $0, encoding: .utf8) }
         }
+        var fileURLs: [String] = []
+        func readFileURLs() -> [String] { fileURLs }
     }
 
     private let userClip: [[String: Data]] = [[NSPasteboard.PasteboardType.string.rawValue: Data("user's own".utf8)]]
