@@ -932,6 +932,11 @@ final class DispatchPillController: ObservableObject {
     /// take the keyboard nor send (`submit`), so a Return meant for the card never sends a hidden draft.
     var cardHoldsPill: Bool { presentation != .fullScreen && (cardQueue.front != nil || shellCardId != nil) }
 
+    /// The composer may not hold the keyboard: a card is on the pill or on its way IN. A card fading OUT (set aside by
+    /// typing, answered) already gives it back — so a key that sets the cards aside can start typing (or an IME's
+    /// composition) at once; `submit` still waits out the fade (`cardHoldsPill`).
+    var composerKeyboardBlocked: Bool { presentation != .fullScreen && cardQueue.front != nil }
+
     /// How many set-aside asks the "waiting for you" pill above the main one counts (0: it is not shown).
     var setAsideCardCount: Int {
         cardQueue.front == nil && presentation != .fullScreen ? cardQueue.setAside.count : 0
@@ -1073,7 +1078,7 @@ final class DispatchPillController: ObservableObject {
     /// when the panel has it, so typing just works.
     private func syncComposerFocus() {
         guard let textView = composerView?.documentView as? CommandTextView else { return }
-        let allowed = !cardHoldsPill
+        let allowed = !composerKeyboardBlocked
         textView.focusAllowed = allowed
         if !allowed {
             if panel.firstResponder === textView { panel.makeFirstResponder(nil) }
@@ -1083,21 +1088,27 @@ final class DispatchPillController: ObservableObject {
         }
     }
 
-    /// A printable key pressed while a card holds the pill and no field of the card is being typed in: the user went
-    /// back to writing — every card that may step aside does (`setAllAside`; a countdown card stays) and the key goes
-    /// into the composer. Never Return, Tab, arrows, or a ⌘/⌃ shortcut: those are not writing. Returns whether the key
-    /// was taken.
+    /// A key pressed while a card holds the pill that is the user going back to writing (`dispatchPillKeyIsTyping`): every
+    /// card that may step aside does (`setAllAside`; a countdown card stays) and the EVENT itself goes to the composer —
+    /// so a dead key or an input method starts its composition there as it would in any text field. Returns whether
+    /// the key was taken.
     func typeAsideCard(_ event: NSEvent) -> Bool {
-        guard cardHoldsPill, !(panel.firstResponder is NSText),
-              event.modifierFlags.intersection([.command, .control]).isEmpty,
-              let characters = event.characters, let scalar = characters.unicodeScalars.first,
-              scalar.value >= 0x20, scalar.value != 0x7F, !(0xF700...0xF8FF).contains(scalar.value),
+        let editing = (panel.firstResponder as? NSTextView)?.isEditable == true
+        guard cardHoldsPill,
+              dispatchPillKeyIsTyping(characters: event.characters, modifiers: event.modifierFlags,
+                                      editingText: editing, fullKeyboardAccess: NSApp.isFullKeyboardAccessEnabled),
               let textView = composerView?.documentView as? NSTextView else { return false }
         var next = cardQueue
         next.setAllAside()
         guard next.front == nil else { return false } // a countdown card stays: the key is not for the composer
         applyCardQueue(next)
-        textView.insertText(characters, replacementRange: textView.selectedRange())
+        textView.window?.makeFirstResponder(textView)
+        if textView.window?.firstResponder === textView {
+            textView.keyDown(with: event)
+        } else if let characters = event.characters, !characters.isEmpty {
+            // The panel is not key (a test, a late activation): the text still lands.
+            textView.insertText(characters, replacementRange: textView.selectedRange())
+        }
         return true
     }
 
@@ -1392,7 +1403,7 @@ final class DispatchPillController: ObservableObject {
 
     func registerComposerView(_ view: NSScrollView) {
         composerView = view
-        (view.documentView as? CommandTextView)?.focusAllowed = !cardHoldsPill
+        (view.documentView as? CommandTextView)?.focusAllowed = !composerKeyboardBlocked
         view.wantsLayer = true
         view.layerUsesCoreImageFilters = true
         appliedComposerBlur = -1

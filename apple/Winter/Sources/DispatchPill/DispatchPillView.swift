@@ -327,7 +327,7 @@ struct DispatchPillComposerBar: View {
                         viewAlpha: hidden ? 0 : 1,
                         // Under a card the composer never holds the keyboard: a Return meant for the card must not
                         // reach (and send) a draft hidden underneath.
-                        takesFocus: !controller.cardHoldsPill,
+                        takesFocus: !controller.composerKeyboardBlocked,
                         onFocusKey: { key, _, _ in controller.handleMenuKey(key) },
                         // A shell line the pill will RUN reads in purple, whole; a `/` command typed in full in blue.
                         highlightRanges: { [commandMode] text in
