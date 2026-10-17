@@ -123,6 +123,29 @@ class ReproRoot(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.build.check_repro_root(path, self.source)
 
+    def test_the_protected_clause_refuses_on_its_own(self):
+        """The non-empty clause must not be what stops these: the protected directory is empty, or does not exist
+        yet, so only the protected-directory clause can refuse it."""
+        with tempfile.TemporaryDirectory() as directory:
+            fake_source = Path(directory) / 'source'
+            fake_source.mkdir()
+            self.assertEqual(list(fake_source.iterdir()), [])
+            with self.assertRaises(RuntimeError) as empty:
+                self.build.check_repro_root(fake_source, fake_source)
+            self.assertIn('protected', str(empty.exception))
+            self.assertTrue(fake_source.is_dir())
+            # A directory that does not exist yet but lies inside the source, and one that is the source's parent.
+            with self.assertRaises(RuntimeError) as inside:
+                self.build.check_repro_root(fake_source / 'repro', fake_source)
+            self.assertIn('protected', str(inside.exception))
+            with self.assertRaises(RuntimeError) as parent:
+                self.build.check_repro_root(Path(directory), fake_source)
+            self.assertIn('protected', str(parent.exception))
+            # The same paths with a different source are accepted, so the refusals above came from the source.
+            other = Path(directory) / 'other'
+            other.mkdir()
+            self.assertEqual(self.build.check_repro_root(fake_source, other), fake_source.absolute())
+
     def test_a_new_or_empty_directory_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(self.build.check_repro_root(directory, self.source), Path(directory).absolute())
@@ -143,10 +166,10 @@ class Candidate(unittest.TestCase):
         for patch in self.pin['basePatches'] + self.pin['newPatches']:
             self.assertEqual(hashlib.sha256((ROOT / patch['patchFile']).read_bytes()).hexdigest(), patch['patchSha256'], patch['patchFile'])
 
-    def test_queue_is_contiguous_and_the_new_patches_are_14_to_22(self):
+    def test_queue_is_contiguous_and_the_new_patches_are_14_to_23(self):
         numbers = [int(Path(p['patchFile']).name[:4]) for p in self.pin['basePatches'] + self.pin['newPatches']]
-        self.assertEqual(numbers, list(range(4, 23)))
-        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.pin['newPatches']], list(range(14, 23)))
+        self.assertEqual(numbers, list(range(4, 24)))
+        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.pin['newPatches']], list(range(14, 24)))
 
     def test_declared_scope_equals_the_files_each_patch_touches(self):
         for entry in self.pin['newPatches']:
@@ -154,7 +177,7 @@ class Candidate(unittest.TestCase):
             self.assertEqual(sorted(set(re.findall(r'^diff --git a/(\S+) b/', text, re.M))), sorted(entry['allowedFiles']), entry['patchFile'])
 
     def test_the_device_set_files_change_only_where_declared_and_never_attach_a_device(self):
-        # builder.rs (the device attach sequence), hvf and the block device change only in the exit-path patch, which
+        # builder.rs (the device attach sequence), hvf and the block device change only in the exit-path patches (22, 23), which
         # registers observers and adds a PSCI reset variant; nothing touches the device manager or the arch layer.
         only_exit_path = {'src/vmm/src/builder.rs', 'src/hvf/src/lib.rs', 'src/devices/src/virtio/block/device.rs'}
         for entry in self.pin['newPatches']:
@@ -162,7 +185,7 @@ class Candidate(unittest.TestCase):
             for name in entry['allowedFiles']:
                 self.assertFalse(name.startswith(('src/vmm/src/device_manager/', 'src/arch/')), name)
                 if name in only_exit_path:
-                    self.assertEqual(number, 22, name)
+                    self.assertIn(number, (22, 23), name)
             text = (ROOT / entry['patchFile']).read_text()
             self.assertEqual(prep.scope_findings(entry['patchFile'], text, entry['allowedFiles'], self.pin['forbiddenAddedText'], self.pin['deviceForbiddenAddedText'], self.pin['deviceForbiddenExemptFiles']), [])
 

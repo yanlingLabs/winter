@@ -1,8 +1,8 @@
 diff --git a/include/libkrun.h b/include/libkrun.h
-index ea0673c..7a708cd 100644
+index ea0673c..669d9bd 100644
 --- a/include/libkrun.h
 +++ b/include/libkrun.h
-@@ -283,6 +283,116 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+@@ -283,6 +283,119 @@ int32_t krun_add_disk2(uint32_t ctx_id,
                         bool direct_io,
                         uint32_t sync_mode);
  
@@ -75,9 +75,12 @@ index ea0673c..7a708cd 100644
 +/** Called once, on the exiting thread, after every other exit observer (the final flush of both volumes
 + * included) and immediately before the process _exit()s. It must not block, and must not call any
 + * krun_* function except the counter getters. The whole exit sequence is bounded (20 s); if an
-+ * observer cannot finish, the process exits without calling the hook. Hard crashes (SIGSEGV, SIGBUS,
-+ * SIGILL, SIGSYS, an abort) exit from a signal handler without observers or the hook. A guest that
-+ * already stopped cleanly (off or reset) exits with status 0 even if a late fault fires. */
++ * observer cannot finish, the process exits without calling the hook, and after a clean off or reset
++ * that exit status is still 0: exit 0 with no hook call, or completed < requested in the flush counters,
++ * is an UNCERTAIN final flush. Hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS, an abort) are not handled
++ * (no signal handler is installed): the process dies by the default disposition, without observers or
++ * the hook. A guest that already stopped cleanly (off or reset) exits with status 0 even if a late
++ * fault fires. */
 +typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason);
 +/** Register the exit hook. Optional; accepted once, only on a production context, with a non-NULL hook. */
 +int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data);
@@ -119,7 +122,7 @@ index ea0673c..7a708cd 100644
  /** Developer-only admitted workspace RAW pair; Apple Silicon/macOS + blk only.
   * Requires reduced guarded reclaim opt-in; launch additionally requires the generic runtime port,
   * exactly two admitted disks, 2 vCPUs/768MiB and no path-backed/extra devices.
-@@ -298,16 +408,10 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+@@ -298,16 +411,10 @@ int32_t krun_add_disk2(uint32_t ctx_id,
   */
  /* Existing developer-only reduced-profile opt-in, also required for this pair API. */
  int32_t krun_enable_cowork_block_fixture_reclaim(uint32_t ctx_id);
@@ -137,7 +140,7 @@ index ea0673c..7a708cd 100644
  
  /* Supported virtio-fs permission semantics */
  
-@@ -1426,6 +1530,7 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
+@@ -1426,6 +1533,7 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
   */
  int32_t krun_start_enter(uint32_t ctx_id);
  
@@ -145,7 +148,7 @@ index ea0673c..7a708cd 100644
  /* TEST-ONLY closed single-port bootstrap/runtime stream factory; blk/macOS only.
   * Call after krun_enable_cowork_block_fixture_reclaim. Returns only the opposite PEER fd
   * (>=3, CLOEXEC) on success; caller owns it and must close it. Device endpoint and all
-@@ -1444,6 +1549,7 @@ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
+@@ -1444,6 +1552,7 @@ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
  int32_t krun_enable_cowork_runtime_port_fixture_trace(uint32_t ctx_id);
  /* DEPRECATED TEST API: caller-supplied descriptors are always refused (-EINVAL). */
  int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);

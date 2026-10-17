@@ -6,9 +6,11 @@
 //! order, then `_exit`s. The reason is recorded once (first writer wins) so the worker's exit hook, which is
 //! registered last, can tell a clean power-off from a reset and from a fault.
 //!
-//! Not covered: hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS and the like) exit from a signal handler with
-//! `_exit` and cannot run observers or the hook, and a panic across an `extern "C"` frame aborts. Those are
-//! "uncertain" exits: the worker's owner must treat them as such.
+//! Not covered: hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS and the like). `signal_handler::register_signal_handlers`
+//! is never called in this process, so a crash signal kills it by its default disposition: no observer, no hook,
+//! a signal exit status. A panic across an `extern "C"` frame aborts. Those are "uncertain" exits: the worker's
+//! owner must treat them as such. The watchdog is also not covered by the hook: when it fires over a hung
+//! observer the process exits with the effective status (0 after a clean off or reset) and the hook never ran.
 use devices::virtio::VmmExitObserver;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -88,6 +90,12 @@ pub fn run_observers(observers: &[Arc<Mutex<dyn VmmExitObserver>>]) {
 /// The one exit path: claim, bound, run the observers, `_exit`. A second thread that arrives here while
 /// the first is finishing never returns.
 pub fn finish(observers: &Observers, requested_code: i32) -> ! {
+    finish_with_budget(observers, requested_code, OBSERVER_BUDGET)
+}
+
+/// `finish` with the watchdog budget as a parameter, so a test can run the real sequence with a short one in a
+/// child process. Production only ever passes `OBSERVER_BUDGET` (pinned by a test).
+pub fn finish_with_budget(observers: &Observers, requested_code: i32, budget: Duration) -> ! {
     if !STATE.claim() {
         loop {
             std::thread::park();
@@ -95,11 +103,21 @@ pub fn finish(observers: &Observers, requested_code: i32) -> ! {
     }
     let code = STATE.effective_code(requested_code);
     std::thread::spawn(move || {
-        std::thread::sleep(OBSERVER_BUDGET);
+        std::thread::sleep(budget);
         unsafe { libc::_exit(code) }
     });
     run_observers(observers);
     unsafe { libc::_exit(code) }
+}
+
+/// The terminal-fault notifier's state change: record the reason (so a late clean-stop status cannot hide it
+/// and the exit hook reports it) and publish status 77 to the exit code the run loop reads.
+pub fn note_terminal_fault(code: &std::sync::atomic::AtomicI32) {
+    note_terminal_fault_in(&STATE, code);
+}
+pub fn note_terminal_fault_in(state: &ExitState, code: &std::sync::atomic::AtomicI32) {
+    state.record(REASON_TERMINAL_FAULT);
+    code.store(TERMINAL_FAULT_EXIT_CODE, Ordering::SeqCst);
 }
 
 /// For callers without the VMM (the reclaim fixture's `fatal()`): record the reason and take the same
@@ -215,5 +233,171 @@ mod tests {
         ExitHook::new(callback, 0x1234 as *mut c_void).on_vmm_exit();
         assert_eq!(SEEN.load(Ordering::SeqCst), reason());
         assert_eq!(DATA.load(Ordering::SeqCst), 0x1234);
+    }
+    #[test]
+    fn the_production_budget_is_twenty_seconds_and_finish_uses_it() {
+        assert_eq!(OBSERVER_BUDGET, Duration::from_secs(20));
+        let source = include_str!("cowork_exit.rs");
+        let body = &source[source.find("pub fn finish(observers").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("finish_with_budget(observers, requested_code, OBSERVER_BUDGET)"));
+    }
+
+    #[test]
+    fn the_terminal_fault_notifier_records_the_reason_and_publishes_status_77() {
+        let state = ExitState::new();
+        let code = std::sync::atomic::AtomicI32::new(i32::MAX);
+        note_terminal_fault_in(&state, &code);
+        assert_eq!(state.reason(), REASON_TERMINAL_FAULT);
+        assert_eq!(code.load(Ordering::SeqCst), 77);
+        // The builder's notifier goes through it (a text pin: the closure cannot run without a VMM).
+        let builder = include_str!("builder.rs");
+        let at = builder.find("access.set_terminal_notifier(").expect("notifier");
+        let closure = &builder[at..at + builder[at..].find("Some(access)").unwrap()];
+        assert!(closure.contains("crate::cowork_exit::note_terminal_fault(&terminal_code)"));
+    }
+
+    // The exit sequence ends in `_exit`, so it is run for real in a child process: this test binary re-executed
+    // with one case selected through the environment. Without the variable the `child_*` tests do nothing.
+    const CASE: &str = "COWORK_EXIT_TEST_CASE";
+    const LOG: &str = "COWORK_EXIT_TEST_LOG";
+
+    struct Appender(&'static str);
+    impl VmmExitObserver for Appender {
+        fn on_vmm_exit(&mut self) {
+            use std::io::Write;
+            let path = std::env::var(LOG).unwrap();
+            let mut file = std::fs::OpenOptions::new().append(true).create(true).open(path).unwrap();
+            writeln!(file, "{}", self.0).unwrap();
+        }
+    }
+    struct Hang;
+    impl VmmExitObserver for Hang {
+        fn on_vmm_exit(&mut self) {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+    }
+    struct SleepAfterAppend(&'static str);
+    impl VmmExitObserver for SleepAfterAppend {
+        fn on_vmm_exit(&mut self) {
+            Appender(self.0).on_vmm_exit();
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    }
+    fn list(items: Vec<Box<dyn FnOnce() -> Arc<Mutex<dyn VmmExitObserver>>>>) -> Observers {
+        items.into_iter().map(|make| make()).collect()
+    }
+
+    #[test]
+    fn child_exit_sequence() {
+        let Ok(case) = std::env::var(CASE) else { return };
+        let short = Duration::from_millis(300);
+        match case.as_str() {
+            // An observer that never returns: the watchdog must end the process with the requested status.
+            "hang_fault" => {
+                record(REASON_TERMINAL_FAULT);
+                let observers = list(vec![Box::new(|| Arc::new(Mutex::new(Appender("first")))), Box::new(|| Arc::new(Mutex::new(Hang))), Box::new(|| Arc::new(Mutex::new(Appender("hook"))))]);
+                finish_with_budget(&observers, 77, short)
+            }
+            // After a clean power-off the watchdog exits 0 and the hook (registered last) never ran.
+            "hang_after_off" => {
+                record(REASON_OFF);
+                let observers = list(vec![Box::new(|| Arc::new(Mutex::new(Hang))), Box::new(|| Arc::new(Mutex::new(Appender("hook"))))]);
+                finish_with_budget(&observers, 77, short)
+            }
+            // A late fault after a clean stop keeps status 0; a fault alone keeps its status.
+            "off_then_fault" => {
+                record(REASON_OFF);
+                finish_with_budget(&Vec::new(), 77, Duration::from_secs(20))
+            }
+            "reset_then_fault" => {
+                record(REASON_RESET);
+                finish_with_budget(&Vec::new(), 77, Duration::from_secs(20))
+            }
+            "fault" => {
+                record(REASON_TERMINAL_FAULT);
+                finish_with_budget(&Vec::new(), 77, Duration::from_secs(20))
+            }
+            // Two threads race into the exit path: exactly one runs the observers.
+            "two_callers" => {
+                record(REASON_VCPU_ERROR);
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let _other = {
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        let observers: Observers = vec![Arc::new(Mutex::new(SleepAfterAppend("second")))];
+                        barrier.wait();
+                        finish_with_budget(&observers, 77, Duration::from_secs(20))
+                    })
+                };
+                let observers: Observers = vec![Arc::new(Mutex::new(SleepAfterAppend("first")))];
+                barrier.wait();
+                finish_with_budget(&observers, 77, Duration::from_secs(20))
+            }
+            other => panic!("unknown case {other}"),
+        }
+    }
+
+    /// Runs one child case; returns (exit status code, seconds, log lines). The child is killed after 30 s.
+    fn run_child(case: &str) -> (Option<i32>, f64, Vec<String>) {
+        let log = std::env::temp_dir().join(format!("winter-cowork-exit-{}-{case}.log", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let started = std::time::Instant::now();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cowork_exit::tests::child_exit_sequence", "--test-threads=1", "--nocapture"])
+            .env(CASE, case)
+            .env(LOG, &log)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let seconds = started.elapsed().as_secs_f64();
+        let lines = std::fs::read_to_string(&log).map(|text| text.lines().map(str::to_string).collect()).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        (status.and_then(|s| s.code()), seconds, lines)
+    }
+
+    #[test]
+    fn a_hung_observer_cannot_keep_the_process_alive_past_the_budget() {
+        let (code, seconds, lines) = run_child("hang_fault");
+        assert_eq!(code, Some(77), "the watchdog ends the process with the requested status (None means it was still alive after 30 s)");
+        assert!(seconds < 15.0, "{seconds}");
+        // Observers before the hung one ran; the ones after it, the exit hook among them, did not.
+        assert_eq!(lines, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn the_watchdog_over_a_hung_observer_after_a_clean_off_exits_zero_without_the_hook() {
+        let (code, seconds, lines) = run_child("hang_after_off");
+        assert_eq!(code, Some(0));
+        assert!(seconds < 15.0, "{seconds}");
+        assert!(lines.is_empty(), "the hook must not have run: {lines:?}");
+    }
+
+    #[test]
+    fn the_exit_status_follows_the_recorded_reason_through_the_real_sequence() {
+        assert_eq!(run_child("off_then_fault").0, Some(0));
+        assert_eq!(run_child("reset_then_fault").0, Some(0));
+        assert_eq!(run_child("fault").0, Some(77));
+    }
+
+    #[test]
+    fn two_callers_in_the_exit_path_run_the_observers_once() {
+        let (code, _, lines) = run_child("two_callers");
+        assert_eq!(code, Some(77));
+        assert_eq!(lines.len(), 1, "{lines:?}");
     }
 }

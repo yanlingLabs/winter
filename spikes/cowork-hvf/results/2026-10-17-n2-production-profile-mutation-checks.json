@@ -13,7 +13,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 2.7
+      "seconds": 1.9
     },
     {
       "id": "A02-mem-ceiling-constant-only",
@@ -27,7 +27,7 @@
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
       "killed": true,
-      "seconds": 3.0
+      "seconds": 1.5
     },
     {
       "id": "A03-vcpu-ceiling-lifted",
@@ -60,7 +60,7 @@
         "cowork_workspace_disks_tests::workspace_disks_startup_preconstruct_postvalidate_sequence"
       ],
       "killed": true,
-      "seconds": 2.4
+      "seconds": 1.5
     },
     {
       "id": "A04-mem-floor-removed",
@@ -74,7 +74,7 @@
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
       "killed": true,
-      "seconds": 3.2
+      "seconds": 1.5
     },
     {
       "id": "A05-pair-rule-ignores-production",
@@ -86,7 +86,7 @@
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
       "killed": true,
-      "seconds": 2.7
+      "seconds": 1.6
     },
     {
       "id": "A06-fixture-pair-range-leak",
@@ -98,7 +98,7 @@
         "cowork_production_profile_tests::production_range_never_leaks_into_the_fixture_profile"
       ],
       "killed": true,
-      "seconds": 2.6
+      "seconds": 1.4
     },
     {
       "id": "A07-shutdown-device-allowed",
@@ -113,7 +113,7 @@
         "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
       ],
       "killed": true,
-      "seconds": 3.3
+      "seconds": 1.8
     },
     {
       "id": "A08-fixture-trace-allowed",
@@ -127,7 +127,7 @@
         "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
       ],
       "killed": true,
-      "seconds": 2.9
+      "seconds": 1.9
     },
     {
       "id": "A09-hvc-stream-allowed",
@@ -140,7 +140,7 @@
         "cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction"
       ],
       "killed": true,
-      "seconds": 2.9
+      "seconds": 1.5
     },
     {
       "id": "A10-enable-not-virgin-only",
@@ -153,7 +153,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.1
+      "seconds": 1.9
     },
     {
       "id": "A11-fixture-enable-ignores-production",
@@ -165,7 +165,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.7
+      "seconds": 1.8
     },
     {
       "id": "A12-runtime-port-profile-mismatch",
@@ -177,7 +177,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.8
+      "seconds": 1.6
     },
     {
       "id": "A13-pair-setter-profile-mismatch",
@@ -189,7 +189,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.6
+      "seconds": 1.7
     },
     {
       "id": "A14-trace-enable-ignores-production",
@@ -201,7 +201,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 3.5
+      "seconds": 1.7
     },
     {
       "id": "A15-preflight-ignores-marker",
@@ -213,7 +213,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.2
+      "seconds": 1.9
     },
     {
       "id": "A16-header-fixture-outside-ifdef",
@@ -225,7 +225,7 @@
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points"
       ],
       "killed": true,
-      "seconds": 2.8
+      "seconds": 2.1
     },
     {
       "id": "A17-header-limit-mismatch",
@@ -237,7 +237,7 @@
         "cowork_production_profile_tests::production_header_exposes_the_production_api_and_hides_the_fixture_entry_points"
       ],
       "killed": true,
-      "seconds": 2.2
+      "seconds": 1.4
     },
     {
       "id": "A18-pin-budget-changed",
@@ -250,7 +250,7 @@
         "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory"
       ],
       "killed": true,
-      "seconds": 4.1
+      "seconds": 4.6
     },
     {
       "id": "A19-device-attach-added",
@@ -262,7 +262,7 @@
         "cowork_production_profile_tests::production_profile_keeps_the_admitted_pin_budget_and_device_inventory"
       ],
       "killed": true,
-      "seconds": 4.1
+      "seconds": 3.0
     },
     {
       "id": "A20-block-trace-compiled-in",
@@ -274,7 +274,7 @@
         "cowork_production_trace_tests::production_block_trace_is_compiled_out_silent_and_uncapped"
       ],
       "killed": true,
-      "seconds": 5.0
+      "seconds": 3.4
     },
     {
       "id": "A21-preflight-not-mandatory",
@@ -286,7 +286,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 5.1
+      "seconds": 3.1
     },
     {
       "id": "A22-preflight-record-not-cleared",
@@ -298,7 +298,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 3.2
+      "seconds": 1.8
     },
     {
       "id": "A23-production-only-not-enforced",
@@ -310,7 +310,7 @@
         "cowork_production_start_tests::production_only_build_refuses_plain_and_fixture_contexts"
       ],
       "killed": true,
-      "seconds": 3.1
+      "seconds": 2.4
     },
     {
       "id": "A24-completion-hold-in-production",
@@ -322,7 +322,7 @@
         "cowork_production_quiet_tests::production_block_requests_have_no_completion_hold"
       ],
       "killed": true,
-      "seconds": 4.1
+      "seconds": 2.8
     },
     {
       "id": "A25-reclaim-rows-in-production",
@@ -334,7 +334,7 @@
         "cowork_production_quiet_tests::production_reclaim_rows_are_compiled_out"
       ],
       "killed": true,
-      "seconds": 4.6
+      "seconds": 2.6
     },
     {
       "id": "A26-oracle-drops-reclaim-rows",
@@ -346,7 +346,7 @@
         "cowork_production_quiet_tests::production_reclaim_rows_are_compiled_out"
       ],
       "killed": true,
-      "seconds": 7.3
+      "seconds": 4.0
     },
     {
       "id": "A27-flush-request-not-counted",
@@ -358,7 +358,7 @@
         "block_bounce::tests::flush_requests_and_successful_completions_are_counted"
       ],
       "killed": true,
-      "seconds": 3.0
+      "seconds": 1.8
     },
     {
       "id": "A28-failed-flush-counted-completed",
@@ -370,7 +370,7 @@
         "block_bounce::tests::flush_requests_and_successful_completions_are_counted"
       ],
       "killed": true,
-      "seconds": 2.2
+      "seconds": 1.4
     },
     {
       "id": "A29-pin-high-water-not-fed",
@@ -382,7 +382,7 @@
         "cowork_production_counters_tests::the_access_pin_path_feeds_the_counters"
       ],
       "killed": true,
-      "seconds": 4.4
+      "seconds": 3.5
     },
     {
       "id": "A30-pin-refusal-not-counted",
@@ -394,7 +394,7 @@
         "cowork_production_counters_tests::the_access_pin_path_feeds_the_counters"
       ],
       "killed": true,
-      "seconds": 3.2
+      "seconds": 2.6
     },
     {
       "id": "A31-counter-getter-accepts-short-size",
@@ -406,7 +406,7 @@
         "cowork_production_counters_tests::counter_getters_validate_the_caller_structure"
       ],
       "killed": true,
-      "seconds": 3.9
+      "seconds": 2.6
     },
     {
       "id": "A32-exit-hook-on-any-context",
@@ -418,7 +418,7 @@
         "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null"
       ],
       "killed": true,
-      "seconds": 2.5
+      "seconds": 1.5
     },
     {
       "id": "A33-exit-hook-twice",
@@ -430,7 +430,7 @@
         "cowork_production_exit_tests::the_exit_hook_is_production_only_once_and_non_null"
       ],
       "killed": true,
-      "seconds": 2.2
+      "seconds": 1.7
     },
     {
       "id": "A34-hook-not-last",
@@ -442,7 +442,7 @@
         "cowork_production_exit_tests::the_exit_hook_is_registered_last_and_the_list_is_published_before_the_vcpus_start"
       ],
       "killed": true,
-      "seconds": 3.2
+      "seconds": 2.4
     },
     {
       "id": "A35-fatal-bypasses-exit-path",
@@ -454,7 +454,7 @@
         "cowork_production_exit_tests::only_the_exit_module_and_the_crash_handlers_call_underscore_exit"
       ],
       "killed": true,
-      "seconds": 3.6
+      "seconds": 2.2
     },
     {
       "id": "A36-stop-bypasses-exit-path",
@@ -466,7 +466,7 @@
         "cowork_production_exit_tests::only_the_exit_module_and_the_crash_handlers_call_underscore_exit"
       ],
       "killed": true,
-      "seconds": 3.6
+      "seconds": 2.2
     },
     {
       "id": "A37-reset-recorded-as-off",
@@ -478,7 +478,7 @@
         "cowork_production_exit_tests::psci_off_and_reset_are_different_exits_with_different_reasons"
       ],
       "killed": true,
-      "seconds": 3.5
+      "seconds": 1.9
     },
     {
       "id": "A38-reset-maps-to-shutdown",
@@ -490,7 +490,7 @@
         "cowork_production_exit_tests::psci_off_and_reset_are_different_exits_with_different_reasons"
       ],
       "killed": true,
-      "seconds": 5.3
+      "seconds": 3.4
     },
     {
       "id": "A39-final-flush-skipped",
@@ -502,7 +502,7 @@
         "cowork_production_exit_tests::guarded_block_devices_do_a_final_flush_at_exit"
       ],
       "killed": true,
-      "seconds": 4.7
+      "seconds": 3.2
     },
     {
       "id": "A40-final-flush-before-join",
@@ -514,7 +514,7 @@
         "cowork_production_exit_tests::the_final_flush_joins_the_worker_before_it_syncs"
       ],
       "killed": true,
-      "seconds": 4.9
+      "seconds": 2.9
     },
     {
       "id": "A41-last-reason-wins",
@@ -526,7 +526,7 @@
         "cowork_exit::tests::the_first_recorded_reason_wins"
       ],
       "killed": true,
-      "seconds": 4.5
+      "seconds": 4.2
     },
     {
       "id": "A42-clean-stop-keeps-fault-status",
@@ -535,10 +535,12 @@
       "expectedFailingTest": "a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status",
       "compiled": true,
       "observedFailingTests": [
-        "cowork_exit::tests::a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status"
+        "cowork_exit::tests::a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status",
+        "cowork_exit::tests::the_exit_status_follows_the_recorded_reason_through_the_real_sequence",
+        "cowork_exit::tests::the_watchdog_over_a_hung_observer_after_a_clean_off_exits_zero_without_the_hook"
       ],
       "killed": true,
-      "seconds": 2.8
+      "seconds": 2.9
     },
     {
       "id": "A43-two-finishers",
@@ -547,10 +549,11 @@
       "expectedFailingTest": "exactly_one_caller_claims_the_exit_sequence",
       "compiled": true,
       "observedFailingTests": [
-        "cowork_exit::tests::exactly_one_caller_claims_the_exit_sequence"
+        "cowork_exit::tests::exactly_one_caller_claims_the_exit_sequence",
+        "cowork_exit::tests::two_callers_in_the_exit_path_run_the_observers_once"
       ],
       "killed": true,
-      "seconds": 2.7
+      "seconds": 3.0
     },
     {
       "id": "A44-resource-field-unclassified",
@@ -560,7 +563,7 @@
       "compiled": false,
       "observedFailingTests": [],
       "killed": true,
-      "seconds": 2.0
+      "seconds": 0.8
     },
     {
       "id": "A45-context-field-unclassified",
@@ -570,7 +573,7 @@
       "compiled": false,
       "observedFailingTests": [],
       "killed": true,
-      "seconds": 3.4
+      "seconds": 3.6
     },
     {
       "id": "R01-phase-skip-beforevmm",
@@ -582,7 +585,7 @@
         "cowork_production_gate_matrix_tests::the_pre_vmm_phase_applies_the_production_admission"
       ],
       "killed": true,
-      "seconds": 2.9
+      "seconds": 1.7
     },
     {
       "id": "R02-phase-skip-beforeconstruction",
@@ -596,7 +599,7 @@
         "cowork_production_profile_tests::production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device"
       ],
       "killed": true,
-      "seconds": 2.6
+      "seconds": 1.6
     },
     {
       "id": "R03-ceiling-exclusive",
@@ -609,7 +612,7 @@
         "cowork_production_profile_tests::production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate"
       ],
       "killed": true,
-      "seconds": 2.6
+      "seconds": 1.6
     },
     {
       "id": "R04-floor-plus-one",
@@ -634,7 +637,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 2.5
+      "seconds": 1.6
     },
     {
       "id": "R05-enable-no-machinery-switches",
@@ -660,7 +663,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 2.4
+      "seconds": 1.7
     },
     {
       "id": "R06-production-vcpu-check-only",
@@ -672,7 +675,7 @@
         "cowork_production_gate_matrix_tests::the_production_check_refuses_the_limits_on_its_own"
       ],
       "killed": true,
-      "seconds": 2.5
+      "seconds": 1.8
     },
     {
       "id": "R07-reviewed-normalized-gpu-removed",
@@ -685,7 +688,7 @@
         "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start"
       ],
       "killed": true,
-      "seconds": 2.1
+      "seconds": 3.4
     },
     {
       "id": "R08-reviewed-public-gpu-removed",
@@ -697,7 +700,7 @@
         "cowork_admission_tests::cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start"
       ],
       "killed": true,
-      "seconds": 2.3
+      "seconds": 1.8
     },
     {
       "id": "R09-reviewed-vsock-removed",
@@ -711,7 +714,7 @@
         "cowork_production_profile_tests::production_gate_keeps_the_reviewed_fixture_refusals"
       ],
       "killed": true,
-      "seconds": 2.3
+      "seconds": 1.8
     },
     {
       "id": "R10-reviewed-fs-removed",
@@ -725,7 +728,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 2.2
+      "seconds": 1.6
     },
     {
       "id": "R11-reviewed-virtio-consoles-removed",
@@ -738,7 +741,7 @@
         "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context"
       ],
       "killed": true,
-      "seconds": 2.5
+      "seconds": 1.8
     },
     {
       "id": "R12-reviewed-kernel-bundle-firmware-removed",
@@ -751,7 +754,7 @@
         "cowork_production_gate_matrix_tests::every_reviewed_inventory_clause_refuses_a_production_context"
       ],
       "killed": true,
-      "seconds": 2.6
+      "seconds": 1.8
     },
     {
       "id": "R13-reviewed-block-cfgs-removed",
@@ -765,7 +768,7 @@
         "cowork_workspace_disks_tests::workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_construction"
       ],
       "killed": true,
-      "seconds": 2.5
+      "seconds": 1.9
     },
     {
       "id": "R14-oracle-feature-drops-trace",
@@ -778,7 +781,7 @@
         "cowork_production_trace_tests::fixture_oracle_keeps_the_block_trace_compiled_in"
       ],
       "killed": true,
-      "seconds": 6.0
+      "seconds": 3.7
     },
     {
       "id": "R15-shutdown-check-inverted",
@@ -803,7 +806,7 @@
         "cowork_production_start_tests::start_admission_requires_the_mandatory_preflight"
       ],
       "killed": true,
-      "seconds": 2.5
+      "seconds": 2.2
     },
     {
       "id": "R16-enable-skips-virgin-guard-guarded-only",
@@ -815,7 +818,7 @@
         "cowork_production_gate_matrix_tests::production_enable_refuses_every_partial_fixture_state"
       ],
       "killed": true,
-      "seconds": 2.3
+      "seconds": 1.7
     },
     {
       "id": "R17-fixture-reclaim-only-ignores-production",
@@ -827,7 +830,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.9
+      "seconds": 1.9
     },
     {
       "id": "R18-bootstrap-factory-ignores-production",
@@ -839,7 +842,7 @@
         "cowork_production_profile_tests::production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in"
       ],
       "killed": true,
-      "seconds": 2.8
+      "seconds": 2.0
     },
     {
       "id": "R19-blk-feature-includes-oracle",
@@ -851,7 +854,7 @@
       "compiled": true,
       "observedFailingTests": [],
       "killed": true,
-      "seconds": 15.7
+      "seconds": 19.9
     },
     {
       "id": "R20-fixture-export-cfg-removed",
@@ -865,7 +868,7 @@
       "compiled": true,
       "observedFailingTests": [],
       "killed": true,
-      "seconds": 38.8
+      "seconds": 27.6
     }
   ],
   "pythonMutations": [
@@ -880,7 +883,7 @@
       "id": "P02-repro-root-protected-allowed",
       "description": "build_production_profile.py stops refusing protected directories as --repro-root",
       "file": "build_production_profile.py",
-      "expectedFailingTest": "test_protected_directories_are_refused",
+      "expectedFailingTest": "test_the_protected_clause_refuses_on_its_own",
       "killed": true
     },
     {
@@ -905,5 +908,133 @@
       "killed": true
     }
   ],
-  "allKilled": true
+  "allKilled": true,
+  "deltaReviewMutations": [
+    {
+      "id": "D01-watchdog-removed",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::a_hung_observer_cannot_keep_the_process_alive_past_the_budget",
+        "cowork_exit::tests::the_watchdog_over_a_hung_observer_after_a_clean_off_exits_zero_without_the_hook"
+      ]
+    },
+    {
+      "id": "D02-watchdog-budget-200s",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::the_production_budget_is_twenty_seconds_and_finish_uses_it"
+      ]
+    },
+    {
+      "id": "D03-finish-ignores-effective-code",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::the_exit_status_follows_the_recorded_reason_through_the_real_sequence",
+        "cowork_exit::tests::the_watchdog_over_a_hung_observer_after_a_clean_off_exits_zero_without_the_hook"
+      ]
+    },
+    {
+      "id": "D04-finish-ignores-claim",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::two_callers_in_the_exit_path_run_the_observers_once"
+      ]
+    },
+    {
+      "id": "D05-observers-reversed",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::a_hung_observer_cannot_keep_the_process_alive_past_the_budget",
+        "cowork_exit::tests::observers_run_once_in_registration_order_and_survive_a_poisoned_lock"
+      ]
+    },
+    {
+      "id": "D06-hook-gets-zero",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::the_hook_receives_the_recorded_reason"
+      ]
+    },
+    {
+      "id": "D07-final-flush-always-ok",
+      "killed": true,
+      "firstFailingTests": [
+        "virtio::block::device::workspace_fd_tests::the_final_flush_syncs_the_admitted_volume_and_reports_its_real_result"
+      ]
+    },
+    {
+      "id": "D08-final-flush-no-sync",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_production_exit_tests::the_final_flush_joins_the_worker_before_it_syncs",
+        "virtio::block::device::workspace_fd_tests::the_final_flush_syncs_the_admitted_volume_and_reports_its_real_result"
+      ]
+    },
+    {
+      "id": "D09-observer-no-stop-flag",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_production_exit_tests::the_final_flush_joins_the_worker_before_it_syncs",
+        "virtio::block::device::workspace_fd_tests::the_final_flush_wakes_the_worker_through_the_stop_fd_and_joins_it_before_syncing"
+      ]
+    },
+    {
+      "id": "D10-observer-no-stopfd-write",
+      "killed": true,
+      "firstFailingTests": [
+        "virtio::block::device::workspace_fd_tests::the_final_flush_wakes_the_worker_through_the_stop_fd_and_joins_it_before_syncing"
+      ]
+    },
+    {
+      "id": "D11-disk-flush-drops-sync",
+      "killed": true,
+      "firstFailingTests": [
+        "virtio::block::device::workspace_fd_tests::a_disk_flush_reaches_sync_all_on_the_admitted_volume_and_a_failing_sync_fails_it"
+      ]
+    },
+    {
+      "id": "D12-raw-storage-sync-drops-sync_all",
+      "killed": true,
+      "firstFailingTests": [
+        "workspace_raw_storage::tests::workspace_disks_storage_sync_is_a_validated_sync_all",
+        "virtio::block::device::workspace_fd_tests::a_disk_flush_reaches_sync_all_on_the_admitted_volume_and_a_failing_sync_fails_it"
+      ]
+    },
+    {
+      "id": "D13-flush-requested-for-every-command",
+      "killed": true,
+      "firstFailingTests": [
+        "block_bounce::tests::flush_requests_and_successful_completions_are_counted"
+      ]
+    },
+    {
+      "id": "D14-terminal-notifier-no-record",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::the_terminal_fault_notifier_records_the_reason_and_publishes_status_77"
+      ]
+    },
+    {
+      "id": "D14b-note-fault-no-record",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::the_terminal_fault_notifier_records_the_reason_and_publishes_status_77"
+      ]
+    },
+    {
+      "id": "D12b-helper-no-sync_all",
+      "killed": true,
+      "firstFailingTests": [
+        "workspace_raw_storage::tests::workspace_disks_storage_sync_is_a_validated_sync_all"
+      ]
+    },
+    {
+      "id": "D15-clean-stop-masks-flush-failure-status",
+      "killed": true,
+      "firstFailingTests": [
+        "cowork_exit::tests::a_clean_guest_stop_keeps_status_zero_and_a_fault_keeps_its_status"
+      ]
+    }
+  ],
+  "deltaReviewAllKilled": true
 }

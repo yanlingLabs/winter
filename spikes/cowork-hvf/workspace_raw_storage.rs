@@ -65,6 +65,34 @@ impl PinnedRawStorage {
         )
     }
 }
+/// The one full-sync call of the admitted storage (`sync_all`, as imago's `SyncMode::Full`). Test builds can
+/// count the calls made on one inode and fail the next ones, which is how the tests pin that a guest FLUSH and
+/// the final flush at exit really reach it.
+fn full_sync(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::atomic::Ordering;
+        if file.metadata()?.ino() == sync_seam::WATCH_INODE.load(Ordering::Acquire) {
+            sync_seam::CALLS.fetch_add(1, Ordering::AcqRel);
+            if sync_seam::FAIL.load(Ordering::Acquire) {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+        }
+    }
+    file.sync_all()
+}
+#[cfg(test)]
+pub(crate) mod sync_seam {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::Mutex;
+    /// Inode whose full syncs are counted (0: none).
+    pub static WATCH_INODE: AtomicU64 = AtomicU64::new(0);
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static FAIL: AtomicBool = AtomicBool::new(false);
+    /// Serializes the tests that use the seam.
+    pub static LOCK: Mutex<()> = Mutex::new(());
+}
 fn transfer(
     offset: u64,
     length: usize,
@@ -116,7 +144,7 @@ impl Storage for PinnedRawStorage {
     async fn sync(&self) -> io::Result<()> {
         validate(&self.file, self.expected)?;
         // Same full-sync primitive as imago::File's SyncMode::Full; no relaxed fsync override.
-        self.file.sync_all()?;
+        full_sync(&self.file)?;
         validate(&self.file, self.expected)
     }
     async unsafe fn invalidate_cache(&self) -> io::Result<()> {
@@ -230,5 +258,21 @@ mod tests {
         })
         .is_err());
         assert_eq!(calls, 0);
+    }
+
+    /// The sync path of the storage is one `sync_all` through `full_sync`; the Block-level tests count and fail
+    /// it, this pins the two lines that cannot be observed without a real device failure.
+    #[test]
+    fn workspace_disks_storage_sync_is_a_validated_sync_all() {
+        let source = include_str!("workspace_raw_storage.rs");
+        let sync = &source[source.find("async fn sync(&self)").unwrap()..];
+        let sync = &sync[..sync.find("\n    }\n").unwrap()];
+        let first = sync.find("validate(&self.file, self.expected)?;").expect("validates before");
+        let call = sync.find("full_sync(&self.file)?;").expect("full sync");
+        let last = sync.rfind("validate(&self.file, self.expected)").unwrap();
+        assert!(first < call && call < last);
+        let helper = &source[source.find("fn full_sync(file: &File)").unwrap()..];
+        let helper = &helper[..helper.find("\n}\n").unwrap()];
+        assert!(helper.trim_end().ends_with("file.sync_all()"), "{helper}");
     }
 }

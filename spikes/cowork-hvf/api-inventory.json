@@ -69,7 +69,7 @@
   "productionProfile": {
     "candidate": "production-profile-candidate.json",
     "build": "cargo rustc -p libkrun --release --locked --offline --no-default-features --features blk --crate-type staticlib, then ZERO_AR_DATE=1 strip -S",
-    "strippedArchiveSha256": "9dbc0474ff9e409b7bfa4dfeaf5c0ad51e23c58490e931a39c015b3aa92faa73",
+    "strippedArchiveSha256": "d9d06a17c6f3c5cc48933b7eb540baf23fec75a07159b7b11c4c4891b848c825",
     "exportCount": 69,
     "productionExports": [
       "krun_cowork_create_runtime_port_v1",

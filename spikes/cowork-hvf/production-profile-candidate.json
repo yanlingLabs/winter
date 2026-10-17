@@ -160,9 +160,21 @@
       ],
       "purpose": "one exit path for every stop (reason recorded once: off, reset, vcpu error, terminal fault; PSCI reset distinguished from off), final flush observer for both volumes, exit hook registered last, fatal() routed through the same path",
       "patchSha256": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a"
+    },
+    {
+      "patchFile": "patches/0023-proposed-production-exit-and-final-flush-pins.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/virtio/block/workspace_fd_tests.rs",
+        "src/devices/src/workspace_raw_storage.rs",
+        "src/vmm/src/builder.rs",
+        "src/vmm/src/cowork_exit.rs"
+      ],
+      "purpose": "tests that run the exit sequence for real in a child process (watchdog over a hung observer, status by reason, one claimant), the final flush on the real admitted-storage path (sync_all counted and failed through a test seam, real result, stop-fd wake), and the terminal-fault notifier; finish takes its budget as a parameter (production passes 20 s)",
+      "patchSha256": "fdf42d0dc80d784865166771e12af9806fe2f8adb932e9a77efee23be7db6ccb"
     }
   ],
-  "fullSourceDiffSha256": "505a68e38b3415e6b503ea06ddc68f15d313ce91066cbb50f69cfc09b9bcbe29",
+  "fullSourceDiffSha256": "5aa45e285112e8b52eaf192686d179694aef14f5fe07c66259ff46a8395bbf35",
   "allAddedFiles": [
     "src/devices/src/block_bounce.rs",
     "src/devices/src/block_trace.rs",
