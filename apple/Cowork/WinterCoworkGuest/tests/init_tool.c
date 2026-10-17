@@ -197,10 +197,9 @@ int main(int argc, char **argv) {
         size_t length = 0;
         char *text = slurp(argv[4], &length);
         fsync_calls = 0;
-        wg_trusted_fsync_fn = strcmp(argv[5], "fail") == 0 ? failing_fsync : counting_fsync;
+        wg_trusted_config_test_seams(strcmp(argv[5], "fail") == 0 ? failing_fsync : counting_fsync, strcmp(argv[6], "none") == 0 ? NULL : race);
         race_path_extra = argv[2];
         race_mode = argv[6];
-        wg_trusted_race_hook = strcmp(argv[6], "none") == 0 ? NULL : race;
         int fd = wg_write_trusted_config(argv[2], argv[3], text, length);
         free(text);
         char path[600];

@@ -327,8 +327,11 @@ def runtime_artifacts_config(digests):
     return json.dumps(config,sort_keys=True,separators=(',',':')).encode()
 
 def refuse_provider_bridge(tree):
-    """Decision D10: the first Mac worker has no provider bridge. The image carries no provider worker, no provider socket server, no credential
-    broker and no extra runtime artifact for one; the supervisor's runtime artifacts are exactly launcher, executable and ownerLibrary."""
+    """A NAME-BASED TRIPWIRE, not a proof, for decision D10 (the first Mac worker has no provider bridge). It catches the obvious mistake: a file under
+    /opt/winter (the distribution's own files under the environment root are not judged) named like a provider worker, a credential broker or a host client,
+    the main-entry runtime coming back, or a fourth runtime artifact. A renamed component passes it. What actually keeps a provider bridge out is the pinned
+    root manifest and cpio digest (the image contains exactly the files it lists), the fact that nothing in the image serves `provider.sock`, and the guest
+    relay, which refuses the provider class at the frame header."""
     for name in tree.nodes:
         lowered=name.lower()
         if lowered.startswith('opt/winter/') and not lowered.startswith('opt/winter/environment/') and ('provider' in lowered or 'credential' in lowered or lowered.endswith('host-client') or lowered.endswith('hostclient')):raise ValueError('provider bridge component in the image: '+name)

@@ -113,6 +113,29 @@ class GuestSourceHygiene(unittest.TestCase):
         self.assertLess(body.index("if (profile != 1) return -1;"), body.index("wg_read_small_file(RUNTIME_ARTIFACTS_PATH"))
         self.assertEqual(init.count("RUNTIME_ARTIFACTS_PATH"), 2)   # its definition and the one read
 
+    def test_no_production_source_has_a_writable_test_seam(self):
+        """The seams in trusted_config.c exist only under WG_TEST_SEAMS (which only the native test build defines), as statics behind one setter; PID 1
+        and the relay never reach them, and init_linux.c's sys_calls table is only ever read there."""
+        import re as regex
+        self.assertNotIn("WG_TEST_SEAMS", (ROOT / "build.py").read_text())
+        for path in C_FILES:
+            code = strip_comments(path.read_text())
+            self.assertNotRegex(code, r"\bextern\s+[^;]*\(\*\s*\w+\)", path.name)                # no exported function-pointer variable
+            if path.name not in ("trusted_config.c", "trusted_config.h"):
+                self.assertNotIn("WG_TEST_SEAMS", code, path.name)
+                self.assertNotIn("wg_trusted_config_test_seams", code, path.name)
+        source = strip_comments((ROOT / "init/trusted_config.c").read_text())
+        production = regex.sub(r"#ifdef WG_TEST_SEAMS.*?#else", "#else", source, flags=regex.S)
+        self.assertNotIn("seam_", production)
+        self.assertIn("#define SYNC_CONFIG(fd) fsync(fd)", production)
+        self.assertIn("#define AFTER_CLOSE(path) ((void)0)", production)
+        self.assertEqual(len(regex.findall(r"\bstatic\b[^;]*\bseam_\w+", source)), 2)
+        header = strip_comments((ROOT / "init/trusted_config.h").read_text())
+        self.assertRegex(header, r"#ifdef WG_TEST_SEAMS\s+void wg_trusted_config_test_seams\(.*\);\s+#endif")
+        init = strip_comments((ROOT / "init/init_linux.c").read_text())
+        self.assertIsNone(regex.search(r"sys_calls\.\w+\s*=[^=]", init))                              # only read, never assigned, in PID 1
+        self.assertEqual(len(regex.findall(r"static struct \{[^}]*\} sys_calls", init, flags=regex.S)), 1)
+
     def test_the_supervisor_ready_line_is_compared_by_length_and_bytes(self):
         init = strip_comments((ROOT / "init/init_linux.c").read_text())
         self.assertNotIn("strcmp(G.ready_line", init)

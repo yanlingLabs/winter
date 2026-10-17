@@ -106,8 +106,21 @@ enum wg_config_result wg_build_trusted_config(const char *boot_id, const char *b
     return WG_CONFIG_OK;
 }
 
-int (*wg_trusted_fsync_fn)(int) = fsync;
-void (*wg_trusted_race_hook)(const char *path) = NULL;
+/* Test seams exist only in a build that defines WG_TEST_SEAMS (the native tests do; build.py never does, and a hygiene test pins that). In the production
+ * binary the config is synced by a direct fsync(2) and there is no hook and no writable pointer. */
+#ifdef WG_TEST_SEAMS
+static int (*seam_fsync)(int) = fsync;
+static void (*seam_race_hook)(const char *path) = NULL;
+void wg_trusted_config_test_seams(int (*fsync_fn)(int), void (*race_hook)(const char *path)) {
+    seam_fsync = fsync_fn ? fsync_fn : fsync;
+    seam_race_hook = race_hook;
+}
+#define SYNC_CONFIG(fd) seam_fsync(fd)
+#define AFTER_CLOSE(path) do { if (seam_race_hook) seam_race_hook(path); } while (0)
+#else
+#define SYNC_CONFIG(fd) fsync(fd)
+#define AFTER_CLOSE(path) ((void)0)
+#endif
 
 int wg_write_trusted_config(const char *directory, const char *name, const char *text, size_t length) {
     char path[512];
@@ -121,9 +134,9 @@ int wg_write_trusted_config(const char *directory, const char *name, const char 
         if (n <= 0) { close(fd); unlink(path); return -1; }
         done += (size_t)n;
     }
-    if (fchmod(fd, 0400) != 0 || wg_trusted_fsync_fn(fd) != 0) { close(fd); unlink(path); return -1; }
+    if (fchmod(fd, 0400) != 0 || SYNC_CONFIG(fd) != 0) { close(fd); unlink(path); return -1; }
     close(fd);
-    if (wg_trusted_race_hook) wg_trusted_race_hook(path);
+    AFTER_CLOSE(path);
     int reader = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (reader < 0) return -1;
     struct stat st;

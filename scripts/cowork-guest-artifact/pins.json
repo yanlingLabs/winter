@@ -63,8 +63,8 @@
   "packageLockSha256": "b0127b7a8f1fa2f8b2a06236cef26e1f1b297bacf9d70e800440df8747d93252",
   "expectedArtifact": {
     "runtimeSha256": "c13918b426d62615640280df47d8e1b4602cddb486c20e4ce15942d635472217",
-    "cpioSha256": "8e1b61e6c37d88acce5cea6fe4b6095d869225df1019b18224b90c7d23ec43d5",
-    "rootManifestSha256": "7929ab8088d0ae03de8efc7d6122c8f87b981858a9c4a6c0e205816c101073d4",
+    "cpioSha256": "6df820cbd2c57db3461d621c17b01730ec0884d8aa40703d60d4172b03f2d688",
+    "rootManifestSha256": "ad08a0b174c9b508abe6795468051be82a17704d84c71dedfa9e88df5858b75b",
     "helperBinarySha256": {
       "file-worker.c": "f26932e539aac05448de0ab6d346b5fb5fd653580a9d938ea2086cd82f6f29cc",
       "linux-runtime-compartment.c": "40049e5cb751d720a20dc957aaabb66a8ab74710ad5039d8f26448139278534a",
@@ -96,12 +96,12 @@
     "zig": "0.14.1",
     "programs": {
       "init": {
-        "binarySha256": "5ad18e1d4bcf1aba82d98bea99dc3a3f66de46334fd971ad27149a994c815bb8",
-        "sourceSha256": "6cf125ac4fae5cf073dca66cdc207ef3cf88e4c333d62ab683cef242da9c34ac"
+        "binarySha256": "3999518fcd3f790a0ee933a046f80c87725c0ca3d710363112879120fae7c4f6",
+        "sourceSha256": "551d4bfa28dcded83645175688122a581f77396eb1caa3a0fcb4b0efee10992a"
       },
       "winter-guest-relay": {
         "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",
-        "sourceSha256": "db824614a5eb56c99c58ab1d061b5764b43587129de0c87c7f0ce1f2184b70a1"
+        "sourceSha256": "467bd945ad8dd83650824f97a4f2679988c91df496b99d6e7e1537fe067bad7a"
       }
     },
     "scripts": {

@@ -30,7 +30,7 @@ def is_bootstrap(vector):
 
 
 def build(sources, output, extra=()):
-    flags = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic", *extra]
+    flags = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic", "-DWG_TEST_SEAMS", *extra]
     if SANITIZE:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
     command = [CC, *flags, *map(str, sources), "-o", str(output)]
