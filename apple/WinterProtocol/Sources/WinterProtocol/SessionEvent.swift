@@ -65,6 +65,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case panelCommand(PanelCommand)
     case providerLoginProgress(ProviderLoginProgress)
     case providerLoginFinished(ProviderLoginFinished)
+    case wakeArmed(WakeArmed)
+    case wakeEnded(WakeEnded)
 
     public struct SessionCreated: Codable, Equatable, Sendable {
         public let seq: Int
@@ -74,6 +76,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         // Dispatch (Phase 7 durability follow-up): carried so a full index.db rebuild can restore
         // the dispatch-singleton invariant (see events.ts's SessionCreatedEvent doc comment).
         // Additive/optional — pure Codable synthesis, no Discriminator/decode/encode changes.
+        // Cowork (session door): `"cowork"` is now a recognised value (`SESSION_MODES` in events.ts),
+        // carried verbatim like `"dispatch"`/`"chat"`. No Winter creates one yet — `session.create` refuses it
+        // with `unsupported_topology` — and the app's `SessionMode.cowork.isAvailable` stays false.
         public let mode: String?
         // Winter Phase 8c (P8c-5): the runtime annotation — same additive-optional shape as `mode`
         // above, so no Discriminator/decode/encode change here either. `runtimeKind` is a closed
@@ -108,6 +113,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public init(n: Int, path: String) { self.n = n; self.path = path }
     }
 
+    /// Code-mode file attachments (2026-10-13): one `[File #n]` placeholder's file or folder — the user's own
+    /// absolute path (`UserMessageFileRef`, `packages/protocol/src/events.ts`).
+    public struct UserMessageFileRef: Codable, Equatable, Sendable {
+        public let n: Int
+        public let path: String
+        public init(n: Int, path: String) { self.n = n; self.path = path }
+    }
+
     public struct UserMessage: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -119,12 +132,15 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// Code-mode image input: the staged file behind each `[Image #n]` in `text` (only the model
         /// sees the paths). Absent on every message without images, and stays absent on re-encode.
         public let images: [UserMessageImageRef]?
+        /// Code-mode file attachments: the file or folder behind each `[File #n]` in `text` (only the model
+        /// sees the paths; the Mac's bubble draws a chip per token). Absent on every message without files.
+        public let files: [UserMessageFileRef]?
         // Public init so a Swift PRODUCER (WinterChatKit's phone ChatEngine) can construct this event
         // — the synthesized memberwise init is `internal`. Additive; no wire/shape change.
         public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String, clientName: String,
-                    images: [UserMessageImageRef]? = nil) {
+                    images: [UserMessageImageRef]? = nil, files: [UserMessageFileRef]? = nil) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
-            self.text = text; self.clientName = clientName; self.images = images
+            self.text = text; self.clientName = clientName; self.images = images; self.files = files
         }
     }
 
@@ -909,6 +925,37 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let resultSummary: String?
     }
 
+    /// ComputerV2 wake triggers (2026-10-12): the session's model armed a trigger on a bound app or tab
+    /// (`wakeWhen`) — Winter waits for the USER to click, submit, … PERSISTED, and broadcast to every harness like
+    /// `session_titled` (the session list's mark). `condition` is the kind (`clicked`, `submitted`, `navigated`,
+    /// `appeared`, `gone`, `changed`, `titled`) as a plain String, validated on the TS side; the two labels are what
+    /// the user sees (screen-derived, ≤ 200, never the model's note). `expiresAt`: epoch ms.
+    public struct WakeArmed: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let wakeId: String
+        public let condition: String
+        public let targetLabel: String
+        public let elementLabel: String?
+        public let expiresAt: Int
+    }
+
+    /// ComputerV2 wake triggers: a trigger ended — `fired`, `lost`, `expired`, `cancelled`, `restart` or
+    /// `disabled` (a plain String). `at`: epoch ms. `woken`: a `computer-wake` message carries this ending (Winter
+    /// continues) — what a client reads, never the reason (an `expired` wakes only when the model asked).
+    public struct WakeEnded: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let wakeId: String
+        public let reason: String
+        public let at: Int
+        public let woken: Bool
+    }
+
     /// CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
     /// internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent`
     /// bridge maps its `started`/`progress`/`completed`/`failed` variants onto these 4 events so an
@@ -1256,6 +1303,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case panel_command
         case provider_login_progress
         case provider_login_finished
+        case wake_armed
+        case wake_ended
     }
 
     private enum TypeKey: String, CodingKey { case type }
@@ -1327,6 +1376,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .panel_command:        self = .panelCommand(try PanelCommand(from: decoder))
         case .provider_login_progress: self = .providerLoginProgress(try ProviderLoginProgress(from: decoder))
         case .provider_login_finished: self = .providerLoginFinished(try ProviderLoginFinished(from: decoder))
+        case .wake_armed:           self = .wakeArmed(try WakeArmed(from: decoder))
+        case .wake_ended:           self = .wakeEnded(try WakeEnded(from: decoder))
         }
     }
 
@@ -1540,6 +1591,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.child_update.rawValue, forKey: .type)
+        case .wakeArmed(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.wake_armed.rawValue, forKey: .type)
+        case .wakeEnded(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.wake_ended.rawValue, forKey: .type)
         case .workflowStarted(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)

@@ -155,6 +155,10 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   thinking_delta: false,
   // The reviewing pill (2026-10-08): TRANSIENT live state for the HUMAN — never persisted, so never in a transcript.
   tool_review_progress: false,
+  // ComputerV2 wake triggers (2026-10-12): main-thread state for the HUMAN (the Mac's pill), written by the daemon's
+  // registry — never in a child's transcript (the model learns of an ending from the `computer-wake` message).
+  wake_armed: false,
+  wake_ended: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
@@ -319,4 +323,7 @@ export const PROJECTED_EVENT_COVERAGE = {
   // while nobody is attached to the coordinator) is unrelated — a daemon producer, not the projector.
   notification_requested: false,
   task_notification: false,
+  // ComputerV2 wake triggers (2026-10-12): a DAEMON producer — `computer-use/wakes/registry.ts`.
+  wake_armed: false,
+  wake_ended: false,
 } satisfies Record<SessionEvent["type"], boolean>;

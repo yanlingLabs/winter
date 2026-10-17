@@ -40,6 +40,13 @@ extension CUCore {
         let previous = sys.frontmostPid()
         let first = holdLock.withLock { () -> Bool in
             if heldForeground[t.id] != nil { return false }
+            // The app already held by another session's hold: where the front goes back is THAT hold's (it was taken
+            // from there), so the last hold to end gives it back.
+            if let other = heldForeground.values.first(where: { $0.pid == t.pid }) {
+                heldForeground[t.id] = HeldForeground(sessionId: t.sessionId, pid: t.pid, appName: t.appName,
+                                                      previous: other.previous, previousView: other.previousView)
+                return true
+            }
             heldForeground[t.id] = HeldForeground(sessionId: t.sessionId, pid: t.pid, appName: t.appName,
                                                   previous: previous == t.pid ? nil : previous,
                                                   previousView: previous == t.pid ? nil : CUGuardedView(app: previous, space: sys.activeSpace()))
@@ -96,6 +103,12 @@ extension CUCore {
     /// activation left them in the held app). Off the caller (it may wait up to the restore's deadline). Review of round 8:
     /// it activated the pid captured at the start, over a move of the user's.
     private func giveBack(_ h: HeldForeground) {
+        // Another session still holds the same app in front (holds are per target, the exemption per app — review of round
+        // 9, MEDIUM #3): its exemption stays, and the front is not given back under it; the last hold's end does both.
+        if holdLock.withLock({ heldForeground.values.contains { $0.pid == h.pid } }) {
+            CULog.act.notice("foreground in \(h.appName, privacy: .public): another hold of the app goes on — nothing given back yet")
+            return
+        }
         let endedAt = clock.nowSeconds(); guardianLock.withLock { guardianCore.endExempt(h.pid, now: endedAt) }
         let back = { [weak self] in
             guard let self, self.sys.frontmostPid() == h.pid else { return }

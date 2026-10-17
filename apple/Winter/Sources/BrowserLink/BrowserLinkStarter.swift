@@ -26,9 +26,15 @@ final class BrowserLink {
     /// silent. It is read lazily, once, and again only after the daemon refused a `protocol.hello`
     /// (the daemon re-creates the item at its own boot, and may have minted a new one) — never once
     /// per reconnect attempt while the daemon is simply down.
-    static func start(home: String, keychainService: String, runtime: BrowserRuntime? = nil) -> BrowserLink {
+    static func start(home: String, keychainService: String, runtime: BrowserRuntime? = nil,
+                      headless: HeadlessPresentStore? = nil) -> BrowserLink {
         let host = BrowserLinkHost(runtime: runtime ?? .shared,
                                    downloadsRoot: (home as NSString).appendingPathComponent("cache/downloads"))
+        // Feature `headless` (lane H3): the app's headless presentations, and the only folder a chosen file is copied
+        // into for a headless page — Winter Headless reads one from nowhere else.
+        let presentations = headless ?? .shared
+        presentations.uploadsRoot = (home as NSString).appendingPathComponent("cache/headless-uploads")
+        host.headless = presentations
         let socketPath = WinterPaths.socketPath(home: home)
         let tokens = HarnessTokenCache(service: keychainService)
         let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
@@ -43,6 +49,10 @@ final class BrowserLink {
                                 requestTimeout: .seconds(30))
         }, handler: host)
         host.output = client
+        presentations.sendAction = { [weak client] sessionId, tabId, action in
+            guard let client else { throw BrowserLinkHeadlessError.notConnected }
+            return try await client.headless(sessionId: sessionId, tabId: tabId, action: action)
+        }
         client.start()
         return BrowserLink(host: host, client: client)
     }

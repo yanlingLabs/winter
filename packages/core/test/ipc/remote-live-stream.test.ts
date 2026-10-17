@@ -421,12 +421,15 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // `thinking_delta` via the transients, 12 → 13).
     // 29 → 30 (the reviewing pill, 2026-10-08: `tool_review_progress` via the transients, 13 → 14 — the phone's
     // WinterSessionClient decodes frames as untyped JSON and its fold ignores an unknown type).
-    // 30 → 35 (Cowork workspace notifications, 2026-10-14: `workspace_sources_changed`/`_policy_changed`/
-    // `_operation_changed`/`_metadata_changed`/`_instructions_changed` via HISTORY_EVENT_TYPES, 13 → 18 —
+    // 30 → 32 (ComputerV2 wake triggers, 2026-10-12: `wake_armed`/`wake_ended` via HISTORY_EVENT_TYPES, 13 → 15 — an
+    // old phone decodes them opaquely and its fold `default: break`s on them).
+    // 32 → 37 (Cowork workspace notifications, 2026-10-14: `workspace_sources_changed`/`_policy_changed`/
+    // `_operation_changed`/`_metadata_changed`/`_instructions_changed` via HISTORY_EVENT_TYPES, 15 → 20 —
     // ordinary durable host events admitted to history and remote streams on purpose, scoped per frame
     // to the workspace; see docs/cowork-workspace-events.md "Client and trust boundaries"). The per-event
     // cap question is moot: every field is a ≤200-char id, an enum, an int or a 64-hex digest, and `sources` is ≤ 100.
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(35);
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(37);
+    expect(REMOTE_STREAM_EVENT_TYPES.has("wake_armed")).toBe(true);
     for (const t of ["workspace_sources_changed", "workspace_policy_changed", "workspace_operation_changed", "workspace_metadata_changed", "workspace_instructions_changed"] as const) {
       expect(REMOTE_STREAM_EVENT_TYPES.has(t)).toBe(true);
     }

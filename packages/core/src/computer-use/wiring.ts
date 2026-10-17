@@ -15,24 +15,36 @@ import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
+import { runnableModeOf } from "../sessions/session-mode";
+import { AutomationFailure } from "./errors";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
-  computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
+  computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWakesFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
   setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type ComputerUseFlagsPatch, type Settings,
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
 import { installedBrowser, systemAppResolver } from "./app-resolve";
-import { BrowserLink } from "./browser/cef-link/rpc";
+import { BrowserLink, type HeadlessLinkActions } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
 import { BrowserBackendRegistry } from "./browser/registry";
+import { resolveWinterHeadless, winterAppRequirementFor } from "./browser/headless/engines";
+import { HEADLESS_NAME, HeadlessPool, sweepHeadless, type HeadlessPoolDeps } from "./browser/headless/pool";
+import { processSatisfiesRequirement } from "./helper-verify";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
+import { ISLAND_SHOWN_ACK_MS, type IslandPresence } from "../island/registry";
 import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException, type DesktopVisitPanel } from "./policy";
 import { HelperRpcError, HelperUnavailableError, type DesktopVisitPromptResult, type HelperPermissions } from "./protocol";
 import { RecentApps } from "./recent-apps";
 import { ComputerV2Service } from "./service";
 import { AutomationTelemetry } from "./telemetry";
 import type { AutomationWorker, AutomationWorkerOptions } from "./worker-host";
+import type { MessagingDriverHandle } from "../agent/session-messaging";
+import { BrowserWakeBackend } from "./browser/wake/backend";
+import { AppWakeBackend } from "./wakes/app-backend";
+import { WakeStore } from "./wakes/persist";
+import { WakeRegistry, type WakeBackends } from "./wakes/registry";
+import type { WakeSessionState } from "./wakes/delivery";
 
 /** Test seams: a FAKE helper (transport, launcher, verifier), a scripted worker, the idle timeout. */
 export interface ComputerUseInjection {
@@ -49,6 +61,12 @@ export interface ComputerUseInjection {
   adapters?: readonly AppAdapter[];
   /** Phase 2: is a browser app installed (default: a LaunchServices lookup, never a launch)? */
   browserInstalled?: (bundleId: string) => boolean;
+  /** Phase 4: the headless pool's engine seams (a fake helper on its pipe, no signature check) — tests only. */
+  headless?: Partial<Pick<HeadlessPoolDeps, "resolve" | "spawn" | "verify" | "memoryOf" | "idleExitMs" | "enabledPollMs" | "timeouts" | "presentStartMs">>;
+  /** Wake triggers (2026-10-12): FAKE backends in place of the real ones (the e2e drives a trigger through a real
+   *  daemon), and the registry's timing seams. Never set in production. */
+  wakeBackends?: WakeBackends;
+  wakeTimings?: { coalesceMs?: number; pollMs?: number; retryDelaysMs?: readonly number[]; armTimeoutMs?: number };
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -71,6 +89,14 @@ export interface ComputerUseRuntimeDeps {
   savedAllowRules?(cwd?: string): readonly string[];
   /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
   turnRunning?(sessionId: string): boolean;
+  /** Wake triggers: the session driver table (late-bound — built after this runtime), the door a wake goes in by. */
+  sessions?(): { get(sessionId: string): MessagingDriverHandle | undefined; ensure(sessionId: string): Promise<MessagingDriverHandle | undefined> } | undefined;
+  /** Wake triggers, Dispatch: is a turn of this child followed now; follow its wake turn (`DispatchChildren`). */
+  followedNow?(sessionId: string): boolean;
+  followWake?(sessionId: string, text: string): (() => void) | undefined;
+  /** The Winter island: whether an island client (Winter.app) is connected and shows the desktop-switch card — then
+   *  the prompt is the app's and the helper's own panel is only the fallback (`islandAwareDesktopPanel`). */
+  island?: IslandPresence;
   inject?: ComputerUseInjection;
   log?(line: string): void;
 }
@@ -85,6 +111,8 @@ export interface ComputerUseStatus {
   headlessEnabled: boolean;
   /** Phase 4: `computerUse.webmcp` (default true). */
   webmcp: boolean;
+  /** Wake triggers (2026-10-12): `computerUse.wakes` (default true). */
+  wakes: boolean;
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
   /** Phase 2: the browsers ComputerV2 can drive (the built-in one, and every user's browser connected or installed). */
   browsers?: Array<{ id: string; name: string; connected: boolean; reason?: string }>;
@@ -110,6 +138,9 @@ export interface ComputerUseControl {
   appsList(): ComputerUseAppRow[];
   appsSet(p: { bundleId: string; name?: string; access?: ComputerUseAccess | null; grant?: "always" | null }): void;
   setSettings(p: ComputerUseFlagsPatch): void;
+  /** Wake triggers: how many the session has armed (the session list's mark), and the Mac's [Stop waiting]. */
+  wakesArmed?(sessionId: string): number;
+  wakesCancel?(sessionId: string, wakeId: string): boolean;
 }
 
 export interface ComputerUseRuntime {
@@ -125,10 +156,29 @@ export interface ComputerUseRuntime {
   browsers: BrowserEngine;
   backends: BrowserBackendRegistry;
   browserLink: BrowserLink;
+  /** Phase 4: Winter's headless browser (the `headless` backend). */
+  headless: HeadlessPool;
+  /** Wake triggers (2026-10-12): the registry. `wakes.start()` runs the boot sweep once the session drivers exist;
+   *  `wakes.beginShutdown()` stops deliveries before the drivers drain. */
+  wakes: WakeRegistry;
+  /** The session was archived: its wake triggers end `disabled` FIRST — before the browser engine closes its agent
+   *  tabs, whose backend would otherwise report the closing tab as `lost` and wake the archived session — then the
+   *  engine closes them. (A deletion takes the same order in `service.endSession`.) */
+  sessionArchived(sessionId: string): void;
   stop(): void;
 }
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+
+/** The `mode` of the facts `ComputerPolicy` judges a session by, from the stored column (absent = code, as
+ *  everywhere). A stored `cowork` row — or any other string that is not a runnable mode — is REFUSED here:
+ *  `NotAllowed`, which the policy and the helper's own callers already treat as a plain refusal, never read as
+ *  Code by a `: "code"` default, so a computer-use call on such a row's behalf has no policy facts at all. */
+export function computerPolicyModeOf(stored: string | undefined): "code" | "dispatch" | "chat" {
+  const mode = runnableModeOf(stored);
+  if (mode === undefined) throw new AutomationFailure("NotAllowed", "computer use is not available in this session");
+  return mode;
+}
 
 /**
  * THE DESKTOP SWITCH, refused (user ruling 2026-10-10, 5a): the session whose desktop-switch refusals an event lifts —
@@ -162,6 +212,53 @@ export function helperDesktopPanel(helper: Pick<HelperClient, "request">, log: (
   };
 }
 
+/**
+ * The Winter island (`docs/claude/island.md`): while Winter.app is connected with an island (its hello advertised
+ * `CLIENT_CAPABILITY_ISLAND`), the desktop-switch prompt's on-screen half is the APP's — it shows the session's own
+ * card (`approval_requested`, `onTimeout: "allow"`) in the island, answered through `approval.respond` like any card,
+ * the first answer winning in the broker. The helper's own panel stays the fallback, asked (with the same deadline,
+ * its answer chained) when there is no island client at the prompt, when the last one LEAVES before an answer (the app
+ * quit or crashed mid-prompt), or when none says it shows the card within `ackMs` (`island.shown`; an app that is
+ * connected but hung). `close()` closes whichever is up.
+ */
+export function islandAwareDesktopPanel(
+  helperPanel: DesktopVisitPanel, island: IslandPresence | undefined, log: (line: string) => void, ackMs = ISLAND_SHOWN_ACK_MS,
+): DesktopVisitPanel {
+  return {
+    show(p) {
+      if (island === undefined || !island.hasClient()) return helperPanel.show(p);
+      log(`computer-use: the desktop-switch prompt ${p.promptId} is shown by Winter's island`);
+      let closed = false;
+      let inner: ReturnType<DesktopVisitPanel["show"]> | undefined;
+      let settle!: (a: "switch" | "refuse" | "expired" | undefined) => void;
+      const answer = new Promise<"switch" | "refuse" | "expired" | undefined>((resolve) => { settle = resolve; });
+      const fallBack = (why: string): void => {
+        if (closed || inner !== undefined) return;
+        log(`computer-use: the desktop-switch prompt ${p.promptId} goes to the helper too (${why})`);
+        try {
+          inner = helperPanel.show(p);
+        } catch {
+          return;
+        }
+        inner.answer.then(settle, () => settle(undefined));
+      };
+      const unsubscribe = island.onAllClientsGone(() => fallBack("Winter's island left"));
+      const ackWait = new AbortController();
+      void island.waitShown(p.promptId, ackMs, ackWait.signal).then((shown) => { if (!shown) fallBack("Winter's island did not show it"); });
+      return {
+        answer,
+        close: () => {
+          closed = true;
+          ackWait.abort(); // the 2 s ack timer goes with the prompt
+          unsubscribe();
+          try { inner?.close(); } catch { /* already gone */ }
+          settle(undefined);
+        },
+      };
+    },
+  };
+}
+
 export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): ComputerUseRuntime {
   const log = (line: string): void => deps.log?.(line);
   let written: { basis: Settings | null | undefined; next: Settings } | undefined;
@@ -185,8 +282,10 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
   const recentApps = new RecentApps(deps.home);
   const diffBases = new DiffBases();
   const adapters = new AppAdapters({ ...(deps.inject?.adapters === undefined ? {} : { extra: deps.inject.adapters }), log });
-  // Late-bound: the helper's notifications go to the service, which is built after the helper.
+  // Late-bound: the helper's notifications go to the service, which is built after the helper — and to the wake
+  // registry's backends (the app backend routes the helper's `watchEvent`).
   let service: ComputerV2Service | undefined;
+  let wakes: WakeRegistry | undefined;
   const helper = new HelperClient({
     home: deps.home,
     profile: deps.profile,
@@ -194,8 +293,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     ...(deps.inject?.transport === undefined ? {} : { transport: deps.inject.transport }),
     ...(deps.inject?.launcher === undefined ? {} : { launcher: deps.inject.launcher }),
     ...(deps.inject?.verifier === undefined ? {} : { verifier: deps.inject.verifier }),
-    onNotification: (n) => service?.handleNotification(n),
-    onDisconnect: () => service?.helperDisconnected(),
+    onNotification: (n) => { service?.handleNotification(n); wakes?.handleNotification(n); },
+    onDisconnect: () => { service?.helperDisconnected(); wakes?.helperDisconnected(); },
     log,
   });
 
@@ -206,7 +305,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     emit: (sessionId, event: NewSessionEvent) => { deps.hub.append(sessionId, event); },
     session: (sessionId) => {
       const meta = deps.store.meta(sessionId);
-      const mode = meta.mode === "chat" || meta.mode === "dispatch" ? meta.mode : "code";
+      const mode = computerPolicyModeOf(meta.mode);
       return { policy: meta.approvalPolicy, mode, ...(meta.origin === undefined ? {} : { origin: meta.origin }), ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }) };
     },
     turnOrigin: (sessionId) => { try { return runningTurnOrigin(deps.store.read(sessionId)); } catch { return undefined; } },
@@ -219,7 +318,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       try { if (deps.store.meta(sessionId).mode === "dispatch") return false; } catch { return false; }
       return deps.hub.attachedHarnesses(sessionId).some((h) => h.role !== "remote" && h.clientName !== "iphone-gateway");
     },
-    desktopPanel: helperDesktopPanel(helper, log),
+    desktopPanel: islandAwareDesktopPanel(helperDesktopPanel(helper, log), deps.island, log),
     log,
   });
 
@@ -235,10 +334,40 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       ...(fold.activeTabId === undefined ? {} : { activeTabId: fold.activeTabId }),
     };
   };
-  const browserLink = new BrowserLink({
-    registry: backends, log,
+  // Lane H3: the person's panel actions on headless tabs reach the pool (made just below).
+  const headlessActions: HeadlessLinkActions = {
+    list: (sessionId) => headless.panelTabs(sessionId),
+    act: (sessionId, tabId, action) => headless.panelAction(sessionId, tabId, action),
+  };
+  const browserLink: BrowserLink = new BrowserLink({
+    registry: backends, log, headless: headlessActions,
     tabUrl: (sessionId, tabId) => winterWebTabs(sessionId).tabs.find((t) => t.tabId === tabId)?.url,
   });
+  // Phase 4: Winter's headless browser — the `headless` backend, its engine started on the first tab. A helper and a
+  // cache an earlier daemon left behind go first (this daemon is starting: nothing of them can be in use).
+  const telemetry = new AutomationTelemetry(deps.home);
+  sweepHeadless(deps.home, { log });
+  const headless: HeadlessPool = new HeadlessPool({
+    home: deps.home,
+    enabled: () => computerUseHeadlessEnabledFrom(settings()),
+    // A daemon off its profile's own home finds the helper only through `$WINTER_HEADLESS_APP` (never an installed one).
+    resolve: deps.inject?.headless?.resolve ?? (() => resolveWinterHeadless(deps.profile, { overrideOnly: !(deps.inject?.launchAllowed ?? deps.launchAllowed) })),
+    ...(deps.inject?.headless?.spawn === undefined ? {} : { spawn: deps.inject.headless.spawn }),
+    verify: deps.inject?.headless?.verify ?? processSatisfiesRequirement,
+    ...(deps.inject?.headless?.memoryOf === undefined ? {} : { memoryOf: deps.inject.headless.memoryOf }),
+    ...(deps.inject?.headless?.idleExitMs === undefined ? {} : { idleExitMs: deps.inject.headless.idleExitMs }),
+    ...(deps.inject?.headless?.enabledPollMs === undefined ? {} : { enabledPollMs: deps.inject.headless.enabledPollMs }),
+    ...(deps.inject?.headless?.timeouts === undefined ? {} : { timeouts: deps.inject.headless.timeouts }),
+    // Lane H3: Winter.app's panel shows a headless tab (the browser link's feature `headless`); the helper accepts only
+    // Winter's own app as its viewer.
+    viewer: () => browserLink.headlessViewer(),
+    viewerMissing: () => browserLink.headlessViewerMissing(),
+    viewerRequirement: () => winterAppRequirementFor(deps.profile),
+    ...(deps.inject?.headless?.presentStartMs === undefined ? {} : { presentStartMs: deps.inject.headless.presentStartMs }),
+    metric: (m) => telemetry.primitive(m),
+    log,
+  });
+  backends.register(headless, { family: "headless", name: HEADLESS_NAME, instanceKey: "headless" });
   const browsers = new BrowserEngine({
     registry: backends,
     // The old Browser's door: parsed through the panel's schema (the http/https guard and the caps), then minted —
@@ -269,12 +398,68 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
     stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),
+    headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
+    headlessReason: () => headless.reason,
+    headlessLocalNetworkRefusedAt: (tabKey) => headless.localNetworkRefusedAt(tabKey),
+    headlessPresentMissing: () => headless.presentMissing(),
+    headlessHandBack: (tabKey) => headless.handBack(tabKey),
+    headlessHandoffOver: (tabKey) => headless.handoffOver(tabKey),
+    headlessView: (tabKey) => headless.view(tabKey),
+    headlessHeld: (tabKey) => headless.held(tabKey),
+    headlessHolds: (tabKey) => headless.holds(tabKey),
+    // Wake triggers: the helper's input to a browser bound as an APP reaches its page as trusted DOM events — Winter's
+    // own, never the user's action on a tab trigger (the service records it per app, from every session).
+    ownAppInputAt: (bundleId, at) => service?.ownAppInputAt(bundleId, at) === true,
     log,
   });
 
+  // Wake triggers (2026-10-12): the registry, and the two backends it routes to by target kind — a tab binding → the
+  // browser engine's backend, an app target → the helper's. A test daemon may inject fakes in their place.
+  const wakeBackends: WakeBackends = { ...(deps.inject?.wakeBackends ?? {}) };
+  if (deps.inject?.wakeBackends === undefined) {
+    // The tab watches, over the engine's tabs (the page runtime's watcher, or Winter for Chrome's own). The registry
+    // calls its `stop()` first at daemon stop — before `svc.stop()` stops the engine — so its watches end quietly
+    // rather than as `lost` while their links close.
+    wakeBackends.tab = new BrowserWakeBackend(browsers, { log });
+    // The helper's watches. Its hooks — the helper's `watchEvent`, the connection's loss, the daemon's stop — reach it
+    // through the registry, which fans the helper callbacks above and its own `stop()` out to each backend.
+    wakeBackends.app = new AppWakeBackend({
+      helper,
+      target: (sessionId, targetId) => service?.appTarget(sessionId, targetId),
+      persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
+      log,
+    });
+  }
+  const sessionState = (sessionId: string): WakeSessionState => {
+    try { return deps.store.meta(sessionId).archived === true ? "archived" : "live"; } catch { return "gone"; }
+  };
+  wakes = new WakeRegistry({
+    backends: () => wakeBackends,
+    settings,
+    append: (sessionId, event) => { deps.hub.append(sessionId, event); },
+    sessionState,
+    sessions: () => deps.sessions?.(),
+    ...(deps.followedNow === undefined ? {} : { followedNow: deps.followedNow }),
+    ...(deps.followWake === undefined ? {} : { followWake: deps.followWake }),
+    store: new WakeStore(deps.home, log),
+    telemetry: (m) => telemetry.primitive(m),
+    ...(deps.audit === undefined ? {} : { audit: deps.audit }),
+    ...(deps.inject?.wakeTimings?.coalesceMs === undefined ? {} : { coalesceMs: deps.inject.wakeTimings.coalesceMs }),
+    ...(deps.inject?.wakeTimings?.pollMs === undefined ? {} : { pollMs: deps.inject.wakeTimings.pollMs }),
+    ...(deps.inject?.wakeTimings?.retryDelaysMs === undefined ? {} : { retryDelaysMs: deps.inject.wakeTimings.retryDelaysMs }),
+    ...(deps.inject?.wakeTimings?.armTimeoutMs === undefined ? {} : { armTimeoutMs: deps.inject.wakeTimings.armTimeoutMs }),
+    log,
+  });
+  const wakeRegistry = wakes;
+
   service = new ComputerV2Service({
-    helper, policy, settings, diffBases, recentApps, adapters, browsers,
-    telemetry: new AutomationTelemetry(deps.home),
+    helper, policy, settings, diffBases, recentApps, adapters, browsers, wakes: wakeRegistry,
+    site: {
+      ...(deps.dangerousDomainsAdded === undefined ? {} : { dangerousDomainsAdded: deps.dangerousDomainsAdded }),
+      ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
+    },
+    sessionCwd: (sessionId) => deps.store.meta(sessionId).cwd ?? undefined,
+    telemetry,
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
     // The worker never reads the daemon's own home, whatever its profile would otherwise allow (review I2).
@@ -298,6 +483,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
         privateEventPath: computerUsePrivateEventPathFrom(s),
         headlessEnabled: computerUseHeadlessEnabledFrom(s),
         webmcp: computerUseWebMcpFrom(s),
+        wakes: computerUseWakesFrom(s),
         helper: helperStatus,
         browsers: browsers.listRows().map((r) => ({ id: r.id, name: r.name, connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) })),
       };
@@ -353,7 +539,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     setSettings(p) {
       writeSettings((s) => setComputerUseFlags(s, p));
+      // Turned off from the app: the armed triggers end now, not at the next poll.
+      if (p.wakes === false || p.enabled === false) wakeRegistry.checkSettings();
     },
+    wakesArmed: (sessionId) => wakeRegistry.countFor(sessionId),
+    wakesCancel: (sessionId, wakeId) => wakeRegistry.cancel(sessionId, wakeId, "user"),
   };
 
   return {
@@ -365,6 +555,12 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     browsers,
     backends,
     browserLink,
+    headless,
+    wakes: wakeRegistry,
+    sessionArchived(sessionId) {
+      wakeRegistry.sessionEnded(sessionId);
+      browsers.sessionArchived(sessionId);
+    },
     observe(event) {
       diffBases.observe(event);
       adapters.observe(event);
@@ -380,8 +576,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       }
     },
     stop() {
+      // The armed triggers stay in `wakes.json` (the next boot's `restart`); their backends let go first.
+      wakeRegistry.stop();
       svc.stop();
       browserLink.stop();
+      headless.stop();
       helper.close();
     },
   };

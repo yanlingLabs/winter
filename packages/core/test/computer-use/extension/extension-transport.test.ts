@@ -315,3 +315,50 @@ describe("Phase 3: the members an extension's hello names", () => {
     expect(downloads).toEqual([["418", { id: "dl1", state: "done", name: "report.csv", bytes: 12, path: "/x/report.csv", mime: "text/csv" }]]);
   });
 });
+
+describe("1.2.0 — wake triggers' watches (feature watch)", () => {
+  const spec = { watchId: "wk_0123456789ab", kind: "clicked" as const, pill: "Winter continues when you click “Submit”", expiresAt: 1, initial: "refuse" as const };
+
+  test("offered only when the hello names watch", () => {
+    expect(harness().t.watch).toBeUndefined();
+    const h = harness({}, ["watch"]);
+    expect(typeof h.t.watch).toBe("function");
+    expect(typeof h.t.unwatch).toBe("function");
+    expect(typeof h.t.onWatchEvent).toBe("function");
+  });
+
+  test("watch → watch.arm { tabKey, spec } and the watcher's answer; unwatch → watch.cancel; a malformed answer is refused", async () => {
+    const h = harness({}, ["watch"]);
+    const p = h.t.watch!("418", spec);
+    expect(h.sent.at(-1)).toMatchObject({ method: "watch.arm", params: { tabKey: "418", spec } });
+    h.answer({ ok: true, installed: "new", doc: 12.5, met: false });
+    expect(await p).toEqual({ ok: true, installed: "new", doc: 12.5, met: false });
+    const q = h.t.watch!("418", { ...spec, watchId: "wk_00000000000b" });
+    h.answer({ ok: true });
+    expect((await q.catch((e: TransportError) => e)) as TransportError).toMatchObject({ code: "cdp_error" });
+    const u = h.t.unwatch!("418", spec.watchId);
+    expect(h.sent.at(-1)).toMatchObject({ method: "watch.cancel", params: { tabKey: "418", watchId: spec.watchId } });
+    h.answer({});
+    await u;
+  });
+
+  test("watch.event reaches the engine only for a watch it keeps, its fields checked and capped; the link dropping loses every watch", async () => {
+    const h = harness({}, ["watch"]);
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    h.t.onWatchEvent!((k, e) => seen.push([k, e as unknown as Record<string, unknown>]));
+    const p = h.t.watch!("418", spec);
+    h.answer({ ok: true, installed: "new", doc: 1 });
+    await p;
+    h.notify("watch.event", { tabKey: "418", watchId: "wk_ffffffffffff", outcome: "fired", at: 5 });
+    h.notify("watch.event", { tabKey: "418", watchId: spec.watchId, outcome: "exploded", at: 5 });
+    h.notify("watch.event", { tabKey: "418", watchId: spec.watchId, outcome: "pressed", at: 5, url: "x".repeat(5_000), value: "typed", own: true });
+    expect(seen).toEqual([["418", { watchId: spec.watchId, outcome: "pressed", at: 5, url: "x".repeat(4_096), own: true }]]);
+    const q = h.t.watch!("419", { ...spec, watchId: "wk_00000000000c" });
+    h.answer({ ok: true, installed: "new", doc: 1 });
+    await q;
+    h.t.disconnect();
+    expect(seen.slice(1).map(([k, e]) => [k, e.watchId, e.outcome, e.reason]).sort()).toEqual([
+      ["418", spec.watchId, "lost", "disconnected"], ["419", "wk_00000000000c", "lost", "disconnected"],
+    ]);
+  });
+});

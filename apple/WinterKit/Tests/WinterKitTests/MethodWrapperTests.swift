@@ -66,6 +66,29 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(created.sessionId, "s_chat")
     }
 
+    /// Cowork (session door): the protocol RECOGNISES `cowork`, so the value rides `session.create` verbatim —
+    /// and the daemon refuses it for every role with the Cowork `unsupported_topology` error, which must
+    /// surface as a typed `RpcError` (never a decode failure, never a silently-created session). Nothing in
+    /// the app asks for it today (`SessionMode.cowork.isAvailable == false`); this pins the client half so a
+    /// future caller meets the refusal as data.
+    func testCreateSessionCoworkIsSentVerbatimAndTheTypedRefusalSurfaces() async throws {
+        let (client, t) = try await connected()
+
+        async let create = client.createSession(scope: "global", mode: "cowork")
+        let request = decodeLine(try await waitForSent(t, count: 2)[1])
+        XCTAssertEqual(request["method"] as? String, "session.create")
+        XCTAssertEqual((request["params"] as? [String: Any])?["mode"] as? String, "cowork")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(request["id"] as! Int),"error":{"code":-32602,"message":"Cowork unavailable","data":{"code":"unsupported_topology"}}}"#)
+        do {
+            _ = try await create
+            XCTFail("a refused create must not return a session")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.code, -32602)
+            XCTAssertEqual(error.message, "Cowork unavailable")
+            XCTAssertEqual(error.data?["code"]?.stringValue, "unsupported_topology")
+        }
+    }
+
     /// mac-chat-parity T7 (spec §5): `model`/`effort` are additive to `createSession` — the
     /// new-chat page's pre-session choice, **stamped at create** rather than set after it. The
     /// create-then-set alternative leaves a window in which a turn fired immediately after the
@@ -284,6 +307,40 @@ final class MethodWrapperTests: XCTestCase {
             try await client.send(sessionId: "s_1", text: "plain")
         }
         XCTAssertNil((plainReq["params"] as? [String: Any])?["images"], "no images → no key")
+        XCTAssertNil((plainReq["params"] as? [String: Any])?["files"], "no files → no key")
+    }
+
+    /// Code-mode file attachments (2026-10-13): `files` rides beside `images` as `[{n, path}]` on send and steer,
+    /// omitted when empty; `supportsAttachmentFiles` reads the hello's `attachment-files`.
+    func testSendAndSteerCarryFilesOnlyWhenPresentAndTheHelloAnnouncesThem() async throws {
+        let (older, _) = try await connected()
+        let olderSupports = await older.supportsAttachmentFiles
+        XCTAssertFalse(olderSupports)
+        XCTAssertEqual(WinterClient.featureAttachmentFiles, "attachment-files")
+
+        let t = ScriptedTransport()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "wrap-test")
+        async let c: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true,"serverVersion":"x","protocolVersion":0,"features":["image-original-paths","attachment-files"]}}"#)
+        try await c
+        let supports = await client.supportsAttachmentFiles
+        XCTAssertTrue(supports)
+
+        let files = [SessionEvent.UserMessageFileRef(n: 2, path: "/Users/me/My Report.pdf"),
+                     SessionEvent.UserMessageFileRef(n: 1, path: "/Users/me/app")]
+        let (sendReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{"seq":4}"#) {
+            try await client.send(sessionId: "s_1", text: "[File #2] [File #1]", files: files)
+        }
+        let sendParams = sendReq["params"] as? [String: Any]
+        XCTAssertNil(sendParams?["images"])
+        let sent = sendParams?["files"] as? [[String: Any]]
+        XCTAssertEqual(sent?.map { $0["n"] as? Int }, [2, 1])
+        XCTAssertEqual(sent?.map { $0["path"] as? String }, ["/Users/me/My Report.pdf", "/Users/me/app"])
+        let (steerReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"injected":true}"#) {
+            try await client.steer(sessionId: "s_1", text: "[File #2]", files: [files[0]])
+        }
+        XCTAssertEqual(((steerReq["params"] as? [String: Any])?["files"] as? [[String: Any]])?.first?["n"] as? Int, 2)
     }
 
     /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear
@@ -368,6 +425,47 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(sessions[0].providerId, "anthropic")
         XCTAssertNil(sessions[1].runtimeKind, "absent on the wire decodes to nil")
         XCTAssertNil(sessions[1].providerId, "absent on the wire decodes to nil")
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): `listSessions()` threads `wakesArmed` — how many triggers the session has
+    /// armed (the row's "waiting for you" mark); absent on the wire (none, or an older daemon) decodes to nil.
+    func testListSessionsDecodesWakesArmed() async throws {
+        let (client, t) = try await connected()
+        let (_, sessions) = try await roundTrip(
+            t, sentIndex: 1,
+            result: #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":5,"lastSeq":9,"wakesArmed":2},{"sessionId":"s_2","scope":"global","createdAt":6,"lastSeq":1}]}"#
+        ) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(sessions[0].wakesArmed, 2)
+        XCTAssertNil(sessions[1].wakesArmed, "absent on the wire decodes to nil")
+    }
+
+    /// ComputerV2 wake triggers: the pill's [Stop waiting] — `computerUse.wakes.cancel {sessionId, wakeId}`, its
+    /// `cancelled` decoded (false: the trigger had already ended), and a refusal thrown as the daemon's `RpcError` (the
+    /// pill shows its message and lets the user try again).
+    func testCancelWakeEncodesTheIdsDecodesCancelledAndThrowsARefusal() async throws {
+        let (client, t) = try await connected()
+        let (req, cancelled) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"cancelled":true}"#) {
+            try await client.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        }
+        XCTAssertEqual(req["method"] as? String, "computerUse.wakes.cancel")
+        XCTAssertEqual(req["params"] as? [String: String], ["sessionId": "s_1", "wakeId": "wk_1a2b3c4d5e6f"])
+        XCTAssertTrue(cancelled)
+        let (_, already) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"cancelled":false}"#) {
+            try await client.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        }
+        XCTAssertFalse(already)
+        async let refused: Bool = client.cancelWake(sessionId: "s_1", wakeId: "wk_1a2b3c4d5e6f")
+        let sent = try await waitForSent(t, count: 4)
+        let third = decodeLine(sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(third["id"] as! Int),"error":{"code":-32001,"message":"computerUse.wakes.cancel is available to local clients only"}}"#)
+        do {
+            _ = try await refused
+            XCTFail("a refusal must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "computerUse.wakes.cancel is available to local clients only")
+        }
     }
 
     /// provider-correctness T4: `session.setEffort`'s wire shape — same required-but-nullable rule

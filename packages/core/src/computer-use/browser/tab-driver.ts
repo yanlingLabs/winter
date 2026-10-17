@@ -18,8 +18,11 @@ import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerAdvice } from "./page-runtime/rules";
+import { WAKE_LIMITS } from "../wakes/types";
+import type { WatchArmResult, WatchSpec, WatchWaitResult } from "./page-runtime/watch";
+import { ambiguousOptionSentence, comboShows, matchOption, noOptionSentence, pressTookEffect, WHOLE_VALUE_CAP } from "./page-runtime/widgets";
 import {
-  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
+  PAGE_RUNTIME_CALL, type RtWatchLocate, type RtCheck, type RtCheckFacts, type RtClassify, type RtComboOptions, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtInspect, type RtLink, type RtNode, type RtPoint, type RtSiteToolAnswer, type RtSiteTools, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
 import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
@@ -113,6 +116,7 @@ export function transportFailure(err: unknown, browserName: string): Error {
   if (!(err instanceof TransportError)) return err instanceof Error ? err : new Error(String(err));
   switch (err.code) {
     case "disconnected":
+      if (browserName === "Winter's headless browser") return new AutomationFailure("BrowserUnavailable", `Winter's headless browser can't be reached: ${err.message}`, true);
       return new AutomationFailure("BrowserUnavailable", browserName === "Winter's browser"
         ? "Winter's browser can't be reached: Winter isn't running — ask the user to open Winter"
         : `${browserName} can't be reached: Winter for Chrome is not connected — ask the user`, true);
@@ -153,7 +157,7 @@ export class TabDriver {
   /** The model's own goto/close on an agent tab: a `beforeunload` dialog it raises is accepted. */
   agentNavigating = false;
   dialog?: Dialog;
-  fileChooser?: { frameId: string; mode: string };
+  fileChooser?: { frameId: string; mode: string; backendNodeId?: number; ref?: number };
 
   private attached = false;
   /** Times the tab's document was replaced underneath the engine or its debugger let go while the tab lived (an idle
@@ -194,6 +198,12 @@ export class TabDriver {
   private loadSeen?: string;
   private readonly pokes = new Set<() => void>();
   private readonly shots = new Map<string, ShotFrame>();
+  /** The tab's view as last synced (`syncView`): screenshots are stamped with it. */
+  private viewEpoch = 0;
+  /** The person's holds of the tab as last counted (`noteHolds`). */
+  private holdsSeen = 0;
+  /** Daemon lines owed to the agent's next primitive (`takeNotes`). */
+  private notes: string[] = [];
   private shotCounter = 0;
   /** The `uniqueId` each recently created context reported (`<session>:<id>` → uniqueId): the browser reports a world's
    *  creation BEFORE it answers the `Page.createIsolatedWorld` that made it, so the id is matched up afterwards. */
@@ -215,6 +225,36 @@ export class TabDriver {
   readonly listeners = new Set<(e: CdpEvent) => void>();
   /** Phase 3: a `download()` capture is armed on this tab (a download the page starts now is the capture's to say). */
   capturing = 0;
+  /** Wake triggers: told when the tab goes (`closed`, `crashed`, `stopped`, `detached_by_user`). */
+  readonly goneListeners = new Set<(reason: string) => void>();
+  /** Wake triggers armed on this tab now, either path (an agent tab waiting on the user is not closed at turn end). */
+  wakesArmed = 0;
+  /** Wake holders (`wake:<id>` → its session): the debugger path keeps the tab held while armed. */
+  readonly wakeHolders = new Map<string, string>();
+  /** WATCH-ONLY (wake triggers): while only `wake:` holders hold the tab, the attachment changes nothing the user sees
+   *  or does — no file-chooser interception, no focus emulation, no emulated screen size, no agent overlay, and (the
+   *  built-in browser, link feature `watchOnly`) none of Winter.app's native-UI holds. A primitive's hold turns them
+   *  back on; the tab drops back to watch-only when only wake holders remain. */
+  private watchMode = false;
+  private modeChain: Promise<void> = Promise.resolve();
+  /** A release (or the drop to watch-only) held back because it would dismiss a page dialog the user raised around a
+   *  wake trigger firing (`keepsDialogHeld`); done once the dialog closes. */
+  private deferredLeave = false;
+  /** When the open page dialog opened, and whether Winter's own input was in flight then. */
+  private dialogAt = 0;
+  private dialogOwn = false;
+  /** The open dialog is kept held for the session a wake trigger woke over it (`keepDialog`), until it closes. */
+  private dialogKept = false;
+  /** A held-back release with no holder left goes after this long anyway (a dialog nobody answers). */
+  private deferredTimer?: ReturnType<typeof setTimeout>;
+  /** Wake triggers: told when the drop to watch-only is held back by a page dialog the user raised that the built-in
+   *  browser holds unseen — the page is paused on it, and only a woken session can read and answer it. */
+  readonly pausedListeners = new Set<() => void>();
+  /** When a wake trigger on this tab last fired on the user's own action (the backend says). */
+  private userFiredAt = -Infinity;
+  private ownInputDepth = 0;
+  private ownInputStart = 0;
+  private readonly ownInputWindows: Array<[number, number]> = [];
 
   constructor(
     readonly backend: string,
@@ -229,13 +269,20 @@ export class TabDriver {
 
   // ── transport ───────────────────────────────────────────────────────────────────────────────────
 
-  async send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, session?: string, timeoutMs?: number): Promise<T> {
+  async send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, session?: string, timeoutMs?: number, o: { dialogRace?: boolean } = {}): Promise<T> {
     if (this.gone !== undefined) throw this.lost();
     // A page dialog pauses the page: input, and any read of the page, would be answered only once the dialog is — so
-    // nothing of the kind is sent while one is open (only the dialog's answer, navigation and closing are).
-    const pausable = method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate";
+    // nothing of the kind is sent while one is open (only the dialog's answer, navigation and closing are). A wake
+    // watch's long poll (`dialogRace: false`) only waits longer.
+    const pausable = o.dialogRace !== false && (method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate");
     if (pausable && this.dialog !== undefined) throw new AutomationFailure("TargetBusy", this.dialogBusySentence());
     const sent = this.transport.send<T>(this.tabKey, method, params, { ...(session === undefined ? {} : { cdpSessionId: session }), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+    // Winter's own input to the tab, from any session: what lands meanwhile (and just after) is never the user's.
+    if (OWN_INPUT_METHOD.test(method)) {
+      this.beginOwnInput();
+      const end = (): void => this.endOwnInput();
+      void sent.then(end, end);
+    }
     try {
       // A dialog opening while it is in flight: stop waiting at once — input counts as delivered; a read is TargetBusy.
       if (pausable) {
@@ -300,9 +347,16 @@ export class TabDriver {
     if (this.gone !== undefined) throw this.lost();
     if (this.releasing !== undefined) await this.releasing;
     this.holders.add(sessionId);
-    this.lastUsed = this.now();
-    if (this.attached) return;
+    this.clearDeferred();
+    if (!isWakeHolder(sessionId)) this.lastUsed = this.now();
+    if (this.attached) { await this.syncMode(); return; }
     this.attaching ??= (async () => {
+      // Let go meanwhile (the backend said "stopped" — a headless tab's person taking it over, an app parking its
+      // browser): this attach is not the tab held, whatever of it succeeded.
+      const detachesAtStart = this.detaches;
+      // Only wake holders: attached watch-only from the start (an idle detach recovered, a wake armed on a tab its
+      // session does not hold now).
+      this.watchMode = this.watchOnlyWanted;
       // Taken back after a hand-off: what the page logged while the user had it is replayed by the browser on
       // Runtime.enable / Log.enable, and is not Winter's to read.
       const handedOff = this.handedOffAt;
@@ -313,7 +367,7 @@ export class TabDriver {
       try {
         let info: { viewport: [number, number]; dpr: number } | undefined;
         for (let attempt = 0; info === undefined; attempt++) {
-          try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
+          try { info = await this.transport.attach(this.tabKey, { sessionId: this.sessionOf(sessionId), ...(this.watchMode ? { watchOnly: true } : {}) }); } catch (err) {
             if (err instanceof TransportError && err.code === "tab_gone") {
               const moved = movedTo(err);
               if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
@@ -329,10 +383,13 @@ export class TabDriver {
         const events = transportHasCdp3(this.transport) ? TAB_EVENTS : TAB_EVENTS.filter((e) => !PHASE3_TAB_EVENTS.has(e));
         try { await this.transport.subscribe(this.tabKey, events); } catch (err) { throw transportFailure(err, this.browserName); }
         await this.enableDomains(undefined);
-        // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
-        await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
-        if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+        if (!this.watchMode) {
+          // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
+          await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+          if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+        }
         await this.loadTopFrame();
+        if (this.detaches !== detachesAtStart) throw new AutomationFailure("TargetBusy", "the tab was let go while Winter was taking it — try again");
         this.attached = true;
         this.handedOffAt = undefined;
       } finally {
@@ -375,7 +432,8 @@ export class TabDriver {
     await this.send("Network.enable", { ...NETWORK_BUFFERS }, session).catch(() => undefined);
     // The browser's own page messages (failed loads, CSP, interventions) for console().
     if (transportHasCdp3(this.transport)) await this.send("Log.enable", {}, session).catch(() => undefined);
-    await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
+    // Watch-only: the user's own file chooser opens as the browser opens it.
+    if (!this.watchMode) await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session).catch(() => undefined);
   }
 
@@ -386,8 +444,18 @@ export class TabDriver {
    */
   async release(sessionId: string): Promise<void> {
     this.holders.delete(sessionId);
-    if (this.holders.size > 0 || !this.attached) return;
+    if (!this.attached) return;
+    // Only wake holders left: the tab drops back to watch-only.
+    if (this.holders.size > 0) { await this.syncMode(); return; }
+    if (this.keepsDialogHeld()) { this.deferLeave(); return; }
+    await this.detachNow();
+  }
+
+  private async detachNow(): Promise<void> {
+    if (!this.attached || this.holders.size > 0) return;
     this.attached = false;
+    this.watchMode = false;
+    this.clearDeferred();
     this.overlay(false);
     this.resetDocumentState(false);
     this.releasing = (async () => {
@@ -409,6 +477,127 @@ export class TabDriver {
     await this.releasing;
   }
 
+  // ── watch-only (wake triggers) ────────────────────────────────────────────────────────────────
+
+  /** Only wake triggers hold the tab: the attachment must change nothing the user sees or does. */
+  private get watchOnlyWanted(): boolean {
+    return this.holders.size > 0 && [...this.holders].every(isWakeHolder);
+  }
+
+  /** The session a holder stands for (a wake holder's is the session that armed it) — what a hold is made for. */
+  private sessionOf(holder: string): string {
+    return isWakeHolder(holder) ? this.wakeHolders.get(holder) ?? holder : holder;
+  }
+
+  /** Is the tab attached watch-only now (tests, the backend)? */
+  get isWatchOnly(): boolean { return this.attached && this.watchMode; }
+
+  /** Bring the attachment's mode in line with its holders (serialized): watch-only while only wake holders hold it, a
+   *  primitive's full hold otherwise. The drop to watch-only waits while it would dismiss a page dialog the user raised
+   *  around a wake firing (`keepsDialogHeld`). */
+  private syncMode(): Promise<void> {
+    const run = async (): Promise<void> => {
+      for (let i = 0; i < 4; i++) {
+        if (!this.attached || this.gone !== undefined || this.holders.size === 0) return;
+        const want = this.watchOnlyWanted;
+        if (want === this.watchMode) return;
+        if (want) {
+          if (this.keepsDialogHeld()) {
+            this.deferLeave();
+            // The page is paused on a dialog Winter's browser holds unseen: the waits on it can't go on — their
+            // backend wakes the session over it (and keeps it held for that session).
+            for (const l of [...this.pausedListeners]) { try { l(); } catch { /* a listener never breaks the driver */ } }
+            return;
+          }
+          await this.enterWatch();
+        } else {
+          await this.leaveWatch();
+        }
+      }
+    };
+    const p = this.modeChain.then(run, run);
+    this.modeChain = p.catch(() => undefined);
+    return p;
+  }
+
+  private async enterWatch(): Promise<void> {
+    this.watchMode = true;
+    this.clearDeferred();
+    this.overlay(false);
+    const holder = [...this.holders][0]!;
+    // The built-in browser first: Winter.app's native-UI holds come off (the page's dialogs, prompts, file choosers,
+    // downloads, context menus, keys and focus are the user's again).
+    if (this.transport.watchOnlyHolds === true) {
+      try { await this.transport.attach(this.tabKey, { sessionId: this.sessionOf(holder), watchOnly: true }); } catch { /* the tab or the link went */ }
+    }
+    for (const s of [...this.runtimeOn]) await this.send("Page.setInterceptFileChooserDialog", { enabled: false }, s === "" ? undefined : s).catch(() => undefined);
+    await this.send("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => undefined);
+    if (this.emulating) {
+      await this.send("Emulation.clearDeviceMetricsOverride").catch(() => undefined);
+      this.emulating = false;
+    }
+  }
+
+  private async leaveWatch(): Promise<void> {
+    this.watchMode = false;
+    const holder = [...this.holders].find((h) => !isWakeHolder(h)) ?? [...this.holders][0]!;
+    if (this.transport.watchOnlyHolds === true) {
+      try { await this.transport.attach(this.tabKey, { sessionId: this.sessionOf(holder) }); } catch (err) { throw transportFailure(err, this.browserName); }
+    }
+    for (const s of [...this.runtimeOn]) await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, s === "" ? undefined : s).catch(() => undefined);
+    await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
+    if (this.viewportWish !== undefined) await this.applyViewport(this.viewportWish).catch(() => undefined);
+  }
+
+  /**
+   * Would letting go of the hold now (a full detach, or the drop to watch-only) dismiss a page dialog the USER raised?
+   * The built-in browser holds a dialog unseen while it fully holds the tab, and taking its native-UI holds off
+   * dismisses it as Cancel. So a dialog that opened outside Winter's own input is kept while a wake trigger waits on the
+   * tab (the user acted there while the arming run still held it: their submit's confirm(), say — its wake's report is
+   * stuck behind the paused page), for the session a trigger woke over it (`keepDialog`), and around a trigger firing on
+   * the user's action: that session reads it in state() and answers it — the wake path never cancels it. Any other
+   * dialog goes as it always did (a cancelled wait's included).
+   */
+  private keepsDialogHeld(): boolean {
+    if (this.transport.family !== "winter" || this.watchMode || this.dialog === undefined || this.dialogOwn) return false;
+    return this.wakeHolders.size > 0 || this.dialogKept || Math.abs(this.dialogAt - this.userFiredAt) <= WAKE_DIALOG_KEEP_MS;
+  }
+
+  /** The backend woke a session over the open dialog: it stays held for that session until it closes. */
+  keepDialog(): void { if (this.dialog !== undefined) this.dialogKept = true; }
+
+  /** Is the open dialog one the built-in browser holds unseen (a full hold) that the user raised? */
+  get dialogHeldUnseen(): { type: string } | undefined {
+    if (this.transport.family !== "winter" || !this.attached || this.watchMode || this.dialog === undefined || this.dialogOwn) return undefined;
+    return { type: this.dialog.type };
+  }
+
+  private deferLeave(): void {
+    this.deferredLeave = true;
+    if (this.holders.size > 0 || this.deferredTimer !== undefined) return;
+    // Nobody holds it any more: a dialog nobody answers is let go (dismissed) after a while all the same.
+    this.deferredTimer = setTimeout(() => { this.deferredTimer = undefined; if (this.deferredLeave && this.holders.size === 0) void this.detachNow(); }, WAKE_DIALOG_HOLD_MAX_MS);
+  }
+
+  private clearDeferred(): void {
+    this.deferredLeave = false;
+    if (this.deferredTimer !== undefined) { clearTimeout(this.deferredTimer); this.deferredTimer = undefined; }
+  }
+
+  /** The backend: a wake trigger on this tab fired on the user's own action at `at`. */
+  noteUserFired(at: number): void {
+    this.userFiredAt = Math.max(this.userFiredAt, at);
+  }
+
+  /** A held-back release or drop to watch-only, once the dialog that held it back closed. */
+  private settleDeferred(): void {
+    this.dialogKept = false;
+    if (!this.deferredLeave) return;
+    this.clearDeferred();
+    if (this.holders.size === 0) void this.detachNow();
+    else void this.syncMode();
+  }
+
   /** When the tab was handed to the user (`handOff`), until Winter attaches again. */
   private handedOffAt: number | undefined;
 
@@ -421,7 +610,7 @@ export class TabDriver {
   async handOff(): Promise<void> {
     this.handedOffAt = this.now();
     this.holders.clear();
-    await this.release("");
+    await this.detachNow();
   }
 
   /** The tab's top-level frame (a download capture tells its document from a frame's). */
@@ -439,18 +628,22 @@ export class TabDriver {
 
   // ── events ──────────────────────────────────────────────────────────────────────────────────────
 
-  onEvent(e: CdpEvent): void {
+  /** One event of the tab. `person`: the user holds the tab in Winter's panel (a headless tab, lane H3) — the page is still
+   *  followed (its frames, navigations, dialogs), but what it logs, loads or downloads meanwhile is the person's and never
+   *  reaches `console()`, `network()` or the state's download line. */
+  onEvent(e: CdpEvent, o: { person?: boolean } = {}): void {
     const p = e.params as Record<string, any>;
     const session = e.cdpSessionId;
+    const person = o.person === true;
     for (const l of [...this.listeners]) {
       try { l(e); } catch { /* a listener never breaks the driver */ }
     }
     switch (e.method) {
       case "Runtime.consoleAPICalled": case "Runtime.exceptionThrown": case "Log.entryAdded": case "Network.responseReceived":
-        this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
+        if (!person) this.devtools.onEvent(e.method, p, session, (id) => this.isWinterContext(id, session));
         break;
       case "Page.downloadWillBegin": {
-        if (this.capturing > 0) break; // the armed capture says what became of it
+        if (this.capturing > 0 || person) break; // the armed capture says what became of it; the person's is theirs
         const name = typeof p.suggestedFilename === "string" && p.suggestedFilename.length > 0 ? p.suggestedFilename : "a file";
         if (this.uncaughtDownloads.length < 5) this.uncaughtDownloads.push(name.slice(0, 120));
         break;
@@ -511,6 +704,9 @@ export class TabDriver {
           break;
         }
         const okRef = this.nextRef++;
+        this.dialogAt = this.now();
+        this.dialogOwn = this.ownInputNow;
+        this.dialogKept = false;
         this.dialog = {
           type, message: typeof p.message === "string" ? p.message : "", okRef,
           ...(type === "alert" ? {} : { cancelRef: this.nextRef++ }),
@@ -521,9 +717,11 @@ export class TabDriver {
       }
       case "Page.javascriptDialogClosed":
         this.dialog = undefined;
+        // A release held back for it goes now.
+        if (session === undefined) this.settleDeferred();
         break;
       case "Page.fileChooserOpened":
-        this.fileChooser = { frameId: String(p.frameId ?? ""), mode: String(p.mode ?? "selectSingle") };
+        this.fileChooser = { frameId: String(p.frameId ?? ""), mode: String(p.mode ?? "selectSingle"), ...(typeof p.backendNodeId === "number" ? { backendNodeId: p.backendNodeId } : {}) };
         break;
       case "Runtime.executionContextCreated": {
         const c = (p.context ?? {}) as { id: number; name?: string; uniqueId?: string; auxData?: { frameId?: string } };
@@ -558,12 +756,12 @@ export class TabDriver {
       case "Network.requestWillBeSent":
         this.inflight.add(`${session ?? ""}:${String(p.requestId)}`);
         this.lastRequestAt = this.now();
-        this.devtools.onEvent(e.method, p, session, () => false);
+        if (!person) this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Network.loadingFinished":
       case "Network.loadingFailed":
         this.inflight.delete(`${session ?? ""}:${String(p.requestId)}`);
-        this.devtools.onEvent(e.method, p, session, () => false);
+        if (!person) this.devtools.onEvent(e.method, p, session, () => false);
         break;
       case "Target.attachedToTarget": {
         const child = typeof p.sessionId === "string" ? p.sessionId : undefined;
@@ -591,11 +789,14 @@ export class TabDriver {
       }
       case "Inspector.targetCrashed":
         this.gone ??= "crashed";
+        for (const l of [...this.goneListeners]) {
+          try { l("crashed"); } catch { /* a listener never breaks the driver */ }
+        }
         break;
       case "Inspector.detached":
         // The tab's debugger was let go (idle, or the target swapped) while the tab lives: attach again on the next
         // primitive; its world, and so every ref, will be new.
-        if (session === undefined) { this.attached = false; this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
+        if (session === undefined) { this.attached = false; this.watchMode = false; this.clearDeferred(); this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
         break;
       default:
         break;
@@ -612,10 +813,15 @@ export class TabDriver {
   }
 
   onGone(reason: string): void {
+    for (const l of [...this.goneListeners]) {
+      try { l(reason); } catch { /* a listener never breaks the driver */ }
+    }
     if (reason === "stopped") {
       // The tab's browser was stopped or its debugger let go (the app parked it; the extension idled out): the tab
       // itself may live on — the next primitive attaches again; its document (and so every ref) is new.
       this.attached = false;
+      this.watchMode = false;
+      this.clearDeferred();
       this.detaches++;
       this.holders.clear();
       this.resetDocumentState(true);
@@ -717,6 +923,9 @@ export class TabDriver {
   // ── the page runtime ───────────────────────────────────────────────────────────────────────────
 
   private top(): FrameRec {
+    // A tab lost while a primitive was waiting on it (its browser died mid-wait: the failed command reset the document
+    // first) is lost, not "not ready".
+    if (this.gone !== undefined) throw this.lost();
     const rec = this.topFrameId === undefined ? undefined : this.frames.get(this.topFrameId);
     if (rec === undefined) throw new AutomationFailure("TargetBusy", "the page is not ready yet — try again in a moment", true);
     return rec;
@@ -760,13 +969,13 @@ export class TabDriver {
   }
 
   /** One page-runtime op in `rec`'s current document. */
-  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number; staleMessage?: string } = {}): Promise<T> {
+  private async callIn<T>(rec: FrameRec, op: string, arg: unknown, opts: { byValue?: boolean; expectRt?: string; timeoutMs?: number; staleMessage?: string; dialogRace?: boolean } = {}): Promise<T> {
     await this.ensureRuntime(rec);
     if (opts.expectRt !== undefined && rec.rtId !== opts.expectRt) throw new AutomationFailure("StaleRef", opts.staleMessage ?? "that element is gone (the page changed) — call state()");
     const res = await this.send<{ result?: { value?: unknown; objectId?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } }>("Runtime.callFunctionOn", {
       functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: op }, { value: arg ?? null }],
       returnByValue: opts.byValue !== false, awaitPromise: true,
-    }, rec.ctxSession, opts.timeoutMs);
+    }, rec.ctxSession, opts.timeoutMs, opts.dialogRace === false ? { dialogRace: false } : {});
     if (res.exceptionDetails !== undefined) {
       const msg = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? "error";
       const m = /stale:(\d+)/.exec(msg);
@@ -873,7 +1082,7 @@ export class TabDriver {
     const budget = { frames: 0 };
     if (within !== undefined) {
       const { rec, id, rtId } = this.resolve(within);
-      const snap = await this.callIn<RtSnapshot>(rec, "snapshot", { within: id }, { expectRt: rtId });
+      const snap = await this.callIn<RtSnapshot>(rec, "snapshot", { within: id, valueCap: WHOLE_VALUE_CAP }, { expectRt: rtId });
       const focus: { ref?: number } = {};
       const roots = await this.convert(rec, snap.roots, budget, 0, focus);
       return { roots, ...(snap.unread === undefined ? {} : { unread: snap.unread }) };
@@ -901,6 +1110,7 @@ export class TabDriver {
       const t: TabNode = {
         ref: this.refFor(rtId, n.id), role: n.role, states: n.states ?? [], children: [],
         ...(n.name === undefined ? {} : { name: n.name }), ...(n.value === undefined ? {} : { value: n.value }),
+        ...(n.valueLength === undefined ? {} : { valueLength: n.valueLength }),
         ...(n.showEmptyValue === true ? { showEmptyValue: true } : {}), ...(n.secure === true ? { secure: true } : {}),
         ...(n.level === undefined ? {} : { level: n.level }), ...(n.href === undefined ? {} : { href: n.href }),
         ...(n.origin === undefined ? {} : { origin: n.origin }), ...(n.items === undefined ? {} : { items: n.items }),
@@ -933,9 +1143,11 @@ export class TabDriver {
 
   private header(settle?: { settled: boolean; ms: number }, focusedRef?: number, unread?: number, scoped = false): TabHeader {
     const notes: string[] = [];
-    if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
+    if (this.fileChooser !== undefined) notes.push(`the page asked for a file — use upload(${this.fileChooser.ref === undefined ? "ref" : `[${this.fileChooser.ref}]`}, paths) on its file input`);
     for (const name of this.takeUncaughtDownloads()) {
-      notes.push(`the page started a download of "${redactText(name)}" — ${this.browserName === "Winter's browser" ? "it was not saved" : `${this.browserName} saved it in its own Downloads folder`}; download(ref) saves a file into this session`);
+      notes.push(this.browserName === "Winter's headless browser"
+        ? `the page started a download of "${redactText(name)}" — it was not saved (Winter's headless browser doesn't download files)`
+        : `the page started a download of "${redactText(name)}" — ${this.browserName === "Winter's browser" ? "it was not saved" : `${this.browserName} saved it in its own Downloads folder`}; download(ref) saves a file into this session`);
     }
     return {
       title: this.shownTitle, url: this.shownUrl,
@@ -967,8 +1179,10 @@ export class TabDriver {
     if (tools !== undefined && tools.total > 0) header.siteTools = tools;
     // A whole-tab, non-full state folds what is out of view first; `full` is everything the read saw (its cap said).
     // What the print shows is kept with the snapshot: a later diff surfaces what it had folded.
-    const printed = printedState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true);
-    const snap = makeSnapshot(id, tree.roots, o.within, printed.shown);
+    // A read within one element shows its values whole up to 8,000 characters.
+    const valueCap = o.within === undefined ? undefined : WHOLE_VALUE_CAP;
+    const printed = printedState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true, valueCap);
+    const snap = makeSnapshot(id, tree.roots, o.within, printed.shown, valueCap);
     if (toolsSig !== undefined) snap.siteTools = toolsSig;
     let text = printed.text;
     let isDiff = false;
@@ -996,13 +1210,18 @@ export class TabDriver {
     return { text, snapshotId: id, isDiff, ...(settle === undefined ? {} : { settled: settle.settled, waitedMs: settle.ms }) };
   }
 
-  async find(q: RtFindQuery): Promise<Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }>> {
+  async find(q: RtFindQuery): Promise<Array<{ ref: number; role: string; name?: string; value?: string; valueLength?: number; states?: string[] }>> {
     this.requireNoDialog("find()");
     const top = this.top();
-    const out: Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }> = [];
+    const out: Array<{ ref: number; role: string; name?: string; value?: string; valueLength?: number; states?: string[] }> = [];
     const visit = async (rec: FrameRec, depth: number): Promise<void> => {
       const found = await this.callFresh<RtFound[]>(rec, "find", q);
-      for (const f of found) if (out.length < 50) out.push({ ref: this.refFor(rec.rtId!, f.id), role: f.role, ...(f.name === undefined ? {} : { name: f.name }), ...(f.value === undefined ? {} : { value: f.value }), ...(f.states === undefined ? {} : { states: f.states }) });
+      for (const f of found) {
+        if (out.length < 50) {
+          out.push({ ref: this.refFor(rec.rtId!, f.id), role: f.role, ...(f.name === undefined ? {} : { name: f.name }), ...(f.value === undefined ? {} : { value: f.value }),
+            ...(f.valueLength === undefined ? {} : { valueLength: f.valueLength }), ...(f.states === undefined ? {} : { states: f.states }) });
+        }
+      }
       if (depth >= MAX_FRAME_DEPTH) return;
       for (const c of [...this.frames.values()].filter((x) => x.parentId === rec.frameId)) {
         try { await visit(c, depth + 1); } catch { /* an unreadable frame */ }
@@ -1238,7 +1457,7 @@ export class TabDriver {
   /** A ref → where to click in the top frame's viewport (CSS px), after the actionability check; `picker` names the
    *  native window pressing it would open (the engine refuses that). `guardMenu`: a right-click follows — the
    *  element's frame stops the browser's own context menu from opening (unless the page shows its own). */
-  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string }> {
+  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string; check?: RtCheckFacts; chooser?: true }> {
     const { rec, id, rtId } = this.resolve(ref);
     const guard = o.guardMenu === true ? { guardMenu: true } : {};
     const p = await this.callIn<RtPoint>(rec, "point", { id, scroll: true, ...guard }, { expectRt: rtId });
@@ -1254,7 +1473,7 @@ export class TabDriver {
         }
       }
     }
-    const picker = p.picker === undefined ? {} : { picker: p.picker };
+    const picker = { ...(p.picker === undefined ? {} : { picker: p.picker }), ...(p.check === undefined ? {} : { check: p.check }), ...(p.chooser === true ? { chooser: true as const } : {}) };
     if (rec.parentId === undefined) return { x: p.x, y: p.y, ...picker };
     // In a child frame: every ancestor brings this point into its view, then the frame paints where it now is
     // before the click (an out-of-process frame is hit-tested by where it last painted).
@@ -1289,7 +1508,44 @@ export class TabDriver {
     const shot = shotId === undefined ? undefined : this.shots.get(shotId);
     if (shot === undefined) throw new AutomationFailure("NotAllowed", "a point is pixels in this tab's latest screenshot — take tab.screenshot() first, or use an element ref");
     if (shot.fullPage === true) throw new AutomationFailure("NotAllowed", "a full-page screenshot is for looking — take an ordinary screenshot() to act at a point, or use an element ref");
+    if ((shot.viewEpoch ?? 0) !== this.viewEpoch) throw new AutomationFailure("NotAllowed", VIEW_RESIZED_POINT);
     return toCss(shot, x, y);
+  }
+
+  /**
+   * Lane H3: the view a headless tab's page is laid out in, as the pool last heard it from the helper — a tab shown in
+   * Winter's panel is laid out in the panel's size while the person looks (watching too), and gets the agent's 1280×800
+   * back after. Called at the start of every primitive. A change since the last call (a new `epoch`): the Points of
+   * every screenshot taken before it are refused (`VIEW_RESIZED_POINT`) — refs keep working — and the one daemon line
+   * for the state header is answered, once.
+   */
+  syncView(view: { epoch: number; width: number; height: number; watched: boolean } | undefined): void {
+    const epoch = view?.epoch ?? 0;
+    if (epoch === this.viewEpoch) return;
+    this.viewEpoch = epoch;
+    if (view === undefined) return;
+    this.notes.push(view.watched ? `the view is now ${view.width}×${view.height} while the user watches`
+      : `the view is back to ${view.width}×${view.height} — the user stopped watching`);
+  }
+
+  /**
+   * Lane H3: the person's holds of a headless tab in Winter's panel, as the pool counts them (and when the latest
+   * began). A new one since the last call: what the browser replays on Winter's next attach from then on is hidden, as
+   * after a hand-off (`ensureAttached`), and the next primitive says once that the user had the tab — what the page
+   * logged and loaded meanwhile was theirs (`onEvent`'s `person`). Called at the start of every primitive.
+   */
+  noteHolds(holds: { count: number; since: number } | undefined): void {
+    if (holds === undefined || holds.count === this.holdsSeen) return;
+    this.holdsSeen = holds.count;
+    if (!this.attached) this.handedOffAt = Math.min(this.handedOffAt ?? holds.since, holds.since);
+    this.notes.push(PERSON_HELD_NOTE);
+  }
+
+  /** The daemon lines owed to the agent since its last primitive (each said once). */
+  takeNotes(): string[] {
+    const notes = this.notes;
+    this.notes = [];
+    return notes;
   }
 
   // ── Phase 3: element readers ───────────────────────────────────────────────────────────────────
@@ -1399,9 +1655,74 @@ export class TabDriver {
     return await this.callIn<RtLink>(rec, "linkOf", { id }, { expectRt: rtId });
   }
 
-  async checkState(ref: number): Promise<{ checkable: boolean; checked?: boolean }> {
+  /** Is `ref` a check box, radio or switch (or a label or role-less wrapper of one), and is it checked? `control`: the
+   *  ref to press instead (the native control a role-less wrapper holds). */
+  async checkState(ref: number): Promise<{ checkable: boolean; checked?: boolean; control?: number; kind?: "checkbox" | "radio" }> {
     const { rec, id, rtId } = this.resolve(ref);
-    return await this.callIn<{ checkable: boolean; checked?: boolean }>(rec, "checkState", { id }, { expectRt: rtId });
+    const r = await this.callIn<{ checkable: boolean; checked?: boolean; control?: number; kind?: "checkbox" | "radio" }>(rec, "checkState", { id }, { expectRt: rtId });
+    return { checkable: r.checkable, ...(r.checked === undefined ? {} : { checked: r.checked }), ...(r.kind === undefined ? {} : { kind: r.kind }),
+      ...(r.control === undefined ? {} : { control: this.refFor(rtId, r.control) }) };
+  }
+
+  /** After a press on a check box: its state, read until it took (a page may apply it a moment later) or `ms` passed.
+   *  Undefined when it can no longer be read (the press replaced the element). */
+  async checkAfterPress(ref: number, kind: "checkbox" | "radio", before: boolean, ms = 600, signal?: AbortSignal): Promise<boolean | undefined> {
+    const t0 = this.now();
+    for (;;) {
+      let now: boolean | undefined;
+      try { now = (await this.checkState(ref)).checked; } catch { return undefined; }
+      if (now === undefined) return undefined;
+      if (pressTookEffect(kind, before, now) || this.now() - t0 >= ms || signal?.aborted === true) return now;
+      await sleep(60);
+    }
+  }
+
+  /** Where the keyboard focus is now (a ref and its label), and a focused field's selection — what a key just did. */
+  async focusNow(): Promise<{ ref?: number; label?: string; selection?: { start: number; end: number; length: number } }> {
+    let rec = this.top();
+    let c = await this.callFresh<RtClassify>(rec, "classify", {});
+    for (let depth = 0; c.kind === "frame" && depth < MAX_FRAME_DEPTH; depth++) {
+      await this.ensureOwners(rec);
+      const child = this.childFrameFor(rec, c.id);
+      if (child === undefined) break;
+      rec = child;
+      c = await this.callFresh<RtClassify>(rec, "classify", {});
+    }
+    const f = await this.callFresh<{ id?: number; role?: string; name?: string; selection?: { start: number; end: number; length: number } }>(rec, "focusInfo", null);
+    if (f.id === undefined || rec.rtId === undefined) return {};
+    const ref = this.refFor(rec.rtId, f.id);
+    return { ref, label: `[${ref}] ${f.role ?? "element"}${f.name === undefined ? "" : ` "${f.name}"`}`, ...(f.selection === undefined ? {} : { selection: f.selection }) };
+  }
+
+  /** The file input a file chooser the page opened belongs to, as a ref (`Page.fileChooserOpened`'s `backendNodeId`,
+   *  resolved in its frame's winter world) — undefined when none is open or it can't be placed. */
+  async fileChooserInput(): Promise<number | undefined> {
+    const fc = this.fileChooser;
+    if (fc?.backendNodeId === undefined) return undefined;
+    const rec = this.frames.get(fc.frameId) ?? this.top();
+    try {
+      await this.ensureRuntime(rec);
+      if (rec.ctx === undefined || rec.rtId === undefined) return undefined;
+      const node = await this.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: fc.backendNodeId, executionContextId: rec.ctx }, rec.ctxSession);
+      const objectId = node.object.objectId;
+      if (objectId === undefined) return undefined;
+      try {
+        const res = await this.send<{ result?: { value?: unknown } }>("Runtime.callFunctionOn", {
+          functionDeclaration: PAGE_RUNTIME_CALL, objectId, arguments: [{ value: "owner" }, { value: null }], returnByValue: true,
+        }, rec.ctxSession);
+        if (typeof res.result?.value !== "number") return undefined;
+        const ref = this.refFor(rec.rtId, res.result.value);
+        if (this.fileChooser === fc) fc.ref = ref;
+        return ref;
+      } finally {
+        void this.send("Runtime.releaseObject", { objectId }, rec.ctxSession).catch(() => undefined);
+      }
+    } catch { return undefined; }
+  }
+
+  /** Wait (bounded) for the page to open a file chooser — a press on a button whose handler clicks a file input. */
+  async waitFileChooser(ms: number, signal?: AbortSignal): Promise<boolean> {
+    return await this.waitUntil(() => this.fileChooser !== undefined, ms, signal);
   }
 
   /** An element's box in the top frame's viewport (CSS px), brought into view first (for a screenshot of it).
@@ -1581,16 +1902,61 @@ export class TabDriver {
     return r.handled;
   }
 
-  async setValue(ref: number, value: string): Promise<string> {
+  /** `o.live`: called before each press (the run's liveness check); `o.signal`: the run's. */
+  async setValue(ref: number, value: string, o: { live?: () => void; signal?: AbortSignal } = {}): Promise<string> {
     const { rec, id, rtId } = this.resolve(ref);
     const r = await this.callIn<{ ok: true; shown: string } | { ok: false; reason: string; control?: number }>(rec, "setValue", { id, value }, { expectRt: rtId });
     if (!r.ok) {
       if (r.reason === "secure_field") throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
       if (r.reason === "gone") throw stale(ref);
       if (r.reason === "text") throw textLeafError(ref, "setValue", r.control === undefined ? undefined : this.refFor(rtId, r.control));
+      if (r.reason === "combobox") return await this.chooseOption(ref, value, o);
       throw new Error(`[${ref}]: ${r.reason}`);
     }
     return r.shown;
+  }
+
+  /** `setValue` on a combo box that pops up a list (an ARIA select): open it with a press where the page takes one,
+   *  wait for its list (often drawn in an overlay elsewhere in the document), press the option the value names, and
+   *  check the combo box now shows it. A list Winter opened is closed again (Escape) when nothing in it matches. */
+  private async chooseOption(ref: number, value: string, o: { live?: () => void; signal?: AbortSignal }): Promise<string> {
+    const { rec, id, rtId } = this.resolve(ref);
+    const read = async (): Promise<RtComboOptions> => await this.callIn<RtComboOptions>(rec, "comboOptions", { id }, { expectRt: rtId });
+    const poll = async (until: (c: RtComboOptions) => boolean, ms: number): Promise<RtComboOptions> => {
+      const t0 = this.now();
+      for (;;) {
+        const c = await read();
+        if (until(c) || this.now() - t0 >= ms || o.signal?.aborted === true) return c;
+        await sleep(60);
+      }
+    };
+    let info = await read();
+    if (!info.combo) throw new Error(`[${ref}]: that element takes no value — click it, or type into a text field`);
+    let opened = false;
+    if (!info.open) {
+      const at = await this.pointForRef(ref);
+      if (at.picker !== undefined) throw new AutomationFailure("Refused", pickerSentence(ref, at.picker));
+      o.live?.();
+      await this.click(at, {});
+      opened = true;
+      info = await poll((c) => c.combo && c.open, 1_500);
+      if (!info.combo || !info.open) throw new Error(`[${ref}]: pressing the combo box did not open its list — state() shows what it did`);
+    }
+    const close = async (): Promise<void> => { if (opened) await this.press(parseCombo("escape"), 1).catch(() => undefined); };
+    const m = matchOption(info.options, value);
+    if ("none" in m) { await close(); throw new Error(`[${ref}]: ${noOptionSentence(value, info.options)}`); }
+    if ("ambiguous" in m) { await close(); throw new Error(`[${ref}]: ${ambiguousOptionSentence(value, m.ambiguous)}`); }
+    const want = m.option;
+    if (want.disabled === true) { await close(); throw new Error(`[${ref}]: the option "${want.text}" is disabled`); }
+    if (info.options.find((x) => x.selected === true) === want && comboShows(info.value, want.text)) { await close(); return want.text; }
+    const at = await this.pointForRef(this.refFor(rtId, want.id));
+    o.live?.();
+    await this.click(at, {});
+    const after = await poll((c) => c.combo && comboShows(c.value, want.text), 1_000);
+    if (!after.combo || !comboShows(after.value, want.text)) {
+      throw new Error(`[${ref}]: pressed the option "${want.text}" but the combo box shows ${after.combo && after.value !== undefined ? `"${after.value}"` : "nothing"} — state() shows what happened`);
+    }
+    return want.text;
   }
 
   async select(ref: number, text: string, o: { before?: string; after?: string; caret?: "start" | "end" }): Promise<void> {
@@ -1743,6 +2109,116 @@ export class TabDriver {
     }
   }
 
+  // ── wake triggers (`wake/backend.ts`) ─────────────────────────────────────────────────────────────
+
+  /** Winter's own input to this tab starts (the engine marks each act primitive; `send` each input or navigation). */
+  beginOwnInput(): void {
+    if (this.ownInputDepth++ === 0) this.ownInputStart = this.now();
+  }
+
+  endOwnInput(): void {
+    if (this.ownInputDepth === 0) return;
+    if (--this.ownInputDepth > 0) return;
+    const end = this.now();
+    this.ownInputWindows.push([this.ownInputStart, end]);
+    while (this.ownInputWindows.length > 32 || (this.ownInputWindows.length > 0 && end - this.ownInputWindows[0]![1] > 60_000)) this.ownInputWindows.shift();
+  }
+
+  /** Was Winter's own input to this tab in flight at `at` (epoch ms), or did it end at most the grace before? */
+  ownInputAt(at: number): boolean {
+    const grace = WAKE_LIMITS.ownInputGraceMs;
+    if (this.ownInputDepth > 0 && at >= this.ownInputStart - 50) return true;
+    return this.ownInputWindows.some(([start, end]) => at >= start - 50 && at <= end + grace);
+  }
+
+  /** Winter's own input to this tab is in flight now, or ended within the grace. */
+  get ownInputNow(): boolean { return this.ownInputAt(this.now()); }
+
+  /** A watch's frame: its document's page runtime instance. Gone (another document, or the world went with a detach):
+   *  `WakeWorldGone`. */
+  private wakeRec(frame: WakeFrame): FrameRec {
+    const rec = this.frames.get(frame.frameId);
+    if (rec === undefined || rec.rtId !== frame.rtId || rec.ctx === undefined) throw new WakeWorldGone();
+    return rec;
+  }
+
+  /** Read an element for a watch, in its own frame's runtime. */
+  async wakeLocate(ref: number): Promise<{ frame: WakeFrame; found: RtWatchLocate }> {
+    this.requireNoDialog("wakeWhen()");
+    const { rec, id, rtId } = this.resolve(ref);
+    const found = await this.callIn<RtWatchLocate>(rec, "watchLocate", { id }, { expectRt: rtId });
+    return { frame: { frameId: rec.frameId, rtId, top: rec.parentId === undefined }, found };
+  }
+
+  /** The top frame's runtime now (made if need be), for a watch of the page itself. */
+  async wakeTopFrame(): Promise<WakeFrame> {
+    const top = this.top();
+    await this.ensureRuntime(top);
+    if (top.rtId === undefined) throw new WakeWorldGone();
+    return { frameId: top.frameId, rtId: top.rtId, top: true };
+  }
+
+  /** A frame's runtime as it is now (another world of the same document after a detach, or another document), for a
+   *  watch armed again by its locator. */
+  async wakeFrameAgain(frameId: string): Promise<WakeFrame> {
+    const rec = this.frames.get(frameId);
+    if (rec === undefined) throw new WakeWorldGone();
+    await this.ensureRuntime(rec);
+    if (rec.rtId === undefined) throw new WakeWorldGone();
+    return { frameId, rtId: rec.rtId, top: rec.parentId === undefined };
+  }
+
+  /** Arm a watch in `frame`'s world (`ref`: its element, when it is still that runtime's; else the spec's locator). */
+  async wakeArm(frame: WakeFrame, spec: WatchSpec, ref?: number): Promise<WatchArmResult> {
+    const rec = this.wakeRec(frame);
+    let id: number | undefined;
+    if (ref !== undefined) {
+      try { const r = this.resolve(ref); if (r.rtId === frame.rtId) id = r.id; } catch { id = undefined; }
+    }
+    try {
+      return await this.callIn<WatchArmResult>(rec, "watchArm", { spec, ...(id === undefined ? {} : { id }) }, { expectRt: frame.rtId });
+    } catch (err) {
+      if (isContextGone(err) || (err instanceof AutomationFailure && err.kind === "StaleRef")) throw new WakeWorldGone();
+      if (err instanceof Error && /secure_field/.test(err.message)) throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
+      throw err;
+    }
+  }
+
+  /** The long poll: the watch events of `frame`'s world after `ack`. A page dialog only delays it. `live`: the watches
+   *  the daemon keeps — the watcher drops any other (one cancelled while its disarm could not reach the page). */
+  async wakeWait(frame: WakeFrame, ack: number, maxMs: number, world?: string, live?: readonly string[]): Promise<WatchWaitResult> {
+    const rec = this.wakeRec(frame);
+    let res: { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+    try {
+      res = await this.send("Runtime.callFunctionOn", {
+        functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx,
+        arguments: [{ value: "watchWait" }, { value: { ack, maxMs, ...(world === undefined ? {} : { world }), ...(live === undefined ? {} : { live: [...live] }) } }],
+        returnByValue: true, awaitPromise: true,
+      }, rec.ctxSession, maxMs + 15_000, { dialogRace: false });
+    } catch (err) {
+      if (isContextGone(err) || /navigated or closed/i.test(err instanceof Error ? err.message : "") || (err instanceof AutomationFailure && err.kind === "StaleRef")) throw new WakeWorldGone();
+      throw err;
+    }
+    if (res.exceptionDetails !== undefined) {
+      const msg = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? "error";
+      if (isContextGone(new Error(msg))) throw new WakeWorldGone();
+      throw new Error(`the page runtime failed (${msg.split("\n")[0]!.slice(0, 200)})`);
+    }
+    const v = res.result?.value as WatchWaitResult | undefined;
+    if (v === undefined || typeof v.world !== "string" || !Array.isArray(v.events) || !Array.isArray(v.alive)) throw new WakeWorldGone();
+    if (this.wakeRec(frame) !== rec) throw new WakeWorldGone();
+    return v;
+  }
+
+  /** Best effort: the watch leaves `frame`'s world (its ring and pill with it). */
+  async wakeDisarm(frame: WakeFrame, watchId: string): Promise<void> {
+    try {
+      const rec = this.wakeRec(frame);
+      // Sent even while a page dialog is open (it lands once the dialog closes); the next poll's `live` list is the belt.
+      await this.callIn(rec, "watchDisarm", { watchId }, { expectRt: frame.rtId, timeoutMs: 5_000, dialogRace: false });
+    } catch { /* the world (or the tab) went: the watch went with it */ }
+  }
+
   // ── screenshots ────────────────────────────────────────────────────────────────────────────────
 
   private async viewportSize(): Promise<[number, number]> {
@@ -1756,6 +2232,9 @@ export class TabDriver {
   /** One JPEG at the budget; its frame is kept so a Point maps back to CSS px. */
   async screenshot(budget: ScreenshotBudget, region: CssRect | undefined, quality: number, o: { fullPage?: boolean } = {}): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
     this.requireNoDialog("screenshot()");
+    // The view as known BEFORE the capture: a change that lands meanwhile makes the shot's Points refused (never the
+    // other way round).
+    const epoch = this.viewEpoch;
     const m = await this.send<{ cssVisualViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number }; cssContentSize?: { width: number; height: number } }>("Page.getLayoutMetrics");
     const vv = m.cssVisualViewport;
     if (o.fullPage === true) return await this.fullPageShot(budget, quality, vv, m.cssContentSize);
@@ -1777,7 +2256,7 @@ export class TabDriver {
       scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
     }
     const shotId = `tshot${++this.shotCounter}`;
-    this.shots.set(shotId, { width: size!.width, height: size!.height, css });
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, viewEpoch: epoch });
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
@@ -1785,6 +2264,7 @@ export class TabDriver {
   /** The whole document (its height capped at FULL_PAGE_MAX_CSS), scaled to the budget. For looking only: a Point in it
    *  is refused (`pointForShot`). */
   private async fullPageShot(budget: ScreenshotBudget, quality: number, vv: { clientWidth: number; clientHeight: number }, content: { width: number; height: number } | undefined): Promise<{ shotId: string; imageBase64: string; width: number; height: number; css: CssRect }> {
+    const epoch = this.viewEpoch;
     const css: CssRect = { x: 0, y: 0, width: Math.max(1, Math.round(content?.width ?? vv.clientWidth)), height: Math.max(1, Math.min(FULL_PAGE_MAX_CSS, Math.round(content?.height ?? vv.clientHeight))) };
     let scale = scaleFor(css, this.dpr, budget);
     let shot: { data: string } | undefined;
@@ -1800,14 +2280,40 @@ export class TabDriver {
       scale *= Math.min(budget.maxLongEdge / Math.max(size.width, size.height), 0.97);
     }
     const shotId = `tshot${++this.shotCounter}`;
-    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true });
+    this.shots.set(shotId, { width: size!.width, height: size!.height, css, fullPage: true, viewEpoch: epoch });
     if (this.shots.size > 16) this.shots.delete(this.shots.keys().next().value!);
     return { shotId, imageBase64: shot!.data, width: size!.width, height: size!.height, css };
   }
 }
 
+/** Wake triggers: a watch's frame, by the page runtime instance (its world in one document) it was armed in. */
+export interface WakeFrame { frameId: string; rtId: string; top: boolean }
+
+/** A watch's world is gone: another document, or the world went with a detach — arm it again (by its locator). */
+export class WakeWorldGone extends Error {
+  constructor() { super("the watch's page world is gone"); this.name = "WakeWorldGone"; }
+}
+
+/** Winter's own input to a tab, for the wake triggers' rule (only the user's action counts). */
+const OWN_INPUT_METHOD = /^(?:Input\.|Page\.navigate$|Page\.reload$|Page\.navigateToHistoryEntry$)/;
+
+/** A wake trigger's holder (`wake:<id>`), never a session's. */
+export function isWakeHolder(holder: string): boolean { return holder.startsWith("wake:"); }
+
+/** A page dialog that opened this close to a wake firing on the user's action is taken for theirs (`keepsDialogHeld`). */
+export const WAKE_DIALOG_KEEP_MS = 10_000;
+/** A kept dialog nobody holds the tab for any more is let go (dismissed) after this long. */
+export const WAKE_DIALOG_HOLD_MAX_MS = 10 * 60_000;
+
 /** A full-page screenshot's document height at most this (CSS px). */
 export const FULL_PAGE_MAX_CSS = 10_000;
+
+/** Lane H3: said once after the person held a headless tab in Winter's panel (their console and network were theirs). */
+export const PERSON_HELD_NOTE = "the user had this tab in Winter's panel since you last used it — what the page logged and loaded while they had it is left out of console() and network()";
+
+/** Lane H3: a Point of a screenshot taken before the tab's view changed (a headless tab shown in Winter's panel follows the
+ *  panel's size while the user looks, and gets the agent's view back after). */
+export const VIEW_RESIZED_POINT = "the tab was resized while the user was looking — take a new screenshot before using a Point";
 
 /** The user's own tab is never moved for a picture: `fullPage` lays the page out again, `within` would scroll. */
 export const USER_TAB_FULL_PAGE = "screenshot({ fullPage }) lays the page out again, which can move what the user sees — on the user's own tab Winter takes only what is in view: screenshot(), or text() for the whole page";

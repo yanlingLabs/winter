@@ -239,6 +239,448 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(poster.keyDowns.count, 2)
     }
 
+    /// Round 13's dogfood item 13: a field scrolled out of view is scrolled to before the focus click — the click goes
+    /// to where it is now, never to a point outside the window (it would land on something else).
+    func testAFieldScrolledOutOfViewIsScrolledToBeforeTheFocusClick() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.put(field, [kAXFocusedAttribute: kCFBooleanFalse])
+        var below = CGPoint(x: 20, y: 1400), size = CGSize(width: 300, height: 24)
+        ax.put(field, [kAXPositionAttribute: AXValueCreate(.cgPoint, &below)!, kAXSizeAttribute: AXValueCreate(.cgSize, &size)!])
+        ax.refuses.insert("\(token(field)):\(kAXPressAction)")
+        ax.onPerform = { [unowned self] action in
+            guard action == "\(token(field)):AXScrollToVisible" else { return }
+            var into = CGPoint(x: 20, y: 300)
+            ax.put(field, [kAXPositionAttribute: AXValueCreate(.cgPoint, &into)!])
+        }
+        poster.onPost = { [unowned self] e in if e.type == .leftMouseUp { ax.focus(pid: pid, on: field) } }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        XCTAssertTrue(ax.performed.contains("\(token(field)):AXScrollToVisible"), "scrolled to first")
+        let downs = poster.entries.filter { $0.type == .leftMouseDown }
+        XCTAssertEqual(downs.count, 1)
+        XCTAssertEqual(downs.first?.location.y ?? 0, 312, accuracy: 1, "at the field's centre where it is now")
+    }
+
+    /// Round 14 (the Material probe): Space or Return INTO a control a press acts on (a check box, a button) is ONE
+    /// press — never a press to place the focus and then the key (a check box toggled twice, a button pressed twice);
+    /// another key into it is refused with the way.
+    /// Round 16, P1 (the live hands-off regression): a type act checked I6 at its start; the user then clicked into Name;
+    /// the act's focus placement must NOT take them back to Email — and a burst in flight stops before its next key.
+    func testAnActInFlightNeverMovesTheFocusOnceTheUserWorks() async throws {
+        safari(fieldOwner: pid)
+        sys.front = pid  // the app in front: the user works in it
+        core.testUserInput(pid: pid, switching: false)  // their click into another field of it
+        XCTAssertThrowsError(try core.placeFocus(field, target, ref: ref(field))) { e in
+            XCTAssertEqual((e as? CUError)?.data?["reason"], .string("user_working"))
+        }
+        XCTAssertTrue(ax.performed.isEmpty, "no press to place the focus: \(ax.performed)")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click")
+    }
+
+    /// Round 16's editor-target seed 51: the target stole the front mid-burst while the focus blip's reroute was on it;
+    /// the user's keys went to THEIR app — no work in the target. Round 17 (the review of round 16, MEDIUM): the REROUTE's
+    /// own decision marks the work — a key it lets through into the target is work there even while the guardian's place
+    /// is still elsewhere (the session tap can see the key before the reroute decides it); one it sends to their place is
+    /// not. Its destination changes between the two keys, as the one rule's answer does.
+    func testTheReroutesOwnDecisionMarksTheWorkNeverTheFrontApp() throws {
+        safari(fieldOwner: pid)
+        core.guardianLock.withLock { core.guardianCore.begin(view: CUGuardedView(app: 1, space: nil)) }
+        let installer = FakeKeyTapInstaller()
+        var destination: pid_t = 1
+        let reroute = CUKeyReroute(target: pid, victim: 1, installer: installer, post: { _, _ in }, destination: { destination })
+        reroute.onPassThrough = core.passThroughWorkMarker(pid)  // as the focus blip installs it
+        XCTAssertTrue(reroute.begin())
+        core.activeKeyReroute = reroute
+        sys.front = pid  // the target took the front by itself
+        let key = keyEvent(stamped: false)  // the user's hardware key
+        // The session tap sees the key first: the reroute decides, nothing is marked from the front app.
+        core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
+        XCTAssertNil(reroute.handle(key), "sent to their place, dropped from the target")
+        XCTAssertFalse(core.userIsWorking(in: pid), "their key went to their place, not into the target")
+        // The one rule now says the target (their own move, heard by the rule) — while the guardian's place is still U: the
+        // key goes through, and that is work in it.
+        destination = pid
+        core.noteUserInteraction(type: .keyDown, flags: [], keycode: 0, location: nil, targetPid: Int64(pid))
+        XCTAssertNotNil(reroute.handle(key), "let through into the target")
+        XCTAssertTrue(core.userIsWorking(in: pid), "a key that reached the target is work in it")
+        _ = reroute.end()
+    }
+
+    func testABurstInFlightStopsBeforeItsNextKeyOnceTheUserWorks() async throws {
+        safari(fieldOwner: pid)
+        var downs = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            downs += 1
+            if downs == 2 { sys.front = pid; core.testUserInput(pid: pid, switching: false) }  // they start working after two keys
+        }
+        do {
+            _ = try await act(.type(CUTypeAction(text: "\t\tabcd")))  // keys (a tab: never an insert)
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+            XCTAssertTrue(e.message.hasPrefix("typed 2 of 6 characters"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2, "nothing after they started working")
+    }
+
+    /// Round 17 (the review of round 16, H1 — proved there with a failing test): the agent's focusing click lands, the user's
+    /// own click into the app lands right after it, and `typeText`'s accessibility insert still went into the field. The
+    /// act's write guard stops it: nothing written after they started working.
+    func testAnAccessibilityInsertIsNeverWrittenOnceTheUserWorksAfterTheFocusClick() async throws {
+        safari(fieldOwner: pid, settableText: true)
+        _ = searchHasFocus()
+        poster.onPost = { [unowned self] e in
+            guard e.type == .leftMouseUp else { return }
+            ax.focus(pid: pid, on: field)
+            sys.front = pid
+            core.testUserInput(pid: pid, switching: false)  // their click into the app, right after the agent's
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+        }
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "the agent's focusing click went (before)")
+        XCTAssertFalse(ax.written.contains("\(token(field)):\(kAXSelectedTextAttribute)"), "no insert after they started: \(ax.written)")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key either")
+    }
+
+    /// Round 17 (the review of round 16, H1 — proved there with a failing test): AXPress does not focus the field, the user
+    /// clicks into the app during the 400 ms web wait, and the caret-placing selection write put the focus back on the field
+    /// (WebKit focuses the control it selects in). Never written now.
+    func testTheCaretPlacingSelectionWriteIsNeverMadeOnceTheUserWorksDuringTheWait() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.setActions(field, [kAXPressAction])
+        ax.makeSettable(field, kAXSelectedTextRangeAttribute)
+        ax.onPerform = { [unowned self] what in
+            guard what == "\(token(field)):\(kAXPressAction)" else { return }
+            sys.front = pid
+            core.testUserInput(pid: pid, switching: false)  // their click during the wait (the press placed nothing)
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+        }
+        XCTAssertTrue(ax.performed.contains("\(token(field)):\(kAXPressAction)"), "the press went (before)")
+        XCTAssertFalse(ax.written.contains("\(token(field)):\(kAXSelectedTextRangeAttribute)"), "no caret write after: \(ax.written)")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click either")
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    /// Round 17: the guard stops what STARTS something (a key down, a click) — the up of a down already sent still goes, so
+    /// nothing is left held down in the app; a lone up for a down that never went is not sent.
+    func testOnceStoppedAnUpGoesOnlyForADownThatWent() async throws {
+        safari(fieldOwner: pid)
+        var downs = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            downs += 1
+            if downs == 2 { sys.front = pid; core.testUserInput(pid: pid, switching: false) }  // between key 2's down and up
+        }
+        do {
+            _ = try await act(.type(CUTypeAction(text: "\t\tabcd")))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2)
+        XCTAssertEqual(poster.entries.filter { $0.type == .keyUp }.count, 2, "each down that went has its up")
+    }
+
+    func testSpaceIntoACheckBoxIsOnePressNeverTwo() async throws {
+        safari(fieldOwner: pid)
+        let cb = fakeElement(93_090)
+        ax.add(cb, role: kAXCheckBoxRole, title: "Accept terms", frame: CGRect(x: 20, y: 120, width: 20, height: 20),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!, kAXValueAttribute: 0])
+        ax.setActions(cb, [kAXPressAction])
+        let r = try await act(.key(CUKeyAction(combo: "space", into: ref(cb))))
+        XCTAssertEqual(ax.performed.filter { $0.hasSuffix(":AXPress") }.count, 1, "one press: \(ax.performed)")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key sent after it")
+        XCTAssertTrue(r.detail?.contains("is that one press") ?? false, r.detail ?? "")
+        // Return does not toggle a check box (natively it doesn't); a key that types is refused.
+        for combo in ["return", "a"] {
+            do {
+                _ = try await act(.key(CUKeyAction(combo: combo, into: ref(cb))))
+                XCTFail("\(combo): refused")
+            } catch let e as CUError {
+                XCTAssertTrue(e.message.contains(combo == "return" ? "Return does not toggle" : "would press it"), e.message)
+            }
+        }
+        XCTAssertEqual(ax.performed.filter { $0.hasSuffix(":AXPress") }.count, 1, "still one press")
+    }
+
+    /// Round 14's live run (a regression of the one-press rule): End aimed INTO a web button scrolls the page as before —
+    /// sent to where the focus is, never refused, and never after a focusing press of the button.
+    func testANavigationKeyIntoAButtonGoesToTheFocusWithoutPressingIt() async throws {
+        safari(fieldOwner: pid)
+        let button = fakeElement(93_091)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!])
+        ax.setActions(button, [kAXPressAction])
+        _ = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the button never pressed: \(ax.performed)")
+        XCTAssertTrue(poster.keyDowns.contains { $0.keycode == Int64(kVK_End) }, "End sent")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no focusing click either")
+    }
+
+    /// Review of round 15, HIGH #2: only a NAVIGATION key aimed at a button goes to where the focus is; any other key
+    /// would act on whatever has it (Delete deletes in the focused field, ⇧Return submits a form) — refused, nothing sent.
+    func testANonNavigationKeyIntoAButtonIsRefused() async throws {
+        safari(fieldOwner: pid)
+        let button = fakeElement(93_092)
+        ax.add(button, role: kAXButtonRole, title: "Remove", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!])
+        ax.setActions(button, [kAXPressAction])
+        for (combo, rep) in [("delete", 1), ("forwarddelete", 1), ("shift+return", 1), ("alt+left", 1), ("a", 1), ("return", 2), ("cmd+down", 1)] {
+            do {
+                _ = try await act(.key(CUKeyAction(combo: combo, into: ref(button), repeat: rep)))
+                XCTFail("\(combo) ×\(rep): refused")
+            } catch let e as CUError {
+                XCTAssertTrue(e.message.contains("would press it"), "\(combo): \(e.message)")
+            }
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing sent")
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "nothing pressed")
+    }
+
+    /// Round 16, P2 (the live "scroll by keys" failure in a WKWebView): End aimed at a button while the keyboard focus is
+    /// OUTSIDE its page — the page gets the focus by a click on a blank spot of it (never the button's press), then End.
+    func testANavigationKeyGivesThePageTheFocusByABlankSpotFirst() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let button = fakeElement(93_093)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: web])
+        ax.setActions(button, [kAXPressAction])
+        ax.put(web, [kAXChildrenAttribute: [field, button]])
+        _ = searchHasFocus()  // the focus outside the page (the browser's own field)
+        let r = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        let downs = poster.entries.filter { $0.type == .leftMouseDown }
+        // (A click, and one more when the fake's focus never shows it landed — a real page takes the first.)
+        XCTAssertFalse(downs.isEmpty, "a click to give the page the focus")
+        for d in downs {
+            XCTAssertFalse(CGRect(x: 20, y: 160, width: 120, height: 30).contains(d.location), "never on the button: \(d.location)")
+            XCTAssertFalse(CGRect(x: 20, y: 60, width: 300, height: 24).contains(d.location), "nor on a field: \(d.location)")
+        }
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the button never pressed: \(ax.performed)")
+        // The fake page never shows the focus arriving (a background WKWebView did the same, run138): End is done to the
+        // page over accessibility instead — its last element brought into view.
+        XCTAssertTrue(r.detail?.contains("the page had no keyboard focus, so end was done over accessibility") ?? false, r.detail ?? "")
+        XCTAssertTrue(ax.performed.contains("\(token(button)):AXScrollToVisible"), "\(ax.performed)")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key into whatever has the focus")
+    }
+
+    /// Round 17 (the review of round 16, MEDIUM): the accessibility fallback's "last element scrolled into view" is
+    /// verified — an element that still reads outside what the page shows is said to be unconfirmed.
+    func testTheFallbacksScrollIntoViewIsVerifiedNotAssumed() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let button = fakeElement(93_096), footer = fakeElement(93_097)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: web])
+        ax.setActions(button, [kAXPressAction])
+        ax.add(footer, role: "AXGroup", frame: CGRect(x: 0, y: 5_000, width: 900, height: 40), extra: [kAXParentAttribute: web])
+        ax.put(web, [kAXChildrenAttribute: [field, button, footer]])
+        _ = searchHasFocus()
+        // The page ignores the request: the footer stays far below.
+        let r = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(ax.performed.contains("\(token(footer)):AXScrollToVisible"), "\(ax.performed)")
+        XCTAssertTrue(r.detail?.contains("not confirmed") ?? false, r.detail ?? "")
+        // It moves into view: said so.
+        ax.onPerform = { [unowned self] what in
+            guard what == "\(token(footer)):AXScrollToVisible" else { return }
+            var p = CGPoint(x: 0, y: 500)
+            ax.put(footer, [kAXPositionAttribute: AXValueCreate(.cgPoint, &p)!])
+        }
+        let again = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(again.detail?.contains("its last element scrolled into view") ?? false, again.detail ?? "")
+    }
+
+    /// Round 17 (the review of round 16, MEDIUM): a blank spot is never one a link covers from inside a `display:contents`
+    /// wrapper (no box of its own) or from a positioned child outside its parent's box.
+    func testABlankSpotIsNeverUnderALinkOutsideItsParentsBox() throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!   // (0, 50, 900, 550); the window (0, 0, 900, 600)
+        let wrapper = fakeElement(93_098), link = fakeElement(93_099), box = fakeElement(93_100), popup = fakeElement(93_101)
+        // The first candidate (the page's bottom-left, inset 6): a link inside a zero-size wrapper covers it.
+        ax.add(wrapper, role: "AXGroup", frame: CGRect(x: 0, y: 0, width: 0, height: 0), extra: [kAXParentAttribute: web])
+        ax.add(link, role: "AXLink", title: "Footer link", frame: CGRect(x: 0, y: 580, width: 60, height: 20), extra: [kAXParentAttribute: wrapper])
+        ax.put(wrapper, [kAXChildrenAttribute: [link]])
+        // The second (bottom-right): a positioned button outside its small parent's box.
+        ax.add(box, role: "AXGroup", frame: CGRect(x: 10, y: 60, width: 10, height: 10), extra: [kAXParentAttribute: web])
+        ax.add(popup, role: kAXButtonRole, title: "Chat", frame: CGRect(x: 850, y: 570, width: 60, height: 40), extra: [kAXParentAttribute: box])
+        ax.setActions(popup, [kAXPressAction])
+        ax.put(box, [kAXChildrenAttribute: [popup]])
+        ax.put(web, [kAXChildrenAttribute: [field, wrapper, box]])
+        let spot = try XCTUnwrap(core.blankSpot(in: web, target))
+        XCTAssertFalse(CGRect(x: 0, y: 580, width: 60, height: 20).insetBy(dx: -2, dy: -2).contains(spot), "not under the link: \(spot)")
+        XCTAssertFalse(CGRect(x: 850, y: 570, width: 60, height: 40).insetBy(dx: -2, dy: -2).contains(spot), "not under the button: \(spot)")
+        XCTAssertEqual(spot, CGPoint(x: 450, y: 594), "the next candidate: the bottom's middle")
+    }
+
+    /// Round 17b (the review of round 17, M3): a real page has thousands of nodes — round 17's walk stopped at 800 and
+    /// proved no spot blank. The app's own hit test at each candidate needs no walk.
+    func testABlankSpotIsFoundOnAPageOfThousandsOfNodes() throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!   // (0, 50, 900, 550)
+        var kids: [AXUIElement] = [field]
+        for i in 0..<1_200 {
+            let e = fakeElement(Int32(94_000 + i))
+            ax.add(e, role: kAXStaticTextRole, frame: CGRect(x: 20, y: 100 + Double(i % 40) * 10, width: 200, height: 8), extra: [kAXParentAttribute: web])
+            kids.append(e)
+        }
+        ax.put(web, [kAXChildrenAttribute: kids])
+        let spot = try XCTUnwrap(core.blankSpot(in: web, target), "a blank spot on a large page")
+        XCTAssertFalse(CGRect(x: 20, y: 60, width: 300, height: 24).contains(spot))
+    }
+
+    /// Round 17b (the review of round 17, LOW): an app that reports NO focused element (Electron, Chromium often) is not
+    /// shown to have its focus outside the page — the refusal says what is known: it doesn't say where its focus is.
+    func testANavigationKeyRefusalWithNoFocusReportedSaysSo() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let link = fakeElement(93_102)
+        ax.add(link, role: "AXLink", title: "Read more", frame: CGRect(x: 20, y: 160, width: 120, height: 30), extra: [kAXParentAttribute: web])
+        ax.setActions(link, [kAXPressAction])
+        ax.put(web, [kAXChildrenAttribute: [field, link]])
+        ax.focus(pid: pid, on: nil)  // the app reports no focused element
+        do {
+            _ = try await act(.key(CUKeyAction(combo: "down", into: ref(link))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"), e.message)
+            XCTAssertTrue(e.message.contains("doesn't say where its keyboard focus is"), e.message)
+            XCTAssertFalse(e.message.contains("is outside the page"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    /// Round 17b (the review of round 17, LOW): the fallback's check reads until the page settles (a page scrolls a moment
+    /// after the request) — an element that arrives on the second read is "scrolled into view", not "unconfirmed".
+    func testTheFallbacksScrollCheckWaitsForThePageToSettle() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let button = fakeElement(93_103), footer = fakeElement(93_104)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30), extra: [kAXParentAttribute: web])
+        ax.setActions(button, [kAXPressAction])
+        ax.add(footer, role: "AXGroup", frame: CGRect(x: 0, y: 5_000, width: 900, height: 40), extra: [kAXParentAttribute: web])
+        ax.put(web, [kAXChildrenAttribute: [field, button, footer]])
+        _ = searchHasFocus()
+        var asked = false, reads = 0
+        ax.onPerform = { what in if what == "\(self.token(footer)):AXScrollToVisible" { asked = true } }
+        ax.onRead = { [unowned self] what in
+            guard asked, what == "\(token(footer)):\(kAXPositionAttribute)" else { return }
+            reads += 1
+            if reads == 2 { var p = CGPoint(x: 0, y: 500); ax.put(footer, [kAXPositionAttribute: AXValueCreate(.cgPoint, &p)!]) }
+        }
+        let r = try await act(.key(CUKeyAction(combo: "end", into: ref(button))))
+        XCTAssertTrue(r.detail?.contains("its last element scrolled into view") ?? false, r.detail ?? "")
+    }
+
+    /// Round 17 (the review of round 16, MEDIUM): ↓ aimed at a web link in Mail moved the message list — the key went to
+    /// a focus the act had just shown is outside the control's page. Now refused, nothing sent (End and its kin still have
+    /// the accessibility fallback above).
+    func testAnArrowIsNeverSentToAFocusShownOutsideTheControlsPage() async throws {
+        safari(fieldOwner: pid)
+        let web = ax.element(field, kAXParentAttribute)!
+        let link = fakeElement(93_094)
+        ax.add(link, role: "AXLink", title: "Read more", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: web])
+        ax.setActions(link, [kAXPressAction])
+        ax.put(web, [kAXChildrenAttribute: [field, link]])
+        _ = searchHasFocus()  // the focus outside the page (the message list, in Mail)
+        for combo in ["down", "tab", "escape"] {
+            do {
+                _ = try await act(.key(CUKeyAction(combo: combo, into: ref(link))))
+                XCTFail("\(combo): refused")
+            } catch let e as CUError {
+                XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"), "\(combo): \(e.message)")
+            }
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing sent to the focus outside the page")
+        XCTAssertTrue(ax.performed.filter { $0.hasSuffix(":AXPress") }.isEmpty, "the link never pressed")
+    }
+
+    /// Round 17 (the review of round 16, MEDIUM): a navigation key aimed at a press-acted control goes to where the focus
+    /// is ONCE per call, as its doc said — `repeat` is refused there (the safer way), nothing sent.
+    func testANavigationKeyAimedAtAControlIsSentOncePerCall() async throws {
+        safari(fieldOwner: pid)
+        let button = fakeElement(93_095)
+        ax.add(button, role: kAXButtonRole, title: "Web Button", frame: CGRect(x: 20, y: 160, width: 120, height: 30),
+               extra: [kAXParentAttribute: ax.element(field, kAXParentAttribute)!])
+        ax.setActions(button, [kAXPressAction])
+        do {
+            _ = try await act(.key(CUKeyAction(combo: "down", into: ref(button), repeat: 5)))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertTrue(e.message.contains("once per call"), e.message)
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+        _ = try await act(.key(CUKeyAction(combo: "down", into: ref(button))))
+        XCTAssertEqual(poster.keyDowns.count, 1, "once")
+    }
+
+    /// Review of round 13, MEDIUM #5: a paste the field took but shows otherwise (a formatting input, a rich target, a
+    /// block editor) is done and said — never Uncertain; Markdown is looked for rendered too.
+    func testAPasteTheFieldReformattedIsDoneAndSaid() async throws {
+        safari(fieldOwner: pid)
+        ax.put(field, [kAXValueAttribute: ""])
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "(555) 123-4567"]) }
+        }
+        let r = try await act(.paste(CUPasteAction(text: "5551234567", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("does not show the text exactly as sent") ?? false, r.detail ?? "")
+        XCTAssertEqual(CUPasteSequence.rendered(text: "**Note:** see [the doc](https://example.org)", format: .markdown), "Note: see the doc")
+        let ev = CUEditEvidence(readValue: { "Note: see the doc" }, nowMs: { 0 }, sleepMs: { _ in })
+        XCTAssertTrue(ev.wait(before: "", expect: "**Note:** see [the doc](https://example.org)", also: "Note: see the doc", capMs: 0))
+    }
+
+    /// Review of round 14, LOW #4: a field that changed WITHOUT the pasted text (a counter, an autosave) proves nothing —
+    /// Uncertain; the letters and digits of the pasted text decide.
+    func testAFieldThatChangedWithoutThePasteIsUncertain() async throws {
+        safari(fieldOwner: pid)
+        ax.put(field, [kAXValueAttribute: "draft"])
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "draft (saved)"]) }
+        }
+        do {
+            _ = try await act(.paste(CUPasteAction(text: "the report is done", into: ref(field))))
+            XCTFail("Uncertain")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), e.message)
+        }
+        XCTAssertTrue(CUCore.holdsPasted("(555) 123-4567", was: "", texts: ["5551234567"]), "a formatting input")
+        XCTAssertTrue(CUCore.holdsPasted("Note: see the doc", was: "", texts: ["**Note:** see [the doc](x)", "Note: see the doc"]))
+        XCTAssertFalse(CUCore.holdsPasted("draft (saved)", was: "draft", texts: ["the report is done"]))
+    }
+
+    /// Review of round 13, MEDIUM #4: the guards come before the scroll — a focus click refused (the app in front with
+    /// another of its windows key) has scrolled nothing.
+    func testARefusedFocusClickScrollsNothing() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.put(field, [kAXFocusedAttribute: kCFBooleanFalse])
+        var below = CGPoint(x: 20, y: 1400)
+        ax.put(field, [kAXPositionAttribute: AXValueCreate(.cgPoint, &below)!])
+        ax.refuses.insert("\(token(field)):\(kAXPressAction)")
+        sys.front = pid
+        let userWindow = fakeElement(93_098)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [userWindow, window], kAXFocusedWindowAttribute: userWindow])
+        do {
+            _ = try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(field)):AXScrollToVisible"), "nothing scrolled: \(ax.performed)")
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty)
+    }
+
     func testAMenuCommandMakesTheBoundWindowKeyThroughTheElementJustWorkedOn() async throws {
         safari(fieldOwner: pid)
         ax.makeSettable(field, kAXValueAttribute)
@@ -379,9 +821,15 @@ final class KeyboardTargetTests: XCTestCase {
         sys.contentProcesses[content] = pid
         ax.put(field, [kAXValueAttribute: "existing"])
         let start = Date()
-        let r = try await act(.paste(CUPasteAction(text: "hello")))
+        // Round 13's dogfood item 12: never a success — Uncertain (sent, not confirmed; never retried).
+        do {
+            _ = try await act(.paste(CUPasteAction(text: "hello")))
+            XCTFail("a field that shows its text and not the paste is no success")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), e.message)
+            XCTAssertTrue(e.message.contains("does not show the pasted text"), e.message)
+        }
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no 1.5 s wait for a web editor")
-        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
     }
 
     func testAnInsertThatCantBeReadBackInWebContentIsNeverTypedAgain() async throws {
@@ -604,6 +1052,10 @@ final class KeyboardTargetTests: XCTestCase {
 
     func testSeveralLinesIntoAFieldThatReadsBackGoAsAPasteAndSaySo() async throws {
         safari(fieldOwner: pid)
+        // The paste lands (⌘V): the field shows it — an unshown paste is Uncertain since round 13.
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyDown, e.flags.contains(.maskCommand) { ax.put(field, [kAXValueAttribute: "one\ntwo"]) }
+        }
         let r = try await act(.type(CUTypeAction(text: "one\ntwo", into: ref(field))))
         XCTAssertTrue(r.detail?.hasPrefix("as a paste (several lines go as a paste into a field that reads them back)") ?? false, r.detail ?? "")
     }
@@ -648,6 +1100,30 @@ final class KeyboardTargetTests: XCTestCase {
         ax.focus(pid: pid, on: nil)
         ax.onSet = { _ in XCTFail("no AXFocused write for a remembered app") }
         _ = try core.focusField(f2, target)
+    }
+
+    /// The review of round 19, M3 (the survey's mid-act seed 1067): the user's click into the target lands while the
+    /// guarded AXFocused write runs. The write's check judges by the one rule like every act's after-check: their move,
+    /// left alone — no restore over it (the seed: one issued 7 ms after their click, before the guardian had heard the
+    /// activation, then their keys into the target judged the agent's), and the app is not remembered as activating on it.
+    /// With no click, the same change is still the write's (the test above).
+    func testTheUsersClickLandingDuringTheFocusWriteIsLeftAlone() throws {
+        let f = nativeField()
+        core.switchInputObservableOverride = true
+        core.startGuardian(privatePath: true)
+        defer { core.stopGuardian() }
+        core.noteGuardianCause(pid)  // the agent's act on the target is running
+        ax.onSet = { [unowned self] what in
+            guard what.hasSuffix(":\(kAXFocusedAttribute)") else { return }
+            core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())
+            core.noteSwitchInput(now: core.clock.nowSeconds(), .app, target: pid)  // what the click handler records
+            sys.front = pid
+        }
+        sys.windows[77]?.onScreen = false
+        _ = try core.focusField(f, target)
+        XCTAssertTrue(sys.activated.isEmpty, "never pulled back out of the app they clicked into — \(sys.activated)")
+        XCTAssertFalse(target.takeViewNotes().contains { $0.contains("activated itself") }, "not said as the write's doing")
+        XCTAssertFalse(core.appActivatesOnFocusWrite(target), "not remembered")
     }
 
     func testAWebFieldIsPressedNotWritten() throws {

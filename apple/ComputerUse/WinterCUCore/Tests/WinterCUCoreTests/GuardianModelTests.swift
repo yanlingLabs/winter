@@ -20,11 +20,17 @@ import XCTest
 /// Where the contract leaves more than one right answer (the engine can't see the difference by design), every one is
 /// kept and the engine is held to the one it takes; the share is reported. A failure prints the seed and a minimized list
 /// of steps.
+/// THE FROZEN REFERENCE (the user's process ruling, round 17): this oracle — GuardianSim*, GuardianSimRun, these
+/// expectation lists — and its world's fakes (FakeAX, RecordingPoster, the fakes' user key) change only in commits of their
+/// own, each citing a ruling, never together with engine code; the ratchet below holds the whole surveyed ranges.
 final class GuardianModelTests: XCTestCase {
     static let seeds = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_SEEDS"] ?? "") ?? 20
     static let steps = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_STEPS"] ?? "") ?? 250
     /// WINTER_CU_SIM_SURVEY=1: every seed runs to its first violation, none minimized, and they are counted (a report).
     static let survey = ProcessInfo.processInfo.environment["WINTER_CU_SIM_SURVEY"] == "1"
+    /// WINTER_CU_SIM_TARGET=<bundle id>: T is that app instead of Finder — its acts open only T, the default browser and
+    /// the mail app (round 14's queue item 1).
+    static let targetBundle = ProcessInfo.processInfo.environment["WINTER_CU_SIM_TARGET"]
 
     func testTheInvariantsHoldOverRandomInterleavings() async throws {
         var totals = SimStats()
@@ -33,7 +39,12 @@ final class GuardianModelTests: XCTestCase {
         // WINTER_CU_SIM_FIRST_SEED: a sweep of seeds first…first+seeds−1 (a long run in parallel processes).
         let first = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_FIRST_SEED"] ?? "") ?? 1
         for seed in only.map({ [$0] }) ?? Array(first..<(first + Self.seeds)) {
-            let plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
+            // (The ratchet runner's own probes — a child that crashes, a child that hangs, on that seed: test-only hooks.)
+            let env = ProcessInfo.processInfo.environment
+            if env["WINTER_CU_SIM_CRASH_SEED"] == "\(seed)" { abort() }
+            if env["WINTER_CU_SIM_HANG_SEED"] == "\(seed)" { while true { sleep(60) } }
+            var plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
+            if let b = Self.targetBundle { plan.targetBundle = b }
             let run = await SimRun.execute(plan)
             totals.add(run.stats)
             if let v = run.violation, Self.survey {
@@ -71,11 +82,14 @@ final class GuardianModelTests: XCTestCase {
         XCTAssertGreaterThan(totals.undone, 0, "thefts were undone")
         XCTAssertGreaterThan(totals.userMovesKept, 0, "user moves were kept")
         XCTAssertGreaterThan(totals.s2Ops, 0, "session s2 ran")
+        // (Round 18, round 17's H1: the in-flight invariant had chances to fail — not vacuous.)
+        XCTAssertGreaterThan(totals.inFlightChances, 0, "the user began working in T while an act on it ran")
         XCTAssertLessThan(Double(totals.unchecked), Double(totals.changes) * 0.05, "unchecked: \(totals.words)")
     }
 
     /// Seeds KNOWN to fail (round 11's first item), pinned so CI meets them: each must still fail (an expected failure,
-    /// shown as such), and a seed that passes is reported, to come off the list.
+    /// shown as such), and a seed that passes is reported, to come off the list. Each is pinned to its violation CLASS —
+    /// the invariant its `what` begins with (round 18): failing another way is a new failure.
     static let knownFailing: [(seed: Int, what: String)] = [
         (338, "I3: a user key reached T with no reroute while T was in the background (a blip ending during a theft)"),
         (508, "I2: the engine's place U, the user's P — Secure Event Input with the modifiers unseen"),
@@ -83,13 +97,29 @@ final class GuardianModelTests: XCTestCase {
         // Round 11's sweep of seeds 1000–1079 (each failed on round 10's engine too; 10 more of its failures are gone):
         (1018, "I4: settled at U, should be X@200 — an untouched U sent back as the agent's indirect effect after the user moved"),
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
-        (1067, "I2: the engine's place T2@300 (the visited app), the user's X@200"),
+        // Round 16: pinned per the review of round 15 (LOW) — still failing there.
+        (1062, "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing"),
     ]
 
+    /// The ordinary target's (`sim.editor`, round 14's standing second check) known-failing seeds in its surveyed range
+    /// 1–60 (the ratchet below runs the whole range), each pinned to its violation class.
+    /// (Round 19: the ordinary target's 49, pinned when the world's Finder fix surfaced it, came off once the engine judged
+    /// a switch of theirs into the visited desktop once — their place, the visit's end leaving them there.)
+    static let ordinaryTargetKnownFailing: [Int: String] = [:]
+
+    /// (Round 16's fixed-seed lists — 1008, 1011, 1017, 1038, 1049, 1051, 1055, 1057, 1059, 1063, 1067, 1073 and, with an
+    /// ordinary target, 36, 49, 51, 58 — and the ordinary target's seeds 1–12 are subsumed by the ratchet's whole ranges.)
+
+    /// The known-failing seeds outside the ratchet's range (inside it, the ratchet holds them).
     func testKnownFailingSeedsAreStillKnown() async {
-        for (seed, what) in Self.knownFailing {
+        for (seed, what) in Self.knownFailing where !Self.ratchetRange.contains(seed) {
             let r = await SimRun.execute(SimPlan.generate(seed: UInt64(seed), count: Self.steps))
             if let v = r.violation {
+                // (Pinned to its violation class, round 18: failing another way is a new failure.)
+                if Self.violationClass(v) != Self.violationClass(what) {
+                    XCTFail("seed \(seed) is known to fail with \(Self.violationClass(what) ?? "?"), but now fails with: \(v)")
+                    continue
+                }
                 XCTExpectFailure("KNOWN, round 12: seed \(seed) — \(what)", strict: true) { XCTFail("seed \(seed): \(v)") }
             } else {
                 XCTFail("seed \(seed) passes now — take it off GuardianModelTests.knownFailing")
@@ -97,12 +127,195 @@ final class GuardianModelTests: XCTestCase {
         }
     }
 
+    // MARK: THE RATCHET (the user's process ruling, round 17)
+
+    /// The surveyed ranges, WHOLE: every seed passes but for the known-failing ones, a list that can only shrink — the
+    /// default target's seeds 1000–1079 (round 11's sweep; `knownFailing`) and the ordinary target's (`sim.editor`) seeds
+    /// 1–60 (round 14's; `ordinaryTargetKnownFailing`). (The review of round 16: 1020 and 1036 passed in round 15's survey
+    /// and failed in round 16's — the hand-picked seed lists missed both. They are subsumed here.)
+    static let ratchetRange = 1000...1079
+    static let ordinaryRatchetRange = 1...60
+
+    /// The default random test's own seeds (1–20, what `testTheInvariantsHoldOverRandomInterleavings` runs by default):
+    /// a checked range of the ratchet too (round 18).
+    static let defaultRatchetRange = 1...20
+
+    /// The mid-act click's own known-failing seeds (round 19: the ratchet runs every range with it too — the user clicking
+    /// into T while an act on it runs, at `midActStandingChance` per act), each pinned to its violation class.
+    /// The review of round 19, MEDIUM 1: the mid-act click is never skipped (a click on the empty desktop, T's window on
+    /// another desktop, is a real action of the user's) — 1014 is the same app on two desktops, 1022's class.
+    /// The baseline (the review of round 19, M2 — the controller's ruling): this list is what fails on the HONEST,
+    /// un-narrowed generator, so {1014, 1022, 1062, 1067} was its starting baseline, and it only shrinks from here — 1067
+    /// left it on the engine's fix of the guarded AXFocused write (its own mechanism, not 1022's class: the write's check
+    /// undid the user's click into T that landed during it).
+    static let midActKnownFailing: [Int: String] = [
+        1014: "I2: the engine's place T@200, the user's T@300 — the same app on two desktops (the mid-act click on the empty desktop brought Finder forward window-less)",
+        1022: "I2: the engine's place T@200, the user's T@100 — the same app on two desktops",
+        1062: "I1: S came forward as the user clicked into it, 4 ms later — the engine took the click as theirs and said nothing",
+    ]
+    /// The ordinary target's with the mid-act click.
+    static let ordinaryMidActKnownFailing: [Int: String] = [:]
+    static let midActStandingChance = "0.2"
+
+    func testTheRatchetTheWholeSurveyedRangesPassButForTheKnownFailing() throws {
+        // (A seed takes ~8 s, mostly waiting: the ranges run as child processes of this bundle, in parallel.)
+        let known = Dictionary(Self.knownFailing.map { ($0.seed, $0.what) }, uniquingKeysWith: { a, _ in a })
+        let midAct = Self.midActKnownFailing
+        let ordinary = Self.ordinaryTargetKnownFailing
+        let off = "0", on = Self.midActStandingChance
+        for (target, range, known, mid) in [(nil, Self.ratchetRange, known, off), (nil, Self.defaultRatchetRange, known, off),
+                                            ("sim.editor", Self.ordinaryRatchetRange, ordinary, off),
+                                            (nil, Self.ratchetRange, midAct, on), (nil, Self.defaultRatchetRange, midAct, on),
+                                            ("sim.editor", Self.ordinaryRatchetRange, Self.ordinaryMidActKnownFailing, on)]
+                as [(String?, ClosedRange<Int>, [Int: String], String)] {
+            let what = (target.map { "with an ordinary target (\($0))" } ?? "with Finder as the target")
+                + (mid == off ? "" : ", the user clicking into T mid-act (\(mid) per act)")
+            let failing = try Self.surveyInChildren(target: target, seeds: range, extraEnv: ["WINTER_CU_SIM_MID_ACT": mid])
+            // (R18 L6: the in-flight invariant had chances across the whole range — summed over its children.)
+            XCTAssertGreaterThan(Self.lastSurveyInFlightChances, 0, "RATCHET: \(what), seeds \(range): the user never began working in T during an act")
+            for (seed, v) in failing.sorted(by: { $0.key < $1.key }) {
+                guard let pinned = known[seed] else {
+                    XCTFail("RATCHET: seed \(seed) \(what) fails and is not known-failing — a regression: \(v)")
+                    continue
+                }
+                // Pinned to its violation CLASS (round 18): a known-failing seed failing another way is a new failure.
+                if !pinned.isEmpty, Self.violationClass(v) != Self.violationClass(pinned) {
+                    XCTFail("RATCHET: seed \(seed) \(what) is known to fail with \(Self.violationClass(pinned) ?? "?"), but now fails with: \(v)")
+                }
+            }
+            for seed in known.keys.filter(range.contains).sorted() where failing[seed] == nil {
+                XCTFail("RATCHET: seed \(seed) \(what) passes now — take it off its known-failing list (the list only shrinks)")
+            }
+        }
+    }
+
+    /// A violation's class: the invariant it names ("I1" … "I6"), as the oracle words it ("I2: the engine takes …").
+    static func violationClass(_ v: String) -> String? {
+        let head = v.prefix { $0 != ":" }
+        return head.hasPrefix("I") && head.count <= 3 ? String(head) : nil
+    }
+
+    /// A child of the survey that has not finished by then is HUNG: killed, and the survey fails naming its seeds.
+    /// The in-flight chances the last survey's children reported, summed (R18 L6).
+    nonisolated(unsafe) static var lastSurveyInFlightChances = 0
+
+    static let childDeadline = TimeInterval(ProcessInfo.processInfo.environment["WINTER_CU_SIM_CHILD_DEADLINE"] ?? "") ?? 900
+
+    /// Runs the random test's survey over `seeds` in child processes of this test bundle (`chunk` seeds each, all at once);
+    /// returns the failing seeds and their violations. Every child must report its survey line — a child that crashed or
+    /// was cut short is a failure, never a pass.
+    static func surveyInChildren(target: String?, seeds: ClosedRange<Int>, chunk: Int = 6, deadline: TimeInterval = childDeadline,
+                                 extraEnv: [String: String] = [:]) throws -> [Int: String] {
+        let chunks = stride(from: seeds.lowerBound, through: seeds.upperBound, by: chunk).map { start in
+            (target: target, seeds: start...min(start + chunk - 1, seeds.upperBound))
+        }
+        let failing = try surveyInChildren(chunks, deadline: deadline, extraEnv: extraEnv, naming: "\(seeds)")
+        return Dictionary(failing.map { ($0.key.seed, $0.value) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// The same over any list of chunks, each with its own target (round 19, M3: the named regression tests' seeds, one
+    /// child each, all at once). A failing seed's key is its target (nil: Finder) and its number.
+    static func surveyInChildren(_ chunks: [(target: String?, seeds: ClosedRange<Int>)], deadline: TimeInterval = childDeadline,
+                                 extraEnv: [String: String] = [:], naming: String) throws -> [SurveyKey: String] {
+        let seeds = naming
+        let bundle = Bundle(for: GuardianModelTests.self).bundlePath
+        var children: [(process: Process, out: Pipe, err: Pipe, seeds: ClosedRange<Int>, target: String?)] = []
+        for c in chunks {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            p.arguments = ["xctest", "-XCTest", "WinterCUCoreTests.GuardianModelTests/testTheInvariantsHoldOverRandomInterleavings", bundle]
+            var env = ProcessInfo.processInfo.environment
+            env["WINTER_CU_SIM_SURVEY"] = "1"
+            env["WINTER_CU_SIM_FIRST_SEED"] = "\(c.seeds.lowerBound)"
+            env["WINTER_CU_SIM_SEEDS"] = "\(c.seeds.count)"
+            env["WINTER_CU_SIM_STEPS"] = "\(steps)"
+            env["WINTER_CU_SIM_TARGET"] = c.target
+            env["WINTER_CU_SIM_ONLY_SEED"] = nil
+            for (k, v) in extraEnv { env[k] = v }
+            p.environment = env
+            let out = Pipe(), err = Pipe()
+            p.standardOutput = out
+            p.standardError = err
+            try p.run()
+            children.append((p, out, err, c.seeds, c.target))
+        }
+        let lock = NSLock()
+        var texts: [(target: String?, text: String)] = []
+        var broken: [String] = []
+        let group = DispatchGroup()
+        for c in children {
+            group.enter()
+            // A per-child deadline: a hung child is killed, and the survey fails naming its seeds.
+            let hung = DispatchWorkItem { lock.withLock { broken.append("seeds \(c.seeds) HUNG (no end within \(Int(deadline)) s)") }; c.process.terminate() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: hung)
+            DispatchQueue.global().async {
+                // (stderr read alongside, so a chatty child never blocks on a full pipe.)
+                var errData = Data()
+                let errDone = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async { errData = c.err.fileHandleForReading.readDataToEndOfFile(); errDone.signal() }
+                let data = c.out.fileHandleForReading.readDataToEndOfFile()
+                c.process.waitUntilExit()
+                errDone.wait()
+                hung.cancel()
+                let text = String(decoding: data, as: UTF8.self)
+                lock.withLock {
+                    texts.append((c.target, text))
+                    // Every child must report its own survey line and exit cleanly; one that crashed or was cut short is a
+                    // failure — with its stderr kept, for the report.
+                    let reported = text.split(separator: "\n").contains { $0.hasPrefix("SURVEY: ") }
+                    if !reported || c.process.terminationReason != .exit || c.process.terminationStatus != 0 {
+                        let tail = String(decoding: errData.suffix(2_000), as: UTF8.self)
+                        broken.append("seeds \(c.seeds) ended \(c.process.terminationReason == .exit ? "with status \(c.process.terminationStatus)" : "by signal \(c.process.terminationStatus)")\(reported ? "" : " without reporting") — stderr: \(tail)")
+                    }
+                }
+                group.leave()
+            }
+        }
+        group.wait()
+        let lines = texts.flatMap { $0.text.split(separator: "\n").map(String.init) }
+        lastSurveyInFlightChances = lines.compactMap { l -> Int? in
+            guard let r = l.range(of: " times the user began working in T during an act") else { return nil }
+            return Int(l[..<r.lowerBound].split(separator: " ").last ?? "")
+        }.reduce(0, +)
+        guard broken.isEmpty else {
+            throw CUError.unsupported("the survey of seeds \(seeds): \(broken.sorted().joined(separator: "; "))")
+        }
+        var failing: [SurveyKey: String] = [:]
+        for t in texts {
+            for l in t.text.split(separator: "\n") where l.hasPrefix("SURVEY seed ") {
+                let rest = l.dropFirst("SURVEY seed ".count)
+                guard let colon = rest.firstIndex(of: ":"), let seed = Int(rest[..<colon]) else { continue }
+                failing[SurveyKey(target: t.target, seed: seed)] = String(rest[rest.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return failing
+    }
+
+    struct SurveyKey: Hashable { var target: String?; var seed: Int }
+
+    /// The ratchet's runner itself (the review of round 17's probe): a child that crashes mid-chunk fails the survey — never
+    /// a pass — and so does a child that hangs (killed at its deadline, naming its seeds).
+    func testTheSurveyRunnerFailsOnACrashedChild() throws {
+        XCTAssertThrowsError(try Self.surveyInChildren(target: nil, seeds: 1000...1002, chunk: 3,
+                                                       extraEnv: ["WINTER_CU_SIM_CRASH_SEED": "1001"])) { e in
+            XCTAssertTrue("\(e)".contains("1000...1002"), "names the crashed child's seeds: \(e)")
+        }
+    }
+
+    func testTheSurveyRunnerFailsOnAHungChild() throws {
+        XCTAssertThrowsError(try Self.surveyInChildren(target: nil, seeds: 1000...1001, chunk: 1, deadline: 20,
+                                                       extraEnv: ["WINTER_CU_SIM_HANG_SEED": "1001"])) { e in
+            XCTAssertTrue("\(e)".contains("1001...1001 HUNG"), "names the hung child's seed: \(e)")
+        }
+    }
+
     // MARK: the reviewer's findings, as plans (each over a dozen seeds: the world's own timing varies)
 
     /// Runs `plan` with seeds 1…`seeds`; returns the first violation (with its trace) or nil.
-    func run(_ name: String, seeds: Int = 12, flagsSeen: Bool = true, _ steps: [(Double, SimKind)]) async -> String? {
+    func run(_ name: String, seeds: Int = 12, flagsSeen: Bool = true, targetBundle: String = "com.apple.finder",
+             _ steps: [(Double, SimKind)]) async -> String? {
         for seed in 1...seeds {
-            let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), flagsSeen: flagsSeen, steps))
+            let r = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), flagsSeen: flagsSeen, targetBundle: targetBundle, steps))
             if ProcessInfo.processInfo.environment["WINTER_CU_SIM_TRACE_ALL"] == "1" { Self.saveTrace(name + "-ok", seed: seed, r.violation ?? "none", r.trace) }
             if let v = r.violation {
                 let at = r.trace.firstIndex { $0.hasPrefix("VIOLATION") } ?? r.trace.count
@@ -182,6 +395,27 @@ final class GuardianModelTests: XCTestCase {
     func testTheUsersOwnLaunchIsNeverSentBack() async {
         let v = await run("f2-user-launch", [(300, .userLaunch(2_700)), (3_000, .agentType(2)), (6_500, .quiet)])
         XCTAssertNil(v, v ?? "")
+    }
+
+    /// Round 14's queue item 1: T is an ordinary app (not Finder) — a third party's app (X, Terminal: another agent
+    /// session's) coming forward right after the agent's act, with no input of the user's, is outside what the act can
+    /// open: left in front and said, never undone; what the act can open (S, the default browser) is still sent back.
+    func testAThirdPartysActivationRightAfterAnActIsNeverUndone() async {
+        // A click in T (an opener act), X comes forward 250 ms later, no input of the user's for seconds before.
+        let steps: [(Double, SimKind)] = [(300, .typing(5)), (3_300, .agentClick(.field)), (3_550, .selfActivate(SimPid.third)), (6_500, .quiet)]
+        let left = await run("r14-third-party", targetBundle: "sim.editor", steps)
+        XCTAssertNil(left, left ?? "")
+        // Not vacuous: the same steps with T as Finder (whose acts open any app) send X back; with T an ordinary app,
+        // X is left in front.
+        for seed in 1...4 {
+            let finder = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), steps))
+            let editor = await SimRun.execute(SimPlan.scripted(seed: UInt64(seed), targetBundle: "sim.editor", steps))
+            XCTAssertTrue(finder.trace.contains { $0.contains("X activates itself") && $0.contains("undone") }, "seed \(seed): Finder")
+            XCTAssertTrue(editor.trace.contains { $0.contains("X activates itself") && $0.contains("left in front") }, "seed \(seed): an ordinary app")
+        }
+        let opened = await run("r14-in-scope", targetBundle: "sim.editor",
+                               [(300, .agentClick(.opener, ms: 400)), (3_000, .agentType(3)), (6_500, .quiet)])
+        XCTAssertNil(opened, opened ?? "")
     }
 
     /// #2: an already-running app the agent never touched coming forward right after its act, no input of the user's

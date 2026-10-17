@@ -196,7 +196,7 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
     // No-restart proof: the same RunningDaemon object and the same socket this test started with.
     expect(daemon).toBe(daemonRef);
     expect(daemon.socketPath).toBe(daemonRef.socketPath);
-  });
+  }, 20_000); // two waits on the live holder, each bounded at 5 s by untilSettings: the test's own timeout must sit above both
 
   test("advisorModel reaches the live holder too — Task 5's create.ts reads it there", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-hot-e2e-advisor-"));
@@ -207,5 +207,5 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
     expect(daemon.settings()?.runtimes?.advisorModel).toBeUndefined();
     writeSettingsFile(home, { runtimes: { advisorModel: "some-advisor-model" } });
     await untilSettings(daemon, "advisorModel to reach the live holder", (s) => s?.runtimes?.advisorModel === "some-advisor-model");
-  });
+  }, 15_000); // the wait on the live holder is bounded at 5 s by untilSettings: the test's own timeout must sit above it
 });

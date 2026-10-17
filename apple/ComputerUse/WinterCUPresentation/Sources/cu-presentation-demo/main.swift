@@ -8,6 +8,10 @@ import WinterCUPresentation
 //
 //   cu-presentation-demo --list                 windows you can pick (id, app, frame)
 //   cu-presentation-demo --window <id> [--seconds 30] [--no-mirror] [--no-esc]
+//   cu-presentation-demo --render-island <dir>  the desktop-switch island rendered OFFSCREEN to PNG files
+//   cu-presentation-demo --show-island [--seconds 20]
+//                                               the island shown for real, as a prompt would show it (answers
+//                                               are printed; nothing switches)
 //   cu-presentation-demo --render-gallery <dir> [--no-gifs]
 //                                               every cursor state rendered OFFSCREEN to PNG/GIF files: no window,
 //                                               no overlay, no capture, no event tap
@@ -17,6 +21,8 @@ import WinterCUPresentation
 
 struct Options {
     var galleryDir: String?
+    var islandDir: String?
+    var showIsland = false
     var gifs = true
     var list = false
     var windowID: CGWindowID?
@@ -35,6 +41,11 @@ func parse(_ args: [String]) -> Options? {
             i += 1
             guard i < args.count else { return nil }
             o.galleryDir = args[i]
+        case "--render-island":
+            i += 1
+            guard i < args.count else { return nil }
+            o.islandDir = args[i]
+        case "--show-island": o.showIsland = true
         case "--no-gifs": o.gifs = false
         case "--window":
             i += 1
@@ -68,7 +79,7 @@ func describe(_ info: [String: Any]) -> (id: CGWindowID, pid: pid_t, app: String
 }
 
 let usage = "usage: cu-presentation-demo --list | --window <id> [--seconds N] [--no-mirror] [--no-esc]"
-    + " | --render-gallery <dir> [--no-gifs]"
+    + " | --render-gallery <dir> [--no-gifs] | --render-island <dir> | --show-island [--seconds N]"
 guard let options = parse(Array(CommandLine.arguments.dropFirst())) else {
     FileHandle.standardError.write((usage + "\n").data(using: .utf8)!)
     exit(2)
@@ -85,6 +96,40 @@ if let dir = options.galleryDir {
         FileHandle.standardError.write("render failed: \(error)\n".data(using: .utf8)!)
         exit(1)
     }
+}
+
+if let dir = options.islandDir {
+    do {
+        let urls = try MainActor.assumeIsolated { try CUDesktopIslandGallery.render(to: URL(fileURLWithPath: dir, isDirectory: true)) }
+        for url in urls { print(url.path) }
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("render failed: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+}
+
+/// The demo's prompt controller, kept for the life of the process (it answers the island's buttons and runs its
+/// countdown).
+@MainActor var islandPrompts: CUDesktopPromptController?
+
+if options.showIsland {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let seconds = options.seconds
+    MainActor.assumeIsolated {
+        let prompts = CUDesktopPromptController.live()
+        islandPrompts = prompts
+        let request = CUDesktopPromptRequest(
+            promptId: "demo", sessionId: "demo", app: "Google Chrome", bundleId: "com.google.Chrome",
+            reason: "To see what the page shows now.", timeoutMs: Int(seconds * 1000))
+        prompts.show(request) { answer in
+            print("answered: \(answer.rawValue)")
+            // Let the way back up play before quitting.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { exit(0) }
+        }
+    }
+    app.run()
 }
 
 if options.list || options.windowID == nil {

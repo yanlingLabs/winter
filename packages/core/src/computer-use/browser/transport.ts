@@ -2,6 +2,7 @@
 // CDP through it and nothing else; the built-in browser (Winter.app over the browser link), Winter's headless browser
 // (private, windowless engines the daemon runs over pipes) and the user's browsers (the Winter for Chrome extension
 // over winter-browser-host) each implement it. Change it only through the controller.
+import type { WatchArmResult, WatchSpec } from "./page-runtime/watch";
 
 /** A browser family as the model names it: `browsers.list()` ids, `{ browser }` options, tab id prefixes. */
 export type BrowserFamily = "winter" | "headless" | "chrome" | "edge" | "brave" | "vivaldi" | "opera" | "arc" | "chromium";
@@ -87,8 +88,10 @@ export interface CdpTransport {
   keepTab(tabKey: string, opts?: { group?: string }): Promise<void>;
   listTabs(opts?: { sessionId?: string }): Promise<TransportTab[]>;
   /** Make the tab drivable — winter: its browser live and held; headless: a flattened CDP session on its page target;
-   *  extension: the debugger attached. Idempotent. */
-  attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }>;
+   *  extension: the debugger attached. Idempotent. `watchOnly` (wake triggers): an attachment that changes nothing
+   *  the user sees or does — a transport with `watchOnlyHolds` holds the tab with none of its native-UI effects, and
+   *  attaching an attached tab again changes its hold; any other transport ignores it. */
+  attach(tabKey: string, opts: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [w: number, h: number]; dpr: number }>;
   /** Drop the hold / detach the debugger. Idempotent; never closes the tab. */
   detach(tabKey: string): Promise<void>;
   send<T = unknown>(tabKey: string, method: string, params?: Record<string, unknown>, opts?: { cdpSessionId?: string; timeoutMs?: number }): Promise<T>;
@@ -129,6 +132,46 @@ export interface CdpTransport {
   onDownload?(listener: (tabKey: string, d: TransportDownload) => void): () => void;
   /** The engine has taken the finished file: the browser forgets the item (extension: its downloads list entry). */
   releaseDownload?(id: string): Promise<void>;
+
+  // ── wake triggers (Winter for Chrome 1.2.0, feature `watch`) ──
+
+  /** Keep a watch on the tab's top document with NO debugger: the extension injects the page watcher
+   *  (`page-runtime/watch.ts`) into its own isolated world, again in each new document of the tab (`initial: "fire"`,
+   *  or `"baseline"` after its own input or navigation), and reports what it sees. The watcher's answer to the first
+   *  injection. */
+  watch?(tabKey: string, spec: WatchSpec): Promise<WatchArmResult>;
+  /** Idempotent; the watcher (its ring and pill) leaves the page. */
+  unwatch?(tabKey: string, watchId: string): Promise<void>;
+  onWatchEvent?(listener: (tabKey: string, e: TransportWatchEvent) => void): () => void;
+  /** Wake triggers on Winter's built-in browser (link feature `watchOnly`): its hold has native-UI effects (Winter.app
+   *  holds the tab's dialogs, denies its prompts, cancels its file choosers and downloads, …), and it can hold a tab
+   *  WATCH-ONLY, with none of them (`attach`'s `watchOnly`). Absent or false: holds have no such effects (a user's
+   *  browser, a headless engine) — or, on the built-in browser, the app is older, and a built-in tab is never held for
+   *  a wake. */
+  readonly watchOnlyHolds?: boolean;
+}
+
+/** One report of a tab watch (`CdpTransport.onWatchEvent`). */
+export interface TransportWatchEvent {
+  watchId: string;
+  /** `url`: the tab's top-level URL changed (a `navigated` watch); `lost`: `reason` "doc" (a new document under a ref
+   *  watch), "gone" (its element went), "disconnected" (the link to the extension dropped). */
+  outcome: "fired" | "pressed" | "lost" | "url";
+  /** Epoch ms. */
+  at: number;
+  /** submitted / changed: when the trusted pointer or key event that made it the user's landed (epoch ms) — Winter's
+   *  own input then makes it Winter's too. */
+  cause?: number;
+  /** The tab's address as `watchUrlShape` gives it (origin and path; never a query or a fragment). */
+  url?: string;
+  /** `url` (a `navigated` watch): `watchUrlKey` of the whole address — another key is another address — and, for a
+   *  watch with words (`WatchSpec.url`), whether the whole address contains them. */
+  key?: string;
+  match?: boolean;
+  title?: string;
+  reason?: string;
+  /** The extension sent this tab input or a navigation (its debugger) within the grace before `at` (or `cause`). */
+  own?: boolean;
 }
 
 export interface BrowserBackendInfo {

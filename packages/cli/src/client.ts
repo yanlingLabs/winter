@@ -1,3 +1,4 @@
+import { controllingTtyName } from "./tty-name";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent, COWORK_RPC, CoworkWatchFrame, WORKSPACE_WATCH_RENEW_MS, WORKSPACE_WATCH_LEASE_MS, type CoworkMethod, type CoworkParams, type CoworkResult,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloResult, SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
@@ -67,6 +68,9 @@ export interface ConnectOptions {
   token: string;
   clientName: string;
   role?: "harness" | "admin";
+  /** The controlling terminal sent in the hello (`HelloParams.tty`) — the Winter island's "is this terminal in
+   *  front?" question. Default: detected (`controllingTtyName`); `null` sends none. */
+  tty?: string | null;
   timeoutMs?: number;
   onEvent: (event: SessionEvent) => void;
   /** Separate ephemeral stream, never a session/$system event. */
@@ -156,6 +160,7 @@ export class WinterClient {
       role: opts.role ?? "harness",
       token: opts.token,
       clientName: opts.clientName,
+      ...helloTty(opts),
     });
     const parsed = HelloResult.safeParse(hello);
     client.features = new Set(parsed.success ? (parsed.data.features ?? []) : []);
@@ -285,7 +290,9 @@ export class WinterClient {
     };
   }
 
-  async createSession(scope: string, opts?: { cwd?: string; approvalPolicy?: ApprovalPolicy }): Promise<{ sessionId: string; trusted: boolean }> {
+  /** `model` (optional) is the one-shot per-session model choice -- a provider-qualified tag the daemon
+   *  validates and stamps at creation (`session.create`'s own `model`); `winter -p --model` sends it. */
+  async createSession(scope: string, opts?: { cwd?: string; approvalPolicy?: ApprovalPolicy; model?: string }): Promise<{ sessionId: string; trusted: boolean }> {
     const r = this.validated(SessionCreateResult, await this.request(METHODS.sessionCreate, { scope, ...opts }), METHODS.sessionCreate);
     return { sessionId: r.sessionId, trusted: r.trusted };
   }
@@ -587,4 +594,11 @@ export class WinterClient {
     for (const id of [...this.watchRenewals.keys()]) this.stopWatchRenewal(id);
     this.socket.end();
   }
+}
+
+/** The hello's `tty`: a harness client's terminal (explicit, or detected), never an admin's. */
+function helloTty(opts: ConnectOptions): { tty?: string } {
+  if ((opts.role ?? "harness") !== "harness" || opts.tty === null) return {};
+  const tty = opts.tty ?? controllingTtyName();
+  return tty === undefined ? {} : { tty };
 }

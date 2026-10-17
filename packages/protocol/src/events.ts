@@ -17,6 +17,17 @@ const Base = z.object({
  *  prefix can never collide with a real session's id). */
 export const SYSTEM_SESSION_ID = "$system";
 
+/** Every session mode this protocol RECOGNISES — the one list the wire, the log and the capability
+ *  table share. Recognised is not runnable: `cowork` is named so a client, a stored row or a replayed
+ *  log can carry it, but no Winter can create or run one yet — `session.create` refuses it for every
+ *  role with the Cowork `unsupported_topology` error and core's runtime keeps its own three-valued
+ *  `RunnableSessionMode` (`sessions/session-mode.ts`, pinned to this list at compile time), so a new
+ *  entry here is a type error there until someone classifies it. Do not enable Cowork by listing it
+ *  somewhere else: see docs/cowork-status.md. */
+export const SESSION_MODES = ["code", "dispatch", "chat", "cowork"] as const;
+export const SessionModeSchema = z.enum(SESSION_MODES);
+export type SessionMode = z.infer<typeof SessionModeSchema>;
+
 export const SessionCreatedEvent = Base.extend({
   type: z.literal("session_created"),
   scope: z.string().min(1),
@@ -29,7 +40,9 @@ export const SessionCreatedEvent = Base.extend({
   // absent means "code" (same convention as SessionRow.mode/opts.mode elsewhere).
   // Chat Mode Slice A: "chat" added — a conversation with no filesystem/shell access that shares
   // dispatch's _assistant memory bucket but, unlike dispatch, is NOT a singleton (many chats).
-  mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Cowork (session door): "cowork" is RECOGNISED on the wire and in a stored log, never produced by
+  // any Winter today — `session.create` refuses it before a row exists (see `SESSION_MODES`).
+  mode: SessionModeSchema.optional(),
   // Winter Phase 8c (P8c-5): the runtime annotation — which leg backs this session, its provider
   // and the model it opened with. All three OPTIONAL by design (protocol discipline P8c-5: no new
   // variant, no new method): the row in `sessions/store.ts`'s `createSession` is inserted BEFORE
@@ -74,6 +87,25 @@ export const UserMessageImageRef = z.object({
 });
 export type UserMessageImageRef = z.infer<typeof UserMessageImageRef>;
 
+/** Code-mode file attachments (2026-10-13): at most this many `[File #n]` files ride one `user_message`
+ *  (and one `session.send`/`session.steer` — the daemon refuses more, typed `file_reference_invalid`). */
+export const USER_MESSAGE_FILES_MAX = 20;
+/** The refusal past `USER_MESSAGE_FILES_MAX`. */
+export const USER_MESSAGE_FILES_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_FILES_MAX} files`;
+/** Images and files TOGETHER: at most this many on one `user_message` (the daemon refuses more on send/steer,
+ *  typed `file_reference_invalid`). With each path ≤ `USER_MESSAGE_IMAGE_PATH_MAX`, a message's paths are at most
+ *  80 KiB — inside `session.history`/the remote stream's 160 KiB per-event cap with room for the text. */
+export const USER_MESSAGE_ATTACHMENTS_MAX = 20;
+export const USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_ATTACHMENTS_MAX} attachments`;
+/** One `[File #n]` placeholder's file or folder: `n` is the number in the message text's token, `path` the
+ *  user's own absolute path (any type, a folder too). The model is given the path in the token's place; the
+ *  file itself is never read, copied or staged by the daemon. Same path bound as an image's. */
+export const UserMessageFileRef = z.object({
+  n: z.number().int().positive(),
+  path: z.string().min(1).max(USER_MESSAGE_IMAGE_PATH_MAX),
+});
+export type UserMessageFileRef = z.infer<typeof UserMessageFileRef>;
+
 export const UserMessageEvent = Base.extend({
   type: z.literal("user_message"),
   threadId: z.string().min(1),
@@ -87,6 +119,10 @@ export const UserMessageEvent = Base.extend({
    *  `USER_MESSAGE_IMAGE_PATH_MAX` chars), so it stays inside `session.history`/the remote stream's
    *  per-event caps. */
   images: z.array(UserMessageImageRef).min(1).max(USER_MESSAGE_IMAGES_MAX).optional(),
+  /** Code-mode file attachments: the user's file or folder behind each `[File #n]` in `text`. Like `images`,
+   *  only the MODEL sees the paths (`modelTextOf` substitutes them); the Mac's bubble draws a chip per
+   *  token. Absent on every message without files (never an empty array); ≤ `USER_MESSAGE_FILES_MAX`. */
+  files: z.array(UserMessageFileRef).min(1).max(USER_MESSAGE_FILES_MAX).optional(),
 });
 
 const ThreadBase = Base.extend({ threadId: z.string().min(1) });
@@ -439,6 +475,50 @@ export const ChildUpdateEvent = ThreadBase.extend({
  *  `dispatchWakeClientName`). Not a variant — a `user_message` is still what the runtime child is
  *  given, so the durable send queue keeps its pairing. */
 export const DISPATCH_WAKE_CLIENT_NAME = "dispatch-wake";
+
+/** ComputerV2 wake triggers (2026-10-12): the `clientName` of the `user_message` that WAKES a session when a trigger
+ *  its model armed (`target.wakeWhen(…)`) ends — the user clicked what it waited for, the target was lost, or Winter
+ *  restarted (core's `computer-use/wakes/`). The daemon wrote it, not the user: clients render it as a notice built from
+ *  the `wake_armed`/`wake_ended` pair, never as a user bubble. Not a variant, for the same reason as
+ *  `DISPATCH_WAKE_CLIENT_NAME` (Swift mirror: `SessionModel`'s `computerWakeClientName`). */
+export const COMPUTER_WAKE_CLIENT_NAME = "computer-wake";
+
+/** A wake trigger's id: `wk_` + 12 hex. */
+export const WAKE_ID_PATTERN = /^wk_[0-9a-f]{12}$/;
+/** The longest label a wake event carries (the target, the element) — screen-derived, so bounded here, and cut by
+ *  the producer before it is appended. */
+export const WAKE_LABEL_MAX = 200;
+/** What a trigger waits for (`computer-use/wakes/types.ts`'s `WakeConditionKind`). */
+export const WakeConditionKind = z.enum(["clicked", "submitted", "navigated", "appeared", "gone", "changed", "titled"]);
+/** How a trigger ended (`computer-use/wakes/types.ts`'s `WakeEndReason`). */
+export const WakeEndReason = z.enum(["fired", "lost", "expired", "cancelled", "restart", "disabled"]);
+
+/** ComputerV2 wake triggers: the model armed a trigger on a bound app or tab (`wakeWhen`). PERSISTED on the session's
+ *  main thread, and broadcast to every harness like `session_titled` (the session list's "waiting for you" mark). The
+ *  labels are what the user sees ("Chrome — Developer Dashboard", “Submit for review”), redacted by the backend and
+ *  cut to `WAKE_LABEL_MAX`; the model's own `note` is NEVER here (it is for the model alone). `expiresAt`: epoch ms.
+ *  The Mac shows a pill while it is armed: "Waiting for you · click “Submit for review” in Chrome · 52 min left". */
+export const WakeArmedEvent = ThreadBase.extend({
+  type: z.literal("wake_armed"),
+  wakeId: z.string().regex(WAKE_ID_PATTERN),
+  condition: WakeConditionKind,
+  targetLabel: z.string().max(WAKE_LABEL_MAX),
+  elementLabel: z.string().max(WAKE_LABEL_MAX).optional(),
+  expiresAt: z.number().int().nonnegative(),
+});
+
+/** ComputerV2 wake triggers: a trigger ended — `fired` / `lost` (its backend), `expired`, `cancelled` (the model or
+ *  the user), `disabled` (the setting turned off, the session archived), `restart` (reported at the next boot).
+ *  Appended for EVERY ending, whether or not the session is woken for it. `at`: epoch ms. `woken` is true exactly when
+ *  a `computer-wake` message carries this ending — clients decide "Winter will continue" from it, NEVER from the
+ *  reason (an `expired` wakes only when the model asked; a silent one is just "stopped waiting"). */
+export const WakeEndedEvent = ThreadBase.extend({
+  type: z.literal("wake_ended"),
+  wakeId: z.string().regex(WAKE_ID_PATTERN),
+  reason: WakeEndReason,
+  at: z.number().int().nonnegative(),
+  woken: z.boolean(),
+});
 
 /** CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
  *  internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent` bridge
@@ -1162,6 +1242,8 @@ export const SessionEvent = z.discriminatedUnion("type", [
   PanelCommandEvent,
   ProviderLoginProgressEvent,
   ProviderLoginFinishedEvent,
+  WakeArmedEvent,
+  WakeEndedEvent,
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 

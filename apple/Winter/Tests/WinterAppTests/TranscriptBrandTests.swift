@@ -62,6 +62,25 @@ final class TranscriptBrandTests: XCTestCase {
         "DiffAdded": ("1F7A3D", "4CC38A", 1, 1),
         "DiffAddedWash": ("22C55E", "22C55E", 0.10, 0.16),
         "DiffRemovedWash": ("EF4444", "EF4444", 0.10, 0.16),
+        // The Dispatch pill's command mode and its terminal (§ 3.9). The terminal's ANSI colours carry ONE
+        // value for both appearances: the terminal window is dark whatever the system says.
+        "CommandPurple": ("7C3AED", "BF8CFF", 1, 1),
+        "TerminalBlack": ("2E2E2E", "2E2E2E", 1, 1),
+        "TerminalRed": ("FF6B70", "FF6B70", 1, 1),
+        "TerminalGreen": ("4CC38A", "4CC38A", 1, 1),
+        "TerminalYellow": ("F2C66D", "F2C66D", 1, 1),
+        "TerminalBlue": ("6BA3FF", "6BA3FF", 1, 1),
+        "TerminalMagenta": ("BF8CFF", "BF8CFF", 1, 1),
+        "TerminalCyan": ("8CCBF0", "8CCBF0", 1, 1),
+        "TerminalWhite": ("D4D4D4", "D4D4D4", 1, 1),
+        "TerminalBrightBlack": ("767676", "767676", 1, 1),
+        "TerminalBrightRed": ("FF8E92", "FF8E92", 1, 1),
+        "TerminalBrightGreen": ("74D9A6", "74D9A6", 1, 1),
+        "TerminalBrightYellow": ("FFDB8F", "FFDB8F", 1, 1),
+        "TerminalBrightBlue": ("92BCFF", "92BCFF", 1, 1),
+        "TerminalBrightMagenta": ("D4B3FF", "D4B3FF", 1, 1),
+        "TerminalBrightCyan": ("B3DDF5", "B3DDF5", 1, 1),
+        "TerminalBrightWhite": ("FFFFFF", "FFFFFF", 1, 1),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
@@ -461,11 +480,13 @@ final class TranscriptBrandTests: XCTestCase {
         // 11 since the header-only `WorkingDirsMenu.swift` was deleted (2026-09-17); 12 with
         // `ElicitationAnswer.swift` (WS-27 — this pin was not moved then and failed on main); 13 with
         // `TranscriptFileMentions.swift` (transcript file links, 2026-09-30); 14 with
-        // `TranscriptAutoFollow.swift` (the smooth follow, 2026-10-02).
+        // `TranscriptAutoFollow.swift` (the smooth follow, 2026-10-02); 15 with `WakeWaitingPill.swift`
+        // (wake triggers); 16 with `PromptAttachments.swift` (composer attachments, 2026-10-13) — scanned
+        // and clean: it takes its tint as a parameter and names no colour of its own.
         // Exact, not a floor (fix round 1, review M3): `> 10` against 12 files quietly tolerated
         // deleting two of them, which would have made the ban pass by scanning less.
         XCTAssertEqual(scanned, try chatContentSources().count)
-        XCTAssertEqual(scanned, 14, "ChatContent's file count changed — confirm the new file is scanned")
+        XCTAssertEqual(scanned, 16, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     /// **The fence on IMPORTANT-1's fix itself.** The two pins above prove `HairlineElevated` is a
@@ -500,13 +521,13 @@ final class TranscriptBrandTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(elevatedSites, 10,
+        XCTAssertEqual(elevatedSites, 11,
                        "the question separator, the code-block rim, the latest pill, the "
                        + "interaction card's own rim, the pending box's option separators, its "
                        + "header pills, the inline sidebars' divider, the floating cards' rim, "
                        + "the reply's image-thumbnail rim (transcript file links, 2026-09-30) and "
-                       + "the 'Show earlier turns' pill (2026-10-10) "
-                       + "— all ten, or this pin is passing because the rules stopped "
+                       + "the 'Show earlier turns' pill (2026-10-10) and the wake trigger's "
+                       + "waiting pill (2026-10-12) — all eleven, or this pin is passing because the rules stopped "
                        + "being drawn at all")
     }
 

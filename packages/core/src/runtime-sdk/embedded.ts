@@ -39,11 +39,12 @@ import { EMBEDDED_KILL_GRACE_MS, spawnEmbeddedWorker, type EmbeddedWorkerProcess
 import { RUNTIME_VERSION } from "@yanlinglabs/winter-agent-runtime/version";
 import { WORKFLOW_WORKER_BRIDGE_FLAG } from "@yanlinglabs/winter-agent-runtime/workflow-worker";
 import { REQUIRED_WINTER_AGENT_SDK } from "./versions";
+import type { RunnableSessionMode } from "../sessions/session-mode";
 
 /** The modes that run embedded. Dispatch's CHILD sessions are code sessions, so they stay subprocesses. */
 export const EMBEDDED_MODES = ["chat", "dispatch"] as const;
 
-export function runsEmbedded(mode: "code" | "dispatch" | "chat"): boolean {
+export function runsEmbedded(mode: RunnableSessionMode): boolean {
   return (EMBEDDED_MODES as readonly string[]).includes(mode);
 }
 

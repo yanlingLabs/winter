@@ -702,11 +702,16 @@ WinterCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
 /// always-answers contract true. A flat map keyed by a packed pair would make the fail-all a scan of
 /// every pending call in the process on each close.
 ///
-/// Message ids are assigned by CEF and are per-browser (`ExecuteDevToolsMethod`'s own doc:
-/// "an incremental number ... based on previous values"), so the browser id is a necessary part of
-/// the key — two tabs can legitimately be waiting on the same number.
+/// Message ids are per browser — drawn from one per-browser counter (`SuggestedCDPMessageId`) by both
+/// doors, `WinterCEFSendCDP`'s raw messages and `WinterCEFExecuteCDP`'s `ExecuteDevToolsMethod` — so the
+/// browser id is a necessary part of the key: two tabs can legitimately be waiting on the same number.
 static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *>
     *g_pending_cdp = nil;
+
+/// Browser identifier → (message id → the flattened child session the call was sent to), for the calls sent to
+/// one. A child session that detaches before it answers would leave its calls waiting until the browser closed:
+/// `FailPendingCDPOfSession` fails them when the browser says it detached (`Target.detachedFromTarget`).
+static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, NSString *> *> *g_pending_cdp_sessions = nil;
 
 /// The DevTools observer registration for each open browser, filled beside its `WinterCEFOpenBrowser`
 /// record in `RememberOpenBrowser` and dropped beside it in `ForgetOpenBrowser` — the same
@@ -735,8 +740,9 @@ NSString *CDPReasonJSON(NSString *message) {
   return json ?: @"{\"message\":\"the browser could not report why this failed\"}";
 }
 
-/// Register a completion against the id CEF assigned its method call.
-void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion completion) {
+/// Register a completion against its call's message id — and, for a call sent to a flattened child session, that
+/// session.
+void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion completion, NSString *session = nil) {
   if (g_pending_cdp == nil) {
     g_pending_cdp = [[NSMutableDictionary alloc] init];
   }
@@ -746,6 +752,36 @@ void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion c
     g_pending_cdp[@(browser_id)] = byMessage;
   }
   byMessage[@(message_id)] = [completion copy];
+  if (session.length > 0) {
+    if (g_pending_cdp_sessions == nil) {
+      g_pending_cdp_sessions = [[NSMutableDictionary alloc] init];
+    }
+    NSMutableDictionary<NSNumber *, NSString *> *sessions = g_pending_cdp_sessions[@(browser_id)];
+    if (sessions == nil) {
+      sessions = [[NSMutableDictionary alloc] init];
+      g_pending_cdp_sessions[@(browser_id)] = sessions;
+    }
+    sessions[@(message_id)] = [session copy];
+  }
+}
+
+/// Take one call's entry out of both maps, unanswered; its completion, if it was still pending.
+WinterCEFCDPCompletion TakePendingCDP(int browser_id, int message_id) {
+  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  WinterCEFCDPCompletion completion = byMessage[@(message_id)];
+  if (completion == nil) {
+    return nil;
+  }
+  [byMessage removeObjectForKey:@(message_id)];
+  if (byMessage.count == 0) {
+    [g_pending_cdp removeObjectForKey:@(browser_id)];
+  }
+  NSMutableDictionary<NSNumber *, NSString *> *sessions = g_pending_cdp_sessions[@(browser_id)];
+  [sessions removeObjectForKey:@(message_id)];
+  if (sessions != nil && sessions.count == 0) {
+    [g_pending_cdp_sessions removeObjectForKey:@(browser_id)];
+  }
+  return completion;
 }
 
 /// Settle exactly one pending call. **Erase THEN call** — the same delete-then-resolve ordering the
@@ -757,14 +793,9 @@ void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion c
 /// a DevTools front-end attached to the same browser, or an event message that reached
 /// `OnDevToolsMethodResult` for a call this app never made, has no completion to be owed one.
 void SettlePendingCDP(int browser_id, int message_id, BOOL ok, NSString *payloadJSON) {
-  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
-  WinterCEFCDPCompletion completion = byMessage[@(message_id)];
+  WinterCEFCDPCompletion completion = TakePendingCDP(browser_id, message_id);
   if (completion == nil) {
     return;
-  }
-  [byMessage removeObjectForKey:@(message_id)];
-  if (byMessage.count == 0) {
-    [g_pending_cdp removeObjectForKey:@(browser_id)];
   }
   completion(ok, payloadJSON);
 }
@@ -782,6 +813,7 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
     return;
   }
   [g_pending_cdp removeObjectForKey:@(browser_id)];
+  [g_pending_cdp_sessions removeObjectForKey:@(browser_id)];
   NSString *payload = CDPReasonJSON(reason);
   Log("cdp-pending-failed (id=%d, %lu call(s), %s)", browser_id,
       static_cast<unsigned long>(byMessage.count), reason.UTF8String);
@@ -790,6 +822,35 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
     if (completion != nil) {
       completion(NO, payload);
     }
+  }
+}
+
+/// **Fail every call one flattened child session stranded** — it detached (its frame went away, or navigated to
+/// another process) before answering. Same order as the fail-all: every entry out first, then each completion.
+void FailPendingCDPOfSession(int browser_id, NSString *session, NSString *reason) {
+  NSDictionary<NSNumber *, NSString *> *sessions = [g_pending_cdp_sessions[@(browser_id)] copy];
+  if (sessions.count == 0 || session.length == 0) {
+    return;
+  }
+  NSMutableArray<WinterCEFCDPCompletion> *stranded = [[NSMutableArray alloc] init];
+  // In the order the calls were made.
+  for (NSNumber *messageId in [[sessions allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+    if (![sessions[messageId] isEqualToString:session]) {
+      continue;
+    }
+    WinterCEFCDPCompletion completion = TakePendingCDP(browser_id, messageId.intValue);
+    if (completion != nil) {
+      [stranded addObject:completion];
+    }
+  }
+  if (stranded.count == 0) {
+    return;
+  }
+  Log("cdp-pending-failed (id=%d, %lu call(s) of a detached child session)", browser_id,
+      static_cast<unsigned long>(stranded.count));
+  NSString *payload = CDPReasonJSON(reason);
+  for (WinterCEFCDPCompletion completion in stranded) {
+    completion(NO, payload);
   }
 }
 
@@ -816,6 +877,112 @@ void NoteCDPMessageId(int browser_id, int message_id) {
   }
 }
 
+/// The deepest the params may nest. Foundation accepts any depth; Chromium refuses a deep message with an answer that
+/// names no id — which would leave the call waiting for its timeout.
+const int kCDPParamsMaxDepth = 100;
+
+/// Whether JSON text nests no deeper than `maxDepth` objects and arrays (a byte scan, strings skipped).
+bool JSONNestsWithin(const char *bytes, size_t size, int maxDepth) {
+  int depth = 0;
+  bool inString = false;
+  bool escaped = false;
+  for (size_t i = 0; i < size; i++) {
+    const char c = bytes[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        inString = false;
+      }
+    } else if (c == '"') {
+      inString = true;
+    } else if (c == '{' || c == '[') {
+      if (++depth > maxDepth) {
+        return false;
+      }
+    } else if (c == '}' || c == ']') {
+      depth -= 1;
+    }
+  }
+  return true;
+}
+
+/// One raw DevTools message, `{"id":…,"method":…,"params":…[,"sessionId":…]}`, with `paramsJSON` placed in it
+/// exactly as given once it is checked: ONE JSON object, starting with `{` (no byte-order mark), nesting at most
+/// `kCDPParamsMaxDepth` deep. The params are never re-encoded, so what the engine sent is what the browser reads.
+/// `nil`, with `outReason` (a `{"message": …}` sentence) set, when it can't be sent.
+NSData *RawDevToolsMessage(int messageId, const char *method, const char *paramsJSON, const char *cdpSessionId,
+                           NSString **outReason) {
+  auto refuse = [&](NSString *why) -> NSData * {
+    if (outReason != nullptr) {
+      *outReason = CDPReasonJSON(why);
+    }
+    return nil;
+  };
+  NSString *methodName = method != nullptr ? [NSString stringWithUTF8String:method] : nil;
+  if (method == nullptr || *method == '\0') {
+    return refuse(@"no DevTools method was named");
+  }
+  if (methodName == nil) {
+    return refuse(@"the DevTools method name is not valid UTF-8");
+  }
+  NSString *session = nil;
+  if (cdpSessionId != nullptr && *cdpSessionId != '\0') {
+    session = [NSString stringWithUTF8String:cdpSessionId];
+    if (session == nil) {
+      return refuse(@"the DevTools session id is not valid UTF-8");
+    }
+  }
+  NSData *params = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+  if (paramsJSON != nullptr && *paramsJSON != '\0') {
+    const size_t length = strlen(paramsJSON);
+    if (*paramsJSON != '{') {
+      return refuse(@"the DevTools params were not a JSON object");
+    }
+    if (!JSONNestsWithin(paramsJSON, length, kCDPParamsMaxDepth)) {
+      return refuse(@"the DevTools params nest too deeply");
+    }
+    params = [NSData dataWithBytes:paramsJSON length:length];
+    id parsed = [NSJSONSerialization JSONObjectWithData:params options:0 error:nil];
+    if (![parsed isKindOfClass:[NSDictionary class]]) {
+      return refuse(@"the DevTools params were not a JSON object");
+    }
+  }
+  NSData *methodJSON = [NSJSONSerialization dataWithJSONObject:methodName options:NSJSONWritingFragmentsAllowed error:nil];
+  NSData *sessionJSON = session == nil ? nil : [NSJSONSerialization dataWithJSONObject:session options:NSJSONWritingFragmentsAllowed error:nil];
+  if (methodJSON == nil || (session != nil && sessionJSON == nil)) {
+    return refuse(@"the DevTools message could not be encoded");
+  }
+  NSMutableData *out = [[NSMutableData alloc] init];
+  [out appendData:[[NSString stringWithFormat:@"{\"id\":%d,\"method\":", messageId] dataUsingEncoding:NSUTF8StringEncoding]];
+  [out appendData:methodJSON];
+  [out appendData:[@",\"params\":" dataUsingEncoding:NSUTF8StringEncoding]];
+  [out appendData:params];
+  if (sessionJSON != nil) {
+    [out appendData:[@",\"sessionId\":" dataUsingEncoding:NSUTF8StringEncoding]];
+    [out appendData:sessionJSON];
+  }
+  [out appendData:[@"}" dataUsingEncoding:NSUTF8StringEncoding]];
+  return out;
+}
+
+/// **Register, THEN send.** A method the browser process answers by itself (`Page.handleJavaScriptDialog`, for
+/// one) answers INSIDE the send — CEF hands the reply to the observer before `SendDevToolsMessage` returns — so a
+/// registration made after the send would miss it and leave the call waiting for its timeout. `send` answers
+/// whether the message was submitted. Refused: the registration is taken back unanswered and this returns false
+/// (the caller answers the refusal). Submitted, or already answered from inside the send: true.
+bool RegisterThenSend(int browser_id, int message_id, WinterCEFCDPCompletion settle, const std::function<bool()> &send,
+                      NSString *session = nil) {
+  RememberPendingCDP(browser_id, message_id, settle, session);
+  if (send()) {
+    return true;
+  }
+  // Answered from inside the send after all: that answer stands. Otherwise the entry is taken back unanswered.
+  return TakePendingCDP(browser_id, message_id) == nil;
+}
+
 /// Whether a failure payload is the browser's own protocol error (`{"code": …, "message": …}`) rather
 /// than one this file synthesised (`CDPReasonJSON`, `{"message": …}` only).
 bool PayloadIsProtocolError(NSString *payload) {
@@ -824,8 +991,42 @@ bool PayloadIsProtocolError(NSString *payload) {
     return false;
   }
   id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  if (parsed == nil) {
+    // Unparseable here (Foundation refuses a lone surrogate) — but the browser's own error object starts with its
+    // code, which this file's synthesised `{"message": …}` never carries.
+    return [payload hasPrefix:@"{\"code\":"];
+  }
   return [parsed isKindOfClass:[NSDictionary class]] &&
          [((NSDictionary *)parsed)[@"code"] isKindOfClass:[NSNumber class]];
+}
+
+/// **The browser link's door, with the send injected** (`WinterCEFSendCDP` passes `SendDevToolsMessage`): ONE path
+/// for the tab's own session and a flattened child's — a raw message (`RawDevToolsMessage`) with an id from the
+/// per-browser counter, REGISTERED BEFORE IT IS SENT (`RegisterThenSend`: a browser-side method answers inside the
+/// send), with the child session it went to (so a detach fails it). The completion fires exactly once: a refusal
+/// here, synchronously; otherwise the answer, an error, or a fail-all.
+void SendCDPOver(int browser_id, const char *method, const char *paramsJSON, const char *cdpSessionId,
+                 WinterCEFCDPStatusCompletion answer, const std::function<bool(NSData *)> &send) {
+  const int messageId = SuggestedCDPMessageId(browser_id);
+  NSString *reason = nil;
+  NSData *message = RawDevToolsMessage(messageId, method, paramsJSON, cdpSessionId, &reason);
+  if (message == nil) {
+    answer(WinterCEFCDPStatusRefused, reason ?: CDPReasonJSON(@"the DevTools message could not be encoded"));
+    return;
+  }
+  NoteCDPMessageId(browser_id, messageId);
+  WinterCEFCDPCompletion settle = ^(BOOL ok, NSString *payload) {
+    if (ok) {
+      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
+    } else {
+      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
+             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
+    }
+  };
+  NSString *session = (cdpSessionId != nullptr && *cdpSessionId != '\0') ? [NSString stringWithUTF8String:cdpSessionId] : nil;
+  if (!RegisterThenSend(browser_id, messageId, settle, [&] { return send(message); }, session)) {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
+  }
 }
 
 /// **The decisions behind `WinterCEFAutomationNativeUI`**, one function per kind — called by the
@@ -920,63 +1121,213 @@ bool HoldJSDialog(WinterCEFTabBridge *bridge, CefRefPtr<CefJSDialogCallback> cal
   return true;
 }
 
-/// The child session a raw DevTools message is an EVENT of, or `nil`.
-///
-/// A flattened child target's messages (an out-of-process iframe) arrive on the browser's one
-/// DevTools connection with a top-level `"sessionId"` — and CEF's structured `OnDevToolsEvent` drops
-/// that key, so the raw observer must catch them. It runs on EVERY message, a multi-megabyte
-/// screenshot result included, so it first makes a byte test that parses nothing: Chromium appends a
-/// child's `sessionId` as the message's LAST key, so only a message ending `,"sessionId":"<id>"}` can
-/// be one (a nested `sessionId`, as in `Target.attachedToTarget`'s params, ends `"}}`). Results go to
-/// `OnDevToolsMethodResult` like the tab's own (their ids are unique per browser); only events with a
-/// session are parsed here.
-NSString *ChildSessionEventOf(const char *bytes, size_t size, NSString **outMethod, NSData **outParams) {
+/// Where a raw DevTools message's flattened-child suffix `,"sessionId":"<id>"}` starts, and the id — or false. The
+/// byte test, parsing nothing, that every message passes through (a multi-megabyte screenshot result included).
+/// Chromium appends a flattened child's `sessionId` as the message's LAST key, so only such a message can be a
+/// child's (a nested `sessionId`, as in `Target.attachedToTarget`'s params, ends `"}}`).
+bool ChildSessionSuffix(const char *bytes, size_t size, size_t *outKeyStart, NSString **outSession) {
   static const char kKey[] = ",\"sessionId\":\"";
   const size_t keyLength = sizeof(kKey) - 1;
   if (bytes == nullptr || size < keyLength + 3 || bytes[size - 1] != '}' || bytes[size - 2] != '"') {
-    return nil;
+    return false;
   }
   const size_t closingQuote = size - 2;
   size_t valueStart = closingQuote;
   while (valueStart > 0 && bytes[valueStart - 1] != '"') {
     const unsigned char c = static_cast<unsigned char>(bytes[valueStart - 1]);
     if (!(isalnum(c) || c == '-' || c == '_' || c == '.') || closingQuote - valueStart >= 128) {
-      return nil;
+      return false;
     }
     valueStart -= 1;
   }
   if (valueStart == closingQuote || valueStart < keyLength) {
-    return nil;
+    return false;
   }
   if (memcmp(bytes + valueStart - keyLength, kKey, keyLength) != 0) {
+    return false;
+  }
+  if (outKeyStart != nullptr) {
+    *outKeyStart = valueStart - keyLength;
+  }
+  if (outSession != nullptr) {
+    *outSession = [[NSString alloc] initWithBytes:bytes + valueStart length:closingQuote - valueStart encoding:NSASCIIStringEncoding];
+  }
+  return true;
+}
+
+/// Whether a raw DevTools message is a method RESULT (`{"id":…` first) rather than an event.
+bool IsDevToolsResult(const char *bytes, size_t size) {
+  return bytes != nullptr && size >= 6 && memcmp(bytes, "{\"id\":", 6) == 0;
+}
+
+/// The JSON object text between `start` and `end` (whitespace trimmed) — `{` … `}` — or nil.
+NSData *JSONObjectSlice(const char *bytes, size_t start, size_t end) {
+  while (start < end && isspace(static_cast<unsigned char>(bytes[start]))) start++;
+  while (end > start && isspace(static_cast<unsigned char>(bytes[end - 1]))) end--;
+  if (end - start < 2 || bytes[start] != '{' || bytes[end - 1] != '}') {
     return nil;
   }
-  if (size >= 6 && memcmp(bytes, "{\"id\":", 6) == 0) {
-    return nil;  // a result — it settles through `OnDevToolsMethodResult`
+  return [NSData dataWithBytes:bytes + start length:end - start];
+}
+
+/// What one raw DevTools message is, for the raw observer.
+enum class RawDevToolsKind {
+  /// Not a flattened child's: CEF's structured callbacks take it.
+  NotAChilds,
+  /// A child's result, read: `id`, `ok`, `payload` (the result or error object's own text).
+  ChildResult,
+  /// A child's result whose id was read but whose body could not be: settled as an error.
+  UnreadableChildResult,
+  /// A child's event, read: `session`, `method`, `params` (its own text).
+  ChildEvent,
+  /// A child's message that could not be read at all: consumed and dropped (never left to CEF, which would drop
+  /// its session and hand it on as the tab's own).
+  UnreadableChildMessage,
+};
+
+struct RawDevToolsRead {
+  RawDevToolsKind kind = RawDevToolsKind::NotAChilds;
+  int messageId = 0;
+  BOOL ok = NO;
+  NSString *payload = nil;
+  NSString *session = nil;
+  NSString *method = nil;
+  NSData *params = nil;
+};
+
+/// **A flattened child session's message, read by SLICING, never by a full parse.** Once a message ends with a
+/// child's session (`ChildSessionSuffix`) it is a child's, and is never left to CEF: CEF's parser drops a child's
+/// RESULT (it takes a result only as `{"id":…,"result":…}`, logging "Failed to parse message"), and a child's EVENT
+/// would reach the structured callback with its session dropped — attributed to the tab itself. And it is not parsed
+/// whole: Foundation refuses JSON Chromium writes (a lone surrogate, `\ud83d`, from a string cut mid-pair), and a
+/// re-encode would change number text. So:
+///   * a RESULT, `{"id":N,"result":{…},"sessionId":"…"}` (or `"error"`): `N` read from the bytes, and the object
+///     between the key and the suffix handed on as it is;
+///   * an EVENT, `{"method":"M","params":{…},"sessionId":"…"}` (params may be absent): the same.
+/// Anything of a child's that doesn't fit is "unreadable" — a result with an id is still settled, as an error.
+RawDevToolsRead ReadRawDevToolsMessage(const char *bytes, size_t size) {
+  RawDevToolsRead read;
+  size_t suffix = 0;
+  NSString *session = nil;
+  if (!ChildSessionSuffix(bytes, size, &suffix, &session)) {
+    return read;
   }
-  NSData *data = [NSData dataWithBytes:bytes length:size];
-  id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  read.kind = RawDevToolsKind::UnreadableChildMessage;
+  read.session = session;
+  if (IsDevToolsResult(bytes, size)) {
+    size_t i = 6;
+    long long id = 0;
+    const size_t digits = i;
+    while (i < suffix && isdigit(static_cast<unsigned char>(bytes[i])) && i - digits < 10) {
+      id = id * 10 + (bytes[i] - '0');
+      i++;
+    }
+    if (i == digits || id > INT_MAX) {
+      return read;
+    }
+    read.messageId = static_cast<int>(id);
+    read.kind = RawDevToolsKind::UnreadableChildResult;
+    static const char kResult[] = ",\"result\":";
+    static const char kError[] = ",\"error\":";
+    size_t bodyStart = 0;
+    if (suffix - i >= sizeof(kResult) - 1 && memcmp(bytes + i, kResult, sizeof(kResult) - 1) == 0) {
+      read.ok = YES;
+      bodyStart = i + sizeof(kResult) - 1;
+    } else if (suffix - i >= sizeof(kError) - 1 && memcmp(bytes + i, kError, sizeof(kError) - 1) == 0) {
+      read.ok = NO;
+      bodyStart = i + sizeof(kError) - 1;
+    } else {
+      return read;
+    }
+    NSData *body = JSONObjectSlice(bytes, bodyStart, suffix);
+    NSString *payload = body == nil ? nil : [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    if (payload == nil) {
+      return read;
+    }
+    read.payload = payload;
+    read.kind = RawDevToolsKind::ChildResult;
+    return read;
+  }
+  static const char kMethod[] = "{\"method\":\"";
+  const size_t methodLength = sizeof(kMethod) - 1;
+  if (suffix < methodLength || memcmp(bytes, kMethod, methodLength) != 0) {
+    return read;
+  }
+  size_t i = methodLength;
+  while (i < suffix && bytes[i] != '"' && bytes[i] != '\\') i++;
+  if (i >= suffix || bytes[i] != '"' || i == methodLength) {
+    return read;
+  }
+  NSString *method = [[NSString alloc] initWithBytes:bytes + methodLength length:i - methodLength encoding:NSUTF8StringEncoding];
+  if (method == nil) {
+    return read;
+  }
+  i++;  // the closing quote
+  NSData *params = nil;
+  static const char kParams[] = ",\"params\":";
+  if (i == suffix) {
+    params = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+  } else if (suffix - i >= sizeof(kParams) - 1 && memcmp(bytes + i, kParams, sizeof(kParams) - 1) == 0) {
+    params = JSONObjectSlice(bytes, i + sizeof(kParams) - 1, suffix);
+  }
+  if (params == nil) {
+    return read;
+  }
+  read.kind = RawDevToolsKind::ChildEvent;
+  read.method = method;
+  read.params = params;
+  return read;
+}
+
+/// The child session a DevTools EVENT says detached (`Target.detachedFromTarget`'s `params.sessionId`), or nil.
+NSString *DetachedSessionOf(NSString *method, NSData *params) {
+  if (![method isEqualToString:@"Target.detachedFromTarget"] || params == nil) {
+    return nil;
+  }
+  id parsed = [NSJSONSerialization JSONObjectWithData:params options:0 error:nil];
   if (![parsed isKindOfClass:[NSDictionary class]]) {
     return nil;
   }
-  NSDictionary *message = parsed;
-  NSString *method = message[@"method"];
-  NSString *session = message[@"sessionId"];
-  if (message[@"id"] != nil || ![method isKindOfClass:[NSString class]] ||
-      ![session isKindOfClass:[NSString class]]) {
-    return nil;
+  NSString *session = ((NSDictionary *)parsed)[@"sessionId"];
+  return [session isKindOfClass:[NSString class]] ? session : nil;
+}
+
+/// An event of the browser's (its own, or a child's): a child session that detached fails the calls it still owed.
+void NoteDevToolsEvent(int browser_id, NSString *method, NSData *params) {
+  if (NSString *detached = DetachedSessionOf(method, params)) {
+    FailPendingCDPOfSession(browser_id, detached, @"the frame's DevTools session ended before it answered");
   }
-  id params = message[@"params"];
-  if (![params isKindOfClass:[NSDictionary class]]) {
-    params = @{};
+}
+
+/// **The raw observer's whole decision for one message** (`WinterCDPObserver::OnDevToolsMessage`), with no CEF: a
+/// flattened child's RESULT settles its pending call by id (an unreadable body as an error); a child's EVENT goes to
+/// `deliver` with its session; a child's message nothing could be read of is dropped. Every child's message is
+/// consumed (`true`); anything else is left to CEF's structured callbacks (`false`).
+bool HandleRawDevToolsMessage(int browser_id, const char *bytes, size_t size,
+                              void (^deliver)(NSString *method, NSData *params, NSString *session)) {
+  RawDevToolsRead read = ReadRawDevToolsMessage(bytes, size);
+  switch (read.kind) {
+    case RawDevToolsKind::NotAChilds:
+      return false;
+    case RawDevToolsKind::ChildResult:
+      SettlePendingCDP(browser_id, read.messageId, read.ok, read.payload);
+      return true;
+    case RawDevToolsKind::UnreadableChildResult:
+      Log("cdp-child-result-unreadable (id=%d, message %d)", browser_id, read.messageId);
+      SettlePendingCDP(browser_id, read.messageId, NO,
+                       @"{\"code\":-32603,\"message\":\"the child session's result could not be read\"}");
+      return true;
+    case RawDevToolsKind::ChildEvent:
+      NoteDevToolsEvent(browser_id, read.method, read.params);
+      if (deliver != nil) {
+        deliver(read.method, read.params, read.session);
+      }
+      return true;
+    case RawDevToolsKind::UnreadableChildMessage:
+      Log("cdp-child-message-unreadable (id=%d, %zu bytes) — dropped", browser_id, size);
+      return true;
   }
-  if (outMethod != nullptr) {
-    *outMethod = method;
-  }
-  if (outParams != nullptr) {
-    *outParams = [NSJSONSerialization dataWithJSONObject:params options:0 error:nil] ?: [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-  }
-  return session;
+  return true;
 }
 
 /// **The reply side of the CDP door.** One instance per open browser, alive for exactly as long as
@@ -988,10 +1339,11 @@ NSString *ChildSessionEventOf(const char *bytes, size_t size, NSString **outMeth
 ///
 ///   * `OnDevToolsEvent` — the tab's own events, handed to the tab's `devToolsEventObserver` (unset
 ///     for every tab the link does not hold, so nothing changes for those);
-///   * `OnDevToolsMessage` — answers `true` (handled) ONLY for a flattened child target's event,
-///     which the structured callback would deliver without its session (`ChildSessionEventOf`).
-///     Every other message — every result, the old consumer's included, and every event of the tab
-///     itself — answers `false` and reaches the structured callbacks exactly as before.
+///   * `OnDevToolsMessage` — answers `true` (handled) ONLY for a flattened child target's message
+///     (`HandleRawDevToolsMessage`): its event, which the structured callback would deliver without its
+///     session, and its RESULT, which CEF's parser drops and which is settled here by its id. Every other
+///     message — every result of the tab's own session, the old consumer's included, and every event of
+///     the tab itself — answers `false` and reaches the structured callbacks exactly as before.
 ///
 /// `OnDevToolsAgentAttached` is a fact with no consequence for a caller that is already waiting.
 class WinterCDPObserver : public CefDevToolsMessageObserver {
@@ -1001,17 +1353,9 @@ class WinterCDPObserver : public CefDevToolsMessageObserver {
     if (!browser) {
       return false;
     }
-    NSString *method = nil;
-    NSData *params = nil;
-    NSString *session = ChildSessionEventOf(static_cast<const char *>(message), message_size, &method, &params);
-    if (session == nil) {
-      return false;
-    }
     WinterCEFTabBridge *bridge = OpenBrowserRecordFor(browser).bridge;
-    if (bridge.devToolsEventObserver != nil) {
-      bridge.devToolsEventObserver(method, params, session);
-    }
-    return true;
+    void (^observer)(NSString *, NSData *, NSString *) = bridge.devToolsEventObserver;
+    return HandleRawDevToolsMessage(browser->GetIdentifier(), static_cast<const char *>(message), message_size, observer);
   }
 
   void OnDevToolsEvent(CefRefPtr<CefBrowser> browser,
@@ -1022,6 +1366,11 @@ class WinterCDPObserver : public CefDevToolsMessageObserver {
     if (!browser) {
       return;
     }
+    NSString *name = [NSString stringWithUTF8String:method.ToString().c_str()] ?: @"";
+    // A child session that detached fails the calls it still owed — whether or not anyone observes events.
+    if ([name isEqualToString:@"Target.detachedFromTarget"] && params != nullptr && params_size > 0) {
+      NoteDevToolsEvent(browser->GetIdentifier(), name, [NSData dataWithBytes:params length:params_size]);
+    }
     WinterCEFTabBridge *bridge = OpenBrowserRecordFor(browser).bridge;
     if (bridge.devToolsEventObserver == nil) {
       return;
@@ -1029,11 +1378,12 @@ class WinterCDPObserver : public CefDevToolsMessageObserver {
     // "|params| is only valid for the scope of this callback" — copied, since the observer hands it on.
     NSData *data = (params != nullptr && params_size > 0) ? [NSData dataWithBytes:params length:params_size]
                                                           : [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-    bridge.devToolsEventObserver([NSString stringWithUTF8String:method.ToString().c_str()] ?: @"", data, nil);
+    bridge.devToolsEventObserver(name, data, nil);
   }
 
-  /// A method call finished. `message_id` is the id `ExecuteDevToolsMethod` returned to the caller,
-  /// which is the whole correlation: `result` is the protocol's `"result"` dictionary on success and
+  /// A method call finished. `message_id` is the call's own id — the one `WinterCEFExecuteCDP`'s
+  /// `ExecuteDevToolsMethod` returned, or the one `WinterCEFSendCDP` put in its raw message — which is the
+  /// whole correlation: `result` is the protocol's `"result"` dictionary on success and
   /// its `"error"` dictionary on failure (`cef_devtools_message_observer.h`), and both are already
   /// the JSON object this door's completion promises — so neither is reshaped here.
   void OnDevToolsMethodResult(CefRefPtr<CefBrowser> browser,
@@ -3161,7 +3511,9 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     // Append rather than assign: a bare AppendSwitchWithValue would silently drop any value CEF or
     // a future caller had already put there.
     static const char kSwitch[] = "disable-features";
-    static const char kFeatures[] = "SoftNavigationDetection,SoftNavigationHeuristics";
+    // `AimEnabled`, `AutofillServerCommunication`: see the background calls below.
+    static const char kFeatures[] =
+        "SoftNavigationDetection,SoftNavigationHeuristics,AimEnabled,AutofillServerCommunication";
     std::string value = kFeatures;
     if (command_line->HasSwitch(kSwitch)) {
       const std::string existing = command_line->GetSwitchValue(kSwitch).ToString();
@@ -3170,13 +3522,33 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
       }
     }
     command_line->AppendSwitchWithValue(kSwitch, value);
-    Log("disable-features=%s (upstream ReadAnythingSoftNavigationObserver null-deref)", value.c_str());
+    Log("disable-features=%s (SoftNavigation*: the upstream ReadAnythingSoftNavigationObserver null-deref; AimEnabled, "
+        "AutofillServerCommunication: background calls)", value.c_str());
     // WebMCP (ComputerV2 Phase 4): a site's own agent tools, `document.modelContext` — off by default in this Chromium
     // (an origin trial). Process-wide and fixed at launch, so always on; the daemon's `computerUse.webmcp` decides
     // whether Winter reads or calls them. Appended like the switch above.
     static const char kEnable[] = "enable-features";
     const std::string enabled = command_line->HasSwitch(kEnable) ? command_line->GetSwitchValue(kEnable).ToString() : "";
     command_line->AppendSwitchWithValue(kEnable, enabled.empty() ? "WebMCP" : enabled + ",WebMCP");
+    // **The browser's own background calls that serve nothing in Winter** (the user's ruling): each one is a request to
+    // Google no page made, and none feeds anything Winter's browsers can show. Measured: a first-run NetLog of Winter
+    // Dev's panel before and after (AI Mode's request and the RLZ ping gone, every other call unchanged; domain
+    // reliability seen in neither), and each one alone on Winter Headless — same Chromium, same app class — by
+    // leaving it out (its request came back):
+    //  * `AimEnabled` (in the list above) — Chrome's AI Mode eligibility request at start (www.google.com/async/folae),
+    //    for an AI Mode entry in Chrome's own address bar, which no Winter browser has;
+    //  * `--no-first-run` — the RLZ ping 90 s after a first run (clients1.google.com/tools/pso/ping), search
+    //    attribution only; the first-run UI it also skips does not exist in an Alloy-style browser;
+    //  * `--disable-domain-reliability` — error beacons about Google's own sites, for Google's monitoring;
+    //  * `AutofillServerCommunication` (in the list above) — each form page's signatures and each submitted form's
+    //    field votes sent to Google's autofill server, which answers 400 in this build (no API key): no prediction
+    //    ever comes back. The panel's own form suggestions (the dropdown from what was typed before, kept in the
+    //    profile's `Web Data`) are local and stay.
+    // KEPT, on purpose: the component updater (the root store, the CRLSet, DRM and the data sites rely on), Google
+    // sign-in and the network-time query. Winter Headless, which runs this same app class, goes further with its own
+    // switches (`HeadlessArguments`).
+    command_line->AppendSwitch("no-first-run");
+    command_line->AppendSwitch("disable-domain-reliability");
   }
 
   void OnContextInitialized() override {
@@ -3362,36 +3734,39 @@ static void (^g_pre_shutdown_hook)(void) = nil;
 // caller obligation nobody had — "nothing else in this header may be called before this returns
 // YES" — which is discharged here instead: `WinterCEFInitialize` below is its only caller, and
 // every other entry point guards on `g_initialized`.
-static BOOL WinterCEFLoadLibrary(void) {
+static BOOL WinterCEFLoadLibrary(const char *frameworkDir) {
   if (g_library_loaded) {
     return YES;
   }
-  // `LoadInMain` — the MAIN-process arm of the loader. Task 5's signing A/B exercised only
-  // `LoadInHelper`; same team-ID logic and the same symlink, but this call had never run anywhere
-  // before Task 6a. It computes `<executable dir>/../Frameworks/Chromium Embedded Framework
-  // .framework/Chromium Embedded Framework` (`cef_scoped_library_loader_mac.mm`, kPathFromMainExe)
-  // — which, since Task 5 restructured the embedded copy into the versioned macOS layout Xcode's
-  // product validator demands, resolves through the framework's top-level symlink to
-  // `Versions/A/`. dlopen follows symlinks, so the path is unchanged from CEF's flat original.
+  // BY PATH. Winter's one Chromium lives in the nested Winter Headless helper
+  // (`Contents/Helpers/Winter Headless.app/Contents/Frameworks`, the user's ruling), not where
+  // `LoadInMain` looks (`<executable dir>/../Frameworks`, `cef_scoped_library_loader_mac.mm`'s
+  // kPathFromMainExe) — the same call `LoadInMain` ends in, `cef_load_library`, with the path given.
+  // The framework is in the versioned layout; its top-level symlink resolves to `Versions/A/`, and
+  // dlopen follows symlinks. Library validation holds: it is signed by Winter's team, like the app.
   //
-  // The handle is deliberately never destroyed — the framework stays loaded for the life of the
-  // process. It was `static` until the whole-branch review (F9), which did nothing: the value is
-  // overwritten on every call and the function early-returns on `g_library_loaded` anyway, so the
-  // storage class only read as though it were load-bearing.
-  void *loader = cef_scoped_library_loader_create(0 /* 0 = main process, not helper */);
-  if (loader == nullptr) {
-    g_last_error = "could not load the Chromium Embedded Framework (LoadInMain failed)";
+  // The library is deliberately never unloaded — the framework stays loaded for the life of the
+  // process.
+  if (frameworkDir == nullptr || *frameworkDir == '\0') {
+    g_last_error = "no Chromium Embedded Framework path was given";
+    Log("FAILED: %s", g_last_error.c_str());
+    return NO;
+  }
+  const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
+  if (!cef_load_library(library.c_str())) {
+    g_last_error = "could not load the Chromium Embedded Framework from Winter Headless's bundle";
     Log("FAILED: %s", g_last_error.c_str());
     return NO;
   }
   g_library_loaded = true;
-  Log("framework loaded (LoadInMain)");
+  Log("framework loaded (by path, from the nested helper)");
   return YES;
 }
 
 BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
+                        const char *frameworkDir,
                         const char *subprocessPath) {
   if (g_initialized) {
     return YES;
@@ -3402,7 +3777,7 @@ BOOL WinterCEFInitialize(int argc,
     Log("REFUSED: %s", g_last_error.c_str());
     return NO;
   }
-  if (!WinterCEFLoadLibrary()) {
+  if (!WinterCEFLoadLibrary(frameworkDir)) {
     return NO;
   }
 
@@ -3411,6 +3786,8 @@ BOOL WinterCEFInitialize(int argc,
   CefMainArgs main_args(argc, argv);
 
   CefSettings settings;
+  // Where the framework is (its resources, locales and ICU data are read from it): the nested helper's.
+  CefString(&settings.framework_dir_path).FromString(frameworkDir);
   settings.external_message_pump = true;  // this app's run loop is SwiftUI's, and already running
   settings.multi_threaded_message_loop = false;  // unsupported on macOS anyway
   settings.no_sandbox = false;                   // the helpers' CEF_USE_SANDBOX half is in project.yml
@@ -3714,12 +4091,12 @@ void WinterCEFExecuteCDP(NSView *parent,
     return;
   }
   NoteCDPMessageId(browserId, messageId);
-  // **The ordering assumption, stated rather than assumed.** A DevTools method result travels back
-  // through the agent, never re-entrantly out of the call above, so registering after the submit is
-  // safe — but if that were ever untrue the reply would find no pending entry and be dropped, and
-  // this completion would never fire. That is the one hole in the always-answers contract that lives
-  // on this line, and the caller's own deadline is what covers it (`PanelCommandConsumer`'s
-  // abandonment timer, which exists for the app-is-wedged case anyway).
+  // **The ordering assumption, and where it is FALSE.** A method the browser process answers by itself
+  // (`Page.handleJavaScriptDialog`, for one) answers re-entrantly, from INSIDE the call above — measured on the
+  // browser link's door, which therefore registers before it sends (`RegisterThenSend`). Registered after the
+  // submit, as here, such an answer finds no pending entry and is dropped, and this completion never fires. This
+  // door's verbs (the old `Browser` tool's) send no such method; the caller's own deadline is what covers it if one
+  // ever does (`PanelCommandConsumer`'s abandonment timer, which exists for the app-is-wedged case anyway).
   RememberPendingCDP(browser->GetIdentifier(), messageId, answer);
 }
 
@@ -3750,73 +4127,9 @@ void WinterCEFSendCDP(NSView *parent,
     answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"this tab has no live browser"));
     return;
   }
-  const int browserId = browser->GetIdentifier();
-  // The shared registry speaks `(ok, payload)`; this door's caller needs the KIND of failure. A failure
-  // the browser reported carries the protocol's numeric `code`; one this file decided (the browser
-  // closed, the agent detached — `FailAllPendingCDP`) carries only a message.
-  WinterCEFCDPCompletion settle = ^(BOOL ok, NSString *payload) {
-    if (ok) {
-      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
-    } else {
-      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
-             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
-    }
-  };
-
-  if (cdpSessionId == nullptr || *cdpSessionId == '\0') {
-    // The tab's own session: the structured door, as `WinterCEFExecuteCDP` uses it.
-    CefRefPtr<CefDictionaryValue> params;
-    if (paramsJSON != nullptr && *paramsJSON != '\0') {
-      CefRefPtr<CefValue> parsed = CefParseJSON(CefString(paramsJSON), JSON_PARSER_RFC);
-      if (!parsed || parsed->GetType() != VTYPE_DICTIONARY) {
-        answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
-        return;
-      }
-      params = parsed->GetDictionary();
-    }
-    const int messageId =
-        browser->GetHost()->ExecuteDevToolsMethod(SuggestedCDPMessageId(browserId), CefString(method), params);
-    if (messageId <= 0) {
-      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools method"));
-      return;
-    }
-    NoteCDPMessageId(browserId, messageId);
-    RememberPendingCDP(browserId, messageId, settle);
-    return;
-  }
-
-  // A child target's session: raw, because only the raw message can name a `sessionId`. Its result
-  // still arrives through `OnDevToolsMethodResult` by id — which is why the id comes from the same
-  // counter as every other on this browser.
-  id params = @{};
-  if (paramsJSON != nullptr && *paramsJSON != '\0') {
-    NSData *data = [NSData dataWithBytes:paramsJSON length:strlen(paramsJSON)];
-    params = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (![params isKindOfClass:[NSDictionary class]]) {
-      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
-      return;
-    }
-  }
-  const int messageId = SuggestedCDPMessageId(browserId);
-  NSDictionary *message = @{
-    @"id" : @(messageId),
-    @"method" : [NSString stringWithUTF8String:method] ?: @"",
-    @"params" : params,
-    @"sessionId" : [NSString stringWithUTF8String:cdpSessionId] ?: @"",
-  };
-  NSData *encoded = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
-  if (encoded == nil) {
-    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools message could not be encoded"));
-    return;
-  }
-  NoteCDPMessageId(browserId, messageId);
-  if (!browser->GetHost()->SendDevToolsMessage(encoded.bytes, encoded.length)) {
-    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
-    return;
-  }
-  // Registered after the submit, as `WinterCEFExecuteCDP` does and on the same ordering argument: a
-  // reply travels back through the agent, never re-entrantly out of the call above.
-  RememberPendingCDP(browserId, messageId, settle);
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  SendCDPOver(browser->GetIdentifier(), method, paramsJSON, cdpSessionId, answer,
+              [&](NSData *message) { return host->SendDevToolsMessage(message.bytes, message.length); });
 }
 
 void WinterCEFSetDevToolsEventObserver(NSView *parent,
@@ -3997,12 +4310,94 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags) {
 
 NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message) {
   NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
-  NSString *method = nil;
-  NSData *params = nil;
-  NSString *session = ChildSessionEventOf(static_cast<const char *>(data.bytes), data.length, &method, &params);
-  return session != nil ? [NSString stringWithFormat:@"%@ %@ %@", session, method,
-                                    [[NSString alloc] initWithData:params encoding:NSUTF8StringEncoding]]
-                        : nil;
+  RawDevToolsRead read = ReadRawDevToolsMessage(static_cast<const char *>(data.bytes), data.length);
+  if (read.kind != RawDevToolsKind::ChildEvent) {
+    return nil;
+  }
+  return [NSString stringWithFormat:@"%@ %@ %@", read.session, read.method,
+                                    [[NSString alloc] initWithData:read.params encoding:NSUTF8StringEncoding]];
+}
+
+NSString *WinterCEFRawMessageTranscriptWithNoCEFAnywhere(NSString *message) {
+  // A browser id no real browser can have (CEF never starts in the unit-test host), with calls 1…20 pending — 15 and
+  // 16 of them sent to a child session "AB12CD".
+  const int browserId = -717171;
+  NSMutableArray<NSString *> *rows = [[NSMutableArray alloc] init];
+  for (int id = 1; id <= 20; id++) {
+    RememberPendingCDP(browserId, id, ^(BOOL ok, NSString *payload) {
+      [rows addObject:[NSString stringWithFormat:@"settled %d ok=%d %@", id, ok ? 1 : 0, payload]];
+    }, (id == 15 || id == 16) ? @"AB12CD" : nil);
+  }
+  NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
+  const bool consumed = HandleRawDevToolsMessage(browserId, static_cast<const char *>(data.bytes), data.length,
+                                                 ^(NSString *method, NSData *params, NSString *session) {
+    [rows addObject:[NSString stringWithFormat:@"event %@ %@ %@", session, method,
+                                               [[NSString alloc] initWithData:params encoding:NSUTF8StringEncoding]]];
+  });
+  [rows insertObject:[NSString stringWithFormat:@"consumed=%d", consumed ? 1 : 0] atIndex:0];
+  for (int id = 1; id <= 20; id++) {
+    (void)TakePendingCDP(browserId, id);
+  }
+  return [rows componentsJoinedByString:@";"];
+}
+
+NSString *WinterCEFSendCDPTranscriptWithNoCEFAnywhere(void) {
+  const int browserId = -818181;
+  NSMutableArray<NSString *> *rows = [[NSMutableArray alloc] init];
+  WinterCEFCDPStatusCompletion record = ^(WinterCEFCDPStatus status, NSString *payload) {
+    [rows addObject:[NSString stringWithFormat:@"status=%d %@", static_cast<int>(status), payload]];
+  };
+  // The id the door put in a message it sent.
+  auto idOf = [](NSData *message) -> int {
+    const char *bytes = static_cast<const char *>(message.bytes);
+    return message.length > 6 ? atoi(bytes + 6) : 0;
+  };
+  // 1. A browser-side method answered INSIDE the send (the tab's own session: CEF's structured callback).
+  SendCDPOver(browserId, "Page.handleJavaScriptDialog", "{\"accept\":true}", nullptr, record, [&](NSData *m) {
+    SettlePendingCDP(browserId, idOf(m), YES, @"{}");
+    return true;
+  });
+  // 2. A child session's result, with a lone surrogate Foundation refuses, answered inside the send through the raw
+  //    observer's own path.
+  SendCDPOver(browserId, "Runtime.callFunctionOn", "{\"returnByValue\":true}", "AB12CD", record, [&](NSData *m) {
+    NSString *raw = [NSString stringWithFormat:@"{\"id\":%d,\"result\":{\"result\":{\"type\":\"string\",\"value\":\"x\\ud83d\"}},\"sessionId\":\"AB12CD\"}", idOf(m)];
+    NSData *bytes = [raw dataUsingEncoding:NSUTF8StringEncoding];
+    HandleRawDevToolsMessage(browserId, static_cast<const char *>(bytes.bytes), bytes.length, nil);
+    return true;
+  });
+  // 3. A child session's error, answered later.
+  int later = 0;
+  SendCDPOver(browserId, "DOM.resolveNode", "{}", "AB12CD", record, [&](NSData *m) { later = idOf(m); return true; });
+  NSString *error = [NSString stringWithFormat:@"{\"id\":%d,\"error\":{\"code\":-32000,\"message\":\"No node\"},\"sessionId\":\"AB12CD\"}", later];
+  NSData *errorBytes = [error dataUsingEncoding:NSUTF8StringEncoding];
+  HandleRawDevToolsMessage(browserId, static_cast<const char *>(errorBytes.bytes), errorBytes.length, nil);
+  // 4. A child session that detaches before it answers: its call fails; a call on the tab's own session does not.
+  SendCDPOver(browserId, "Page.enable", nullptr, "EF34", record, [](NSData *) { return true; });
+  int own = 0;
+  SendCDPOver(browserId, "Page.enable", nullptr, nullptr, record, [&](NSData *m) { own = idOf(m); return true; });
+  NoteDevToolsEvent(browserId, @"Target.detachedFromTarget", [@"{\"sessionId\":\"EF34\",\"targetId\":\"T\"}" dataUsingEncoding:NSUTF8StringEncoding]);
+  [rows addObject:[NSString stringWithFormat:@"own pending=%d", g_pending_cdp[@(browserId)][@(own)] != nil ? 1 : 0]];
+  (void)TakePendingCDP(browserId, own);
+  // 5. Refused before anything is sent: a refused send; params that are not one object, or start with a BOM, or nest
+  //    too deep; a method that is not UTF-8.
+  SendCDPOver(browserId, "Page.enable", nullptr, nullptr, record, [](NSData *) { return false; });
+  SendCDPOver(browserId, "Page.enable", "[1]", nullptr, record, [](NSData *) { return true; });
+  SendCDPOver(browserId, "Page.enable", "\xEF\xBB\xBF{}", nullptr, record, [](NSData *) { return true; });
+  std::string deep(101, '[');
+  deep = "{\"a\":" + deep + std::string(101, ']') + "}";
+  SendCDPOver(browserId, "Page.enable", deep.c_str(), nullptr, record, [](NSData *) { return true; });
+  SendCDPOver(browserId, "Page.\xFF", nullptr, nullptr, record, [](NSData *) { return true; });
+  [rows addObject:[NSString stringWithFormat:@"pending=%lu", static_cast<unsigned long>(g_pending_cdp[@(browserId)].count)]];
+  [g_pending_cdp removeObjectForKey:@(browserId)];
+  [g_pending_cdp_sessions removeObjectForKey:@(browserId)];
+  g_cdp_last_message_id.erase(browserId);
+  return [rows componentsJoinedByString:@"\n"];
+}
+
+NSString *WinterCEFRawDevToolsMessageWithNoCEFAnywhere(int messageId, const char *method, const char *paramsJSON,
+                                                      const char *cdpSessionId) {
+  NSData *data = RawDevToolsMessage(messageId, method, paramsJSON, cdpSessionId, nullptr);
+  return data != nil ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
 }
 
 NSString *WinterCEFPrintingPreferenceDecisions(void) {
@@ -4500,4 +4895,1326 @@ void WinterCEFShutdown(void) {
 
 BOOL WinterCEFDidShutdown(void) {
   return g_did_shutdown ? YES : NO;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// ComputerV2 Phase 4 — Winter Headless: the windowless mode and per-session request contexts.
+//
+// ADDITIONS ONLY. Nothing above calls into this section, and nothing here changes a browser Winter.app
+// creates: only `WinterCEFInitializeHeadless` (which Winter.app never calls) turns windowless rendering on,
+// and only `WinterCEFCreateWindowlessBrowser` makes a browser with the client below. See `WinterCEF.h`.
+// ---------------------------------------------------------------------------------------------------
+
+#include <atomic>
+#include <cmath>
+#include <cstdlib>
+
+#include "include/cef_cookie.h"
+#include "include/cef_render_handler.h"
+#include "include/cef_request_context_handler.h"
+#include "include/cef_resource_request_handler.h"
+
+namespace {
+
+/// Low on purpose: nobody sees these frames, and a page's own animation work is bound to this rate.
+/// `Page.captureScreenshot` asks for a fresh frame of its own. (To be tuned by measuring memory and CPU on a live run.)
+const int kHeadlessFrameRate = 10;
+
+bool g_headless = false;
+
+/// The view a headless browser reports. Paint goes nowhere: the engine reads pixels only through
+/// `Page.captureScreenshot`, which the compositor answers on its own.
+/// Presentation (`WinterCEFHeadlessSet*Observer`, `WinterCEFHeadlessSetPresentation`). Main (CEF UI) thread only.
+void (^g_headless_paint_observer)(int, int, IOSurfaceRef, int, int, double) = nil;
+void (^g_headless_popup_observer)(int, int, int, int, int, int) = nil;
+void (^g_headless_cursor_observer)(int, int) = nil;
+/// Version 2 of a presentation (`WinterPresentWire.h`): where the IME composition is drawn, the page's dialogs and file
+/// choosers. Main (CEF UI) thread only.
+void (^g_headless_ime_observer)(int, int, int, NSArray<NSValue *> *) = nil;
+void (^g_headless_dialog_opened_observer)(int, int, NSString *, NSString *, NSString *) = nil;
+void (^g_headless_dialog_closed_observer)(int) = nil;
+/// The shown page's address and title, by browser id (`WinterCEFHeadlessSetPageObserver`).
+void (^g_headless_page_observer)(int, NSString *, NSString *) = nil;
+BOOL (^g_headless_file_chooser_handler)(int, int, int, NSArray<NSString *> *) = nil;
+/// A window the page opens while the person holds the browser (`WinterCEFHeadlessSetPopupAdopter`), and every headless
+/// browser's close (`WinterCEFHeadlessSetClosedObserver`).
+NSView *(^g_headless_popup_adopter)(int, NSString *) = nil;
+void (^g_headless_closed_observer)(int) = nil;
+/// Every applied change of a headless browser's view (`WinterCEFHeadlessSetViewObserver`).
+void (^g_headless_view_observer)(int, int, int, double) = nil;
+/// The dialog each headless browser holds now (type 0 alert, 1 confirm, 2 prompt, 3 beforeunload), by browser id.
+struct HeadlessDialogInfo {
+  int type;
+  std::string message;
+  std::string defaultText;
+  std::string origin;  // the page that raised it, `scheme://host[:port]` (empty when unknown)
+};
+/// Each headless browser's main-frame address and title as last reported, by browser id.
+struct HeadlessPage {
+  std::string url;
+  std::string title;
+};
+std::map<int, HeadlessPage> &HeadlessPages() {
+  static auto *pages = new std::map<int, HeadlessPage>();
+  return *pages;
+}
+/// `scheme://host[:port]` of `url` — what a dialog names as its author; empty for a URL with no host (data:, about:).
+std::string HeadlessOriginOf(const std::string &url) {
+  @autoreleasepool {
+    NSURLComponents *c = [NSURLComponents componentsWithString:[NSString stringWithUTF8String:url.c_str()] ?: @""];
+    if (c.scheme.length == 0 || c.host.length == 0) return std::string();
+    // An IPv6 literal keeps its brackets (`http://[::1]:8080`): without them its port could not be told from the address.
+    NSString *host = [c.host containsString:@":"] && ![c.host hasPrefix:@"["] ? [NSString stringWithFormat:@"[%@]", c.host] : c.host;
+    NSString *origin = c.port != nil ? [NSString stringWithFormat:@"%@://%@:%@", c.scheme, host, c.port]
+                                     : [NSString stringWithFormat:@"%@://%@", c.scheme, host];
+    return std::string(origin.UTF8String ?: "");
+  }
+}
+std::map<int, HeadlessDialogInfo> &HeadlessDialogs() {
+  static auto *dialogs = new std::map<int, HeadlessDialogInfo>();
+  return *dialogs;
+}
+/// File choosers a presentation's viewer answers, by request id: the callback and its browser.
+struct HeadlessFileChooser {
+  int browserId;
+  CefRefPtr<CefFileDialogCallback> callback;
+};
+std::map<int, HeadlessFileChooser> &HeadlessFileChoosers() {
+  static auto *choosers = new std::map<int, HeadlessFileChooser>();
+  return *choosers;
+}
+int g_headless_next_file_chooser = 0;
+/// The headless browsers a presentation's person holds now (`WinterCEFHeadlessSetUserControl`): they may take focus — the
+/// page's input method events need a focused widget — which an automated tab otherwise refuses.
+std::set<int> &HeadlessUserControlled() {
+  static auto *ids = new std::set<int>();
+  return *ids;
+}
+/// An in-page drag the person started in a presented browser (HTML5 drag and drop: a list reordered, a card moved):
+/// run inside the browser itself — its drag data handed straight back as the drop target's, the person's moves its drag
+/// moves, their release its drop — since there is no window here for a system drag. By browser id.
+struct HeadlessDrag {
+  CefRefPtr<CefDragData> data;
+  cef_drag_operations_mask_t allowed = DRAG_OPERATION_NONE;
+  cef_drag_operations_mask_t current = DRAG_OPERATION_NONE;
+  bool inside = true;
+};
+std::map<int, HeadlessDrag> &HeadlessDrags() {
+  static auto *drags = new std::map<int, HeadlessDrag>();
+  return *drags;
+}
+
+/// The view a headless browser lays its page out in — its size in CSS pixels — and its device scale. Nobody watching:
+/// the agent's fixed view (`WinterCEFHeadlessViewWidth`×`Height` at 1). Shown in Winter's panel: the panel's size in
+/// points at the screen's backing scale (`WinterCEFHeadlessSetPresentation`).
+struct HeadlessGeometry {
+  int width = WinterCEFHeadlessViewWidth;
+  int height = WinterCEFHeadlessViewHeight;
+  double scale = 1.0;
+  bool operator==(const HeadlessGeometry &o) const { return width == o.width && height == o.height && scale == o.scale; }
+  bool operator!=(const HeadlessGeometry &o) const { return !(*this == o); }
+  /// A frame `pixelWidth`×`pixelHeight` device pixels big was painted at this geometry.
+  bool Paints(int pixelWidth, int pixelHeight) const {
+    return std::abs(static_cast<long>(std::lround(width * scale)) - pixelWidth) <= 1 &&
+           std::abs(static_cast<long>(std::lround(height * scale)) - pixelHeight) <= 1;
+  }
+};
+
+/// A browser's view as applied (what `GetViewRect`/`GetScreenInfo` answer), the one before it (frames the compositor
+/// painted before it caught up), the newest wish, and when the view last changed. Two changes in quick succession (a
+/// presentation ending at one scale and the next starting at another a few milliseconds later) left the browser painting
+/// NOTHING — measured: no `OnAcceleratedPaint` at all afterwards, whatever was asked of it — so a change (of size or scale
+/// alike) is applied at most once per `kHeadlessScaleSettle`; a later wish waits for the rest of it, and only the last
+/// one is applied. A live resize of the panel therefore re-lays the page out at most every 300 ms. A browser's creation
+/// and its first frame count as changes too: a sign-in window the person opened, shown in the panel at once and asked
+/// for the panel's view ~150 ms after it was created, painted ONE letterboxed frame and then nothing — `Invalidate`
+/// included — until the person clicked in it (Drill A, 2026-10-13; reproduced by the presentation proof's static window).
+struct HeadlessViewState {
+  HeadlessGeometry applied;
+  HeadlessGeometry previous;
+  HeadlessGeometry wanted;
+  CFAbsoluteTime changedAt = 0;
+  bool scheduled = false;
+  /// Frames of another view since the last change: refreshes asked for (bounded), and one waiting to be asked.
+  int staleRefreshes = 0;
+  bool refreshPending = false;
+  /// The browser painted its first frame (its creation and its first frame count as changes for the settle).
+  bool painted = false;
+};
+std::map<int, HeadlessViewState> &HeadlessViewStates() {
+  static auto *states = new std::map<int, HeadlessViewState>();
+  return *states;
+}
+const CFTimeInterval kHeadlessScaleSettle = 0.3;
+
+/// A frame painted at another view than the applied one, after a change: CEF's capturer keeps its old size (its
+/// resolution follows the renderer's frame metadata only AFTER that frame activated, and asks for no capture then), so
+/// the new layout comes letterboxed into the old box — and on a page with nothing moving (a sign-in window) no later
+/// paint ever replaces it: the person saw the window small, black bars beside it, until they clicked in it (Drill A,
+/// 2026-10-13). Each such frame asks for a refresh of the view (`Invalidate`, a capture at the capturer's size now)
+/// `kHeadlessStaleRefreshDelay` later, at most `kHeadlessStaleRefreshMax` times per change; a frame of the applied view
+/// ends it.
+const CFTimeInterval kHeadlessStaleRefreshDelay = 0.05;
+const int kHeadlessStaleRefreshMax = 40;
+
+/// The view `browser` is laid out in now (the agent's fixed one for a browser nobody has shown).
+HeadlessGeometry HeadlessAppliedGeometry(CefRefPtr<CefBrowser> browser) {
+  if (!browser) return HeadlessGeometry();
+  auto it = HeadlessViewStates().find(browser->GetIdentifier());
+  return it == HeadlessViewStates().end() ? HeadlessGeometry() : it->second.applied;
+}
+
+/// The geometry a frame of `pixelWidth`×`pixelHeight` was painted at: the applied view when its size is that, else the
+/// one before it (a frame the compositor painted before it caught up), else the applied scale with the size the frame
+/// itself has.
+HeadlessGeometry HeadlessGeometryOfFrame(CefRefPtr<CefBrowser> browser, int pixelWidth, int pixelHeight) {
+  auto it = browser ? HeadlessViewStates().find(browser->GetIdentifier()) : HeadlessViewStates().end();
+  const HeadlessGeometry applied = it == HeadlessViewStates().end() ? HeadlessGeometry() : it->second.applied;
+  if (applied.Paints(pixelWidth, pixelHeight)) return applied;
+  if (it != HeadlessViewStates().end() && it->second.previous.Paints(pixelWidth, pixelHeight)) return it->second.previous;
+  HeadlessGeometry g = applied;
+  g.width = static_cast<int>(std::lround(pixelWidth / applied.scale));
+  g.height = static_cast<int>(std::lround(pixelHeight / applied.scale));
+  return g;
+}
+
+
+class WinterHeadlessRenderHandler : public CefRenderHandler {
+ public:
+  WinterHeadlessRenderHandler() = default;
+
+  void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect &rect) override {
+    const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+    rect = CefRect(0, 0, g.width, g.height);
+  }
+
+  /// The "screen" is the view itself (a page's `screen.width` is what it is laid out in), at the view's device scale.
+  bool GetScreenInfo(CefRefPtr<CefBrowser> browser, CefScreenInfo &screen_info) override {
+    const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+    const CefRect screen(0, 0, g.width, g.height);
+    screen_info.Set(static_cast<float>(g.scale), 24, 8, false, screen, screen);
+    return true;
+  }
+
+  /// Not called: every headless browser renders accelerated (`OnAcceleratedPaint`).
+  void OnPaint(CefRefPtr<CefBrowser> browser,
+               PaintElementType type,
+               const RectList &dirtyRects,
+               const void *buffer,
+               int width,
+               int height) override {}
+
+  /// The borrowed frame goes to the presentation, if any, synchronously: it must be read before this returns. With it,
+  /// the view it was painted at (a popup's: the view's now).
+  void OnAcceleratedPaint(CefRefPtr<CefBrowser> browser,
+                          PaintElementType type,
+                          const RectList &dirtyRects,
+                          const CefAcceleratedPaintInfo &info) override {
+    if (!g_headless_paint_observer || !browser || !info.shared_texture_io_surface) return;
+    IOSurfaceRef surface = reinterpret_cast<IOSurfaceRef>(info.shared_texture_io_surface);
+    const int pixelWidth = static_cast<int>(IOSurfaceGetWidth(surface));
+    const int pixelHeight = static_cast<int>(IOSurfaceGetHeight(surface));
+    const HeadlessGeometry g = type == PET_POPUP
+        ? HeadlessAppliedGeometry(browser)
+        : HeadlessGeometryOfFrame(browser, pixelWidth, pixelHeight);
+    g_headless_paint_observer(browser->GetIdentifier(), type == PET_POPUP ? 1 : 0, surface, g.width, g.height, g.scale);
+    if (type == PET_VIEW) RefreshIfStale(browser, pixelWidth, pixelHeight);
+  }
+
+  /// A frame of another view than the applied one: a refresh asked for shortly (`kHeadlessStaleRefreshDelay`), bounded.
+  static void RefreshIfStale(CefRefPtr<CefBrowser> browser, int pixelWidth, int pixelHeight) {
+    const int id = browser->GetIdentifier();
+    auto it = HeadlessViewStates().find(id);
+    if (it == HeadlessViewStates().end()) return;
+    HeadlessViewState &state = it->second;
+    if (!state.painted) {
+      state.painted = true;
+      state.changedAt = std::max(state.changedAt, CFAbsoluteTimeGetCurrent());
+    }
+    if (state.applied.Paints(pixelWidth, pixelHeight)) {
+      state.staleRefreshes = 0;
+      return;
+    }
+    if (state.refreshPending || state.staleRefreshes >= kHeadlessStaleRefreshMax) return;
+    state.refreshPending = true;
+    state.staleRefreshes++;
+    CefRefPtr<CefBrowser> held = browser;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kHeadlessStaleRefreshDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      auto again = HeadlessViewStates().find(id);
+      if (again == HeadlessViewStates().end()) return;  // the browser closed meanwhile
+      again->second.refreshPending = false;
+      if (held->IsValid() && held->GetHost()) held->GetHost()->Invalidate(PET_VIEW);
+    });
+  }
+
+  void OnPopupShow(CefRefPtr<CefBrowser> browser, bool show) override {
+    if (g_headless_popup_observer && browser) g_headless_popup_observer(browser->GetIdentifier(), show ? 1 : 0, 0, 0, 0, 0);
+  }
+
+  /// Where the IME composition's characters are drawn (view CSS pixels), for a presentation's candidate window.
+  void OnImeCompositionRangeChanged(CefRefPtr<CefBrowser> browser,
+                                    const CefRange &selected_range,
+                                    const RectList &character_bounds) override {
+    if (!g_headless_ime_observer || !browser) return;
+    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:character_bounds.size()];
+    for (const CefRect &r : character_bounds) [rects addObject:[NSValue valueWithRect:NSMakeRect(r.x, r.y, r.width, r.height)]];
+    g_headless_ime_observer(browser->GetIdentifier(), static_cast<int>(selected_range.from), static_cast<int>(selected_range.to), rects);
+  }
+
+  void OnPopupSize(CefRefPtr<CefBrowser> browser, const CefRect &rect) override {
+    if (g_headless_popup_observer && browser) {
+      g_headless_popup_observer(browser->GetIdentifier(), 2, rect.x, rect.y, rect.width, rect.height);
+    }
+  }
+
+  /// A drag the page starts goes nowhere for the agent (no window, no pasteboard of the user's): cancelled. For the
+  /// PERSON holding a presented browser it is an in-page drag, run inside the browser (`HeadlessDrags`): its data
+  /// enters as the drop target's at once, and the person's moves and release (`WinterCEFHeadlessSendInput`) carry it.
+  bool StartDragging(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefDragData> drag_data,
+                     DragOperationsMask allowed_ops,
+                     int x,
+                     int y) override {
+    if (!browser || !drag_data || HeadlessUserControlled().count(browser->GetIdentifier()) == 0) return false;
+    const int id = browser->GetIdentifier();
+    CefRefPtr<CefDragData> data = drag_data->Clone();
+    data->ResetFileContents();  // file contents may not be dragged into a web view
+    HeadlessDrag &drag = HeadlessDrags()[id];
+    drag.data = data;
+    drag.allowed = allowed_ops;
+    drag.current = DRAG_OPERATION_NONE;
+    drag.inside = true;
+    CefRefPtr<CefBrowser> held = browser;
+    // After this callback: the drag source's own bookkeeping comes first.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      auto it = HeadlessDrags().find(id);
+      if (it == HeadlessDrags().end()) return;
+      CefMouseEvent event;
+      event.x = x;
+      event.y = y;
+      held->GetHost()->DragTargetDragEnter(it->second.data, event, it->second.allowed);
+      held->GetHost()->DragTargetDragOver(event, it->second.allowed);
+    });
+    Log("in-page drag for the person in control (id=%d)", id);
+    return true;
+  }
+
+  void UpdateDragCursor(CefRefPtr<CefBrowser> browser, DragOperation operation) override {
+    if (!browser) return;
+    auto it = HeadlessDrags().find(browser->GetIdentifier());
+    if (it != HeadlessDrags().end()) it->second.current = static_cast<cef_drag_operations_mask_t>(operation);
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WinterHeadlessRenderHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessRenderHandler);
+};
+
+/// The helper's local-network rule (`WinterCEFHeadlessSetRequestRule`). Read on the UI and IO threads.
+std::atomic<WinterCEFHeadlessRequestRule> g_headless_rule{nullptr};
+/// Where refusals are reported (`WinterCEFHeadlessSetNoticeObserver`). Main thread only.
+void (^g_headless_notice)(int, const char *) = nil;
+
+/// Must a request to `url` be refused? With no rule installed, every request is (fail closed).
+bool HeadlessRequestRefused(const CefString &url) {
+  const WinterCEFHeadlessRequestRule rule = g_headless_rule.load();
+  if (rule == nullptr) {
+    return true;
+  }
+  return rule(url.ToString().c_str());
+}
+
+/// Report a refusal for `browser` on the main thread (from any thread). `kind` is a string literal. A request with no
+/// browser (a service worker's) has no tab to name and is not reported.
+void NoteHeadless(CefRefPtr<CefBrowser> browser, const char *kind) {
+  const int browserId = browser ? browser->GetIdentifier() : 0;
+  Log("headless %s refused (id=%d)", kind, browserId);
+  if (browserId == 0) {
+    return;
+  }
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (g_headless_notice != nil) {
+      g_headless_notice(browserId, kind);
+    }
+  });
+}
+
+/// **Every request a headless browser makes, before it is sent.** Returned by the headless client for each request
+/// tied to a browser and by each session's request-context handler for the rest (a service worker's): a request the
+/// local-network rule refuses is cancelled before any socket opens, and a redirect to one is never followed. A URL
+/// with an unknown scheme is never handed to another app.
+class WinterHeadlessRequestGuard : public CefResourceRequestHandler {
+ public:
+  WinterHeadlessRequestGuard() = default;
+
+  ReturnValue OnBeforeResourceLoad(CefRefPtr<CefBrowser> browser,
+                                   CefRefPtr<CefFrame> frame,
+                                   CefRefPtr<CefRequest> request,
+                                   CefRefPtr<CefCallback> callback) override {
+    if (!request || !HeadlessRequestRefused(request->GetURL())) {
+      return RV_CONTINUE;
+    }
+    NoteHeadless(browser, "local-network");
+    return RV_CANCEL;
+  }
+
+  /// A redirect to a refused address is pointed at `about:blank` instead — a redirect nothing follows to the network
+  /// (Chromium refuses a redirect to it as unsafe). The redirected request meets `OnBeforeResourceLoad` again too.
+  void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
+                          CefRefPtr<CefFrame> frame,
+                          CefRefPtr<CefRequest> request,
+                          CefRefPtr<CefResponse> response,
+                          CefString &new_url) override {
+    if (!HeadlessRequestRefused(new_url)) {
+      return;
+    }
+    NoteHeadless(browser, "local-network");
+    new_url = "about:blank";
+  }
+
+  /// `mailto:`, `tel:`, a custom scheme: never handed to the app registered for it.
+  void OnProtocolExecution(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefFrame> frame,
+                           CefRefPtr<CefRequest> request,
+                           bool &allow_os_execution) override {
+    allow_os_execution = false;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WinterHeadlessRequestGuard);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessRequestGuard);
+};
+
+/// One guard serves every request (it keeps no state). Heap-allocated and never released: CEF's IO thread may still
+/// hold it while the process shuts down.
+CefRefPtr<WinterHeadlessRequestGuard> &HeadlessRequestGuard() {
+  static auto *guard = new CefRefPtr<WinterHeadlessRequestGuard>(new WinterHeadlessRequestGuard());
+  return *guard;
+}
+
+/// `WinterClient` for a browser nobody can see. Two differences are forced by having no window:
+///  * a render handler (a windowless browser cannot exist without one);
+///  * `DoClose` answers `false`. Winter.app's `true` means "the host completes the close by releasing the
+///    host view" — and a windowless browser has none, so CEF's own reading of `false` for it ("If no OS
+///    window exists … returning false will cause the browser object to be destroyed immediately") is the only
+///    close that ever completes. With `true`, `CloseBrowser(true)` would be cancelled and the browser leak.
+/// The rest are additions for a browser driven with no one watching: the local-network rule on every request
+/// (`WinterHeadlessRequestGuard`, `OnBeforeBrowse`), and an explicit answer from every handler whose default could
+/// show UI. Everything else — the CDP door and its DevTools observer (`WinterCEFSendCDP`, `WinterCDPObserver`: one
+/// door for both apps), the crash observer — is the base class's, unchanged.
+///
+/// **Every CEF handler whose default can show UI, and what a headless browser answers** (the native-UI flags —
+/// `WinterCEFAutomationNativeUI` — are all set when the browser is created and never cleared):
+///  * JS dialogs, `beforeunload` (`OnJSDialog`, `OnBeforeUnloadDialog`) — held for the engine, answered over
+///    DevTools or by `WinterCEFResolveHeldDialog`; never shown (base, flag).
+///  * Permission prompts (`OnShowPermissionPrompt`: notifications, location, clipboard, local network access, …) —
+///    denied (base, flag).
+///  * Camera, microphone, screen capture (`OnRequestMediaAccessPermission`, `getDisplayMedia` included) — cancelled
+///    before macOS is asked (base, flag).
+///  * File choosers, the File System Access pickers (`OnFileDialog`) — cancelled; `upload()` intercepts the chooser
+///    over DevTools first (base, flag).
+///  * Downloads (`CanDownload`, `OnBeforeDownload`) — refused, never a save dialog (base, flag).
+///  * Pop-ups (`OnBeforePopup`) — cancelled (no pop-up observer is ever set) and reported (below).
+///  * Context menus (`RunContextMenu`) — cancelled (below): no menu is ever run.
+///  * HTTP authentication (`GetAuthCredentials`) — cancelled, never a credential dialog (below).
+///  * Certificate errors (`OnCertificateError`) — cancelled (below).
+///  * Client certificates (`OnSelectClientCertificate`) — continued WITHOUT a certificate, never a selection dialog,
+///    never a key used (below).
+///  * External protocols (`OnProtocolExecution`) — never handed to another app (`WinterHeadlessRequestGuard`).
+///  * Printing — `printing.enabled` off in every session's context: `window.print()` does nothing.
+///  * WebRTC — `webrtc.ip_handling_policy` `disable_non_proxied_udp` in every session's context: no UDP, so no
+///    host candidate, no mDNS announcement and no STUN check to an address a page names (below).
+///  * Focus, fullscreen, keys (`OnSetFocus`, fullscreen, unhandled keys) — refused, exited, swallowed (base, flags).
+///  * Native pickers that are windows of their own (a colour panel, an eye dropper) — cannot reach the screen: the
+///    helper's window guard refuses to order any window in (`WinterHeadlessApplication`). `<select>` and date pickers
+///    are painted off screen by a windowless browser.
+///  * WebAuthn, Bluetooth, USB, HID, serial choosers — no chooser exists in this embed; the request fails.
+class WinterHeadlessClient : public WinterClient {
+ public:
+  WinterHeadlessClient(WinterCEFBrowserCreation *creation,
+                       WinterCEFTabBridge *bridge,
+                       CefRefPtr<CefRenderHandler> render)
+      : WinterClient(creation, bridge), render_(render) {}
+
+  CefRefPtr<CefRenderHandler> GetRenderHandler() override { return render_; }
+
+  /// The page's cursor, for a presentation (a windowless browser has no view of its own to set it on).
+  bool OnCursorChange(CefRefPtr<CefBrowser> browser,
+                      CefCursorHandle cursor,
+                      cef_cursor_type_t type,
+                      const CefCursorInfo &custom_cursor_info) override {
+    if (g_headless_cursor_observer && browser) g_headless_cursor_observer(browser->GetIdentifier(), type);
+    return true;  // handled: nothing to set it on here
+  }
+
+  /// An automated tab refuses focus (the base) — except while a presentation's person holds it: their IME needs it.
+  bool OnSetFocus(CefRefPtr<CefBrowser> browser, FocusSource source) override {
+    if (browser && HeadlessUserControlled().count(browser->GetIdentifier()) > 0) return false;
+    return WinterClient::OnSetFocus(browser, source);
+  }
+
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString &url) override {
+    WinterClient::OnAddressChange(browser, frame, url);
+    if (!frame || !frame->IsMain()) return;
+    const std::string u = url.ToString();
+    PageChanged(browser, &u, nullptr);
+  }
+
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
+    WinterClient::OnTitleChange(browser, title);
+    const std::string t = title.ToString();
+    PageChanged(browser, nullptr, &t);
+  }
+
+  /// The browser's creation counts as a change of its view (`HeadlessViewState`): its first view change waits the settle.
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnAfterCreated(browser);
+    if (browser) HeadlessViewStates()[browser->GetIdentifier()].changedAt = CFAbsoluteTimeGetCurrent();
+  }
+
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (browser) {
+      if (g_headless_closed_observer) g_headless_closed_observer(browser->GetIdentifier());
+      HeadlessUserControlled().erase(browser->GetIdentifier());
+      HeadlessDrags().erase(browser->GetIdentifier());
+      HeadlessViewStates().erase(browser->GetIdentifier());
+      HeadlessPages().erase(browser->GetIdentifier());
+      DialogGone(browser);
+      WinterCEFHeadlessCancelFileChoosers(browser->GetIdentifier());
+    }
+    WinterClient::OnBeforeClose(browser);
+  }
+
+  /// Held for the engine as before (the base) — and, for a presentation, recorded and said, so the person in control
+  /// can answer it in Winter's panel (`WinterCEFHeadlessSetDialogObservers`).
+  bool OnJSDialog(CefRefPtr<CefBrowser> browser,
+                  const CefString &origin_url,
+                  JSDialogType dialog_type,
+                  const CefString &message_text,
+                  const CefString &default_prompt_text,
+                  CefRefPtr<CefJSDialogCallback> callback,
+                  bool &suppress_message) override {
+    const bool held = WinterClient::OnJSDialog(browser, origin_url, dialog_type, message_text, default_prompt_text, callback, suppress_message);
+    if (held && browser) {
+      DialogHeld(browser, dialog_type == JSDIALOGTYPE_ALERT ? 0 : dialog_type == JSDIALOGTYPE_CONFIRM ? 1 : 2, message_text, default_prompt_text,
+                 HeadlessOriginOf(origin_url.ToString()));
+    }
+    return held;
+  }
+
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                            const CefString &message_text,
+                            bool is_reload,
+                            CefRefPtr<CefJSDialogCallback> callback) override {
+    const bool held = WinterClient::OnBeforeUnloadDialog(browser, message_text, is_reload, callback);
+    if (held && browser) {
+      CefRefPtr<CefFrame> main = browser->GetMainFrame();
+      DialogHeld(browser, 3, message_text, CefString(), main ? HeadlessOriginOf(main->GetURL().ToString()) : std::string());
+    }
+    return held;
+  }
+
+  void OnResetDialogState(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnResetDialogState(browser);
+    DialogGone(browser);
+  }
+
+  void OnDialogClosed(CefRefPtr<CefBrowser> browser) override {
+    WinterClient::OnDialogClosed(browser);
+    DialogGone(browser);
+  }
+
+  /// A presentation's person in control answers a file chooser in Winter's panel (`WinterCEFHeadlessSetFileChooser
+  /// Handler`); anywhere else it is cancelled as before (the base: `upload()` intercepts the chooser over DevTools first).
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,
+                    FileDialogMode mode,
+                    const CefString &title,
+                    const CefString &default_file_path,
+                    const std::vector<CefString> &accept_filters,
+                    const std::vector<CefString> &accept_extensions,
+                    const std::vector<CefString> &accept_descriptions,
+                    CefRefPtr<CefFileDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (g_headless_file_chooser_handler && browser && callback) {
+      const int requestId = ++g_headless_next_file_chooser;
+      NSMutableArray<NSString *> *accept = [NSMutableArray arrayWithCapacity:accept_filters.size()];
+      for (const CefString &filter : accept_filters) [accept addObject:StringOf(filter)];
+      const int m = mode == FILE_DIALOG_OPEN_MULTIPLE ? 1 : mode == FILE_DIALOG_OPEN_FOLDER ? 2 : mode == FILE_DIALOG_SAVE ? 3 : 0;
+      HeadlessFileChoosers()[requestId] = {browser->GetIdentifier(), callback};
+      if (g_headless_file_chooser_handler(browser->GetIdentifier(), requestId, m, accept)) {
+        Log("file-chooser for a presentation's viewer (request %d)", requestId);
+        return true;
+      }
+      HeadlessFileChoosers().erase(requestId);
+    }
+    return WinterClient::OnFileDialog(browser, mode, title, default_file_path, accept_filters, accept_extensions,
+                                      accept_descriptions, callback);
+  }
+
+  /// A navigation (and each of its redirects) the local-network rule refuses is cancelled before it is sent. The
+  /// `cefQuery` router's call is owed only to a navigation that proceeds, so it is made only then.
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request,
+                      bool user_gesture,
+                      bool is_redirect) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (request && HeadlessRequestRefused(request->GetURL())) {
+      NoteHeadless(browser, "local-network");
+      return true;  // cancel
+    }
+    return WinterClient::OnBeforeBrowse(browser, frame, request, user_gesture, is_redirect);
+  }
+
+  CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser> browser,
+                                                                 CefRefPtr<CefFrame> frame,
+                                                                 CefRefPtr<CefRequest> request,
+                                                                 bool is_navigation,
+                                                                 bool is_download,
+                                                                 const CefString &request_initiator,
+                                                                 bool &disable_default_handling) override {
+    return HeadlessRequestGuard();
+  }
+
+  bool GetAuthCredentials(CefRefPtr<CefBrowser> browser,
+                          const CefString &origin_url,
+                          bool isProxy,
+                          const CefString &host,
+                          int port,
+                          const CefString &realm,
+                          const CefString &scheme,
+                          CefRefPtr<CefAuthCallback> callback) override {
+    return false;  // cancel the request: nobody can type a password here
+  }
+
+  bool OnCertificateError(CefRefPtr<CefBrowser> browser,
+                          cef_errorcode_t cert_error,
+                          const CefString &request_url,
+                          CefRefPtr<CefSSLInfo> ssl_info,
+                          CefRefPtr<CefCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    return false;  // cancel the request
+  }
+
+  /// CEF's default with certificates on offer is a selection DIALOG. Continued without one instead: no dialog, and
+  /// none of the user's keys is ever used by a page nobody sees.
+  bool OnSelectClientCertificate(CefRefPtr<CefBrowser> browser,
+                                 bool isProxy,
+                                 const CefString &host,
+                                 int port,
+                                 const X509CertificateList &certificates,
+                                 CefRefPtr<CefSelectClientCertificateCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (callback) {
+      callback->Select(nullptr);
+    }
+    Log("headless client-certificate request answered with none (offered=%zu)", certificates.size());
+    return true;
+  }
+
+  /// Cancelled as the base does (no pop-up observer is ever set on a headless tab) — and reported.
+  bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefFrame> frame,
+                     int popup_id,
+                     const CefString &target_url,
+                     const CefString &target_frame_name,
+                     WindowOpenDisposition target_disposition,
+                     bool user_gesture,
+                     const CefPopupFeatures &popupFeatures,
+                     CefWindowInfo &windowInfo,
+                     CefRefPtr<CefClient> &client,
+                     CefBrowserSettings &settings,
+                     CefRefPtr<CefDictionaryValue> &extra_info,
+                     bool *no_javascript_access) override {
+    // A window the PERSON opened (a user gesture) while holding the browser in Winter's panel — a sign-in window, as a
+    // rule: created by CEF itself, so the page keeps its `window.opener` and the flow completes, windowless and
+    // accelerated like every headless browser, in the opener's context; the helper adopts it as a tab of the opener's
+    // session and the daemon shows it beside its opener. Every other window is cancelled and reported, as before.
+    if (browser && user_gesture && g_headless_popup_adopter && HeadlessUserControlled().count(browser->GetIdentifier()) > 0) {
+      NSView *key = g_headless_popup_adopter(browser->GetIdentifier(), StringOf(target_url));
+      if (key != nil) {
+        windowInfo.SetAsWindowless(kNullWindowHandle);
+        windowInfo.shared_texture_enabled = true;
+        WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
+        creation.parent = key;
+        WinterCEFTabBridge *bridge = BridgeFor(key);
+        bridge.creation = creation;
+        settings.windowless_frame_rate = kHeadlessFrameRate;
+        settings.background_color = 0xFFFFFFFF;
+        client = new WinterHeadlessClient(creation, bridge, render_);
+        Log("headless window opened by the person in control (opener id=%d)", browser->GetIdentifier());
+        return false;
+      }
+    }
+    const bool cancel = WinterClient::OnBeforePopup(browser, frame, popup_id, target_url, target_frame_name,
+                                                    target_disposition, user_gesture, popupFeatures, windowInfo,
+                                                    client, settings, extra_info, no_javascript_access);
+    NoteHeadless(browser, "popup");
+    return cancel;
+  }
+
+  bool RunContextMenu(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefContextMenuParams> params,
+                      CefRefPtr<CefMenuModel> model,
+                      CefRefPtr<CefRunContextMenuCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (callback) {
+      callback->Cancel();
+    }
+    return true;  // handled: no menu is ever run
+  }
+
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    Log("headless browser close completes in CEF (DoClose->false, id=%d)", browser->GetIdentifier());
+    return false;
+  }
+
+ private:
+  void DialogHeld(CefRefPtr<CefBrowser> browser, int type, const CefString &message, const CefString &defaultText,
+                  const std::string &origin) {
+    const int id = browser->GetIdentifier();
+    HeadlessDialogs()[id] = {type, message.ToString(), defaultText.ToString(), origin};
+    if (g_headless_dialog_opened_observer) {
+      g_headless_dialog_opened_observer(id, type, StringOf(message), StringOf(defaultText),
+                                        [NSString stringWithUTF8String:origin.c_str()] ?: @"");
+    }
+  }
+
+  /// The main frame's address and title, recorded and said (a presentation's viewer names the page by them).
+  void PageChanged(CefRefPtr<CefBrowser> browser, const std::string *url, const std::string *title) {
+    if (!browser) return;
+    HeadlessPage &page = HeadlessPages()[browser->GetIdentifier()];
+    if (url) page.url = *url;
+    if (title) page.title = *title;
+    if (g_headless_page_observer) {
+      g_headless_page_observer(browser->GetIdentifier(), [NSString stringWithUTF8String:page.url.c_str()] ?: @"",
+                               [NSString stringWithUTF8String:page.title.c_str()] ?: @"");
+    }
+  }
+
+  void DialogGone(CefRefPtr<CefBrowser> browser) {
+    if (!browser) return;
+    const int id = browser->GetIdentifier();
+    if (HeadlessDialogs().erase(id) > 0 && g_headless_dialog_closed_observer) g_headless_dialog_closed_observer(id);
+  }
+
+  CefRefPtr<CefRenderHandler> render_;
+};
+
+CefRefPtr<WinterHeadlessRenderHandler> g_headless_render;
+
+}  // namespace
+
+/// A creation waiting for its session's context to come up. Weak: a tab closed meanwhile is simply dropped.
+@interface WinterCEFHeadlessPendingBrowser : NSObject
+@property(nonatomic, weak) NSView *key;
+@property(nonatomic, copy) NSString *url;
+@end
+
+@implementation WinterCEFHeadlessPendingBrowser
+@end
+
+namespace {
+
+struct HeadlessContext {
+  CefRefPtr<CefRequestContext> context;
+  bool initialized = false;
+  std::string printing = "pending";
+  /// What turning the browser's own predictive connections off came to (the same answers as `printing`).
+  std::string prediction = "pending";
+  /// What holding WebRTC to proxied TCP came to (the same answers as `printing`).
+  std::string webrtc = "pending";
+  NSMutableArray<WinterCEFHeadlessPendingBrowser *> *pending = nil;
+};
+
+/// One request context per Winter session, keyed by the session id. Main (CEF UI) thread only. Heap-allocated and
+/// never destroyed, like the registrations above: nothing here may be released by a static destructor after
+/// `CefShutdown`.
+std::map<std::string, HeadlessContext> &HeadlessContexts() {
+  static auto *contexts = new std::map<std::string, HeadlessContext>();
+  return *contexts;
+}
+
+void CreateWindowlessBrowserNow(NSView *key, const std::string &url, CefRefPtr<CefRequestContext> context) {
+  CefWindowInfo window_info;
+  // `SetAsWindowless` also sets the Alloy runtime style (`cef_mac.h`). No parent: there is no view to attach
+  // dialogs or menus to, and none is wanted.
+  window_info.SetAsWindowless(kNullWindowHandle);
+
+  // Accelerated: CEF composites on the GPU and hands each frame over as an IOSurface, no CPU readback — and only a
+  // browser created this way can be PRESENTED later (`WinterCEFHeadlessSetPaintObserver`): the mode is fixed at
+  // creation, and a presentation must never recreate the page.
+  window_info.shared_texture_enabled = true;
+
+  WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
+  creation.parent = key;  // held for the length of the creation, as `CreateBrowserNow` does
+  WinterCEFTabBridge *bridge = BridgeFor(key);
+  bridge.creation = creation;
+
+  CefBrowserSettings browser_settings;
+  browser_settings.windowless_frame_rate = kHeadlessFrameRate;
+  // Opaque white, explicitly: for a WINDOWLESS browser a transparent (0) background turns on transparent
+  // painting, and a screenshot of a page with no background of its own would come back transparent.
+  browser_settings.background_color = 0xFFFFFFFF;
+
+  if (!g_headless_render) {
+    g_headless_render = new WinterHeadlessRenderHandler();
+  }
+  CefRefPtr<WinterHeadlessClient> client = new WinterHeadlessClient(creation, bridge, g_headless_render);
+  if (!CefBrowserHost::CreateBrowser(window_info, client, CefString(url), browser_settings, nullptr, context)) {
+    creation.parent = nil;
+    Log("headless CreateBrowser refused the request");
+  }
+}
+
+void HeadlessContextInitialized(const std::string &sessionId, CefRefPtr<CefRequestContext> context) {
+  auto it = HeadlessContexts().find(sessionId);
+  if (it == HeadlessContexts().end() || !it->second.context || !it->second.context->IsSame(context)) {
+    return;  // disposed (or replaced) before it came up
+  }
+  HeadlessContext &record = it->second;
+  // Before any of the session's browsers exists — they are created just below — so no page in this context
+  // ever runs with printing on. The same preference, and the same decision, as the built-in browser's.
+  const CefString name(kPrintingEnabledPreference);
+  record.printing = DisablePrinting(
+      [&] { return context->HasPreference(name); },
+      [&] { return context->CanSetPreference(name); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetBool(false);
+        CefString reason;
+        const bool ok = context->SetPreference(name, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  // Off too: the browser's own predictive connections (a page's `<link rel=preconnect>`, DNS prefetching) — a socket
+  // opened with no request, which the request guard never sees. `NETWORK_PREDICTION_NEVER` is 2.
+  const CefString prediction("net.network_prediction_options");
+  record.prediction = DisablePrinting(
+      [&] { return context->HasPreference(prediction); },
+      [&] { return context->CanSetPreference(prediction); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetInt(2);
+        CefString reason;
+        const bool ok = context->SetPreference(prediction, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  // WebRTC held to proxied TCP (`disable_non_proxied_udp`): no UDP socket at all, so no host candidate is gathered
+  // and no STUN check is ever sent to an address a page names — none of it is a request the guard or the resolver
+  // belt sees. What TCP WebRTC still makes goes through the proxy resolution, where the PAC belt refuses the local
+  // network. (Its mDNS responder, which binds the mDNS port even so, is off by switch: `HeadlessArguments`.)
+  const CefString webrtc("webrtc.ip_handling_policy");
+  record.webrtc = DisablePrinting(
+      [&] { return context->HasPreference(webrtc); },
+      [&] { return context->CanSetPreference(webrtc); },
+      [&](std::string &error) {
+        CefRefPtr<CefValue> value = CefValue::Create();
+        value->SetString("disable_non_proxied_udp");
+        CefString reason;
+        const bool ok = context->SetPreference(webrtc, value, reason);
+        error = reason.ToString();
+        return ok;
+      });
+  record.initialized = true;
+  Log("headless context initialized (printing: %s, network prediction: %s, webrtc: %s)", record.printing.c_str(),
+      record.prediction.c_str(), record.webrtc.c_str());
+  NSArray<WinterCEFHeadlessPendingBrowser *> *pending = [record.pending copy];
+  record.pending = nil;
+  for (WinterCEFHeadlessPendingBrowser *request in pending) {
+    NSView *key = request.key;
+    if (key == nil) {
+      continue;
+    }
+    CreateWindowlessBrowserNow(key, std::string([request.url UTF8String] ?: ""), record.context);
+  }
+}
+
+class WinterHeadlessContextHandler : public CefRequestContextHandler {
+ public:
+  explicit WinterHeadlessContextHandler(std::string sessionId) : session_(std::move(sessionId)) {}
+
+  void OnRequestContextInitialized(CefRefPtr<CefRequestContext> request_context) override {
+    CEF_REQUIRE_UI_THREAD();
+    HeadlessContextInitialized(session_, request_context);
+  }
+
+  /// The requests no browser's client sees — a service worker's: the same guard.
+  CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser> browser,
+                                                                 CefRefPtr<CefFrame> frame,
+                                                                 CefRefPtr<CefRequest> request,
+                                                                 bool is_navigation,
+                                                                 bool is_download,
+                                                                 const CefString &request_initiator,
+                                                                 bool &disable_default_handling) override {
+    return HeadlessRequestGuard();
+  }
+
+ private:
+  std::string session_;
+  IMPLEMENT_REFCOUNTING(WinterHeadlessContextHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterHeadlessContextHandler);
+};
+
+}  // namespace
+
+BOOL WinterCEFInitializeHeadless(int argc,
+                                 char **argv,
+                                 const char *frameworkDir,
+                                 const char *mainBundlePath,
+                                 const char *subprocessPath,
+                                 const char *rootCachePath) {
+  if (g_initialized) {
+    return g_headless ? YES : NO;
+  }
+  if (g_did_shutdown) {
+    g_last_error = "CEF was already shut down in this process and cannot be restarted";
+    return NO;
+  }
+  if (frameworkDir == nullptr || mainBundlePath == nullptr || subprocessPath == nullptr ||
+      rootCachePath == nullptr) {
+    g_last_error = "the headless helper's layout is incomplete";
+    return NO;
+  }
+  if (!g_library_loaded) {
+    // BY PATH, from the layout the helper resolved (its own Contents/Frameworks), so that layout is the one
+    // source of where the framework is.
+    const std::string library = std::string(frameworkDir) + "/Chromium Embedded Framework";
+    if (!cef_load_library(library.c_str())) {
+      g_last_error = "could not load the Chromium Embedded Framework at the headless layout's path";
+      Log("FAILED: %s", g_last_error.c_str());
+      return NO;
+    }
+    g_library_loaded = true;
+    Log("framework loaded (headless, by path)");
+  }
+
+  ExternalPump::Create();
+  CefMainArgs main_args(argc, argv);
+
+  CefSettings settings;
+  settings.external_message_pump = true;  // the helper's own `[NSApp run]`
+  settings.multi_threaded_message_loop = false;
+  settings.no_sandbox = false;  // the renderers keep CEF's sandbox (the "Winter Helper" bundles' own)
+  settings.windowless_rendering_enabled = true;
+  CefString(&settings.framework_dir_path).FromString(frameworkDir);
+  CefString(&settings.main_bundle_path).FromString(mainBundlePath);
+  CefString(&settings.browser_subprocess_path).FromString(subprocessPath);
+  CefString(&settings.root_cache_path).FromString(rootCachePath);
+  // No `cache_path`: the global context is in memory, like every session's. Nothing a page stores is written.
+  const std::string logPath = std::string(rootCachePath) + "/chromium-debug.log";
+  CefString(&settings.log_file).FromString(logPath);
+#if DEBUG
+  settings.log_severity = LOGSEVERITY_WARNING;
+#else
+  settings.log_severity = LOGSEVERITY_DISABLE;
+#endif
+
+  // The SAME app class as Winter.app's browser process: CEF requires the same custom-scheme list in every
+  // process, and the "Winter Helper" subprocesses — the ones this host carries, which Winter.app's own CEF runs
+  // too — register Winter's editor scheme.
+  g_app = new WinterApp();
+  if (!CefInitialize(main_args, settings, g_app.get(), nullptr)) {
+    g_last_error = "CefInitialize failed (exit code " + std::to_string(CefGetExitCode()) + ")";
+    Log("FAILED: %s", g_last_error.c_str());
+    g_app = nullptr;
+    return NO;
+  }
+  g_initialized = true;
+  g_headless = true;
+  Log("CefInitialize ok (headless, windowless rendering)");
+  return YES;
+}
+
+BOOL WinterCEFHeadlessReady(void) {
+  return (g_headless && g_initialized && g_context_initialized && !g_shutting_down) ? YES : NO;
+}
+
+void WinterCEFCreateWindowlessBrowser(NSView *key, const char *url, const char *sessionId) {
+  if (!g_headless || !g_initialized || g_shutting_down || key == nil || sessionId == nullptr ||
+      sessionId[0] == '\0') {
+    return;
+  }
+  const std::string session(sessionId);
+  const std::string target(url != nullptr ? url : "");
+  auto it = HeadlessContexts().find(session);
+  if (it == HeadlessContexts().end()) {
+    HeadlessContext record;
+    CefRequestContextSettings context_settings;  // no cache_path: "incognito", in memory
+    record.context = CefRequestContext::CreateContext(context_settings, new WinterHeadlessContextHandler(session));
+    if (!record.context) {
+      Log("headless CreateContext refused the request");
+      return;
+    }
+    it = HeadlessContexts().emplace(session, std::move(record)).first;
+    Log("headless context created (contexts=%zu)", HeadlessContexts().size());
+  }
+  HeadlessContext &record = it->second;
+  if (record.initialized) {
+    CreateWindowlessBrowserNow(key, target, record.context);
+    return;
+  }
+  if (record.pending == nil) {
+    record.pending = [[NSMutableArray alloc] init];
+  }
+  WinterCEFHeadlessPendingBrowser *request = [[WinterCEFHeadlessPendingBrowser alloc] init];
+  request.key = key;
+  request.url = [NSString stringWithUTF8String:target.c_str()] ?: @"";
+  [record.pending addObject:request];
+}
+
+void WinterCEFHeadlessSetRequestRule(WinterCEFHeadlessRequestRule rule) {
+  g_headless_rule.store(rule);
+}
+
+void WinterCEFHeadlessSetNoticeObserver(void (^observer)(int browserId, const char *kind)) {
+  g_headless_notice = [observer copy];
+}
+
+void WinterCEFHeadlessDisposeContext(const char *sessionId) {
+  if (sessionId == nullptr) {
+    return;
+  }
+  auto it = HeadlessContexts().find(std::string(sessionId));
+  if (it == HeadlessContexts().end()) {
+    return;
+  }
+  if (it->second.context && it->second.initialized) {
+    // Belt: the context is in memory and goes with its last reference, but its cookies go NOW, whatever
+    // still holds a reference to it.
+    if (CefRefPtr<CefCookieManager> cookies = it->second.context->GetCookieManager(nullptr)) {
+      cookies->DeleteCookies(CefString(), CefString(), nullptr);
+    }
+  }
+  HeadlessContexts().erase(it);
+  Log("headless context disposed (contexts=%zu)", HeadlessContexts().size());
+}
+
+void WinterCEFHeadlessDisposeAllContexts(void) {
+  HeadlessContexts().clear();
+}
+
+int WinterCEFHeadlessContextCount(void) {
+  return static_cast<int>(HeadlessContexts().size());
+}
+
+void WinterCEFHeadlessSetPaintObserver(void (^observer)(int browserId, int type, IOSurfaceRef surface, int cssWidth,
+                                                        int cssHeight, double scale)) {
+  g_headless_paint_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetPopupObserver(void (^observer)(int browserId, int kind, int x, int y, int width, int height)) {
+  g_headless_popup_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetCursorObserver(void (^observer)(int browserId, int cursorType)) {
+  g_headless_cursor_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetImeObserver(void (^observer)(int browserId, int rangeStart, int rangeEnd, NSArray<NSValue *> *rects)) {
+  g_headless_ime_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetDialogObservers(void (^opened)(int browserId, int type, NSString *message, NSString *defaultText,
+                                                         NSString *origin),
+                                         void (^closed)(int browserId)) {
+  g_headless_dialog_opened_observer = [opened copy];
+  g_headless_dialog_closed_observer = [closed copy];
+}
+
+BOOL WinterCEFHeadlessCurrentDialog(NSView *key, int *type, NSString **message, NSString **defaultText, NSString **origin) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  auto it = HeadlessDialogs().find(browser->GetIdentifier());
+  if (it == HeadlessDialogs().end()) return NO;
+  if (type) *type = it->second.type;
+  if (message) *message = [NSString stringWithUTF8String:it->second.message.c_str()] ?: @"";
+  if (defaultText) *defaultText = [NSString stringWithUTF8String:it->second.defaultText.c_str()] ?: @"";
+  if (origin) *origin = [NSString stringWithUTF8String:it->second.origin.c_str()] ?: @"";
+  return YES;
+}
+
+void WinterCEFHeadlessSetPageObserver(void (^observer)(int browserId, NSString *url, NSString *title)) {
+  g_headless_page_observer = [observer copy];
+}
+
+BOOL WinterCEFHeadlessCurrentPage(NSView *key, NSString **url, NSString **title) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  auto it = HeadlessPages().find(browser->GetIdentifier());
+  if (it == HeadlessPages().end()) return NO;
+  if (url) *url = [NSString stringWithUTF8String:it->second.url.c_str()] ?: @"";
+  if (title) *title = [NSString stringWithUTF8String:it->second.title.c_str()] ?: @"";
+  return YES;
+}
+
+void WinterCEFHeadlessSetFileChooserHandler(BOOL (^handler)(int browserId, int requestId, int mode, NSArray<NSString *> *accept)) {
+  g_headless_file_chooser_handler = [handler copy];
+}
+
+void WinterCEFHeadlessResolveFileChooser(int requestId, NSArray<NSString *> *paths) {
+  auto it = HeadlessFileChoosers().find(requestId);
+  if (it == HeadlessFileChoosers().end()) return;
+  CefRefPtr<CefFileDialogCallback> callback = it->second.callback;
+  HeadlessFileChoosers().erase(it);
+  if (!callback) return;
+  if (paths.count == 0) {
+    callback->Cancel();
+    Log("file-chooser cancelled by the viewer (request %d)", requestId);
+    return;
+  }
+  std::vector<CefString> files;
+  for (NSString *path in paths) files.push_back(CefString(path.UTF8String));
+  callback->Continue(files);
+  Log("file-chooser answered by the viewer (request %d, %zu file(s))", requestId, files.size());
+}
+
+void WinterCEFHeadlessSetPopupAdopter(NSView *(^adopter)(int openerBrowserId, NSString *url)) {
+  g_headless_popup_adopter = [adopter copy];
+}
+
+void WinterCEFHeadlessSetClosedObserver(void (^observer)(int browserId)) {
+  g_headless_closed_observer = [observer copy];
+}
+
+void WinterCEFHeadlessSetUserControl(NSView *key, BOOL control) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  const int id = browser->GetIdentifier();
+  if (control) {
+    HeadlessUserControlled().insert(id);
+    return;
+  }
+  HeadlessUserControlled().erase(id);
+  // A drag the person had in progress ends with their control: cancelled, nothing dropped.
+  auto drag = HeadlessDrags().find(id);
+  if (drag != HeadlessDrags().end()) {
+    if (drag->second.inside) browser->GetHost()->DragTargetDragLeave();
+    HeadlessDrags().erase(drag);
+    browser->GetHost()->DragSourceEndedAt(-1, -1, DRAG_OPERATION_NONE);
+    browser->GetHost()->DragSourceSystemDragEnded();
+  }
+}
+
+void WinterCEFHeadlessCancelFileChoosers(int browserId) {
+  for (auto it = HeadlessFileChoosers().begin(); it != HeadlessFileChoosers().end();) {
+    if (browserId == 0 || it->second.browserId == browserId) {
+      if (it->second.callback) it->second.callback->Cancel();
+      it = HeadlessFileChoosers().erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void WinterCEFHeadlessIme(NSView *key, int kind, NSString *text, int selectionStart, int selectionEnd, int replacementStart,
+                          int replacementEnd) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  const CefString value((text ?: @"").UTF8String);
+  const CefRange replacement = replacementStart >= 0 && replacementEnd >= replacementStart
+      ? CefRange(static_cast<uint32_t>(replacementStart), static_cast<uint32_t>(replacementEnd)) : CefRange::InvalidRange();
+  switch (kind) {
+    case 1: {  // set composition: one plain underline under the marked text
+      std::vector<CefCompositionUnderline> underlines;
+      CefCompositionUnderline line;
+      line.range = CefRange(0, static_cast<uint32_t>(text.length));
+      line.color = 0xFF000000;
+      line.background_color = 0;
+      line.thick = 0;
+      line.style = CEF_CUS_SOLID;
+      underlines.push_back(line);
+      const CefRange selection = selectionStart >= 0 && selectionEnd >= selectionStart
+          ? CefRange(static_cast<uint32_t>(selectionStart), static_cast<uint32_t>(selectionEnd))
+          : CefRange(static_cast<uint32_t>(text.length), static_cast<uint32_t>(text.length));
+      host->ImeSetComposition(value, underlines, replacement, selection);
+      break;
+    }
+    case 2: host->ImeCommitText(value, replacement, 0); break;
+    case 3: host->ImeFinishComposingText(false); break;
+    case 4: host->ImeCancelComposition(); break;
+    default: break;
+  }
+}
+
+void WinterCEFHeadlessEdit(NSView *key, int command, NSString *text) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefFrame> frame = browser->GetFocusedFrame();
+  if (!frame) frame = browser->GetMainFrame();
+  switch (command) {
+    case 1: if (frame) frame->Copy(); break;
+    case 2: if (frame) frame->Cut(); break;
+    // A paste is the TEXT Winter.app read from the pasteboard on the user's ⌘V, put in at the caret: this process never
+    // reads the pasteboard itself.
+    case 3: if (text.length > 0) browser->GetHost()->ImeCommitText(CefString(text.UTF8String), CefRange::InvalidRange(), 0); break;
+    case 4: if (frame) frame->SelectAll(); break;
+    case 5: if (frame) frame->Undo(); break;
+    case 6: if (frame) frame->Redo(); break;
+    case 7: if (frame) frame->Delete(); break;
+    default: break;
+  }
+}
+
+
+/// The wish, applied: CEF re-reads the view (`GetViewRect`) and the screen (`GetScreenInfo`) and lays the SAME document
+/// out again — a resize and a device-pixel-ratio change, never a reload.
+void ApplyHeadlessView(CefRefPtr<CefBrowser> browser, HeadlessViewState &state) {
+  if (state.wanted == state.applied) return;
+  state.previous = state.applied;
+  state.applied = state.wanted;
+  state.changedAt = CFAbsoluteTimeGetCurrent();
+  state.staleRefreshes = 0;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  host->NotifyScreenInfoChanged();
+  host->WasResized();
+  host->Invalidate(PET_VIEW);
+  if (g_headless_view_observer) {
+    g_headless_view_observer(browser->GetIdentifier(), state.applied.width, state.applied.height, state.applied.scale);
+  }
+}
+
+/// What a presentation may ask for: a size of at least `WinterCEFHeadlessViewMinWidth`×`MinHeight` CSS pixels and at most
+/// `WinterCEFHeadlessViewMaxPixels` device pixels a side, a scale in [1, 4]; nothing (≤ 0): the agent's fixed view.
+HeadlessGeometry HeadlessClampedGeometry(int cssWidth, int cssHeight, double scale) {
+  HeadlessGeometry g;
+  g.scale = std::isfinite(scale) && scale > 1.0 ? std::min(scale, 4.0) : 1.0;
+  if (cssWidth > 0 && cssHeight > 0) {
+    const int most = static_cast<int>(static_cast<double>(WinterCEFHeadlessViewMaxPixels) / g.scale);
+    g.width = std::min(std::max(cssWidth, static_cast<int>(WinterCEFHeadlessViewMinWidth)), most);
+    g.height = std::min(std::max(cssHeight, static_cast<int>(WinterCEFHeadlessViewMinHeight)), most);
+  }
+  return g;
+}
+
+/// The newest wish applied once the settle is over — measured again when the wait ends (the browser's first frame may
+/// have moved it on meanwhile).
+void ScheduleHeadlessView(NSView *key, int id, CFTimeInterval wait) {
+  HeadlessViewState &state = HeadlessViewStates()[id];
+  if (state.scheduled) return;
+  state.scheduled = true;
+  __weak NSView *weakKey = key;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    auto it = HeadlessViewStates().find(id);
+    if (it == HeadlessViewStates().end()) return;
+    it->second.scheduled = false;
+    NSView *k = weakKey;
+    CefRefPtr<CefBrowser> current = k == nil ? nullptr : BrowserForParent(k);
+    if (!current || current->GetIdentifier() != id) return;
+    const CFTimeInterval more = it->second.changedAt + kHeadlessScaleSettle - CFAbsoluteTimeGetCurrent();
+    if (more > 0.001) {
+      ScheduleHeadlessView(k, id, more);
+      return;
+    }
+    ApplyHeadlessView(current, it->second);
+  });
+}
+
+void WinterCEFHeadlessSetPresentation(NSView *key, int cssWidth, int cssHeight, double scale, int frameRate) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  const int id = browser->GetIdentifier();
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  host->SetWindowlessFrameRate(frameRate > 0 ? frameRate : kHeadlessFrameRate);
+  HeadlessViewState &state = HeadlessViewStates()[id];
+  state.wanted = HeadlessClampedGeometry(cssWidth, cssHeight, scale);
+  if (state.wanted == state.applied) {
+    host->Invalidate(PET_VIEW);
+    return;
+  }
+  const CFTimeInterval wait = state.changedAt + kHeadlessScaleSettle - CFAbsoluteTimeGetCurrent();
+  if (wait <= 0) {
+    ApplyHeadlessView(browser, state);
+    return;
+  }
+  host->Invalidate(PET_VIEW);
+  ScheduleHeadlessView(key, id, wait);
+}
+
+void WinterCEFHeadlessSetViewObserver(void (^observer)(int browserId, int cssWidth, int cssHeight, double scale)) {
+  g_headless_view_observer = [observer copy];
+}
+
+BOOL WinterCEFHeadlessViewGeometry(NSView *key, int *cssWidth, int *cssHeight, double *scale) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return NO;
+  const HeadlessGeometry g = HeadlessAppliedGeometry(browser);
+  if (cssWidth) *cssWidth = g.width;
+  if (cssHeight) *cssHeight = g.height;
+  if (scale) *scale = g.scale;
+  return YES;
+}
+
+void WinterCEFHeadlessSendInput(NSView *key, int kind, int x, int y, int dx, int dy, int button, int clickCount,
+                                unsigned modifiers, int windowsKeyCode, int nativeKeyCode, unsigned short character,
+                                unsigned short unmodifiedCharacter) {
+  CefRefPtr<CefBrowser> browser = BrowserForParent(key);
+  if (!browser) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  CefMouseEvent mouse;
+  mouse.x = x;
+  mouse.y = y;
+  mouse.modifiers = modifiers;
+  // An in-page drag the person started (`StartDragging`): their moves are its moves, their release its drop.
+  auto drag = HeadlessDrags().find(browser->GetIdentifier());
+  if (drag != HeadlessDrags().end() && (kind == 1 || kind == 3 || kind == 5)) {
+    HeadlessDrag &d = drag->second;
+    if (kind == 1) {
+      if (!d.inside) {
+        host->DragTargetDragEnter(d.data, mouse, d.allowed);
+        d.inside = true;
+      }
+      host->DragTargetDragOver(mouse, d.allowed);
+    } else if (kind == 5) {
+      if (d.inside) host->DragTargetDragLeave();
+      d.inside = false;
+    } else {
+      cef_drag_operations_mask_t op = DRAG_OPERATION_NONE;
+      if (d.inside) {
+        host->DragTargetDrop(mouse);
+        op = d.current;
+      }
+      HeadlessDrags().erase(drag);
+      host->DragSourceEndedAt(x, y, op);
+      host->DragSourceSystemDragEnded();
+    }
+    return;
+  }
+  const cef_mouse_button_type_t which = button == 2 ? MBT_RIGHT : button == 1 ? MBT_MIDDLE : MBT_LEFT;
+  switch (kind) {
+    case 1: host->SendMouseMoveEvent(mouse, false); break;                       // move
+    case 2: host->SendMouseClickEvent(mouse, which, false, clickCount > 0 ? clickCount : 1); break;  // down
+    case 3: host->SendMouseClickEvent(mouse, which, true, clickCount > 0 ? clickCount : 1); break;   // up
+    case 4: host->SendMouseWheelEvent(mouse, dx, dy); break;                     // wheel
+    case 5: host->SendMouseMoveEvent(mouse, true); break;                        // leave
+    case 6: case 7: case 8: {                                                    // key down / up / char
+      CefKeyEvent event;
+      event.type = kind == 6 ? KEYEVENT_RAWKEYDOWN : kind == 7 ? KEYEVENT_KEYUP : KEYEVENT_CHAR;
+      event.modifiers = modifiers;
+      event.windows_key_code = windowsKeyCode;
+      event.native_key_code = nativeKeyCode;
+      event.character = character;
+      event.unmodified_character = unmodifiedCharacter;
+      event.is_system_key = false;
+      host->SendKeyEvent(event);
+      break;
+    }
+    case 9: host->SetFocus(x != 0); break;                                       // focus / blur
+    default: break;
+  }
+}
+
+NSString *WinterCEFHeadlessPrintingOutcome(const char *sessionId) {
+  if (sessionId == nullptr) {
+    return @"";
+  }
+  auto it = HeadlessContexts().find(std::string(sessionId));
+  if (it == HeadlessContexts().end()) {
+    return @"";
+  }
+  return [NSString stringWithUTF8String:it->second.printing.c_str()] ?: @"";
 }

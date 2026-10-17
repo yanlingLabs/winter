@@ -1,0 +1,11 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "wake_ended",
+  "wakeId": "wk_1a2b3c4d5e6f",
+  "reason": "fired",
+  "at": 1781270460000,
+  "woken": true
+}

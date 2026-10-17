@@ -1,5 +1,33 @@
 import SwiftUI
 
+/// The transcript's place in its window: it takes exactly the room it is offered, like a colour fill, and never asks its
+/// scroll view how big it would like to be.
+///
+/// The live freeze (2026-10-12, Winter Dev, the shell window on a 34-event computer-use session): the main thread sat at
+/// 99% in SwiftUI's run-loop commit observer for minutes. A sixth of every sample was the column's own stack PROBING the
+/// transcript's `ScrollView` for its size (`StackLayout … resize` → `ScrollViewLayoutComputer.Engine.sizeThatFits`), and a
+/// scroll view answers that by measuring its content: `LazyStack.measureEstimates` over every cell the lazy stack holds.
+/// That made the lazy stack's own churn — `LazyLayoutViewCache.updateItemPhases`, cells entering the placed set
+/// (`initialPlacement`) every pass — an input to the LAYOUT OF THE WHOLE COLUMN, re-run from the window's fixed frame down
+/// on every pass. The transcript has no size of its own to offer (it fills the column whatever it holds), so nothing above
+/// it is allowed to depend on what it holds: this layout answers a size probe from the proposal alone and only hands the
+/// scroll view the final, exact size when it places it.
+///
+/// What this does NOT claim: the churn inside the lazy stack is SwiftUI's own, and the trigger that started it was not
+/// reproduced outside the user's window (the replayed session at 24 sizes, the real shell, a pointer swept over it).
+/// This removes the one app-owned edge that fed it back into the rest of the window.
+struct TranscriptViewport: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for subview in subviews {
+            subview.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+        }
+    }
+}
+
 /// Spec §3: autoscroll only follows when the user is already near the bottom — v1 yanked
 /// unconditionally on every streaming chunk (donor ChatRootView.swift:514-522); this is the
 /// one deliberate improvement over the transplant.
@@ -52,14 +80,17 @@ struct TranscriptView: View {
 
     var body: some View {
         // The reader lets the follower make its far moves through SwiftUI (`TranscriptFollower.farJump`).
-        ScrollViewReader { proxy in
-            transcriptScroll(proxy: proxy)
-                .onAppear {
-                    follower.onLanded = onLanded
-                    follower.farJump = { [layoutMemo] in
-                        if let last = layoutMemo.lastCellID { proxy.scrollTo(last, anchor: .bottom) }
+        // `TranscriptViewport`: the column never asks the scroll view how big it would like to be (see its doc).
+        TranscriptViewport {
+            ScrollViewReader { proxy in
+                transcriptScroll(proxy: proxy)
+                    .onAppear {
+                        follower.onLanded = onLanded
+                        follower.farJump = { [layoutMemo] in
+                            if let last = layoutMemo.lastCellID { proxy.scrollTo(last, anchor: .bottom) }
+                        }
                     }
-                }
+            }
         }
         // The pill-themed tool pills read this to show a call under safety review (`PillToolRunHeader`).
         .environment(\.reviewingCallIds, adapter.reviewingCallIds)
@@ -82,6 +113,9 @@ struct TranscriptView: View {
     private func cellSpecs(_ transcript: [Exchange], from first: Int, streaming: String?, cards: TranscriptCardState) -> [TranscriptCellSpec] {
         var specs: [TranscriptCellSpec] = []
         var known: Set<TranscriptLayoutMemo.Key> = []
+        // The directories the session has named so far, newest last — a reply's relative names may
+        // resolve inside one (`TranscriptReplyContext`).
+        var sessionDirectories: [String] = []
         for (index, exchange) in transcript.enumerated() where index >= first {
             let isLast = index == transcript.count - 1
             // Live only for the newest exchange (mac-chat-parity Task 2). That is not quite the same as "every in-flight
@@ -95,23 +129,34 @@ struct TranscriptView: View {
             let streamingText = isLast ? streaming : nil
             let layout = layoutMemo.layout(for: exchange, style: toolRowStyle)
             known.insert(layout.key)
+            sessionDirectories = transcriptMergedDirectories(sessionDirectories, layout.directories)
+            let replyContext = TranscriptReplyContext(directories: Array(sessionDirectories.reversed()),
+                                                      readImages: layout.allReadImages)
             let base = index * TranscriptCellSpec.idStride
             var cells: [(id: Int, content: TranscriptCellContent)] = []
             if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
-                cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope)))
+                cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope,
+                                            attachments: exchange.promptAttachments)))
+            }
+            // ComputerV2 wake triggers: the daemon's note that Winter continued (never a user bubble).
+            if let notice = exchange.notice {
+                cells.append((base + TranscriptCellSpec.noticeOffset, .notice(notice)))
             }
             let finalReply = streamingText == nil ? layout.finalReply : nil
             for (offset, entry) in layout.entries.enumerated() {
                 let id = base + TranscriptCellSpec.firstEntryOffset + offset
                 switch entry {
                 case .group(let groupIndex, let group):
-                    if let content = groupContent(group, index: groupIndex, exchangeIndex: index, cards: cards) {
+                    if let content = groupContent(group, index: groupIndex, exchangeIndex: index, cards: cards,
+                                                  readImages: layout.readImages[groupIndex] ?? []) {
                         cells.append((id, content))
                     }
                 case .pillRow(let items):
-                    cells.append((id, .pillRow(items: items, open: items.map { pillIsOpen($0, exchangeIndex: index) })))
+                    cells.append((id, .pillRow(items: items, open: items.map { pillIsOpen($0, exchangeIndex: index) },
+                                               readImages: layout.readImages)))
                 case .reply(let replyIndex):
-                    cells.append((id, .reply(text: exchange.replies[replyIndex], showsCopy: replyIndex == finalReply)))
+                    cells.append((id, .reply(text: exchange.replies[replyIndex], showsCopy: replyIndex == finalReply,
+                                             context: replyContext)))
                 }
             }
             if exchange.aborted { cells.append((base + TranscriptCellSpec.stoppedOffset, .stopped)) }
@@ -127,17 +172,18 @@ struct TranscriptView: View {
     }
 
     /// A non-pill activity row's content, or nil when it draws nothing (a pending question the composer has become).
-    private func groupContent(_ group: ActivityGroup, index: Int, exchangeIndex: Int, cards: TranscriptCardState) -> TranscriptCellContent? {
+    private func groupContent(_ group: ActivityGroup, index: Int, exchangeIndex: Int, cards: TranscriptCardState,
+                              readImages: [String]) -> TranscriptCellContent? {
         switch group {
         case .toolRun(let entries):
             let key = transcriptExpansionKey(toolRunExpansionKey(entries, fallbackIndex: index), exchangeIndex: exchangeIndex)
-            return .group(index: index, group: group, isExpanded: expansion.contains(key), cards: nil)
+            return .group(index: index, group: group, isExpanded: expansion.contains(key), cards: nil, readImages: readImages)
         case .single(let item):
             if let record = item.interactionRecord {
                 if questionMorphsTheComposer(record, closed: cards.closedAsks) { return nil }
-                return .group(index: index, group: group, isExpanded: false, cards: cards)
+                return .group(index: index, group: group, isExpanded: false, cards: cards, readImages: [])
             }
-            return .group(index: index, group: group, isExpanded: false, cards: nil)
+            return .group(index: index, group: group, isExpanded: false, cards: nil, readImages: [])
         }
     }
 
@@ -405,6 +451,28 @@ private func transcriptTimeline(_ exchange: Exchange, style: TranscriptToolRowSt
     return entries
 }
 
+/// PURE: the images each tool run of a timeline read (`toolRunReadImages`), by group index, each image only at
+/// its FIRST read in the turn — the same picture read twice shows once.
+private func transcriptReadImagesByGroup(_ entries: [TimelineEntry]) -> [Int: [String]] {
+    var seen = Set<String>()
+    var out: [Int: [String]] = [:]
+    func take(_ index: Int, _ runs: [ToolRunEntry]) {
+        let fresh = toolRunReadImages(runs).filter { seen.insert($0).inserted }
+        if !fresh.isEmpty { out[index] = fresh }
+    }
+    for entry in entries {
+        switch entry {
+        case .group(let index, .toolRun(let runs)):
+            take(index, runs)
+        case .pillRow(let items):
+            for case .tool(let index, let run) in items { take(index, [run]) }
+        case .group, .reply:
+            break
+        }
+    }
+    return out
+}
+
 /// What an exchange's timeline was worked out to, kept by the exchange's content stamp (`Exchange.stamp` moves
 /// whenever its content does): every cell of a long transcript is asked for on every publish, and grouping a turn's
 /// activity is linear in it.
@@ -420,6 +488,13 @@ private final class TranscriptLayoutMemo {
         let entries: [TimelineEntry]
         /// Which reply carries the copy button once nothing is streaming (`exchangeFinalReplyIndex`).
         let finalReply: Int?
+        /// The images each tool run read that no earlier run of the turn shows, by group index
+        /// (`transcriptReadImagesByGroup`).
+        var readImages: [Int: [String]] = [:]
+        /// Every image the turn read — never drawn again under a reply.
+        var allReadImages: Set<String> = []
+        /// The directories this exchange named (`transcriptExchangeDirectories`).
+        var directories: [String] = []
     }
 
     private var known: [Key: Layout] = [:]
@@ -429,8 +504,12 @@ private final class TranscriptLayoutMemo {
     func layout(for exchange: Exchange, style: TranscriptToolRowStyle) -> Layout {
         let key = Key(stamp: exchange.stamp, pill: style == .pill)
         if let layout = known[key] { return layout }
-        let layout = Layout(key: key, entries: transcriptTimeline(exchange, style: style),
-                            finalReply: exchangeFinalReplyIndex(exchange, isStreaming: false))
+        let entries = transcriptTimeline(exchange, style: style)
+        let readImages = transcriptReadImagesByGroup(entries)
+        let layout = Layout(key: key, entries: entries,
+                            finalReply: exchangeFinalReplyIndex(exchange, isStreaming: false),
+                            readImages: readImages, allReadImages: Set(readImages.values.joined()),
+                            directories: transcriptExchangeDirectories(exchange))
         known[key] = layout
         return layout
     }
@@ -444,15 +523,17 @@ private final class TranscriptLayoutMemo {
 
 /// What one cell draws — a value, so a cell can be told apart from what it was without running its body.
 private enum TranscriptCellContent: Equatable {
-    case prompt(text: String, envelope: AgentMessageEnvelope?)
+    case prompt(text: String, envelope: AgentMessageEnvelope?, attachments: PromptAttachments)
     /// A non-pill activity row. `isExpanded` is the tool run's open state; `cards` is the card state an interaction
     /// card draws from (nil for every other row, so typing in a card does not rebuild them).
-    case group(index: Int, group: ActivityGroup, isExpanded: Bool, cards: TranscriptCardState?)
-    /// A row of pills with which of them are open.
-    case pillRow(items: [PillRowItem], open: [Bool])
-    case reply(text: String, showsCopy: Bool)
+    case group(index: Int, group: ActivityGroup, isExpanded: Bool, cards: TranscriptCardState?, readImages: [String])
+    /// A row of pills with which of them are open, and the exchange's read images by group index.
+    case pillRow(items: [PillRowItem], open: [Bool], readImages: [Int: [String]])
+    case reply(text: String, showsCopy: Bool, context: TranscriptReplyContext)
     case streaming(String)
     case stopped
+    /// A daemon note on the exchange — Winter continued after a wake trigger (`Exchange.notice`).
+    case notice(String)
 }
 
 private struct TranscriptCellSpec: Identifiable {
@@ -461,6 +542,7 @@ private struct TranscriptCellSpec: Identifiable {
     /// reducer keeps 200 activity items).
     static let idStride = 100_000
     static let firstEntryOffset = 1
+    static let noticeOffset = 99_997
     static let stoppedOffset = 99_998
     static let streamingOffset = 99_999
 
@@ -528,22 +610,25 @@ private struct TranscriptCell: View {
         let _ = { transcriptCellBodyEvaluations += 1 }()
         #endif
         switch content {
-        case .prompt(let text, let envelope):
-            TranscriptUserBubble(text: text, tint: tint, envelope: envelope)
-        case .group(let index, let group, _, _):
-            activityGroupRow(group, index: index)
-        case .pillRow(let items, _):
-            pillRow(items)
-        case .reply(let text, let showsCopy):
+        case .prompt(let text, let envelope, let attachments):
+            TranscriptUserBubble(text: text, tint: tint, envelope: envelope, attachments: attachments)
+        case .group(let index, let group, _, _, let readImages):
+            activityGroupRow(group, index: index, readImages: readImages)
+        case .pillRow(let items, _, let readImages):
+            pillRow(items, readImages: readImages)
+        case .reply(let text, let showsCopy, let context):
             // One cell per assistant message (mac-chat-parity Task 1) — the engine emits one per ROUND. `.assistant`:
             // the transcript reply IS `docs/brand.md` § 4's serif allowlist binding #4. A FINISHED reply gets the
             // file door (2026-09-30); the streaming one never does (`TranscriptAssistantMessage.fileDoor`'s doc).
-            TranscriptAssistantMessage(text: text, isStreaming: false, role: .assistant, fileDoor: fileDoor, showsCopyButton: showsCopy)
+            TranscriptAssistantMessage(text: text, isStreaming: false, role: .assistant, fileDoor: fileDoor,
+                                       context: context, showsCopyButton: showsCopy)
         case .streaming(let text):
             // ADDITIVE: while round N streams, rounds 1…N-1 stay on screen.
             TranscriptAssistantMessage(text: text, isStreaming: true, role: .assistant)
         case .stopped:
             TranscriptStoppedRow()
+        case .notice(let text):
+            TranscriptWakeNoticeRow(text: text)
         }
     }
 
@@ -573,7 +658,7 @@ private struct TranscriptCell: View {
     /// A row of tool pills, then — beneath it — each pill's body that has something to show: an
     /// opened pill's calls, a failure line, its diff chips.
     @ViewBuilder
-    private func pillRow(_ items: [PillRowItem]) -> some View {
+    private func pillRow(_ items: [PillRowItem], readImages: [Int: [String]]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             PillFlowLayout(spacing: 8, lineSpacing: 8) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -583,7 +668,7 @@ private struct TranscriptCell: View {
             }
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 if case .tool(let index, let entry) = item {
-                    toolPillBody(entry, index: index)
+                    toolPillBody(entry, index: index, readImages: readImages[index] ?? [])
                 }
             }
         }
@@ -611,14 +696,14 @@ private struct TranscriptCell: View {
     /// Beneath a tool pill: its opened calls, a failure line, its diff chips — when it has any. A
     /// search pill opens into itself instead, so it shows nothing here while open.
     @ViewBuilder
-    private func toolPillBody(_ entry: ToolRunEntry, index: Int) -> some View {
+    private func toolPillBody(_ entry: ToolRunEntry, index: Int, readImages: [String]) -> some View {
         let key = toolKey(entry, index: index)
         let opensInPlace = PillToolRunHeader.opensInPlace(entry)
         let expanded = expansion.contains(key) && !opensInPlace
         if opensInPlace && expansion.contains(key) {
             EmptyView()
         } else if expanded || toolRunFailureSummary([entry]) != nil
-            || !toolRunCollapsedDiffChips([entry]).chips.isEmpty {
+            || !toolRunCollapsedDiffChips([entry]).chips.isEmpty || (onOpenFile != nil && !readImages.isEmpty) {
             TranscriptToolGroupRow(
                 entries: [entry],
                 turnIsLive: turnIsLive,
@@ -627,13 +712,14 @@ private struct TranscriptCell: View {
                 onOpenDiff: onOpenDiff,
                 onOpenFile: onOpenFile,
                 sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                readImages: readImages,
                 showsHeader: false
             )
         }
     }
 
     @ViewBuilder
-    private func activityGroupRow(_ group: ActivityGroup, index: Int) -> some View {
+    private func activityGroupRow(_ group: ActivityGroup, index: Int, readImages: [String]) -> some View {
         switch group {
         case .toolRun(let entries):
             let key = transcriptExpansionKey(toolRunExpansionKey(entries, fallbackIndex: index), exchangeIndex: exchangeIndex)
@@ -644,7 +730,8 @@ private struct TranscriptCell: View {
                 toggle: { toggle(key, morph: false) },
                 onOpenDiff: onOpenDiff,
                 onOpenFile: onOpenFile,
-                sessionHasWorkingDirectory: sessionHasWorkingDirectory
+                sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                readImages: readImages
             )
         case .single(let item):
             // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, where it was

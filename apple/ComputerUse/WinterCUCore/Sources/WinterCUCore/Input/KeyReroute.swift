@@ -33,6 +33,10 @@ final class CUKeyReroute {
     /// user's keys until the next check).
     private let destination: () -> pid_t
     private var _passedThrough = 0
+    /// A key of the user's this reroute let through into the target (their own move took them there): the caller marks
+    /// their work in it from here — the reroute's own decision, never a guess from the front app (round 17, the review of
+    /// round 16's MEDIUM).
+    var onPassThrough: ((CGEvent) -> Void)?
 
     init(target: pid_t, victim: pid_t, installer: CUKeyTapInstalling, post: @escaping (CGEvent, pid_t) -> Void,
          destination: (() -> pid_t)? = nil) {
@@ -62,6 +66,7 @@ final class CUKeyReroute {
         let to = destination()
         if to == target {
             lock.withLock { _passedThrough += 1 }
+            onPassThrough?(event)
             return event
         }
         if let copy = event.copy() { post(copy, to) }

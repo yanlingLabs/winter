@@ -32,11 +32,33 @@ public struct CUWindowRef: Sendable, Hashable {
     /// inside that target's mirror. Kinds that are not about a place (`wait`, `refused`, `foreground`, `idle`, `done`,
     /// `caption`) use `point` only when the cursor has not appeared yet.
     func cursor(sessionId: String, target: CUWindowRef, point: CGPoint, kind: CUCursorKind)
+    /// The arrival gate (DESIGN-cursor.md, "Arrival"): seconds from now until the overlay cursor has arrived for the
+    /// last place-bound `cursor` event on this target (its glide and reticle settled, its press pulse starting), at
+    /// most `CUCursorArrival.cap`. The helper holds the real action that long, so the page reacts when the arrow is there.
+    /// 0 when no overlay cursor is drawn there (window off screen or on another desktop, cursor covered or hidden),
+    /// under Reduce Motion, or when the cursor already rests at the point.
+    func cursorArrival(sessionId: String, target: CUWindowRef) -> TimeInterval
+    /// Told on the main actor whenever whether a target's agent cursor is DRAWN where the user can see it changes —
+    /// its overlay shown (window on screen, on this desktop), not covered, Reduce Motion off. While it is false the
+    /// arrival gate's answer is 0, so the engine need not ask (and a busy main thread costs it nothing).
+    var onCursorDrawn: ((_ sessionId: String, _ target: CUWindowRef, _ drawn: Bool) -> Void)? { get set }
     /// The session's turn ended → fade its mirrors (also auto-fade 30 s after the last cursor/action on a target).
     func turnEnded(sessionId: String)
     func sessionEnded(sessionId: String)
     /// Global enable flag (settings computerUse.mirror). false → no mirrors (cursor overlay still shown).
     var mirrorsEnabled: Bool { get set }
+}
+
+extension CUPresentation {
+    /// A presentation that draws no cursor never holds an action.
+    public func cursorArrival(sessionId: String, target: CUWindowRef) -> TimeInterval { 0 }
+}
+
+public enum CUCursorArrival {
+    /// The longest the arrival gate holds one action (seconds). A glide lasts 0.14–0.55 s
+    /// (`CursorTimeline.glideDuration`): at 0.4 s every reach up to ~300 pt has fully landed, and a 1000 pt one is
+    /// within ~3% of its point. The engine applies the same cap to the whole act (`CUCore.cursorArrivalCapMs`).
+    public static let cap: TimeInterval = 0.4
 }
 
 /// What the agent cursor shows at `point`. The first five cases are the pinned originals; the rest were added for the

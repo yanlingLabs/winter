@@ -155,6 +155,34 @@ final class FocusMenusFoldPasteTests: XCTestCase {
                                                  allowForeground: foreground, privatePath: privatePath))
     }
 
+    /// Round 17 (the review of round 16, H2): menu() checked the user's window at its start, but the preparation before the
+    /// press (the selection hold, keyForMenu, the activation, the walk) can take a second — the user clicked into ANOTHER
+    /// window of the app in front meanwhile, and the command would have acted on THEIR window. Checked again right before
+    /// the press: refused, nothing pressed.
+    func testAMenuCommandIsCheckedAgainRightBeforeItsPress() async throws {
+        finder()
+        sys.front = pid  // Finder in front, the bound window its key window
+        let theirs = fakeElement(98_020)
+        ax.add(theirs, role: kAXWindowRole, title: "Their window", frame: CGRect(x: 200, y: 200, width: 600, height: 400))
+        ax.windowIDs[AXIdentity(element: theirs)] = 78
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])
+        // After the start's check and the aiming (the bound window made main), the walk reads the menu bar: by then the
+        // user has clicked into their other Finder window.
+        var aimed = false
+        ax.onSet = { what in if what.hasSuffix(":\(kAXMainAttribute)") { aimed = true } }
+        ax.onRead = { [unowned self] what in
+            guard aimed, what == "\(pid):\(kAXMenuBarAttribute)" else { return }
+            ax.put(ax.application(pid), [kAXFocusedWindowAttribute: theirs])
+        }
+        do {
+            try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+            XCTFail("refused")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("app_in_front"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(trash)):\(kAXPressAction)"), "never pressed on their window: \(ax.performed)")
+    }
+
     // MARK: 1. focus without raise
 
     func testAnEnabledMenuCommandTakesNoFocusBlip() async throws {
@@ -845,7 +873,9 @@ final class FocusMenusFoldPasteTests: XCTestCase {
                 try await act(.type(CUTypeAction(text: "abcdef")))
                 XCTFail("\(dest): typed on")
             } catch let e as CUError {
-                XCTAssertEqual(e.data?["reason"], .string("app_in_front"), "\(dest): \(e.message)")
+                // (Round 17: their key the reroute let through into the target marks their work in it — the reroute's own
+                // decision — so the burst stops as "the user is working in it" there; in a third app, as "came to the front".)
+                XCTAssertEqual(e.data?["reason"], .string(dest == "the target" ? "user_working" : "app_in_front"), "\(dest): \(e.message)")
             }
             XCTAssertEqual(poster.keyDowns.count, 2, "\(dest): nothing more sent after the switch")
             XCTAssertEqual(FocusSPI.calls.filter { $0.hasPrefix("focus pid 1 ") }.count, handBackBefore, "\(dest): no hand-back to the app they left")

@@ -161,10 +161,18 @@ final class Counter: @unchecked Sendable {
 
     var calls: [Call] = []
     var mirrorsEnabled = true
+    /// What `cursorArrival` answers, and who asked.
+    var arrival: TimeInterval = 0
+    var arrivalAsks: [(String, CUWindowRef)] = []
+    var onCursorDrawn: ((String, CUWindowRef, Bool) -> Void)?
 
     func showMirror(sessionId: String, target: CUWindowRef) { calls.append(.show(sessionId, target)) }
     func hideMirror(sessionId: String, target: CUWindowRef) { calls.append(.hide(sessionId, target)) }
     func cursor(sessionId: String, target: CUWindowRef, point: CGPoint, kind: CUCursorKind) { calls.append(.cursor(sessionId, target, point, kind)) }
+    func cursorArrival(sessionId: String, target: CUWindowRef) -> TimeInterval {
+        arrivalAsks.append((sessionId, target))
+        return arrival
+    }
     func turnEnded(sessionId: String) { calls.append(.turnEnded(sessionId)) }
     func sessionEnded(sessionId: String) { calls.append(.sessionEnded(sessionId)) }
 }
@@ -319,10 +327,15 @@ extension FakeIdleScheduler: ViewClock {}
     let dispatcher: RPCDispatcher
     var notifications: [HelperNotification] = []
 
-    init(prompts: CUDesktopPrompting? = nil) {
+    let rings = FakeWatchRings()
+
+    init(prompts: CUDesktopPrompting? = nil, watches: WatchService? = nil, liveTest: Bool = false,
+         userClicker: (@Sendable (TestUserClickParams) async -> TestUserClickResult)? = nil) {
         viewHub = ViewHub(capture: capture, geometry: geometry, snapshotter: snapshotter, clock: clock)
-        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub, prompts: prompts ?? FakePrompter())
-        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
+        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub, prompts: prompts ?? FakePrompter(),
+                                        watchRings: rings)
+        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight, liveTest: liveTest,
+                                   watches: watches, userClicker: userClicker)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }
         let sink = sink
         let decode = { (line: Data) in try! JSONDecoder().decode(JSONValue.self, from: line) }
@@ -439,4 +452,10 @@ final class LineClient {
     func answer(_ promptId: String, _ a: CUDesktopPromptAnswer) {
         answers.removeValue(forKey: promptId)?(a)
     }
+}
+
+/// The wake triggers' rings, recorded.
+@MainActor final class FakeWatchRings: CUWatchRingPresenting {
+    var shown: [[CUWatchRing]] = []
+    func show(_ rings: [CUWatchRing]) { shown.append(rings) }
 }

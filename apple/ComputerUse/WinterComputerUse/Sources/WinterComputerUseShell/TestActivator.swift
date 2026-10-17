@@ -7,7 +7,10 @@ public struct TestActivateParams: Codable, Sendable, Equatable {
     /// The activation stands for the USER's switch (round 10): the engine first gets the facts their input would leave
     /// (hardware input, a switch for that app), so the guardian treats it as theirs, not the agent's indirect effect.
     public var asUser: Bool?
-    public init(pid: Int32, asUser: Bool? = nil) { self.pid = pid; self.asUser = asUser }
+    /// (1.17.0) The title of the app's window to raise and make main — else its front window is raised as before (the
+    /// wake rows: the user brings the watched Form window forward, not just the app).
+    public var window: String?
+    public init(pid: Int32, asUser: Bool? = nil, window: String? = nil) { self.pid = pid; self.asUser = asUser; self.window = window }
 }
 
 /// `test.userInput {pid}` (round 10, the live suite only): the user WORKS in `pid` (a click into its window while it is
@@ -37,17 +40,26 @@ public struct TestActivateResult: Codable, Sendable, Equatable {
 /// through a live-test instance's `test.activate`; a normal helper has no such route.
 @MainActor
 public enum TestActivator {
-    public static func activate(pid: Int32) -> TestActivateResult {
+    public static func activate(pid: Int32, window: String? = nil) -> TestActivateResult {
         let app = AXUIElementCreateApplication(pid)
         let set = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
         var raised = false
         var value: CFTypeRef?
         if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-           let windows = value as? [AXUIElement], let first = windows.first {
+           let windows = value as? [AXUIElement], let first = pick(windows, title: window) {
             _ = AXUIElementSetAttributeValue(first, kAXMainAttribute as CFString, kCFBooleanTrue)
             raised = AXUIElementPerformAction(first, kAXRaiseAction as CFString) == .success
         }
         let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
         return TestActivateResult(frontmostSet: set, raised: raised, frontmost: front)
+    }
+
+    /// The window to raise: the one titled `title` (none such: nothing), else the app's front window. Pure over its input.
+    nonisolated static func pick(_ windows: [AXUIElement], title: String?, titleOf: (AXUIElement) -> String? = { e in
+        var v: CFTypeRef?
+        return AXUIElementCopyAttributeValue(e, kAXTitleAttribute as CFString, &v) == .success ? v as? String : nil
+    }) -> AXUIElement? {
+        guard let title else { return windows.first }
+        return windows.first { titleOf($0) == title }
     }
 }

@@ -138,9 +138,9 @@ final class BrowserLinkHostTests: XCTestCase {
     /// Run one command and return what it answered (`nil` while it has not).
     private final class Answer { var value: BrowserLinkReply? }
 
-    private func run(_ op: BrowserLinkCommand.Op, cmdId: String = "c") -> Answer {
+    private func run(_ op: BrowserLinkCommand.Op, cmdId: String = "c", watchOnly: Bool = false) -> Answer {
         let answer = Answer()
-        host.browserLinkCommand(BrowserLinkCommand(linkId: "L1", cmdId: cmdId, op: op),
+        host.browserLinkCommand(BrowserLinkCommand(linkId: "L1", cmdId: cmdId, op: op, watchOnly: watchOnly),
                                 reply: BrowserLinkReplier { reply in
                                     MainActor.assumeIsolated { answer.value = reply }
                                 })
@@ -324,6 +324,22 @@ final class BrowserLinkHostTests: XCTestCase {
         XCTAssertEqual(data?["cdpCode"]?.intValue, -32603)
     }
 
+    /// A result the gate must read (a world method's, a response body) that Swift's decoder refuses — a lone surrogate
+    /// Chromium wrote for a string cut mid-pair — is an error, never a silently empty `{"result":{}}`.
+    func testAWorldResultThatCantBeReadIsAnErrorNotEmpty() {
+        ensureLive()
+        let world = run(.cdpSend(tabId: "t1", method: "Page.createIsolatedWorld",
+                                 params: .object(["frameId": .string("F"), "worldName": .string("winter")]), cdpSessionId: nil))
+        link.answer(.OK, #"{"executionContextId":4}"#)
+        guard case .ok = world.value else { return XCTFail() }
+        let cut = run(.cdpSend(tabId: "t1", method: "Runtime.evaluate", params: .object(["contextId": .number(4)]), cdpSessionId: nil))
+        link.answer(.OK, #"{"result":{"type":"string","value":"x\ud83d"}}"#)
+        guard case .failure(let code, let message, let data) = cut.value else { return XCTFail("an unreadable result must not read as empty") }
+        XCTAssertEqual(code, .cdpError)
+        XCTAssertEqual(message, "the browser's answer to Runtime.evaluate could not be read")
+        XCTAssertEqual(data?["cdpCode"]?.intValue, -32603)
+    }
+
     // MARK: - tabs.live
 
     func testTabsLiveListsEveryLiveBrowserAndWhichAreHeld() {
@@ -502,6 +518,40 @@ final class BrowserLinkHostTests: XCTestCase {
         XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], BrowserNativeUIPolicy.flags(held: true))
     }
 
+    // MARK: - Feature `watchOnly` (wake triggers)
+
+    /// A WATCH-ONLY hold sets none of the native-UI flags (the tab's dialogs, prompts, file choosers, downloads,
+    /// menus, keys and focus stay the user's); a primitive's full hold takes them back, and the tab drops back after —
+    /// the same hold all along, counted toward the ceiling.
+    func testAWatchOnlyHoldSetsNoNativeUIAndAFullHoldTakesItBack() {
+        let answer = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: "https://example.com/"), watchOnly: true)
+        let container = runtime.container(forTabId: "t1")!
+        link.browserIds[ObjectIdentifier(container)] = 7
+        clock.tick()
+        guard case .ok = answer.value else { return XCTFail("\(String(describing: answer.value))") }
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], 0, "a watch-only hold holds no native UI")
+        XCTAssertEqual(host.heldTabIds, ["t1"], "but it is a hold all the same")
+        XCTAssertNotNil(runtime.holds["t1"])
+        XCTAssertNotNil(link.eventObservers[ObjectIdentifier(container)], "its CDP still flows (the watch is polled)")
+
+        guard case .ok = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: nil)).value else { return XCTFail("upgrade") }
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], BrowserNativeUIPolicy.flags(held: true))
+        guard case .ok = run(.tabEnsure(sessionId: "s1", tabId: "t1", url: nil), watchOnly: true).value else { return XCTFail("downgrade") }
+        XCTAssertEqual(link.nativeUI[ObjectIdentifier(container)], 0)
+        XCTAssertEqual(host.heldTabIds, ["t1"])
+    }
+
+    func testWatchOnlyHoldsCountTowardTheCeiling() {
+        for i in 0..<BrowserLinkHost.maxHeldTabs {
+            let answer = run(.tabEnsure(sessionId: "s", tabId: "t\(i)", url: nil), watchOnly: true)
+            link.browserIds[ObjectIdentifier(runtime.container(forTabId: "t\(i)")!)] = 7
+            clock.tick()
+            guard case .ok = answer.value else { return XCTFail("t\(i)") }
+        }
+        XCTAssertEqual(failureCode(run(.tabEnsure(sessionId: "s", tabId: "one-too-many", url: nil), watchOnly: true)), .notAllowed)
+        XCTAssertEqual(failureCode(run(.tabEnsure(sessionId: "s", tabId: "another", url: nil))), .notAllowed)
+    }
+
     func testMuteReachesTheTabsBrowser() {
         XCTAssertEqual(failureCode(run(.tabMute(tabId: "t1", muted: true))), .notLive)
         let container = ensureLive()
@@ -633,6 +683,39 @@ final class BrowserLinkHostTests: XCTestCase {
             XCTAssertFalse(without.contains(decision), "\(decision) without its flag")
         }
     }
+
+    // MARK: - Feature `headless` (lane H3)
+
+    private func runHeadless(_ op: BrowserLinkHeadlessCommand.Op) -> Answer {
+        let answer = Answer()
+        host.browserLinkHeadlessCommand(BrowserLinkHeadlessCommand(linkId: "L1", cmdId: "h", op: op),
+                                        reply: BrowserLinkReplier { reply in
+                                            MainActor.assumeIsolated { answer.value = reply }
+                                        })
+        return answer
+    }
+
+    func testAHeadlessCommandWithNoStoreIsRefused() {
+        XCTAssertNil(host.headless)
+        XCTAssertEqual(failureCode(runHeadless(.tabs(sessionId: "s1", tabs: []))), .notAllowed)
+    }
+
+    func testAHeadlessCommandReachesTheStoreAndANewLinkClearsItsLists() {
+        let store = HeadlessPresentStore(device: nil)
+        host.headless = store
+        let tab = BrowserLinkHeadlessTab(tabId: "ht_1", url: "https://example.com/", title: "Example", presented: false, control: false)
+        XCTAssertEqual(runHeadless(.tabs(sessionId: "s1", tabs: [tab])).value, .empty)
+        XCTAssertEqual(store.tabsBySession["s1"], [tab])
+        XCTAssertEqual(runHeadless(.hide(sessionId: "s1", tabId: "ht_9", reason: "gone")).value, .empty)
+        host.browserLinkLost()
+        XCTAssertEqual(store.tabsBySession, [:])
+    }
+
+    func testAHeadlessCommandWhileQuittingIsRefused() {
+        host.headless = HeadlessPresentStore(device: nil)
+        runtime.quiesce()
+        XCTAssertEqual(failureCode(runHeadless(.tabs(sessionId: "s1", tabs: []))), .quiescent)
+    }
 }
 
 /// ComputerV2 Phase 2 — the browser link's CEF door, through the seams that need no CEF.
@@ -642,7 +725,8 @@ final class BrowserLinkCEFSeamTests: XCTestCase {
         XCTAssertEqual(WinterCEFChildSessionOfDevToolsMessage(
             #"{"method":"Runtime.executionContextCreated","params":{"context":{"id":3}},"sessionId":"AB12CD"}"#),
             #"AB12CD Runtime.executionContextCreated {"context":{"id":3}}"#)
-        // A child's RESULT settles by id like any other; the tab's own event goes to the structured callback.
+        // A child's RESULT is not an event (the raw observer settles it); the tab's own event goes to the
+        // structured callback.
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(#"{"id":12,"result":{},"sessionId":"AB12CD"}"#))
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(#"{"method":"Page.loadEventFired","params":{"timestamp":1}}"#))
         // A sessionId nested in the tab's own event's params is not a child's message.
@@ -652,6 +736,71 @@ final class BrowserLinkCEFSeamTests: XCTestCase {
             #"{"method":"Target.attachedToTarget","params":{"targetInfo":{},"sessionId":"AB12CD"}}"#))
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(#"not json "sessionId":"x"}"#))
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(""))
+    }
+
+    /// The raw observer's whole decision, against calls pending on a browser: a flattened child's RESULT settles its
+    /// call by id — read by slicing, so one Foundation can't parse (a lone surrogate) settles all the same, and one
+    /// whose body can't be read at all settles as an error, never left to time out; a child's EVENT goes on with its
+    /// session (sliced, never re-encoded); a child's message nothing can be read of is consumed and dropped; anything
+    /// else is left to CEF.
+    func testTheRawObserverSettlesAChildsResultsAndDeliversItsEvents() {
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"id":12,"result":{"executionContextId":2},"sessionId":"AB12CD"}"#),
+                       #"consumed=1;settled 12 ok=1 {"executionContextId":2}"#)
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"id":13,"result":{"result":{"type":"string","value":"x\ud83d"}},"sessionId":"AB12CD"}"#),
+                       #"consumed=1;settled 13 ok=1 {"result":{"type":"string","value":"x\ud83d"}}"#)
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"id":14,"error":{"code":-32000,"message":"No frame"},"sessionId":"AB12CD"}"#),
+                       #"consumed=1;settled 14 ok=0 {"code":-32000,"message":"No frame"}"#)
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"id":15,"weird":1,"sessionId":"AB12CD"}"#),
+                       #"consumed=1;settled 15 ok=0 {"code":-32603,"message":"the child session's result could not be read"}"#)
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"method":"Runtime.consoleAPICalled","params":{"args":[{"value":"\ud83d"}]},"sessionId":"AB12CD"}"#),
+                       #"consumed=1;event AB12CD Runtime.consoleAPICalled {"args":[{"value":"\ud83d"}]}"#)
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"method":"Page.frameStartedLoading","sessionId":"AB12CD"}"#),
+                       #"consumed=1;event AB12CD Page.frameStartedLoading {}"#)
+        // A grandchild detaching on a child's session fails the calls sent to it (15 and 16 went to AB12CD).
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"method":"Target.detachedFromTarget","params":{"sessionId":"AB12CD"},"sessionId":"PARENT"}"#),
+                       #"consumed=1;settled 15 ok=0 {"message":"the frame's DevTools session ended before it answered"};settled 16 ok=0 {"message":"the frame's DevTools session ended before it answered"};event PARENT Target.detachedFromTarget {"sessionId":"AB12CD"}"#)
+        // A child's message nothing can be read of: consumed (never handed to CEF, which would drop its session).
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"method":"Runtime.\"odd","sessionId":"AB12CD"}"#), "consumed=1")
+        // The tab's own messages are CEF's.
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"id":12,"result":{}}"#), "consumed=0")
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"id":12,"result":{"sessionId":"AB12CD"}}"#), "consumed=0")
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(#"{"method":"Page.loadEventFired","params":{"timestamp":1}}"#), "consumed=0")
+        XCTAssertEqual(WinterCEFRawMessageTranscriptWithNoCEFAnywhere(""), "consumed=0")
+    }
+
+    /// The door's own body, with the send injected: registered BEFORE it is sent (an answer from inside the send is
+    /// not lost), a child's result Foundation can't parse still answered, a child's error typed, a child session that
+    /// detaches failing only its own calls, and every refusal answered at once with its own sentence.
+    func testTheDoorRegistersBeforeItSendsAndAlwaysAnswers() {
+        let expected = [
+            #"status=0 {}"#,
+            #"status=0 {"result":{"type":"string","value":"x\ud83d"}}"#,
+            #"status=1 {"code":-32000,"message":"No node"}"#,
+            #"status=3 {"message":"the frame's DevTools session ended before it answered"}"#,
+            "own pending=1",
+            #"status=4 {"message":"the browser refused to submit the DevTools message"}"#,
+            #"status=4 {"message":"the DevTools params were not a JSON object"}"#,
+            #"status=4 {"message":"the DevTools params were not a JSON object"}"#,
+            #"status=4 {"message":"the DevTools params nest too deeply"}"#,
+            #"status=4 {"message":"the DevTools method name is not valid UTF-8"}"#,
+            "pending=0",
+        ].joined(separator: "\n")
+        XCTAssertEqual(WinterCEFSendCDPTranscriptWithNoCEFAnywhere(), expected)
+    }
+
+    /// One raw message for both sessions: the params placed as given (never re-encoded), a child's session last.
+    func testTheDoorsRawMessageCarriesTheParamsAsGiven() {
+        XCTAssertEqual(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(7, "Runtime.evaluate", #"{"expression":"1.0","contextId":3}"#, nil),
+                       #"{"id":7,"method":"Runtime.evaluate","params":{"expression":"1.0","contextId":3}}"#)
+        XCTAssertEqual(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(8, "Page.enable", nil, "AB12CD"),
+                       #"{"id":8,"method":"Page.enable","params":{},"sessionId":"AB12CD"}"#)
+        XCTAssertEqual(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(9, "Page.enable", "", ""),
+                       #"{"id":9,"method":"Page.enable","params":{}}"#)
+        // Anything but one JSON object that starts with `{` is refused before it could be sent.
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", "[1]", nil))
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", #"{"a":1} , "id": 5"#, nil))
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", "{", nil))
+        XCTAssertNil(WinterCEFRawDevToolsMessageWithNoCEFAnywhere(10, "Page.enable", " {}", nil))
     }
 
     /// A page can call `window.print()` with no input from anyone, and no CEF handler stops the macOS
@@ -715,7 +864,7 @@ final class BrowserLinkEndToEndTests: XCTestCase {
             guard let id = message["id"] as? Int, let method = message["method"] as? String else { return }
             switch method {
             case "browserLink.attach":
-                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"L1","protocol":1}}"#)
+                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"L1","protocol":\#(BrowserLinkProtocol.version)}}"#)
             default:
                 feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
             }

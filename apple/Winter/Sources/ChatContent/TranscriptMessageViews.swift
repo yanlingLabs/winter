@@ -106,6 +106,9 @@ struct TranscriptUserBubble: View {
     /// Set when `text` is the body of ANOTHER session's message (`Exchange.promptEnvelope`): a small
     /// "From session …" header (and the summary, subtly) rides above the body.
     var envelope: AgentMessageEnvelope? = nil
+    /// Composer attachments (2026-10-13): the paths behind the prompt's placeholders. Each placeholder that has
+    /// one is drawn as the composer's own chip, inline where it is (`promptDisplay`, `PromptBodyView`).
+    var attachments = PromptAttachments()
     @Environment(\.transcriptUserMessageStyle) private var style
     @Environment(\.transcriptSessionTitle) private var sessionTitle
 
@@ -134,8 +137,9 @@ struct TranscriptUserBubble: View {
     /// each role actually renders as.
     var proseRole: TranscriptProseRole { .sans }
 
-    private var displayText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// The prose and the chips in it — derived from `text` and `attachments`.
+    var display: PromptDisplay {
+        promptDisplay(text.trimmingCharacters(in: .whitespacesAndNewlines), attachments: attachments)
     }
 
     var body: some View {
@@ -152,8 +156,8 @@ struct TranscriptUserBubble: View {
             VStack(alignment: .leading, spacing: 0) {
                 senderBlock
                     .padding(.bottom, envelope == nil ? 0 : 22)
-                if !displayText.isEmpty {
-                    RuledUserMessageText(text: displayText, tint: tint, role: proseRole)
+                if !display.isEmpty {
+                    RuledUserMessageText(display: display, tint: tint, role: proseRole)
                 }
                 Rectangle()
                     .fill(Theme.textPrimary.opacity(0.85)) // white: the window is dark-only
@@ -166,11 +170,10 @@ struct TranscriptUserBubble: View {
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             senderBlock
-            if !displayText.isEmpty {
-                TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
-                                               fillsAvailableWidth: false)
+            if !display.isEmpty {
+                PromptBodyView(display: display, tint: tint, role: proseRole, fillsAvailableWidth: false)
                     .foregroundStyle(.primary)
             }
         }
@@ -185,9 +188,21 @@ struct TranscriptUserBubble: View {
 /// text shows with "Show less" under it. A message only a little over the limit is never clamped
 /// (`collapseSlack`): hiding three lines behind a button is worse than showing them.
 struct RuledUserMessageText: View {
-    let text: String
+    /// The message, its chips in place (`promptDisplay`).
+    let display: PromptDisplay
     let tint: Color
     let role: TranscriptProseRole
+
+    init(display: PromptDisplay, tint: Color, role: TranscriptProseRole) {
+        self.display = display
+        self.tint = tint
+        self.role = role
+    }
+
+    /// A message with no attachments.
+    init(text: String, tint: Color, role: TranscriptProseRole) {
+        self.init(display: promptDisplay(text, attachments: PromptAttachments()), tint: tint, role: role)
+    }
 
     static let collapsedHeight: CGFloat = 200
     static let collapseSlack: CGFloat = 60
@@ -205,7 +220,7 @@ struct RuledUserMessageText: View {
     private var isCollapsed: Bool { Self.isCollapsible(fullHeight: fullHeight) && !isExpanded }
 
     private var message: some View {
-        TranscriptFormattedMessageText(text: text, tint: tint, role: role, fillsAvailableWidth: true)
+        PromptBodyView(display: display, tint: tint, role: role, fillsAvailableWidth: true)
             .foregroundStyle(.primary)
             .transcriptRuledUserMessageWeight()
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -298,6 +313,9 @@ struct TranscriptAssistantMessage: View, Equatable {
     /// window and both plan-card bodies pass — renders this reply exactly as before: no links, no
     /// thumbnails, no stat. A STREAMING reply ignores it too; it links once its round has finished.
     var fileDoor: TranscriptFileDoor? = nil
+    /// What this reply knows of its turn (2026-10-13): the directories a relative name may resolve in,
+    /// and the images a `read` already shows beside its tool row (left out of this reply's thumbnails).
+    var context = TranscriptReplyContext()
     /// Whether this reply carries the copy button (2026-10-06): in the transcript only the FINAL reply
     /// of a turn does (`exchangeFinalReplyIndex`) — never the short messages between tool calls. The
     /// plan cards' bodies keep the default.
@@ -307,7 +325,7 @@ struct TranscriptAssistantMessage: View, Equatable {
     @State private var didCopyMessage = false
     /// The last resolution this row finished, with the inputs it answered for. Read only while those
     /// inputs are still current (`fileLinks`), so a reused row never shows another reply's links.
-    @State private var resolvedFiles: (key: TranscriptFileMentionKey, files: Set<String>)?
+    @State private var resolvedMentions: (key: TranscriptFileMentionKey, mentions: [String: TranscriptResolvedMention])?
 
     private var displayText: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -318,34 +336,33 @@ struct TranscriptAssistantMessage: View, Equatable {
     private var mentionKey: TranscriptFileMentionKey? {
         guard let fileDoor, !isStreaming else { return nil }
         return TranscriptFileMentionKey(text: displayText, baseDirectory: fileDoor.baseDirectory,
-                                        sessionHasWorkingDirectory: fileDoor.sessionHasWorkingDirectory)
+                                        sessionHasWorkingDirectory: fileDoor.sessionHasWorkingDirectory,
+                                        contextDirectories: context.directories)
     }
 
-    /// Everything this reply links, or `nil` when it links nothing. Falls back to the existence
-    /// cache's synchronous answer until this row's own resolution lands, so a recycled row draws its
-    /// links and thumbnails on its first frame.
+    private static func resolver(for key: TranscriptFileMentionKey, candidates: [String]) -> TranscriptMentionResolver {
+        TranscriptMentionResolver(candidates: candidates, baseDirectory: key.baseDirectory,
+                                  contextDirectories: key.contextDirectories, homeDirectory: NSHomeDirectory())
+    }
+
+    /// Everything this reply links. Falls back to the existence cache's synchronous answer until this
+    /// row's own resolution lands, so a recycled row draws its links and thumbnails on its first frame.
     private func fileLinks(for key: TranscriptFileMentionKey,
                            candidates: [String]) -> TranscriptFileLinks {
-        let home = NSHomeDirectory()
-        let files: Set<String>
-        if let resolvedFiles, resolvedFiles.key == key {
-            files = resolvedFiles.files
+        let mentions: [String: TranscriptResolvedMention]
+        if let resolvedMentions, resolvedMentions.key == key {
+            mentions = resolvedMentions.mentions
         } else {
-            files = TranscriptFileExistenceCache.shared.knownFiles(
-                among: candidates.compactMap {
-                    transcriptResolvedMentionPath($0, baseDirectory: key.baseDirectory, homeDirectory: home)
-                })
+            mentions = transcriptKnownMentions(Self.resolver(for: key, candidates: candidates))
         }
-        return TranscriptFileLinks(baseDirectory: key.baseDirectory, homeDirectory: home,
-                                   sessionHasWorkingDirectory: key.sessionHasWorkingDirectory,
-                                   existingFiles: files)
+        return TranscriptFileLinks(resolved: mentions, sessionHasWorkingDirectory: key.sessionHasWorkingDirectory)
     }
 
     var body: some View {
         let key = mentionKey
         let candidates = key.map { transcriptFileMentionCandidates(in: $0.text) } ?? []
         let links = key.map { fileLinks(for: $0, candidates: candidates) }
-        let images = links?.images(among: candidates) ?? []
+        let images = links?.images(among: candidates, excluding: context.readImages) ?? []
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 // `Theme.accent` rather than `.accentColor`: SwiftUI's `.accentColor` resolves to
@@ -387,19 +404,19 @@ struct TranscriptAssistantMessage: View, Equatable {
         .frame(maxWidth: .infinity, alignment: .leading)
         // A linked path's click: this reply's own scheme goes to the file door, with the absolute
         // path the link carries; any other URL keeps the system's behaviour.
+        // A folder opens in Finder, and a file the panel cannot open here is revealed there
+        // (`transcriptFileLinkAction`).
         .environment(\.openURL, OpenURLAction { url in
             guard let fileDoor, let path = transcriptFileLinkPath(from: url) else { return .systemAction }
-            fileDoor.open(path)
+            let action = links?.action(forPath: path) ?? .openInPanel
+            transcriptPerformFileLinkAction(action, path: path, door: fileDoor)
             return .handled
         })
         .task(id: key) {
             guard let key else { return }
-            let home = NSHomeDirectory()
-            let paths = candidates.compactMap {
-                transcriptResolvedMentionPath($0, baseDirectory: key.baseDirectory, homeDirectory: home)
-            }
-            let files = paths.isEmpty ? [] : await TranscriptFileExistenceCache.shared.files(among: paths)
-            resolvedFiles = (key, files)
+            let mentions = candidates.isEmpty
+                ? [:] : await transcriptResolveMentions(Self.resolver(for: key, candidates: candidates))
+            resolvedMentions = (key, mentions)
         }
     }
 
@@ -421,6 +438,7 @@ struct TranscriptAssistantMessage: View, Equatable {
             && (lhs.fileDoor == nil) == (rhs.fileDoor == nil)
             && lhs.fileDoor?.baseDirectory == rhs.fileDoor?.baseDirectory
             && lhs.fileDoor?.sessionHasWorkingDirectory == rhs.fileDoor?.sessionHasWorkingDirectory
+            && lhs.context == rhs.context
     }
 
     private func showMessageCopiedFeedback() {
@@ -811,6 +829,26 @@ struct TranscriptActivityRow: View {
 
 /// The "⏹ stopped" line shown when an exchange's turn ended via Esc-interrupt
 /// (`Exchange.aborted`) — v1 parity companion to the activity rows, same quiet-meta token.
+/// ComputerV2 wake triggers (2026-10-12): the daemon's note that Winter carried on because the user did what a wake
+/// trigger waited for ("Winter continued: you clicked “Submit for review” in Chrome"). Quiet meta, like the stopped
+/// line — the daemon talking, never a bubble.
+struct TranscriptWakeNoticeRow: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "bell")
+                .imageScale(.small)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Typography.caption())
+        .foregroundStyle(Theme.textMuted)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct TranscriptStoppedRow: View {
     var body: some View {
         HStack(spacing: 6) {
@@ -879,6 +917,8 @@ struct ToolCallRecord: Equatable {
     var writtenLines: Int? = nil
     /// A ComputerV2 call's script (`ActivityItem.scriptCode`) — the expanded row's monospace block.
     var scriptCode: String? = nil
+    /// A `read` call's whole path (`ActivityItem.readPath`) — what `toolCallReadImagePath` draws.
+    var readPath: String? = nil
 }
 
 /// Stable identity for one `.toolRun` group's EXPANSION state.
@@ -1015,7 +1055,8 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, let siteIcons):
             let record = ToolCallRecord(callId: callId, detail: detail, output: output,
                                         isError: isError, fileDiff: fileDiff, siteIcons: siteIcons,
-                                        writtenLines: item.writtenLines, scriptCode: item.scriptCode)
+                                        writtenLines: item.writtenLines, scriptCode: item.scriptCode,
+                                        readPath: item.readPath)
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(name: name, calls: last.calls + [record])
@@ -1333,6 +1374,43 @@ func toolImageChipText(_ count: Int) -> String {
     count == 1 ? "Screenshot" : "\(count) images"
 }
 
+// MARK: - Images a read looked at (2026-10-13)
+//
+// A `read` of an image file comes back as "[image]" — the bytes go to the model and are never in the
+// session log — but its CALL names the file, and the file is on this Mac. So each image the model read is
+// drawn as a compact thumbnail beside the tool row that read it: under the collapsed row (deduplicated
+// across the turn: the same picture read twice shows at the first read, bounded with a note), and per
+// call when the row is open. A result with images and no path (a ComputerV2 screenshot) keeps the chip.
+
+/// PURE: the image a call looked at — a `read` that succeeded, whose result carried an image placeholder,
+/// of an absolute path the panel shows as a picture — spelled as the transcript's links spell it
+/// (`/tmp` → `/private/tmp`), or `nil`.
+func toolCallReadImagePath(name: String, call: ToolCallRecord) -> String? {
+    guard name.lowercased() == "read", !call.isError,
+          let output = call.output, output.contains(toolOutputImagePlaceholder),
+          let raw = call.readPath, raw.hasPrefix("/"), transcriptFileMentionIsImage(raw) else { return nil }
+    return transcriptResolvedMentionPath(raw, baseDirectory: nil, homeDirectory: NSHomeDirectory())
+}
+
+/// PURE: every image a run read, in call order, each once.
+func toolRunReadImages(_ entries: [ToolRunEntry]) -> [String] {
+    var seen = Set<String>()
+    return entries.flatMap { entry in entry.calls.compactMap { toolCallReadImagePath(name: entry.name, call: $0) } }
+        .filter { seen.insert($0).inserted }
+}
+
+/// How many read images a COLLAPSED row draws (a sideways-scrolling row of compact thumbnails) — the rest are
+/// reachable by expanding.
+let maxCollapsedReadImages = 12
+
+/// What the collapsed row draws: the first `max` images, plus a note naming what it withholds.
+func toolRunCollapsedReadImages(_ images: [String],
+                                max limit: Int = maxCollapsedReadImages) -> (images: [String], note: String?) {
+    guard images.count > limit else { return (images, nil) }
+    let withheld = images.count - limit
+    return (Array(images.prefix(limit)), "… \(withheld) more image\(withheld == 1 ? "" : "s") — expand to see \(withheld == 1 ? "it" : "them")")
+}
+
 /// The one line a COLLAPSED run shows when something in it failed: the first non-blank line of the
 /// first failed call's output, which is where every tool puts its error.
 ///
@@ -1453,6 +1531,8 @@ struct ToolRunCallLine: Equatable {
     /// How many images the result carried (its `[image]` placeholders, which `output` no longer shows):
     /// drawn as a chip under the text, or alone when the result was only images.
     var imageCount: Int = 0
+    /// The image file this call READ (`toolCallReadImagePath`) — drawn as its thumbnail instead of the chip.
+    var readImagePath: String? = nil
 }
 
 /// Everything an expanded run draws: one line per call, plus a note when the block budget bit.
@@ -1510,7 +1590,8 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
                 // than defer some drawing.
                 fileDiff: call.fileDiff,
                 scriptCode: call.scriptCode,
-                imageCount: imageCount
+                imageCount: imageCount,
+                readImagePath: toolCallReadImagePath(name: entry.name, call: call)
             ))
         }
     }
@@ -1782,6 +1863,10 @@ struct TranscriptToolGroupRow: View {
     var onOpenFile: ((String) -> Void)? = nil
     /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
     var sessionHasWorkingDirectory: Bool = false
+    /// The images this run READ that no earlier run of the turn already shows (`toolRunReadImages`,
+    /// deduplicated across the turn by the transcript) — compact thumbnails under the collapsed row,
+    /// where the file door is wired.
+    var readImages: [String] = []
 
     @Environment(\.transcriptToolRowStyle) private var rowStyle
     /// False when the run's header is drawn elsewhere — the pill-themed window lays several tools'
@@ -1820,6 +1905,10 @@ struct TranscriptToolGroupRow: View {
             // would make the feature invisible in the state the row spends nearly all its time in.
             // Bounded — `toolRunCollapsedDiffChips` — with the rest reachable by expanding.
             if !isExpanded { collapsedDiffChips }
+
+            // The images the run looked at, beside the row that read them (2026-10-13) — on the
+            // collapsed row for the reason the diff chips are: it is the state the row lives in.
+            if !isExpanded, let onOpenFile, !readImages.isEmpty { collapsedReadImages(onOpenFile) }
 
             if isExpanded { expandedCalls.modifier(PillToolRunCard(active: rowStyle == .pill)) }
         }
@@ -1868,6 +1957,21 @@ struct TranscriptToolGroupRow: View {
         }
     }
 
+    /// The collapsed row's read images — compact, bounded, with a note when the bound bites.
+    private func collapsedReadImages(_ onOpen: @escaping (String) -> Void) -> some View {
+        let bounded = toolRunCollapsedReadImages(readImages)
+        return VStack(alignment: .leading, spacing: 4) {
+            TranscriptImageThumbnailStrip(paths: bounded.images, maxSize: transcriptCompactThumbnailMaxSize,
+                                          onOpen: onOpen)
+            if let note = bounded.note {
+                Text(note)
+                    .font(Typography.tiny())
+                    .foregroundStyle(Theme.textMuted)
+            }
+        }
+        .padding(.leading, rowStyle == .pill ? 16 : 32)
+    }
+
     /// Every call in the run, in order — including the ones with no detail and no result, which
     /// contributed no line at all before Task 2 (five `browser` calls expanded to an empty area).
     @ViewBuilder private var expandedCalls: some View {
@@ -1905,8 +2009,16 @@ struct TranscriptToolGroupRow: View {
                     }
 
                     if line.imageCount > 0 {
-                        TranscriptImageChip(count: line.imageCount)
-                            .padding(.leading, 16)
+                        // A read image shows itself; any other image result (a screenshot with no
+                        // file) keeps the chip.
+                        if let path = line.readImagePath, let onOpenFile {
+                            TranscriptImageThumbnail(path: path, maxSize: transcriptCompactThumbnailMaxSize,
+                                                     onOpen: onOpenFile)
+                                .padding(.leading, 16)
+                        } else {
+                            TranscriptImageChip(count: line.imageCount)
+                                .padding(.leading, 16)
+                        }
                     }
                 }
             }

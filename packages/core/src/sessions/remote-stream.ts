@@ -101,13 +101,14 @@ export const REMOTE_STREAM_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new 
  *
  *  Events are never rewritten in place: `capEvent` returns the SAME reference when nothing needed
  *  capping (the overwhelmingly common case), so the fan-out to other clients is unaffected. */
-export function filterRemoteStreamEvent(event: SessionEvent): SessionEvent | null {
+export function filterRemoteStreamEvent(event: SessionEvent, log?: (sessionId: string) => readonly SessionEvent[] | undefined): SessionEvent | null {
   if (!REMOTE_STREAM_EVENT_TYPES.has(event.type)) return null;
   // The thinking pill (review r1): the phone gets a reasoning event WITHOUT its text (`phoneViewOf`,
   // the same view `session.history` serves). A live `delta` left with no title is not sent at all —
   // with its text gone it says nothing. (Repeats of an unchanged title are dropped per CLIENT, by
   // `createRemoteStreamFilter` below.)
-  const view = phoneViewOf(event);
+  // A ComputerV2 wake message reads its one line from the session's LOG (`log`), as `session.history` does.
+  const view = phoneViewOf(event, log === undefined ? undefined : () => log(event.sessionId));
   if (view.type === "thinking_delta" && view.phase === "delta" && view.title === undefined) return null;
   return capEvent(view);
 }
@@ -128,10 +129,10 @@ const REMOTE_THINKING_BLOCKS_MAX = 64;
  * each CHANGE of title or kind; repeats are dropped, and the block is forgotten at its `thinking_block`.
  * Construct one per remote `HubClient` (a re-attach builds a new one, so it relearns).
  */
-export function createRemoteStreamFilter(): (event: SessionEvent) => SessionEvent | null {
+export function createRemoteStreamFilter(opts: { log?: (sessionId: string) => readonly SessionEvent[] | undefined } = {}): (event: SessionEvent) => SessionEvent | null {
   const sent = new Map<string, string>();
   return (event) => {
-    const allowed = filterRemoteStreamEvent(event);
+    const allowed = filterRemoteStreamEvent(event, opts.log);
     if (allowed === null) return null;
     if (allowed.type === "thinking_block") {
       sent.delete(allowed.blockId);

@@ -455,6 +455,12 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([withImages])), complete: true });
     expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
     expect(store.lastSeq(id)).toBe(1);
+    // Code-mode file attachments: `files` names files on this Mac too — refused the same way.
+    const withFiles = { ...userMsg(id, 2, "see [File #1]"), files: [{ n: 1, path: "/Users/me/report.pdf" }] };
+    const badFiles = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([withFiles])), complete: true });
+    expect(badFiles.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(badFiles.error?.message).toContain("with files");
+    expect(store.lastSeq(id)).toBe(1);
     c.close();
   });
 

@@ -11,11 +11,13 @@
 // from the daemon but its op arguments. The one call into the page's own code it makes, besides input events, is
 // WebMCP's `executeTool` (`webmcp.ts`), and only for the model's `tab.callTool()`.
 import type {
-  RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
+  RtCheck, RtCheckFacts, RtClassify, RtComboOptions, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot, RtWatchLocate,
 } from "./protocol";
 import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
-import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
+import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, sliceUnits, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 import { listSiteTools, modelContextOf, SiteToolCalls, type SiteToolOwner } from "./webmcp";
+import { WAKE_OVERLAY_TAG, WATCH_LOCATOR_ATTRS, wakeWatcher, type WatchLocator, type WatchSpec } from "./watch";
+import { ambiguousOptionSentence, capValue, checkedStateOf, matchOption, NAME_FROM_CONTENT_ROLES, noOptionSentence, VALUE_CAP, WHOLE_VALUE_CAP, type CheckFacts, type OptionFacts } from "./widgets";
 
 type Any = Record<string, unknown>;
 
@@ -82,6 +84,23 @@ type Any = Record<string, unknown>;
   const isTextEntry = (el: Element): boolean => isTextEntryFacts(factsOf(el));
   const isSecure = (el: Element): boolean => isSecureField(factsOf(el), inPaymentFrame);
 
+  // ── check boxes: a native control, or one a page draws its own box over ─────────────────────────
+  const isNativeCheck = (el: Element | null | undefined): el is HTMLInputElement =>
+    el instanceof HTMLInputElement && (el.type.toLowerCase() === "checkbox" || el.type.toLowerCase() === "radio");
+  /** The native check box or radio that carries `el`'s state: itself, the control its label names, or the one native
+   *  control it wraps (a Material-style check box draws its box over a visually hidden native input). */
+  const nativeCheckOf = (el: Element): HTMLInputElement | undefined => {
+    if (isNativeCheck(el)) return el;
+    if (el instanceof HTMLLabelElement) return isNativeCheck(el.control) ? el.control : undefined;
+    const inner = el.querySelectorAll("input[type=checkbox], input[type=radio]");
+    const only = inner.length === 1 ? inner[0] : undefined;
+    return isNativeCheck(only) ? only : undefined;
+  };
+  const checkFactsOf = (el: Element): CheckFacts => {
+    const n = nativeCheckOf(el);
+    return { ariaChecked: el.getAttribute("aria-checked"), ...(n === undefined ? {} : { native: { checked: n.checked, indeterminate: n.indeterminate }, nativeIsSelf: n === el }) };
+  };
+
   // ── the composed tree ───────────────────────────────────────────────────────────────────────────
   const composedChildren = (n: Node): Node[] => {
     if (n instanceof HTMLSlotElement) {
@@ -108,7 +127,7 @@ type Any = Record<string, unknown>;
 
   // Never part of the page as a reader sees it: scripts and styles — and Winter for Chrome's own overlay (the glow,
   // the agent cursor, the Stop button it injects into a driven tab).
-  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "SVG", "PATH", "BR", "HR", "WBR", "WINTER-AGENT-OVERLAY"]);
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "SVG", "PATH", "BR", "HR", "WBR", "WINTER-AGENT-OVERLAY", WAKE_OVERLAY_TAG.toUpperCase()]);
   const styleOf = (el: Element): CSSStyleDeclaration | undefined => { try { return getComputedStyle(el); } catch { return undefined; } };
   /** Hidden from a reader: not rendered, hidden by ARIA, or a hidden input. `contents` boxes are walked through. */
   const hidden = (el: Element, st: CSSStyleDeclaration | undefined): boolean => {
@@ -126,7 +145,8 @@ type Any = Record<string, unknown>;
   };
 
   const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
-  const cap = (s: string, n = 200): string => (s.length <= n ? s : `${s.slice(0, n)}…`);
+  // Never between the halves of a surrogate pair (`sliceUnits`).
+  const cap = (s: string, n = 200): string => (s.length <= n ? s : `${sliceUnits(s, n)}…`);
 
   // ── roles ───────────────────────────────────────────────────────────────────────────────────────
   const ROLE_WORDS: Record<string, string> = {
@@ -142,7 +162,7 @@ type Any = Record<string, unknown>;
   const INTERACTIVE = new Set(["button", "link", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "option", "menuitem",
     "menuitemcheckbox", "menuitemradio", "tab", "slider", "spinbutton", "treeitem"]);
   /** Roles whose name is their content: their subtree is not read again as text. */
-  const NAME_FROM_CONTENT = new Set(["button", "link", "heading", "tab", "option", "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem", "cell", "columnheader", "rowheader", "switch"]);
+  const NAME_FROM_CONTENT = NAME_FROM_CONTENT_ROLES;
   const LANDMARK = new Set(["main", "navigation", "banner", "contentinfo", "complementary", "region", "form", "search"]);
   const CONTAINERS = new Set(["list", "table", "grid", "treegrid", "row", "dialog", "alertdialog", "alert", "menu", "menubar", "tablist", "tabpanel",
     "tree", "toolbar", "group", "listbox", "status", "log", "article", "figure", "feed"]);
@@ -298,6 +318,8 @@ type Any = Record<string, unknown>;
       if (el instanceof HTMLProgressElement) raw = String(el.value);
     } else if (role === "combobox" || role === "textbox" || role === "searchbox") {
       raw = el.getAttribute("aria-valuetext") ?? el.getAttribute("aria-valuenow") ?? undefined;
+      // A combo box built from an element (an ARIA select): what it shows is its value — the chosen option's text.
+      if (raw === undefined && role === "combobox") { const shown = textOf(el, 400); if (shown.length > 0) raw = shown; }
     }
     if (raw === undefined) return {};
     if (looksSecret(raw)) return { value: REDACTED };
@@ -310,11 +332,8 @@ type Any = Record<string, unknown>;
     if (disabled) out.push("disabled");
     if (el === active) out.push("focused");
     if (role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox" || role === "menuitemradio") {
-      const aria = el.getAttribute("aria-checked");
-      const checked = el instanceof HTMLInputElement ? el.checked : aria === "true";
-      if (el instanceof HTMLInputElement && el.indeterminate) out.push("mixed");
-      else if (aria === "mixed") out.push("mixed");
-      else out.push(checked ? "checked" : "unchecked");
+      // Its own aria-checked, else the native control it is or wraps (`widgets.ts`).
+      out.push(checkedStateOf(checkFactsOf(el)));
     }
     if (el.getAttribute("aria-selected") === "true" || (el instanceof HTMLOptionElement && el.selected)) out.push("selected");
     const expanded = el.getAttribute("aria-expanded");
@@ -342,7 +361,8 @@ type Any = Record<string, unknown>;
   };
 
   // ── the tree ────────────────────────────────────────────────────────────────────────────────────
-  interface WalkCtx { emitted: number; visited: number; maxNodes: number; unread: number; active: Element | null }
+  /** `valueCap`: values are cut at this many characters (`valueLength` says so). */
+  interface WalkCtx { emitted: number; visited: number; maxNodes: number; unread: number; active: Element | null; valueCap: number }
   const MAX_VISITED = 40_000;
 
   /** One element as a node, or undefined when it is not one a reader needs (its children are still walked). */
@@ -361,7 +381,11 @@ type Any = Record<string, unknown>;
     const node: RtNode = { id: idOf(el), role: roleWord(role, el) };
     if (name !== undefined) node.name = cap(name);
     const v = valueOf(el, role);
-    if (v.value !== undefined && (v.value !== name || v.secure === true)) node.value = cap(v.value);
+    if (v.value !== undefined && (v.value !== name || v.secure === true)) {
+      const c = capValue(v.value, ctx.valueCap);
+      node.value = c.value;
+      if (c.length !== undefined) node.valueLength = c.length;
+    }
     if (v.secure === true) node.secure = true;
     if (v.showEmpty === true && v.value === "") node.showEmptyValue = true;
     const states = statesOf(el, role, ctx.active);
@@ -419,10 +443,13 @@ type Any = Record<string, unknown>;
       out.push(node);
       if (node.frame === true || child instanceof HTMLSelectElement || child instanceof HTMLTextAreaElement || child instanceof HTMLInputElement) continue;
       if (role === "textbox" && (child as HTMLElement).isContentEditable === true) continue;
-      // A name read from the content is not read again as text — unless (a table cell) it holds controls.
+      // A combo box whose value is what it shows: that text is its value, not read again (one with a field inside is walked).
+      if (role === "combobox" && node.value !== undefined && child.querySelector("input, textarea, [contenteditable]") === null) continue;
+      // A name read from the content is not read again as text — unless (a table cell, or a check box or radio whose
+      // text holds a link: "I agree to the Terms") it holds controls.
       if (role !== undefined && NAME_FROM_CONTENT.has(role)) {
-        const cellLike = role === "cell" || role === "columnheader" || role === "rowheader";
-        if (!cellLike || child.querySelector(INTERACTIVE_SELECTOR) === null) continue;
+        const holdsControls = role === "cell" || role === "columnheader" || role === "rowheader" || role === "checkbox" || role === "radio";
+        if (!holdsControls || child.querySelector(INTERACTIVE_SELECTOR) === null) continue;
       }
       const kids: RtNode[] = [];
       const inner = newRun();
@@ -444,9 +471,11 @@ type Any = Record<string, unknown>;
     out.push({ id: idOf(first), role: "text", name: cap(redactText(text)) });
   };
 
-  const snapshot = (arg: { within?: RtId; maxNodes?: number } | null): RtSnapshot => {
+  const snapshot = (arg: { within?: RtId; maxNodes?: number; valueCap?: number } | null): RtSnapshot => {
     prune();
-    const ctx: WalkCtx = { emitted: 0, visited: 0, maxNodes: Math.min(10_000, Math.max(50, arg?.maxNodes ?? 4_000)), unread: 0, active: deepActive() };
+    // A read within one element shows its fields' values whole, up to 8,000 characters (the helper's rule).
+    const valueCap = Math.min(WHOLE_VALUE_CAP, Math.max(VALUE_CAP, arg?.valueCap ?? (arg?.within === undefined ? VALUE_CAP : WHOLE_VALUE_CAP)));
+    const ctx: WalkCtx = { emitted: 0, visited: 0, maxNodes: Math.min(10_000, Math.max(50, arg?.maxNodes ?? 4_000)), unread: 0, active: deepActive(), valueCap };
     const roots: RtNode[] = [];
     if (arg?.within !== undefined) {
       const el = elementOf(arg.within);
@@ -491,7 +520,8 @@ type Any = Record<string, unknown>;
         if (!hay.includes(want.text)) ok = false;
       }
       if (ok && (want.text.length > 0 || want.role.length > 0 || want.name.length > 0)) {
-        out.push({ id: n.id, role: n.role, ...(n.name === undefined ? {} : { name: n.name }), ...(n.value === undefined ? {} : { value: n.value }), ...(n.states === undefined ? {} : { states: n.states }) });
+        out.push({ id: n.id, role: n.role, ...(n.name === undefined ? {} : { name: n.name }), ...(n.value === undefined ? {} : { value: n.value }),
+          ...(n.valueLength === undefined ? {} : { valueLength: n.valueLength }), ...(n.states === undefined ? {} : { states: n.states }) });
       }
       for (const c of n.children ?? []) visit(c);
     };
@@ -529,7 +559,7 @@ type Any = Record<string, unknown>;
     let selector = q.css ?? (q.testId !== undefined ? TEST_ID : q.placeholder !== undefined ? "[placeholder]" : FIELD);
     if (q.css !== undefined && (q.testId !== undefined || q.placeholder !== undefined)) selector = q.css;
     let candidates: Element[];
-    try { candidates = deepQuery(selector); } catch { throw new Error(`css: "${String(q.css).slice(0, 80)}" is not a valid selector`); }
+    try { candidates = deepQuery(selector); } catch { throw new Error(`css: "${sliceUnits(String(q.css), 80)}" is not a valid selector`); }
     const active = deepActive();
     const out: RtFound[] = [];
     for (const el of candidates) {
@@ -553,7 +583,9 @@ type Any = Record<string, unknown>;
         if (!matches(hay, q.text, exact)) continue;
       }
       const states = statesOf(el, role, active);
-      out.push({ id: idOf(el), role: roleWord(role, el), ...(name === undefined ? {} : { name: cap(redactText(name)) }), ...(v.value === undefined ? {} : { value: v.value }), ...(states.length === 0 ? {} : { states }) });
+      const cv = v.value === undefined ? undefined : capValue(v.value, VALUE_CAP);
+      out.push({ id: idOf(el), role: roleWord(role, el), ...(name === undefined ? {} : { name: cap(redactText(name)) }), ...(cv === undefined ? {} : { value: cv.value }),
+        ...(cv?.length === undefined ? {} : { valueLength: cv.length }), ...(states.length === 0 ? {} : { states }) });
     }
     return out;
   };
@@ -625,7 +657,7 @@ type Any = Record<string, unknown>;
     let cut = false;
     const put = (s: string): void => {
       if (cut) return;
-      if (out.length + s.length > max) { out += s.slice(0, max - out.length); cut = true; return; }
+      if (out.length + s.length > max) { out += sliceUnits(s, max - out.length); cut = true; return; }
       out += s;
     };
     const ser = (node: Node): void => {
@@ -721,15 +753,24 @@ type Any = Record<string, unknown>;
     if (el instanceof HTMLSourceElement && el.src.length > 0) return { kind: "media", url: el.src };
     return { kind: "other" };
   };
-  const checkState = (arg: { id: RtId }): { checkable: boolean; checked?: boolean } => {
+  /** A checkable element's kind and state — a role, a native control, or a label or role-less wrapper of one. */
+  const checkOf = (el: Element): (RtCheckFacts & { control?: Element }) | undefined => {
+    const role = roleOf(el);
+    const native = nativeCheckOf(el);
+    const roleCheck = role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox" || role === "menuitemradio";
+    if (!roleCheck && native === undefined) return undefined;
+    const kind = role === "radio" || role === "menuitemradio" || (!roleCheck && native?.type.toLowerCase() === "radio") ? "radio" : "checkbox";
+    const checked = checkedStateOf(checkFactsOf(el)) === "checked";
+    // A wrapper with no role of its own (nor a label, which forwards a press) is pressed at the control it holds.
+    const control = !roleCheck && native !== undefined && native !== el && !(el instanceof HTMLLabelElement) ? native : undefined;
+    return { kind, checked, ...(control === undefined ? {} : { control }) };
+  };
+  const checkState = (arg: { id: RtId }): { checkable: boolean; checked?: boolean; control?: RtId; kind?: "checkbox" | "radio" } => {
     const el = elementOf(arg.id);
     if (el === undefined) throw new Error(`stale:${arg.id}`);
-    if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) return { checkable: true, checked: el.checked };
-    const role = roleOf(el);
-    if (role === "checkbox" || role === "radio" || role === "switch" || role === "menuitemcheckbox" || role === "menuitemradio") {
-      return { checkable: true, checked: el.getAttribute("aria-checked") === "true" };
-    }
-    return { checkable: false };
+    const c = checkOf(el);
+    if (c === undefined) return { checkable: false };
+    return { checkable: true, checked: c.checked, kind: c.kind, ...(c.control === undefined ? {} : { control: idOf(c.control) }) };
   };
 
   // ── readable text ───────────────────────────────────────────────────────────────────────────────
@@ -783,7 +824,7 @@ type Any = Record<string, unknown>;
   /** Winter for Chrome's own overlay (and anything in it) is never what a point hits, nor what covers an element. */
   const isOverlay = (el: Element): boolean => {
     for (let n: Node | null = el; n !== null; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) {
-      if (n instanceof Element && n.tagName === "WINTER-AGENT-OVERLAY") return true;
+      if (n instanceof Element && (n.tagName === "WINTER-AGENT-OVERLAY" || n.tagName === WAKE_OVERLAY_TAG.toUpperCase())) return true;
     }
     return false;
   };
@@ -835,6 +876,32 @@ type Any = Record<string, unknown>;
     addEventListener("contextmenu", onMenu, { once: true });
     setTimeout(() => removeEventListener("contextmenu", onMenu), 3_000);
   };
+  /** A visible label of a native control (the first one drawn). */
+  const labelFor = (el: HTMLInputElement): HTMLLabelElement | undefined => {
+    for (const l of el.labels ?? []) if (visibleRect(l) !== undefined && !hidden(l, styleOf(l))) return l;
+    return undefined;
+  };
+  const tiny = (r: DOMRect): boolean => r.width < 4 || r.height < 4;
+  /** Could pressing `el` make the page open a file chooser (a button whose handler clicks a hidden file input)? A
+   *  button-like element (a button, a link, a role=button) with a file input in its form, or — outside a form — within
+   *  its nearest four ancestors. The engine waits for a chooser only after such a press. */
+  const mayOpenChooser = (el: Element): boolean => {
+    const role = roleOf(el);
+    if (role !== "button" && role !== "link" && role !== "menuitem") return false;
+    const FILE = "input[type=file]";
+    const form = el.closest("form");
+    if (form !== null) return form.querySelector(FILE) !== null;
+    let p: Element | null = el.parentElement;
+    for (let i = 0; i < 4 && p !== null; i++, p = p.parentElement) if (p.querySelector(FILE) !== null) return true;
+    return false;
+  };
+  /** Does a press at `el`'s centre reach it (or its own label)? */
+  const pressable = (el: Element): boolean => {
+    const r = visibleRect(el);
+    if (r === undefined || !inViewport(r)) return true; // scrolled to and hit-tested by the ordinary path
+    const hit = deepFromPoint((Math.max(r.left, 0) + Math.min(r.right, innerWidth)) / 2, (Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2);
+    return hit === null || composedContains(el, hit) || (hit instanceof HTMLLabelElement && hit.control === el);
+  };
   const point = async (arg: { id: RtId; scroll?: boolean; settle?: boolean; guardMenu?: boolean }): Promise<RtPoint> => {
     // In a child frame just brought into view, the frame paints before its point is measured and hit-tested.
     if (arg.settle === true) await nextFrame();
@@ -850,6 +917,17 @@ type Any = Record<string, unknown>;
       return undefined;
     };
     if (isDisabled(el)) return { ok: false, reason: "disabled" };
+    // A native check box or radio a page draws its own box over (zero-size, clipped, or under the box): its label takes
+    // the press for it — pressing a label presses its control.
+    if (node === el && isNativeCheck(el)) {
+      const via = labelFor(el);
+      if (via !== undefined && (visibleRect(el) === undefined || tiny(visibleRect(el)!) || !pressable(el))) {
+        const p = await point({ ...arg, id: idOf(via) });
+        if (!p.ok) return p;
+        const c = checkOf(el);
+        return c === undefined ? p : { ...p, check: { kind: c.kind, checked: c.checked } };
+      }
+    }
     const st = styleOf(el);
     if (hidden(el, st)) return { ok: false, reason: "hidden" };
     let r = rectOf();
@@ -867,9 +945,12 @@ type Any = Record<string, unknown>;
     // A <select>, a date/time/color or file input (or a label for one) opens a native window when pressed: the engine
     // refuses pointer input on it.
     const picker = pickerFor(el)?.what;
+    // A check box's state before the press: the engine checks the press took (a page can take it elsewhere).
+    const chk = node === el ? checkOf(el) : undefined;
+    const chooser = mayOpenChooser(el);
     const okAt = (): RtPoint => {
       if (arg.guardMenu === true) guardMenu();
-      return { ok: true, x, y, ...(picker === undefined ? {} : { picker }) };
+      return { ok: true, x, y, ...(picker === undefined ? {} : { picker }), ...(chk === undefined ? {} : { check: { kind: chk.kind, checked: chk.checked } }), ...(chooser ? { chooser: true as const } : {}) };
     };
     const hit = deepFromPoint(x, y);
     if (hit === null) return okAt();
@@ -940,13 +1021,14 @@ type Any = Record<string, unknown>;
       // option per line and selects exactly those.
       const wants = el.multiple ? arg.value.split("\n").map((w) => w.trim()).filter((w) => w.length > 0) : [arg.value];
       const chosen: HTMLOptionElement[] = [];
+      const facts: Array<OptionFacts & { el: HTMLOptionElement }> = [...el.options].map((o) => ({ el: o, text: collapse(o.label || o.text), value: o.value, disabled: o.disabled }));
       for (const raw of wants) {
-        const want = raw.trim().toLowerCase();
-        const opt = [...el.options].find((o) => collapse(o.label || o.text).toLowerCase() === want) ?? [...el.options].find((o) => o.value.toLowerCase() === want)
-          ?? [...el.options].find((o) => collapse(o.label || o.text).toLowerCase().includes(want));
-        if (opt === undefined) return { ok: false, reason: `no option "${cap(raw, 60)}" — the options are: ${[...el.options].slice(0, 20).map((o) => `"${cap(collapse(o.label || o.text), 40)}"`).join(", ")}` };
-        if (opt.disabled) return { ok: false, reason: `the option "${cap(collapse(opt.label || opt.text), 60)}" is disabled` };
-        chosen.push(opt);
+        const m = matchOption(facts, raw);
+        if ("none" in m) return { ok: false, reason: noOptionSentence(raw, facts) };
+        if ("ambiguous" in m) return { ok: false, reason: ambiguousOptionSentence(raw, m.ambiguous) };
+        const opt = m.option;
+        if (opt.disabled === true) return { ok: false, reason: `the option "${cap(opt.text, 60)}" is disabled` };
+        chosen.push(opt.el);
       }
       if (el.multiple) { for (const o of el.options) o.selected = chosen.includes(o); } else el.value = chosen[0]!.value;
       fire(el, "input"); fire(el, "change");
@@ -954,6 +1036,8 @@ type Any = Record<string, unknown>;
     }
     if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) return { ok: false, reason: "a check box or radio button takes click(), not setValue()" };
     if (el instanceof HTMLInputElement && el.type === "file") return { ok: false, reason: "a file input takes upload(ref, paths)" };
+    // A combo box that pops up a list (an ARIA select): the engine opens it and presses the option (`comboOptions`).
+    if (isListCombo(el)) return { ok: false, reason: "combobox" };
     const set = nativeSetter(el);
     if (set !== undefined) {
       (el as HTMLElement).focus?.({ preventScroll: true });
@@ -1027,6 +1111,65 @@ type Any = Record<string, unknown>;
     sel?.removeAllRanges(); sel?.addRange(range);
     return { ok: true };
   };
+  // ── combo boxes that pop up a list (ARIA selects) ───────────────────────────────────────────────
+  /** A combo box built from an element, not a field: its list pops up on a press (`aria-haspopup` listbox — the
+   *  combo box's default — or a menu). */
+  const isListCombo = (el: Element): boolean => {
+    if (roleOf(el) !== "combobox" || el instanceof HTMLSelectElement || isTextEntry(el)) return false;
+    const popup = (el.getAttribute("aria-haspopup") ?? "listbox").trim().toLowerCase();
+    return popup === "listbox" || popup === "true" || popup === "menu" || popup === "";
+  };
+  const OPTION_SELECTOR = "[role=option], [role=menuitem], [role=menuitemradio], [role=menuitemcheckbox], option";
+  const shownBox = (el: Element): boolean => visibleRect(el) !== undefined && !hidden(el, styleOf(el));
+  /** The open list of a combo box: the element its `aria-controls`/`aria-owns` names, else the shown list box that
+   *  names the combo box, else — while it says it is expanded — the one shown list box on the page (a list drawn in an
+   *  overlay at the end of the document). */
+  const popupOf = (el: Element): Element | undefined => {
+    const root = el.getRootNode() as Document | ShadowRoot;
+    for (const attr of ["aria-controls", "aria-owns"]) {
+      for (const ref of (el.getAttribute(attr) ?? "").split(/\s+/).filter((x) => x.length > 0)) {
+        const p = (root as Document).getElementById?.(ref) ?? document.getElementById(ref);
+        if (p !== null && shownBox(p) && p.querySelector(OPTION_SELECTOR) !== null) return p;
+      }
+    }
+    const boxes = deepQuery("[role=listbox], [role=menu]", 50).filter((b) => b !== el && shownBox(b) && b.querySelector(OPTION_SELECTOR) !== null);
+    const id = el.id;
+    const named = id.length === 0 ? undefined : boxes.find((b) => (b.getAttribute("aria-labelledby") ?? "").split(/\s+/).includes(id));
+    if (named !== undefined) return named;
+    return el.getAttribute("aria-expanded") === "true" && boxes.length === 1 ? boxes[0] : undefined;
+  };
+  const comboOptions = (arg: { id: RtId }): RtComboOptions => {
+    const el = elementOf(arg.id);
+    if (el === undefined) throw new Error(`stale:${arg.id}`);
+    if (!isListCombo(el)) return { combo: false };
+    const shown = valueOf(el, "combobox").value;
+    const popup = popupOf(el);
+    const options: Array<{ id: RtId; text: string; selected?: true; disabled?: true }> = [];
+    if (popup !== undefined) {
+      for (const o of popup.querySelectorAll(OPTION_SELECTOR)) {
+        if (options.length >= 200) break;
+        if (!shownBox(o)) continue;
+        const text = cap(redactText(textOf(o) || collapse(o.getAttribute("aria-label") ?? "")), 200);
+        if (text.length === 0) continue;
+        const selected = o.getAttribute("aria-selected") === "true" || o.getAttribute("aria-checked") === "true";
+        options.push({ id: idOf(o), text, ...(selected ? { selected: true as const } : {}), ...(isDisabled(o) ? { disabled: true as const } : {}) });
+      }
+    }
+    return { combo: true, open: options.length > 0, ...(shown === undefined ? {} : { value: cap(shown, 200) }), options };
+  };
+  /** Where the keyboard focus is now, and a focused field's selection (what a key just did). */
+  const focusInfo = (): { id?: RtId; role?: string; name?: string; selection?: { start: number; end: number; length: number } } => {
+    const a = deepActive();
+    if (a === null || a === document.body || a === document.documentElement) return {};
+    const role = roleOf(a);
+    const name = nameOf(a, role);
+    let selection: { start: number; end: number; length: number } | undefined;
+    if (!isSecure(a) && (a instanceof HTMLTextAreaElement || (a instanceof HTMLInputElement && TEXT_INPUT_TYPES.has(a.type.toLowerCase())))) {
+      try { if (a.selectionStart !== null && a.selectionEnd !== null) selection = { start: a.selectionStart, end: a.selectionEnd, length: a.value.length }; } catch { /* a type with no selection */ }
+    }
+    return { id: idOf(a), ...(role === undefined ? {} : { role: roleWord(role, a) }), ...(name === undefined ? {} : { name: cap(redactText(name), 80) }), ...(selection === undefined ? {} : { selection }) };
+  };
+
   const readValue = (arg: { id: RtId }): string | null => {
     const el = elementOf(arg.id);
     if (el === undefined || isSecure(el)) return null;
@@ -1077,7 +1220,7 @@ type Any = Record<string, unknown>;
     if (met && c.url !== undefined && !location.href.includes(c.url)) met = false;
     if (met && c.ids !== undefined && c.ids.some((id) => nodeOf(id) === undefined)) met = false;
     if (met && c.goneIds !== undefined && c.goneIds.some((id) => nodeOf(id) !== undefined)) met = false;
-    const seenText = collapse(vt()).slice(0, 300);
+    const seenText = sliceUnits(collapse(vt()), 300);
     return { met, seen: redactText(`title "${cap(document.title, 80)}" · ${seenText}`) };
   };
   const waitChange = (arg: { maxMs: number }): Promise<boolean> => new Promise((resolve) => {
@@ -1122,12 +1265,51 @@ type Any = Record<string, unknown>;
   const siteCalls = new SiteToolCalls();
   const siteOwner = (): SiteToolOwner => ({ window, origin: location.origin });
 
+  // ── wake triggers (`watch.ts`) ──────────────────────────────────────────────────────────────────────
+  // The daemon reads the element HERE (its role and name, redacted as in state(); the secure-field floor), then arms
+  // the shared watcher in this world — or hands its locator to Winter for Chrome, which arms the same watcher in its
+  // own isolated world with no debugger.
+  const elementFor = (id: unknown): Element | undefined => {
+    const node = nodeOf(id);
+    return node instanceof Element ? node : node instanceof Text ? node.parentElement ?? undefined : undefined;
+  };
+  const locatorOf = (el: Element): WatchLocator => {
+    const path: Array<[string, number, number]> = [];
+    let cur: Element = el;
+    for (let depth = 0; depth < 512; depth++) {
+      const parent: Node | null = cur.parentNode;
+      const siblings = parent instanceof Element || parent instanceof Document || parent instanceof DocumentFragment ? [...parent.children] : [cur];
+      const tag = cur.tagName;
+      path.unshift([tag, siblings.filter((s) => s.tagName === tag).indexOf(cur), parent instanceof ShadowRoot ? 1 : 0]);
+      if (parent instanceof ShadowRoot) cur = parent.host;
+      else if (parent instanceof Element) cur = parent;
+      else break;
+    }
+    const attrs: Record<string, string> = {};
+    for (const k of WATCH_LOCATOR_ATTRS) {
+      const v = el.getAttribute(k);
+      if (v !== null && v.length <= 500) attrs[k] = v;
+    }
+    return { doc: performance.timeOrigin, path, tag: el.tagName, attrs };
+  };
+  const watchLocate = (arg: { id: RtId }): RtWatchLocate => {
+    const el = elementFor(arg.id);
+    if (el === undefined) return { ok: false, reason: "gone" };
+    if (inPaymentFrame || isSecure(el)) return { ok: false, reason: "secure" };
+    const role = roleOf(el);
+    const name = nameOf(el, role);
+    return {
+      ok: true, element: { role: role === undefined ? el.tagName.toLowerCase() : roleWord(role, el), name: name === undefined ? "" : cap(redactText(name), 120) },
+      locator: locatorOf(el), top: window.top === window,
+    };
+  };
+
   // ── the entry ───────────────────────────────────────────────────────────────────────────────────
   const call = (op: string, arg: unknown, self: unknown): unknown => {
     const a = (arg ?? null) as Any | null;
     switch (op) {
       case "hello": return { id: RUNTIME_ID, url: location.href, title: document.title, readyState: document.readyState };
-      case "snapshot": return snapshot(a as { within?: RtId; maxNodes?: number } | null);
+      case "snapshot": return snapshot(a as { within?: RtId; maxNodes?: number; valueCap?: number } | null);
       case "find": return find((a ?? {}) as RtFindQuery);
       case "text": return readable(a?.markdown === true, typeof a?.within === "number" ? a.within : undefined);
       case "owner": return self instanceof Node ? idOf(self) : null;
@@ -1151,9 +1333,23 @@ type Any = Record<string, unknown>;
       case "assets": return assets(a as { kinds: string[]; max: number });
       case "linkOf": return linkOf(a as { id: RtId });
       case "checkState": return checkState(a as { id: RtId });
+      case "comboOptions": return comboOptions(a as { id: RtId });
+      case "focusInfo": return focusInfo();
       case "siteTools": return listSiteTools(modelContextOf(document), siteOwner(), { describe: a?.describe === true });
       case "callSiteTool": return siteCalls.call(modelContextOf(document), siteOwner(), a as { name: string; input: unknown; callId: string });
       case "cancelSiteTool": return siteCalls.cancel(a?.callId);
+      case "watchLocate": return watchLocate(a as { id: RtId });
+      case "watchArm": {
+        const w = a as { spec: WatchSpec; id?: RtId };
+        const el = w.id === undefined ? undefined : elementFor(w.id);
+        if (el !== undefined && (inPaymentFrame || isSecure(el))) throw new Error("secure_field");
+        return wakeWatcher({ op: "arm", sink: "queue", spec: w.spec, ...(el === undefined ? {} : { element: el }) });
+      }
+      case "watchWait": return wakeWatcher({
+        op: "wait", ack: Number(a?.ack ?? 0), maxMs: Number(a?.maxMs ?? 0), ...(typeof a?.world === "string" ? { world: a.world } : {}),
+        ...(Array.isArray(a?.live) ? { live: (a.live as unknown[]).filter((x): x is string => typeof x === "string") } : {}),
+      });
+      case "watchDisarm": return wakeWatcher({ op: "disarm", watchId: String(a?.watchId ?? "") });
       default: throw new Error(`unknown op ${op}`);
     }
   };

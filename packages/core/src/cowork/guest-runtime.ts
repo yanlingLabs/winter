@@ -63,7 +63,7 @@ const sameScope = (a: Readonly<GuestRuntimeScope>, b: Readonly<GuestRuntimeScope
 function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
-function confinedToolVisibility(toolClasses: readonly string[]): readonly string[] {
+export function confinedToolVisibility(toolClasses: readonly string[]): readonly string[] {
   // Visibility is derived once from captured host authority. No pre-approval is
   // inferred from it, and unimplemented guest tool families remain unavailable.
   const classes = new Set(toolClasses), tools: string[] = [];
