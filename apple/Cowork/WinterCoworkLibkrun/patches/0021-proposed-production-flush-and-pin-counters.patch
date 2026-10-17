@@ -1,0 +1,485 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index fd1f850..7f93707 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -342,6 +342,36 @@ int32_t krun_cowork_set_workspace_disks_v1(uint32_t ctx_id,
+  * production context that never had one. Starts nothing and opens nothing. */
+ int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id);
+ 
++/** Flush accounting for one admitted disk. */
++struct krun_cowork_flush_device_v1 {
++    uint64_t requested;            /* guest FLUSH requests captured from the queue */
++    uint64_t completed;            /* ... whose backing-file flush and sync_all returned success */
++    uint64_t final_sync_attempted; /* final flush at VMM exit (0 or 1) */
++    uint64_t final_sync_completed; /* ... that succeeded */
++};
++struct krun_cowork_flush_counters_v1 {
++    uint32_t size;                 /* in: sizeof(struct); out: bytes written */
++    uint32_t device_count;         /* out: 2 */
++    struct krun_cowork_flush_device_v1 device[2]; /* [0] winter-data, [1] winter-environment */
++};
++/** Process-global flush counters (not per context: the context leaves the library's table when the VM
++ * starts, and one VM runs per process). Readable at any time, including from the exit hook and after
++ * it. -EINVAL for NULL or a size smaller than the structure. */
++int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_flush_counters_v1 *out);
++
++/** The pin budget and its high-water marks since process start (the production replacement for the
++ * fixture's trace rows). */
++struct krun_cowork_pin_counters_v1 {
++    uint32_t size;                 /* in: sizeof(struct); out: bytes written */
++    uint32_t reserved;
++    uint64_t max_pins;             /* 48 */
++    uint64_t max_pinned_bytes;     /* 8 MiB */
++    uint64_t high_water_pins;
++    uint64_t high_water_bytes;
++    uint64_t budget_refusals;      /* pins refused for the budget; the worker stops after one */
++};
++int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out);
++
+ #ifdef KRUN_COWORK_FIXTURE_ORACLE
+ /* ====== Fixture oracle: present only when built with `cowork-fixture-oracle` ======
+  * Regression oracle for the reviewed fixture profile. Never a production API. A context that carries
+diff --git a/src/devices/src/block_bounce.rs b/src/devices/src/block_bounce.rs
+index dfa074d..c44ab40 100644
+--- a/src/devices/src/block_bounce.rs
++++ b/src/devices/src/block_bounce.rs
+@@ -83,6 +83,9 @@ pub fn capture(
+         None => return Ok(None),
+     };
+     validate(&request)?;
++    if request.command == Command::Flush {
++        crate::cowork_counters::flush_requested(device.id());
++    }
+     let pin = lease.pin(&request.protected)?;
+     drop(lease); // No memory lease survives into Work or the blocking host I/O function.
+     Ok(Some(Work {
+@@ -153,7 +156,13 @@ pub fn perform(work: Work, disk: &mut impl Disk) -> Completion {
+                 }
+                 good
+             }
+-            Command::Flush => disk.flush().is_ok(),
++            Command::Flush => {
++                let flushed = disk.flush().is_ok();
++                if flushed {
++                    crate::cowork_counters::flush_completed(work.device.id());
++                }
++                flushed
++            }
+             Command::GetId
+                 if disk.id().len() <= request.length && disk.id().len() <= MAX_REQUEST =>
+             {
+@@ -456,6 +465,34 @@ mod tests {
+             frozen.resume().unwrap();
+         }
+     }
++    /// Flush accounting for the receipt: `requested` when a Flush is captured, `completed` only when the
++    /// backing flush returned Ok; reads and writes count nothing. The counters are process-global, so the
++    /// assertions are deltas of the device-0 slot.
++    #[test]
++    fn flush_requests_and_successful_completions_are_counted() {
++        let slot = || crate::cowork_counters::flush_snapshot()[0];
++        for command in [Command::Read, Command::Write] {
++            let before = slot();
++            let (a, d, mut p, mut b) = fixture(command);
++            let work = capture(&a, d, &mut p).unwrap().unwrap();
++            let _ = perform(work, &mut b);
++            assert_eq!(slot(), before);
++        }
++        let before = slot();
++        let (a, d, mut p, mut b) = fixture(Command::Flush);
++        let work = capture(&a, d, &mut p).unwrap().unwrap();
++        assert_eq!(slot().requested - before.requested, 1);
++        assert_eq!(slot().completed - before.completed, 0, "not completed before the flush ran");
++        assert!(perform(work, &mut b).outcome.success);
++        assert_eq!(slot().completed - before.completed, 1);
++        let (a, d, mut p, mut b) = fixture(Command::Flush);
++        b.fail = true;
++        let work = capture(&a, d, &mut p).unwrap().unwrap();
++        assert!(!perform(work, &mut b).outcome.success);
++        assert_eq!(slot().requested - before.requested, 2);
++        assert_eq!(slot().completed - before.completed, 1, "a failed flush is requested but not completed");
++        drop(a);
++    }
+     #[test]
+     fn completion_during_freeze_stays_pinned_and_is_deferred() {
+         let (a, d, mut p, mut b) = fixture(Command::Read);
+diff --git a/src/devices/src/cowork_counters.rs b/src/devices/src/cowork_counters.rs
+new file mode 100644
+index 0000000..ee89196
+--- /dev/null
++++ b/src/devices/src/cowork_counters.rs
+@@ -0,0 +1,135 @@
++//! Process-global production counters for the Cowork worker: flush accounting per disk and the pin
++//! high-water marks. They are process-global (not per context) because the context leaves the context
++//! map when `krun_start_enter` takes it, and one VM runs per process. Plain atomics: no locks, no
++//! allocation, no output, so they are safe to bump from any device thread and to read from any thread.
++use std::sync::atomic::{AtomicU64, Ordering};
++
++/// Disks that are counted: the admitted pair (`workspace_disks::DATA_DEVICE`, `ENVIRONMENT_DEVICE`).
++pub const FLUSH_SLOTS: usize = 2;
++
++struct FlushSlot {
++    requested: AtomicU64,
++    completed: AtomicU64,
++    final_attempted: AtomicU64,
++    final_completed: AtomicU64,
++}
++impl FlushSlot {
++    const fn new() -> Self {
++        Self {
++            requested: AtomicU64::new(0),
++            completed: AtomicU64::new(0),
++            final_attempted: AtomicU64::new(0),
++            final_completed: AtomicU64::new(0),
++        }
++    }
++}
++static FLUSH: [FlushSlot; FLUSH_SLOTS] = [FlushSlot::new(), FlushSlot::new()];
++static PIN_HIGH_COUNT: AtomicU64 = AtomicU64::new(0);
++static PIN_HIGH_BYTES: AtomicU64 = AtomicU64::new(0);
++static PIN_REFUSED: AtomicU64 = AtomicU64::new(0);
++
++fn slot(device: u64) -> Option<&'static FlushSlot> {
++    usize::try_from(device).ok().and_then(|index| FLUSH.get(index))
++}
++/// A guest FLUSH request was captured from the queue.
++pub fn flush_requested(device: u64) {
++    if let Some(slot) = slot(device) {
++        slot.requested.fetch_add(1, Ordering::AcqRel);
++    }
++}
++/// The backing file's flush and `sync_all` returned success for a guest FLUSH request.
++pub fn flush_completed(device: u64) {
++    if let Some(slot) = slot(device) {
++        slot.completed.fetch_add(1, Ordering::AcqRel);
++    }
++}
++/// The final flush at VMM exit ran (and whether it succeeded).
++pub fn final_sync(device: u64, ok: bool) {
++    if let Some(slot) = slot(device) {
++        slot.final_attempted.fetch_add(1, Ordering::AcqRel);
++        if ok {
++            slot.final_completed.fetch_add(1, Ordering::AcqRel);
++        }
++    }
++}
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct FlushSnapshot {
++    pub requested: u64,
++    pub completed: u64,
++    pub final_attempted: u64,
++    pub final_completed: u64,
++}
++pub fn flush_snapshot() -> [FlushSnapshot; FLUSH_SLOTS] {
++    let read = |slot: &FlushSlot| FlushSnapshot {
++        requested: slot.requested.load(Ordering::Acquire),
++        completed: slot.completed.load(Ordering::Acquire),
++        final_attempted: slot.final_attempted.load(Ordering::Acquire),
++        final_completed: slot.final_completed.load(Ordering::Acquire),
++    };
++    [read(&FLUSH[0]), read(&FLUSH[1])]
++}
++
++/// A pin was accepted; `count` and `bytes` are the totals after it.
++pub fn pin_accepted(count: usize, bytes: u64) {
++    PIN_HIGH_COUNT.fetch_max(count as u64, Ordering::AcqRel);
++    PIN_HIGH_BYTES.fetch_max(bytes, Ordering::AcqRel);
++}
++/// A pin was refused because the count or byte budget would be exceeded (the worker then stops).
++pub fn pin_refused() {
++    PIN_REFUSED.fetch_add(1, Ordering::AcqRel);
++}
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct PinSnapshot {
++    pub high_water_pins: u64,
++    pub high_water_bytes: u64,
++    pub budget_refusals: u64,
++}
++pub fn pin_snapshot() -> PinSnapshot {
++    PinSnapshot {
++        high_water_pins: PIN_HIGH_COUNT.load(Ordering::Acquire),
++        high_water_bytes: PIN_HIGH_BYTES.load(Ordering::Acquire),
++        budget_refusals: PIN_REFUSED.load(Ordering::Acquire),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    /// The counters are process-global, so assertions are relative to a snapshot taken first.
++    #[test]
++    fn flush_counters_count_per_disk_and_ignore_other_devices() {
++        let before = flush_snapshot();
++        flush_requested(0);
++        flush_requested(0);
++        flush_requested(1);
++        flush_completed(0);
++        final_sync(1, true);
++        final_sync(1, false);
++        flush_requested(2);
++        flush_completed(u64::MAX);
++        final_sync(7, true);
++        let after = flush_snapshot();
++        assert_eq!(after[0].requested - before[0].requested, 2);
++        assert_eq!(after[0].completed - before[0].completed, 1);
++        assert_eq!(after[1].requested - before[1].requested, 1);
++        assert_eq!(after[1].completed - before[1].completed, 0);
++        assert_eq!(after[1].final_attempted - before[1].final_attempted, 2);
++        assert_eq!(after[1].final_completed - before[1].final_completed, 1);
++        assert_eq!(after[0].final_attempted, before[0].final_attempted);
++    }
++    #[test]
++    fn pin_high_water_only_rises() {
++        pin_accepted(3, 100);
++        let high = pin_snapshot();
++        pin_accepted(1, 10);
++        let same = pin_snapshot();
++        assert_eq!((same.high_water_pins, same.high_water_bytes), (high.high_water_pins, high.high_water_bytes));
++        pin_accepted(high.high_water_pins as usize + 5, high.high_water_bytes + 7);
++        let raised = pin_snapshot();
++        assert_eq!(raised.high_water_pins, high.high_water_pins + 5);
++        assert_eq!(raised.high_water_bytes, high.high_water_bytes + 7);
++        let refused = pin_snapshot().budget_refusals;
++        pin_refused();
++        assert_eq!(pin_snapshot().budget_refusals, refused + 1);
++    }
++}
+diff --git a/src/devices/src/lib.rs b/src/devices/src/lib.rs
+index 300ded3..2ee2358 100644
+--- a/src/devices/src/lib.rs
++++ b/src/devices/src/lib.rs
+@@ -63,6 +63,7 @@ pub mod reclaim_access;
+ pub mod block_bounce;
+ 
+ #[cfg(feature="blk")]pub mod block_trace;
++#[cfg(feature="blk")]pub mod cowork_counters;
+ #[cfg(feature="blk")]pub mod stream_io;
+ 
+ #[cfg(all(feature="blk",target_os="macos"))]
+diff --git a/src/devices/src/reclaim_access.rs b/src/devices/src/reclaim_access.rs
+index 7f08f50..a39b4cf 100644
+--- a/src/devices/src/reclaim_access.rs
++++ b/src/devices/src/reclaim_access.rs
+@@ -8,6 +8,12 @@ pub struct Device {
+     id: u64,
+     generation: u64,
+ }
++impl Device {
++    /// The registration id (the disk index for block devices); stable across generation resets.
++    pub fn id(&self) -> u64 {
++        self.id
++    }
++}
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct Range {
+     pub gpa: u64,
+@@ -331,12 +337,14 @@ impl Lease {
+             .checked_add(bytes)
+             .ok_or(Fault::Overflow)?;
+         if state.pins.len() >= self.inner.max_pins || total > self.inner.max_pinned_bytes {
++            crate::cowork_counters::pin_refused();
+             return Err(Fault::Limit);
+         }
+         state.next_pin = state.next_pin.checked_add(1).ok_or(Fault::Overflow)?;
+         let id = state.next_pin;
+         state.pins.insert(id, (self.device, ranges.to_vec()));
+         state.pinned_bytes = total;
++        crate::cowork_counters::pin_accepted(state.pins.len(), total);
+         Ok(Pin {
+             inner: self.inner.clone(),
+             id,
+diff --git a/src/libkrun/src/cowork_production_counters_tests.rs b/src/libkrun/src/cowork_production_counters_tests.rs
+new file mode 100644
+index 0000000..71cf022
+--- /dev/null
++++ b/src/libkrun/src/cowork_production_counters_tests.rs
+@@ -0,0 +1,84 @@
++//! The production counters: layout, size handling and the process-global flush and pin accounting. The
++//! counters are process-global, so every assertion is relative to a snapshot taken first. Pure, VM-free
++//! checks; run with `--test-threads=1`.
++use super::*;
++
++fn flush() -> KrunCoworkFlushCountersV1 {
++    let mut out = KrunCoworkFlushCountersV1 { size: std::mem::size_of::<KrunCoworkFlushCountersV1>() as u32, ..Default::default() };
++    assert_eq!(unsafe { krun_cowork_get_flush_counters_v1(&mut out) }, 0);
++    out
++}
++fn pins() -> KrunCoworkPinCountersV1 {
++    let mut out = KrunCoworkPinCountersV1 { size: std::mem::size_of::<KrunCoworkPinCountersV1>() as u32, ..Default::default() };
++    assert_eq!(unsafe { krun_cowork_get_pin_counters_v1(&mut out) }, 0);
++    out
++}
++
++#[test]
++fn counter_structures_have_the_header_layout() {
++    assert_eq!(std::mem::size_of::<KrunCoworkFlushDeviceV1>(), 32);
++    assert_eq!(std::mem::size_of::<KrunCoworkFlushCountersV1>(), 72);
++    assert_eq!(std::mem::size_of::<KrunCoworkPinCountersV1>(), 48);
++    let header = include_str!("../../../include/libkrun.h");
++    for field in ["uint64_t requested;", "uint64_t completed;", "uint64_t final_sync_attempted;", "uint64_t final_sync_completed;", "struct krun_cowork_flush_device_v1 device[2];", "uint64_t high_water_pins;", "uint64_t high_water_bytes;", "uint64_t budget_refusals;"] {
++        assert!(header.contains(field), "{field}");
++    }
++}
++
++#[test]
++fn counter_getters_validate_the_caller_structure() {
++    assert_eq!(unsafe { krun_cowork_get_flush_counters_v1(std::ptr::null_mut()) }, -libc::EINVAL);
++    assert_eq!(unsafe { krun_cowork_get_pin_counters_v1(std::ptr::null_mut()) }, -libc::EINVAL);
++    let mut short = KrunCoworkFlushCountersV1 { size: 71, ..Default::default() };
++    assert_eq!(unsafe { krun_cowork_get_flush_counters_v1(&mut short) }, -libc::EINVAL);
++    assert_eq!(short.device_count, 0, "a refused call writes nothing");
++    let mut short = KrunCoworkPinCountersV1 { size: 47, ..Default::default() };
++    assert_eq!(unsafe { krun_cowork_get_pin_counters_v1(&mut short) }, -libc::EINVAL);
++    assert_eq!(flush().device_count, 2);
++    assert_eq!(flush().size, 72);
++    assert_eq!(pins().size, 48);
++}
++
++#[test]
++fn flush_counters_follow_the_captured_and_completed_flushes() {
++    let before = flush();
++    devices::cowork_counters::flush_requested(0);
++    devices::cowork_counters::flush_requested(1);
++    devices::cowork_counters::flush_requested(1);
++    devices::cowork_counters::flush_completed(1);
++    devices::cowork_counters::final_sync(0, true);
++    let after = flush();
++    assert_eq!(after.device[0].requested - before.device[0].requested, 1);
++    assert_eq!(after.device[0].completed - before.device[0].completed, 0);
++    assert_eq!(after.device[0].final_sync_completed - before.device[0].final_sync_completed, 1);
++    assert_eq!(after.device[1].requested - before.device[1].requested, 2);
++    assert_eq!(after.device[1].completed - before.device[1].completed, 1);
++}
++
++#[test]
++fn pin_counters_report_the_admitted_budget_and_the_high_water_marks() {
++    let before = pins();
++    assert_eq!(before.max_pins, 48);
++    assert_eq!(before.max_pinned_bytes, 8 * 1024 * 1024);
++    devices::cowork_counters::pin_accepted(before.high_water_pins as usize + 1, before.high_water_bytes + 4096);
++    let after = pins();
++    assert_eq!(after.high_water_pins, before.high_water_pins + 1);
++    assert_eq!(after.high_water_bytes, before.high_water_bytes + 4096);
++}
++
++/// The real pin path feeds the high-water mark and a real budget refusal is counted.
++#[test]
++fn the_access_pin_path_feeds_the_counters() {
++    use devices::reclaim_access::{Access, Range};
++    let before = pins();
++    let access = Access::new(1, 2, 8192);
++    let device = access.register(0).unwrap();
++    let lease = access.begin(device).unwrap();
++    let first = lease.pin(&[Range { gpa: 0, len: 4096 }]).unwrap();
++    let second = lease.pin(&[Range { gpa: 8192, len: 4096 }]).unwrap();
++    assert!(lease.pin(&[Range { gpa: 16384, len: 1 }]).is_err());
++    let after = pins();
++    assert_eq!(after.budget_refusals - before.budget_refusals, 1);
++    assert!(after.high_water_pins >= 2 && after.high_water_bytes >= 8192);
++    drop((first, second, lease));
++}
+diff --git a/src/libkrun/src/cowork_production_profile_tests.rs b/src/libkrun/src/cowork_production_profile_tests.rs
+index 77772ca..91cb4d6 100644
+--- a/src/libkrun/src/cowork_production_profile_tests.rs
++++ b/src/libkrun/src/cowork_production_profile_tests.rs
+@@ -469,6 +469,8 @@ fn production_header_exposes_the_production_api_and_hides_the_fixture_entry_poin
+         [
+             "krun_cowork_create_runtime_port_v1",
+             "krun_cowork_enable_profile_v1",
++            "krun_cowork_get_flush_counters_v1",
++            "krun_cowork_get_pin_counters_v1",
+             "krun_cowork_set_workspace_disks_v1",
+             "krun_cowork_validate_profile_v1",
+         ]
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 2e4a2cf..c98ee29 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -3346,6 +3346,81 @@ pub extern "C" fn krun_cowork_enable_profile_v1(ctx_id: u32) -> i32 {
+     }
+ }
+ 
++/// Flush accounting for one admitted disk, as returned by `krun_cowork_get_flush_counters_v1`.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct KrunCoworkFlushDeviceV1 {
++    /// Guest FLUSH requests captured from the queue.
++    pub requested: u64,
++    /// Guest FLUSH requests whose backing-file flush and `sync_all` returned success.
++    pub completed: u64,
++    /// Final flushes attempted at VMM exit (0 or 1).
++    pub final_sync_attempted: u64,
++    /// Final flushes that succeeded.
++    pub final_sync_completed: u64,
++}
++/// `struct krun_cowork_flush_counters_v1`: `size` is set by the caller to `sizeof` and is rewritten to the
++/// number of bytes written; `device[0]` is `winter-data`, `device[1]` is `winter-environment`.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct KrunCoworkFlushCountersV1 {
++    pub size: u32,
++    pub device_count: u32,
++    pub device: [KrunCoworkFlushDeviceV1; 2],
++}
++/// `struct krun_cowork_pin_counters_v1`: the pin budget and its high-water marks since process start.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct KrunCoworkPinCountersV1 {
++    pub size: u32,
++    pub reserved: u32,
++    pub max_pins: u64,
++    pub max_pinned_bytes: u64,
++    pub high_water_pins: u64,
++    pub high_water_bytes: u64,
++    /// Pins refused because the count or byte budget would be exceeded (the worker then stops).
++    pub budget_refusals: u64,
++}
++
++/// Process-global flush counters (not per context: the context leaves the context map when the VM
++/// starts, and one VM runs per process). Readable at any time, including after the exit hook ran.
++/// `-EINVAL` for a null pointer or a `size` smaller than the structure.
++///
++/// # Safety
++/// `out` must be null or point to a writable `KrunCoworkFlushCountersV1`.
++#[no_mangle]
++pub unsafe extern "C" fn krun_cowork_get_flush_counters_v1(out: *mut KrunCoworkFlushCountersV1) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = out; -libc::EINVAL }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        if out.is_null() || (*out).size < std::mem::size_of::<KrunCoworkFlushCountersV1>() as u32 { return -libc::EINVAL; }
++        let snapshot = devices::cowork_counters::flush_snapshot();
++        let device = |s: devices::cowork_counters::FlushSnapshot| KrunCoworkFlushDeviceV1 { requested: s.requested, completed: s.completed, final_sync_attempted: s.final_attempted, final_sync_completed: s.final_completed };
++        *out = KrunCoworkFlushCountersV1 { size: std::mem::size_of::<KrunCoworkFlushCountersV1>() as u32, device_count: 2, device: [device(snapshot[0]), device(snapshot[1])] };
++        0
++    }
++}
++
++/// Process-global pin high-water counters, the production replacement for the fixture's trace rows: a G4 run
++/// reads them to see how close the 48-pin / 8 MiB budget came. `-EINVAL` for a null pointer or a short `size`.
++///
++/// # Safety
++/// `out` must be null or point to a writable `KrunCoworkPinCountersV1`.
++#[no_mangle]
++pub unsafe extern "C" fn krun_cowork_get_pin_counters_v1(out: *mut KrunCoworkPinCountersV1) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = out; -libc::EINVAL }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        if out.is_null() || (*out).size < std::mem::size_of::<KrunCoworkPinCountersV1>() as u32 { return -libc::EINVAL; }
++        let snapshot = devices::cowork_counters::pin_snapshot();
++        *out = KrunCoworkPinCountersV1 { size: std::mem::size_of::<KrunCoworkPinCountersV1>() as u32, reserved: 0, max_pins: devices::workspace_disks::MAX_PINS as u64, max_pinned_bytes: devices::workspace_disks::MAX_PINNED_BYTES,
++            high_water_pins: snapshot.high_water_pins, high_water_bytes: snapshot.high_water_bytes, budget_refusals: snapshot.budget_refusals };
++        0
++    }
++}
++
+ /// Mandatory side-effect-free preflight of the production gate's first (pre-construction) phase: zero
+ /// when that phase of the start-time admission passes, `-EINVAL` otherwise. The later phases (after the
+ /// block devices are built, and again before the VMM) run at start and are not previewed here. A
+@@ -3665,3 +3740,5 @@ mod cowork_production_gate_matrix_tests;
+ mod cowork_production_start_tests;
+ #[cfg(all(test,feature="blk",target_os="macos"))]
+ mod cowork_production_quiet_tests;
++#[cfg(all(test,feature="blk",target_os="macos"))]
++mod cowork_production_counters_tests;

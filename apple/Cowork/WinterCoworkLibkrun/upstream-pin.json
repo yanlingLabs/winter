@@ -1,0 +1,21 @@
+{
+  "_comment": "Exact upstream pin of the libkrun source this queue applies to, and the Rust toolchain that builds it. Nothing else is fetched.",
+  "libkrun": {
+    "version": "1.19.6",
+    "tag": "v1.19.6",
+    "repository": "https://github.com/containers/libkrun",
+    "revision": "227b2de6ed323fe180e02f871c5f325a90c13cc2",
+    "archiveUrl": "https://codeload.github.com/containers/libkrun/tar.gz/227b2de6ed323fe180e02f871c5f325a90c13cc2",
+    "archiveSha256": "373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050",
+    "treeSha1": "16c2ac4cdd03e394e813b244e4be3b6325215f0b",
+    "lockSha256": "a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873",
+    "defaultFeatures": false
+  },
+  "rust": {
+    "version": "1.90.0",
+    "commitHash": "1159e78c4747b02ef996e55082b704c09b970588",
+    "host": "aarch64-apple-darwin",
+    "url": "https://static.rust-lang.org/dist/rust-1.90.0-aarch64-apple-darwin.tar.xz",
+    "sha256": "9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f"
+  }
+}

@@ -1,0 +1,3732 @@
+diff --git a/src/devices/src/block_bounce.rs b/src/devices/src/block_bounce.rs
+new file mode 100644
+index 0000000..addbb9c
+--- /dev/null
++++ b/src/devices/src/block_bounce.rs
+@@ -0,0 +1,464 @@
++//! Shared guarded block pipeline. Host I/O receives only owned buffers, never guest pointers/slices.
++use crate::reclaim_access::{Access, Device, Fault, Lease, Pin, Range};
++pub const CHUNK: usize = 64 * 1024;
++pub const MAX_REQUEST: usize = 1024 * 1024;
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Command {
++    Read,
++    Write,
++    Flush,
++    GetId,
++    Unsupported,
++}
++#[derive(Clone, Debug)]
++pub struct Captured {
++    pub command: Command,
++    pub sector: u64,
++    pub length: usize,
++    pub head: u16,
++    pub queue_generation: u64,
++    pub protected: Vec<Range>,
++    pub write_payload: Vec<u8>,
++}
++#[derive(Debug)]
++pub struct Outcome {
++    pub success: bool,
++    pub data: Vec<u8>,
++    pub unsupported: bool,
++}
++pub trait Port {
++    fn capture(&mut self, lease: &Lease) -> Result<Option<Captured>, Fault>;
++    fn complete(
++        &mut self,
++        lease: &Lease,
++        request: &Captured,
++        outcome: &Outcome,
++    ) -> Result<(), Fault>;
++}
++pub trait Disk {
++    fn capacity(&self) -> u64;
++    fn read(&mut self, offset: u64, target: &mut [u8]) -> Result<usize, ()>;
++    fn write(&mut self, offset: u64, bytes: &[u8]) -> Result<usize, ()>;
++    fn flush(&mut self) -> Result<(), ()>;
++    fn id(&self) -> &[u8];
++}
++pub struct Work {
++    request: Captured,
++    pin: Option<Pin>,
++    device: Device,
++}
++pub struct Completion {
++    work: Work,
++    pub outcome: Outcome,
++}
++fn validate(request: &Captured) -> Result<(), Fault> {
++    if request.length > MAX_REQUEST || request.protected.is_empty() || request.protected.len() > 512
++    {
++        return Err(Fault::Limit);
++    }
++    if matches!(request.command, Command::Read | Command::Write) && request.length % 512 != 0 {
++        return Err(Fault::InvalidRange);
++    }
++    request
++        .sector
++        .checked_mul(512)
++        .and_then(|offset| offset.checked_add(request.length as u64))
++        .ok_or(Fault::Overflow)?;
++    if request.command == Command::Write && request.write_payload.len() != request.length {
++        return Err(Fault::InvalidRange);
++    }
++    if request.command != Command::Write && !request.write_payload.is_empty() {
++        return Err(Fault::InvalidRange);
++    }
++    Ok(())
++}
++pub fn capture(
++    access: &Access,
++    device: Device,
++    port: &mut impl Port,
++) -> Result<Option<Work>, Fault> {
++    let lease = access.begin(device)?;
++    let request = match port.capture(&lease)? {
++        Some(request) => request,
++        None => return Ok(None),
++    };
++    validate(&request)?;
++    let pin = lease.pin(&request.protected)?;
++    drop(lease); // No memory lease survives into Work or the blocking host I/O function.
++    Ok(Some(Work {
++        request,
++        pin: Some(pin),
++        device,
++    }))
++}
++pub fn perform(work: Work, disk: &mut impl Disk) -> Completion {
++    let request = &work.request;
++    let offset = request.sector.checked_mul(512);
++    let mut outcome = Outcome {
++        success: false,
++        data: Vec::new(),
++        unsupported: request.command == Command::Unsupported,
++    };
++    if let Some(offset) = offset {
++        let within = offset
++            .checked_add(request.length as u64)
++            .is_some_and(|end| end <= disk.capacity());
++        outcome.success = match request.command {
++            Command::Read if within => {
++                let mut data = vec![0u8; request.length];
++                let mut done = 0;
++                let mut good = true;
++                while done < data.len() {
++                    let limit = (done + CHUNK).min(data.len());
++                    let mut part = done;
++                    while part < limit {
++                        match disk.read(offset + part as u64, &mut data[part..limit]) {
++                            Ok(n) if n > 0 && n <= limit - part => part += n,
++                            _ => {
++                                good = false;
++                                break;
++                            }
++                        }
++                    }
++                    if !good {
++                        break;
++                    }
++                    done = limit;
++                }
++                if good {
++                    outcome.data = data;
++                }
++                good
++            }
++            Command::Write if within => {
++                let mut done = 0;
++                let mut good = true;
++                while done < request.write_payload.len() {
++                    let limit = (done + CHUNK).min(request.write_payload.len());
++                    let mut part = done;
++                    while part < limit {
++                        match disk.write(offset + part as u64, &request.write_payload[part..limit])
++                        {
++                            Ok(n) if n > 0 && n <= limit - part => part += n,
++                            _ => {
++                                good = false;
++                                break;
++                            }
++                        }
++                    }
++                    if !good {
++                        break;
++                    }
++                    done = limit;
++                }
++                good
++            }
++            Command::Flush => disk.flush().is_ok(),
++            Command::GetId
++                if disk.id().len() <= request.length && disk.id().len() <= MAX_REQUEST =>
++            {
++                outcome.data = disk.id().to_vec();
++                true
++            }
++            _ => false,
++        };
++    }
++    Completion { work, outcome }
++}
++/// Frozen returns an error with Completion still owned by the caller, preserving its range pins.
++pub fn complete(
++    access: &Access,
++    completion: &mut Completion,
++    port: &mut impl Port,
++) -> Result<(), Fault> {
++    if completion.work.pin.is_none() {
++        return Err(Fault::Duplicate);
++    }
++    let lease = access.begin(completion.work.device)?;
++    port.complete(&lease, &completion.work.request, &completion.outcome)?;
++    completion.work.pin.take();
++    drop(lease);
++    Ok(())
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub enum Step {
++    Empty,
++    Completed,
++    Stopped,
++}
++/// One actual worker transaction, also exercised without epoll/VM. Caller holds no VMM/device lock.
++pub fn service_next(
++    access: &Access,
++    device: Device,
++    port: &mut impl Port,
++    disk: &mut impl Disk,
++    stopped: impl Fn() -> bool,
++) -> Result<Step, Fault> {
++    use std::time::{Duration, Instant};
++    let wait = || -> Result<bool, Fault> {
++        let deadline = Instant::now() + Duration::from_secs(2);
++        loop {
++            if stopped() || access.stopped() {
++                return Ok(false);
++            }
++            match access.wait_begin(device, Duration::from_millis(10)) {
++                Ok(lease) => {
++                    drop(lease);
++                    return Ok(true);
++                }
++                Err(Fault::Timeout) if Instant::now() < deadline => {}
++                Err(fault) => return Err(fault),
++            }
++        }
++    };
++    let work = loop {
++        if stopped() || access.stopped() {
++            return Ok(Step::Stopped);
++        }
++        match capture(access, device, port) {
++            Ok(Some(work)) => break work,
++            Ok(None) => return Ok(Step::Empty),
++            Err(Fault::Frozen) => {
++                if !wait()? {
++                    return Ok(Step::Stopped);
++                }
++            }
++            Err(fault) => return Err(fault),
++        }
++    };
++    // This stop check and every disk call happen with no RAM lease.
++    if stopped() || access.stopped() {
++        return Ok(Step::Stopped);
++    }
++    let mut completion = perform(work, disk);
++    loop {
++        if stopped() || access.stopped() {
++            return Ok(Step::Stopped);
++        }
++        match complete(access, &mut completion, port) {
++            Ok(()) => return Ok(Step::Completed),
++            Err(Fault::Frozen) => {
++                if !wait()? {
++                    return Ok(Step::Stopped);
++                }
++            }
++            Err(fault) => return Err(fault),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::{
++        atomic::{AtomicBool, Ordering},
++        Arc,
++    };
++    use std::time::Duration;
++    struct FakePort {
++        request: Option<Captured>,
++        completed: usize,
++        generation: u64,
++    }
++    impl Port for FakePort {
++        fn capture(&mut self, _lease: &Lease) -> Result<Option<Captured>, Fault> {
++            Ok(self.request.take())
++        }
++        fn complete(&mut self, _lease: &Lease, r: &Captured, _: &Outcome) -> Result<(), Fault> {
++            if r.queue_generation != self.generation {
++                return Err(Fault::Stale);
++            }
++            assert_eq!(r.head, 0);
++            self.completed += 1;
++            Ok(())
++        }
++    }
++    struct Backend {
++        bytes: Vec<u8>,
++        access: Access,
++        device: Device,
++        during_io: Arc<AtomicBool>,
++        sizes: Vec<usize>,
++        fail: bool,
++    }
++    impl Disk for Backend {
++        fn capacity(&self) -> u64 {
++            self.bytes.len() as u64
++        }
++        fn read(&mut self, o: u64, t: &mut [u8]) -> Result<usize, ()> {
++            self.check(t.len());
++            if self.fail {
++                return Err(());
++            }
++            t.copy_from_slice(&self.bytes[o as usize..o as usize + t.len()]);
++            Ok(t.len())
++        }
++        fn write(&mut self, o: u64, b: &[u8]) -> Result<usize, ()> {
++            self.check(b.len());
++            if self.fail {
++                return Err(());
++            }
++            self.bytes[o as usize..o as usize + b.len()].copy_from_slice(b);
++            Ok(b.len())
++        }
++        fn flush(&mut self) -> Result<(), ()> {
++            self.check(0);
++            if self.fail {
++                Err(())
++            } else {
++                Ok(())
++            }
++        }
++        fn id(&self) -> &[u8] {
++            b"fixture"
++        }
++    }
++    impl Backend {
++        fn check(&mut self, n: usize) {
++            assert_eq!(self.access.active_leases(), 0);
++            assert!(n <= CHUNK);
++            self.sizes.push(n);
++            if !self.during_io.swap(true, Ordering::SeqCst) {
++                let frozen = self.access.freeze(1, Duration::from_secs(1)).unwrap();
++                assert!(!frozen.exclusions().is_empty());
++                assert!(matches!(self.access.begin(self.device), Err(Fault::Frozen)));
++                frozen.resume().unwrap();
++            }
++        }
++    }
++    fn fixture(command: Command) -> (Access, Device, FakePort, Backend) {
++        let access = Access::new(1, 16, 2 * MAX_REQUEST as u64);
++        let device = access.register(0).unwrap();
++        let length = if command == Command::Flush {
++            0
++        } else {
++            128 * 1024
++        };
++        let request = Captured {
++            command,
++            sector: 0,
++            length,
++            head: 0,
++            queue_generation: 1,
++            protected: vec![
++                Range {
++                    gpa: 0x1000,
++                    len: 4096,
++                },
++                Range {
++                    gpa: 0x2000,
++                    len: length.max(1) as u64,
++                },
++            ],
++            write_payload: if command == Command::Write {
++                vec![0x5a; length]
++            } else {
++                Vec::new()
++            },
++        };
++        let port = FakePort {
++            request: Some(request),
++            completed: 0,
++            generation: 1,
++        };
++        let backend = Backend {
++            bytes: vec![0xa5; MAX_REQUEST],
++            access: access.clone(),
++            device,
++            during_io: Arc::new(AtomicBool::new(false)),
++            sizes: Vec::new(),
++            fail: false,
++        };
++        (access, device, port, backend)
++    }
++    #[test]
++    fn actual_owned_pipeline_performs_io_with_zero_memory_leases_and_pins_excluded() {
++        for command in [Command::Read, Command::Write, Command::Flush] {
++            let (a, d, mut p, mut b) = fixture(command);
++            let work = capture(&a, d, &mut p).unwrap().unwrap();
++            let mut result = perform(work, &mut b);
++            assert!(result.outcome.success);
++            assert!(b.during_io.load(Ordering::SeqCst));
++            complete(&a, &mut result, &mut p).unwrap();
++            assert_eq!(p.completed, 1);
++            let frozen = a.freeze(2, Duration::from_secs(1)).unwrap();
++            assert!(frozen.exclusions().is_empty());
++            frozen.resume().unwrap();
++        }
++    }
++    #[test]
++    fn completion_during_freeze_stays_pinned_and_is_deferred() {
++        let (a, d, mut p, mut b) = fixture(Command::Read);
++        let mut result = perform(capture(&a, d, &mut p).unwrap().unwrap(), &mut b);
++        let frozen = a.freeze(2, Duration::from_secs(1)).unwrap();
++        assert_eq!(complete(&a, &mut result, &mut p), Err(Fault::Frozen));
++        assert_eq!(p.completed, 0);
++        assert!(!frozen.exclusions().is_empty());
++        frozen.resume().unwrap();
++        complete(&a, &mut result, &mut p).unwrap();
++        assert_eq!(p.completed, 1);
++    }
++    #[test]
++    fn stale_queue_or_device_generation_cannot_write_completion() {
++        for device_reset in [false, true] {
++            let (a, d, mut p, mut b) = fixture(Command::Read);
++            let mut result = perform(capture(&a, d, &mut p).unwrap().unwrap(), &mut b);
++            if device_reset {
++                a.reset_generation(d).unwrap();
++            } else {
++                p.generation = 2;
++            }
++            assert_eq!(complete(&a, &mut result, &mut p), Err(Fault::Stale));
++            assert_eq!(p.completed, 0);
++        }
++    }
++    #[test]
++    fn disk_error_has_no_partial_read_data_and_returns_error_status() {
++        let (a, d, mut p, mut b) = fixture(Command::Read);
++        b.fail = true;
++        let mut result = perform(capture(&a, d, &mut p).unwrap().unwrap(), &mut b);
++        assert!(!result.outcome.success);
++        assert!(result.outcome.data.is_empty());
++        complete(&a, &mut result, &mut p).unwrap();
++        assert_eq!(p.completed, 1);
++    }
++    #[test]
++    fn malformed_size_and_sector_overflow_do_not_start_io() {
++        for overflow in [false, true] {
++            let (a, d, mut p, b) = fixture(Command::Read);
++            if overflow {
++                p.request.as_mut().unwrap().sector = u64::MAX;
++            } else {
++                p.request.as_mut().unwrap().length = MAX_REQUEST + 1;
++            }
++            assert!(capture(&a, d, &mut p).is_err());
++            assert!(b.sizes.is_empty());
++            assert_eq!(a.active_leases(), 0);
++        }
++    }
++    #[test]
++    fn stop_blocks_completion_without_guest_access() {
++        let (a, d, mut p, mut b) = fixture(Command::Read);
++        let mut result = perform(capture(&a, d, &mut p).unwrap().unwrap(), &mut b);
++        a.stop();
++        assert_eq!(complete(&a, &mut result, &mut p), Err(Fault::Stopped));
++        assert_eq!(p.completed, 0);
++    }
++    #[test]
++    fn duplicate_completion_cannot_touch_unpinned_guest_ram() {
++        let (a, d, mut p, mut b) = fixture(Command::Read);
++        let mut result = perform(capture(&a, d, &mut p).unwrap().unwrap(), &mut b);
++        complete(&a, &mut result, &mut p).unwrap();
++        assert_eq!(complete(&a, &mut result, &mut p), Err(Fault::Duplicate));
++        assert_eq!(p.completed, 1);
++    }
++    #[test]
++    fn get_id_uses_owned_metadata_then_completes_once() {
++        let (a, d, mut p, mut b) = fixture(Command::GetId);
++        let mut result = perform(capture(&a, d, &mut p).unwrap().unwrap(), &mut b);
++        assert_eq!(result.outcome.data, b"fixture");
++        complete(&a, &mut result, &mut p).unwrap();
++        assert_eq!(p.completed, 1);
++    }
++}
+diff --git a/src/devices/src/lib.rs b/src/devices/src/lib.rs
+index 5df65dc..3bae73e 100644
+--- a/src/devices/src/lib.rs
++++ b/src/devices/src/lib.rs
+@@ -56,3 +56,8 @@ impl fmt::Display for DeviceType {
+         write!(f, "{self:?}")
+     }
+ }
++
++#[cfg(feature = "blk")]
++pub mod reclaim_access;
++#[cfg(feature = "blk")]
++pub mod block_bounce;
+diff --git a/src/devices/src/reclaim_access.rs b/src/devices/src/reclaim_access.rs
+new file mode 100644
+index 0000000..955db79
+--- /dev/null
++++ b/src/devices/src/reclaim_access.rs
+@@ -0,0 +1,552 @@
++//! Per-VM host-RAM admission/pins. Pure implementation; no raw guest-memory or OS mapping APIs.
++use std::collections::BTreeMap;
++use std::sync::{Arc, Condvar, Mutex};
++use std::time::{Duration, Instant};
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++pub struct Device {
++    id: u64,
++    generation: u64,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Range {
++    pub gpa: u64,
++    pub len: u64,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Fault {
++    Stopped,
++    Frozen,
++    Stale,
++    Duplicate,
++    Overflow,
++    Limit,
++    InvalidRange,
++    Busy,
++    Timeout,
++    Epoch,
++    Mutation,
++}
++struct State {
++    stopped: bool,
++    closed: Option<u64>,
++    last_epoch: u64,
++    mutating: bool,
++    devices: BTreeMap<u64, u64>,
++    active: usize,
++    pins: BTreeMap<u64, (Device, Vec<Range>)>,
++    next_pin: u64,
++    pinned_bytes: u64,
++}
++struct Inner {
++    state: Mutex<State>,
++    wake: Condvar,
++    terminal: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
++    max_devices: usize,
++    max_pins: usize,
++    max_pinned_bytes: u64,
++}
++#[derive(Clone)]
++pub struct Access {
++    inner: Arc<Inner>,
++}
++pub struct Lease {
++    inner: Arc<Inner>,
++    device: Device,
++}
++pub struct Pin {
++    inner: Arc<Inner>,
++    id: u64,
++}
++pub struct Frozen {
++    inner: Arc<Inner>,
++    epoch: u64,
++    mutation: bool,
++    mapping_complete: bool,
++    finished: bool,
++    ranges: Vec<Range>,
++}
++fn valid(state: &State, device: Device) -> Result<(), Fault> {
++    if state.stopped {
++        return Err(Fault::Stopped);
++    }
++    if state.devices.get(&device.id) != Some(&device.generation) {
++        return Err(Fault::Stale);
++    }
++    Ok(())
++}
++impl Access {
++    pub fn new(max_devices: usize, max_pins: usize, max_pinned_bytes: u64) -> Self {
++        Self {
++            inner: Arc::new(Inner {
++                state: Mutex::new(State {
++                    stopped: false,
++                    closed: None,
++                    last_epoch: 0,
++                    mutating: false,
++                    devices: BTreeMap::new(),
++                    active: 0,
++                    pins: BTreeMap::new(),
++                    next_pin: 0,
++                    pinned_bytes: 0,
++                }),
++                wake: Condvar::new(),
++                terminal: Mutex::new(None),
++                max_devices,
++                max_pins,
++                max_pinned_bytes,
++            }),
++        }
++    }
++    pub fn register(&self, id: u64) -> Result<Device, Fault> {
++        let mut state = self.inner.state.lock().unwrap();
++        if state.stopped {
++            return Err(Fault::Stopped);
++        }
++        if state.closed.is_some() {
++            return Err(Fault::Frozen);
++        }
++        if state.devices.contains_key(&id) {
++            return Err(Fault::Duplicate);
++        }
++        if state.devices.len() >= self.inner.max_devices {
++            return Err(Fault::Limit);
++        }
++        state.devices.insert(id, 1);
++        Ok(Device { id, generation: 1 })
++    }
++    pub fn begin(&self, device: Device) -> Result<Lease, Fault> {
++        let mut state = self.inner.state.lock().unwrap();
++        valid(&state, device)?;
++        if state.closed.is_some() {
++            return Err(Fault::Frozen);
++        }
++        state.active = state.active.checked_add(1).ok_or(Fault::Overflow)?;
++        Ok(Lease {
++            inner: self.inner.clone(),
++            device,
++        })
++    }
++    pub fn wait_begin(&self, device: Device, timeout: Duration) -> Result<Lease, Fault> {
++        let deadline = Instant::now() + timeout;
++        let mut state = self.inner.state.lock().unwrap();
++        loop {
++            valid(&state, device)?;
++            if state.closed.is_none() {
++                state.active = state.active.checked_add(1).ok_or(Fault::Overflow)?;
++                return Ok(Lease {
++                    inner: self.inner.clone(),
++                    device,
++                });
++            }
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            if remaining.is_zero() {
++                return Err(Fault::Timeout);
++            }
++            let (next, _) = self.inner.wake.wait_timeout(state, remaining).unwrap();
++            state = next;
++        }
++    }
++    /// Invalidate old completions only after all memory copies drain; reset owner supplies this call.
++    pub fn reset_generation(&self, device: Device) -> Result<Device, Fault> {
++        let mut state = self.inner.state.lock().unwrap();
++        valid(&state, device)?;
++        if state.closed.is_some() {
++            return Err(Fault::Frozen);
++        }
++        if state.active != 0 {
++            return Err(Fault::Busy);
++        }
++        let generation = device.generation.checked_add(1).ok_or(Fault::Overflow)?;
++        state.devices.insert(device.id, generation);
++        self.inner.wake.notify_all();
++        Ok(Device {
++            id: device.id,
++            generation,
++        })
++    }
++    /// Called only AFTER exact CPU park and with NO VMM/device/disk mutex held by the caller.
++    pub fn freeze(&self, epoch: u64, timeout: Duration) -> Result<Frozen, Fault> {
++        let deadline = Instant::now() + timeout;
++        let mut state = self.inner.state.lock().unwrap();
++        if state.stopped {
++            return Err(Fault::Stopped);
++        }
++        if state.closed.is_some() {
++            return Err(Fault::Frozen);
++        }
++        if epoch == 0 || epoch <= state.last_epoch {
++            return Err(Fault::Epoch);
++        }
++        state.last_epoch = epoch;
++        state.closed = Some(epoch);
++        while state.active != 0 {
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            if remaining.is_zero() {
++                state.stopped = true;
++                self.inner.wake.notify_all();
++                drop(state);
++                signal_terminal(&self.inner);
++                return Err(Fault::Timeout);
++            }
++            let (waited, _) = self.inner.wake.wait_timeout(state, remaining).unwrap();
++            state = waited;
++            if state.stopped {
++                return Err(Fault::Stopped);
++            }
++        }
++        let ranges = state
++            .pins
++            .values()
++            .flat_map(|(_, ranges)| ranges.iter().copied())
++            .collect();
++        Ok(Frozen {
++            inner: self.inner.clone(),
++            epoch,
++            mutation: false,
++            mapping_complete: false,
++            finished: false,
++            ranges,
++        })
++    }
++    /// Notification contains no guest RAM; runs only after the state lock is released.
++    pub fn set_terminal_notifier(&self, notify: Arc<dyn Fn() + Send + Sync>) {
++        *self.inner.terminal.lock().unwrap() = Some(notify);
++    }
++    /// Serialize Stop against EACH actual mapping/FRQ ACK operation; never a VMM/device drain wait.
++    pub fn frozen_operation<T>(
++        &self,
++        epoch: u64,
++        operation: impl FnOnce() -> T,
++    ) -> Result<T, Fault> {
++        let state = self.inner.state.lock().unwrap();
++        if state.stopped {
++            return Err(Fault::Stopped);
++        }
++        if state.closed != Some(epoch) || !state.mutating || state.active != 0 {
++            return Err(Fault::Mutation);
++        }
++        Ok(operation())
++    }
++    pub fn stopped(&self) -> bool {
++        self.inner.state.lock().unwrap().stopped
++    }
++    pub fn active_leases(&self) -> usize {
++        self.inner.state.lock().unwrap().active
++    }
++    pub fn stop(&self) {
++        let mut s = self.inner.state.lock().unwrap();
++        s.stopped = true;
++        self.inner.wake.notify_all();
++        drop(s);
++        signal_terminal(&self.inner);
++    }
++}
++fn signal_terminal(inner: &Inner) {
++    let notify = inner.terminal.lock().unwrap().clone();
++    if let Some(notify) = notify {
++        notify();
++    }
++}
++impl Lease {
++    pub fn check(&self, access: &Access, device: Device) -> Result<(), Fault> {
++        if !Arc::ptr_eq(&self.inner, &access.inner) || self.device != device {
++            return Err(Fault::Stale);
++        }
++        valid(&self.inner.state.lock().unwrap(), device)
++    }
++    pub fn pin(&self, ranges: &[Range]) -> Result<Pin, Fault> {
++        let mut bytes = 0u64;
++        if ranges.is_empty() {
++            return Err(Fault::InvalidRange);
++        }
++        for r in ranges {
++            if r.len == 0 || r.gpa.checked_add(r.len).is_none() {
++                return Err(Fault::InvalidRange);
++            }
++            bytes = bytes.checked_add(r.len).ok_or(Fault::Overflow)?;
++        }
++        let mut state = self.inner.state.lock().unwrap();
++        valid(&state, self.device)?;
++        // A lease already active when admission closes may finish its copy and publish pins.
++        // freeze waits for that lease to drop before taking its exclusion snapshot.
++        let total = state
++            .pinned_bytes
++            .checked_add(bytes)
++            .ok_or(Fault::Overflow)?;
++        if state.pins.len() >= self.inner.max_pins || total > self.inner.max_pinned_bytes {
++            return Err(Fault::Limit);
++        }
++        state.next_pin = state.next_pin.checked_add(1).ok_or(Fault::Overflow)?;
++        let id = state.next_pin;
++        state.pins.insert(id, (self.device, ranges.to_vec()));
++        state.pinned_bytes = total;
++        Ok(Pin {
++            inner: self.inner.clone(),
++            id,
++        })
++    }
++}
++impl Drop for Lease {
++    fn drop(&mut self) {
++        let mut s = self.inner.state.lock().unwrap();
++        s.active = s.active.checked_sub(1).expect("lease accounting");
++        self.inner.wake.notify_all();
++    }
++}
++impl Drop for Pin {
++    fn drop(&mut self) {
++        let mut s = self.inner.state.lock().unwrap();
++        if let Some((_, ranges)) = s.pins.remove(&self.id) {
++            let bytes: u64 = ranges.iter().map(|r| r.len).sum();
++            s.pinned_bytes = s.pinned_bytes.checked_sub(bytes).expect("pin accounting");
++        }
++        self.inner.wake.notify_all();
++    }
++}
++impl Frozen {
++    pub fn exclusions(&self) -> &[Range] {
++        &self.ranges
++    }
++    pub fn begin_mutation(&mut self) -> Result<(), Fault> {
++        let mut s = self.inner.state.lock().unwrap();
++        if s.stopped {
++            return Err(Fault::Stopped);
++        }
++        if s.closed != Some(self.epoch) || s.active != 0 {
++            return Err(Fault::Epoch);
++        }
++        if self.mutation {
++            return Err(Fault::Mutation);
++        }
++        s.mutating = true;
++        self.mutation = true;
++        Ok(())
++    }
++    pub fn complete_mutation(&mut self) -> Result<(), Fault> {
++        let s = self.inner.state.lock().unwrap();
++        if s.stopped {
++            return Err(Fault::Stopped);
++        }
++        if s.closed != Some(self.epoch) || !self.mutation {
++            return Err(Fault::Mutation);
++        }
++        self.mapping_complete = true;
++        Ok(())
++    }
++    pub fn resume(mut self) -> Result<(), Fault> {
++        let mut s = self.inner.state.lock().unwrap();
++        if s.stopped {
++            return Err(Fault::Stopped);
++        }
++        if s.closed != Some(self.epoch) {
++            return Err(Fault::Epoch);
++        }
++        if self.mutation && !self.mapping_complete {
++            s.stopped = true;
++            self.finished = true;
++            self.inner.wake.notify_all();
++            drop(s);
++            signal_terminal(&self.inner);
++            return Err(Fault::Mutation);
++        }
++        s.closed = None;
++        s.mutating = false;
++        self.finished = true;
++        self.inner.wake.notify_all();
++        Ok(())
++    }
++    pub fn abort(mut self) {
++        self.inner.state.lock().unwrap().stopped = true;
++        self.finished = true;
++        self.inner.wake.notify_all();
++        signal_terminal(&self.inner);
++    }
++}
++impl Drop for Frozen {
++    fn drop(&mut self) {
++        if !self.finished {
++            self.inner.state.lock().unwrap().stopped = true;
++            self.inner.wake.notify_all();
++            signal_terminal(&self.inner);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::thread;
++    fn access() -> (Access, Device) {
++        let a = Access::new(2, 8, 1024 * 1024);
++        let d = a.register(7).unwrap();
++        (a, d)
++    }
++    #[test]
++    fn freeze_denies_new_access_and_snapshots_pinned_io_with_zero_readers() {
++        let (a, d) = access();
++        let lease = a.begin(d).unwrap();
++        let pin = lease
++            .pin(&[Range {
++                gpa: 0x1000,
++                len: 4096,
++            }])
++            .unwrap();
++        drop(lease);
++        let frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++        assert_eq!(a.active_leases(), 0);
++        assert!(matches!(a.begin(d), Err(Fault::Frozen)));
++        assert_eq!(
++            frozen.exclusions(),
++            [Range {
++                gpa: 0x1000,
++                len: 4096
++            }]
++        );
++        frozen.resume().unwrap();
++        drop(pin);
++        assert!(a.begin(d).is_ok());
++    }
++    #[test]
++    fn drain_waits_for_short_copy_without_blocking_lease_drop() {
++        let (a, d) = access();
++        let lease = a.begin(d).unwrap();
++        let other = a.clone();
++        let thread = thread::spawn(move || other.freeze(1, Duration::from_secs(1)));
++        thread::sleep(Duration::from_millis(10));
++        assert!(!thread.is_finished());
++        drop(lease);
++        thread.join().unwrap().unwrap().resume().unwrap();
++    }
++    #[test]
++    fn no_implicit_resume_after_partial_mutation_or_abandoned_freeze() {
++        for mutation in [false, true] {
++            let (a, d) = access();
++            let mut frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++            if mutation {
++                frozen.begin_mutation().unwrap();
++            }
++            drop(frozen);
++            assert!(a.stopped());
++            assert!(matches!(a.begin(d), Err(Fault::Stopped)));
++        }
++    }
++    #[test]
++    fn resume_requires_explicit_complete_mapping_transaction() {
++        for complete in [false, true] {
++            let (a, d) = access();
++            let mut frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++            frozen.begin_mutation().unwrap();
++            if complete {
++                frozen.complete_mutation().unwrap();
++                assert!(frozen.resume().is_ok());
++                assert!(a.begin(d).is_ok());
++            } else {
++                assert_eq!(frozen.resume(), Err(Fault::Mutation));
++                assert!(a.stopped());
++            }
++        }
++    }
++    #[test]
++    fn explicit_abort_keeps_gate_closed() {
++        let (a, d) = access();
++        a.freeze(1, Duration::from_secs(1)).unwrap().abort();
++        assert!(a.stopped());
++        assert!(matches!(a.begin(d), Err(Fault::Stopped)));
++    }
++    #[test]
++    fn waiting_completion_wakes_on_resume_and_stop() {
++        for stop in [false, true] {
++            let (a, d) = access();
++            let frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++            let other = a.clone();
++            let worker = thread::spawn(move || other.wait_begin(d, Duration::from_secs(1)));
++            if stop {
++                a.stop();
++                drop(frozen);
++                assert!(matches!(worker.join().unwrap(), Err(Fault::Stopped)));
++            } else {
++                frozen.resume().unwrap();
++                assert!(worker.join().unwrap().is_ok());
++            }
++        }
++    }
++    #[test]
++    fn stopped_or_stale_generation_never_reenters_ram() {
++        let (a, d) = access();
++        let newer = a.reset_generation(d).unwrap();
++        assert!(matches!(a.begin(d), Err(Fault::Stale)));
++        assert!(a.begin(newer).is_ok());
++        a.stop();
++        assert!(matches!(a.begin(newer), Err(Fault::Stopped)));
++    }
++    #[test]
++    fn timeout_stops_gate_and_preserves_outstanding_lease() {
++        let (a, d) = access();
++        let lease = a.begin(d).unwrap();
++        assert!(matches!(
++            a.freeze(1, Duration::from_millis(1)),
++            Err(Fault::Timeout)
++        ));
++        assert!(a.stopped());
++        drop(lease);
++        assert_eq!(a.active_leases(), 0);
++    }
++    #[test]
++    fn pins_budget_and_overflow_are_checked_before_recording() {
++        let (a, d) = access();
++        let lease = a.begin(d).unwrap();
++        assert!(matches!(
++            lease.pin(&[Range {
++                gpa: u64::MAX,
++                len: 1
++            }]),
++            Err(Fault::InvalidRange)
++        ));
++        assert!(matches!(
++            lease.pin(&[Range {
++                gpa: 0,
++                len: 2 * 1024 * 1024
++            }]),
++            Err(Fault::Limit)
++        ));
++        drop(lease);
++        assert!(a
++            .freeze(1, Duration::from_secs(1))
++            .unwrap()
++            .exclusions()
++            .is_empty());
++    }
++    #[test]
++    fn frozen_mapping_and_stop_are_serialized_no_operations_after_stop() {
++        let (a, _) = access();
++        let mut frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++        frozen.begin_mutation().unwrap();
++        let mapping = a.clone();
++        let (entered, inside) = std::sync::mpsc::sync_channel(0);
++        let (release, go) = std::sync::mpsc::sync_channel(0);
++        let worker = thread::spawn(move || {
++            mapping.frozen_operation(1, || {
++                entered.send(()).unwrap();
++                go.recv_timeout(Duration::from_secs(1)).unwrap();
++            })
++        });
++        inside.recv_timeout(Duration::from_secs(1)).unwrap();
++        let stopper = a.clone();
++        let (stop_entered, stop_started) = std::sync::mpsc::sync_channel(0);
++        let stopped = thread::spawn(move || {
++            stop_entered.send(()).unwrap();
++            stopper.stop();
++        });
++        stop_started.recv_timeout(Duration::from_secs(1)).unwrap();
++        assert!(!stopped.is_finished());
++        release.send(()).unwrap();
++        assert_eq!(worker.join().unwrap(), Ok(()));
++        stopped.join().unwrap();
++        assert_eq!(
++            a.frozen_operation(1, || panic!("mapping/ACK after Stop")),
++            Err(Fault::Stopped)
++        );
++        assert!(frozen.complete_mutation().is_err());
++    }
++}
+diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
+index 85b2812..d21b701 100644
+--- a/src/devices/src/virtio/balloon/device.rs
++++ b/src/devices/src/virtio/balloon/device.rs
+@@ -46,6 +46,9 @@ pub struct VirtioBalloonConfig {
+ unsafe impl ByteValued for VirtioBalloonConfig {}
+ 
+ pub struct Balloon {
++    pub fixture_reclaim: bool,
++    pub fixture_pending: bool,
++    pub fixture_generation: u64,
+     pub(crate) queues: Option<Vec<DeviceQueue>>,
+     pub(crate) avail_features: u64,
+     pub(crate) acked_features: u64,
+@@ -57,6 +60,9 @@ pub struct Balloon {
+ impl Balloon {
+     pub fn new() -> super::Result<Balloon> {
+         Ok(Balloon {
++            fixture_reclaim: false,
++            fixture_pending: false,
++            fixture_generation: 0,
+             queues: None,
+             avail_features: AVAIL_FEATURES,
+             acked_features: 0,
+@@ -72,6 +78,7 @@ impl Balloon {
+     }
+ 
+     pub fn process_frq(&mut self) -> bool {
++        if self.fixture_reclaim { self.fixture_pending = true; return false; }
+         debug!("balloon: process_frq()");
+         let mem = match self.device_state {
+             DeviceState::Activated(ref mem, _) => mem,
+@@ -183,6 +190,8 @@ impl VirtioDevice for Balloon {
+             return Err(ActivateError::BadActivate);
+         }
+ 
++        self.fixture_generation = self.fixture_generation.checked_add(1).expect("generation overflow");
++        self.fixture_pending = false;
+         self.queues = Some(queues);
+         self.device_state = DeviceState::Activated(mem, interrupt);
+ 
+@@ -193,3 +202,27 @@ impl VirtioDevice for Balloon {
+         self.device_state.is_activated()
+     }
+ }
++
++impl Balloon {
++    pub fn fixture_exclusions(&self) -> Result<Vec<(u64,u64)>, &'static str> {
++        let mut out=Vec::new();
++        if let DeviceState::Activated(mem,_) = &self.device_state {
++            for (index,q) in self.queues.as_ref().ok_or("balloon queues")?.iter().enumerate() {
++                if index==FRQ_INDEX {q.queue.fixture_validate_report(mem)?;}
++                out.extend(q.queue.fixture_exclusions(mem,index!=FRQ_INDEX)?);
++            }
++        } else { return Err("balloon inactive"); }
++        Ok(out)
++    }
++    pub fn fixture_pop(&mut self) -> Result<Vec<(u16,Vec<(u64,u64)>)>, &'static str> {
++        let mem=match &self.device_state {DeviceState::Activated(mem,_)=>mem,_=>return Err("balloon inactive")};
++        let queue=&mut self.queues.as_mut().ok_or("balloon queues")?[FRQ_INDEX].queue;
++        let result=queue.fixture_pop_reports(mem)?;self.fixture_pending=false;Ok(result)
++    }
++    pub fn fixture_ack(&mut self,indices:&[u16])->Result<(),&'static str> {
++        let mem=match &self.device_state {DeviceState::Activated(mem,_)=>mem,_=>return Err("balloon inactive")};
++        let queue=&mut self.queues.as_mut().ok_or("balloon queues")?[FRQ_INDEX].queue;
++        queue.fixture_ack_reports(mem,indices)?;
++        if !indices.is_empty() {self.device_state.signal_used_queue();}Ok(())
++    }
++}
+diff --git a/src/devices/src/virtio/block/cowork.rs b/src/devices/src/virtio/block/cowork.rs
+new file mode 100644
+index 0000000..9799794
+--- /dev/null
++++ b/src/devices/src/virtio/block/cowork.rs
+@@ -0,0 +1,881 @@
++//! Reduced guarded-block profile. This is not enabled by the frozen A6 fixture.
++use crate::block_bounce::{Captured, Command, Outcome, Port};
++use crate::reclaim_access::{Access, Device, Fault, Lease, Pin, Range};
++use crate::virtio::queue::{fixture_chain, Queue};
++use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
++
++/// Opaque leaf: no raw Mmap, DescriptorChain, Reader/Writer or VolatileSlice leaves this module.
++pub(crate) struct ProtectedQueue {
++    memory: GuestMemoryMmap,
++    queue: Queue,
++    access: Access,
++    device: Device,
++    generation: u64,
++    completion: Option<(u16, Vec<Range>, Range)>,
++    _ring_pin: Pin,
++}
++impl ProtectedQueue {
++    pub(crate) fn new(
++        memory: GuestMemoryMmap,
++        queue: Queue,
++        access: Access,
++        device: Device,
++        generation: u64,
++    ) -> Result<Self, Fault> {
++        let lease = access.begin(device)?;
++        queue
++            .fixture_validate_report(&memory)
++            .map_err(|_| Fault::InvalidRange)?;
++        let rings: Vec<_> = queue
++            .fixture_exclusions(&memory, false)
++            .map_err(|_| Fault::InvalidRange)?
++            .into_iter()
++            .map(|(gpa, len)| Range { gpa, len })
++            .collect();
++        let ring_pin = lease.pin(&rings)?;
++        drop(lease);
++        Ok(Self {
++            memory,
++            queue,
++            access,
++            device,
++            generation,
++            completion: None,
++            _ring_pin: ring_pin,
++        })
++    }
++    fn checked_range(&self, range: Range) -> Result<(), Fault> {
++        if range.len == 0 {
++            return Err(Fault::InvalidRange);
++        }
++        let end = range.gpa.checked_add(range.len).ok_or(Fault::Overflow)?;
++        let region = self
++            .memory
++            .find_region(GuestAddress(range.gpa))
++            .ok_or(Fault::InvalidRange)?;
++        if end
++            > region
++                .start_addr()
++                .raw_value()
++                .checked_add(region.len())
++                .ok_or(Fault::Overflow)?
++        {
++            return Err(Fault::InvalidRange);
++        }
++        Ok(())
++    }
++    fn copy_from(&self, ranges: &[Range], mut skip: usize, count: usize) -> Result<Vec<u8>, Fault> {
++        let mut out = vec![0; count];
++        let mut done = 0;
++        for range in ranges {
++            self.checked_range(*range)?;
++            let len = usize::try_from(range.len).map_err(|_| Fault::Overflow)?;
++            if skip >= len {
++                skip -= len;
++                continue;
++            }
++            let copied = (len - skip).min(count - done);
++            let addr = range.gpa.checked_add(skip as u64).ok_or(Fault::Overflow)?;
++            self.memory
++                .read_slice(&mut out[done..done + copied], GuestAddress(addr))
++                .map_err(|_| Fault::InvalidRange)?;
++            done += copied;
++            skip = 0;
++            if done == count {
++                return Ok(out);
++            }
++        }
++        if done == count {
++            Ok(out)
++        } else {
++            Err(Fault::InvalidRange)
++        }
++    }
++    fn copy_to(&self, ranges: &[Range], data: &[u8]) -> Result<(), Fault> {
++        let mut done = 0;
++        for range in ranges {
++            self.checked_range(*range)?;
++            let copied = usize::try_from(range.len)
++                .map_err(|_| Fault::Overflow)?
++                .min(data.len() - done);
++            self.memory
++                .write_slice(&data[done..done + copied], GuestAddress(range.gpa))
++                .map_err(|_| Fault::InvalidRange)?;
++            done += copied;
++            if done == data.len() {
++                return Ok(());
++            }
++        }
++        if done == data.len() {
++            Ok(())
++        } else {
++            Err(Fault::InvalidRange)
++        }
++    }
++}
++impl Port for ProtectedQueue {
++    fn capture(&mut self, lease: &Lease) -> Result<Option<Captured>, Fault> {
++        lease.check(&self.access, self.device)?;
++        if self.completion.is_some() {
++            return Err(Fault::Busy);
++        }
++        self.queue
++            .fixture_validate_report(&self.memory)
++            .map_err(|_| Fault::InvalidRange)?;
++        let mut protected: Vec<_> = self
++            .queue
++            .fixture_exclusions(&self.memory, false)
++            .map_err(|_| Fault::InvalidRange)?
++            .into_iter()
++            .map(|(gpa, len)| Range { gpa, len })
++            .collect();
++        let Some(head) = self
++            .queue
++            .fixture_checked_pop(&self.memory)
++            .map_err(|_| Fault::InvalidRange)?
++        else {
++            return Ok(None);
++        };
++        let index = head.index;
++        let descriptors = fixture_chain(head).map_err(|_| Fault::InvalidRange)?;
++        let mut readable = Vec::new();
++        let mut writable = Vec::new();
++        let mut seen_write = false;
++        for desc in descriptors {
++            if desc.len == 0 {
++                continue;
++            }
++            let range = Range {
++                gpa: desc.addr.raw_value(),
++                len: u64::from(desc.len),
++            };
++            self.checked_range(range)?;
++            if desc.is_write_only() {
++                seen_write = true;
++                writable.push(range);
++            } else {
++                if seen_write {
++                    return Err(Fault::InvalidRange);
++                }
++                readable.push(range);
++            }
++            protected.push(range);
++        }
++        let header = self.copy_from(&readable, 0, 16)?;
++        let request_type = u32::from_le_bytes(header[0..4].try_into().unwrap());
++        let sector = u64::from_le_bytes(header[8..16].try_into().unwrap());
++        let command = match request_type {
++            0 => Command::Read,
++            1 => Command::Write,
++            4 => Command::Flush,
++            8 => Command::GetId,
++            _ => Command::Unsupported,
++        };
++        let read_bytes = readable
++            .iter()
++            .try_fold(0u64, |sum, r| sum.checked_add(r.len))
++            .ok_or(Fault::Overflow)?;
++        let write_bytes = writable
++            .iter()
++            .try_fold(0u64, |sum, r| sum.checked_add(r.len))
++            .ok_or(Fault::Overflow)?;
++        let last = writable.last_mut().ok_or(Fault::InvalidRange)?;
++        let status = Range {
++            gpa: last.gpa.checked_add(last.len - 1).ok_or(Fault::Overflow)?,
++            len: 1,
++        };
++        last.len -= 1;
++        if last.len == 0 {
++            writable.pop();
++        }
++        let length = match command {
++            Command::Read | Command::GetId => {
++                write_bytes.checked_sub(1).ok_or(Fault::InvalidRange)?
++            }
++            Command::Write => read_bytes.checked_sub(16).ok_or(Fault::InvalidRange)?,
++            Command::Flush | Command::Unsupported => 0,
++        };
++        if length > crate::block_bounce::MAX_REQUEST as u64 {
++            return Err(Fault::Limit);
++        }
++        let length = usize::try_from(length).map_err(|_| Fault::Overflow)?;
++        let payload = if command == Command::Write {
++            self.copy_from(&readable, 16, length)?
++        } else {
++            Vec::new()
++        };
++        self.completion = Some((index, writable, status));
++        Ok(Some(Captured {
++            command,
++            sector,
++            length,
++            head: index,
++            queue_generation: self.generation,
++            protected,
++            write_payload: payload,
++        }))
++    }
++    fn complete(
++        &mut self,
++        lease: &Lease,
++        request: &Captured,
++        outcome: &Outcome,
++    ) -> Result<(), Fault> {
++        lease.check(&self.access, self.device)?;
++        if request.queue_generation != self.generation {
++            return Err(Fault::Stale);
++        }
++        self.queue
++            .fixture_validate_report(&self.memory)
++            .map_err(|_| Fault::InvalidRange)?;
++        let (head, destinations, status) = self.completion.as_ref().ok_or(Fault::Duplicate)?;
++        if *head != request.head {
++            return Err(Fault::Stale);
++        }
++        if outcome.success && !outcome.data.is_empty() {
++            self.copy_to(destinations, &outcome.data)?;
++        }
++        self.memory
++            .write_obj(
++                if outcome.unsupported {
++                    2u8
++                } else if outcome.success {
++                    0u8
++                } else {
++                    1u8
++                },
++                GuestAddress(status.gpa),
++            )
++            .map_err(|_| Fault::InvalidRange)?;
++        let len = u32::try_from(if outcome.success {
++            outcome.data.len() + 1
++        } else {
++            1
++        })
++        .map_err(|_| Fault::Overflow)?;
++        self.queue
++            .add_used(&self.memory, *head, len)
++            .map_err(|_| Fault::InvalidRange)?;
++        self.completion = None;
++        Ok(())
++    }
++}
++
++impl crate::block_bounce::Disk for super::device::DiskProperties {
++    fn capacity(&self) -> u64 {
++        self.nsectors().saturating_mul(512)
++    }
++    fn read(&mut self, offset: u64, target: &mut [u8]) -> Result<usize, ()> {
++        use imago::io_buffers::IoVectorMut;
++        use std::io::IoSliceMut;
++        let len = target.len();
++        let vector = IoVectorMut::from(vec![IoSliceMut::new(target)]);
++        self.file
++            .lock()
++            .unwrap()
++            .readv(vector, offset)
++            .map_err(|_| ())?;
++        Ok(len)
++    }
++    fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, ()> {
++        use imago::io_buffers::IoVector;
++        use std::io::IoSlice;
++        let vector = IoVector::from(vec![IoSlice::new(data)]);
++        self.file
++            .lock()
++            .unwrap()
++            .writev(vector, offset)
++            .map_err(|_| ())?;
++        Ok(data.len())
++    }
++    fn flush(&mut self) -> Result<(), ()> {
++        let file = self.file.lock().unwrap();
++        file.flush().map_err(|_| ())?;
++        file.sync().map_err(|_| ())
++    }
++    fn id(&self) -> &[u8] {
++        self.image_id()
++    }
++}
++
++pub(crate) struct GuardedBlockWorker {
++    port: ProtectedQueue,
++    access: Access,
++    device: Device,
++    disk: super::device::DiskProperties,
++    event: std::sync::Arc<utils::eventfd::EventFd>,
++    stop_fd: utils::eventfd::EventFd,
++    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
++    interrupt: crate::virtio::InterruptTransport,
++}
++impl GuardedBlockWorker {
++    pub(crate) fn new(
++        queue: crate::virtio::DeviceQueue,
++        memory: GuestMemoryMmap,
++        access: Access,
++        device: Device,
++        disk: super::device::DiskProperties,
++        stop_fd: utils::eventfd::EventFd,
++        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
++        interrupt: crate::virtio::InterruptTransport,
++    ) -> Result<Self, Fault> {
++        let port = ProtectedQueue::new(memory, queue.queue, access.clone(), device, 1)?;
++        Ok(Self {
++            port,
++            access,
++            device,
++            disk,
++            event: queue.event,
++            stop_fd,
++            stop,
++            interrupt,
++        })
++    }
++    pub(crate) fn run(self) -> std::thread::JoinHandle<()> {
++        std::thread::Builder::new()
++            .name("guarded block worker".into())
++            .spawn(move || self.work())
++            .unwrap()
++    }
++    fn work(mut self) {
++        let result = run_guarded_epoll(
++            &self.access,
++            self.device,
++            &mut self.port,
++            &mut self.disk,
++            &self.event,
++            &self.stop_fd,
++            &self.stop,
++            || self.interrupt.signal_used_queue(),
++        );
++        let _ = result;
++    }
++}
++/// Reusable eventfd is nonblocking; reset owner also drains after joining (including dead workers).
++pub(crate) fn drain_stop_event(fd: &utils::eventfd::EventFd) {
++    let _ = fd.read();
++}
++fn run_guarded_epoll(
++    access: &Access,
++    device: Device,
++    port: &mut impl Port,
++    disk: &mut impl crate::block_bounce::Disk,
++    event: &utils::eventfd::EventFd,
++    stop_fd: &utils::eventfd::EventFd,
++    stop: &std::sync::atomic::AtomicBool,
++    completed: impl FnMut(),
++) -> Result<(), Fault> {
++    let result = guarded_epoll_loop(access, device, port, disk, event, stop_fd, stop, completed);
++    if result.is_err() {
++        access.stop();
++    }
++    result
++}
++fn guarded_epoll_loop(
++    access: &Access,
++    device: Device,
++    port: &mut impl Port,
++    disk: &mut impl crate::block_bounce::Disk,
++    event: &utils::eventfd::EventFd,
++    stop_fd: &utils::eventfd::EventFd,
++    stop: &std::sync::atomic::AtomicBool,
++    mut completed: impl FnMut(),
++) -> Result<(), Fault> {
++    use std::os::fd::AsRawFd;
++    use std::sync::atomic::Ordering;
++    use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
++    struct Drain<'a>(&'a utils::eventfd::EventFd);
++    impl Drop for Drain<'_> {
++        fn drop(&mut self) {
++            drain_stop_event(self.0);
++        }
++    }
++    let _drain = Drain(stop_fd);
++    let epoll = Epoll::new().map_err(|_| Fault::Stopped)?;
++    for fd in [event.as_raw_fd(), stop_fd.as_raw_fd()] {
++        epoll
++            .ctl(
++                ControlOperation::Add,
++                fd,
++                &EpollEvent::new(EventSet::IN, fd as u64),
++            )
++            .map_err(|_| Fault::Stopped)?;
++    }
++    loop {
++        let mut events = vec![EpollEvent::new(EventSet::empty(), 0); 8];
++        let count = epoll.wait(8, -1, &mut events).map_err(|_| Fault::Stopped)?;
++        for ready in &events[..count] {
++            if ready.fd() == stop_fd.as_raw_fd() || stop.load(Ordering::Acquire) {
++                return Ok(());
++            }
++            if ready.fd() != event.as_raw_fd() {
++                continue;
++            }
++            let _ = event.read();
++            loop {
++                match crate::block_bounce::service_next(access, device, port, disk, || {
++                    stop.load(Ordering::Acquire)
++                }) {
++                    Ok(crate::block_bounce::Step::Completed) => completed(),
++                    Ok(crate::block_bounce::Step::Empty) => break,
++                    Ok(crate::block_bounce::Step::Stopped) => return Ok(()),
++                    Err(fault) => return Err(fault),
++                }
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::block_bounce::{self, Disk};
++    use std::time::Duration;
++    struct FakeDisk {
++        access: Access,
++    }
++    impl Disk for FakeDisk {
++        fn capacity(&self) -> u64 {
++            1024 * 1024
++        }
++        fn read(&mut self, _: u64, data: &mut [u8]) -> Result<usize, ()> {
++            assert_eq!(self.access.active_leases(), 0);
++            data.fill(0x6b);
++            Ok(data.len())
++        }
++        fn write(&mut self, _: u64, data: &[u8]) -> Result<usize, ()> {
++            assert_eq!(self.access.active_leases(), 0);
++            assert!(data.iter().all(|b| *b == 0x4a));
++            Ok(data.len())
++        }
++        fn flush(&mut self) -> Result<(), ()> {
++            assert_eq!(self.access.active_leases(), 0);
++            Ok(())
++        }
++        fn id(&self) -> &[u8] {
++            b"fixture"
++        }
++    }
++    fn fixture(write: bool) -> (Access, Device, ProtectedQueue) {
++        let access = Access::new(1, 4, 1024 * 1024);
++        let device = access.register(0).unwrap();
++        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 65536)]).unwrap();
++        let mut queue = Queue::new(8);
++        queue.size = 8;
++        queue.ready = true;
++        queue.desc_table = GuestAddress(0x1000);
++        queue.avail_ring = GuestAddress(0x2000);
++        queue.used_ring = GuestAddress(0x3000);
++        let mut header = [0u8; 16];
++        header[..4].copy_from_slice(&(if write { 1u32 } else { 0u32 }).to_le_bytes());
++        memory.write_slice(&header, GuestAddress(0x4000)).unwrap();
++        memory
++            .write_slice(&vec![0x4a; 512], GuestAddress(0x5000))
++            .unwrap();
++        for (i, descriptor) in [
++            crate::virtio::Descriptor {
++                addr: 0x4000,
++                len: 16,
++                flags: 1,
++                next: 1,
++            },
++            crate::virtio::Descriptor {
++                addr: 0x5000,
++                len: 512,
++                flags: if write { 1 } else { 3 },
++                next: 2,
++            },
++            crate::virtio::Descriptor {
++                addr: 0x6000,
++                len: 1,
++                flags: 2,
++                next: 0,
++            },
++        ]
++        .into_iter()
++        .enumerate()
++        {
++            memory
++                .write_obj(descriptor, queue.desc_table.unchecked_add((i * 16) as u64))
++                .unwrap();
++        }
++        memory
++            .write_obj(0u16, queue.avail_ring.unchecked_add(4))
++            .unwrap();
++        memory
++            .write_obj(1u16, queue.avail_ring.unchecked_add(2))
++            .unwrap();
++        (
++            access.clone(),
++            device,
++            ProtectedQueue::new(memory, queue, access, device, 1).unwrap(),
++        )
++    }
++    #[test]
++    fn cowork_block_actual_queue_copies_then_io_has_no_guest_lease() {
++        for write in [false, true] {
++            let (a, d, mut p) = fixture(write);
++            let work = block_bounce::capture(&a, d, &mut p).unwrap().unwrap();
++            let frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++            assert_eq!(a.active_leases(), 0);
++            assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x5000));
++            frozen.resume().unwrap();
++            let mut completion = block_bounce::perform(work, &mut FakeDisk { access: a.clone() });
++            assert!(completion.outcome.success);
++            block_bounce::complete(&a, &mut completion, &mut p).unwrap();
++            assert_eq!(p.memory.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0);
++            if !write {
++                assert_eq!(p.memory.read_obj::<u8>(GuestAddress(0x5000)).unwrap(), 0x6b);
++            }
++        }
++    }
++    #[test]
++    fn cowork_block_frozen_completion_is_pinned_until_gate_reopens() {
++        let (a, d, mut p) = fixture(false);
++        let mut completion = block_bounce::perform(
++            block_bounce::capture(&a, d, &mut p).unwrap().unwrap(),
++            &mut FakeDisk { access: a.clone() },
++        );
++        let frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++        assert_eq!(
++            block_bounce::complete(&a, &mut completion, &mut p),
++            Err(Fault::Frozen)
++        );
++        assert_eq!(p.memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        frozen.resume().unwrap();
++        block_bounce::complete(&a, &mut completion, &mut p).unwrap();
++        assert_eq!(p.memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
++    }
++    #[test]
++    fn cowork_block_wrong_lease_device_cannot_parse_guest_ram() {
++        let (a, _d, mut p) = fixture(false);
++        let other = Access::new(1, 4, 1024 * 1024);
++        let token = other.register(0).unwrap();
++        let lease = other.begin(token).unwrap();
++        assert!(matches!(p.capture(&lease), Err(Fault::Stale)));
++        assert_eq!(a.active_leases(), 0);
++    }
++    #[test]
++    fn cowork_block_ring_pin_survives_empty_queue_and_completion() {
++        let (a, d, mut p) = fixture(false);
++        let mut c = block_bounce::perform(
++            block_bounce::capture(&a, d, &mut p).unwrap().unwrap(),
++            &mut FakeDisk { access: a.clone() },
++        );
++        block_bounce::complete(&a, &mut c, &mut p).unwrap();
++        assert!(block_bounce::capture(&a, d, &mut p).unwrap().is_none());
++        let frozen = a.freeze(1, Duration::from_secs(1)).unwrap();
++        for base in [0x1000, 0x2000, 0x3000] {
++            assert!(frozen.exclusions().iter().any(|r| r.gpa == base));
++        }
++        frozen.resume().unwrap();
++    }
++    #[test]
++    fn cowork_block_nonready_and_cyclic_queue_fail_before_disk_or_ack() {
++        for cyclic in [false, true] {
++            let (a, d, mut p) = fixture(false);
++            if cyclic {
++                p.memory
++                    .write_obj(
++                        crate::virtio::Descriptor {
++                            addr: 0x4000,
++                            len: 16,
++                            flags: 1,
++                            next: 0,
++                        },
++                        GuestAddress(0x1000),
++                    )
++                    .unwrap();
++            } else {
++                p.queue.ready = false;
++            }
++            assert!(block_bounce::capture(&a, d, &mut p).is_err());
++            assert_eq!(p.memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++            assert_eq!(a.active_leases(), 0);
++        }
++    }
++    #[test]
++    fn cowork_block_stale_completion_has_no_copy_or_used_ack() {
++        let (a, d, mut p) = fixture(false);
++        let mut c = block_bounce::perform(
++            block_bounce::capture(&a, d, &mut p).unwrap().unwrap(),
++            &mut FakeDisk { access: a.clone() },
++        );
++        a.reset_generation(d).unwrap();
++        assert_eq!(
++            block_bounce::complete(&a, &mut c, &mut p),
++            Err(Fault::Stale)
++        );
++        assert_eq!(p.memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        assert_eq!(p.memory.read_obj::<u8>(GuestAddress(0x5000)).unwrap(), 0x4a);
++    }
++    #[test]
++    fn cowork_block_unsupported_command_completes_unsupp_without_disk_io() {
++        let (a, d, mut p) = fixture(false);
++        p.memory.write_obj(99u32, GuestAddress(0x4000)).unwrap();
++        let mut c = block_bounce::perform(
++            block_bounce::capture(&a, d, &mut p).unwrap().unwrap(),
++            &mut FakeDisk { access: a.clone() },
++        );
++        assert!(c.outcome.unsupported);
++        block_bounce::complete(&a, &mut c, &mut p).unwrap();
++        assert_eq!(p.memory.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 2);
++        assert_eq!(p.memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
++    }
++    struct StalledDisk {
++        access: Access,
++        entered: std::sync::mpsc::SyncSender<()>,
++        release: std::sync::mpsc::Receiver<()>,
++    }
++    impl Disk for StalledDisk {
++        fn capacity(&self) -> u64 {
++            1024 * 1024
++        }
++        fn read(&mut self, _: u64, data: &mut [u8]) -> Result<usize, ()> {
++            assert_eq!(self.access.active_leases(), 0);
++            self.entered.send(()).unwrap();
++            self.release.recv_timeout(Duration::from_secs(2)).unwrap();
++            data.fill(0x37);
++            Ok(data.len())
++        }
++        fn write(&mut self, _: u64, _: &[u8]) -> Result<usize, ()> {
++            panic!("unexpected write")
++        }
++        fn flush(&mut self) -> Result<(), ()> {
++            panic!("unexpected flush")
++        }
++        fn id(&self) -> &[u8] {
++            b"fixture"
++        }
++    }
++    #[test]
++    fn cowork_block_actual_worker_stalled_io_freezes_and_defers_completion() {
++        let (a, d, mut p) = fixture(false);
++        let memory = p.memory.clone();
++        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
++        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
++        let (done_tx, done_rx) = std::sync::mpsc::channel();
++        let worker_access = a.clone();
++        let thread = std::thread::spawn(move || {
++            let mut disk = StalledDisk {
++                access: worker_access.clone(),
++                entered: entered_tx,
++                release: release_rx,
++            };
++            let result = block_bounce::service_next(&worker_access, d, &mut p, &mut disk, || false);
++            done_tx.send(result).unwrap();
++        });
++        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
++        let mut frozen = a.freeze(1, Duration::from_millis(100)).unwrap();
++        assert_eq!(a.active_leases(), 0);
++        assert!(frozen.exclusions().iter().any(|r| r.gpa == 0x5000));
++        release_tx.send(()).unwrap();
++        assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        frozen.begin_mutation().unwrap();
++        frozen.complete_mutation().unwrap();
++        frozen.resume().unwrap();
++        assert_eq!(
++            done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ok(block_bounce::Step::Completed)
++        );
++        thread.join().unwrap();
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
++        assert_eq!(memory.read_obj::<u8>(GuestAddress(0x5000)).unwrap(), 0x37);
++    }
++    #[test]
++    fn cowork_block_actual_worker_stop_after_io_never_completes_guest() {
++        let (a, d, mut p) = fixture(false);
++        let memory = p.memory.clone();
++        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
++        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
++        let worker_access = a.clone();
++        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let worker_stop = stop.clone();
++        let thread = std::thread::spawn(move || {
++            let mut disk = StalledDisk {
++                access: worker_access.clone(),
++                entered: entered_tx,
++                release: release_rx,
++            };
++            block_bounce::service_next(&worker_access, d, &mut p, &mut disk, || {
++                worker_stop.load(std::sync::atomic::Ordering::Acquire)
++            })
++        });
++        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
++        stop.store(true, std::sync::atomic::Ordering::Release);
++        release_tx.send(()).unwrap();
++        assert_eq!(thread.join().unwrap(), Ok(block_bounce::Step::Stopped));
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        assert_eq!(memory.read_obj::<u8>(GuestAddress(0x5000)).unwrap(), 0x4a);
++    }
++    #[test]
++    fn cowork_block_out_of_range_first_head_and_next_are_terminal_not_empty() {
++        for next in [false, true] {
++            let (a, d, mut p) = fixture(false);
++            if next {
++                p.memory
++                    .write_obj(
++                        crate::virtio::Descriptor {
++                            addr: 0x4000,
++                            len: 16,
++                            flags: 1,
++                            next: 8,
++                        },
++                        GuestAddress(0x1000),
++                    )
++                    .unwrap();
++            } else {
++                p.memory.write_obj(8u16, GuestAddress(0x2004)).unwrap();
++            }
++            assert!(matches!(
++                block_bounce::capture(&a, d, &mut p),
++                Err(Fault::InvalidRange)
++            ));
++            assert_eq!(p.memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
++        }
++    }
++    #[test]
++    fn cowork_block_actual_epoll_reset_reactivate_reuses_drained_stopfd_and_completes_io() {
++        use std::sync::{
++            atomic::{AtomicBool, Ordering},
++            Arc,
++        };
++        use utils::eventfd::{EventFd, EFD_NONBLOCK};
++        let stop_fd = EventFd::new(EFD_NONBLOCK).unwrap();
++        for cycle in 0..2 {
++            let (a, d, mut port) = fixture(false);
++            let memory = port.memory.clone();
++            let event = Arc::new(EventFd::new(EFD_NONBLOCK).unwrap());
++            let stop = Arc::new(AtomicBool::new(false));
++            let worker_event = event.clone();
++            let worker_stop = stop.clone();
++            let worker_fd = stop_fd.try_clone().unwrap();
++            let (tx, rx) = std::sync::mpsc::sync_channel(0);
++            let thread = std::thread::spawn(move || {
++                run_guarded_epoll(
++                    &a,
++                    d,
++                    &mut port,
++                    &mut FakeDisk { access: a.clone() },
++                    &worker_event,
++                    &worker_fd,
++                    &worker_stop,
++                    || tx.send(()).unwrap(),
++                )
++            });
++            event.write(1).unwrap();
++            rx.recv_timeout(Duration::from_secs(1)).unwrap();
++            assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
++            assert_eq!(memory.read_obj::<u8>(GuestAddress(0x5000)).unwrap(), 0x6b);
++            stop.store(true, Ordering::Release);
++            stop_fd.write(1).unwrap();
++            assert_eq!(thread.join().unwrap(), Ok(()));
++            assert!(stop_fd.read().is_err());
++            if cycle == 0 {
++                stop_fd.write(1).unwrap();
++                drain_stop_event(&stop_fd);
++            } // Actual reset's post-join drain handles a worker already gone.
++        }
++    }
++    #[test]
++    fn cowork_block_actual_epoll_stop_during_io_drains_reusable_fd() {
++        use std::sync::{
++            atomic::{AtomicBool, Ordering},
++            Arc,
++        };
++        use utils::eventfd::{EventFd, EFD_NONBLOCK};
++        let (a, d, mut port) = fixture(false);
++        let event = Arc::new(EventFd::new(EFD_NONBLOCK).unwrap());
++        let stop_fd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let worker_fd = stop_fd.try_clone().unwrap();
++        let stop = Arc::new(AtomicBool::new(false));
++        let worker_stop = stop.clone();
++        let worker_event = event.clone();
++        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
++        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
++        let thread = std::thread::spawn(move || {
++            run_guarded_epoll(
++                &a,
++                d,
++                &mut port,
++                &mut StalledDisk {
++                    access: a.clone(),
++                    entered: entered_tx,
++                    release: release_rx,
++                },
++                &worker_event,
++                &worker_fd,
++                &worker_stop,
++                || panic!("no completion after stop"),
++            )
++        });
++        event.write(1).unwrap();
++        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
++        stop.store(true, Ordering::Release);
++        stop_fd.write(1).unwrap();
++        release_tx.send(()).unwrap();
++        assert_eq!(thread.join().unwrap(), Ok(()));
++        assert!(stop_fd.read().is_err());
++    }
++    #[test]
++    fn cowork_block_terminal_access_fault_wakes_quiet_event_manager() {
++        use polly::event_manager::{EventManager, Subscriber};
++        use std::os::fd::AsRawFd;
++        use std::sync::{
++            atomic::{AtomicBool, Ordering},
++            Arc, Mutex,
++        };
++        use utils::{
++            epoll::{EpollEvent, EventSet},
++            eventfd::{EventFd, EFD_NONBLOCK},
++        };
++        struct Terminal {
++            fd: EventFd,
++            seen: Arc<AtomicBool>,
++        }
++        impl Subscriber for Terminal {
++            fn interest_list(&self) -> Vec<EpollEvent> {
++                vec![EpollEvent::new(EventSet::IN, self.fd.as_raw_fd() as u64)]
++            }
++            fn process(&mut self, _: &EpollEvent, _: &mut EventManager) {
++                self.fd.read().unwrap();
++                self.seen.store(true, Ordering::Release);
++            }
++        }
++        let (access, device, mut port) = fixture(false);
++        port.memory.write_obj(8u16, GuestAddress(0x2004)).unwrap();
++        let event = EventFd::new(EFD_NONBLOCK).unwrap();
++        let sender = event.try_clone().unwrap();
++        let seen = Arc::new(AtomicBool::new(false));
++        let mut manager = EventManager::new().unwrap();
++        manager
++            .add_subscriber(Arc::new(Mutex::new(Terminal {
++                fd: event,
++                seen: seen.clone(),
++            })))
++            .unwrap();
++        access.set_terminal_notifier(Arc::new(move || sender.write(1).unwrap()));
++
++        let queue_event = EventFd::new(EFD_NONBLOCK).unwrap();
++        queue_event.write(1).unwrap();
++        let stop_fd = EventFd::new(EFD_NONBLOCK).unwrap();
++        let thread = std::thread::spawn(move || {
++            run_guarded_epoll(
++                &access,
++                device,
++                &mut port,
++                &mut FakeDisk {
++                    access: access.clone(),
++                },
++                &queue_event,
++                &stop_fd,
++                &AtomicBool::new(false),
++                || panic!("malformed head cannot ACK"),
++            )
++        });
++        assert!(manager.run_with_timeout(1000).unwrap() > 0);
++        assert_eq!(thread.join().unwrap(), Err(Fault::InvalidRange));
++        assert!(seen.load(Ordering::Acquire));
++    }
++}
+diff --git a/src/devices/src/virtio/block/device.rs b/src/devices/src/virtio/block/device.rs
+index 9e83a77..69f0659 100644
+--- a/src/devices/src/virtio/block/device.rs
++++ b/src/devices/src/virtio/block/device.rs
+@@ -212,6 +212,8 @@ unsafe impl ByteValued for VirtioBlkConfig {}
+ 
+ /// Virtio device for exposing block level read/write operations on a host file.
+ pub struct Block {
++    cowork_access: Option<(crate::reclaim_access::Access,crate::reclaim_access::Device)>,
++    cowork_stop: Arc<std::sync::atomic::AtomicBool>,
+     // Host file and properties.
+     disk: Option<DiskProperties>,
+     cache_type: CacheType,
+@@ -336,6 +338,8 @@ impl Block {
+             acked_features: 0u64,
+             device_state: DeviceState::Inactive,
+             worker_thread: None,
++            cowork_access: None,
++            cowork_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
+         })
+     }
+@@ -350,6 +354,14 @@ impl Block {
+         self.partuuid.as_ref()
+     }
+ 
++    /// TEST-ONLY: restrict the supported request/resource profile and enable guarded worker.
++    pub fn enable_cowork_guard(&mut self,access:crate::reclaim_access::Access,device:crate::reclaim_access::Device){
++        self.cowork_access=Some((access,device));
++        self.avail_features &= !((1u64<<VIRTIO_BLK_F_DISCARD)|(1u64<<VIRTIO_BLK_F_WRITE_ZEROES)|(1u64<<VIRTIO_RING_F_EVENT_IDX));
++        self.avail_features |= 1u64<<VIRTIO_BLK_F_SIZE_MAX;
++        self.config.size_max=crate::block_bounce::CHUNK as u32;self.config.seg_max=16;
++    }
++
+     /// Specifies if this block device is read only.
+     pub fn is_read_only(&self) -> bool {
+         self.avail_features & (1u64 << VIRTIO_BLK_F_RO) != 0
+@@ -428,26 +440,34 @@ impl VirtioDevice for Block {
+             .map_err(|_| ActivateError::BadActivate)?,
+         };
+ 
+-        let worker = BlockWorker::new(
+-            blk_q,
+-            interrupt.clone(),
+-            mem.clone(),
+-            disk,
+-            self.worker_stopfd.try_clone().unwrap(),
+-        );
+-        self.worker_thread = Some(worker.run());
++        super::cowork::drain_stop_event(&self.worker_stopfd);
++        self.cowork_stop.store(false,std::sync::atomic::Ordering::Release);
++        if let Some((access,device))=&self.cowork_access {
++            let worker=super::cowork::GuardedBlockWorker::new(blk_q,mem.clone(),access.clone(),*device,disk,
++                self.worker_stopfd.try_clone().unwrap(),self.cowork_stop.clone(),interrupt.clone()).map_err(|_|ActivateError::BadActivate)?;
++            self.worker_thread=Some(worker.run());
++        } else {
++            let worker=BlockWorker::new(blk_q,interrupt.clone(),mem.clone(),disk,self.worker_stopfd.try_clone().unwrap());
++            self.worker_thread=Some(worker.run());
++        }
+ 
+         self.device_state = DeviceState::Activated(mem, interrupt);
+         Ok(())
+     }
+ 
+     fn reset(&mut self) -> bool {
++        self.cowork_stop.store(true,std::sync::atomic::Ordering::Release);
+         if let Some(worker) = self.worker_thread.take() {
+             let _ = self.worker_stopfd.write(1);
+             if let Err(e) = worker.join() {
+                 error!("error waiting for worker thread: {e:?}");
+             }
+         }
++        // Even a worker that exited before reset could not consume reset's later notification.
++        super::cowork::drain_stop_event(&self.worker_stopfd);
++        if let Some((access,device))=&mut self.cowork_access {
++            match access.reset_generation(*device){Ok(next)=>*device=next,Err(_)=>access.stop()}
++        }
+         self.device_state = DeviceState::Inactive;
+         true
+     }
+diff --git a/src/devices/src/virtio/block/mod.rs b/src/devices/src/virtio/block/mod.rs
+index c842bf2..d006918 100644
+--- a/src/devices/src/virtio/block/mod.rs
++++ b/src/devices/src/virtio/block/mod.rs
+@@ -3,6 +3,7 @@
+ 
+ pub mod device;
+ mod worker;
++pub(crate) mod cowork;
+ 
+ pub use self::device::{Block, CacheType};
+ 
+diff --git a/src/devices/src/virtio/queue.rs b/src/devices/src/virtio/queue.rs
+index 2fb7428..a44c59a 100644
+--- a/src/devices/src/virtio/queue.rs
++++ b/src/devices/src/virtio/queue.rs
+@@ -1141,3 +1141,130 @@ pub(crate) mod tests {
+         assert_eq!(x.len, 0x1000);
+     }
+ }
++
++impl Queue {
++    pub fn fixture_exclusions(&self, mem: &GuestMemoryMmap, buffers: bool) -> Result<Vec<(u64,u64)>, &'static str> {
++        use vm_memory::GuestMemoryRegion;
++        if !self.ready { return Ok(Vec::new()); }
++        let size=u64::from(self.actual_size());
++        let mut ranges=vec![(self.desc_table.raw_value(),16*size), (self.avail_ring.raw_value(),6+2*size), (self.used_ring.raw_value(),6+8*size)];
++        for &(start,len) in &ranges {
++            let region=mem.find_region(GuestAddress(start)).ok_or("queue region")?;
++            let end=start.checked_add(len).ok_or("queue overflow")?;
++            if len==0 || end>region.start_addr().raw_value().checked_add(region.len()).ok_or("region overflow")? { return Err("queue full span"); }
++        }
++        if !self.is_valid(mem) { return Err("queue configuration"); }
++        let pending=self.len(mem); if pending>self.actual_size() { return Err("queue pending count"); }
++        if buffers {
++            for offset in 0..pending {
++                let ring=4+2*((self.next_avail.0.wrapping_add(offset))%self.actual_size());
++                let index=mem.read_obj::<u16>(self.avail_ring.checked_add(u64::from(ring)).ok_or("ring offset")?).map_err(|_| "ring read")?;
++                let head=DescriptorChain::checked_new(mem,self.desc_table,self.actual_size(),u16::from_le(index)).ok_or("pending descriptor")?;
++                for descriptor in fixture_chain(head)? { if descriptor.len!=0 {ranges.push((descriptor.addr.raw_value(),u64::from(descriptor.len)));} }
++            }
++        }
++        Ok(ranges)
++    }
++}
++/// Validate the complete chain, including malformed NEXT/cycles/indirect flags; no silent truncation.
++pub fn fixture_chain(head: DescriptorChain<'_>) -> Result<Vec<DescriptorChain<'_>>, &'static str> {
++    let mut out=Vec::new(); let mut seen=std::collections::HashSet::new(); let mut next=Some(head);
++    while let Some(desc)=next {
++        if out.len()>=256 || !seen.insert(desc.index) || desc.flags & !3 != 0 { return Err("descriptor chain"); }
++        next=if desc.flags & 1 != 0 { Some(desc.next_descriptor().ok_or("descriptor NEXT")?) } else { None };
++        out.push(desc);
++    }
++    Ok(out)
++}
++
++impl Queue {
++    pub fn fixture_checked_pop<'a>(&mut self,mem:&'a GuestMemoryMmap)->Result<Option<DescriptorChain<'a>>,&'static str> {
++        self.fixture_checked_pop_after_snapshot(mem,||{})
++    }
++    fn fixture_checked_pop_after_snapshot<'a>(&mut self,mem:&'a GuestMemoryMmap,after:impl FnOnce())->Result<Option<DescriptorChain<'a>>,&'static str> {
++        self.fixture_validate_report(mem)?;
++        let pending=self.len(mem);if pending==0{return Ok(None);}
++        let offset=4+2*(self.next_avail.0%self.actual_size());
++        let address=self.avail_ring.checked_add(u64::from(offset)).ok_or("ring address")?;
++        fence(Ordering::Acquire);
++        let index=u16::from_le(mem.read_obj::<u16>(address).map_err(|_|"head read")?);
++        let head=DescriptorChain::checked_new(mem,self.desc_table,self.actual_size(),index).ok_or("malformed first head/NEXT")?;
++        after();
++        // A changed first head/pending count is a malformed transaction, never an empty kick.
++        if mem.read_obj::<u16>(address).map_err(|_|"head re-read")?!=index.to_le() || self.len(mem)!=pending{return Err("changing queue metadata");}
++        self.next_avail+=Wrapping(1);Ok(Some(head))
++    }
++    pub fn fixture_validate_report(&self,mem:&GuestMemoryMmap)->Result<(),&'static str> {
++        if !self.ready {return Err("FRQ not ready");}
++        self.fixture_exclusions(mem,false).map(|_|())
++    }
++    pub fn fixture_pop_reports(&mut self,mem:&GuestMemoryMmap)->Result<Vec<(u16,Vec<(u64,u64)>)>,&'static str> {
++        self.fixture_validate_report(mem)?; // BEFORE len/pop or any consumed head.
++        let mut batches=Vec::new();let mut heads=std::collections::HashSet::new();
++        while self.len(mem)>0 {
++            if batches.len()>=256 {return Err("report batch bound");}
++            let head=self.pop(mem).ok_or("report head")?;let index=head.index;
++            if !heads.insert(index) {return Err("duplicate report head");}
++            let mut ranges=Vec::new();
++            for desc in fixture_chain(head)? {
++                if !desc.is_write_only() {return Err("report writable flag");}
++                ranges.push((desc.addr.0,u64::from(desc.len)));
++            }
++            batches.push((index,ranges));
++        }
++        Ok(batches)
++    }
++    pub fn fixture_ack_reports(&mut self,mem:&GuestMemoryMmap,indices:&[u16])->Result<(),&'static str> {
++        self.fixture_validate_report(mem)?; // ACK also independently enforces active valid FRQ.
++        for &index in indices {if index>=self.actual_size() {return Err("ACK head index");}}
++        for &index in indices {self.add_used(mem,index,0).map_err(|_|"report ack")?;}
++        Ok(())
++    }
++}
++#[cfg(test)] mod cowork_frq_tests {
++    use super::*;
++    fn setup()->(Queue,GuestMemoryMmap) {
++        let mem=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),65536)]).unwrap();
++        let mut q=Queue::new(8);q.size=8;q.ready=true;q.desc_table=GuestAddress(0x1000);q.avail_ring=GuestAddress(0x2000);q.used_ring=GuestAddress(0x3000);(q,mem)
++    }
++    fn report(q:&Queue,mem:&GuestMemoryMmap,addr:u64,len:u32,flags:u16) {
++        mem.write_obj(Descriptor{addr,len,flags,next:0},q.desc_table).unwrap();
++        mem.write_obj(0u16,q.avail_ring.unchecked_add(4)).unwrap();mem.write_obj(1u16,q.avail_ring.unchecked_add(2)).unwrap();
++    }
++    fn used(q:&Queue,mem:&GuestMemoryMmap)->u16 {mem.read_obj(q.used_ring.unchecked_add(2)).unwrap()}
++    #[test] fn cowork_frq_nonready_nonzero_metadata_never_pops_or_acks() {
++        let(mut q,mem)=setup();report(&q,&mem,q.used_ring.0,16384,2);q.ready=false;
++        assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(q.next_avail.0,0);assert!(q.fixture_ack_reports(&mem,&[0]).is_err());assert_eq!(used(&q,&mem),0);
++    }
++    #[test] fn cowork_frq_pending_count_and_whole_ring_spans_before_pop() {
++        let(mut q,mem)=setup();mem.write_obj(9u16,q.avail_ring.unchecked_add(2)).unwrap();assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(q.next_avail.0,0);
++        let mem=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),8192),(GuestAddress(8192),8192)]).unwrap();q.size=8;q.desc_table=GuestAddress(8192-64);q.avail_ring=GuestAddress(10000);q.used_ring=GuestAddress(11000);
++        assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(q.next_avail.0,0);
++    }
++    #[test] fn cowork_frq_two_kicks_one_batch_second_has_no_invented_head() {
++        let(mut q,mem)=setup();report(&q,&mem,0x4000,16384,2);
++        let first=q.fixture_pop_reports(&mem).unwrap();assert_eq!(first,vec![(0,vec![(0x4000,16384)])]);q.fixture_ack_reports(&mem,&[0]).unwrap();assert_eq!(used(&q,&mem),1);
++        assert!(q.fixture_pop_reports(&mem).unwrap().is_empty());q.fixture_ack_reports(&mem,&[]).unwrap();assert_eq!(used(&q,&mem),1);
++    }
++    #[test] fn cowork_frq_ring_intersection_is_returnable_valid_chain_for_noop() {
++        let(mut q,mem)=setup();report(&q,&mem,q.used_ring.0,16384,2);let batch=q.fixture_pop_reports(&mem).unwrap();assert_eq!(batch[0].1[0].0,q.used_ring.0);
++        q.fixture_ack_reports(&mem,&[0]).unwrap();assert_eq!(used(&q,&mem),1);
++    }
++    #[test] fn cowork_frq_malformed_chain_never_acknowledged() {
++        for flags in [3,6,10] {let(mut q,mem)=setup();report(&q,&mem,0x4000,16384,flags);assert!(q.fixture_pop_reports(&mem).is_err());assert_eq!(used(&q,&mem),0);}
++    }
++    #[test] fn cowork_frq_zero_length_payload_is_structurally_valid_for_noop() {
++        let(mut q,mem)=setup();report(&q,&mem,0x4000,0,2);assert_eq!(q.fixture_pop_reports(&mem).unwrap(),vec![(0,vec![(0x4000,0)])]);q.fixture_ack_reports(&mem,&[0]).unwrap();assert_eq!(used(&q,&mem),1);
++    }
++}
++
++#[cfg(test)]mod cowork_pop_tests {
++ use super::*;
++ #[test]fn cowork_block_checked_pop_rejects_changed_metadata(){
++    for changed_head in [false,true]{
++      let memory=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),0x10000)]).unwrap();let mut queue=Queue::new(8);queue.ready=true;queue.size=8;queue.desc_table=GuestAddress(0x1000);queue.avail_ring=GuestAddress(0x2000);queue.used_ring=GuestAddress(0x3000);
++      memory.write_obj(crate::virtio::Descriptor{addr:0x4000,len:16,flags:0,next:0},GuestAddress(0x1000)).unwrap();memory.write_obj(1u16,GuestAddress(0x2002)).unwrap();memory.write_obj(0u16,GuestAddress(0x2004)).unwrap();
++      assert!(queue.fixture_checked_pop_after_snapshot(&memory,||memory.write_obj(if changed_head{7u16}else{2u16},GuestAddress(if changed_head{0x2004}else{0x2002})).unwrap()).is_err());assert_eq!(queue.next_avail.0,0);assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(),0);
++    }
++ }
++}
+diff --git a/src/devices/src/virtio/rng/device.rs b/src/devices/src/virtio/rng/device.rs
+index c008c61..2c468b5 100644
+--- a/src/devices/src/virtio/rng/device.rs
++++ b/src/devices/src/virtio/rng/device.rs
+@@ -156,3 +156,13 @@ impl VirtioDevice for Rng {
+         true
+     }
+ }
++
++impl Rng {
++    pub fn fixture_exclusions(&self) -> Result<Vec<(u64,u64)>, &'static str> {
++        let mut out=Vec::new();
++        if let DeviceState::Activated(mem,_) = &self.device_state {
++            for q in self.queues.as_ref().ok_or("rng queues")? { out.extend(q.queue.fixture_exclusions(mem,true)?); }
++        }
++        Ok(out)
++    }
++}
+diff --git a/src/hvf/src/lib.rs b/src/hvf/src/lib.rs
+index b2d6d0d..1d80ce5 100644
+--- a/src/hvf/src/lib.rs
++++ b/src/hvf/src/lib.rs
+@@ -240,6 +240,7 @@ pub fn check_nested_virt() -> Result<bool, Error> {
+     Ok(el2_supported)
+ }
+ 
++#[derive(Clone)]
+ pub struct HvfVm {}
+ 
+ static HVF: LazyLock<libloading::Library> = LazyLock::new(|| unsafe {
+@@ -809,3 +810,14 @@ impl HvfVcpu<'_> {
+         }
+     }
+ }
++
++impl HvfVm {
++    /// TEST-ONLY: caller must own the full mapping and hold an exact-epoch all-vCPU/device barrier.
++    pub unsafe fn fixture_unmap(&self, gpa: u64, len: usize) -> i32 {
++        hv_vm_unmap(gpa, len)
++    }
++    /// TEST-ONLY: same backing address and the initial map_memory RWX flags are required.
++    pub unsafe fn fixture_map(&self, hva: *mut core::ffi::c_void, gpa: u64, len: usize) -> i32 {
++        hv_vm_map(hva, gpa, len, (HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC).into())
++    }
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index a797fd1..6223134 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2869,6 +2869,32 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
+     KRUN_SUCCESS
+ }
+ 
++fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
++    let r=&cfg.vmr;
++    if !r.cowork_fixture_reclaim{return Ok(());}
++    if cfg!(any(feature="init-blob",feature="net",feature="gpu",feature="snd",feature="input",feature="efi",feature="tee"))
++        || r.cowork_guarded_block!=cfg!(feature="blk")
++        || cfg.gpu_virgl_flags.is_some() || cfg.gpu_shm_size.is_some() || cfg.render_server_fd.is_some()
++        || !matches!(cfg.vsock_config,VsockConfig::Disabled) || !r.disable_implicit_console || !r.virtio_consoles.is_empty()
++        || r.serial_consoles.len()!=1 || !r.fs.is_empty() || r.external_kernel.is_none() || r.kernel_bundle.is_some()
++        || r.firmware_config.is_some() || r.nested_enabled || r.gpu_virgl_flags.is_some() || r.gpu_shm_size.is_some()
++        || r.gpu_render_server_fd.is_some() || r.vm_config().vcpu_count!=Some(2)
++        || r.vm_config().mem_size_mib.is_none_or(|m|m>1024) {return Err(());}
++    #[cfg(feature="blk")]
++    cowork_validate_blocks(r.cowork_guarded_block,r.vm_config().mem_size_mib,&cfg.get_block_cfg())?;
++    Ok(())
++}
++#[cfg(feature="blk")]
++fn cowork_validate_blocks(guarded:bool,memory:Option<usize>,disks:&[BlockDeviceConfig])->Result<(),()> {
++    if guarded && (memory!=Some(768) || disks.len()!=1 || disks[0].disk_image_format!=ImageType::Raw
++        || disks[0].cache_type!=CacheType::Writeback || disks[0].sync_mode!=SyncMode::Full) {return Err(());}Ok(())
++}
++#[cfg(feature="blk")]
++fn cowork_construct_blocks(guarded:bool,memory:Option<usize>,configs:Vec<BlockDeviceConfig>,mut opener:impl FnMut(BlockDeviceConfig)->Result<(),()>)->Result<(),()> {
++    cowork_validate_blocks(guarded,memory,&configs)?;
++    for cfg in configs {opener(cfg)?;}Ok(())
++}
++
+ #[no_mangle]
+ #[allow(unreachable_code)]
+ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+@@ -2884,6 +2910,11 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     #[cfg(feature = "aws-nitro")]
+     return krun_start_enter_nitro(ctx_id);
+ 
++    {
++        let contexts=CTX_MAP.lock().unwrap();
++        let Some(cfg)=contexts.get(&ctx_id) else{return -libc::ENOENT;};
++        if cowork_validate_profile(cfg).is_err(){return -libc::EINVAL;}
++    } // Admit BEFORE any kernel payload loader, disk opener or VM allocation.
+     let mut event_manager = match EventManager::new() {
+         Ok(em) => em,
+         Err(e) => {
+@@ -2914,13 +2945,12 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     }
+ 
+     #[cfg(feature = "blk")]
+-    for block_cfg in ctx_cfg.get_block_cfg() {
+-        if ctx_cfg.vmr.add_block_device(block_cfg).is_err() {
+-            error!("Error configuring virtio-blk for block");
+-            return -libc::EINVAL;
+-        }
++    {
++        let guarded=ctx_cfg.vmr.cowork_guarded_block;
++        let memory=ctx_cfg.vmr.vm_config().mem_size_mib;
++        let configs=ctx_cfg.get_block_cfg();
++        if cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|())).is_err(){return -libc::EINVAL;}
+     }
+-
+     /*
+      * Before krun_start_enter() is called in an encrypted context, the TEE
+      * config must have been set via krun_set_tee_config_file(). If the TEE
+@@ -2977,7 +3007,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+             let vsock_device_config = VsockDeviceConfig {
+                 vsock_id: "vsock0".to_string(),
+                 guest_cid: 3,
+-                host_port_map: ctx_cfg.tsi_port_map,
++                host_port_map: ctx_cfg.tsi_port_map.take(),
+                 unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
+                 tsi_flags: *tsi_flags,
+             };
+@@ -2995,7 +3025,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+ 
+             if enable_tsi || has_ipc_map {
+                 let (tsi_flags, host_port_map) = if enable_tsi {
+-                    (TsiFlags::HIJACK_INET, ctx_cfg.tsi_port_map)
++                    (TsiFlags::HIJACK_INET, ctx_cfg.tsi_port_map.take())
+                 } else {
+                     (TsiFlags::empty(), None)
+                 };
+@@ -3025,10 +3055,12 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     #[cfg(feature = "snd")]
+     ctx_cfg.vmr.set_snd_device(ctx_cfg.enable_snd);
+ 
+-    if let Some(console_output) = ctx_cfg.console_output {
++    if let Some(console_output) = ctx_cfg.console_output.take() {
+         ctx_cfg.vmr.set_console_output(console_output);
+     }
+ 
++    // Re-check the normalized resources immediately before any identity change/allocation.
++    if cowork_validate_profile(&ctx_cfg).is_err(){return -libc::EINVAL;}
+     if let Some(gid) = ctx_cfg.vmm_gid {
+         if unsafe { libc::setgid(gid) } != 0 {
+             error!("Failed to set gid {gid}");
+@@ -3072,6 +3104,8 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     vmm::worker::start_worker_thread(_vmm.clone(), _receiver.clone()).unwrap();
+ 
+     loop {
++        #[cfg(target_os = "macos")]
++        vmm::cowork_reclaim_tick(&_vmm);
+         match event_manager.run() {
+             Ok(_) => {}
+             Err(e) => {
+@@ -3158,3 +3192,38 @@ mod test_shutdown_eventfd {
+         assert_eq!(krun_free_ctx(ctx), KRUN_SUCCESS);
+     }
+ }
++
++#[no_mangle]
++pub extern "C" fn krun_enable_cowork_fixture_reclaim(ctx_id: u32) -> i32 {
++    match CTX_MAP.lock().unwrap().get_mut(&ctx_id) {
++        Some(cfg) => { cfg.vmr.cowork_fixture_reclaim = true; 0 },
++        None => -libc::ENOENT,
++    }
++}
++
++#[no_mangle]
++pub extern "C" fn krun_enable_cowork_block_fixture_reclaim(ctx_id:u32)->i32 {
++    #[cfg(not(feature="blk"))] {let _=ctx_id;return -libc::EINVAL;}
++    #[cfg(feature="blk")]
++    match CTX_MAP.lock().unwrap().get_mut(&ctx_id){Some(cfg)=>{cfg.vmr.cowork_fixture_reclaim=true;cfg.vmr.cowork_guarded_block=true;0},None=>-libc::ENOENT}
++}
++
++#[cfg(all(test,feature="blk",target_os="macos"))]mod cowork_admission_tests {
++ use super::*;
++ fn disk()->BlockDeviceConfig{BlockDeviceConfig{block_id:"fixture".into(),cache_type:CacheType::Writeback,disk_image_path:"/NO-OPEN-fixture-only".into(),disk_image_format:ImageType::Raw,is_disk_read_only:false,direct_io:false,sync_mode:SyncMode::Full}}
++ fn fixture()->u32{let id=CTX_IDS.fetch_add(1,Ordering::SeqCst) as u32;let mut cfg=ContextConfig::default();cfg.vmr.cowork_fixture_reclaim=true;cfg.vmr.cowork_guarded_block=true;cfg.vsock_config=VsockConfig::Disabled;cfg.vmr.disable_implicit_console=true;cfg.vmr.serial_consoles.push(SerialConsoleConfig{input_fd:-1,output_fd:-1});cfg.vmr.external_kernel=Some(ExternalKernel::default());cfg.vmr.set_vm_config(&VmConfig{vcpu_count:Some(2),mem_size_mib:Some(768),..Default::default()}).unwrap();cfg.block_cfgs.push(disk());assert!(cowork_validate_profile(&cfg).is_ok());CTX_MAP.lock().unwrap().insert(id,cfg);id}
++ #[test]fn cowork_admission_public_gpu_setters_rejected_before_any_vm(){
++  for option in 0..3{let id=fixture();let status=unsafe{match option{0=>krun_set_gpu_options(id,1),1=>krun_set_gpu_options2(id,1,8*1024*1024*1024),_=>krun_set_gpu_render_server_fd(id,1)}};assert_eq!(status,0);assert_eq!(krun_start_enter(id),-libc::EINVAL);assert_eq!(krun_free_ctx(id),0);}
++ }
++ #[test]fn cowork_admission_normalized_gpu_resources_rejected(){
++  for option in 0..3{let id=fixture();{let mut map=CTX_MAP.lock().unwrap();let cfg=map.get_mut(&id).unwrap();match option{0=>cfg.vmr.set_gpu_virgl_flags(1),1=>cfg.vmr.set_gpu_shm_size(8*1024*1024*1024),_=>cfg.vmr.set_gpu_render_server_fd(1)};assert!(cowork_validate_profile(cfg).is_err());}assert_eq!(krun_start_enter(id),-libc::EINVAL);assert_eq!(krun_free_ctx(id),0);}
++ }
++ #[test]fn cowork_admission_rejected_disks_never_invoke_actual_construction_callback(){
++  for option in 0..6{let mut cfg=disk();let mut configs=vec![];match option{0=>cfg.disk_image_format=ImageType::Qcow2,1=>cfg.disk_image_format=ImageType::Vmdk,2=>cfg.cache_type=CacheType::Unsafe,3=>cfg.sync_mode=SyncMode::None,4=>configs.push(disk()),_=>{}};if option!=5{configs.push(cfg);}let mut calls=0;assert!(cowork_construct_blocks(true,Some(768),configs,|_|{calls+=1;Ok(())}).is_err());assert_eq!(calls,0);}
++  let mut calls=0;assert!(cowork_construct_blocks(true,Some(768),vec![disk()],|_|{calls+=1;Ok(())}).is_ok());assert_eq!(calls,1);
++ }
++ #[test]fn cowork_admission_actual_mapping_ack_gate_stopped_freeze_prevents_all_operations(){
++  let access=devices::reclaim_access::Access::new(1,4,65536);access.register(0).unwrap();let mut freeze=access.freeze(1,std::time::Duration::from_secs(1)).unwrap();freeze.begin_mutation().unwrap();let calls=std::cell::Cell::new(0);assert!(vmm::cowork_checked_mapping_operation(&access,1,||calls.set(calls.get()+1)).is_ok());access.stop();for _ in ["unmap","replace","map","FRQ ACK"]{assert!(vmm::cowork_checked_mapping_operation(&access,1,||calls.set(calls.get()+1)).is_err());}assert_eq!(calls.get(),1);assert!(freeze.complete_mutation().is_err());assert!(freeze.resume().is_err());
++ }
++
++}
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 72831f1..ba063a5 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -97,7 +97,7 @@ use vm_memory::Bytes;
+ use vm_memory::GuestMemory;
+ #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+ use vm_memory::GuestRegionMmap;
+-use vm_memory::{GuestAddress, GuestMemoryMmap};
++use vm_memory::{GuestAddress, GuestMemoryMmap, GuestMemoryRegion};
+ 
+ #[cfg(all(target_arch = "aarch64", feature = "efi"))]
+ #[allow(dead_code)]
+@@ -958,7 +958,26 @@ pub fn build_microvm(
+     // We use this atomic to record the exit code set by init/init.c in the VM.
+     let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+ 
++    #[cfg(all(target_os="macos",feature="blk"))]
++    let cowork_access=if vm_resources.cowork_guarded_block {
++        let access=devices::reclaim_access::Access::new(1,16,8*1024*1024);
++        let terminal_fd=exit_evt.try_clone().map_err(Error::EventFd).map_err(StartMicrovmError::Internal)?;
++        let terminal_code=exit_code.clone();
++        access.set_terminal_notifier(Arc::new(move||{crate::cowork_fixture::mark_stop();terminal_code.store(77,std::sync::atomic::Ordering::SeqCst);let _=terminal_fd.write(1);}));Some(access)
++    }else{None};
+     let mut vmm = Vmm {
++        #[cfg(target_os = "macos")]
++        cowork_owned: payload_config.cowork_owned,
++        #[cfg(target_os = "macos")]
++        cowork_enabled: vm_resources.cowork_fixture_reclaim,
++        #[cfg(target_os = "macos")]
++        cowork_epoch: 0,
++        #[cfg(all(target_os="macos",feature="blk"))]
++        cowork_access,
++        #[cfg(target_os = "macos")]
++        cowork_balloon: None,
++        #[cfg(target_os = "macos")]
++        cowork_rng: None,
+         guest_memory,
+         arch_memory_info,
+         kernel_cmdline,
+@@ -1428,6 +1447,8 @@ fn load_payload(
+ }
+ 
+ pub struct PayloadConfig {
++    #[cfg(target_os = "macos")]
++    cowork_owned: Vec<crate::cowork_ranges::OwnedRegion>,
+     entry_addr: GuestAddress,
+     initrd_config: Option<InitrdConfig>,
+     kernel_cmdline: Option<String>,
+@@ -1517,6 +1538,14 @@ pub fn create_guest_memory(
+     let guest_mem = GuestMemoryMmap::from_ranges(&arch_mem_regions)
+         .map_err(|e| StartMicrovmError::GuestMemoryMmap(format!("{e:?}")))?;
+ 
++    #[cfg(target_os = "macos")]
++    let cowork_owned = if vm_resources.cowork_fixture_reclaim {
++        assert!(matches!(payload, Payload::ExternalKernel(_)) && vm_resources.fs.is_empty()
++            && vm_resources.gpu_shm_size.is_none());
++        guest_mem.iter().map(|r| crate::cowork_ranges::OwnedRegion {
++            gpa: r.start_addr().raw_value(), hva: r.as_ptr() as u64, len: r.len(), private_anonymous: true,
++        }).collect()
++    } else { Vec::new() };
+     let (guest_mem, entry_addr, initrd_config, cmdline) =
+         load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
+ 
+@@ -1531,6 +1560,8 @@ pub fn create_guest_memory(
+     }
+ 
+     let payload_config = PayloadConfig {
++        #[cfg(target_os = "macos")]
++        cowork_owned,
+         entry_addr,
+         initrd_config,
+         kernel_cmdline: cmdline.clone(),
+@@ -2221,6 +2252,8 @@ fn attach_balloon_device(
+         .add_subscriber(balloon.clone())
+         .map_err(RegisterEvent)?;
+ 
++    #[cfg(target_os = "macos")]
++    { balloon.lock().unwrap().fixture_reclaim = vmm.cowork_enabled; vmm.cowork_balloon = Some(balloon.clone()); }
+     let id = String::from(balloon.lock().unwrap().id());
+ 
+     // The device mutex mustn't be locked here otherwise it will deadlock.
+@@ -2237,7 +2270,12 @@ fn attach_block_devices(
+ ) -> std::result::Result<(), StartMicrovmError> {
+     use self::StartMicrovmError::*;
+ 
+-    for block in block_devs.list.iter() {
++    for (index,block) in block_devs.list.iter().enumerate() {
++        #[cfg(target_os="macos")]
++        if let Some(access)=&vmm.cowork_access {
++            let device=access.register(index as u64).expect("guarded block registration");
++            block.lock().unwrap().enable_cowork_guard(access.clone(),device);
++        }
+         let id = String::from(block.lock().unwrap().id());
+ 
+         // The device mutex mustn't be locked here otherwise it will deadlock.
+@@ -2261,6 +2299,8 @@ fn attach_rng_device(
+         .add_subscriber(rng.clone())
+         .map_err(RegisterEvent)?;
+ 
++    #[cfg(target_os = "macos")]
++    { vmm.cowork_rng = Some(rng.clone()); }
+     let id = String::from(rng.lock().unwrap().id());
+ 
+     // The device mutex mustn't be locked here otherwise it will deadlock.
+diff --git a/src/vmm/src/cowork_barrier.rs b/src/vmm/src/cowork_barrier.rs
+new file mode 100644
+index 0000000..b005b36
+--- /dev/null
++++ b/src/vmm/src/cowork_barrier.rs
+@@ -0,0 +1,97 @@
++//! Exact-epoch coordinator state. No OS/HVF calls; runtime must supply the actual immutable roster.
++use std::collections::BTreeSet;
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Phase { Awaiting, Parked, Replacing, Mapped, Acknowledged, Resuming, Finished, Stopped, Failed }
++#[derive(Debug)]
++pub struct Barrier {
++    pub epoch: u64,
++    phase: Phase,
++    roster: BTreeSet<u64>,
++    paused: BTreeSet<u64>,
++    resumed: BTreeSet<u64>,
++}
++impl Barrier {
++    pub fn new(epoch:u64, roster:&[u64])->Result<Self,&'static str> {
++        let set:BTreeSet<_>=roster.iter().copied().collect();
++        if epoch==0 || set.is_empty() || set.len()!=roster.len() || set.contains(&u64::MAX) { return Err("invalid epoch/roster"); }
++        Ok(Self{epoch,phase:Phase::Awaiting,roster:set,paused:BTreeSet::new(),resumed:BTreeSet::new()})
++    }
++    pub fn phase(&self)->Phase { self.phase }
++    pub fn pause_ack(&mut self, cpu:u64, epoch:u64)->Result<(),&'static str> {
++        if self.phase!=Phase::Awaiting || epoch!=self.epoch || !self.roster.contains(&cpu) || !self.paused.insert(cpu) { self.fail(); return Err("invalid pause ACK"); }
++        if self.paused==self.roster { self.phase=Phase::Parked; }
++        Ok(())
++    }
++    pub fn begin_replacement(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Parked { return Err("CPUs not parked"); }
++        self.phase=Phase::Replacing; Ok(())
++    }
++    pub fn mappings_complete(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Replacing { return Err("invalid mapping state"); }
++        self.phase=Phase::Mapped; Ok(())
++    }
++    pub fn prepare_noop(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Parked { return Err("CPUs not parked for no-op"); }
++        self.phase=Phase::Mapped; Ok(())
++    }
++    pub fn acknowledge_used(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Mapped { return Err("mappings incomplete"); }
++        self.phase=Phase::Acknowledged; Ok(())
++    }
++    pub fn begin_resume(&mut self)->Result<(),&'static str> {
++        if self.phase!=Phase::Acknowledged { return Err("used ring not acknowledged"); }
++        self.phase=Phase::Resuming; Ok(())
++    }
++    pub fn resume_ack(&mut self,cpu:u64,epoch:u64)->Result<(),&'static str> {
++        if self.phase!=Phase::Resuming || epoch!=self.epoch || !self.roster.contains(&cpu) || !self.resumed.insert(cpu) { self.fail(); return Err("invalid resume ACK"); }
++        if self.resumed==self.roster { self.phase=Phase::Finished; }
++        Ok(())
++    }
++    pub fn stop(&mut self) { self.phase=Phase::Stopped; }
++    pub fn fail(&mut self) { if self.phase!=Phase::Stopped { self.phase=Phase::Failed; } }
++}
++
++#[cfg(test)] mod tests {
++    use super::*;
++    #[test] fn exact_roster_and_epoch_before_any_mapping() {
++        let mut b=Barrier::new(7,&[10,20,30]).unwrap();
++        assert!(b.begin_replacement().is_err());
++        b.pause_ack(10,7).unwrap();
++        b.pause_ack(20,7).unwrap(); assert!(b.begin_replacement().is_err());
++        b.pause_ack(30,7).unwrap(); b.begin_replacement().unwrap();
++        assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        b.mappings_complete().unwrap(); b.acknowledge_used().unwrap(); b.begin_resume().unwrap();
++        for id in [10,20,30] { b.resume_ack(id,7).unwrap(); }
++        assert_eq!(b.phase(),Phase::Finished);
++    }
++    #[test] fn stale_unknown_duplicate_acks_permanently_forbid_mutation() {
++        for (id,epoch) in [(10,6),(40,7),(10,7)] {
++            let mut b=Barrier::new(7,&[10,20,30]).unwrap(); b.pause_ack(10,7).unwrap();
++            assert!(b.pause_ack(id,epoch).is_err()); assert_eq!(b.phase(),Phase::Failed);
++            assert!(b.begin_replacement().is_err()); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn stop_wins_over_every_pause_or_mapping_phase() {
++        for position in 0..6 {
++            let mut b=Barrier::new(1,&[0]).unwrap();
++            if position>=1 { b.pause_ack(0,1).unwrap(); }
++            if position>=2 { b.begin_replacement().unwrap(); }
++            if position>=3 { b.mappings_complete().unwrap(); }
++            if position>=4 { b.acknowledge_used().unwrap(); }
++            if position>=5 { b.begin_resume().unwrap(); }
++            b.stop();
++            assert!(b.pause_ack(0,1).is_err()); assert!(b.begin_replacement().is_err());
++            assert!(b.mappings_complete().is_err()); assert!(b.acknowledge_used().is_err());
++            assert!(b.begin_resume().is_err()); assert!(b.resume_ack(0,1).is_err());
++        }
++    }
++    #[test] fn partial_failure_never_acknowledges_or_resumes() {
++        let mut b=Barrier::new(1,&[0,1]).unwrap();
++        b.pause_ack(0,1).unwrap(); b.pause_ack(1,1).unwrap(); b.begin_replacement().unwrap(); b.fail();
++        assert!(b.mappings_complete().is_err()); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++    }
++    #[test] fn unknown_or_duplicate_roster_refused() {
++        for ids in [&[][..],&[0,0][..],&[u64::MAX][..]] { assert!(Barrier::new(1,ids).is_err()); }
++        assert!(Barrier::new(0,&[0]).is_err());
++    }
++}
+diff --git a/src/vmm/src/cowork_control.rs b/src/vmm/src/cowork_control.rs
+new file mode 100644
+index 0000000..749e976
+--- /dev/null
++++ b/src/vmm/src/cowork_control.rs
+@@ -0,0 +1,331 @@
++//! Actual control/wait functions used by the native candidate, testable without creating an HVF VM.
++use crossbeam_channel::{Receiver, Sender, TryRecvError};
++#[cfg(test)]
++use std::time::Duration;
++use std::time::Instant;
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Meaning {
++    Pause(u64),
++    Resume(u64),
++    Other,
++}
++pub trait Event {
++    fn meaning(&self) -> Meaning;
++}
++pub trait Response {
++    fn paused(epoch: u64) -> Self;
++    fn resumed(epoch: u64) -> Self;
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Fault {
++    ControlClosed,
++    AckClosed,
++    Epoch,
++    ResumeWithoutPause,
++    BootClosed,
++    IrqClosed,
++}
++
++pub fn handle<E: Event, A: Response>(
++    event: E,
++    control: &Receiver<E>,
++    ack: &Sender<A>,
++) -> Result<(), Fault> {
++    match event.meaning() {
++        Meaning::Pause(epoch) => {
++            ack.send(A::paused(epoch)).map_err(|_| Fault::AckClosed)?;
++            match control.recv().map_err(|_| Fault::ControlClosed)?.meaning() {
++                Meaning::Resume(resume) if resume == epoch => {
++                    ack.send(A::resumed(epoch)).map_err(|_| Fault::AckClosed)?;
++                    Ok(())
++                }
++                _ => Err(Fault::Epoch),
++            }
++        }
++        Meaning::Resume(_) => Err(Fault::ResumeWithoutPause),
++        Meaning::Other => Ok(()),
++    }
++}
++pub fn drain<E: Event, A: Response>(control: &Receiver<E>, ack: &Sender<A>) -> Result<(), Fault> {
++    loop {
++        match control.try_recv() {
++            Ok(event) => handle(event, control, ack)?,
++            Err(TryRecvError::Empty) => return Ok(()),
++            Err(TryRecvError::Disconnected) => return Err(Fault::ControlClosed),
++        }
++    }
++}
++pub fn boot<E: Event, A: Response>(
++    entry: &Receiver<u64>,
++    control: &Receiver<E>,
++    ack: &Sender<A>,
++) -> Result<u64, Fault> {
++    loop {
++        crossbeam_channel::select! {
++            recv(entry) -> value => return value.map_err(|_|Fault::BootClosed),
++            recv(control) -> event => handle(event.map_err(|_|Fault::ControlClosed)?,control,ack)?,
++        }
++    }
++}
++#[cfg(test)]
++pub fn wfe<E: Event, A: Response>(
++    irq: &Receiver<u32>,
++    control: &Receiver<E>,
++    ack: &Sender<A>,
++    timeout: Option<Duration>,
++    should_wait: impl Fn() -> bool,
++) -> Result<(), Fault> {
++    wfe_deadline(
++        irq,
++        control,
++        ack,
++        timeout.map(|d| Instant::now() + d),
++        should_wait,
++    )
++}
++/// Deadline must be captured before step() can ACK a pause after emulation.
++pub fn wfe_deadline<E: Event, A: Response>(
++    irq: &Receiver<u32>,
++    control: &Receiver<E>,
++    ack: &Sender<A>,
++    deadline: Option<Instant>,
++    should_wait: impl Fn() -> bool,
++) -> Result<(), Fault> {
++    loop {
++        if !should_wait() {
++            return Ok(());
++        }
++        if let Some(deadline) = deadline {
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            if remaining.is_zero() {
++                return Ok(());
++            }
++            crossbeam_channel::select! {
++                recv(irq) -> value => { value.map_err(|_|Fault::IrqClosed)?;return Ok(()); },
++                recv(control) -> event => handle(event.map_err(|_|Fault::ControlClosed)?,control,ack)?,
++                default(remaining) => return Ok(()),
++            }
++        } else {
++            crossbeam_channel::select! {
++                recv(irq) -> value => { value.map_err(|_|Fault::IrqClosed)?;return Ok(()); },
++                recv(control) -> event => handle(event.map_err(|_|Fault::ControlClosed)?,control,ack)?,
++            }
++        }
++    }
++}
++/// Called around the actual MMIO/emulation callback. Its borrowed guards end before post-step ACK.
++pub fn step<E: Event, A: Response, T>(
++    control: &Receiver<E>,
++    ack: &Sender<A>,
++    emulate: impl FnOnce() -> T,
++    is_stop: impl FnOnce(&T) -> bool,
++) -> Result<T, Fault> {
++    drain(control, ack)?;
++    let result = emulate();
++    if !is_stop(&result) {
++        drain(control, ack)?;
++    }
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crossbeam_channel::unbounded;
++    use std::sync::{Arc, Mutex};
++    use std::thread;
++    impl Event for Meaning {
++        fn meaning(&self) -> Meaning {
++            *self
++        }
++    }
++    #[derive(Debug, PartialEq, Eq)]
++    enum Ack {
++        Pause(u64),
++        Resume(u64),
++    }
++    impl Response for Ack {
++        fn paused(e: u64) -> Self {
++            Self::Pause(e)
++        }
++        fn resumed(e: u64) -> Self {
++            Self::Resume(e)
++        }
++    }
++    #[test]
++    fn actual_boot_wait_parks_then_preserves_boot_arrival() {
++        let (entry, boot_rx) = unbounded();
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        send.send(Meaning::Pause(11)).unwrap();
++        let worker = thread::spawn(move || boot(&boot_rx, &control, &acks));
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Pause(11)
++        );
++        entry.send(0x8100).unwrap();
++        assert!(response.try_recv().is_err());
++        send.send(Meaning::Resume(11)).unwrap();
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Resume(11)
++        );
++        assert_eq!(worker.join().unwrap(), Ok(0x8100));
++    }
++    #[test]
++    fn actual_wfe_preserves_irq_received_while_parked() {
++        let (irq, irq_rx) = unbounded();
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        send.send(Meaning::Pause(12)).unwrap();
++        let worker = thread::spawn(move || wfe(&irq_rx, &control, &acks, None, || true));
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Pause(12)
++        );
++        irq.send(3).unwrap();
++        send.send(Meaning::Resume(12)).unwrap();
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Resume(12)
++        );
++        assert_eq!(worker.join().unwrap(), Ok(()));
++    }
++    #[test]
++    fn actual_wfe_deadline_is_not_restarted_after_pause() {
++        let (_irq, irq_rx) = unbounded();
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        let (done, completed) = unbounded();
++        send.send(Meaning::Pause(13)).unwrap();
++        let worker = thread::spawn(move || {
++            let result = wfe(
++                &irq_rx,
++                &control,
++                &acks,
++                Some(Duration::from_millis(150)),
++                || true,
++            );
++            done.send(result).unwrap();
++        });
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Pause(13)
++        );
++        thread::sleep(Duration::from_millis(180));
++        send.send(Meaning::Resume(13)).unwrap();
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Resume(13)
++        );
++        assert_eq!(
++            completed.recv_timeout(Duration::from_millis(100)).unwrap(),
++            Ok(())
++        );
++        worker.join().unwrap();
++    }
++    #[test]
++    fn actual_step_unlocks_mmio_before_pause_ack() {
++        let device = Arc::new(Mutex::new(()));
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        let (entered, at_mmio) = unbounded();
++        let (finish, may_finish) = unbounded();
++        let cpu_device = device.clone();
++        let worker = thread::spawn(move || {
++            step(
++                &control,
++                &acks,
++                || {
++                    let _guard = cpu_device.lock().unwrap();
++                    entered.send(()).unwrap();
++                    may_finish.recv().unwrap();
++                    42
++                },
++                |_| false,
++            )
++        });
++        at_mmio.recv_timeout(Duration::from_secs(1)).unwrap();
++        send.send(Meaning::Pause(14)).unwrap();
++        assert!(response.try_recv().is_err());
++        finish.send(()).unwrap();
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Pause(14)
++        );
++        assert!(device.try_lock().is_ok());
++        send.send(Meaning::Resume(14)).unwrap();
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Resume(14)
++        );
++        assert_eq!(worker.join().unwrap(), Ok(42));
++    }
++    #[test]
++    fn actual_step_stop_bypasses_queued_pause_ack() {
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        send.send(Meaning::Other).unwrap();
++        let result = step(
++            &control,
++            &acks,
++            || {
++                send.send(Meaning::Pause(15)).unwrap();
++                true
++            },
++            |stop| *stop,
++        );
++        assert_eq!(result, Ok(true));
++        assert!(response.try_recv().is_err());
++    }
++    #[test]
++    fn actual_handler_rejects_wrong_resume_epoch() {
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        send.send(Meaning::Resume(17)).unwrap();
++        assert_eq!(
++            handle(Meaning::Pause(16), &control, &acks),
++            Err(Fault::Epoch)
++        );
++        assert_eq!(response.recv().unwrap(), Ack::Pause(16));
++        assert!(response.try_recv().is_err());
++    }
++    #[test]
++    fn actual_wfe_deadline_captured_before_post_emulation_park_does_not_restart() {
++        let (irq, irq_rx) = unbounded();
++        let (send, control) = unbounded();
++        let (acks, response) = unbounded::<Ack>();
++        let (exited, finished) = unbounded();
++        let pause = send.clone();
++        let worker = thread::spawn(move || {
++            let deadline = step(
++                &control,
++                &acks,
++                || {
++                    let deadline = Instant::now() + Duration::from_millis(20);
++                    pause.send(Meaning::Pause(19)).unwrap();
++                    deadline
++                },
++                |_| false,
++            )
++            .unwrap();
++            wfe_deadline(&irq_rx, &control, &acks, Some(deadline), || true).unwrap();
++            assert_eq!(irq_rx.try_recv(), Ok(7));
++            exited.send(()).unwrap();
++        });
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Pause(19)
++        );
++        thread::sleep(Duration::from_millis(40));
++        // A queued IRQ remains unconsumed if the absolute deadline expired while parked.
++        irq.send(7).unwrap();
++        send.send(Meaning::Resume(19)).unwrap();
++        assert_eq!(
++            response.recv_timeout(Duration::from_secs(1)).unwrap(),
++            Ack::Resume(19)
++        );
++        finished.recv_timeout(Duration::from_secs(1)).unwrap();
++        worker.join().unwrap();
++    }
++}
+diff --git a/src/vmm/src/cowork_coordinator.rs b/src/vmm/src/cowork_coordinator.rs
+new file mode 100644
+index 0000000..f8e0e6e
+--- /dev/null
++++ b/src/vmm/src/cowork_coordinator.rs
+@@ -0,0 +1,81 @@
++//! Actual parked report transaction used by the candidate native event-loop adapter.
++use crate::cowork_barrier::Barrier;
++use crate::cowork_ranges::{self,OwnedRegion,Extent,Reject};
++use crate::cowork_ops::{self,ReplaceOps};
++#[derive(Default)] pub struct Snapshot { pub indices:Vec<u16>,pub reports:Vec<Extent>,pub exclusions:Vec<Extent> }
++pub trait ReportOps:ReplaceOps {
++    fn snapshot(&mut self)->Result<Snapshot,()>;
++    fn acknowledge(&mut self,indices:&[u16])->Result<(),()>;
++}
++#[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Disposition { Empty, Noop(Reject), Replaced{bytes:u64,spans:usize} }
++#[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum Fatal { Malformed, Stop, Replacement(cowork_ops::Failure), State, Acknowledge }
++pub fn finish(barrier:&mut Barrier,regions:&[OwnedRegion],host_page:u64,ops:&mut impl ReportOps)->Result<Disposition,Fatal> {
++    if ops.stopped() { barrier.stop();return Err(Fatal::Stop); }
++    let snapshot=ops.snapshot().map_err(|_| {barrier.fail();Fatal::Malformed})?;
++    if snapshot.indices.is_empty()!=snapshot.reports.is_empty() {barrier.fail();return Err(Fatal::Malformed);}
++    for extent in &snapshot.exclusions {
++        let end=extent.start.checked_add(extent.len).ok_or_else(|| {barrier.fail();Fatal::Malformed})?;
++        if extent.len==0 || !regions.iter().any(|r|extent.start>=r.gpa && r.gpa.checked_add(r.len).is_some_and(|last|end<=last)) {barrier.fail();return Err(Fatal::Malformed);}
++    }
++    let disposition=if snapshot.reports.is_empty() {
++        barrier.prepare_noop().map_err(|_|Fatal::State)?;Disposition::Empty
++    } else {
++        match cowork_ranges::plan(regions,&snapshot.exclusions,&snapshot.reports,host_page) {
++            Ok(spans)=> {cowork_ops::apply(barrier,&spans,ops).map_err(Fatal::Replacement)?;
++                Disposition::Replaced{bytes:spans.iter().map(|r|r.len).sum(),spans:spans.len()}},
++            Err(reject)=> {barrier.prepare_noop().map_err(|_|Fatal::State)?;Disposition::Noop(reject)},
++        }
++    };
++    if ops.stopped() {barrier.stop();return Err(Fatal::Stop);}
++    // Empty/stale kicks invent no used entries. Valid planning rejects return every consumed head.
++    if !snapshot.indices.is_empty() {ops.acknowledge(&snapshot.indices).map_err(|_| {barrier.fail();Fatal::Acknowledge})?;}
++    barrier.acknowledge_used().map_err(|_|Fatal::State)?;
++    Ok(disposition)
++}
++#[cfg(test)] mod tests {
++    use super::*;use crate::cowork_ranges::ReclaimSpan;use crate::cowork_barrier::Phase;
++    struct Fake { snapshot:Option<Result<Snapshot,()>>,calls:Vec<&'static str>,ack:Vec<u16>,fail:Option<usize> }
++    impl ReplaceOps for Fake {
++        fn stopped(&self)->bool {false}
++        fn unmap(&mut self,_:ReclaimSpan)->Result<(),()> {self.op("unmap")}
++        fn replace(&mut self,_:ReclaimSpan)->Result<(),()> {self.op("replace")}
++        fn map(&mut self,_:ReclaimSpan)->Result<(),()> {self.op("map")}
++    }
++    impl Fake {fn op(&mut self,name:&'static str)->Result<(),()> {self.calls.push(name);if self.fail==Some(self.calls.len()) {Err(())}else{Ok(())}}}
++    impl ReportOps for Fake {
++        fn snapshot(&mut self)->Result<Snapshot,()> {self.snapshot.take().unwrap()}
++        fn acknowledge(&mut self,indices:&[u16])->Result<(),()> {self.ack.extend(indices);Ok(())}
++    }
++    fn region()->OwnedRegion {OwnedRegion{gpa:0x80000000,hva:0x100000000,len:8*16384,private_anonymous:true}}
++    fn parked()->Barrier {let mut b=Barrier::new(1,&[0]).unwrap();b.pause_ack(0,1).unwrap();b}
++    fn fake(snapshot:Result<Snapshot,()>)->Fake {Fake{snapshot:Some(snapshot),calls:Vec::new(),ack:Vec::new(),fail:None}}
++    #[test] fn actual_transaction_planner_rejection_acks_noop_and_allows_resume() {
++        let r=region();
++        for reports in [vec![Extent{start:r.gpa,len:4096}],vec![Extent{start:r.gpa+r.len,len:16384}],vec![Extent{start:r.gpa,len:16384};2]] {
++            let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![3],reports,exclusions:vec![]}));
++            assert!(matches!(finish(&mut b,&[r],16384,&mut ops),Ok(Disposition::Noop(_))));assert!(ops.calls.is_empty());assert_eq!(ops.ack,[3]);b.begin_resume().unwrap();
++        }
++        let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![4],reports:vec![Extent{start:r.gpa,len:16384}],exclusions:vec![Extent{start:r.gpa+1,len:2}]}));
++        assert_eq!(finish(&mut b,&[r],16384,&mut ops),Ok(Disposition::Noop(Reject::Excluded)));assert!(ops.calls.is_empty());assert_eq!(ops.ack,[4]);
++    }
++    #[test] fn actual_transaction_two_kicks_one_batch_second_is_empty_no_ack() {
++        let r=region();let mut first=parked();let mut ops=fake(Ok(Snapshot{indices:vec![7],reports:vec![Extent{start:r.gpa,len:16384}],exclusions:vec![]}));
++        assert!(matches!(finish(&mut first,&[r],16384,&mut ops),Ok(Disposition::Replaced{..})));assert_eq!(ops.ack,[7]);
++        let mut second=parked();ops.calls.clear();ops.ack.clear();ops.snapshot=Some(Ok(Snapshot::default()));
++        assert_eq!(finish(&mut second,&[r],16384,&mut ops),Ok(Disposition::Empty));assert!(ops.calls.is_empty());assert!(ops.ack.is_empty());second.begin_resume().unwrap();
++    }
++    #[test] fn actual_transaction_malformed_frq_never_maps_acks_or_resumes() {
++        let mut b=parked();let mut ops=fake(Err(()));assert_eq!(finish(&mut b,&[region()],16384,&mut ops),Err(Fatal::Malformed));
++        assert!(ops.calls.is_empty());assert!(ops.ack.is_empty());assert_eq!(b.phase(),Phase::Failed);assert!(b.begin_resume().is_err());
++    }
++    #[test] fn actual_transaction_partial_map_failure_stays_parked_without_ack() {
++        for failure in 1..=6 {
++            let r=region();let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![2],reports:vec![Extent{start:r.gpa,len:16384},Extent{start:r.gpa+16384,len:16384}],exclusions:vec![]}));ops.fail=Some(failure);
++            assert!(matches!(finish(&mut b,&[r],16384,&mut ops),Err(Fatal::Replacement(_))));assert_eq!(ops.calls.len(),failure);assert!(ops.ack.is_empty());assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn actual_transaction_limit_rejection_returns_heads_without_mapping() {
++        let r=OwnedRegion{len:512*1024*1024,..region()};let mut b=parked();let mut ops=fake(Ok(Snapshot{indices:vec![1],reports:vec![Extent{start:r.gpa,len:385*1024*1024}],exclusions:vec![]}));
++        assert_eq!(finish(&mut b,&[r],16384,&mut ops),Ok(Disposition::Noop(Reject::Limit)));assert!(ops.calls.is_empty());assert_eq!(ops.ack,[1]);b.begin_resume().unwrap();
++    }
++}
+diff --git a/src/vmm/src/cowork_fixture.rs b/src/vmm/src/cowork_fixture.rs
+new file mode 100644
+index 0000000..5e0a25b
+--- /dev/null
++++ b/src/vmm/src/cowork_fixture.rs
+@@ -0,0 +1,178 @@
++//! TEST-ONLY, PL011/RNG/balloon topology. Called on the main event thread, outside device callbacks.
++use super::{Vmm, vstate::{VcpuEvent, VcpuResponse}, cowork_barrier::Barrier, cowork_ranges::Extent};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::time::{Duration, Instant};
++static STOPPED: AtomicBool = AtomicBool::new(false);
++pub(crate) fn mark_stop() { STOPPED.store(true, Ordering::Release); }
++fn fatal(message:&str)->! {
++    eprintln!("{{\"kind\":\"reclaim_failure\",\"message\":\"{}\",\"exitCode\":77}}",message);
++    unsafe { libc::_exit(77) }
++}
++fn alive(barrier:&mut Barrier) {
++    if STOPPED.load(Ordering::Acquire) { barrier.stop(); fatal("stop wins"); }
++}
++fn checked<T>(value:Result<T,impl std::fmt::Debug>, operation:&str)->T {
++    value.unwrap_or_else(|_| fatal(operation))
++}
++
++struct Snapshot {
++    cowork_enabled:bool,cowork_owned:Vec<super::cowork_ranges::OwnedRegion>,cowork_epoch:u64,
++    cowork_balloon:Option<std::sync::Arc<std::sync::Mutex<devices::virtio::Balloon>>>,
++    cowork_rng:Option<std::sync::Arc<std::sync::Mutex<devices::virtio::Rng>>>,
++    vcpus_handles:Vec<super::vstate::VcpuHandle>,vm:hvf::HvfVm,
++    #[cfg(feature="blk")] cowork_access:Option<devices::reclaim_access::Access>,
++}
++pub(crate) fn tick_unlocked(vmm:&std::sync::Arc<std::sync::Mutex<Vmm>>) {
++    let mut snapshot={
++        let mut state=vmm.lock().unwrap();
++        if !state.cowork_enabled {return;}
++        #[cfg(feature="blk")]
++        if state.cowork_access.as_ref().is_some_and(|a|a.stopped()) {fatal("block access stopped");}
++        let pending=state.cowork_balloon.as_ref().is_some_and(|b|b.lock().unwrap().fixture_pending);
++        if !pending {return;}
++        let epoch=state.cowork_epoch;state.cowork_epoch=epoch.checked_add(1).unwrap_or_else(||fatal("epoch overflow"));
++        Snapshot{cowork_enabled:state.cowork_enabled,cowork_owned:state.cowork_owned.clone(),cowork_epoch:epoch,
++            cowork_balloon:state.cowork_balloon.clone(),cowork_rng:state.cowork_rng.clone(),vcpus_handles:state.vcpus_handles.clone(),vm:state.vm.hvf_vm().clone(),
++            #[cfg(feature="blk")] cowork_access:state.cowork_access.clone(),}
++    }; // Global VMM guard ends before any CPU/device/drain wait or mapping operation.
++    snapshot.cowork_fixture_tick();
++}
++impl Snapshot {
++    fn cowork_fixture_tick(&mut self) {
++        if !self.cowork_enabled { return; }
++        let balloon_arc=self.cowork_balloon.as_ref().unwrap_or_else(|| fatal("balloon missing")).clone();
++        let generation={
++            let balloon=balloon_arc.lock().unwrap();
++            if !balloon.fixture_pending { return; }
++            balloon.fixture_generation
++        }; // NO device mutex held while requesting/waiting for park ACKs.
++        self.cowork_epoch=self.cowork_epoch.checked_add(1).unwrap_or_else(|| fatal("epoch overflow"));
++        let epoch=self.cowork_epoch;
++        let ids:Vec<_>=self.vcpus_handles.iter().map(|h|h.fixture_id()).collect();
++        let mut barrier=checked(Barrier::new(epoch,&ids),"roster");
++        alive(&mut barrier);
++        let pause_started=Instant::now();
++        for handle in &self.vcpus_handles { checked(handle.send_event(VcpuEvent::FixturePause(epoch)),"send pause"); }
++        for handle in &self.vcpus_handles { checked(handle.fixture_kick(),"kick pause"); }
++        let deadline=pause_started+Duration::from_millis(1000);
++        for (handle,&id) in self.vcpus_handles.iter().zip(&ids) {
++            let response=checked(handle.response_receiver().recv_timeout(deadline.saturating_duration_since(Instant::now())),"pause timeout");
++            match response {
++                VcpuResponse::FixturePaused(received) => checked(barrier.pause_ack(id,received),"pause epoch ACK"),
++                _ => fatal("unexpected pause response"),
++            }
++        }
++        if self.vcpus_handles.iter().any(|h| h.response_receiver().try_recv().is_ok()) { fatal("duplicate pause ACK"); }
++        alive(&mut barrier);
++        eprintln!("{{\"kind\":\"reclaim_parked\",\"epoch\":{},\"roster\":{:?},\"pauseMicros\":{}}}",epoch,ids,pause_started.elapsed().as_micros());
++        #[cfg(feature="blk")]
++        let mut memory_freeze=self.cowork_access.as_ref().map(|access|checked(access.freeze(epoch,Duration::from_secs(1)),"block lease drain"));
++        #[cfg(feature="blk")]
++        let pinned:Vec<Extent>=memory_freeze.as_ref().map(|guard|guard.exclusions().iter().map(|r|Extent{start:r.gpa,len:r.len}).collect()).unwrap_or_default();
++        #[cfg(not(feature="blk"))]
++        let pinned:Vec<Extent>=Vec::new();
++        let rng_arc=self.cowork_rng.as_ref().unwrap_or_else(|| fatal("rng missing")).clone();
++        let rng=rng_arc.lock().unwrap(); let mut balloon=balloon_arc.lock().unwrap();
++        let page=unsafe {libc::sysconf(libc::_SC_PAGESIZE)};
++        if page!=16384 {fatal("host page mismatch");}
++        let mut operations=FixtureOps{mapping:HvfOps{vm:&self.vm,epoch,
++            #[cfg(feature="blk")] access:self.cowork_access.clone(),},balloon:&mut balloon,rng:&rng,generation,epoch,pinned};
++        #[cfg(feature="blk")]
++        if let Some(guard)=&mut memory_freeze {checked(guard.begin_mutation(),"memory mutation admission");}
++        let disposition=checked(super::cowork_coordinator::finish(&mut barrier,&self.cowork_owned,page as u64,&mut operations),"report transaction failed");
++        let span_count=match disposition {
++            super::cowork_coordinator::Disposition::Replaced{bytes,spans}=> {
++                eprintln!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"replaced\",\"bytes\":{}}}",epoch,bytes);spans
++            },
++            other=> {eprintln!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"{:?}\",\"bytes\":0}}",epoch,other);0},
++        };
++        drop(balloon); drop(rng);
++        #[cfg(feature="blk")]
++        if let Some(mut guard)=memory_freeze {checked(guard.complete_mutation(),"memory transaction completed");checked(guard.resume(),"memory admission resume");}
++        alive(&mut barrier); checked(barrier.begin_resume(),"resume phase");
++        for handle in &self.vcpus_handles { checked(handle.send_event(VcpuEvent::FixtureResume(epoch)),"send resume"); }
++        let resume_deadline=Instant::now()+Duration::from_millis(1000);
++        for (handle,&id) in self.vcpus_handles.iter().zip(&ids) {
++            let response=checked(handle.response_receiver().recv_timeout(resume_deadline.saturating_duration_since(Instant::now())),"resume timeout");
++            match response {
++                VcpuResponse::FixtureResumed(received) => checked(barrier.resume_ack(id,received),"resume epoch ACK"),
++                _ => fatal("unexpected resume response"),
++            }
++        }
++        eprintln!("{{\"kind\":\"reclaim_resumed\",\"epoch\":{},\"roster\":{:?},\"parkMicros\":{},\"spanCount\":{}}}",epoch,ids,pause_started.elapsed().as_micros(),span_count);
++        debug_assert_eq!(barrier.phase(),super::cowork_barrier::Phase::Finished);
++    }
++}
++
++struct HvfOps<'a> { vm:&'a hvf::HvfVm, epoch:u64, #[cfg(feature="blk")] access:Option<devices::reclaim_access::Access> }
++impl HvfOps<'_>{
++    fn checked_operation<T>(&self,operation:impl FnOnce()->T)->Result<T,()>{
++        #[cfg(feature="blk")]
++        {return checked_mapping_operation(self.access.as_ref(),self.epoch,operation);}
++        #[cfg(not(feature="blk"))]
++        {if STOPPED.load(Ordering::Acquire){return Err(());}Ok(operation())}
++    }
++
++}
++impl super::cowork_ops::ReplaceOps for HvfOps<'_> {
++    fn stopped(&self)->bool { STOPPED.load(Ordering::Acquire) || {#[cfg(feature="blk")] {self.access.as_ref().is_some_and(|a|a.stopped())} #[cfg(not(feature="blk"))] {false}} }
++    fn unmap(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
++        let len=usize::try_from(span.len).map_err(|_|())?;
++        let result=self.checked_operation(||unsafe { self.vm.fixture_unmap(span.gpa,len) })?;
++        eprintln!("{{\"kind\":\"reclaim_unmap\",\"epoch\":{},\"gpa\":{},\"hva\":{},\"len\":{},\"return\":{}}}",self.epoch,span.gpa,span.hva,span.len,result);
++        if result==0 { Ok(()) } else { Err(()) }
++    }
++    fn replace(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
++        let len=usize::try_from(span.len).map_err(|_|())?;
++        let hva=usize::try_from(span.hva).map_err(|_|())? as *mut libc::c_void;
++        // Atomic replacement of our OWNED mapping. No standalone munmap hole/allocator race.
++        let result=self.checked_operation(||unsafe { libc::mmap(hva,len,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_ANON|libc::MAP_PRIVATE|libc::MAP_FIXED,-1,0) })?;
++        let mmap_errno=std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
++        eprintln!("{{\"kind\":\"reclaim_replace\",\"epoch\":{},\"gpa\":{},\"sameHVA\":{},\"errnoIfFailed\":{}}}",self.epoch,span.gpa,result==hva,if result==hva {0}else{mmap_errno});
++        if result==hva { Ok(()) } else { Err(()) }
++    }
++    fn map(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
++        let len=usize::try_from(span.len).map_err(|_|())?;
++        let hva=usize::try_from(span.hva).map_err(|_|())? as *mut libc::c_void;
++        let result=self.checked_operation(||unsafe { self.vm.fixture_map(hva,span.gpa,len) })?;
++        eprintln!("{{\"kind\":\"reclaim_map\",\"epoch\":{},\"gpa\":{},\"sameHVA\":true,\"flags\":\"RWX\",\"return\":{}}}",self.epoch,span.gpa,result);
++        if result==0 { Ok(()) } else { Err(()) }
++    }
++}
++
++struct FixtureOps<'a> {
++    mapping:HvfOps<'a>,balloon:&'a mut devices::virtio::Balloon,rng:&'a devices::virtio::Rng,generation:u64,epoch:u64,pinned:Vec<Extent>,
++}
++impl super::cowork_ops::ReplaceOps for FixtureOps<'_> {
++    fn stopped(&self)->bool {super::cowork_ops::ReplaceOps::stopped(&self.mapping)}
++    fn unmap(&mut self,s:super::cowork_ranges::ReclaimSpan)->Result<(),()> {super::cowork_ops::ReplaceOps::unmap(&mut self.mapping,s)}
++    fn replace(&mut self,s:super::cowork_ranges::ReclaimSpan)->Result<(),()> {super::cowork_ops::ReplaceOps::replace(&mut self.mapping,s)}
++    fn map(&mut self,s:super::cowork_ranges::ReclaimSpan)->Result<(),()> {super::cowork_ops::ReplaceOps::map(&mut self.mapping,s)}
++}
++impl super::cowork_coordinator::ReportOps for FixtureOps<'_> {
++    fn snapshot(&mut self)->Result<super::cowork_coordinator::Snapshot,()> {
++        let mut excluded=self.balloon.fixture_exclusions().map_err(|_|())?;
++        excluded.extend(self.rng.fixture_exclusions().map_err(|_|())?);
++        let mut exclusions:Vec<_>=excluded.into_iter().map(|(start,len)|Extent{start,len}).collect();
++        exclusions.extend(self.pinned.iter().copied());
++        for extent in &exclusions {eprintln!("{{\"kind\":\"reclaim_exclusion\",\"epoch\":{},\"gpa\":{},\"len\":{}}}",self.epoch,extent.start,extent.len);}
++        if self.balloon.fixture_generation!=self.generation {
++            self.balloon.fixture_pending=false;return Ok(super::cowork_coordinator::Snapshot{exclusions,..Default::default()});
++        }
++        let batches=self.balloon.fixture_pop().map_err(|_|())?;
++        Ok(super::cowork_coordinator::Snapshot{indices:batches.iter().map(|(index,_)|*index).collect(),
++            reports:batches.iter().flat_map(|(_,ranges)|ranges.iter().map(|&(start,len)|Extent{start,len})).collect(),exclusions})
++    }
++    fn acknowledge(&mut self,indices:&[u16])->Result<(),()> {
++        self.mapping.checked_operation(||self.balloon.fixture_ack(indices))?.map_err(|_|())?;
++        eprintln!("{{\"kind\":\"reclaim_used_ack\",\"epoch\":{},\"indices\":{:?}}}",self.epoch,indices);Ok(())
++    }
++}
++
++#[cfg(feature="blk")]
++pub(crate) fn checked_mapping_operation<T>(access:Option<&devices::reclaim_access::Access>,epoch:u64,operation:impl FnOnce()->T)->Result<T,()>{
++    if STOPPED.load(Ordering::Acquire){return Err(());}
++    let execute=||if STOPPED.load(Ordering::Acquire){Err(())}else{Ok(operation())};
++    if let Some(access)=access{return access.frozen_operation(epoch,execute).map_err(|_|())?;}
++    execute()
++}
+diff --git a/src/vmm/src/cowork_ops.rs b/src/vmm/src/cowork_ops.rs
+new file mode 100644
+index 0000000..89256d2
+--- /dev/null
++++ b/src/vmm/src/cowork_ops.rs
+@@ -0,0 +1,87 @@
++//! Shared replacement sequence; real HVF operations and bounded fakes use this exact function.
++use crate::cowork_barrier::Barrier;
++use crate::cowork_ranges::ReclaimSpan;
++pub trait ReplaceOps {
++    fn stopped(&self)->bool;
++    fn unmap(&mut self, span:ReclaimSpan)->Result<(),()>;
++    fn replace(&mut self, span:ReclaimSpan)->Result<(),()>;
++    fn map(&mut self, span:ReclaimSpan)->Result<(),()>;
++}
++#[derive(Clone,Copy,Debug,PartialEq,Eq)]
++pub enum Failure { NotParked, Empty, Stopped, Unmap, Replace, Map, State }
++fn stop(barrier:&mut Barrier, ops:&impl ReplaceOps)->Result<(),Failure> {
++    if ops.stopped() { barrier.stop(); Err(Failure::Stopped) } else { Ok(()) }
++}
++pub fn apply(barrier:&mut Barrier, spans:&[ReclaimSpan], ops:&mut impl ReplaceOps)->Result<(),Failure> {
++    stop(barrier,ops)?;
++    if spans.is_empty() { barrier.fail(); return Err(Failure::Empty); }
++    barrier.begin_replacement().map_err(|_|Failure::NotParked)?;
++    for &span in spans {
++        stop(barrier,ops)?;
++        if ops.unmap(span).is_err() { barrier.fail(); return Err(Failure::Unmap); }
++        stop(barrier,ops)?;
++        if ops.replace(span).is_err() { barrier.fail(); return Err(Failure::Replace); }
++        stop(barrier,ops)?;
++        if ops.map(span).is_err() { barrier.fail(); return Err(Failure::Map); }
++    }
++    stop(barrier,ops)?;
++    barrier.mappings_complete().map_err(|_|Failure::State)
++}
++#[cfg(test)] mod tests {
++    use super::*;
++    use crate::cowork_barrier::Phase;
++    #[derive(Default)] struct Fake { calls:Vec<(&'static str,ReclaimSpan)>, fail_at:Option<usize>, stop_at:Option<usize> }
++    impl Fake { fn call(&mut self,op:&'static str,span:ReclaimSpan)->Result<(),()> {
++        self.calls.push((op,span)); if self.fail_at==Some(self.calls.len()) { Err(()) } else { Ok(()) }
++    } }
++    impl ReplaceOps for Fake {
++        fn stopped(&self)->bool { self.stop_at.is_some_and(|n| self.calls.len()>=n) }
++        fn unmap(&mut self,s:ReclaimSpan)->Result<(),()> { self.call("unmap",s) }
++        fn replace(&mut self,s:ReclaimSpan)->Result<(),()> { self.call("replace",s) }
++        fn map(&mut self,s:ReclaimSpan)->Result<(),()> { self.call("map",s) }
++    }
++    fn spans()->[ReclaimSpan;2] { [ReclaimSpan{gpa:0x80000000,hva:0x100000000,len:16384},ReclaimSpan{gpa:0x80008000,hva:0x100008000,len:32768}] }
++    fn parked()->Barrier { let mut b=Barrier::new(9,&[10,20]).unwrap(); b.pause_ack(10,9).unwrap(); b.pause_ack(20,9).unwrap(); b }
++    #[test] fn every_partial_hvf_or_mmap_failure_forbids_ack_resume() {
++        for failure in 1..=6 {
++            let mut b=parked();let mut ops=Fake{fail_at:Some(failure),..Fake::default()};
++            assert!(apply(&mut b,&spans(),&mut ops).is_err()); assert_eq!(ops.calls.len(),failure);
++            assert_eq!(b.phase(),Phase::Failed); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn stop_at_each_transition_prevents_more_operations_or_ack() {
++        for position in 0..=6 {
++            let mut b=parked();let mut ops=Fake{stop_at:Some(position),..Fake::default()};
++            assert_eq!(apply(&mut b,&spans(),&mut ops),Err(Failure::Stopped)); assert_eq!(ops.calls.len(),position);
++            assert_eq!(b.phase(),Phase::Stopped); assert!(b.acknowledge_used().is_err()); assert!(b.begin_resume().is_err());
++        }
++    }
++    #[test] fn missing_stale_duplicate_cpu_means_zero_map_calls() {
++        for ack in [None,Some((10,8)),Some((10,9))] {
++            let mut b=Barrier::new(9,&[10,20]).unwrap(); b.pause_ack(10,9).unwrap();
++            if let Some((id,e))=ack { assert!(b.pause_ack(id,e).is_err()); }
++            let mut ops=Fake::default(); assert!(apply(&mut b,&spans(),&mut ops).is_err()); assert!(ops.calls.is_empty());
++        }
++    }
++    #[test] fn full_sequence_preserves_every_hva_and_delays_used_ack() {
++        let mut b=parked();let mut ops=Fake::default();apply(&mut b,&spans(),&mut ops).unwrap();
++        assert_eq!(ops.calls,vec![("unmap",spans()[0]),("replace",spans()[0]),("map",spans()[0]),("unmap",spans()[1]),("replace",spans()[1]),("map",spans()[1])]);
++        assert_eq!(b.phase(),Phase::Mapped);assert!(b.begin_resume().is_err());
++        b.acknowledge_used().unwrap();b.begin_resume().unwrap();
++    }
++    #[test] fn empty_plan_is_not_a_replacement() {
++        let mut b=parked();let mut ops=Fake::default();assert_eq!(apply(&mut b,&[],&mut ops),Err(Failure::Empty));assert!(ops.calls.is_empty());
++    }
++    #[test] fn malformed_report_or_ring_intersection_rejected_before_any_map_call() {
++        use crate::cowork_ranges::{self,OwnedRegion,Extent};
++        let region=OwnedRegion{gpa:0x80000000,hva:0x100000000,len:8*16384,private_anonymous:true};
++        let bad=[Extent{start:region.gpa,len:4096},Extent{start:region.gpa+7*16384,len:2*16384},Extent{start:u64::MAX-16383,len:32768},Extent{start:region.gpa,len:0}];
++        for report in bad {
++            let mut b=parked();let mut ops=Fake::default();
++            if let Ok(spans)=cowork_ranges::plan(&[region],&[],&[report],16384) { let _=apply(&mut b,&spans,&mut ops); }
++            assert!(ops.calls.is_empty());
++        }
++        let report=Extent{start:region.gpa,len:16384};let ring=Extent{start:region.gpa+16383,len:1};
++        assert!(cowork_ranges::plan(&[region],&[ring],&[report],16384).is_err());
++    }
++}
+diff --git a/src/vmm/src/cowork_ranges.rs b/src/vmm/src/cowork_ranges.rs
+new file mode 100644
+index 0000000..e558cca
+--- /dev/null
++++ b/src/vmm/src/cowork_ranges.rs
+@@ -0,0 +1,124 @@
++//! Pure planning only: never unmaps or modifies memory. Runtime owns the registry and exclusions.
++//! Compile tests with the slice-local rustc --test; no VM or library linkage is needed.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Extent { pub start: u64, pub len: u64 }
++#[derive(Clone, Copy, Debug)]
++pub struct OwnedRegion { pub gpa: u64, pub hva: u64, pub len: u64, pub private_anonymous: bool }
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct ReclaimSpan { pub gpa: u64, pub hva: u64, pub len: u64 }
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Reject { HostPageSize, Empty, TooMany, Overflow, Registry, Unowned, Alignment, Overlap, Excluded, Limit }
++
++fn end(start: u64, len: u64) -> Result<u64, Reject> {
++    if len == 0 { return Err(Reject::Empty); }
++    start.checked_add(len).ok_or(Reject::Overflow)
++}
++fn overlaps(a: Extent, b: Extent) -> Result<bool, Reject> {
++    Ok(a.start < end(b.start,b.len)? && b.start < end(a.start,a.len)?)
++}
++
++/// Every input descriptor must be a complete host page, inside ONE sealed private RAM region.
++/// Reject whole batches atomically. Never round, truncate, merge a gap, or translate only the start.
++pub fn plan(regions: &[OwnedRegion], excluded: &[Extent], reports: &[Extent], host_page: u64)
++    -> Result<Vec<ReclaimSpan>, Reject>
++{
++    let owned_bytes=regions.iter().try_fold(0u64,|total,r|total.checked_add(r.len)).ok_or(Reject::Overflow)?;
++    // The ceiling is a bounded-fixture policy. Production can call plan_with_limit with admission policy.
++    plan_with_limit(regions,excluded,reports,host_page,owned_bytes.min(384*1024*1024))
++}
++pub fn plan_with_limit(regions:&[OwnedRegion],excluded:&[Extent],reports:&[Extent],host_page:u64,limit:u64)
++    -> Result<Vec<ReclaimSpan>,Reject>
++{
++    if host_page != 16384 { return Err(Reject::HostPageSize); }
++    if reports.is_empty() { return Err(Reject::Empty); }
++    if reports.len()>256 || regions.len()>256 || excluded.len()>4096 { return Err(Reject::TooMany); }
++    for (i,r) in regions.iter().enumerate() {
++        end(r.gpa,r.len)?; end(r.hva,r.len)?;
++        if !r.private_anonymous || r.gpa%host_page!=0 || r.hva%host_page!=0 || r.len%host_page!=0 {
++            return Err(Reject::Registry);
++        }
++        for previous in &regions[..i] {
++            if overlaps(Extent{start:r.gpa,len:r.len},Extent{start:previous.gpa,len:previous.len})?
++                || overlaps(Extent{start:r.hva,len:r.len},Extent{start:previous.hva,len:previous.len})? {
++                return Err(Reject::Registry);
++            }
++        }
++    }
++    for x in excluded { end(x.start,x.len)?; }
++    let mut spans=Vec::with_capacity(reports.len()); let mut total=0u64;
++    for (i,report) in reports.iter().enumerate() {
++        let report_end=end(report.start,report.len)?;
++        if report.start%host_page!=0 || report.len%host_page!=0 { return Err(Reject::Alignment); }
++        total=total.checked_add(report.len).ok_or(Reject::Overflow)?;
++        if total>limit { return Err(Reject::Limit); }
++        let region=regions.iter().find(|r| report.start>=r.gpa && report_end<=r.gpa+r.len).ok_or(Reject::Unowned)?;
++        let hva=region.hva.checked_add(report.start-region.gpa).ok_or(Reject::Overflow)?;
++        if hva%host_page!=0 || end(hva,report.len)?>region.hva+region.len { return Err(Reject::Alignment); }
++        for previous in &reports[..i] { if overlaps(*report,*previous)? { return Err(Reject::Overlap); } }
++        for x in excluded { if overlaps(*report,*x)? { return Err(Reject::Excluded); } }
++        spans.push(ReclaimSpan{gpa:report.start,hva,len:report.len});
++    }
++    Ok(spans)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    const PAGE:u64=16384;
++    fn region()->OwnedRegion { OwnedRegion{gpa:0x80000000,hva:0x100000000,len:8*PAGE,private_anonymous:true} }
++    fn report(start:u64,len:u64)->Extent { Extent{start,len} }
++    #[test] fn full_span_translation() {
++        let r=region(); let p=plan(&[r],&[],&[report(r.gpa+PAGE,2*PAGE)],PAGE).unwrap();
++        assert_eq!(p,[ReclaimSpan{gpa:r.gpa+PAGE,hva:r.hva+PAGE,len:2*PAGE}]);
++    }
++    #[test] fn valid_start_invalid_full_span() {
++        let r=region();assert_eq!(plan(&[r],&[],&[report(r.gpa+7*PAGE,2*PAGE)],PAGE),Err(Reject::Unowned));
++    }
++    #[test] fn adjacent_regions_are_not_one_owned_span() {
++        let a=region(); let b=OwnedRegion{gpa:a.gpa+a.len,hva:a.hva+a.len,..a};
++        assert_eq!(plan(&[a,b],&[],&[report(a.gpa+7*PAGE,2*PAGE)],PAGE),Err(Reject::Unowned));
++    }
++    #[test] fn partial_host_pages_are_never_rounded() {
++        let r=region();
++        for x in [report(r.gpa,4096),report(r.gpa+4096,PAGE),report(r.gpa,PAGE+4096)] {
++            assert_eq!(plan(&[r],&[],&[x],PAGE),Err(Reject::Alignment));
++        }
++    }
++    #[test] fn overflow_and_empty_inputs() {
++        let r=region();
++        assert_eq!(plan(&[r],&[],&[report(u64::MAX-PAGE+1,2*PAGE)],PAGE),Err(Reject::Overflow));
++        assert_eq!(plan(&[r],&[],&[report(r.gpa,0)],PAGE),Err(Reject::Empty));
++        assert_eq!(plan(&[r],&[],&[],PAGE),Err(Reject::Empty));
++    }
++    #[test] fn duplicate_or_overlapping_reports_rejected() {
++        let r=region();
++        for start in [r.gpa,r.gpa+PAGE] {
++            assert_eq!(plan(&[r],&[],&[report(r.gpa,2*PAGE),report(start,PAGE)],PAGE),Err(Reject::Overlap));
++        }
++    }
++    #[test] fn dma_or_ring_exclusion_even_one_byte() {
++        let r=region();
++        assert_eq!(plan(&[r],&[report(r.gpa+PAGE-1,1)],&[report(r.gpa,PAGE)],PAGE),Err(Reject::Excluded));
++        assert!(plan(&[r],&[report(r.gpa+PAGE,1)],&[report(r.gpa,PAGE)],PAGE).is_ok());
++    }
++    #[test] fn registry_rejects_aliases_shared_memory_and_unaligned_hva() {
++        let r=region();
++        for invalid in [OwnedRegion{private_anonymous:false,..r},OwnedRegion{hva:r.hva+4096,..r}] {
++            assert_eq!(plan(&[invalid],&[],&[report(r.gpa,PAGE)],PAGE),Err(Reject::Registry));
++        }
++        let alias=OwnedRegion{gpa:r.gpa+r.len,..r};
++        assert_eq!(plan(&[r,alias],&[],&[report(r.gpa,PAGE)],PAGE),Err(Reject::Registry));
++    }
++    #[test] fn bounded_fixture_limit_and_descriptor_count() {
++        let r=OwnedRegion{len:512*1024*1024,..region()};
++        assert_eq!(plan(&[r],&[],&[report(r.gpa,385*1024*1024)],PAGE),Err(Reject::Limit));
++        assert_eq!(plan(&[r],&[],&vec![report(r.gpa,PAGE);257],PAGE),Err(Reject::TooMany));
++        assert_eq!(plan(&[r],&[],&[report(r.gpa,PAGE)],4096),Err(Reject::HostPageSize));
++    }
++    #[test] fn explicit_limit_can_narrow_admission_to_region_budget() {
++        let r=region();
++        assert_eq!(plan_with_limit(&[r],&[],&[report(r.gpa,2*PAGE)],PAGE,PAGE),Err(Reject::Limit));
++        assert!(plan_with_limit(&[r],&[],&[report(r.gpa,PAGE)],PAGE,PAGE).is_ok());
++    }
++}
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 0f0f8c2..4e5c812 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -192,7 +192,31 @@ pub trait VmmEventsObserver {
+ pub type Result<T> = std::result::Result<T, Error>;
+ 
+ /// Contains the state and associated methods required for the Firecracker VMM.
++#[cfg(target_os = "macos")]
++mod cowork_fixture;
++#[cfg(target_os = "macos")]
++mod cowork_ranges;
++#[cfg(target_os = "macos")]
++mod cowork_barrier;
++#[cfg(target_os = "macos")]
++mod cowork_ops;
++#[cfg(target_os = "macos")]
++mod cowork_control;
++#[cfg(target_os = "macos")]
++mod cowork_coordinator;
+ pub struct Vmm {
++    #[cfg(target_os = "macos")]
++    cowork_owned: Vec<cowork_ranges::OwnedRegion>,
++    #[cfg(target_os = "macos")]
++    cowork_enabled: bool,
++    #[cfg(target_os = "macos")]
++    cowork_epoch: u64,
++    #[cfg(all(target_os="macos",feature="blk"))]
++    cowork_access: Option<devices::reclaim_access::Access>,
++    #[cfg(target_os = "macos")]
++    cowork_balloon: Option<Arc<Mutex<devices::virtio::Balloon>>>,
++    #[cfg(target_os = "macos")]
++    cowork_rng: Option<Arc<Mutex<devices::virtio::Rng>>>,
+     // Guest VM core resources.
+     guest_memory: GuestMemoryMmap,
+     arch_memory_info: ArchMemoryInfo,
+@@ -440,3 +464,9 @@ impl Subscriber for Vmm {
+         )]
+     }
+ }
++
++#[cfg(target_os="macos")]
++pub fn cowork_reclaim_tick(vmm:&Arc<Mutex<Vmm>>) {cowork_fixture::tick_unlocked(vmm);}
++
++#[cfg(all(target_os="macos",feature="blk"))]
++pub fn cowork_checked_mapping_operation<T>(access:&devices::reclaim_access::Access,epoch:u64,operation:impl FnOnce()->T)->std::result::Result<T,()>{cowork_fixture::checked_mapping_operation(Some(access),epoch,operation)}
+diff --git a/src/vmm/src/macos/vstate.rs b/src/vmm/src/macos/vstate.rs
+index ccafa1c..2ff29bd 100644
+--- a/src/vmm/src/macos/vstate.rs
++++ b/src/vmm/src/macos/vstate.rs
+@@ -10,15 +10,15 @@ use std::collections::HashMap;
+ use std::fmt::{Display, Formatter};
+ use std::io;
+ use std::result;
+-use std::sync::Arc;
++use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+ use std::thread;
+-use std::time::Duration;
++use std::time::Instant;
+ 
+ use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
+ use crate::vmm_config::machine_config::CpuFeaturesTemplate;
+ 
+ use arch::ArchMemoryInfo;
+-use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
++use crossbeam_channel::{unbounded, Receiver, Sender};
+ use devices::legacy::VcpuList;
+ use hvf::{HvfVcpu, HvfVm, VcpuExit, Vcpus};
+ use utils::eventfd::EventFd;
+@@ -201,6 +201,7 @@ pub struct Vcpu {
+ 
+     vcpu_list: Arc<VcpuList>,
+     nested_enabled: bool,
++    fixture_hvf_id: Arc<AtomicU64>,
+ }
+ 
+ impl Vcpu {
+@@ -296,6 +297,7 @@ impl Vcpu {
+             response_sender,
+             vcpu_list,
+             nested_enabled,
++            fixture_hvf_id: Arc::new(AtomicU64::new(u64::MAX)),
+         })
+     }
+ 
+@@ -335,6 +337,7 @@ impl Vcpu {
+         let event_sender = self.event_sender.take().unwrap();
+         let response_receiver = self.response_receiver.take().unwrap();
+         let (init_tls_sender, init_tls_receiver) = unbounded();
++        let fixture_hvf_id = self.fixture_hvf_id.clone();
+ 
+         let vcpu_thread = thread::Builder::new()
+             .name(format!("fc_vcpu {}", self.cpu_index()))
+@@ -354,6 +357,7 @@ impl Vcpu {
+             event_sender,
+             response_receiver,
+             vcpu_thread,
++            fixture_hvf_id,
+         ))
+     }
+ 
+@@ -430,7 +434,7 @@ impl Vcpu {
+                 }
+                 VcpuExit::WaitForEventTimeout(duration) => {
+                     debug!("vCPU {vcpuid} WaitForEventTimeout timeout={duration:?}");
+-                    Ok(VcpuEmulation::WaitForEventTimeout(duration))
++                    Ok(VcpuEmulation::WaitForEventTimeout(Instant::now()+duration))
+                 }
+             },
+             Err(e) => panic!("Error running HVF vCPU: {e:?}"),
+@@ -443,6 +447,7 @@ impl Vcpu {
+             HvfVcpu::new(self.mpidr, self.nested_enabled).expect("Can't create HVF vCPU");
+         let hvf_vcpuid = hvf_vcpu.id();
+ 
++        self.fixture_hvf_id.store(hvf_vcpuid, Ordering::Release);
+         init_tls_sender
+             .send(true)
+             .expect("Cannot notify vcpu TLS initialization.");
+@@ -450,8 +455,8 @@ impl Vcpu {
+         let (wfe_sender, wfe_receiver) = unbounded();
+         self.vcpu_list.register(hvf_vcpuid, wfe_sender);
+ 
+-        let entry_addr = if let Some(boot_receiver) = &self.boot_receiver {
+-            boot_receiver.recv().unwrap()
++        let entry_addr = if let Some(boot_receiver) = self.boot_receiver.clone() {
++            crate::cowork_control::boot(&boot_receiver,&self.event_receiver,&self.response_sender).expect("fixture boot control")
+         } else {
+             self.boot_entry_addr
+         };
+@@ -460,8 +465,14 @@ impl Vcpu {
+             .set_initial_state(self.ipa_size, entry_addr, self.fdt_addr)
+             .unwrap_or_else(|_| panic!("Can't set HVF vCPU {hvf_vcpuid} initial state"));
+ 
++        let fixture_events=self.event_receiver.clone();let fixture_acks=self.response_sender.clone();
+         loop {
+-            match self.run_emulation(&mut hvf_vcpu) {
++            let emulation=crate::cowork_control::step(&fixture_events,&fixture_acks,|| {
++                let result=self.run_emulation(&mut hvf_vcpu);
++                if matches!(&result,Ok(VcpuEmulation::Stopped)|Err(_)) {crate::cowork_fixture::mark_stop();}
++                result
++            },|result|matches!(result,Ok(VcpuEmulation::Stopped)|Err(_))).expect("fixture run control");
++            match emulation {
+                 // Emulation ran successfully, continue.
+                 Ok(VcpuEmulation::Handled) => (),
+                 // Emulation was interrupted by a breakpoint.
+@@ -492,26 +503,16 @@ impl Vcpu {
+         &mut self,
+         hvf_vcpuid: u64,
+         receiver: &Receiver<u32>,
+-        timeout: Option<Duration>,
++        deadline: Option<Instant>,
+     ) {
+-        if self.vcpu_list.should_wait(hvf_vcpuid) {
+-            if let Some(timeout) = timeout {
+-                match receiver.recv_timeout(timeout) {
+-                    Ok(_) => {}
+-                    Err(e) => match e {
+-                        RecvTimeoutError::Timeout => {}
+-                        RecvTimeoutError::Disconnected => panic!("WFE channel closed unexpectedly"),
+-                    },
+-                }
+-            } else {
+-                receiver.recv().unwrap();
+-            }
+-        }
++        crate::cowork_control::wfe_deadline(receiver,&self.event_receiver,&self.response_sender,deadline,
++            || self.vcpu_list.should_wait(hvf_vcpuid)).expect("fixture WFE control");
+     }
+ 
+     fn wait_for_resume(&mut self) {}
+ 
+     fn exit(&mut self, exit_code: u8) {
++        crate::cowork_fixture::mark_stop();
+         self.response_sender
+             .send(VcpuResponse::Exited(exit_code))
+             .expect("failed to send Exited status");
+@@ -535,6 +536,8 @@ impl Drop for Vcpu {
+ pub enum VcpuEvent {
+     /// Pause the Vcpu.
+     Pause,
++    FixturePause(u64),
++    FixtureResume(u64),
+     /// Event that should resume the Vcpu.
+     Resume,
+     // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
+@@ -545,6 +548,8 @@ pub enum VcpuEvent {
+ pub enum VcpuResponse {
+     /// Vcpu is paused.
+     Paused,
++    FixturePaused(u64),
++    FixtureResumed(u64),
+     /// Vcpu is resumed.
+     Resumed,
+     /// Vcpu is stopped.
+@@ -552,7 +557,9 @@ pub enum VcpuResponse {
+ }
+ 
+ /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
++#[derive(Clone)]
+ pub struct VcpuHandle {
++    fixture_hvf_id: Arc<AtomicU64>,
+     event_sender: Sender<VcpuEvent>,
+     response_receiver: Receiver<VcpuResponse>,
+ }
+@@ -562,10 +569,12 @@ impl VcpuHandle {
+         event_sender: Sender<VcpuEvent>,
+         response_receiver: Receiver<VcpuResponse>,
+         _vcpu_thread: thread::JoinHandle<()>,
++        fixture_hvf_id: Arc<AtomicU64>,
+     ) -> Self {
+         Self {
+             event_sender,
+             response_receiver,
++            fixture_hvf_id,
+         }
+     }
+ 
+@@ -586,6 +595,12 @@ impl VcpuHandle {
+         Ok(())
+     }
+ 
++    pub fn fixture_id(&self) -> u64 { self.fixture_hvf_id.load(Ordering::Acquire) }
++    pub fn fixture_kick(&self) -> Result<()> {
++        let id = self.fixture_hvf_id.load(Ordering::Acquire);
++        if id == u64::MAX { return Err(Error::VcpuRun); }
++        hvf::vcpu_request_exit(id).map_err(|_| Error::VcpuRun)
++    }
+     pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
+         &self.response_receiver
+     }
+@@ -597,14 +612,14 @@ enum VcpuEmulation {
+     Stopped,
+     WaitForEvent,
+     WaitForEventExpired,
+-    WaitForEventTimeout(Duration),
++    WaitForEventTimeout(Instant),
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     #[cfg(target_arch = "x86_64")]
+     use crossbeam_channel::RecvTimeoutError;
+-    use std::sync::Arc;
++    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+     #[cfg(target_arch = "x86_64")]
+     use std::time::Duration;
+ 
+@@ -732,3 +747,14 @@ mod tests {
+         );
+     }
+ }
++
++impl crate::cowork_control::Event for VcpuEvent {
++    fn meaning(&self)->crate::cowork_control::Meaning {
++        use crate::cowork_control::Meaning;
++        match self {Self::FixturePause(epoch)=>Meaning::Pause(*epoch),Self::FixtureResume(epoch)=>Meaning::Resume(*epoch),_=>Meaning::Other}
++    }
++}
++impl crate::cowork_control::Response for VcpuResponse {
++    fn paused(epoch:u64)->Self {Self::FixturePaused(epoch)}
++    fn resumed(epoch:u64)->Self {Self::FixtureResumed(epoch)}
++}
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index aa32404..8611354 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -128,6 +128,9 @@ pub enum VsockConfig {
+ /// held in the Vmm.
+ #[derive(Default)]
+ pub struct VmResources {
++    /// TEST-ONLY reduced-device active-reclaim opt-in.
++    pub cowork_fixture_reclaim: bool,
++    pub cowork_guarded_block: bool,
+     /// The vCpu and memory configuration for this microVM.
+     vm_config: VmConfig,
+     /// The firmware to be loaded into the microVM.

@@ -1,0 +1,117 @@
+diff --git a/src/devices/Cargo.toml b/src/devices/Cargo.toml
+index 243d6cc..7b71048 100644
+--- a/src/devices/Cargo.toml
++++ b/src/devices/Cargo.toml
+@@ -21,6 +21,8 @@ input = ["zerocopy", "krun_input"]
+ virgl_resource_map2 = []
+ aws-nitro = []
+ test_utils = []
++# Fixture-only bounded block trace rows; absent from production builds (see block_trace.rs).
++cowork-fixture-trace = []
+ 
+ [dependencies]
+ bitflags = "1.2.0"
+diff --git a/src/devices/src/block_trace.rs b/src/devices/src/block_trace.rs
+index 9e29242..315cea6 100644
+--- a/src/devices/src/block_trace.rs
++++ b/src/devices/src/block_trace.rs
+@@ -1,15 +1,32 @@
+ //! Bounded fixture-only metadata receipts. No guest payload, pointers, credentials or host paths.
++//!
++//! The rows exist for the fixture and its regression oracle only. They are compiled in under test and
++//! with the `cowork-fixture-trace` feature (which libkrun's `cowork-fixture-oracle` enables). A
++//! production build compiles them out: `emit` is then an inert `Ok(())`. Without that, the 60,000-row
++//! process cap below would make a long-lived guest terminate itself (a failed `emit` fails the block
++//! request, which stops the whole worker), and every request would print guest physical addresses.
+ use crate::reclaim_access::{Fault, Range};
+ use std::sync::atomic::{AtomicU64, Ordering};
++#[cfg(any(test, feature = "cowork-fixture-trace"))]
+ use std::sync::OnceLock;
++#[cfg(any(test, feature = "cowork-fixture-trace"))]
+ use std::time::Instant;
++#[cfg(any(test, feature = "cowork-fixture-trace"))]
+ static START: OnceLock<Instant> = OnceLock::new();
++#[cfg(any(test, feature = "cowork-fixture-trace"))]
+ static ROWS: AtomicU64 = AtomicU64::new(0);
+ static REQUESTS: AtomicU64 = AtomicU64::new(0);
+ pub const MAX_ROWS: u64 = 60000;
++/// True only in builds that carry the trace (test and `cowork-fixture-trace`).
++pub const COMPILED: bool = cfg!(any(test, feature = "cowork-fixture-trace"));
++#[cfg(any(test, feature = "cowork-fixture-trace"))]
+ pub fn clock_micros() -> u128 {
+     START.get_or_init(Instant::now).elapsed().as_micros()
+ }
++#[cfg(not(any(test, feature = "cowork-fixture-trace")))]
++pub fn clock_micros() -> u128 {
++    0
++}
+ pub fn next_request() -> Result<u64, Fault> {
+     REQUESTS
+         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+@@ -26,6 +43,13 @@ pub fn ranges(ranges: &[Range]) -> String {
+             .join(",")
+     )
+ }
++/// Production build: no row, no counter, no cap, never an error.
++#[cfg(not(any(test, feature = "cowork-fixture-trace")))]
++pub fn emit(kind: &str, fields: String) -> Result<(), Fault> {
++    let _ = (kind, fields);
++    Ok(())
++}
++#[cfg(any(test, feature = "cowork-fixture-trace"))]
+ pub fn emit(kind: &str, fields: String) -> Result<(), Fault> {
+     let row = ROWS.fetch_add(1, Ordering::AcqRel);
+     if row >= MAX_ROWS {
+diff --git a/src/libkrun/Cargo.toml b/src/libkrun/Cargo.toml
+index d5fd177..4d252fb 100644
+--- a/src/libkrun/Cargo.toml
++++ b/src/libkrun/Cargo.toml
+@@ -23,8 +23,9 @@ input = ["krun_input", "vmm/input", "devices/input"]
+ virgl_resource_map2 = ["devices/virgl_resource_map2"]
+ aws-nitro = ["vmm/aws-nitro", "devices/aws-nitro", "dep:aws-nitro", "dep:nitro-enclaves"]
+ # Cowork fixture regression oracle (N2). Off in every production build: with it, the reviewed
+-# `*_fixture_*` C entry points stay exported next to the production ones. It adds no dependency.
+-cowork-fixture-oracle = []
++# `*_fixture_*` C entry points stay exported next to the production ones, and the fixture-only
++# block trace rows are compiled in. It adds no dependency.
++cowork-fixture-oracle = ["devices/cowork-fixture-trace"]
+ 
+ [dependencies]
+ crossbeam-channel = ">=0.5.15"
+diff --git a/src/libkrun/src/cowork_production_trace_tests.rs b/src/libkrun/src/cowork_production_trace_tests.rs
+new file mode 100644
+index 0000000..e5fbcbc
+--- /dev/null
++++ b/src/libkrun/src/cowork_production_trace_tests.rs
+@@ -0,0 +1,21 @@
++//! The fixture-only block trace must not exist in a production build. A failed `emit` fails the block
++//! request and the guarded loop then stops the whole worker, so the 60,000-row process cap would end a
++//! long-lived production guest after a few thousand block requests. Pure, VM-free checks; run with
++//! `--test-threads=1`.
++
++#[cfg(not(feature = "cowork-fixture-oracle"))]
++#[test]
++fn production_block_trace_is_compiled_out_silent_and_uncapped() {
++    use devices::block_trace::{emit, COMPILED, MAX_ROWS};
++    assert!(!COMPILED);
++    // Far past the fixture's row cap, and every call still succeeds without printing a row.
++    for _ in 0..MAX_ROWS + 1000 {
++        assert!(emit("block_request_capture", String::from("\"request\":1")).is_ok());
++    }
++}
++
++#[cfg(feature = "cowork-fixture-oracle")]
++#[test]
++fn fixture_oracle_keeps_the_block_trace_compiled_in() {
++    assert!(devices::block_trace::COMPILED);
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index daee83d..4c45c07 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -3628,3 +3628,5 @@ pub unsafe extern "C" fn krun_cowork_set_workspace_disks(
+ mod cowork_workspace_disks_tests;
+ #[cfg(all(test,feature="blk",target_os="macos"))]
+ mod cowork_production_profile_tests;
++#[cfg(all(test,feature="blk",target_os="macos"))]
++mod cowork_production_trace_tests;
