@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
@@ -8,6 +8,7 @@ import type { PeerInboxCaps, PeerInboxEntry } from "../../src/cowork/peer-inbox"
 import { CoworkRepository } from "../../src/cowork/repository";
 import { COWORK_BACKUP_EXCLUDED_TABLES, COWORK_TABLES } from "../../src/cowork/schema";
 import { inspectCoworkSource } from "../../src/migration/cowork-exclusion";
+import { repairRuntimeState } from "../../src/runtime-state/doctor";
 import { downgradeCoworkRuntimeStateToV7, downgradeRuntimeStateToV6, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { runPeerInboxStoreConformance, type PeerInboxStoreHarness } from "./peer-inbox-conformance";
 import { definePeerInboxLedgerTests } from "./peer-inbox-ledger-cases";
@@ -218,15 +219,16 @@ test("opening releases a leaked body on a terminal row, reports (and never sweep
   const relaxed = ddl.replace(/,\s*CHECK\(state IN \('accepted','blocked'\) OR body IS NULL\)/, "");
   expect(relaxed).not.toBe(ddl);
   rs.db.run("DROP TABLE cowork_peer_inbox"); rs.db.run(relaxed);
-  put(store, 1); put(store, 2); put(store, 3);
+  put(store, 1); put(store, 2); put(store, 3); put(store, 4);
   rs.db.run("UPDATE cowork_peer_inbox SET state='delivered' WHERE receipt_id='r1'"); // a terminal row that still holds its body
+  rs.db.run("UPDATE cowork_peer_inbox SET state='refused', reason='canceled' WHERE receipt_id='r4'"); // so does a refused one
   rs.db.run("UPDATE cowork_peer_inbox SET body=NULL WHERE receipt_id='r2'"); // an unresolved row whose body is lost
-  expect(store.audit()).toEqual({ unresolvedWithoutBody: ["r2"], terminalWithBody: ["r1"], orphanBodies: 0 });
+  expect(store.audit()).toEqual({ unresolvedWithoutBody: ["r2"], terminalWithBody: ["r1", "r4"], orphanBodies: 0 });
   rs.close();
   const again = openRuntimeStateDb(home); cleanup.push(() => again.close());
   const reopened = new SqlitePeerInboxStore(again);
   expect(reopened.audit()).toEqual({ unresolvedWithoutBody: ["r2"], terminalWithBody: [], orphanBodies: 0 });
-  expect(reopened.get("r1")!.bodyHandle).toBeNull();
+  expect(reopened.get("r1")!.bodyHandle).toBeNull(); expect(reopened.get("r4")!.bodyHandle).toBeNull();
   expect(reopened.get("r2")!.state).toBe("accepted"); // untouched: the ledger fails closed on it
   expect(reopened.readBody("pib_r3")).toBe(`${MARKER}-3`);
 });
@@ -268,7 +270,13 @@ test("deleting a workspace purges the rows addressed to its sessions (counter in
   f.store.update("r1", 1, { state: "delivered", reason: null, updatedAt: 2 }); // even a terminal record to a doomed recipient goes
   put(f.store, 4, `${MARKER}-retained-terminal`, { senderSessionId: "s_doomed", recipientSessionId: "s_live2" });
   f.store.update("r4", 1, { state: "delivered", reason: null, updatedAt: 2 });
-  expect(f.store.purgeWorkspace(doomed.workspaceId, 9_000)).toBe(2); // r1 deleted, r2 ended; r4 was already terminal
+  // A BLOCKED sender row that holds a body and carries an offered epoch: ended too, body and epoch released.
+  put(f.store, 5, `${MARKER}-blocked-from-doomed`, { senderSessionId: "s_doomed", recipientSessionId: "s_live2" });
+  f.store.update("r5", 1, { state: "blocked", reason: "grants", attempts: 1, offered: { incarnationId: "boot-1", leaseEpoch: 2 }, updatedAt: 3 });
+  expect(f.store.get("r5")!.bodyHandle).not.toBeNull();
+  expect(f.store.purgeWorkspace(doomed.workspaceId, 9_000)).toBe(3); // r1 deleted, r2 and r5 ended; r4 was already terminal
+  expect(f.store.get("r5")).toMatchObject({ state: "refused", reason: "sender_gone", bodyHandle: null, offered: null, attempts: 1 });
+  expect(rawRows(f.rs, "SELECT body FROM cowork_peer_inbox WHERE receipt_id='r5'")).toEqual([{ body: null }]);
   expect(f.store.get("r1")).toBeUndefined();
   expect(rawRows(f.rs, "SELECT * FROM cowork_peer_inbox_sequences WHERE recipient_session_id='s_doomed'")).toEqual([]);
   expect(f.store.get("r2")).toMatchObject({ state: "refused", reason: "sender_gone", bodyHandle: null, updatedAt: 9_000, version: 2 });
@@ -288,6 +296,32 @@ test("a purge inside the caller's transaction commits and rolls back with it", (
   expect(f.store.get("r1")!.state).toBe("accepted");
   f.rs.db.transaction(() => { f.store.purgeWorkspace(ws.workspaceId, 5); })();
   expect(f.store.get("r1")).toBeUndefined();
+});
+
+test("a purge is one atomic step: when its last statement fails, nothing it did before is visible", () => {
+  const f = workspaceFixture();
+  const ws = f.project(); f.bind(ws, "s_gone"); f.bind(ws, "s_gone2");
+  put(f.store, 1, `${MARKER}-to`, { recipientSessionId: "s_gone", senderSessionId: "s_live" });
+  put(f.store, 2, `${MARKER}-from`, { senderSessionId: "s_gone2", recipientSessionId: "s_live" });
+  f.rs.db.run("CREATE TRIGGER fail_end BEFORE UPDATE ON cowork_peer_inbox WHEN NEW.reason='sender_gone' BEGIN SELECT RAISE(ABORT,'blocked'); END");
+  expect(() => f.store.purgeWorkspace(ws.workspaceId, 5)).toThrow();
+  expect(f.store.get("r1")!.state).toBe("accepted"); // the DELETE before it was rolled back
+  expect(rawRows(f.rs, "SELECT * FROM cowork_peer_inbox_sequences WHERE recipient_session_id='s_gone'")).toHaveLength(1);
+  expect(f.store.get("r2")!.state).toBe("accepted");
+});
+
+test("secure_delete is pinned to FAST on every open, and freed body pages are zeroed in the main file (the WAL keeps old frames until a checkpoint)", () => {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  expect(rs.db.query("PRAGMA secure_delete").get()).toEqual({ secure_delete: 2 });
+  const ro = openRuntimeStateDb(home, { readonly: true }); cleanup.push(() => ro.close());
+  expect(ro.db.query("PRAGMA secure_delete").get()).toEqual({ secure_delete: 2 });
+  const body = `${MARKER}-zeroed-${"z".repeat(20_000)}`;
+  put(store, 1, body);
+  store.update("r1", 1, { state: "delivered", reason: null, updatedAt: 2 }); // delivery releases the body
+  rs.db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+  expect(readFileSync(rs.path).includes(MARKER)).toBe(false);
+  expect(existsSync(`${rs.path}-wal`) ? readFileSync(`${rs.path}-wal`).includes(MARKER) : false).toBe(false);
 });
 
 // ---------------------------------------------------------------- excluded from backups, export and migration
@@ -314,6 +348,140 @@ test("a backup never carries a body, a record or a counter, and the copy opens a
     expect(store.unresolved("s_r")).toHaveLength(2);
     expect(store.readBody("pib_r1")?.startsWith(MARKER)).toBe(true);
   }
+});
+
+test("the backup copy is vacuumed, not just emptied: no free pages are left behind", () => {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  for (const n of [1, 2, 3, 4]) put(store, n, `${MARKER}-${n}-${"y".repeat(30_000)}`);
+  const copy = rs.backup(join(home, "bk"));
+  const raw = new Database(copy, { readonly: true });
+  try {
+    expect(raw.query("PRAGMA freelist_count").get()).toEqual({ freelist_count: 0 });
+  } finally { raw.close(); }
+});
+
+test("a backup is written under a .tmp name and only renamed into place once the exclusion is proven", () => {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  put(store, 1);
+  rs.db.run("CREATE TRIGGER skip_purge BEFORE DELETE ON cowork_peer_inbox BEGIN SELECT RAISE(IGNORE); END");
+  expect(() => rs.backup(join(home, "bk"))).toThrow(); // the failed copy is deleted: no .tmp and no final-named file remains
+  expect(readdirSync(join(home, "bk"))).toEqual([]);
+});
+
+test("a stale .tmp backup (owner process gone) is deleted by the next backup; a live owner's fresh one is left alone", () => {
+  const home = tempHome();
+  const { rs } = opened(home);
+  const dir = join(home, "bk"); mkdirSync(dir, { recursive: true });
+  const dead = Bun.spawnSync([process.execPath, "-e", "0"]).pid;
+  const stale = join(dir, `runtime-state-2026-01-01-${dead}-0.db.tmp`), mine = join(dir, `runtime-state-2026-01-01-${process.pid}-zz.db.tmp`), old = join(dir, `runtime-state-2026-01-01-${process.pid}-yy.db.tmp`);
+  const unrelated = join(dir, "notes.tmp");
+  for (const file of [stale, mine, old, unrelated]) writeFileSync(file, `${MARKER}`);
+  const longAgo = new Date(Date.now() - 3_600_000); utimesSync(old, longAgo, longAgo);
+  const made = rs.backup(dir);
+  expect(readdirSync(dir).sort()).toEqual([basename(mine), "notes.tmp", basename(made)].sort());
+});
+
+test("a backup temp is never restorable, and a pre-17 style backup name without .tmp still is", async () => {
+  const home = tempHome();
+  const { rs } = opened(home);
+  const dir = join(home, "runtimes", "backups"); mkdirSync(dir, { recursive: true });
+  const temp = join(dir, "runtime-state-2026-01-01-1-0.db.tmp");
+  writeFileSync(temp, "x");
+  const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: temp });
+  expect(result).toMatchObject({ applied: false }); expect(result.detail).toContain("not complete");
+  expect(rs.backup()).toContain("backups");
+});
+
+const backupChild = join(import.meta.dir, "fixtures", "peer-inbox-backup-kill-child.ts");
+test("kill -9 during backups: no file under a backup's real name ever holds a body; a leftover .tmp is swept by the next backup", async () => {
+  const home = tempHome("winter-peer-inbox-bkill-"), dir = join(home, "bk");
+  const child = Bun.spawn([process.execPath, backupChild, home, dir], { stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, WINTER_HOME: home } });
+  const reader = child.stdout.getReader(), decoder = new TextDecoder();
+  let text = "", done = 0;
+  const deadline = Date.now() + 90_000;
+  while (done < 1 && Date.now() < deadline) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    text += decoder.decode(chunk.value);
+    done = (text.match(/^done \d+$/gm) ?? []).length;
+  }
+  expect(done).toBeGreaterThanOrEqual(1);
+  // Kill the moment the next backup's file appears: that is inside the window between VACUUM INTO and the exclusion.
+  const seen = new Set(readdirSync(dir));
+  while (Date.now() < deadline && readdirSync(dir).every(name => seen.has(name))) await Bun.sleep(1);
+  child.kill(9); await child.exited;
+  const finals = readdirSync(dir).filter(name => !/\.tmp(-journal|-wal|-shm)?$/.test(name));
+  expect(finals.length).toBeGreaterThanOrEqual(1);
+  expect(readdirSync(dir).some(name => !seen.has(name))).toBe(true); // the kill really landed on a backup in flight
+  for (const name of finals) {
+    expect(readFileSync(join(dir, name)).includes("PEER-BODY-MARKER-kill")).toBe(false);
+    const raw = new Database(join(dir, name), { readonly: true });
+    try { for (const table of COWORK_BACKUP_EXCLUDED_TABLES) expect(raw.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 }); } finally { raw.close(); }
+  }
+  // Whatever the kill left (a .tmp, or nothing if it landed between backups) is gone after the next backup.
+  const survivor = openRuntimeStateDb(home); cleanup.push(() => survivor.close());
+  survivor.backup(dir);
+  expect(readdirSync(dir).filter(name => /\.tmp(-journal|-wal|-shm)?$/.test(name))).toEqual([]);
+}, 120_000);
+
+// The doctor's raw-copy pre-restore snapshot (used when the current file will not open) is scrubbed the same way.
+function liveStoreThatWillNotOpen(opts: { garbage?: boolean } = {}) {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  for (const n of [1, 2]) put(store, n, `${MARKER}-snap-${n}-${"s".repeat(3_000)}`);
+  const backup = rs.backup(); // the (scrubbed) backup to restore from
+  rs.db.run("PRAGMA user_version = 99"); // newer than this build: door 1 (readonly open) refuses, the raw copy runs
+  return { home, rs, backup, dest: rs.path, opts };
+}
+test("doctor restore-backup raw-copy snapshot carries no inbox body, no row, and no body in its -wal; the tail is kept", async () => {
+  const f = liveStoreThatWillNotOpen();
+  f.rs.db.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+  expect(existsSync(`${f.dest}-wal`)).toBe(true);
+  expect(readFileSync(`${f.dest}-wal`).includes(MARKER)).toBe(true); // the live WAL really does hold bodies
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup });
+  expect(result.applied).toBe(true);
+  const snapshot = /the replaced file is at (\S+)/.exec(result.detail)![1]!;
+  expect(basename(snapshot)).toMatch(/^pre-restore-/);
+  for (const path of [snapshot, `${snapshot}-wal`]) if (existsSync(path)) expect(readFileSync(path).includes(MARKER)).toBe(false);
+  const probe = new Database(snapshot, { readonly: true });
+  try {
+    for (const table of COWORK_BACKUP_EXCLUDED_TABLES) expect(probe.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+    expect(probe.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" });
+  } finally { probe.close(); }
+});
+
+test("doctor restore-backup refuses, deletes the snapshot and leaves the store alone when a SQLite file cannot be scrubbed", async () => {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  put(store, 1, `${MARKER}-structured`);
+  const backup = rs.backup(); const dest = rs.path;
+  rs.db.run("PRAGMA wal_checkpoint(TRUNCATE)"); rs.close();
+  // A valid SQLite header with a destroyed schema page: door 1 refuses and the raw copy cannot be opened to scrub.
+  const bytes = readFileSync(dest); bytes.fill(0xff, 100, 4096);
+  writeFileSync(dest, bytes); rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
+  const before = readFileSync(dest), filesBefore = readdirSync(join(home, "runtimes", "backups")).sort();
+  const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+  expect(result.applied).toBe(false);
+  expect(result.detail).toContain("could not be cleared of owed peer messages");
+  expect(readFileSync(dest)).toEqual(before);
+  expect(readdirSync(join(home, "runtimes", "backups")).sort()).toEqual(filesBefore); // no pre-restore-* left, body-bearing or not
+});
+
+test("doctor restore-backup over a file that is not a database restores, and keeps no copy of the unreadable bytes", async () => {
+  const home = tempHome();
+  const { rs } = opened(home);
+  const backup = rs.backup(); const dest = rs.path; rs.close();
+  writeFileSync(dest, Buffer.concat([Buffer.from(`${MARKER} not a database `), Buffer.alloc(8_192, 7)]));
+  rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
+  const filesBefore = readdirSync(join(home, "runtimes", "backups")).sort();
+  const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+  expect(result.applied).toBe(true);
+  expect(result.detail).toContain("was not a readable database and was not kept");
+  expect(readdirSync(join(home, "runtimes", "backups")).sort()).toEqual(filesBefore);
+  const reopened = openRuntimeStateDb(home); cleanup.push(() => reopened.close());
+  expect(reopened.integrity().ok).toBe(true);
 });
 
 test("a backup fails closed: if the exclusion cannot be proven the copy is deleted and the backup throws", () => {

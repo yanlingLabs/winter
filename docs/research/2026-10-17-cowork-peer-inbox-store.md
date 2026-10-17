@@ -36,10 +36,23 @@ authority (and the ledger tests run the store over a database separate from the 
 - **Handles are derived** (`pib_<receipt id>`, present only while the row holds a body). No record query selects
   the body; only `readBody` reads it, decodes with a fatal UTF-8 decoder and `ignoreBOM`, and throws on any read or
   decode error. Absence is `undefined`.
-- **Backups.** `RuntimeStateDb.backup()` empties both tables in the copy it writes and vacuums it (so the freed
-  pages that held bodies are not in the file), then proves them empty. If it cannot, the copy is deleted and the
-  backup throws. Export manifests are built from named rows and never read these tables (a test pins it). Migration
-  B treats any row as Cowork authority through `COWORK_TABLES` and refuses the copy.
+- **Backups.** `RuntimeStateDb.backup()` writes `VACUUM INTO <name>.tmp`, empties both tables in that copy, checkpoints
+  (TRUNCATE), vacuums (so the freed pages are gone from the file; `freelist_count` is 0), proves them empty, and only
+  then renames it to its real name. If it cannot prove it, the copy is deleted and the backup throws. A process that
+  dies in between leaves only a `.tmp` (or its `-journal`), never a body-bearing file under a backup's name; the next
+  backup into the same directory deletes a `.tmp` whose owner pid is gone or that is over ten minutes old, and
+  `doctor restore-backup` refuses a `.tmp` as incomplete. Export manifests are built from named rows and never read
+  these tables (a test pins it). Migration B treats any row as Cowork authority through `COWORK_TABLES` and refuses
+  the copy.
+- **The doctor's raw-copy snapshot.** When `doctor restore-backup` cannot open the current file it byte-copies it (plus
+  `-wal`/`-shm`) before overwriting. That copy would hold owed bodies, so it is scrubbed with the same routine
+  (`scrubExcludedTables`). If it cannot be scrubbed, the snapshot is DELETED, never kept as a labelled "evidence copy":
+  a snapshot outlives the delivery that deletes a body from the live file, so a copy that may hold bodies is the
+  retention the owner ruled out. What follows depends on the replaced file. A file with a valid SQLite header that
+  still will not scrub is structured data the tool will not destroy unsnapshotted, so the restore REFUSES (nothing
+  overwritten; the operator moves it aside by hand). A file with no SQLite header (a truncated, zeroed or overwritten
+  file, the usual reason to restore at all) is not a database any reader can interpret, so the restore proceeds
+  without a snapshot and says so; the cost is that those unreadable bytes are not preserved as evidence.
 - **Downgrade.** A populated inbox is owed delivery and is retained, like every Cowork table: both downgrade
   functions refuse while any inbox row exists. An empty inbox is dropped with the rest. Counter rows alone do not
   block it (they carry no authority; a drained inbox keeps them so numbers are not reused).
@@ -65,16 +78,25 @@ nothing else names the store.
 
 ## Open points
 
-1. **Freed pages keep bytes in the live database file** until reused or vacuumed; there is no secure deletion
-   (`secure_delete` is off) and the WAL holds earlier page images until a checkpoint. The owner's decision was
-   deletion at delivery, kept out of backups, no extra encryption; the backup copy is vacuumed, the live file is not.
-   Say if `secure_delete` for these statements is wanted.
-2. **A pre-restore snapshot loses the inbox.** `doctor`'s `restore-backup` takes `current.backup()` of the file it
-   replaces; that snapshot now excludes owed messages too, which follows from "excluded from backups" but means the
-   replaced file's owed messages are not recoverable from it.
-3. **Restoring a backup empties the inbox and forgets the counters and dedupe.** By design; senders must retry.
+1. **Freed pages and the WAL.** `PRAGMA secure_delete=FAST` is pinned on every runtime-state open (it is this
+   runtime's default, SQLite 3.51; the pin stops a different build from silently turning it off). With it, the body
+   pages freed at delivery are zeroed in the main file. The WAL keeps the OLD frames (which can hold the body) until
+   the next checkpoint; a TRUNCATE checkpoint clears them (tested). This unwired store adds no checkpoint calls.
+   **Known point for the wiring slice:** decide whether delivery should be followed by a checkpoint, or accept WAL
+   residue until the normal one.
+2. **The pre-restore snapshot excludes the inbox on both paths.** The `backup()` path and, after the scrub above, the
+   raw-copy path. The replaced file's owed messages are therefore not recoverable from either snapshot.
+3. **Restore empties the inbox, the counters and the dedupe records.** Re-read against the ledger
+   (`peer-inbox.ts`): it promises no exactly-once execution, says plainly that a pruned send identity is forgotten
+   and that a restarted sender's replay is a new send, and keeps terminal dedupe records only boundedly (24 h, last
+   100). Nothing assumes dedupe survives a restore, so a sender that retries after a restore produces a duplicate
+   delivery, not a loss (at-least-once). Senders must be written for that.
 4. **No automatic purge hook yet.** There is no workspace delete path in `CoworkRepository`; whoever adds one must
    call `purgeWorkspace` in the same transaction.
-5. **`discardedBy` is stored** (audit only) and never projected to a sender, as the ledger already guarantees.
-6. The store is not safe to back a ledger until the S7 integration constructs it over the same database as the
+5. **A file that violates the table's CHECK takes down the WHOLE runtime-state database, not just Cowork.**
+   `quick_check` at open reports it, `openRuntimeStateDb` throws `corrupt`, and everything in the file (sessions,
+   leases, all of it) is unavailable until restored. It needs an external writer that ignores constraints
+   (`PRAGMA ignore_check_constraints`, or another tool) to occur; this code never produces it.
+6. **`discardedBy` is stored** (audit only) and never projected to a sender, as the ledger already guarantees.
+7. The store is not safe to back a ledger until the S7 integration constructs it over the same database as the
    Cowork records (it works over any `RuntimeStateDb`).
