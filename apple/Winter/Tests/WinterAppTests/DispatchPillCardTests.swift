@@ -187,6 +187,23 @@ final class DispatchPillCardTests: XCTestCase {
         XCTAssertEqual(shortScreen.height, 350, "never taller than the screen leaves room for")
     }
 
+    func testASwapsNewContentStaysHiddenUntilTheShapeIsNearlyThereThenFadesIn() {
+        let pill = CGSize(width: 316, height: 44)
+        let card = CGSize(width: 440, height: 244)
+        XCTAssertEqual(dispatchPillContentReveal(origin: pill, size: pill, target: card), 0, "nothing at the start")
+        XCTAssertEqual(dispatchPillContentReveal(origin: pill, size: CGSize(width: 390, height: 160), target: card), 0,
+                       "still hidden past half way (58 % of the height)")
+        let late = dispatchPillContentReveal(origin: pill, size: CGSize(width: 430, height: 214), target: card)
+        XCTAssertGreaterThan(late, 0)
+        XCTAssertLessThan(late, 1, "fading in over the last stretch")
+        XCTAssertEqual(dispatchPillContentReveal(origin: pill, size: card, target: card), 1, "whole at rest")
+        XCTAssertEqual(dispatchPillContentReveal(origin: card, size: card, target: card), 1, "a swap with nowhere to go")
+        // The collapse is the same rule the other way: the pill's own content comes back near the end.
+        XCTAssertEqual(dispatchPillContentReveal(origin: card, size: CGSize(width: 380, height: 150), target: pill), 0)
+        XCTAssertEqual(dispatchPillContentBlur(visibility: 0), DispatchPillMetrics.maxMorphBlur)
+        XCTAssertEqual(dispatchPillContentBlur(visibility: 1), 0)
+    }
+
     func testEscOnACardLetsGoOfTheKeyboardAndNeverInterrupts() {
         var interrupted = false
         let action = dispatchPillEscAction(cardFront: true, presentation: .compact, previewing: false,

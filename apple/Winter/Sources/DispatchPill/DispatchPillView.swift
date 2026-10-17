@@ -105,11 +105,17 @@ struct DispatchPillShell<Content: View>: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: dispatchPillCornerRadius(height: morph.size.height),
                                      style: .continuous)
+        // A content swap (the pill ↔ a card): the old content fades out before the shape moves (`fade`), the new one
+        // stays hidden while it grows and fades and sharpens in near its end (`reveal`). Outside a swap both are 1.
+        let visibility = morph.fade * morph.reveal
         content
             .frame(width: tracksAnimatedWidth ? morph.size.width : morph.target.width,
                    height: morph.target.height)
             .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
-            .blur(radius: dispatchPillMorphBlur(size: morph.size, target: morph.target))
+            .opacity(visibility)
+            .blur(radius: max(dispatchPillMorphBlur(size: morph.size, target: morph.target),
+                              dispatchPillContentBlur(visibility: visibility)))
+            // Clipped to the morphing shape itself at every frame — nothing inside ever draws past its edge.
             .clipShape(shape)
             .background(shape.fill(Color.black))
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
@@ -207,7 +213,8 @@ struct DispatchPillComposerBar: View {
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
         ZStack(alignment: .top) {
             composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
-                        hidesComposer: working || covered, showsAccessories: showsAccessories)
+                        hidesComposer: working || covered || controller.contentFadingOut,
+                        showsAccessories: showsAccessories)
                 .animation(.easeOut(duration: 0.2)) { $0.opacity(covered ? 0 : 1) }
                 .allowsHitTesting(!covered)
             // `/permissions`: the pill IS the picker — the composer stays mounted underneath, hidden, and
@@ -234,8 +241,9 @@ struct DispatchPillComposerBar: View {
             }
             // The card: laid out at its TARGET width (fixed while the shell springs — no re-wrap, no re-measure mid-
             // morph) and at its own height, which it reports so the shell grows to exactly it. The composer stays
-            // mounted underneath, hidden, so a keystroke still lands in it (and sets the card aside). Its own spring,
-            // blur, rim and shadow are the shell's — nothing here animates the shape.
+            // mounted underneath, hidden, so a keystroke still lands in it (and sets the card aside). Its spring, rim,
+            // shadow, clip and its fade in and out are the shell's (`DispatchPillShell`: the content swap) — nothing
+            // here animates.
             if let card {
                 let records = controller.pendingCardRecords
                 DispatchPillCardView(record: card,
@@ -248,7 +256,6 @@ struct DispatchPillComposerBar: View {
                         controller.cardContentHeightChanged(height)
                     }
                     .id(card.callId)
-                    .transition(.opacity.animation(.easeOut(duration: 0.2)))
             }
         }
     }

@@ -55,6 +55,13 @@ final class DispatchPillCanvasModel: ObservableObject {
 final class DispatchPillMorphModel: ObservableObject {
     @Published var size: CGSize = .zero
     @Published var target: CGSize = .zero
+    /// A CONTENT SWAP (the pill ↔ a card, a card ↔ the next): the size the shape left from — the reveal's measure.
+    var origin: CGSize = .zero
+    /// How much of the shell's content shows (0…1) while a swap's shape springs: nothing until it is close to its
+    /// final size, then fading and sharpening in (`dispatchPillContentReveal`). 1 outside a swap.
+    @Published var reveal: CGFloat = 1
+    /// The OLD content fading out before a swap's shape moves (SwiftUI-animated 1 → 0); 1 otherwise.
+    @Published var fade: CGFloat = 1
 }
 
 /// The pill's own preferences (Settings → Dispatch). App-local, not the daemon's `settings.json`:
@@ -544,8 +551,13 @@ final class DispatchPillController: ObservableObject {
 
     private func setPresentation(_ next: DispatchPillPresentation) {
         guard next != presentation else { return }
+        let cardBefore = cardShowsOnPill
         presentation = next
+        // Into or out of full screen with a card pending, the shell's content changes kind: reveal it as a swap.
+        let swaps = cardBefore != cardShowsOnPill && isVisible
+        if swaps { beginReveal() }
         retargetMain()
+        if swaps, springTimer == nil { endReveal() }
     }
 
     /// Click outside the pill (any app, any other window): compress to the compact pill, never hide,
@@ -891,14 +903,26 @@ final class DispatchPillController: ObservableObject {
                                   inactive: adapter.inactiveElicitations)
     }
 
-    /// The ask the pill has become, or nil.
+    /// The card the pill's shell DRAWS, or nil for the pill's own content. It trails `cardQueue.front` by a content
+    /// swap's fade-out (`syncShellContent`): the old content fades out first, then this changes and the shape moves.
+    @Published private(set) var shellCardId: String?
+    /// The shown card as it was when it took the shell — still drawn while it fades out after being answered.
+    private var shellCardSnapshot: InteractionRecord?
+    /// The old content is fading out ahead of a swap: the AppKit composer hides too.
+    @Published private(set) var contentFadingOut = false
+    /// Bumped by every swap decision, so a fade-out's delayed swap that a newer decision overtook does nothing.
+    private var swapGeneration = 0
+    /// A swap's shape is springing: the content reveal (`morph.reveal`) follows it, and only rises.
+    private var revealing = false
+
+    /// The ask the pill's shell draws (fresh from the pending list while it is pending, else as it last was).
     var frontCard: InteractionRecord? {
-        guard let id = cardQueue.front else { return nil }
-        return pendingCardRecords.first { $0.callId == id }
+        guard let id = shellCardId else { return nil }
+        return pendingCardRecords.first { $0.callId == id } ?? shellCardSnapshot
     }
 
     /// The pill IS a card right now — full screen never is one (its transcript draws every pending ask inline).
-    var cardShowsOnPill: Bool { cardQueue.front != nil && presentation != .fullScreen }
+    var cardShowsOnPill: Bool { shellCardId != nil && presentation != .fullScreen }
 
     /// How many set-aside asks the "waiting for you" pill above the main one counts (0: it is not shown).
     var setAsideCardCount: Int {
@@ -951,7 +975,70 @@ final class DispatchPillController: ObservableObject {
             adapter.policyRefusal = nil
         }
         if had != nil, next.front == nil { cardLeftPill() }
+        syncShellContent()
+    }
+
+    /// Bring what the shell draws in line with the queue, as the island's open morph does: the OLD content fades out
+    /// (`contentFadeOut`) with the shape still, THEN the shell swaps and the shape springs, the new content hidden
+    /// until the shape is close to its size (`dispatchPillContentReveal`). The pill's own content follows the same
+    /// rule both ways, so two contents never overlap. A put-away pill (or no tree yet) swaps at once.
+    private func syncShellContent() {
+        swapGeneration += 1
+        let generation = swapGeneration
+        let wanted = cardQueue.front
+        guard wanted != shellCardId else {
+            // A swap that was on its way out was called off: the current content comes back.
+            if contentFadingOut || morph.fade < 1 {
+                contentFadingOut = false
+                withAnimation(.easeOut(duration: DispatchPillMetrics.contentFadeOut)) { morph.fade = 1 }
+            }
+            retargetMain()
+            return
+        }
+        guard isVisible, hosting != nil else {
+            performShellSwap(to: wanted, reveals: false)
+            return
+        }
+        contentFadingOut = true
+        withAnimation(.easeOut(duration: DispatchPillMetrics.contentFadeOut)) { morph.fade = 0 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + DispatchPillMetrics.contentFadeOut) { [weak self] in
+            guard let self, generation == self.swapGeneration else { return }
+            self.performShellSwap(to: self.cardQueue.front, reveals: true)
+        }
+    }
+
+    private func performShellSwap(to wanted: String?, reveals: Bool) {
+        shellCardId = wanted
+        shellCardSnapshot = wanted.flatMap { id in pendingCardRecords.first { $0.callId == id } }
+        contentFadingOut = false
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { morph.fade = 1 }
+        if reveals {
+            beginReveal()
+        }
         retargetMain()
+        if !reveals || springTimer == nil { endReveal() }
+    }
+
+    /// The new content starts hidden; the spring's ticks raise it (`advanceReveal`).
+    private func beginReveal() {
+        morph.origin = morph.size
+        morph.reveal = 0
+        revealing = true
+        applyComposerBlur()
+    }
+
+    private func advanceReveal() {
+        guard revealing else { return }
+        let next = dispatchPillContentReveal(origin: morph.origin, size: morph.size, target: morph.target)
+        if next > morph.reveal { morph.reveal = next }
+    }
+
+    private func endReveal() {
+        revealing = false
+        if morph.reveal != 1 { morph.reveal = 1 }
+        applyComposerBlur()
     }
 
     /// The pill is a pill again (answered anywhere, or set aside). A card the user clicked into from another app gives
@@ -1186,6 +1273,8 @@ final class DispatchPillController: ObservableObject {
         morph.target = target
         morph.size = target
         pendingShrink = false
+        revealing = false
+        morph.reveal = 1
         applyComposerBlur()
         setCanvas(canvasTarget())
     }
@@ -1253,6 +1342,7 @@ final class DispatchPillController: ObservableObject {
     /// icons soften and sharpen together.
     private weak var composerView: NSScrollView?
     private var appliedComposerBlur: CGFloat = 0
+    private var appliedComposerAlpha: CGFloat = 1
 
     func registerComposerView(_ view: NSScrollView) {
         composerView = view
@@ -1264,15 +1354,24 @@ final class DispatchPillController: ObservableObject {
 
     private func applyComposerBlur() {
         guard let composerView else { return }
-        let radius = dispatchPillMorphBlur(size: morph.size, target: morph.target)
-        guard radius != appliedComposerBlur else { return }
+        // A content swap back to the pill reveals the composer like the rest of the content: hidden, then fading and
+        // sharpening in near the shape's end (an alpha matrix — SwiftUI's opacity does not reach this AppKit view).
+        let alpha = min(1, max(0, morph.reveal))
+        let radius = max(dispatchPillMorphBlur(size: morph.size, target: morph.target),
+                         dispatchPillContentBlur(visibility: alpha))
+        guard radius != appliedComposerBlur || alpha != appliedComposerAlpha else { return }
         appliedComposerBlur = radius
+        appliedComposerAlpha = alpha
+        var filters: [CIFilter] = []
         if radius > 0, let blur = CIFilter(name: "CIGaussianBlur") {
             blur.setValue(radius, forKey: kCIInputRadiusKey)
-            composerView.contentFilters = [blur]
-        } else {
-            composerView.contentFilters = []
+            filters.append(blur)
         }
+        if alpha < 1, let fade = CIFilter(name: "CIColorMatrix") {
+            fade.setValue(CIVector(x: 0, y: 0, z: 0, w: alpha), forKey: "inputAVector")
+            filters.append(fade)
+        }
+        composerView.contentFilters = filters
     }
 
     var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
@@ -1319,8 +1418,10 @@ final class DispatchPillController: ObservableObject {
             morph.size = target
             cancelSpring()
             applyPendingShrink()
+            if revealing { endReveal() }
         } else {
             morph.size = CGSize(width: max(1, w.progress), height: max(1, h.progress))
+            advanceReveal()
         }
         applyComposerBlur()
         updateMouseGate()
@@ -1712,6 +1813,15 @@ final class DispatchPillController: ObservableObject {
     /// Hold the spring mid-flight at `size` (offscreen renders of a change of shape).
     func setAnimatedSizeForTesting(_ size: CGSize) {
         morph.size = size
+        applyComposerBlur()
+    }
+
+    /// Hold a content SWAP mid-flight: the shape at `size` on its way from `origin`, the content revealed as far as
+    /// the spring would have it (`dispatchPillContentReveal`).
+    func setSwapFrameForTesting(size: CGSize, origin: CGSize) {
+        morph.origin = origin
+        morph.size = size
+        morph.reveal = dispatchPillContentReveal(origin: origin, size: size, target: morph.target)
         applyComposerBlur()
     }
 }

@@ -138,7 +138,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "5-working")
     }
 
-    func test6ApprovalFloatsAboveThePill() throws {
+    func test6ApprovalMorphsThePill() throws {
         let record = InteractionRecord(callId: "a1",
                                        ask: .approval(toolName: "bash", summary: "git push origin release/0.124"),
                                        childSessionId: "c1")
@@ -456,24 +456,37 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "20-card-from-typing-pill")
     }
 
-    /// The morph itself: the compact pill's shape springing to the card's, frame by frame (the shell's blur by how
-    /// far it still has to go), stitched into one strip.
+    /// The morph itself, 8 frames: the compact pill's shape springing to the card's (a content swap — the card stays
+    /// hidden while the shape grows, then fades and sharpens in over the last stretch), stitched into one strip.
+    /// Drawn with `ImageRenderer`, which draws SwiftUI's blur and the rounded clip exactly (the window snapshot above
+    /// leaves both out); AppKit-backed pieces (the plume layers) are blank there.
     func test21MorphFilmstrip() throws {
         let p = pillWithCard(approvalRecord())
         _ = try renderImage(p, settle: true) // measure the card, settle the canvas
         let from = CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
         let to = p.morph.target
-        var frames: [NSImage] = []
-        for t in [0.0, 0.25, 0.5, 0.75, 0.9, 1.0] {
-            p.setAnimatedSizeForTesting(CGSize(width: from.width + (to.width - from.width) * t,
-                                               height: from.height + (to.height - from.height) * t))
-            frames.append(try renderImage(p, settle: false))
+        let canvas = p.canvas.size
+        var frames: [CGImage] = []
+        for i in 0..<8 {
+            let t = CGFloat(i) / 7
+            p.setSwapFrameForTesting(size: CGSize(width: from.width + (to.width - from.width) * t,
+                                                  height: from.height + (to.height - from.height) * t),
+                                     origin: from)
+            let view = ZStack {
+                LinearGradient(colors: [Color(red: 0.62, green: 0.56, blue: 0.50), Color(red: 0.36, green: 0.42, blue: 0.52)],
+                               startPoint: .top, endPoint: .bottom)
+                DispatchPillView(controller: p)
+            }
+            .frame(width: canvas.width, height: canvas.height)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            frames.append(try XCTUnwrap(renderer.cgImage, "frame \(i)"))
         }
-        let size = frames[0].size
-        let strip = NSImage(size: CGSize(width: size.width * CGFloat(frames.count), height: size.height))
+        let w = frames[0].width, h = frames[0].height
+        let strip = NSImage(size: CGSize(width: w * frames.count, height: h))
         strip.lockFocus()
         for (i, frame) in frames.enumerated() {
-            frame.draw(in: CGRect(x: size.width * CGFloat(i), y: 0, width: size.width, height: size.height))
+            NSGraphicsContext.current?.cgContext.draw(frame, in: CGRect(x: w * i, y: 0, width: w, height: h))
         }
         strip.unlockFocus()
         try write(strip, "21-morph-filmstrip")
