@@ -60,6 +60,12 @@ const PROBE_TIMEOUT_MS = 90_000;
 /** The homes this script must prove it did not touch. */
 const REAL_HOMES = [join(homedir(), ".winter"), join(homedir(), ".winter-dev")];
 
+/** Bun 1.4 replaced bun:ffi's TinyCC backend with JSC's FFI: no allow-unsigned-executable-memory needed. */
+function ffiNeedsNoUnsignedExecutableMemory(version: string): boolean {
+  const [major = 0, minor = 0] = version.split(".").map(Number);
+  return major > 1 || (major === 1 && minor >= 4);
+}
+
 function log(line: string): void { console.log(line); }
 
 /** A refusal from one of this script's own checks, as opposed to a crash. Carrying it as an
@@ -212,6 +218,11 @@ async function main(): Promise<void> {
     const neg = negSign.status === 0 ? spawnSync(negBinary, ["__keychain-ffi-probe"], { encoding: "utf8", env: ffiEnv, timeout: 30_000 }) : undefined;
     if (sipOff && neg !== undefined && neg.status === 0) {
       log(`--- Step 3c: (skip) NEGATIVE leg: System Integrity Protection is off here, so the hardened runtime does not kill allow-jit alone; it runs where SIP is on ---`);
+    } else if (neg !== undefined && neg.status === 0 && ffiNeedsNoUnsignedExecutableMemory(Bun.version)) {
+      // Bun >= 1.4 moved bun:ffi from TinyCC (trampolines in non-MAP_JIT memory) to JSC's own FFI, so allow-jit alone
+      // no longer kills it (measured on 1.4.2 with SIP on: 1.3.14 SIGKILLs, 1.4.2 runs). The kill this leg looks for
+      // cannot happen on this Bun; the positive leg above still proves the release entitlements run bun:ffi.
+      log(`--- Step 3c: (skip) NEGATIVE leg: Bun ${Bun.version} runs bun:ffi under allow-jit alone, so there is no kill to see; the positive leg above is the gate ---`);
     } else if (neg === undefined || neg.status === 0) {
       rmSync(tmpHome, { recursive: true, force: true });
       rmSync(signedDir, { recursive: true, force: true });
