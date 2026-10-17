@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
-  CoworkNativeMuxSequence, CoworkNativeProtocolError, CoworkNativeRuntimeStreams, coworkNativeConversationsAreBound, coworkNativeGuestStopVerdict, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, COWORK_LIBKRUN_OPTIONAL_SYMBOLS, COWORK_LIBKRUN_EXIT_REASONS, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_NATIVE_WORKER_EXIT_CODES, COWORK_NATIVE_WORKER_FAULTS, COWORK_NATIVE_WORKER_LAYOUT, coworkNativeRuntimeImageDigest, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
+  coworkNativeBootstrapOrder, CoworkNativeMuxSequence, CoworkNativeProtocolError, CoworkNativeRuntimeStreams, coworkNativeConversationsAreBound, coworkNativeGuestStopVerdict, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, COWORK_LIBKRUN_OPTIONAL_SYMBOLS, COWORK_LIBKRUN_EXIT_REASONS, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_NATIVE_WORKER_EXIT_CODES, COWORK_NATIVE_WORKER_FAULTS, COWORK_NATIVE_WORKER_LAYOUT, coworkNativeRuntimeImageDigest, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
   COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES, COWORK_NATIVE_BOOTSTRAP_FAULTS, COWORK_NATIVE_GUEST_FAULTS, COWORK_NATIVE_WORKER_STATES, COWORK_NATIVE_WORKER_STATUS, COWORK_NATIVE_LIMITS, COWORK_NATIVE_MUX_CLASSES, classAInvariantsHold, coworkNativeScopeDigest, parseCoworkNativeEnvelope, parseCoworkNativeLauncherLine,
   parseCoworkNativeMuxFrame, parseCoworkNativeStopReceipt, serializeCoworkNativeEnvelope, serializeCoworkNativeLauncherLine, serializeCoworkNativeMuxFrame, serializeCoworkNativeStopReceipt,
   type CoworkNativeEnvelope, type CoworkNativeLibkrunExitReason, type CoworkNativeLibkrunFlushCounters, type CoworkNativeFlushDevice, type CoworkNativeWorkerStatusState, type CoworkNativeLauncherDirection, type CoworkNativeMuxDirection, type CoworkNativeOrderlyReceipt, type CoworkNativeProtocolFailure,
@@ -238,7 +238,7 @@ test("the contract document names every production symbol, every message type an
   for (const cls of COWORK_NATIVE_MUX_CLASSES) expect(doc).toContain(cls);
 });
 test("the vector files are exactly the six the contract names, and nothing else lives beside them", () => {
-  expect(readdirSync(vectorsDir).sort()).toEqual(["envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"]);
+  expect(readdirSync(vectorsDir).sort()).toEqual(["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"]);
   for (const name of readdirSync(vectorsDir)) expect(basename(name).endsWith(".json")).toBe(true);
   expect(existsSync(join(vectorsDir, "launcher-lines.json"))).toBe(true);
 });
@@ -326,7 +326,7 @@ const GOOD_COUNTERS: CoworkNativeLibkrunFlushCounters = [{ requested: 3, complet
 interface StopVectors { exitReasons: Record<string, number>; cases: { name: string; states: CoworkNativeWorkerStatusState[]; exitReason: CoworkNativeLibkrunExitReason | null; counters: CoworkNativeLibkrunFlushCounters | null; verdict: ReturnType<typeof coworkNativeGuestStopVerdict> }[] }
 const stops = vector<StopVectors>("guest-stop.json");
 test("the guest stop verdict matches every vector, and only the full ordered sequence with reason off is orderly", () => {
-  expect(stops.cases.length).toBeGreaterThanOrEqual(23);
+  expect(stops.cases.length).toBeGreaterThanOrEqual(29);
   for (const entry of stops.cases) expect(`${entry.name}:${JSON.stringify(coworkNativeGuestStopVerdict({ states: entry.states, exitReason: entry.exitReason, counters: entry.counters }))}`).toBe(`${entry.name}:${JSON.stringify(entry.verdict)}`);
   expect(stops.cases.filter(entry => entry.verdict.guest === "orderly").map(entry => entry.name)).toEqual(["orderly"]);
   expect({ ...stops.exitReasons }).toEqual({ ...COWORK_LIBKRUN_EXIT_REASONS });
@@ -366,4 +366,59 @@ test("a flush that was requested and never completed, a failed or missing final 
   expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters: bad({ finalSyncAttempted: 0 }) })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
   expect(coworkNativeGuestStopVerdict({ states: states.filter(state => state !== "guest_halted"), exitReason: "off", counters: GOOD_COUNTERS })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
   expect(stops.cases.filter(entry => entry.verdict.guest === "orderly").length).toBe(1);
+});
+
+test("a stop sequence must run vm_running, draining, drain_acked, halting, guest_halted in that order: every misordering is uncertain", () => {
+  const names = ["draining-before-vm-running", "guest-halted-before-halting", "drain-acked-before-draining"];
+  for (const name of names) {
+    const entry = stops.cases.find(item => item.name === name)!;
+    expect(entry.verdict.guest).toBe("uncertain");
+    expect(coworkNativeGuestStopVerdict({ states: entry.states, exitReason: "off", counters: entry.counters })).toEqual(entry.verdict);
+  }
+  // Every permutation of the five states with the right set but a wrong order is refused; only the one true order is orderly.
+  const five: CoworkNativeWorkerStatusState[] = ["vm_running", "draining", "drain_acked", "halting", "guest_halted"];
+  const permutations = (items: CoworkNativeWorkerStatusState[]): CoworkNativeWorkerStatusState[][] => items.length < 2 ? [items] : items.flatMap((item, at) => permutations([...items.slice(0, at), ...items.slice(at + 1)]).map(rest => [item, ...rest]));
+  for (const states of permutations(five)) expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters: GOOD_COUNTERS }).guest).toBe(states.join() === five.join() ? "orderly" : "uncertain");
+});
+test("a counter array that is not exactly two disks, or a completed count that differs from requested in either direction, is never orderly", () => {
+  const states = stops.cases.find(entry => entry.name === "orderly")!.states;
+  for (const counters of [[], [GOOD_COUNTERS[0]], [...GOOD_COUNTERS, GOOD_COUNTERS[0]]]) expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters: counters as never })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
+  for (const completed of [2, 4]) expect(coworkNativeGuestStopVerdict({ states, exitReason: "off", counters: [{ ...GOOD_COUNTERS[0], completed }, GOOD_COUNTERS[1]] })).toEqual({ guest: "uncertain", reason: "flush-uncertain" });
+});
+test("the vectors carry one positive for every L2 status, every L2 fault, every bootstrap and guest fault and every L1 worker_state: a misnumbering anywhere fails a drift test", () => {
+  const states = new Set<string>(), faults = new Set<string>();
+  for (const entry of envelopes.positive) {
+    const parsed = parseCoworkNativeEnvelope(bytes(entry.hex), entry.rights, entry.direction);
+    if (parsed.kind === "status") states.add(parsed.state); else if (parsed.kind === "fault") faults.add(parsed.code);
+    if (parsed.kind === "status") expect(Buffer.from(entry.hex, "hex").readUInt32LE(16)).toBe(COWORK_NATIVE_WORKER_STATUS.indexOf(parsed.state) + 1); // the numeric code on the wire
+    if (parsed.kind === "fault") expect(Buffer.from(entry.hex, "hex").readUInt32LE(16)).toBe(COWORK_NATIVE_WORKER_FAULTS.indexOf(parsed.code) + 1);
+  }
+  expect([...states].sort()).toEqual([...COWORK_NATIVE_WORKER_STATUS].sort());
+  expect([...faults].sort()).toEqual([...COWORK_NATIVE_WORKER_FAULTS].sort());
+  expect(COWORK_NATIVE_WORKER_STATUS.length).toBe(10); expect(COWORK_NATIVE_WORKER_FAULTS.length).toBe(8);
+  const bootstrap = new Set<string>(), control = new Set<string>();
+  for (const entry of mux.positive) {
+    const frame = parseCoworkNativeMuxFrame(Buffer.from(entry.hex, "hex"), entry.direction as never);
+    if (frame.class === "bootstrap" && frame.message.t === "fault") bootstrap.add(frame.message.code);
+    if (frame.class === "control" && frame.message.t === "fault") control.add(frame.message.code);
+  }
+  expect([...bootstrap].sort()).toEqual([...COWORK_NATIVE_BOOTSTRAP_FAULTS].sort());
+  expect([...control].sort()).toEqual([...COWORK_NATIVE_GUEST_FAULTS].sort());
+  const workerStates = new Set<string>();
+  for (const entry of lines.positive) { const parsed = parseCoworkNativeLauncherLine(entry.line, entry.direction as never, entry.rights); if (parsed.t === "worker_state") workerStates.add(parsed.state); }
+  expect([...workerStates].sort()).toEqual([...COWORK_NATIVE_WORKER_STATES].sort());
+});
+interface OrderVectors { cases: { name: string; events: { dir: "down" | "up"; t: string }[]; result: ReturnType<typeof coworkNativeBootstrapOrder> }[] }
+const orders = vector<OrderVectors>("bootstrap-order.json");
+test("bootstrap order: conversations only after mounted, a second set is second_conversations, runtime_ready only after a set (the stateless parser leaves 'once' to the two ends)", () => {
+  for (const entry of orders.cases) expect(`${entry.name}:${JSON.stringify(coworkNativeBootstrapOrder(entry.events))}`).toBe(`${entry.name}:${JSON.stringify(entry.result)}`);
+  const byName = (name: string) => orders.cases.find(entry => entry.name === name)!.result;
+  expect(byName("full-sequence")).toEqual({ ok: true });
+  expect(byName("conversations-before-mounted")).toMatchObject({ ok: false, reason: "out_of_order" });
+  expect(byName("second-conversation-set")).toMatchObject({ ok: false, reason: "second_conversations" });
+  expect(byName("runtime-ready-without-a-set")).toMatchObject({ ok: false, reason: "out_of_order" });
+  expect(byName("duplicate-runtime-ready")).toMatchObject({ ok: false, reason: "duplicate_runtime_ready" });
+  // The parser alone cannot see a second set: each copy is a valid frame.
+  const set = Buffer.from(mux.positive.find(entry => entry.name === "bootstrap-down-conversations-guided")!.hex, "hex");
+  expect(parseCoworkNativeMuxFrame(set, "down").class).toBe("bootstrap");
 });

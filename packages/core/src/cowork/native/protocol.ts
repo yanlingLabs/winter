@@ -637,6 +637,34 @@ export class CoworkNativeRuntimeStreams {
 export const COWORK_NATIVE_ENVELOPE_MAGIC = "WEV1";
 export const COWORK_NATIVE_ENVELOPE_KINDS = Object.freeze(["scope", "volumes", "drain", "status", "fault"] as const);
 export const COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES = Object.freeze({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
+// ------------------------------------------------------------------------------------------------ bootstrap order
+
+/** One bootstrap-class message as a transcript records it: `down` is host to guest, `up` guest to host. */
+export interface CoworkNativeBootstrapEvent { readonly dir: "down" | "up"; readonly t: string }
+export type CoworkNativeBootstrapOrder = { readonly ok: true } | { readonly ok: false; readonly index: number; readonly reason: "out_of_order" | "second_conversations" | "duplicate_runtime_ready" };
+const BOOTSTRAP_STEPS: Readonly<Record<string, { dir: "down" | "up"; after: string | null }>> = Object.freeze({
+  hello: { dir: "up", after: null }, plan: { dir: "down", after: "hello" }, receipt: { dir: "up", after: "plan" }, ready: { dir: "down", after: "receipt" },
+  mounted: { dir: "up", after: "ready" }, conversations: { dir: "down", after: "mounted" }, runtime_ready: { dir: "up", after: "conversations" },
+});
+/**
+ * The order of one incarnation's bootstrap messages (the single-pass, stateless statement of the rules; section 6.1): hello, plan, receipt, ready, mounted, conversations,
+ * runtime_ready, each only after the one before it and each at most once. `protocol.ts` parses one frame at a time, so "once per incarnation" is ENFORCED by the two ends:
+ * the host sender (it sends one set per start) and the guest (a second set is answered with the bootstrap fault `second_conversations` and ignored). A bootstrap `fault` is valid after `hello`.
+ * This function is the shared test oracle for both: it names the first message that breaks the order.
+ */
+export function coworkNativeBootstrapOrder(events: readonly CoworkNativeBootstrapEvent[]): CoworkNativeBootstrapOrder {
+  const seen = new Set<string>();
+  for (const [index, event] of events.entries()) {
+    if (event.t === "fault") { if (event.dir !== "up" || !seen.has("hello")) return { ok: false, index, reason: "out_of_order" }; continue; }
+    const step = Object.hasOwn(BOOTSTRAP_STEPS, event.t) ? BOOTSTRAP_STEPS[event.t]! : undefined;
+    if (!step || step.dir !== event.dir) return { ok: false, index, reason: "out_of_order" };
+    if (seen.has(event.t)) return { ok: false, index, reason: event.t === "conversations" ? "second_conversations" : event.t === "runtime_ready" ? "duplicate_runtime_ready" : "out_of_order" };
+    if (step.after !== null && !seen.has(step.after)) return { ok: false, index, reason: "out_of_order" };
+    seen.add(event.t);
+  }
+  return { ok: true };
+}
+
 export const COWORK_NATIVE_WORKER_STATUS = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "guest_halted", "exiting", "halting", "guest_fault"] as const);
 export const COWORK_NATIVE_WORKER_FAULTS = Object.freeze(["bad_scope", "bad_volumes", "sandbox_failed", "vm_failed", "mux_violation", "truncated_rights", "internal", "second_drain"] as const);
 export interface CoworkNativeFlushCounters { readonly requested: number; readonly completed: number }
@@ -879,9 +907,9 @@ export type CoworkNativeLibkrunExitReason = keyof typeof COWORK_LIBKRUN_EXIT_REA
 export interface CoworkNativeFlushDevice { readonly requested: number; readonly completed: number; readonly finalSyncAttempted: number; readonly finalSyncCompleted: number }
 /** Both disks, `[0]` winter-data and `[1]` winter-environment; `null` = the worker could not read them. */
 export type CoworkNativeLibkrunFlushCounters = readonly [CoworkNativeFlushDevice, CoworkNativeFlushDevice];
-/** A final-flush failure does NOT change libkrun's exit status, so the counters are the only evidence: every guest flush completed (`completed >= requested`, none lost) and the final sync was attempted and completed on both disks. */
+/** A final-flush failure does NOT change libkrun's exit status, so the counters are the only evidence: every guest flush completed (`completed === requested`: none lost, none invented) and the final sync was attempted and completed on both disks. */
 export function coworkNativeFlushesComplete(counters: CoworkNativeLibkrunFlushCounters | null): boolean {
-  return counters !== null && counters.length === 2 && counters.every(device => device.completed >= device.requested && device.finalSyncAttempted === 1 && device.finalSyncCompleted === 1);
+  return counters !== null && counters.length === 2 && counters.every(device => device.completed === device.requested && device.finalSyncAttempted === 1 && device.finalSyncCompleted === 1);
 }
 export type CoworkNativeGuestStopVerdict =
   | { readonly guest: "orderly" }
@@ -904,7 +932,8 @@ export function coworkNativeGuestStopVerdict(input: { readonly states: readonly 
   if (at("vm_running") < 0) return { guest: "not-booted" };
   if (at("guest_fault") >= 0) return { guest: "uncertain", reason: "guest-fault" };
   const draining = at("draining"), acked = at("drain_acked"), halting = at("halting"), halted = at("guest_halted");
-  if (acked < 0 || draining < 0 || acked < draining) return halted >= 0 ? { guest: "uncertain", reason: "guest-fault" } : { guest: "uncertain", reason: "drain-timeout" };
+  // The guest can only drain a VM that runs: `vm_running` precedes `draining`, which precedes `drain_acked`.
+  if (acked < 0 || draining < 0 || acked < draining || draining < at("vm_running")) return halted >= 0 ? { guest: "uncertain", reason: "guest-fault" } : { guest: "uncertain", reason: "drain-timeout" };
   if (halting < 0 || halting < acked) return { guest: "uncertain", reason: "guest-fault" };
   if (halted < 0 || halted < halting) return { guest: "uncertain", reason: "flush-uncertain" };
   if (!coworkNativeFlushesComplete(input.counters)) return { guest: "uncertain", reason: "flush-uncertain" };
