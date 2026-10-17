@@ -188,13 +188,13 @@ final class IslandOpenMorphTests: XCTestCase {
         for shape in [notched, plain] {
             let r = IslandLayout.island(shape)
             XCTAssertEqual(r.size, CGSize(width: IslandLayout.islandWidth, height: IslandLayout.islandHeight))
-            XCTAssertEqual(r.size, CGSize(width: 560, height: 420))
+            XCTAssertEqual(r.size, CGSize(width: 560, height: 168))
             XCTAssertEqual(r.minY, 0)
             XCTAssertEqual(r.midX, 0, accuracy: 0.001)
             XCTAssertEqual(IslandLayout.island(shape, screenHeight: 956), r, "fits the smallest current Mac screen")
         }
-        // A short screen clamps it — the same for every tab there.
-        XCTAssertEqual(IslandLayout.island(notched, screenHeight: 600).height, 360)
+        // A short screen clamps it — the same for every tab there (168 already fits a 600 pt screen).
+        XCTAssertEqual(IslandLayout.island(notched, screenHeight: 600).height, 168)
         XCTAssertLessThanOrEqual(IslandLayout.island(notched, screenHeight: 600).height, 600)
         // The controller no longer measures a tab (it used to size the island to the selected tab's content).
         let code = try String(contentsOf: sourceFile("IslandController.swift"), encoding: .utf8)

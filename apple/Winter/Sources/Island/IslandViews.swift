@@ -496,8 +496,13 @@ struct IslandExpandedContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: shape.topInset)
-            IslandOpenHeader(store: store)
+            if shape.hasHousing {
+                // The header sits IN the housing's band, inline with it: the title left of the housing, the dots right.
+                IslandOpenHeader(store: store, height: shape.topInset, housingWidth: shape.housing?.width)
+            } else {
+                Color.clear.frame(height: shape.topInset)
+                IslandOpenHeader(store: store)
+            }
             tabBody
         }
         .frame(width: size.width, height: size.height, alignment: .top)
@@ -517,29 +522,40 @@ struct IslandExpandedContent: View {
 /// The open island's header: the selected tab's title (with Needs you's count), and the dots on the same centre line.
 struct IslandOpenHeader: View {
     @ObservedObject var store: IslandStore
+    /// The row's height: `Self.height` below the band without a housing, the housing's height beside it.
+    var height: CGFloat = Self.height
+    /// The housing's width when the header sits beside it: the title keeps left of it, the dots right of it.
+    var housingWidth: CGFloat? = nil
 
-    /// The header's height (the open island's content measure adds it).
+    /// The header's height without a housing (the open island's content measure adds it).
     static let height: CGFloat = 46
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text(store.tabs.selected?.title ?? "")
-                .font(Typography.body(.semibold))
-                .foregroundStyle(Color.white)
-                .lineLimit(1)
-            if store.tabs.selected?.id == IslandTabRegistry.needsYou.id, !store.cards.isEmpty {
-                Text("\(store.cards.count)")
-                    .font(Typography.captionDigits(.semibold))
-                    .foregroundStyle(Color.black)
-                    .padding(.horizontal, 6)
-                    .frame(minWidth: 18, minHeight: 18)
-                    .background(Capsule().fill(pillReviewAmber))
+            HStack(spacing: 8) {
+                Text(store.tabs.selected?.title ?? "")
+                    .font(Typography.body(.semibold))
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if store.tabs.selected?.id == IslandTabRegistry.needsYou.id, !store.cards.isEmpty {
+                    Text("\(store.cards.count)")
+                        .font(Typography.captionDigits(.semibold))
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 6)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(Capsule().fill(pillReviewAmber))
+                }
             }
-            Spacer(minLength: 8)
-            if store.tabs.showsDots { IslandTabDots(state: store.tabs) { store.tabs.select($0) } }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let housingWidth { Color.clear.frame(width: housingWidth) }
+            HStack {
+                if store.tabs.showsDots { IslandTabDots(state: store.tabs) { store.tabs.select($0) } }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, IslandLayout.headerInset)
-        .frame(height: Self.height)
+        .frame(height: height)
     }
 }
 

@@ -212,8 +212,12 @@ private struct IslandExpandedViewForGallery: View {
         let target = CGRect(origin: .zero, size: size)
         IslandOpenFrame(frame: .resting(target), target: target, shape: shape) {
             VStack(spacing: 0) {
-                Color.clear.frame(height: shape.topInset)
-                IslandOpenHeader(store: store)
+                if shape.hasHousing {
+                    IslandOpenHeader(store: store, height: shape.topInset, housingWidth: shape.housing?.width)
+                } else {
+                    Color.clear.frame(height: shape.topInset)
+                    IslandOpenHeader(store: store)
+                }
                 IslandWatchesList(activity: store.activity, scrolls: false, nowMs: { nowMs })
             }
             .frame(width: size.width, height: size.height, alignment: .top)

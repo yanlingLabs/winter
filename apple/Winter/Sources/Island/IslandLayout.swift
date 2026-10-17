@@ -78,11 +78,11 @@ enum IslandLayout {
     static let headerInset: CGFloat = 20
 
     // The open island: ONE size for every tab and any content (user 2026-10-17) — each tab scrolls inside it. 560 is
-    // the island family's widest (the typing Dispatch pill, the desktop-switch pill's ceiling); 420 leaves ~340 pt under
-    // the housing and the header: two full rows of Shelf tiles, five Sessions rows, two Needs-you cards. Under half the
-    // smallest current Mac screen's height (956 pt), and clamped on any shorter one (`island(_:screenHeight:)`).
+    // the island family's widest (the typing Dispatch pill, the desktop-switch pill's ceiling); 168 (user: ~2/5 of the
+    // first 420) keeps it a compact extension of the housing — with a housing the header sits beside it, in its band,
+    // so all of it under the housing is the list. Clamped on any screen too short for it (`island(_:screenHeight:)`).
     static let islandWidth: CGFloat = 560
-    static let islandHeight: CGFloat = 420
+    static let islandHeight: CGFloat = 168
     static let islandCorner: CGFloat = 32
     /// The concave shoulders by which the open island's flat top flares into the screen's edge (`IslandEdgeShape`).
     static let islandShoulder: CGFloat = 14
