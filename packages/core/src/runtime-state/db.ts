@@ -1,9 +1,9 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { COWORK_TABLES, migrateCoworkSchema, migrateCoworkVolumeSchema, migrateCoworkFilesystemSchema, migrateCoworkFolderGrantSchema, migrateCoworkScheduleSchema, migrateCoworkInstructionSchema, migrateCoworkScheduleQuarantineSchema, migrateCoworkOutputSchema, migrateCoworkStorageLifecycleSchema } from "../cowork/schema";
+import { COWORK_TABLES, migrateCoworkSchema, migrateCoworkVolumeSchema, migrateCoworkFilesystemSchema, migrateCoworkFolderGrantSchema, migrateCoworkScheduleSchema, migrateCoworkInstructionSchema, migrateCoworkScheduleQuarantineSchema, migrateCoworkOutputSchema, migrateCoworkStorageLifecycleSchema, migrateCoworkPeerInboxSchema, COWORK_BACKUP_EXCLUDED_TABLES } from "../cowork/schema";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 16;
+export const RUNTIME_STATE_SCHEMA_VERSION = 17;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -239,6 +239,7 @@ const MIGRATIONS: ReadonlyArray<{
   { version: 14, up: migrateCoworkScheduleQuarantineSchema },
   { version: 15, up: migrateCoworkOutputSchema },
   { version: 16, up: migrateCoworkStorageLifecycleSchema },
+  { version: 17, up: migrateCoworkPeerInboxSchema },
 ];
 
 /** `PRAGMA foreign_key_check`'s row count — how many child rows point at no parent. */
@@ -248,13 +249,52 @@ function foreignKeyViolations(db: Database): number {
 
 function dropEmptyCoworkSchema(db: Database): void {
   const tables = COWORK_TABLES.filter(table => db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
-  for (const table of tables) if (db.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw new CoworkDowngradeRefused();
+  // Per-recipient sequence counters carry no authority (the inbox rows they number are checked above): a drained
+  // inbox keeps its counters so numbers are never reused, and that residue must not block a rollback.
+  for (const table of tables) if (table !== "cowork_peer_inbox_sequences" && db.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw new CoworkDowngradeRefused();
   for (const table of tables) db.run(`DROP TABLE ${table}`);
+}
+
+/** Empties the inbox tables of a COPY of the database and proves it: DELETE, a TRUNCATE checkpoint (so no earlier
+ * frame of the copy's own WAL still holds a body), VACUUM (so the freed pages are gone from the file, not merely
+ * zeroed by secure_delete; `PRAGMA freelist_count` is 0 afterwards), then a read-back. Throws if the copy cannot be
+ * opened or proven empty; the caller decides what to do with the file (delete it). Never run it on a live database. */
+export function scrubExcludedTables(path: string): void {
+  const copy = new Database(path);
+  try {
+    copy.run("PRAGMA secure_delete = FAST");
+    const present = COWORK_BACKUP_EXCLUDED_TABLES.filter(table => copy.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
+    for (const table of present) copy.run(`DELETE FROM ${table}`);
+    copy.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    copy.run("VACUUM");
+    copy.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    for (const table of present) if (copy.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw new Error("backup exclusion failed");
+  } finally { copy.close(); }
+}
+
+/** A backup never carries an owed peer-message body (owner decision, 2026-10-16). Fails closed: a copy that cannot be
+ * proven empty is deleted and the backup throws. */
+function excludeFromBackup(dest: string): void {
+  try { scrubExcludedTables(dest); } catch (error) { rmSync(dest, { force: true }); throw error; }
+}
+
+const BACKUP_TMP = /^runtime-state-.*-(\d+)-[0-9a-z]+\.db\.tmp(?:-journal|-wal|-shm)?$/;
+/** A `.tmp` backup (and its SQLite journal) exists only between `VACUUM INTO` and the exclusion; it holds bodies. One left by a process that
+ * died there is deleted by the next backup into the same directory: when its owner pid is gone, or it is stale. */
+function sweepStaleBackupTemps(destDir: string): void {
+  for (const name of readdirSync(destDir)) {
+    const match = BACKUP_TMP.exec(name);
+    if (!match) continue;
+    const path = join(destDir, name), pid = Number(match[1]);
+    let alive = pid === process.pid;
+    if (!alive) { try { process.kill(pid, 0); alive = true; } catch (error) { alive = (error as NodeJS.ErrnoException).code === "EPERM"; } }
+    try { if (!alive || Date.now() - statSync(path).mtimeMs > 10 * 60_000) rmSync(path, { force: true }); } catch { /* best effort */ }
+  }
 }
 
 /** Explicit compatibility rollback only; caller must hold the stopped-daemon migration boundary.
  * Keeps all WS-21/v7 state and filesystem layout intact. Populated Cowork authority never drops. */
-export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16; to: 7 } | "not-needed" {
+export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17; to: 7 } | "not-needed" {
   const path = join(home, "runtimes", "runtime-state.db");
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
@@ -263,10 +303,10 @@ export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 1
     return db.transaction(() => {
       const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
       if (version <= 7) return "not-needed" as const;
-      if (version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13 && version !== 14 && version !== 15 && version !== 16) throw new RuntimeStateUnavailableError(path, "newer-schema");
+      if (version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13 && version !== 14 && version !== 15 && version !== 16 && version !== 17) throw new RuntimeStateUnavailableError(path, "newer-schema");
       dropEmptyCoworkSchema(db);
       db.run("PRAGMA user_version=7");
-      return { from: version as 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16, to: 7 as const };
+      return { from: version as 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17, to: 7 as const };
     }).immediate();
   } finally { db.close(); }
 }
@@ -278,27 +318,27 @@ export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 1
  * cleared (the older CHECK has no such kind), `runtime_sessions` rebuilt under the v6 CHECK by SQLite's
  * 12-step procedure (keys off OUTSIDE the transaction, `foreign_key_check` no worse), the quarantine
  * record dropped, `user_version` 6. `"not-needed"` for no store or a store already at v6 or below; a store
- * NEWER than v16 is refused. A v8..v16 store may roll back only while every Cowork table (`COWORK_TABLES`) is empty; populated authority must be retained. The daemon must be stopped.
+ * NEWER than v17 is refused. A v8..v17 store may roll back only while every Cowork table (`COWORK_TABLES`) is empty; populated authority must be retained. The daemon must be stopped.
  *
  * Dropping `run_root_quarantine` forgets which kept roots were quarantined: after a re-upgrade the boot
  * sweep reconciles those roots AGAIN (they are still on disk — nothing here deletes one). A root that is
  * still unprovable quarantines again: a second evidence copy under `cache/quarantine/`, its sessions
  * re-marked `repair-required` — idempotent, never a loss. Rollback runs this step FIRST (round 3, minor 1).
  */
-export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16; to: 6 } | "not-needed" {
+export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17; to: 6 } | "not-needed" {
   const path = join(home, "runtimes", "runtime-state.db");
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
   try {
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
     if (version <= 6) return "not-needed";
-    if (version > 16) throw new RuntimeStateUnavailableError(path, "newer-schema");
+    if (version > 17) throw new RuntimeStateUnavailableError(path, "newer-schema");
     const row = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").get();
     const v7Check = "IN ('official-spool','sdk-resume-staging','run-folder')";
     db.run("PRAGMA foreign_keys = OFF");
     try {
       db.transaction(() => {
-        // Existing homes may roll back an unused additive v8..v16 schema. Never discard
+        // Existing homes may roll back an unused additive v8..v17 schema. Never discard
         // a home identity, source grant, binding, receipt or retained workspace.
         if (version >= 8) {
           dropEmptyCoworkSchema(db);
@@ -326,7 +366,7 @@ export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 
     } finally {
       db.run("PRAGMA foreign_keys = ON");
     }
-    return { from: version as 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16, to: 6 };
+    return { from: version as 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17, to: 6 };
   } finally {
     db.close();
   }
@@ -358,6 +398,9 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
     // and busy_timeout are per-connection settings and never need a write, so they're unconditional.
     if (!opts.readonly) { db.run("PRAGMA journal_mode = WAL"); db.run("PRAGMA synchronous = NORMAL"); }
     db.run("PRAGMA foreign_keys = ON"); db.run("PRAGMA busy_timeout = 5000");
+    // Freed pages (a delivered peer message's body) are zeroed. 2 = FAST is this runtime's default; pinned so a different
+    // SQLite build cannot silently turn it off. The WAL still holds old frames until the next checkpoint.
+    db.run("PRAGMA secure_delete = FAST");
     const quick = db.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
     if (quick?.quick_check !== "ok") throw new RuntimeStateUnavailableError(path, "corrupt", quick);
   } catch (e) {
@@ -423,7 +466,13 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
     backup(destDir = join(dir, "backups")) {
       mkdirSync(destDir, { recursive: true });
       const dest = join(destDir, `runtime-state-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}-${(backupSeq++).toString(36)}.db`);
-      opened.run(`VACUUM INTO ?`, [dest]);
+      // The body-bearing copy lives under a `.tmp` name until the exclusion is proven, then is renamed into place, so
+      // a process that dies in between never leaves a body-bearing file under a backup's real name.
+      sweepStaleBackupTemps(destDir);
+      const temp = `${dest}.tmp`;
+      opened.run(`VACUUM INTO ?`, [temp]);
+      excludeFromBackup(temp);
+      renameSync(temp, dest);
       // Minor (a): a readonly handle can still VACUUM INTO (it only reads the source), but it must
       // not attempt a write against its own (readonly) connection to record the backup path.
       if (!opts.readonly) opened.run(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('last_backup_path', ?)`, [dest]);

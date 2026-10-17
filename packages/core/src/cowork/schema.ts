@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 
+/** Tables that hold message bodies or per-recipient message counters. `RuntimeStateDb.backup()` empties them in the
+ * copy it writes, so a backup never carries an owed message body (owner decision, 2026-10-16). */
+export const COWORK_BACKUP_EXCLUDED_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox"] as const;
+
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -236,5 +240,40 @@ export function migrateCoworkStorageLifecycleSchema(db: Database): void {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
       UNIQUE(workspace_id,generation)
     );
+  `);
+}
+
+/** v17 same-Project peer-message inbox: a dedicated table (not the `cowork_operations` log). One row per accepted
+ * send. The body lives in `body` only while the message is owed: the CHECK makes a terminal row with a body
+ * unrepresentable, so releasing the body and reaching a terminal state are one statement. The table is excluded
+ * from backups (COWORK_BACKUP_EXCLUDED_TABLES) and never encrypted separately (owner decisions, 2026-10-16).
+ * No foreign keys: a session id here is a name, never authority. The per-recipient counter is its own table so a
+ * sequence number is never reused after rows are removed or pruned. */
+export function migrateCoworkPeerInboxSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cowork_peer_inbox_sequences (
+      recipient_session_id TEXT PRIMARY KEY, last_sequence INTEGER NOT NULL CHECK(last_sequence>0)
+    );
+    CREATE TABLE IF NOT EXISTS cowork_peer_inbox (
+      receipt_id TEXT PRIMARY KEY,
+      sender_session_id TEXT NOT NULL, sender_incarnation TEXT NOT NULL, send_id TEXT NOT NULL,
+      recipient_session_id TEXT NOT NULL, digest TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK(size>=0), body BLOB,
+      sequence INTEGER NOT NULL CHECK(sequence>0),
+      state TEXT NOT NULL CHECK(state IN ('accepted','delivered','blocked','refused')),
+      reason TEXT, attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+      offered_incarnation TEXT, offered_lease_epoch INTEGER,
+      delivered_incarnation TEXT, delivered_lease_epoch INTEGER,
+      discarded_by TEXT, accepted_at REAL NOT NULL, updated_at REAL NOT NULL,
+      version INTEGER NOT NULL CHECK(version>0),
+      UNIQUE(sender_session_id,sender_incarnation,send_id),
+      UNIQUE(recipient_session_id,sequence),
+      CHECK((offered_incarnation IS NULL)=(offered_lease_epoch IS NULL)),
+      CHECK((delivered_incarnation IS NULL)=(delivered_lease_epoch IS NULL)),
+      CHECK(body IS NULL OR length(body)=size),
+      CHECK(state IN ('accepted','blocked') OR body IS NULL)
+    );
+    CREATE INDEX IF NOT EXISTS cowork_peer_inbox_recipient ON cowork_peer_inbox(recipient_session_id,state,sequence);
+    CREATE INDEX IF NOT EXISTS cowork_peer_inbox_sender ON cowork_peer_inbox(sender_session_id);
   `);
 }
