@@ -105,6 +105,15 @@ describe("embed-cowork-native.sh (the Cowork native pair's build phase, standalo
     expect(`${dr.stdout}${dr.stderr}`).toContain(`designated => ${coworkRequirement(COWORK_NATIVE.launcher.identifier, "1ABCDE2345")}`);
   });
 
+  test("refuses a signature whose recorded requirement is not the stated one", () => {
+    // codesign prints a team id that starts with a letter without its quotes, so the recorded requirement differs from the stated one: the
+    // "did not take" check is the guard that notices (the real team id starts with a digit, and its quotes survive).
+    const r = rig();
+    const out = embed(r, { DEVELOPMENT_TEAM: "ABCDE12345" });
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain("designated requirement did not take");
+  });
+
   test("nested code is signed one at a time, the worker first, and the script never uses --deep", () => {
     const text = readFileSync(SCRIPT, "utf8");
     const code = text.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");

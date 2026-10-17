@@ -77,7 +77,7 @@ Commands (all from the repository root; scratch paths of your choice):
 swift build --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build
 swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build                         # 161 tests
 swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build-test -Xswiftc -DWINTER_COWORK_TEST_BUILD   # 165 tests
-bun test scripts/embed-cowork-native.test.ts                                                                         # 19 tests
+bun test scripts/embed-cowork-native.test.ts                                                                         # 20 tests
 ```
 
 The flagged run adds the tests that need the compile-time test pin: the real `winter-cowork-launcher` binary as a child of the test host, its
@@ -98,8 +98,9 @@ key; `codesign --verify --strict` passes; `otool -L` lists only `/usr/lib/...` a
 CoreFoundation, libSystem, and the `/usr/lib/swift` runtime). A first release build carried the builder's absolute source paths in the linker's
 debug map and the embed gate refused it by name; `-Xswiftc -gnone -Xlinker -S -Xlinker -x` (now in `launcherBuildArgs`) removes them.
 
-Mutation checks (the catalogue and runner are in the author's scratch, not committed): 71 mutations, each applied to the source, run against
-the named tests and reverted. 68 are killed. Areas: parent authentication (requirement skipped, pid unchecked, unnamed-pair unchecked, token
+Mutation checks (the catalogue and runners are in the author's scratch, not committed): 78 mutations, each applied to the source, run against
+the named tests and reverted. 75 are killed (71 in Swift and C, and all 7 on `embed-cowork-native.sh`: marker check, foreign-dylib check, entitlements
+set, signing order, `--deep`, the non-Release skip, the recorded-requirement check). Areas: parent authentication (requirement skipped, pid unchecked, unnamed-pair unchecked, token
 failure accepted, dev or wrong-team requirement), worker image (check before resume, check after READY, executed cdhash, pinned digest, requirement
 ignored), natives (probe before kill, kill after a confirmed exit, sole-reaper policy, suspended spawn, `CLOEXEC_DEFAULT`, colliding child
 descriptors, a second signal path), descriptor intake (`MSG_CTRUNC` fatal, `MSG_TRUNC` leak, close-on-exec, extras seen, rights at a boundary, rights
