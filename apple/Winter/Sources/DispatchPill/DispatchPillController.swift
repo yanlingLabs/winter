@@ -103,8 +103,9 @@ struct DispatchPillChildFeed {
 /// already follows (`AppModel.session`), through its OWN `FieldStateAdapter` (the orb's adapter has
 /// its callbacks rewired by `GlassRootView` on every render, so it cannot be shared).
 ///
-/// Above the pill float the asks waiting on the user (`ApprovalCardOverlay`) and the child sessions
-/// Dispatch has spawned (`ChildSessionPillsView`).
+/// An ask waiting on the user (an approval, a question, a link request — Dispatch's own or a child's relayed to it)
+/// is not a panel above the pill: the pill itself MORPHS into the card (`cardQueue`, `DispatchPillCardView`) and back.
+/// Above the pill float the child sessions Dispatch has spawned (`ChildSessionPillsView`).
 ///
 /// Same seam convention as `OrbWindowController`: this controller exposes callbacks and imports no
 /// `AppModel`; `AppDelegate.boot()` wires the real side effects.
@@ -147,6 +148,14 @@ final class DispatchPillController: ObservableObject {
     /// The picker chip the keyboard is on (←/→ or ↑/↓ move it, Enter picks it) — the current mode when
     /// the picker opens.
     @Published private(set) var pickerFocus: String?
+    /// Which pending ask the pill has become, and which ones the user set aside (`DispatchPillCardQueue`).
+    @Published private(set) var cardQueue = DispatchPillCardQueue()
+    /// The card content's own measured height at the card's width — drives the card's height, as
+    /// `composerContentHeight` drives the typing pill's.
+    @Published private(set) var cardContentHeight: CGFloat = 0
+    /// A click on the card is what made the panel key (the pill was resting): when the card leaves, the keyboard goes
+    /// back to the app the user was in, as Esc would hand it back.
+    private var cardEngagedPanel = false
     /// A short line a command left above the pill (`DispatchPillNoticePill`), cleared after a few seconds.
     @Published private(set) var commandNotice: String?
     private var noticeTask: Task<Void, Never>?
@@ -402,6 +411,7 @@ final class DispatchPillController: ObservableObject {
         restoreDraftIfEmpty()
         historyIndex = nil
         presentation = adapter.composerDraft.isEmpty ? .compact : .expanded
+        refreshCards()
         snapToTarget()
         isVisible = true
         onScreenPaths.activate()
@@ -841,9 +851,10 @@ final class DispatchPillController: ObservableObject {
 
     /// The text field's height inside the bar for the current target.
     var composerFieldHeight: CGFloat {
-        // While a turn is pinned the composer is hidden under it, at the height it would have.
-        let composer = previewHeight == nil ? morph.target.height
-            : dispatchPillMainSize(presentation: .expanded, composerContentHeight: composerContentHeight,
+        // While a turn is pinned — or the pill is a card — the composer is hidden under it, at the height it would have.
+        let composer = previewHeight == nil && !cardShowsOnPill ? morph.target.height
+            : dispatchPillMainSize(presentation: presentation == .compact && cardShowsOnPill ? .compact : .expanded,
+                                   composerContentHeight: composerContentHeight,
                                    visibleFrame: lockedVisibleFrame).height
         return max(1, composer - DispatchPillMetrics.composerVerticalPadding)
     }
@@ -864,7 +875,99 @@ final class DispatchPillController: ObservableObject {
 
     /// The text field's width for the current TARGET — fixed while the spring runs, so the text
     /// never re-wraps (and so never re-measures its height) mid-animation.
-    var composerFieldWidth: CGFloat { DispatchPillMetrics.fieldWidth(pillWidth: morph.target.width) }
+    /// Under a card it keeps the width of the pill it will be again, so nothing re-wraps there either.
+    var composerFieldWidth: CGFloat {
+        guard cardShowsOnPill else { return DispatchPillMetrics.fieldWidth(pillWidth: morph.target.width) }
+        let shape = dispatchPillMainSize(presentation: presentation, composerContentHeight: composerContentHeight,
+                                         visibleFrame: lockedVisibleFrame)
+        return DispatchPillMetrics.fieldWidth(pillWidth: shape.width)
+    }
+
+    // MARK: - The pill as a card
+
+    /// Every ask the daemon is still waiting on, oldest first (`pendingInteractionRecords`).
+    var pendingCardRecords: [InteractionRecord] {
+        pendingInteractionRecords(in: adapter.transcript, live: adapter.pendingInteractions,
+                                  inactive: adapter.inactiveElicitations)
+    }
+
+    /// The ask the pill has become, or nil.
+    var frontCard: InteractionRecord? {
+        guard let id = cardQueue.front else { return nil }
+        return pendingCardRecords.first { $0.callId == id }
+    }
+
+    /// The pill IS a card right now — full screen never is one (its transcript draws every pending ask inline).
+    var cardShowsOnPill: Bool { cardQueue.front != nil && presentation != .fullScreen }
+
+    /// How many set-aside asks the "waiting for you" pill above the main one counts (0: it is not shown).
+    var setAsideCardCount: Int {
+        cardQueue.front == nil && presentation != .fullScreen ? cardQueue.setAside.count : 0
+    }
+
+    /// The width the card's content is laid out at — the card's TARGET width, fixed while the spring runs so the
+    /// content never re-wraps (and so never re-measures) mid-morph.
+    var cardLayoutWidth: CGFloat {
+        dispatchPillCardSize(presentation: presentation, measuredHeight: cardContentHeight,
+                             visibleFrame: lockedVisibleFrame).width
+    }
+
+    /// Who is asking, as the card's header says it.
+    func cardHeader(for record: InteractionRecord) -> String {
+        dispatchPillCardHeader(record, childTitle: record.childSessionId.flatMap { childTitle(for: $0) })
+    }
+
+    /// The card's content measured itself (`DispatchPillComposerBar`).
+    func cardContentHeightChanged(_ height: CGFloat) {
+        guard abs(height - cardContentHeight) > 0.5 else { return }
+        cardContentHeight = height
+        if cardShowsOnPill { retargetMain() }
+    }
+
+    /// Re-read the pending asks into the queue (the session changed, an elicitation went inactive, the pill came up).
+    func refreshCards() {
+        var next = cardQueue
+        let typing = presentation == .expanded && cardQueue.front == nil
+            && !adapter.composerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        next.update(pending: pendingCardRecords.map(\.callId), typing: typing)
+        applyCardQueue(next)
+    }
+
+    /// The "waiting for you" pill: the set-aside cards come back, the pill morphs into the oldest.
+    func bringBackCards() {
+        var next = cardQueue
+        next.bringBack()
+        applyCardQueue(next)
+        if cardQueue.front != nil { engage() }
+    }
+
+    private func applyCardQueue(_ next: DispatchPillCardQueue) {
+        guard next != cardQueue else { return }
+        let had = cardQueue.front
+        cardQueue = next
+        if next.front != nil, permissionsPickerOpen {
+            // A card takes the pill over from the mode picker; the picker is one `/permissions` away.
+            permissionsPickerOpen = false
+            adapter.policyRefusal = nil
+        }
+        if had != nil, next.front == nil { cardLeftPill() }
+        retargetMain()
+    }
+
+    /// The pill is a pill again (answered anywhere, or set aside). A card the user clicked into from another app gives
+    /// the keyboard back to that app once it is gone (and the pill is the resting one); otherwise the keyboard stays
+    /// with the pill and the composer takes it again, so typing just works.
+    private func cardLeftPill() {
+        let engagedByCard = cardEngagedPanel
+        cardEngagedPanel = false
+        guard isVisible else { return }
+        if engagedByCard, presentation == .compact, adapter.composerDraft.isEmpty {
+            rest(restoreFocus: true)
+        } else if panel.isKeyWindow, let textView = composerView?.documentView as? NSTextView,
+                  panel.firstResponder !== textView {
+            panel.makeFirstResponder(textView)
+        }
+    }
 
     /// A click on the working pill's plume: open the typing pill (stop stays on the circle, Enter
     /// steers) and take the keyboard.
@@ -922,7 +1025,9 @@ final class DispatchPillController: ObservableObject {
             closePermissionsPicker()
             return true
         }
-        let action = dispatchPillEscAction(presentation: presentation, previewing: historyIndex != nil,
+        // A card on the pill: Esc lets go of the keyboard and the card stays (`dispatchPillEscAction(cardFront:…)`).
+        let action = dispatchPillEscAction(cardFront: cardShowsOnPill, presentation: presentation,
+                                           previewing: historyIndex != nil,
                                            escConsumed: { self.onEsc?() == true })
         switch action {
         case .interrupt:
@@ -984,6 +1089,9 @@ final class DispatchPillController: ObservableObject {
     /// Stop taking the keyboard. `restoreFocus` hands it back to the app that had it before the
     /// summon (Esc, hide); a click-outside does not — the click already chose where focus goes.
     private func rest(restoreFocus: Bool) {
+        // Whatever let go of the keyboard (Esc, a click away, hide), a card no longer holds it: a later summon's
+        // keyboard must not be handed back when that card is answered.
+        cardEngagedPanel = false
         panel.acceptsKeyInput = false
         if restoreFocus { externalFocus?.restore() }
         externalFocus = nil
@@ -992,7 +1100,12 @@ final class DispatchPillController: ObservableObject {
     private func handleRestingMouseDown(at windowPoint: CGPoint) {
         guard isVisible else { return }
         let local = CGPoint(x: windowPoint.x, y: panel.frame.height - windowPoint.y)
-        if dispatchPillMainRect(canvasSize: canvas.size, mainSize: morph.size).contains(local) {
+        let onMain = dispatchPillMainRect(canvasSize: canvas.size, mainSize: morph.size).contains(local)
+        if cardShowsOnPill {
+            // A click on the card (an option, its Other field, ✓): the panel takes the keyboard for it — the same click
+            // lands in the field — and hands it back once the card is gone. No draft comes back under a card.
+            if onMain { cardEngagedPanel = true }
+        } else if onMain {
             restoreDraftIfEmpty()
             if !adapter.composerDraft.isEmpty, presentation == .compact { setPresentation(.expanded) }
         }
@@ -1032,6 +1145,11 @@ final class DispatchPillController: ObservableObject {
     }
 
     private func mainTarget() -> CGSize {
+        // A pending ask: the main pill IS its card until it is answered or set aside.
+        if cardShowsOnPill {
+            return dispatchPillCardSize(presentation: presentation, measuredHeight: cardContentHeight,
+                                        visibleFrame: lockedVisibleFrame)
+        }
         // `/permissions`: the main pill IS the mode picker until it closes.
         if permissionsPickerOpen, presentation != .fullScreen {
             return CGSize(width: DispatchPillMetrics.permissionsPickerWidth, height: DispatchPillMetrics.pillHeight)
@@ -1490,6 +1608,18 @@ final class DispatchPillController: ObservableObject {
                     self.commandMode.draftChanged(new)
                     // A changed draft hands the `/` menu's mark back to the closest match.
                     self.menuSelection = nil
+                    // A keystroke under a card means the user went back to writing: every pending card steps aside
+                    // (the pill becomes the typing pill below). An empty composer — sent, cleared, put away — brings
+                    // them back.
+                    if self.cardQueue.front != nil, !new.isEmpty {
+                        var next = self.cardQueue
+                        next.setAllAside()
+                        self.applyCardQueue(next)
+                    } else if new.isEmpty, !self.cardQueue.setAside.isEmpty {
+                        var next = self.cardQueue
+                        next.bringBack()
+                        self.applyCardQueue(next)
+                    }
                     // Typing while the picker is up means the user went back to writing.
                     if self.permissionsPickerOpen, !new.isEmpty { self.closePermissionsPicker() }
                     if self.historyIndex != nil, !new.isEmpty {
@@ -1500,6 +1630,21 @@ final class DispatchPillController: ObservableObject {
                     if next != self.presentation { self.setPresentation(next) }
                 }
             }
+            .store(in: &cancellables)
+
+        // The asks waiting on the user: one arriving morphs the pill into its card, one answered anywhere (here, the
+        // island, the phone, a timeout) morphs it back — or on to the next. Keyed on the pending ids, so a streaming
+        // turn's every delta does not re-run the queue; read one hop later, when `session.state` is the new one.
+        session.$state
+            .map { state in
+                pendingInteractionRecords(in: state.exchanges, live: state.pendingInteractions).map(\.callId)
+            }
+            .removeDuplicates()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshCards() } }
+            .store(in: &cancellables)
+        adapter.$inactiveElicitations
+            .removeDuplicates()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshCards() } }
             .store(in: &cancellables)
 
         // A refocus/reset shrinks the transcript under a pinned turn — never point past its end.
@@ -1557,6 +1702,12 @@ final class DispatchPillController: ObservableObject {
     }
 
     func setVisibleForTesting(_ visible: Bool) { isVisible = visible }
+
+    /// Feed a card height as its content would, then settle (offscreen renders).
+    func setCardContentHeightForTesting(_ height: CGFloat) {
+        cardContentHeight = height
+        snapToTarget()
+    }
 
     /// Hold the spring mid-flight at `size` (offscreen renders of a change of shape).
     func setAnimatedSizeForTesting(_ size: CGSize) {

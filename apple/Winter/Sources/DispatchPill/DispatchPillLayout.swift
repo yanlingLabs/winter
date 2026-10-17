@@ -73,11 +73,18 @@ enum DispatchPillMetrics {
     /// The narrowest a child pill gets before the row stops splitting and shows "+n" instead —
     /// its stop circle plus room for a few letters of its title.
     static let minChildPillWidth: CGFloat = 72
-    /// The approval cards' width — wider than the compact pill, because a card has a summary and two
-    /// buttons to fit.
+    /// The width the pill morphs to when it becomes a card (an approval, a question, a link request) — wider than
+    /// the compact pill, because a card has a summary, rows and two circles to fit. A TYPING pill that becomes a
+    /// card keeps its own width (`expandedWidth`): a card never narrows what the user was looking at.
     static let cardWidth: CGFloat = 440
-    /// How many pending cards float at once; the rest wait behind a "+n more" line.
-    static let maxFloatingCards = 2
+    /// The tallest the pill grows as a card. Its content is bounded well inside this (line limits), so it is a
+    /// guard, not a layout.
+    static let maxCardHeight: CGFloat = 520
+    /// The card's height before its content has measured itself (the first frame of a morph — blurred anyway).
+    static let cardEstimatedHeight: CGFloat = 132
+    /// The card's insets inside the shell — the pill's own leading inset on the sides.
+    static var cardHorizontalPadding: CGFloat { leadingPadding }
+    static let cardVerticalPadding: CGFloat = 14
     /// Inset of the full-screen surface from the visible frame's sides and top.
     static let fullScreenInset: CGFloat = 28
     /// The most the content blurs mid-change of shape (`dispatchPillMorphBlur`).
@@ -135,6 +142,29 @@ func dispatchPillMainSize(
         return CGSize(width: max(DispatchPillMetrics.expandedWidth, width.rounded(.down)),
                       height: max(DispatchPillMetrics.maxExpandedHeight, height.rounded(.down)))
     }
+}
+
+/// PURE: the main pill's TARGET size while it IS a card (`DispatchPillCardQueue.front`). Full screen never morphs
+/// into a card (its transcript draws every pending ask inline), so the caller asks this only for compact and
+/// expanded. `measuredHeight` is the card content's own measured height at this width (0 until it has reported).
+func dispatchPillCardSize(presentation: DispatchPillPresentation, measuredHeight: CGFloat,
+                          visibleFrame: CGRect) -> CGSize {
+    let width = presentation == .expanded ? DispatchPillMetrics.expandedWidth : DispatchPillMetrics.cardWidth
+    let content = measuredHeight > 0 ? measuredHeight : DispatchPillMetrics.cardEstimatedHeight
+    // Never taller than the screen leaves room for (the child row and a margin above it).
+    let ceiling = min(DispatchPillMetrics.maxCardHeight,
+                      max(DispatchPillMetrics.pillHeight, visibleFrame.height * 0.7))
+    return CGSize(width: width,
+                  height: ceil(min(max(content, DispatchPillMetrics.pillHeight), ceiling)))
+}
+
+/// What Esc does while the pill IS a card: it lets go of the keyboard (back to the app the user was in) and the
+/// card stays — Esc never answers, and never denies. A running turn is not interrupted from a card: the card is
+/// the level Esc backs out of first.
+func dispatchPillEscAction(cardFront: Bool, presentation: DispatchPillPresentation, previewing: Bool,
+                           escConsumed: () -> Bool) -> DispatchPillEscAction {
+    if cardFront, presentation != .fullScreen { return .rest }
+    return dispatchPillEscAction(presentation: presentation, previewing: previewing, escConsumed: escConsumed)
 }
 
 /// PURE: how much the pill's content (text, icons, the plume) blurs while its shape is changing —

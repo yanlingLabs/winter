@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// The pill panel's root: the floating layers (asks waiting on the user, then child sessions)
-/// stacked above the main pill, bottom-aligned in a canvas exactly the panel's size.
+/// The pill panel's root: the floating layers (child sessions, command runs, notices) stacked above
+/// the main pill, bottom-aligned in a canvas exactly the panel's size. An ask waiting on the user is
+/// not one of them: the main pill itself morphs into its card (`DispatchPillComposerBar`).
 ///
 /// Rendered in the dark appearance whatever the system's is: the pill floats over arbitrary desktop
 /// content like the Dynamic Island, and every token below resolves to its dark half (`CardSurface`
@@ -33,8 +34,7 @@ struct DispatchPillView: View {
             || commandMenu != nil
             || controller.commandNotice != nil
             || adapter.compactionStartedAt != nil
-            || !pendingInteractionRecords(in: adapter.transcript, live: adapter.pendingInteractions,
-                                          inactive: adapter.inactiveElicitations).isEmpty
+            || controller.setAsideCardCount > 0
     }
 
     /// The `/` menu for what is typed (`DispatchPillController.currentMenu`).
@@ -118,8 +118,9 @@ struct DispatchPillShell<Content: View>: View {
     }
 }
 
-/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, the
-/// commands run from the pill (`CommandPillsView`), a running compaction's clock, a command's notice, and — right above the main pill — the `/` menu while a
+/// What floats above the pill, top to bottom: the child-session row, the
+/// commands run from the pill (`CommandPillsView`), a running compaction's clock, a command's notice, the cards the
+/// user set aside by typing (`DispatchPillSetAsidePill`), and — right above the main pill — the `/` menu while a
 /// command is being typed. Each layer is present only while it has something to show, and the stack
 /// closes up around one that leaves, so the child sessions always stay on top. (`/permissions` floats
 /// nothing: it turns the main pill itself into the picker.)
@@ -136,8 +137,6 @@ private struct DispatchPillAccessories: View {
 
     var body: some View {
         VStack(spacing: DispatchPillMetrics.stackGap) {
-            ApprovalCardOverlay(adapter: adapter,
-                                width: max(rowWidth, DispatchPillMetrics.cardWidth))
             if !adapter.dispatchChildren.isEmpty {
                 ChildSessionPillsView(
                     children: adapter.dispatchChildren,
@@ -162,6 +161,10 @@ private struct DispatchPillAccessories: View {
                 DispatchPillNoticePill(text: notice)
                     .transition(.childPill)
             }
+            if controller.setAsideCardCount > 0 {
+                DispatchPillSetAsidePill(count: controller.setAsideCardCount) { controller.bringBackCards() }
+                    .transition(.childPill)
+            }
             if let commandMenu {
                 DispatchPillMenuView(menu: commandMenu, selected: controller.menuSelection, width: rowWidth,
                                      onPick: { controller.runMenuItem($0) })
@@ -169,6 +172,7 @@ private struct DispatchPillAccessories: View {
             }
         }
         .animation(childRowSpring, value: adapter.compactionStartedAt != nil)
+        .animation(childRowSpring, value: controller.setAsideCardCount > 0)
     }
 }
 
@@ -193,16 +197,19 @@ struct DispatchPillComposerBar: View {
         let expanded = controller.presentation == .expanded
         let running = adapter.turnRunning
         let draft = adapter.composerDraft
-        let working = !expanded && running
-        let preview = expanded ? controller.turnPreview : nil
-        let picker = controller.permissionsPickerOpen
-        let showsAccessories = expanded && preview == nil && !picker
+        // An ask waiting on the user: the pill IS its card (`DispatchPillCardQueue`).
+        let card = controller.cardShowsOnPill ? controller.frontCard : nil
+        let working = !expanded && running && card == nil
+        let preview = expanded && card == nil ? controller.turnPreview : nil
+        let picker = controller.permissionsPickerOpen && card == nil
+        let covered = preview != nil || picker || card != nil
+        let showsAccessories = expanded && !covered
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
         ZStack(alignment: .top) {
             composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
-                        hidesComposer: working || preview != nil || picker, showsAccessories: showsAccessories)
-                .animation(.easeOut(duration: 0.2)) { $0.opacity(preview == nil && !picker ? 1 : 0) }
-                .allowsHitTesting(preview == nil && !picker)
+                        hidesComposer: working || covered, showsAccessories: showsAccessories)
+                .animation(.easeOut(duration: 0.2)) { $0.opacity(covered ? 0 : 1) }
+                .allowsHitTesting(!covered)
             // `/permissions`: the pill IS the picker — the composer stays mounted underneath, hidden, and
             // comes back on × or Esc.
             if picker {
@@ -223,6 +230,24 @@ struct DispatchPillComposerBar: View {
                 ExpandedPillTurnPreview(preview: preview)
                     .contentShape(Rectangle())
                     .onTapGesture { controller.exitPreview() }
+                    .transition(.opacity.animation(.easeOut(duration: 0.2)))
+            }
+            // The card: laid out at its TARGET width (fixed while the shell springs — no re-wrap, no re-measure mid-
+            // morph) and at its own height, which it reports so the shell grows to exactly it. The composer stays
+            // mounted underneath, hidden, so a keystroke still lands in it (and sets the card aside). Its own spring,
+            // blur, rim and shadow are the shell's — nothing here animates the shape.
+            if let card {
+                let records = controller.pendingCardRecords
+                DispatchPillCardView(record: card,
+                                     wiring: dispatchPillCardWiring(adapter: adapter, records: records),
+                                     header: controller.cardHeader(for: card),
+                                     waiting: controller.cardQueue.waiting)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: controller.cardLayoutWidth)
+                    .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
+                        controller.cardContentHeightChanged(height)
+                    }
+                    .id(card.callId)
                     .transition(.opacity.animation(.easeOut(duration: 0.2)))
             }
         }
