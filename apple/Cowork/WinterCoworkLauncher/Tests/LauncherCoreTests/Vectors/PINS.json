@@ -1,0 +1,18 @@
+{
+  "note": "Copies of the S1 golden vectors (the cross-language oracle of docs/cowork-native-worker.md). Never edited here: a contract change re-copies the files and updates these hashes in the same commit.",
+  "sourceBranch": "cowork/n2-host-adapter",
+  "sourcePath": "packages/core/test/cowork/native/vectors/",
+  "lastCommitTouchingVectors": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+  "sourceHeadWhenCopied": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+  "contractDocSha256AtSourceHead": "cfa927e255540c53b4c2aa62acabab978d589e1b7b1f6bb652c76334ff15a1d7",
+  "sha256": {
+    "bootstrap-order.json": "36be531467c3ceb9d91f0f2cefb02ec40fba324878a021fe5247317a3c389ca4",
+    "envelopes.json": "115be96ae7021cecfb6e1bb72260e21d3cce6e230133e54da6b3a5f915ac9ffb",
+    "guest-stop.json": "beba7550e5b6dfdaee71345f723a4b17329f39d89533e9860baddb4fc3628a72",
+    "launcher-lines.json": "785d88c4cee0a70d5d985d2c7668c45077b7f29e0a635cf22922fc4a4280c92a",
+    "mux-frames.json": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
+    "runtime-flow.json": "c72950ed10d800447bb17bf14a6a076ddf995e4f9d4e2de968c8a218452727b7",
+    "runtime-image.json": "2929af10fe5593a748b4f9d8c1506f2a1393c62b6e4fe4ffc0dba429f4496858",
+    "stop-receipts.json": "9c9a5385e38a5ec632141700962dec87f2cfc707e79db77e6a23bac801091435"
+  }
+}
