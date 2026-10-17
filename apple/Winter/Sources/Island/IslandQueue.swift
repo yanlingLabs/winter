@@ -73,6 +73,11 @@ struct IslandQueue: Equatable {
     }
 
     private mutating func place(_ new: Entry) {
+        // View requests already in line go first: a newer one queues behind them (FIFO), never ahead.
+        if !new.selfCompacts, !viewQueue.isEmpty {
+            viewQueue.append(new)
+            return
+        }
         guard let cur = current else {
             current = new
             currentHovered = false
@@ -149,6 +154,7 @@ struct IslandQueue: Equatable {
             if cur.selfCompacts { compact(cur) } else { waiting = cur }
         }
         current = entry(w.id, selfCompacts: w.selfCompacts, now: now)
+        refillWaiting()
         currentHovered = false
         currentTyping = false
     }

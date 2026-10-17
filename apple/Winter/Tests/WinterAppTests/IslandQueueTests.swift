@@ -248,8 +248,9 @@ final class IslandQueueTests: XCTestCase {
     /// Whatever happens — arrivals, hovers, typing, clicks on the waiting pill, the clock, answers, a return after being
     /// hidden — a view request is never in the compacted set, and every one held is drawn or in line.
     func testAViewRequestIsNeverInTheCompactedSet() {
-        var rng = SystemRandomNumberGenerator()
-        for _ in 0..<300 {
+        // Seeded: a failure names its seed and replays exactly.
+        for seed in UInt64(1)...300 {
+            var rng = SeededGenerator(seed: seed)
             var q = IslandQueue()
             var now: TimeInterval = 0
             var next = 0
@@ -268,7 +269,7 @@ final class IslandQueueTests: XCTestCase {
                 case 4: q.clickWaiting(now: now)
                 case 5: q.tick(now: now)
                 case 6:
-                    if let id = live.keys.randomElement(using: &rng) {
+                    if let id = live.keys.sorted().randomElement(using: &rng) {
                         q.resolve(id, now: now)
                         live[id] = nil
                     }
@@ -279,13 +280,54 @@ final class IslandQueueTests: XCTestCase {
                     live[id] = view
                     q.addCompacted(id, selfCompacts: !view, now: now)
                 }
-                XCTAssertFalse(q.compacted.contains { !$0.selfCompacts }, "a view request was compacted: \(q)")
-                XCTAssertEqual(q.ids, Set(live.keys), "every pending card is held exactly once")
+                XCTAssertFalse(q.compacted.contains { !$0.selfCompacts }, "seed \(seed): a view request was compacted: \(q)")
+                XCTAssertEqual(q.ids, Set(live.keys), "seed \(seed): every pending card is held exactly once")
                 let views = Set(live.filter(\.value).keys)
                 let drawnOrInLine = Set([q.current?.id, q.waiting?.id].compactMap { $0 }).union(q.viewQueue.map(\.id))
-                XCTAssertTrue(views.isSubset(of: drawnOrInLine), "a view request out of sight: \(q)")
-                if q.current == nil { XCTAssertTrue(q.viewQueue.isEmpty && q.waiting == nil, "nothing on top while some wait: \(q)") }
+                XCTAssertTrue(views.isSubset(of: drawnOrInLine), "seed \(seed): a view request out of sight: \(q)")
+                if q.current == nil { XCTAssertTrue(q.viewQueue.isEmpty && q.waiting == nil, "seed \(seed): nothing on top while some wait: \(q)") }
             }
         }
+    }
+
+    /// A new view request queues behind those already in line — never ahead of them into the waiting slot.
+    func testANewViewRequestQueuesBehindThoseAlreadyInLine() {
+        var q = IslandQueue()
+        q.arrive("a", selfCompacts: true, now: 0)
+        q.hoverCurrent(true, now: 0)
+        q.arrive("view1", selfCompacts: false, now: 1)
+        q.arrive("view2", selfCompacts: false, now: 2)
+        // The approval goes up and its time passes unhovered: the replace path must not jump view3 ahead of view2.
+        q.hoverCurrent(false, now: 3)
+        q.arrive("view3", selfCompacts: false, now: 4)
+        XCTAssertEqual(q.current?.id, "a")
+        XCTAssertEqual(q.waiting?.id, "view1")
+        XCTAssertEqual(q.viewQueue.map(\.id), ["view2", "view3"])
+        // A click on the waiting pill: view1 expands, the next in line (view2) takes the waiting slot.
+        q.clickWaiting(now: 5)
+        XCTAssertEqual(q.current?.id, "view1")
+        XCTAssertEqual(q.waiting?.id, "view2")
+        XCTAssertEqual(q.viewQueue.map(\.id), ["view3"])
+        q.arrive("view4", selfCompacts: false, now: 6)
+        XCTAssertEqual(q.viewQueue.map(\.id), ["view3", "view4"])
+        var order: [String] = []
+        while let cur = q.current {
+            order.append(cur.id)
+            q.resolve(cur.id, now: 7)
+        }
+        XCTAssertEqual(order, ["view1", "view2", "view3", "view4"], "first come, first shown")
+    }
+}
+
+/// SplitMix64: a deterministic generator, so a randomised test's failure replays from its seed.
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }

@@ -264,6 +264,8 @@ final class IslandController {
     /// How long focus notifications are gathered into one re-route.
     static let focusCoalesce: TimeInterval = 0.1
     private var pendingReroute: DispatchWorkItem?
+    /// When a card's words have faded in after its birth began (`DesktopIslandFluid`'s `contentIn`, 0.62–0.92 s).
+    static let cardWordsIn: TimeInterval = 0.95
     /// View requests already acked to the daemon (`island.shown`).
     private var acked: Set<String> = []
 
@@ -277,8 +279,10 @@ final class IslandController {
             guard islandPanel.isVisible, islandPanel.screen != nil, openModel.isRestingOpen else { return }
             onScreen = store.cards.filter { $0.kind == .viewRequest }.map(\.callId)
         } else if topPanel.isVisible, topPanel.screen != nil {
-            let settled = shown.map { $0.state.still && $0.state.returningAt == nil } ?? false
-            let visible = Set([settled ? store.queue.current?.id : nil, store.queue.waiting?.id].compactMap { $0 })
+            let wordsIn = shown.map { s in
+                s.state.returningAt == nil && (s.state.still || s.state.bornAt.map { Date().timeIntervalSince($0) >= Self.cardWordsIn - 0.01 } ?? false)
+            } ?? false
+            let visible = Set([wordsIn ? store.queue.current?.id : nil, store.queue.waiting?.id].compactMap { $0 })
             onScreen = store.viewRequestsOnTop.filter { visible.contains($0.id) }.map(\.callId)
         } else {
             return
@@ -431,11 +435,13 @@ final class IslandController {
         }
         state.bornAt = Date()
         if reduceMotion { state.still = true } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + DesktopIslandFluid.settle + 0.05) { [weak state, weak self] in
-                guard let state, state.returningAt == nil else { return }
-                state.still = true
-                // Its words are in: a view request is acked only now.
+            // Its words are in (the liquid's `contentIn` ends at 0.92 s): a view request is acked then — well inside the
+            // daemon's 2 s window, so the helper's own prompt never pops up beside it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.cardWordsIn) { [weak self] in
                 self?.ackShownViewRequests()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + DesktopIslandFluid.settle + 0.05) { [weak state] in
+                if state?.returningAt == nil { state?.still = true }
             }
         }
         return Shown(id: card.id, geometry: geometry, state: state, prompt: prompt)
