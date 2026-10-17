@@ -101,7 +101,7 @@ interface Run {
   /** True once the conversation set went out: a `runtime_ready` before that is out of order. */
   conversationsSent: boolean; earlyReady: boolean;
   /** A second `runtime_ready` is ignored for power, admission and ownership but still passes the up-sequence check, so a later bootstrap-up consumer sees no gap. */
-  readySeen: boolean; readyAccepted: boolean; pendingDuplicates: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>[];
+  readySeen: boolean; readyAccepted: boolean; duplicateSeqAnomaly: boolean; pendingDuplicates: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>[];
 }
 
 const isCrash = (error: unknown): boolean => error instanceof CoworkNativeSimulatedCrash;
@@ -208,7 +208,7 @@ export class CoworkNativeHost {
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
     const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
-      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, pendingDuplicates: [] };
+      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, duplicateSeqAnomaly: false, pendingDuplicates: [] };
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
     try {
@@ -334,7 +334,9 @@ export class CoworkNativeHost {
   }
 
   /** A duplicate `runtime_ready` changes nothing (power, admission, ownership) but is counted in the up sequence; a malformed sequence number on it is not a reason to stop a running guest. */
-  private acceptDuplicate(run: Run, frame: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>): void { try { run.upSeq.accept(frame, "up"); } catch { /* ignored: the first runtime_ready stands */ } }
+  private acceptDuplicate(run: Run, frame: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>): void { try { run.upSeq.accept(frame, "up"); } catch { run.duplicateSeqAnomaly = true; /* recorded, otherwise ignored: the first runtime_ready stands */ } }
+  /** True when a duplicate `runtime_ready` carried a wrong up-sequence number: the frame was ignored (no power, admission or ownership change) but the anomaly is kept for diagnostics. */
+  duplicateReadySeqAnomaly(workspaceId: string): boolean | undefined { return this.runs.get(workspaceId)?.duplicateSeqAnomaly; }
   /** The up-direction bootstrap sequence number the host expects next for a workspace it runs (diagnostics and tests). */
   nextBootstrapUpSequence(workspaceId: string): number | undefined { return this.runs.get(workspaceId)?.upSeq.nextExpected("bootstrap", "up"); }
 

@@ -159,11 +159,12 @@ test("the neighbour scanner sees bare imports, export-from, dynamic import() and
   for (const planted of ['import "node:net";', 'export { a } from "../daemon";', 'await import("../ipc/server");', "await import(name);"]) expect(astSpecifiers(planted).every(target => allowedFixture.has(target))).toBe(false);
 });
 
-/** Every identifier, property name and string literal in a source that spells `name` (an AST scan, so a comment does not count and a computed or quoted spelling does). */
+/** Every identifier, property name, string literal and template-literal part (head, middle, tail) in a source that spells `name` (an AST scan, so a comment does not count and a quoted spelling does).
+ * LIMIT: this guards against ACCIDENTAL spelling, not deliberate evasion. Concatenation (`"unsafeTest" + "Timeouts"`) and computed keys built at run time are not detected. */
 export function spellsToken(source: string, name: string): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
-    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node) || ts.isPrivateIdentifier(node)) && node.text.includes(name)) found = true;
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node) || ts.isPrivateIdentifier(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && node.text.includes(name)) found = true;
     ts.forEachChild(node, visit);
   };
   visit(ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true));
@@ -173,6 +174,8 @@ test("the test-only `unsafeTestTimeouts` switch is spelled nowhere under package
   const holders = allSources.filter(file => spellsToken(readFileSync(file, "utf8"), "unsafeTestTimeouts")).map(file => relative(packages, file).split(sep).join("/"));
   expect(holders).toEqual(["core/src/cowork/native/host.ts"]);
   // The scanner itself: it sees an identifier, a property key, a quoted spelling and a template-free string, and ignores a comment.
-  for (const planted of ["const unsafeTestTimeouts = true;", "x({ unsafeTestTimeouts: true });", 'x({ "unsafeTestTimeouts": true });', 'const k = "unsafeTestTimeouts";']) expect(spellsToken(planted, "unsafeTestTimeouts")).toBe(true);
+  for (const planted of ["const unsafeTestTimeouts = true;", "x({ unsafeTestTimeouts: true });", 'x({ "unsafeTestTimeouts": true });', 'const k = "unsafeTestTimeouts";', "const k = `unsafeTestTimeouts${x}`;", "const k = `${x}unsafeTestTimeouts`;", "const k = `${x}unsafeTestTimeouts${y}`;", "const k = `unsafeTestTimeouts`;"]) expect(spellsToken(planted, "unsafeTestTimeouts")).toBe(true);
+  // The documented limit: a deliberate evasion is not seen.
+  expect(spellsToken('const k = "unsafeTest" + "Timeouts";', "unsafeTestTimeouts")).toBe(false);
   expect(spellsToken("// unsafeTestTimeouts is mentioned only here\nconst a = 1;", "unsafeTestTimeouts")).toBe(false);
 });
