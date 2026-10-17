@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { reapEmptySessions } from "../../src/sessions/reaper";
 import { afterEach, expect, test as bunTest } from "bun:test";
-import { mkdtempSync, rmSync, statfsSync, renameSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, statfsSync, renameSync, readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, LineDecoder, ConnWriter, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -226,10 +226,27 @@ test("instruction change projection carries revision/digest/status without conte
     kind: "workspace_instructions_changed", payload: { instructionRevision: 2, digest: "/Users/private", refreshState: "current" } })).toThrow("recovery_required");
 });
 
+/** The filesystem type name (`apfs`, `hfs`, …) of the mount holding `path`, from `/sbin/mount`: the longest mount
+ *  point that is `path` or one of its parents. */
+function filesystemName(path: string): string | undefined {
+  const real = realpathSync(path);
+  let best: { point: string; name: string } | undefined;
+  for (const line of Bun.spawnSync(["/sbin/mount"]).stdout.toString().split("\n")) {
+    const m = /^.+? on (.+) \(([^,)]+)/.exec(line);
+    if (!m) continue;
+    const point = m[1]!, name = m[2]!;
+    const inside = real === point || real.startsWith(point === "/" ? "/" : point + "/");
+    if (inside && (best === undefined || point.length > best.point.length)) best = { point, name };
+  }
+  return best?.name;
+}
+
 test("actual owned JSONL and held APFS-directory fullsync complete before delivery ACK", () => {
   const f = fixture(); f.pump().drain();
   expect(Bun.version).toBe("1.3.14"); expect(Bun.revision.startsWith("0d9b296a")).toBe(true);
-  const fsType = statfsSync(f.home).type; expect(fsType).toBe(0x1a);
+  // APFS by NAME: `statfs` f_type is a vfs registration number that differs across macOS releases (26 on one
+  // runner image, 25 on another), so the number alone failed on an APFS home.
+  const fsType = statfsSync(f.home).type; expect(filesystemName(f.home)).toBe("apfs");
   f.update("fullsync-log"); const pending = f.records.pendingChanges(f.sessions[0]!)[0]!;
   expect(f.pump().drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
   const acknowledged = f.db.db.query<{ event_seq: number }, [string, string]>("SELECT event_seq FROM cowork_outbox_deliveries WHERE session_id=? AND change_id=?").get(f.sessions[0]!, pending.changeId)!;
