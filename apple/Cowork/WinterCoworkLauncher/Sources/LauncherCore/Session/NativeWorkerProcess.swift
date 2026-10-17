@@ -23,10 +23,11 @@ public final class NativeWorkerProcess: WorkerProcess, @unchecked Sendable {
 
     /// Validates the pinned path, spawns suspended with `l2Child` as fd 3 and `l3Child` as fd 4, and (the child ends having been
     /// inherited) lets the caller close its copies. Both child ends must be numbered above 4 and differ (`Sock.relocate`).
-    public init(path: String, verifier: WorkerImageVerifying, l2Child: OwnedFD, l3Child: OwnedFD) throws {
+    public init(verifier: WorkerImageVerifying, l2Child: OwnedFD, l3Child: OwnedFD) throws {
         do { try verifier.validatePath() } catch { throw SpawnFailure.imageChanged }
         var child: OpaquePointer?
-        let rc = lc_spawn_owned(path, l2Child.raw, l3Child.raw, &child)
+        // The path comes from the verifier that pinned it: there is no way to spawn one file under another file's pin.
+        let rc = lc_spawn_owned(verifier.path, l2Child.raw, l3Child.raw, &child)
         guard rc == 0, let child else { throw SpawnFailure.failed(rc) }
         handle = child; self.verifier = verifier
         pid = lc_owned_pid(child)

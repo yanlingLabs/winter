@@ -85,7 +85,7 @@ final class RuntimeRig {
         let requirement = try CodeRequirement(workerRequirement ?? WinterCodeIdentity.cdhashRequirement(try CodeHash.ofFile(BuiltProducts.fakeWorker)))
         let image = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: requirement)
         let semaphore = finished
-        runtime = LauncherRuntime(l1: launcherEnd, spawner: NativeWorkerSpawner(path: BuiltProducts.fakeWorker, verifier: image), onFinish: { semaphore.signal() })
+        runtime = LauncherRuntime(l1: launcherEnd, spawner: NativeWorkerSpawner(verifier: image), onFinish: { semaphore.signal() })
         var cfg = Fixture.config(); tune(&cfg); config = cfg
         scope = Fixture.scope(mode: mode)
         runtime.start(config: config, dependencies: SessionDependencies(store: store, power: power), observePower: false)

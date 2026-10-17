@@ -7,11 +7,10 @@ public protocol WorkerSpawning: Sendable {
 }
 
 public struct NativeWorkerSpawner: WorkerSpawning {
-    public let path: String
     public let verifier: WorkerImageVerifying
-    public init(path: String, verifier: WorkerImageVerifying) { self.path = path; self.verifier = verifier }
+    public init(verifier: WorkerImageVerifying) { self.verifier = verifier }
     public func spawn(l2Child: OwnedFD, l3Child: OwnedFD) throws -> WorkerProcess {
-        try NativeWorkerProcess(path: path, verifier: verifier, l2Child: l2Child, l3Child: l3Child)
+        try NativeWorkerProcess(verifier: verifier, l2Child: l2Child, l3Child: l3Child)
     }
 }
 

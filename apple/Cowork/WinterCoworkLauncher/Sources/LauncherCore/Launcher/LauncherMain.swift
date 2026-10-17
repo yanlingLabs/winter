@@ -64,7 +64,7 @@ public enum LauncherMain {
         let random = SystemRandomness()
         let config = SessionConfig(homeId: parsed.homeId, launcherInstanceId: "launcher-" + random.bytes(8).map { String(format: "%02x", $0) }.joined(), hostBootId: bootId)
         let ledger = PowerLedger()
-        let runtime = LauncherRuntime(l1: l1, spawner: NativeWorkerSpawner(path: parsed.workerPath, verifier: image), onFinish: { exit(0) })
+        let runtime = LauncherRuntime(l1: l1, spawner: NativeWorkerSpawner(verifier: image), onFinish: { exit(0) })
         runtime.start(config: config, dependencies: SessionDependencies(store: store, power: ledger), observePower: true, handleTerminationSignals: true)
         dispatchMain()
     }

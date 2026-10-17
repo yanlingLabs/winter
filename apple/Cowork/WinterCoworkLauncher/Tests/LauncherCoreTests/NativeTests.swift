@@ -22,6 +22,7 @@ func rawSendRights(_ fd: Int32, _ payload: [UInt8], rights: [Int32]) -> Int {
 func openDescriptorCount() -> Int { (0..<2048).filter { fcntl(Int32($0), F_GETFD) >= 0 }.count }
 
 private struct AcceptingVerifier: WorkerImageVerifying {
+    let path: String
     func validatePath() throws {}
     func validateExecuted(pid: Int32) throws {}
 }
@@ -149,11 +150,11 @@ final class NativeTests: XCTestCase {
 
     // MARK: the owned child (a REAL process, never a VM)
 
-    private func spawn(_ path: String = BuiltProducts.fakeWorker, verifier: WorkerImageVerifying = AcceptingVerifier()) throws -> (NativeWorkerProcess, OwnedFD, OwnedFD) {
+    private func spawn(_ path: String = BuiltProducts.fakeWorker, verifier: WorkerImageVerifying? = nil) throws -> (NativeWorkerProcess, OwnedFD, OwnedFD) {
         let (p2, c2) = try Sock.pair(.datagram), (p3, c3) = try Sock.pair(.stream)
         let parent2 = try Sock.relocate(p2, above: 5), child2 = try Sock.relocate(c2, above: 5)
         let parent3 = try Sock.relocate(p3, above: 5), child3 = try Sock.relocate(c3, above: 5)
-        let process = try NativeWorkerProcess(path: path, verifier: verifier, l2Child: child2, l3Child: child3)
+        let process = try NativeWorkerProcess(verifier: verifier ?? AcceptingVerifier(path: path), l2Child: child2, l3Child: child3)
         return (process, parent2, parent3)
     }
     private func status(of pid: Int32) -> UInt32 {

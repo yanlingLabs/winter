@@ -77,11 +77,32 @@ final class IdentityTests: XCTestCase {
         let image = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: try requirementForFakeWorker())
         try image.validatePath()
         let (p2, c2) = try Sock.pair(.datagram), (p3, c3) = try Sock.pair(.stream)
-        let child = try NativeWorkerProcess(path: BuiltProducts.fakeWorker, verifier: image, l2Child: try Sock.relocate(c2, above: 5), l3Child: try Sock.relocate(c3, above: 5))
+        let child = try NativeWorkerProcess(verifier: image, l2Child: try Sock.relocate(c2, above: 5), l3Child: try Sock.relocate(c3, above: 5))
         defer { _ = child.kill() }
         XCTAssertNoThrow(try child.validateExecutedImage(), "the executed, still SUSPENDED image satisfies its requirement")
         let strict = try WorkerImage(path: BuiltProducts.fakeWorker, requirement: try CodeRequirement(WinterCodeIdentity.cdhashRequirement(String(repeating: "11", count: 20))))
         XCTAssertThrowsError(try strict.validateExecuted(pid: child.pid), "an image under the wrong requirement is not accepted")
+        _ = (p2, p3)
+    }
+    func testAnExecutedImageMustBeTheVeryFileThatWasPinnedNotMerelySomethingThatSatisfiesTheRequirement() throws {
+        // Two different programs that both carry the identifier "FakeWorker": the requirement `identifier "FakeWorker"` accepts either.
+        // Only the pinned code directory hash tells them apart (a path swapped between pinning and exec).
+        let directory = makeTemporaryDirectory("swap"); defer { try? FileManager.default.removeItem(at: directory) }
+        let pinned = BuiltProducts.canonical(directory.path) + "/pinned/FakeWorker", other = BuiltProducts.canonical(directory.path) + "/other/FakeWorker"
+        for path in [pinned, other] { try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true) }
+        try FileManager.default.copyItem(atPath: BuiltProducts.fakeWorker, toPath: pinned)
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: other)
+        for path in [pinned, other] {
+            let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign"); sign.arguments = ["--force", "--sign", "-", "--identifier", "FakeWorker", path]
+            sign.standardError = FileHandle.nullDevice; try sign.run(); sign.waitUntilExit(); XCTAssertEqual(sign.terminationStatus, 0)
+        }
+        XCTAssertNotEqual(try CodeHash.ofFile(pinned), try CodeHash.ofFile(other))
+        let image = try WorkerImage(path: pinned, requirement: try CodeRequirement("identifier \"FakeWorker\""))
+        let (p2, c2) = try Sock.pair(.datagram), (p3, c3) = try Sock.pair(.stream)
+        var child: OpaquePointer?
+        XCTAssertEqual(lc_spawn_owned(other, try Sock.relocate(c2, above: 5).release(), try Sock.relocate(c3, above: 5).release(), &child), 0)
+        defer { _ = lc_kill_owned(child, 250); lc_owned_destroy(child) }
+        XCTAssertThrowsError(try image.validateExecuted(pid: lc_owned_pid(child)), "it satisfies the requirement but it is not the pinned file")
         _ = (p2, p3)
     }
     func testAPathThatIsNotCanonicalOrIsHardLinkedIsNotPinned() throws {

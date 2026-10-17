@@ -131,6 +131,8 @@ public enum CodeSigningParent {
 // ------------------------------------------------------------------------------------------------ the worker image
 
 public protocol WorkerImageVerifying: Sendable {
+    /// The one path this verifier pinned, and so the only path that may be spawned under it.
+    var path: String { get }
     /// The file on disk is still the file that was pinned (same device, inode, link count and contents).
     func validatePath() throws
     /// The EXECUTED image of the spawned process is valid, satisfies the requirement and is the pinned file's code.
