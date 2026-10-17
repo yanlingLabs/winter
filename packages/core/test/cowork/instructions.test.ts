@@ -50,7 +50,7 @@ test("strict content schema refuses client paths/approval flags and bounds UTF-8
  expect(CoworkInstructionUpdate.safeParse({ ...valid, content: "\ud800" }).success).toBe(false);
 });
 test("schema13 retains authority and missing backing remains unavailable without seeding", () => {
- const f = fixture(); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(16);
+ const f = fixture(); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(17);
  refusal(() => f.owner.get(user, f.workspaceId), unavailable); expect(() => downgradeCoworkRuntimeStateToV7(f.home)).toThrow("Cowork authority"); expect(f.db.integrity().ok).toBe(true);
  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_instruction_directories").get()).toEqual({ n: 0 });
 });

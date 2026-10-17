@@ -6,11 +6,11 @@ import { CoworkError, type GuestEpoch } from "./types";
  * Same-Project peer-message receipt ledger (spec: "Same-Project SendMessage", "Persist acceptance and
  * assign a stable receipt before returning accepted/queued success").
  *
- * SOURCE ONLY. Nothing under src/ imports this module, it has no barrel export, there is no SQLite table and
- * no daemon/session wiring (an anti-wiring test pins all three). The ledger is a state machine over an
- * INJECTED, SYNCHRONOUS `PeerInboxStore`; a durable implementation of that port is a separate decision (see
- * docs/research/2026-10-16-cowork-peer-inbox.md). The only implementation here is the in-memory store, which
- * exists so the state machine can be proven; it is not durable.
+ * UNWIRED. Nothing under src/ but its SQLite store imports this module, it has no barrel export and there is no
+ * daemon/session wiring (an anti-wiring test pins all three). The ledger is a state machine over an INJECTED,
+ * SYNCHRONOUS `PeerInboxStore`. The only implementation in this file is the in-memory store, which exists so the
+ * state machine can be proven; it is not durable. The durable store is `peer-inbox-sqlite.ts` (schema 17; see
+ * docs/research/2026-10-17-cowork-peer-inbox-store.md).
  *
  * The ledger owns NO transport. It never imports a session table, a driver or a wake path, so it cannot wake a
  * workspace, resume a conversation or create one. `offer` hands the next owed message and its body to whoever

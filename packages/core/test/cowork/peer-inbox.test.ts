@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
-import { InMemoryPeerInboxStore, createPeerInboxMemoryState, type PeerInboxCaps } from "../../src/cowork/peer-inbox";
+import { InMemoryPeerInboxStore, createPeerInboxMemoryState, type PeerInboxCaps, type PeerInboxMemoryState } from "../../src/cowork/peer-inbox";
 import * as peerInboxModule from "../../src/cowork/peer-inbox";
 import { runPeerInboxStoreConformance, type PeerInboxStoreHarness } from "./peer-inbox-conformance";
 import { definePeerInboxLedgerTests } from "./peer-inbox-ledger-cases";
@@ -14,16 +14,29 @@ import { definePeerInboxLedgerTests } from "./peer-inbox-ledger-cases";
 
 // ---------------------------------------------------------------- the in-memory store under both suites
 
-/** The in-memory store with a failure seam inside append, so the failure-atomicity cases are not vacuous. */
+const unreadableHandles = new WeakMap<PeerInboxMemoryState, Set<string>>();
+/** The in-memory store with a failure seam inside append, so the failure-atomicity cases are not vacuous, and a seam that
+ * makes one body unreadable (the in-memory store has no real I/O to fail). */
 class FaultyMemoryStore extends InMemoryPeerInboxStore {
   private failAt = 0; private writes = 0;
+  private readonly unreadable: Set<string>;
+  constructor(state: PeerInboxMemoryState) {
+    super(state);
+    this.unreadable = unreadableHandles.get(state) ?? new Set();
+    unreadableHandles.set(state, this.unreadable);
+  }
   arm(step: number) { this.failAt = step; this.writes = 0; }
   protected override beforeWrite() { if (this.failAt > 0 && ++this.writes === this.failAt) { this.failAt = 0; throw new Error("injected write failure"); } }
+  override readBody(handle: string): string | undefined {
+    if (this.unreadable.has(handle)) throw new Error("injected read failure");
+    return super.readBody(handle);
+  }
+  markUnreadable(handle: string) { this.unreadable.add(handle); }
 }
 function memoryHarness(): PeerInboxStoreHarness {
   const root = new FaultyMemoryStore(createPeerInboxMemoryState());
   let last: FaultyMemoryStore = root;
-  return { open: () => (last = root.reopen()), failAppendAtStep: step => last.arm(step) };
+  return { open: () => (last = root.reopen()), failAppendAtStep: step => last.arm(step), makeBodyUnreadable: handle => last.markUnreadable(handle) };
 }
 definePeerInboxLedgerTests("ledger over the in-memory store", memoryHarness);
 runPeerInboxStoreConformance("in-memory", memoryHarness);
@@ -51,17 +64,29 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-test("anti-wiring: no src file imports the ledger, it has no barrel export, no SQLite table, no transport, and the in-memory store is its only implementation", () => {
+test("anti-wiring: no src file imports the ledger, it has no barrel export, no transport, and the in-memory store is the only implementation inside it", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "peer-inbox.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
+  // The SQLite store is the one other module allowed to name the ledger's types; nothing else may, and nothing may name the store.
+  const sqliteStore = join(packages, "core", "src", "cowork", "peer-inbox-sqlite.ts");
+  expect(sources).toContain(sqliteStore);
   for (const file of sources.filter(candidate => candidate !== module)) {
     const text = readFileSync(file, "utf8");
-    for (const needle of ["peer-inbox", "CoworkPeerInbox", "PeerInboxStore", "InMemoryPeerInboxStore", "PeerInboxRecord", "peerSendDigest", "PEER_INBOX_LIMITS", "isTerminalPeerState", "createPeerInboxMemoryState", "PeerInboxCaps", "PeerInboxAudit"])
-      expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
-    expect(text).not.toMatch(/implements\s+PeerInboxStore/);
+    // Whole identifiers: schema.ts and db.ts legitimately name the table and its migration (migrateCoworkPeerInboxSchema).
+    const ledgerNames = ["CoworkPeerInbox", "PeerInboxStore", "InMemoryPeerInboxStore", "PeerInboxRecord", "peerSendDigest", "PEER_INBOX_LIMITS", "isTerminalPeerState", "createPeerInboxMemoryState", "PeerInboxCaps", "PeerInboxAudit"];
+    const needles = file === sqliteStore ? ["CoworkPeerInbox", "InMemoryPeerInboxStore", "peerSendDigest", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState"]
+      : ["peer-inbox", "peer-inbox-sqlite", "SqlitePeerInboxStore", ...ledgerNames];
+    for (const needle of needles) {
+      const found = new RegExp(`(?<![\\w-])${needle}(?![\\w-])`).test(text);
+      expect(`${basename(file)}:${needle}:${found}`).toBe(`${basename(file)}:${needle}:false`);
+    }
+    if (file !== sqliteStore) expect(text).not.toMatch(/implements\s+PeerInboxStore/);
   }
+  const sqliteSource = readFileSync(sqliteStore, "utf8");
+  expect([...sqliteSource.matchAll(/implements\s+PeerInboxStore/g)]).toHaveLength(1);
+  expect([...sqliteSource.matchAll(/from "([^"]+)"/g)].map(match => match[1]!).sort()).toEqual(["../runtime-state/db", "./durable-transaction", "./peer-inbox", "./peer-inbox", "./types"]);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/peer-inbox|from "\.\/cowork/);
   const own = readFileSync(module, "utf8");
@@ -72,7 +97,6 @@ test("anti-wiring: no src file imports the ledger, it has no barrel export, no S
   const code = own.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\s\/\/ .*$/gm, ""); // comments may name what the module is NOT
   for (const forbidden of ["bun:sqlite", "CREATE TABLE", "cowork_peer", "session-messaging", "SessionMessaging", "@yanlinglabs", "daemon", "ensure(", "wake(", "resume("]) expect(`${forbidden}:${code.includes(forbidden)}`).toBe(`${forbidden}:false`);
   expect(Object.keys(peerInboxModule).sort()).toEqual(["CoworkPeerInbox", "InMemoryPeerInboxStore", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState", "isTerminalPeerState", "peerSendDigest"]);
-  // No table: the schema and the runtime-state DB do not mention the inbox at all.
-  for (const file of [join(packages, "core", "src", "cowork", "schema.ts"), join(packages, "core", "src", "runtime-state", "db.ts")])
-    expect(readFileSync(file, "utf8")).not.toMatch(/peer_inbox|peer-inbox|cowork_peer|PeerInbox/i);
+  // The schema may name the table; the ledger module itself never does (the SQLite store is a separate module).
+  expect(own).not.toMatch(/cowork_peer_inbox/);
 });
