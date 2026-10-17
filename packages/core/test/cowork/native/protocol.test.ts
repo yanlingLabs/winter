@@ -326,7 +326,7 @@ const GOOD_COUNTERS: CoworkNativeLibkrunFlushCounters = [{ requested: 3, complet
 interface StopVectors { exitReasons: Record<string, number>; cases: { name: string; states: CoworkNativeWorkerStatusState[]; exitReason: CoworkNativeLibkrunExitReason | null; counters: CoworkNativeLibkrunFlushCounters | null; verdict: ReturnType<typeof coworkNativeGuestStopVerdict> }[] }
 const stops = vector<StopVectors>("guest-stop.json");
 test("the guest stop verdict matches every vector, and only the full ordered sequence with reason off is orderly", () => {
-  expect(stops.cases.length).toBeGreaterThanOrEqual(21);
+  expect(stops.cases.length).toBeGreaterThanOrEqual(23);
   for (const entry of stops.cases) expect(`${entry.name}:${JSON.stringify(coworkNativeGuestStopVerdict({ states: entry.states, exitReason: entry.exitReason, counters: entry.counters }))}`).toBe(`${entry.name}:${JSON.stringify(entry.verdict)}`);
   expect(stops.cases.filter(entry => entry.verdict.guest === "orderly").map(entry => entry.name)).toEqual(["orderly"]);
   expect({ ...stops.exitReasons }).toEqual({ ...COWORK_LIBKRUN_EXIT_REASONS });

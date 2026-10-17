@@ -318,7 +318,9 @@ all of this emits Class B instead.
 `halting` could not prove its filesystems unmounted clean (S5: any failed step, a dirty superblock, a mount that would not go) and is `guest-fault`; so is a `guest_fault` status at any time
 (after one, no Class A can exist for the run), a power-off after `drain_ack` but before `halting`, a power-off with no `drain_ack`, and an exit reason of `reset` or `vcpu-error`. A drain that never
 reached `drain_ack` is `drain-timeout`. A worker that exited without reporting `guest_halted` (the exit watchdog skipped the hook), a `terminal-fault` or `none` reason are `flush-uncertain`. The one
-decision procedure is `coworkNativeGuestStopVerdict` in `protocol.ts` and the vectors in `guest-stop.json`; S2 and S3 carry their own drift test against them. **A worker exit with status 0 proves
+decision procedure is `coworkNativeGuestStopVerdict` in `protocol.ts` and the vectors in `guest-stop.json`; S2 and S3 carry their own drift test against them. **The launcher rule is normative:** `guest.drain = acked` exactly when `guest.powerOff = observed` (and `halting` with them). A worker may send `guest_halted` after a mux quarantine (exit 74) or without any `drain_ack`; the launcher must then
+classify the stop as Class B (`guest-fault`), never Class A. The L2 `exiting` counters (flush requested and completed) are meaningful ONLY alongside `guest_halted`; in every uncertain stop they are informational and never feed a Class A.
+Vectors: `guest-halted-after-mux-quarantine`, `guest-halted-without-drain-ack` in `guest-stop.json`. **A worker exit with status 0 proves
 none of it.** A daemon that has seen `worker_state guest_fault` refuses an orderly receipt for that run (`not_orderly`) as it refuses one that knows less than it saw. `stopNonce` is the daemon's nonce from `stop` (`origin = host-stop`) or a launcher-minted one
 (`origin = owner-loss-drain`). The launcher writes the receipt to its durable store and fsyncs BEFORE sending it, and keeps it until
 the daemon sends `receipt_retire`.

@@ -12,7 +12,10 @@ function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs|mts|cts)$/.test(entry.name) && !entry.parentPath.split(sep).includes("node_modules")).map(entry => join(entry.parentPath, entry.name));
 }
 const allSources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
-const nativeSources = sourceFiles(nativeDirectory);
+// The pressure slice (free-space admission, probes, observer) lives in the same directory and carries its own anti-wiring pin; it is listed so the set stays exact.
+const OTHER_SLICES = ["admission-probes", "free-space", "pressure", "resource-observer"];
+const everyNativeSource = sourceFiles(nativeDirectory);
+const nativeSources = everyNativeSource.filter(file => !OTHER_SLICES.includes(basename(file, ".ts")));
 const scriptSources = existsSync(join(repositoryRoot, "scripts")) ? sourceFiles(join(repositoryRoot, "scripts")) : [];
 
 /** Every module specifier a source text names: static imports and re-exports (any form, multi-line included), bare `import "x"`, `import("x")`,
@@ -33,7 +36,7 @@ export function reachesNative(file: string, specifier: string): boolean {
 }
 
 test("the module set is exactly the reviewed one and has no barrel", () => {
-  expect(nativeSources.map(file => basename(file, ".ts")).sort()).toEqual(MODULES);
+  expect(everyNativeSource.map(file => basename(file, ".ts")).sort()).toEqual([...MODULES, ...OTHER_SLICES].sort());
   expect(existsSync(join(nativeDirectory, "index.ts"))).toBe(false);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/cowork\/native|from "\.\/cowork/);
@@ -43,7 +46,7 @@ test("the module set is exactly the reviewed one and has no barrel", () => {
 test("no source file outside cowork/native imports, names or constructs anything from it", () => {
   const needles = ["cowork/native", "CoworkNativeHost", "CoworkNativeAuthority", "CoworkNativeRecovery", "CoworkNativePower", "CoworkNativeStopRegistry", "CoworkLauncherPort", "CoworkLauncherSession", "CoworkNativeImagePins",
     "CoworkNativeDurableReceiptPort", "CoworkNativeOwnerRecoverPort", "parseCoworkNativeLauncherLine", "parseCoworkNativeEnvelope", "parseCoworkNativeMuxFrame", "FdLineChannel", "FdReceiver", "spawnWithChannel", "COWORK_LIBKRUN_"];
-  for (const file of allSources.filter(candidate => !nativeSources.includes(candidate))) {
+  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate))) {
     const text = readFileSync(file, "utf8");
     for (const needle of needles) expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
   }
@@ -98,7 +101,7 @@ test("no module under cowork/native reads anything at import time", () => {
 
 test("no file anywhere (every package's src, and scripts/) imports from cowork/native, however the specifier is written", () => {
   const offenders: string[] = [];
-  for (const file of [...allSources, ...scriptSources].filter(candidate => !nativeSources.includes(candidate)))
+  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate)))
     for (const specifier of specifiersOf(readFileSync(file, "utf8"))) if (reachesNative(file, specifier)) offenders.push(`${relative(repositoryRoot, file)} -> ${specifier}`);
   expect(offenders).toEqual([]);
   expect(scriptSources.length).toBeGreaterThan(5);

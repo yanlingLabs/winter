@@ -101,6 +101,65 @@
       }
     },
     {
+      "name": "guest-halted-after-mux-quarantine",
+      "states": [
+        "sandboxed",
+        "volumes_accepted",
+        "vm_running",
+        "guest_hello",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
+      "name": "guest-halted-without-drain-ack",
+      "states": [
+        "vm_running",
+        "guest_hello",
+        "draining",
+        "guest_halted",
+        "exiting"
+      ],
+      "exitReason": "off",
+      "counters": [
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        },
+        {
+          "requested": 3,
+          "completed": 3,
+          "finalSyncAttempted": 1,
+          "finalSyncCompleted": 1
+        }
+      ],
+      "verdict": {
+        "guest": "uncertain",
+        "reason": "guest-fault"
+      }
+    },
+    {
       "name": "bare-power-off-without-drain-ack",
       "states": [
         "sandboxed",
