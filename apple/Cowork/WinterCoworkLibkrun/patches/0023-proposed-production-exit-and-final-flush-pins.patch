@@ -1,0 +1,486 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index 7a708cd..669d9bd 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -352,9 +352,12 @@ int32_t krun_cowork_validate_profile_v1(uint32_t ctx_id);
+ /** Called once, on the exiting thread, after every other exit observer (the final flush of both volumes
+  * included) and immediately before the process _exit()s. It must not block, and must not call any
+  * krun_* function except the counter getters. The whole exit sequence is bounded (20 s); if an
+- * observer cannot finish, the process exits without calling the hook. Hard crashes (SIGSEGV, SIGBUS,
+- * SIGILL, SIGSYS, an abort) exit from a signal handler without observers or the hook. A guest that
+- * already stopped cleanly (off or reset) exits with status 0 even if a late fault fires. */
++ * observer cannot finish, the process exits without calling the hook, and after a clean off or reset
++ * that exit status is still 0: exit 0 with no hook call, or completed < requested in the flush counters,
++ * is an UNCERTAIN final flush. Hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS, an abort) are not handled
++ * (no signal handler is installed): the process dies by the default disposition, without observers or
++ * the hook. A guest that already stopped cleanly (off or reset) exits with status 0 even if a late
++ * fault fires. */
+ typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason);
+ /** Register the exit hook. Optional; accepted once, only on a production context, with a non-NULL hook. */
+ int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data);
+diff --git a/src/devices/src/virtio/block/workspace_fd_tests.rs b/src/devices/src/virtio/block/workspace_fd_tests.rs
+index 8834c94..30382f6 100644
+--- a/src/devices/src/virtio/block/workspace_fd_tests.rs
++++ b/src/devices/src/virtio/block/workspace_fd_tests.rs
+@@ -132,3 +132,130 @@ fn workspace_disks_actual_raw_io_survives_names_and_caller_fds_without_reopen()
+     );
+     fs::remove_dir_all(root).unwrap();
+ }
++
++// ---- the flush chain on the real admitted-storage path, and the final flush at exit ----
++use crate::virtio::VmmExitObserver;
++use crate::workspace_raw_storage::sync_seam;
++use std::sync::Arc;
++
++/// Two guarded blocks over admitted temp volumes (disk slots 0 and 1) and the inode of each backing file.
++fn guarded_pair(tag: &str) -> (Cleanup, [Block; 2], [u64; 2]) {
++    let root = std::env::temp_dir().join(format!("winter-final-flush-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
++    fs::create_dir(&root).unwrap();
++    let cleanup = Cleanup(root.clone());
++    let make = |name: &str| {
++        let f = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(root.join(name)).unwrap();
++        f.set_len(MIN_CAPACITY).unwrap();
++        let m = f.metadata().unwrap();
++        (f, ExpectedVolume { device: m.dev(), inode: m.ino(), capacity_bytes: m.len(), uid: m.uid(), mode: 0o600 })
++    };
++    let (data, de) = make("data");
++    let (env, ee) = make("environment");
++    let pair = WorkspaceDisks::intake(data.as_raw_fd(), de, env.as_raw_fd(), ee).unwrap();
++    let [d, e] = pair.duplicate_for_blocks().unwrap();
++    let access = crate::reclaim_access::Access::new(3, 48, 8 * 1024 * 1024);
++    let mut data_block = Block::new_cowork_fd("winter-data".into(), d).unwrap();
++    let mut env_block = Block::new_cowork_fd("winter-environment".into(), e).unwrap();
++    data_block.enable_cowork_guard(access.clone(), access.register(0).unwrap());
++    env_block.enable_cowork_guard(access.clone(), access.register(1).unwrap());
++    (cleanup, [data_block, env_block], [de.inode, ee.inode])
++}
++fn watch(inode: u64, fail: bool) {
++    sync_seam::WATCH_INODE.store(inode, Ordering::Release);
++    sync_seam::CALLS.store(0, Ordering::Release);
++    sync_seam::FAIL.store(fail, Ordering::Release);
++}
++fn unwatch() {
++    sync_seam::WATCH_INODE.store(0, Ordering::Release);
++    sync_seam::FAIL.store(false, Ordering::Release);
++}
++
++/// A guest FLUSH on the guarded disk reaches `sync_all` on the admitted volume, and a failing sync fails the
++/// FLUSH (so the `completed` counter, which the block worker bumps only on Ok, cannot move).
++#[test]
++fn a_disk_flush_reaches_sync_all_on_the_admitted_volume_and_a_failing_sync_fails_it() {
++    let _serial = sync_seam::LOCK.lock().unwrap_or_else(|p| p.into_inner());
++    let (_cleanup, mut blocks, inodes) = guarded_pair("flush");
++    let disk = blocks[0].disk.as_mut().unwrap();
++    watch(inodes[0], false);
++    assert_eq!(disk.flush(), Ok(()));
++    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 1, "one flush, one sync_all");
++    assert!(sync_seam::is_sync_all(sync_seam::LAST_CALL.load(Ordering::Acquire)), "the storage hands over File::sync_all");
++    assert_eq!(disk.flush(), Ok(()));
++    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 2);
++    sync_seam::FAIL.store(true, Ordering::Release);
++    assert_eq!(disk.flush(), Err(()));
++    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 3, "the failing sync was attempted");
++    // The other volume's syncs are not counted against this one.
++    watch(inodes[1], false);
++    let disk = blocks[0].disk.as_mut().unwrap();
++    assert_eq!(disk.flush(), Ok(()));
++    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 0);
++    unwatch();
++}
++
++/// The final flush at exit runs flush + `sync_all` on the admitted volume and records the true result: success
++/// moves `final_completed`, a failing sync moves only `final_attempted`.
++#[test]
++fn the_final_flush_syncs_the_admitted_volume_and_reports_its_real_result() {
++    let _serial = sync_seam::LOCK.lock().unwrap_or_else(|p| p.into_inner());
++    let (_cleanup, mut blocks, inodes) = guarded_pair("final");
++    for slot in 0..2usize {
++        let before = crate::cowork_counters::flush_snapshot()[slot];
++        watch(inodes[slot], false);
++        blocks[slot].on_vmm_exit();
++        let after = crate::cowork_counters::flush_snapshot()[slot];
++        assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 1, "disk {slot}: exactly one sync_all");
++        assert_eq!(after.final_attempted - before.final_attempted, 1, "disk {slot}");
++        assert_eq!(after.final_completed - before.final_completed, 1, "disk {slot}");
++        watch(inodes[slot], true);
++        blocks[slot].on_vmm_exit();
++        let failed = crate::cowork_counters::flush_snapshot()[slot];
++        assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 1, "disk {slot}: the failing sync was attempted");
++        assert_eq!(failed.final_attempted - after.final_attempted, 1, "disk {slot}");
++        assert_eq!(failed.final_completed, after.final_completed, "disk {slot}: a failed sync is not a completed final flush");
++    }
++    unwatch();
++}
++
++/// The final flush wakes a worker blocked on its stop fd (and sets the stop flag) and joins it before it
++/// syncs. The "worker" here blocks on the real stop fd exactly like the epoll loop would; if the observer
++/// never wrote the fd the join would wait forever, so the observer runs on its own thread with a deadline.
++#[test]
++fn the_final_flush_wakes_the_worker_through_the_stop_fd_and_joins_it_before_syncing() {
++    let _serial = sync_seam::LOCK.lock().unwrap_or_else(|p| p.into_inner());
++    let (_cleanup, blocks, inodes) = guarded_pair("wake");
++    let [mut block, _other] = blocks;
++    let fd = block.worker_stopfd.as_raw_fd();
++    let flag = block.cowork_stop.clone();
++    let (seen_tx, seen_rx) = std::sync::mpsc::channel();
++    let worker_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
++    let worker_flag = worker_done.clone();
++    block.worker_thread = Some(std::thread::spawn(move || {
++        let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
++        // Blocks until the stop fd is written; `stop_seen` is what the worker sees once it is woken.
++        while unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
++            if worker_flag.load(Ordering::Acquire) {
++                return; // test teardown after a failure
++            }
++        }
++        seen_tx.send(flag.load(Ordering::Acquire)).unwrap();
++    }));
++    let before = crate::cowork_counters::flush_snapshot()[0];
++    watch(inodes[0], false);
++    let (done_tx, done_rx) = std::sync::mpsc::channel();
++    let runner = std::thread::spawn(move || {
++        block.on_vmm_exit();
++        done_tx.send(block).unwrap();
++    });
++    let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(10));
++    worker_done.store(true, Ordering::Release);
++    let block = outcome.expect("the final flush must wake and join the worker (the stop fd was never written)");
++    runner.join().unwrap();
++    assert!(block.worker_thread.is_none(), "the worker was joined");
++    assert_eq!(seen_rx.try_recv(), Ok(true), "the stop flag was set before the worker woke");
++    let after = crate::cowork_counters::flush_snapshot()[0];
++    assert_eq!(after.final_completed - before.final_completed, 1);
++    assert_eq!(sync_seam::CALLS.load(Ordering::Acquire), 1, "synced after the join");
++    unwatch();
++}
+diff --git a/src/devices/src/workspace_raw_storage.rs b/src/devices/src/workspace_raw_storage.rs
+index 0298405..91bdbfe 100644
+--- a/src/devices/src/workspace_raw_storage.rs
++++ b/src/devices/src/workspace_raw_storage.rs
+@@ -65,6 +65,52 @@ impl PinnedRawStorage {
+         )
+     }
+ }
++/// The one full-sync call of the admitted storage (`sync_all`, as imago's `SyncMode::Full`). The call is passed
++/// in so test builds can see which function the storage hands over, count the calls on one inode and swap in a
++/// failing one; production always passes `File::sync_all` and calls it.
++type SyncCall = fn(&File) -> io::Result<()>;
++fn full_sync(file: &File) -> io::Result<()> {
++    full_sync_with(file, File::sync_all)
++}
++fn full_sync_with(file: &File, call: SyncCall) -> io::Result<()> {
++    #[cfg(test)]
++    let call = sync_seam::wrap(file, call);
++    call(file)
++}
++#[cfg(test)]
++pub(crate) mod sync_seam {
++    use super::SyncCall;
++    use std::fs::File;
++    use std::io;
++    use std::os::unix::fs::MetadataExt;
++    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
++    use std::sync::Mutex;
++    /// Inode whose full syncs are counted (0: none).
++    pub static WATCH_INODE: AtomicU64 = AtomicU64::new(0);
++    pub static CALLS: AtomicU64 = AtomicU64::new(0);
++    /// Address of the function the storage handed over on the last watched call.
++    pub static LAST_CALL: AtomicUsize = AtomicUsize::new(0);
++    pub static FAIL: AtomicBool = AtomicBool::new(false);
++    /// Serializes the tests that use the seam.
++    pub static LOCK: Mutex<()> = Mutex::new(());
++    fn failing(_: &File) -> io::Result<()> {
++        Err(io::Error::from_raw_os_error(libc::EIO))
++    }
++    /// For the watched inode: count, remember which function was passed, and substitute a failing one on request.
++    pub(super) fn wrap(file: &File, call: SyncCall) -> SyncCall {
++        match file.metadata() {
++            Ok(m) if m.ino() == WATCH_INODE.load(Ordering::Acquire) => {
++                CALLS.fetch_add(1, Ordering::AcqRel);
++                LAST_CALL.store(call as usize, Ordering::Release);
++                if FAIL.load(Ordering::Acquire) { failing } else { call }
++            }
++            _ => call,
++        }
++    }
++    pub fn is_sync_all(address: usize) -> bool {
++        address == (File::sync_all as SyncCall) as usize
++    }
++}
+ fn transfer(
+     offset: u64,
+     length: usize,
+@@ -116,7 +162,7 @@ impl Storage for PinnedRawStorage {
+     async fn sync(&self) -> io::Result<()> {
+         validate(&self.file, self.expected)?;
+         // Same full-sync primitive as imago::File's SyncMode::Full; no relaxed fsync override.
+-        self.file.sync_all()?;
++        full_sync(&self.file)?;
+         validate(&self.file, self.expected)
+     }
+     async unsafe fn invalidate_cache(&self) -> io::Result<()> {
+@@ -231,4 +277,23 @@ mod tests {
+         .is_err());
+         assert_eq!(calls, 0);
+     }
++
++    /// The sync path of the storage is one `sync_all` through `full_sync`; the Block-level tests count and fail
++    /// it, this pins the two lines that cannot be observed without a real device failure.
++    #[test]
++    fn workspace_disks_storage_sync_is_a_validated_sync_all() {
++        let source = include_str!("workspace_raw_storage.rs");
++        let sync = &source[source.find("async fn sync(&self)").unwrap()..];
++        let sync = &sync[..sync.find("\n    }\n").unwrap()];
++        let first = sync.find("validate(&self.file, self.expected)?;").expect("validates before");
++        let call = sync.find("full_sync(&self.file)?;").expect("full sync");
++        let last = sync.rfind("validate(&self.file, self.expected)").unwrap();
++        assert!(first < call && call < last);
++        let helper = &source[source.find("fn full_sync(file: &File)").unwrap()..];
++        let helper = &helper[..helper.find("\n}\n").unwrap()];
++        assert!(helper.contains("full_sync_with(file, File::sync_all)"), "{helper}");
++        let with = &source[source.find("fn full_sync_with(").unwrap()..];
++        let with = &with[..with.find("\n}\n").unwrap()];
++        assert!(with.trim_end().ends_with("call(file)"), "{with}");
++    }
+ }
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 9b49de8..5795ffd 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -964,7 +964,7 @@ pub fn build_microvm(
+         let access=devices::reclaim_access::Access::new(if workspace {devices::workspace_disks::MAX_DEVICES} else if vm_resources.cowork_stream.is_some(){2}else{1},if workspace {devices::workspace_disks::MAX_PINS} else if vm_resources.cowork_stream.is_some(){32}else{16},devices::workspace_disks::MAX_PINNED_BYTES);
+         let terminal_fd=exit_evt.try_clone().map_err(Error::EventFd).map_err(StartMicrovmError::Internal)?;
+         let terminal_code=exit_code.clone();
+-        access.set_terminal_notifier(Arc::new(move||{crate::cowork_exit::record(crate::cowork_exit::REASON_TERMINAL_FAULT);crate::cowork_fixture::mark_stop();terminal_code.store(77,std::sync::atomic::Ordering::SeqCst);let _=terminal_fd.write(1);}));Some(access)
++        access.set_terminal_notifier(Arc::new(move||{crate::cowork_exit::note_terminal_fault(&terminal_code);crate::cowork_fixture::mark_stop();let _=terminal_fd.write(1);}));Some(access)
+     }else{None};
+     let mut vmm = Vmm {
+         #[cfg(target_os = "macos")]
+diff --git a/src/vmm/src/cowork_exit.rs b/src/vmm/src/cowork_exit.rs
+index e7b3a8a..b4e3e85 100644
+--- a/src/vmm/src/cowork_exit.rs
++++ b/src/vmm/src/cowork_exit.rs
+@@ -6,9 +6,11 @@
+ //! order, then `_exit`s. The reason is recorded once (first writer wins) so the worker's exit hook, which is
+ //! registered last, can tell a clean power-off from a reset and from a fault.
+ //!
+-//! Not covered: hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS and the like) exit from a signal handler with
+-//! `_exit` and cannot run observers or the hook, and a panic across an `extern "C"` frame aborts. Those are
+-//! "uncertain" exits: the worker's owner must treat them as such.
++//! Not covered: hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS and the like). `signal_handler::register_signal_handlers`
++//! is never called in this process, so a crash signal kills it by its default disposition: no observer, no hook,
++//! a signal exit status. A panic across an `extern "C"` frame aborts. Those are "uncertain" exits: the worker's
++//! owner must treat them as such. The watchdog is also not covered by the hook: when it fires over a hung
++//! observer the process exits with the effective status (0 after a clean off or reset) and the hook never ran.
+ use devices::virtio::VmmExitObserver;
+ use std::ffi::c_void;
+ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+@@ -88,6 +90,12 @@ pub fn run_observers(observers: &[Arc<Mutex<dyn VmmExitObserver>>]) {
+ /// The one exit path: claim, bound, run the observers, `_exit`. A second thread that arrives here while
+ /// the first is finishing never returns.
+ pub fn finish(observers: &Observers, requested_code: i32) -> ! {
++    finish_with_budget(observers, requested_code, OBSERVER_BUDGET)
++}
++
++/// `finish` with the watchdog budget as a parameter, so a test can run the real sequence with a short one in a
++/// child process. Production only ever passes `OBSERVER_BUDGET` (pinned by a test).
++pub fn finish_with_budget(observers: &Observers, requested_code: i32, budget: Duration) -> ! {
+     if !STATE.claim() {
+         loop {
+             std::thread::park();
+@@ -95,13 +103,23 @@ pub fn finish(observers: &Observers, requested_code: i32) -> ! {
+     }
+     let code = STATE.effective_code(requested_code);
+     std::thread::spawn(move || {
+-        std::thread::sleep(OBSERVER_BUDGET);
++        std::thread::sleep(budget);
+         unsafe { libc::_exit(code) }
+     });
+     run_observers(observers);
+     unsafe { libc::_exit(code) }
+ }
+ 
++/// The terminal-fault notifier's state change: record the reason (so a late clean-stop status cannot hide it
++/// and the exit hook reports it) and publish status 77 to the exit code the run loop reads.
++pub fn note_terminal_fault(code: &std::sync::atomic::AtomicI32) {
++    note_terminal_fault_in(&STATE, code);
++}
++pub fn note_terminal_fault_in(state: &ExitState, code: &std::sync::atomic::AtomicI32) {
++    state.record(REASON_TERMINAL_FAULT);
++    code.store(TERMINAL_FAULT_EXIT_CODE, Ordering::SeqCst);
++}
++
+ /// For callers without the VMM (the reclaim fixture's `fatal()`): record the reason and take the same
+ /// path. Before the observers are published there is nothing to run.
+ pub fn terminate(reason: u32, code: i32) -> ! {
+@@ -216,4 +234,170 @@ mod tests {
+         assert_eq!(SEEN.load(Ordering::SeqCst), reason());
+         assert_eq!(DATA.load(Ordering::SeqCst), 0x1234);
+     }
++    #[test]
++    fn the_production_budget_is_twenty_seconds_and_finish_uses_it() {
++        assert_eq!(OBSERVER_BUDGET, Duration::from_secs(20));
++        let source = include_str!("cowork_exit.rs");
++        let body = &source[source.find("pub fn finish(observers").unwrap()..];
++        let body = &body[..body.find("\n}\n").unwrap()];
++        assert!(body.contains("finish_with_budget(observers, requested_code, OBSERVER_BUDGET)"));
++    }
++
++    #[test]
++    fn the_terminal_fault_notifier_records_the_reason_and_publishes_status_77() {
++        let state = ExitState::new();
++        let code = std::sync::atomic::AtomicI32::new(i32::MAX);
++        note_terminal_fault_in(&state, &code);
++        assert_eq!(state.reason(), REASON_TERMINAL_FAULT);
++        assert_eq!(code.load(Ordering::SeqCst), 77);
++        // The builder's notifier goes through it (a text pin: the closure cannot run without a VMM).
++        let builder = include_str!("builder.rs");
++        let at = builder.find("access.set_terminal_notifier(").expect("notifier");
++        let closure = &builder[at..at + builder[at..].find("Some(access)").unwrap()];
++        assert!(closure.contains("crate::cowork_exit::note_terminal_fault(&terminal_code)"));
++    }
++
++    // The exit sequence ends in `_exit`, so it is run for real in a child process: this test binary re-executed
++    // with one case selected through the environment. Without the variable the `child_*` tests do nothing.
++    const CASE: &str = "COWORK_EXIT_TEST_CASE";
++    const LOG: &str = "COWORK_EXIT_TEST_LOG";
++
++    struct Appender(&'static str);
++    impl VmmExitObserver for Appender {
++        fn on_vmm_exit(&mut self) {
++            use std::io::Write;
++            let path = std::env::var(LOG).unwrap();
++            let mut file = std::fs::OpenOptions::new().append(true).create(true).open(path).unwrap();
++            writeln!(file, "{}", self.0).unwrap();
++        }
++    }
++    struct Hang;
++    impl VmmExitObserver for Hang {
++        fn on_vmm_exit(&mut self) {
++            loop {
++                std::thread::sleep(Duration::from_secs(3600));
++            }
++        }
++    }
++    struct SleepAfterAppend(&'static str);
++    impl VmmExitObserver for SleepAfterAppend {
++        fn on_vmm_exit(&mut self) {
++            Appender(self.0).on_vmm_exit();
++            std::thread::sleep(Duration::from_millis(400));
++        }
++    }
++    fn list(items: Vec<Box<dyn FnOnce() -> Arc<Mutex<dyn VmmExitObserver>>>>) -> Observers {
++        items.into_iter().map(|make| make()).collect()
++    }
++
++    #[test]
++    fn child_exit_sequence() {
++        let Ok(case) = std::env::var(CASE) else { return };
++        let short = Duration::from_millis(300);
++        match case.as_str() {
++            // An observer that never returns: the watchdog must end the process with the requested status.
++            "hang_fault" => {
++                record(REASON_TERMINAL_FAULT);
++                let observers = list(vec![Box::new(|| Arc::new(Mutex::new(Appender("first")))), Box::new(|| Arc::new(Mutex::new(Hang))), Box::new(|| Arc::new(Mutex::new(Appender("hook"))))]);
++                finish_with_budget(&observers, 77, short)
++            }
++            // After a clean power-off the watchdog exits 0 and the hook (registered last) never ran.
++            "hang_after_off" => {
++                record(REASON_OFF);
++                let observers = list(vec![Box::new(|| Arc::new(Mutex::new(Hang))), Box::new(|| Arc::new(Mutex::new(Appender("hook"))))]);
++                finish_with_budget(&observers, 77, short)
++            }
++            // A late fault after a clean stop keeps status 0; a fault alone keeps its status.
++            "off_then_fault" => {
++                record(REASON_OFF);
++                finish_with_budget(&Vec::new(), 77, Duration::from_secs(20))
++            }
++            "reset_then_fault" => {
++                record(REASON_RESET);
++                finish_with_budget(&Vec::new(), 77, Duration::from_secs(20))
++            }
++            "fault" => {
++                record(REASON_TERMINAL_FAULT);
++                finish_with_budget(&Vec::new(), 77, Duration::from_secs(20))
++            }
++            // Two threads race into the exit path: exactly one runs the observers.
++            "two_callers" => {
++                record(REASON_VCPU_ERROR);
++                let barrier = Arc::new(std::sync::Barrier::new(2));
++                let _other = {
++                    let barrier = barrier.clone();
++                    std::thread::spawn(move || {
++                        let observers: Observers = vec![Arc::new(Mutex::new(SleepAfterAppend("second")))];
++                        barrier.wait();
++                        finish_with_budget(&observers, 77, Duration::from_secs(20))
++                    })
++                };
++                let observers: Observers = vec![Arc::new(Mutex::new(SleepAfterAppend("first")))];
++                barrier.wait();
++                finish_with_budget(&observers, 77, Duration::from_secs(20))
++            }
++            other => panic!("unknown case {other}"),
++        }
++    }
++
++    /// Runs one child case; returns (exit status code, seconds, log lines). The child is killed after 30 s.
++    fn run_child(case: &str) -> (Option<i32>, f64, Vec<String>) {
++        let log = std::env::temp_dir().join(format!("winter-cowork-exit-{}-{case}.log", std::process::id()));
++        let _ = std::fs::remove_file(&log);
++        let started = std::time::Instant::now();
++        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
++            .args(["--exact", "cowork_exit::tests::child_exit_sequence", "--test-threads=1", "--nocapture"])
++            .env(CASE, case)
++            .env(LOG, &log)
++            .stdout(std::process::Stdio::null())
++            .stderr(std::process::Stdio::null())
++            .spawn()
++            .unwrap();
++        let status = loop {
++            if let Some(status) = child.try_wait().unwrap() {
++                break Some(status);
++            }
++            if started.elapsed() > Duration::from_secs(30) {
++                let _ = child.kill();
++                let _ = child.wait();
++                break None;
++            }
++            std::thread::sleep(Duration::from_millis(20));
++        };
++        let seconds = started.elapsed().as_secs_f64();
++        let lines = std::fs::read_to_string(&log).map(|text| text.lines().map(str::to_string).collect()).unwrap_or_default();
++        let _ = std::fs::remove_file(&log);
++        (status.and_then(|s| s.code()), seconds, lines)
++    }
++
++    #[test]
++    fn a_hung_observer_cannot_keep_the_process_alive_past_the_budget() {
++        let (code, seconds, lines) = run_child("hang_fault");
++        assert_eq!(code, Some(77), "the watchdog ends the process with the requested status (None means it was still alive after 30 s)");
++        assert!(seconds < 15.0, "{seconds}");
++        // Observers before the hung one ran; the ones after it, the exit hook among them, did not.
++        assert_eq!(lines, vec!["first".to_string()]);
++    }
++
++    #[test]
++    fn the_watchdog_over_a_hung_observer_after_a_clean_off_exits_zero_without_the_hook() {
++        let (code, seconds, lines) = run_child("hang_after_off");
++        assert_eq!(code, Some(0));
++        assert!(seconds < 15.0, "{seconds}");
++        assert!(lines.is_empty(), "the hook must not have run: {lines:?}");
++    }
++
++    #[test]
++    fn the_exit_status_follows_the_recorded_reason_through_the_real_sequence() {
++        assert_eq!(run_child("off_then_fault").0, Some(0));
++        assert_eq!(run_child("reset_then_fault").0, Some(0));
++        assert_eq!(run_child("fault").0, Some(77));
++    }
++
++    #[test]
++    fn two_callers_in_the_exit_path_run_the_observers_once() {
++        let (code, _, lines) = run_child("two_callers");
++        assert_eq!(code, Some(77));
++        assert_eq!(lines.len(), 1, "{lines:?}");
++    }
+ }

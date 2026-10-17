@@ -1,0 +1,976 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index ea0673c..f60c3af 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -283,6 +283,66 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+                        bool direct_io,
+                        uint32_t sync_mode);
+ 
++/* ====== Cowork production profile (N2): Apple Silicon/macOS + blk builds only ======
++ *
++ * The production profile is a separate gate from the fixture opt-ins below. It admits exactly: the
++ * two admitted RAW volumes, the generic runtime port, TWO vCPUs and 768..1024 MiB. The device
++ * inventory is the admitted one (virtio block x2, console/runtime port, rng, balloon); no shutdown
++ * GPIO device, no network, no vsock, no HVC bootstrap stream and no fixture trace. The limits are
++ * enforced inside the reviewed start-time gate, so krun_start_enter refuses any other geometry
++ * before it allocates anything. Raising either ceiling lifts that gate: it needs a fresh drain and
++ * pin review. A build without the feature `cowork-fixture-oracle` exports none of the fixture
++ * entry points; this header then hides them (KRUN_COWORK_FIXTURE_ORACLE is not defined).
++ *
++ * Call order: krun_create_ctx, the usual non-device setters (kernel, console, krun_set_vm_config
++ * with exactly KRUN_COWORK_PRODUCTION_VCPUS and a memory size in range),
++ * krun_cowork_enable_production_profile, krun_cowork_create_runtime_port,
++ * krun_cowork_set_workspace_disks, optionally krun_cowork_validate_production_profile, and last
++ * krun_start_enter. Every function returns zero (or a descriptor >= 3) or a negative errno.
++ */
++#define KRUN_COWORK_PRODUCTION_VCPUS 2
++#define KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB 768
++#define KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB 1024
++
++struct krun_cowork_volume_identity {
++    uint64_t device;
++    uint64_t inode;
++    uint64_t capacity_bytes;
++    uint32_t uid;
++    uint32_t mode;
++};
++
++/** Opt in to the production profile. Accepted once, only on a context that carries no fixture opt-in
++ * (-EINVAL otherwise, including after any fixture entry point). It also switches on the reduced-device
++ * machinery the profile shares with the fixture; nothing else is enabled. */
++int32_t krun_cowork_enable_production_profile(uint32_t ctx_id);
++
++/** Production runtime port: the one generic non-console virtio port, no keys and no authority.
++ * Returns only the opposite PEER fd (>= 3, CLOEXEC); the caller owns it and must close it. The device
++ * endpoint and every alias stay internal. A duplicate call, a context without the production profile
++ * and the fixture factories all refuse (-EINVAL), publishing no fd. The caller's sandbox must deny
++ * process fork/exec BEFORE this call and never fork afterwards: CLOEXEC covers exec only. */
++int32_t krun_cowork_create_runtime_port(uint32_t ctx_id);
++
++/** Production admitted workspace RAW pair, otherwise the same contract as the fixture oracle's pair
++ * setter documented in the fixture section. Descriptors are BORROWED for the synchronous call, duplicated
++ * CLOEXEC and validated (regular, nlink 1, current-UID exact 0600, O_RDWR non-append, expected
++ * dev/ino/size, 16MiB..256GiB aligned 4096). Errors close only newly owned duplicates; caller
++ * descriptors are never closed. Expected identities corroborate host admission, they authenticate
++ * no daemon, home, workspace, worker, incarnation or lease. FD closure is never a native stop or
++ * disk-release proof. */
++int32_t krun_cowork_set_workspace_disks(uint32_t ctx_id,
++    int32_t data_fd, const struct krun_cowork_volume_identity *data,
++    int32_t environment_fd, const struct krun_cowork_volume_identity *environment);
++
++/** Preflight of the production gate's first phase. Zero when krun_start_enter would pass the same
++ * admission; -EINVAL otherwise (-ENOENT for an unknown context). Starts nothing and opens nothing. */
++int32_t krun_cowork_validate_production_profile(uint32_t ctx_id);
++
++#ifdef KRUN_COWORK_FIXTURE_ORACLE
++/* ====== Fixture oracle: present only when built with `cowork-fixture-oracle` ======
++ * Regression oracle for the reviewed fixture profile. Never a production API. A context that carries
++ * the production profile refuses all of these. */
+ /** Developer-only admitted workspace RAW pair; Apple Silicon/macOS + blk only.
+  * Requires reduced guarded reclaim opt-in; launch additionally requires the generic runtime port,
+  * exactly two admitted disks, 2 vCPUs/768MiB and no path-backed/extra devices.
+@@ -298,16 +358,10 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+  */
+ /* Existing developer-only reduced-profile opt-in, also required for this pair API. */
+ int32_t krun_enable_cowork_block_fixture_reclaim(uint32_t ctx_id);
+-struct krun_cowork_volume_identity {
+-    uint64_t device;
+-    uint64_t inode;
+-    uint64_t capacity_bytes;
+-    uint32_t uid;
+-    uint32_t mode;
+-};
+ int32_t krun_set_cowork_workspace_disks(uint32_t ctx_id,
+     int32_t data_fd, const struct krun_cowork_volume_identity *data,
+     int32_t environment_fd, const struct krun_cowork_volume_identity *environment);
++#endif /* KRUN_COWORK_FIXTURE_ORACLE */
+ 
+ /* Supported virtio-fs permission semantics */
+ 
+@@ -1426,6 +1480,7 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
+  */
+ int32_t krun_start_enter(uint32_t ctx_id);
+ 
++#ifdef KRUN_COWORK_FIXTURE_ORACLE
+ /* TEST-ONLY closed single-port bootstrap/runtime stream factory; blk/macOS only.
+  * Call after krun_enable_cowork_block_fixture_reclaim. Returns only the opposite PEER fd
+  * (>=3, CLOEXEC) on success; caller owns it and must close it. Device endpoint and all
+@@ -1444,6 +1499,7 @@ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
+ int32_t krun_enable_cowork_runtime_port_fixture_trace(uint32_t ctx_id);
+ /* DEPRECATED TEST API: caller-supplied descriptors are always refused (-EINVAL). */
+ int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);
++#endif /* KRUN_COWORK_FIXTURE_ORACLE */
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/libkrun/Cargo.toml b/src/libkrun/Cargo.toml
+index ce4666c..d5fd177 100644
+--- a/src/libkrun/Cargo.toml
++++ b/src/libkrun/Cargo.toml
+@@ -22,6 +22,9 @@ snd = ["vmm/snd", "devices/snd"]
+ input = ["krun_input", "vmm/input", "devices/input"]
+ virgl_resource_map2 = ["devices/virgl_resource_map2"]
+ aws-nitro = ["vmm/aws-nitro", "devices/aws-nitro", "dep:aws-nitro", "dep:nitro-enclaves"]
++# Cowork fixture regression oracle (N2). Off in every production build: with it, the reviewed
++# `*_fixture_*` C entry points stay exported next to the production ones. It adds no dependency.
++cowork-fixture-oracle = []
+ 
+ [dependencies]
+ crossbeam-channel = ">=0.5.15"
+diff --git a/src/libkrun/src/cowork_production_profile_tests.rs b/src/libkrun/src/cowork_production_profile_tests.rs
+new file mode 100644
+index 0000000..e488fb2
+--- /dev/null
++++ b/src/libkrun/src/cowork_production_profile_tests.rs
+@@ -0,0 +1,540 @@
++//! N2 production profile regressions. Pure context and validator checks: nothing here creates a VM,
++//! calls Hypervisor.framework or calls `krun_start_enter` (the start path is represented by the pure
++//! `cowork_validate_profile` it runs first, and by the `krun_cowork_validate_production_profile`
++//! preflight). Run with `--test-threads=1`: contexts, descriptors and the context map are process-wide.
++use super::*;
++use devices::workspace_disks::{
++    ExpectedVolume, DATA_DEVICE, ENVIRONMENT_DEVICE, MAX_DEVICES, MAX_PINNED_BYTES, MAX_PINS,
++    MIN_CAPACITY, RUNTIME_DEVICE,
++};
++use std::fs::{self, File, OpenOptions};
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
++use std::sync::atomic::{AtomicU64, Ordering};
++
++static NEXT: AtomicU64 = AtomicU64::new(0);
++
++struct Volume {
++    path: PathBuf,
++    file: File,
++    expected: ExpectedVolume,
++}
++impl Volume {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!(
++            "winter-production-api-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ));
++        let file = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(&path)
++            .unwrap();
++        file.set_len(MIN_CAPACITY).unwrap();
++        let m = file.metadata().unwrap();
++        Self {
++            path,
++            file,
++            expected: ExpectedVolume {
++                device: m.dev(),
++                inode: m.ino(),
++                capacity_bytes: m.len(),
++                uid: m.uid(),
++                mode: 0o600,
++            },
++        }
++    }
++}
++impl Drop for Volume {
++    fn drop(&mut self) {
++        let _ = fs::remove_file(&self.path);
++    }
++}
++fn open_fds() -> Vec<i32> {
++    let mut fds: Vec<_> = fs::read_dir("/dev/fd")
++        .unwrap()
++        .filter_map(|e| e.unwrap().file_name().to_str().and_then(|s| s.parse::<i32>().ok()))
++        .filter(|fd| *fd >= 3 && unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
++        .collect();
++    fds.sort_unstable();
++    fds
++}
++
++/// The non-device setters every profile needs, applied to a fresh context.
++fn bare() -> u32 {
++    let id = krun_create_ctx() as u32;
++    let mut map = CTX_MAP.lock().unwrap();
++    let cfg = map.get_mut(&id).unwrap();
++    cfg.vsock_config = VsockConfig::Disabled;
++    cfg.vmr.disable_implicit_console = true;
++    cfg.vmr.serial_consoles.push(SerialConsoleConfig {
++        input_fd: -1,
++        output_fd: -1,
++    });
++    cfg.vmr.external_kernel = Some(ExternalKernel::default());
++    cfg.vmr
++        .set_vm_config(&VmConfig {
++            vcpu_count: Some(2),
++            mem_size_mib: Some(768),
++            ..Default::default()
++        })
++        .unwrap();
++    id
++}
++fn machine(id: u32, vcpus: u8, memory: usize) {
++    let mut map = CTX_MAP.lock().unwrap();
++    map.get_mut(&id)
++        .unwrap()
++        .vmr
++        .set_vm_config(&VmConfig {
++            vcpu_count: Some(vcpus),
++            mem_size_mib: Some(memory),
++            ..Default::default()
++        })
++        .unwrap();
++}
++fn valid(id: u32) -> bool {
++    let map = CTX_MAP.lock().unwrap();
++    cowork_validate_profile(map.get(&id).unwrap()).is_ok()
++}
++fn pair_production(id: u32, a: &Volume, b: &Volume) -> i32 {
++    unsafe {
++        krun_cowork_set_workspace_disks(id, a.file.as_raw_fd(), &a.expected, b.file.as_raw_fd(), &b.expected)
++    }
++}
++fn pair_fixture(id: u32, a: &Volume, b: &Volume) -> i32 {
++    unsafe {
++        krun_set_cowork_workspace_disks(id, a.file.as_raw_fd(), &a.expected, b.file.as_raw_fd(), &b.expected)
++    }
++}
++struct Production {
++    id: u32,
++    peer: Option<OwnedFd>,
++    _a: Volume,
++    _b: Volume,
++}
++impl Production {
++    /// A complete production context: profile, runtime port and pair, at 2 vCPUs and 768 MiB.
++    fn new() -> Self {
++        let (a, b) = (Volume::new(), Volume::new());
++        let id = bare();
++        assert_eq!(krun_cowork_enable_production_profile(id), 0);
++        let raw = krun_cowork_create_runtime_port(id);
++        assert!(raw >= 3);
++        let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++        assert_eq!(pair_production(id, &a, &b), 0);
++        assert!(valid(id));
++        assert_eq!(krun_cowork_validate_production_profile(id), 0);
++        Self {
++            id,
++            peer: Some(peer),
++            _a: a,
++            _b: b,
++        }
++    }
++}
++impl Drop for Production {
++    fn drop(&mut self) {
++        assert_eq!(krun_free_ctx(self.id), 0);
++        drop(self.peer.take());
++    }
++}
++
++#[test]
++fn production_profile_enable_is_virgin_only_and_exclusive_with_every_fixture_opt_in() {
++    let before = open_fds();
++    assert_eq!(krun_cowork_enable_production_profile(u32::MAX), -libc::ENOENT);
++    // Once, and never twice.
++    let id = bare();
++    assert_eq!(krun_cowork_enable_production_profile(id), 0);
++    assert_eq!(krun_cowork_enable_production_profile(id), -libc::EINVAL);
++    assert_eq!(krun_free_ctx(id), 0);
++    // Never after any fixture opt-in.
++    let id = bare();
++    assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), 0);
++    assert_eq!(krun_cowork_enable_production_profile(id), -libc::EINVAL);
++    assert_eq!(krun_free_ctx(id), 0);
++    let id = bare();
++    assert_eq!(krun_enable_cowork_fixture_reclaim(id), 0);
++    assert_eq!(krun_cowork_enable_production_profile(id), -libc::EINVAL);
++    assert_eq!(krun_free_ctx(id), 0);
++    // Every fixture entry point refuses a production context and publishes nothing.
++    let (a, b) = (Volume::new(), Volume::new());
++    let baseline = open_fds();
++    let id = bare();
++    assert_eq!(krun_cowork_enable_production_profile(id), 0);
++    assert_eq!(krun_enable_cowork_fixture_reclaim(id), -libc::EINVAL);
++    assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), -libc::EINVAL);
++    assert_eq!(krun_create_cowork_bootstrap_stream(id), -libc::EINVAL);
++    assert_eq!(krun_create_cowork_runtime_stream(id), -libc::EINVAL);
++    assert_eq!(krun_set_cowork_bootstrap_stream(id, a.file.as_raw_fd()), -libc::EINVAL);
++    assert_eq!(pair_fixture(id, &a, &b), -libc::EINVAL);
++    assert_eq!(open_fds(), baseline);
++    let raw = krun_cowork_create_runtime_port(id);
++    assert!(raw >= 3);
++    let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++    assert_eq!(krun_enable_cowork_runtime_port_fixture_trace(id), -libc::EINVAL);
++    assert!(!CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.cowork_runtime_fixture_trace);
++    assert_eq!(krun_cowork_create_runtime_port(id), -libc::EINVAL);
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++    // The reverse: the production entry points refuse a fixture context.
++    let id = bare();
++    assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), 0);
++    assert_eq!(krun_cowork_create_runtime_port(id), -libc::EINVAL);
++    let raw = krun_create_cowork_runtime_stream(id);
++    assert!(raw >= 3);
++    let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++    let held = open_fds();
++    assert_eq!(pair_production(id, &a, &b), -libc::EINVAL);
++    assert_eq!(open_fds(), held);
++    assert_eq!(krun_cowork_validate_production_profile(id), -libc::EINVAL);
++    assert_eq!(pair_fixture(id, &a, &b), 0);
++    assert_eq!(krun_cowork_validate_production_profile(id), -libc::EINVAL);
++    assert!(!CTX_MAP.lock().unwrap().get(&id).unwrap().cowork_production);
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++    drop((a, b));
++    assert_eq!(open_fds(), before);
++}
++
++#[test]
++fn production_profile_enforces_explicit_vcpu_and_memory_limits_inside_the_gate() {
++    let production = Production::new();
++    let id = production.id;
++    // Admitted: exactly two vCPUs, 768..=1024 MiB.
++    for memory in [768usize, 769, 900, 1023, 1024] {
++        machine(id, 2, memory);
++        assert!(valid(id), "memory {memory}");
++        assert_eq!(krun_cowork_validate_production_profile(id), 0, "memory {memory}");
++    }
++    // Refused: above the ceiling (the lifted-gate mutation), below the floor, other vCPU counts.
++    for (vcpus, memory) in [
++        (2u8, 1025usize),
++        (2, 2048),
++        (2, 1 << 20),
++        (2, 767),
++        (2, 512),
++        (2, 1),
++        (3, 768),
++        (4, 768),
++        (32, 1024),
++        (1, 768),
++        (1, 1024),
++    ] {
++        machine(id, vcpus, memory);
++        assert!(!valid(id), "{vcpus} vCPU / {memory} MiB");
++        assert_eq!(
++            krun_cowork_validate_production_profile(id),
++            -libc::EINVAL,
++            "{vcpus} vCPU / {memory} MiB"
++        );
++    }
++    // A context whose machine was never configured is not production-admissible.
++    CTX_MAP
++        .lock()
++        .unwrap()
++        .get_mut(&id)
++        .unwrap()
++        .vmr
++        .set_vm_config(&VmConfig::default())
++        .unwrap();
++    assert!(!valid(id));
++    // The ceilings in the gate are the ones the header and the documentation state.
++    assert_eq!(COWORK_PRODUCTION_VCPUS, 2);
++    assert_eq!(COWORK_PRODUCTION_MIN_MEMORY_MIB, 768);
++    assert_eq!(COWORK_PRODUCTION_MAX_MEMORY_MIB, 1024);
++}
++
++#[test]
++fn production_range_never_leaks_into_the_fixture_profile() {
++    // The fixture's workspace pair stays exactly 768 MiB and exactly two vCPUs.
++    let (a, b) = (Volume::new(), Volume::new());
++    let id = bare();
++    assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), 0);
++    let raw = krun_create_cowork_runtime_stream(id);
++    assert!(raw >= 3);
++    let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++    assert_eq!(pair_fixture(id, &a, &b), 0);
++    assert!(valid(id));
++    for memory in [769usize, 900, 1024, 767] {
++        machine(id, 2, memory);
++        assert!(!valid(id), "fixture {memory} MiB");
++    }
++    machine(id, 2, 768);
++    assert!(valid(id));
++    machine(id, 1, 768);
++    assert!(!valid(id));
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++}
++
++#[test]
++fn production_gate_requires_the_pair_the_runtime_port_and_the_machinery_switches() {
++    let (a, b) = (Volume::new(), Volume::new());
++    // Profile alone is not enough.
++    let id = bare();
++    assert_eq!(krun_cowork_enable_production_profile(id), 0);
++    assert!(!valid(id));
++    assert_eq!(krun_cowork_validate_production_profile(id), -libc::EINVAL);
++    // Pair without the runtime port.
++    assert_eq!(pair_production(id, &a, &b), 0);
++    assert!(!valid(id));
++    // Pair with the runtime port is the admitted shape.
++    let raw = krun_cowork_create_runtime_port(id);
++    assert!(raw >= 3);
++    let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++    assert!(valid(id));
++    // The shared reduced-device switches must both stay on.
++    for which in 0..2 {
++        {
++            let mut map = CTX_MAP.lock().unwrap();
++            let cfg = map.get_mut(&id).unwrap();
++            if which == 0 {
++                cfg.vmr.cowork_fixture_reclaim = false;
++            } else {
++                cfg.vmr.cowork_guarded_block = false;
++            }
++        }
++        assert!(!valid(id), "switch {which}");
++        let mut map = CTX_MAP.lock().unwrap();
++        let cfg = map.get_mut(&id).unwrap();
++        cfg.vmr.cowork_fixture_reclaim = true;
++        cfg.vmr.cowork_guarded_block = true;
++    }
++    assert!(valid(id));
++    // Runtime port without the pair.
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++    let id = bare();
++    assert_eq!(krun_cowork_enable_production_profile(id), 0);
++    let raw = krun_cowork_create_runtime_port(id);
++    assert!(raw >= 3);
++    let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++    assert!(!valid(id));
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++}
++
++#[test]
++fn production_gate_refuses_fixture_trace_hvc_stream_and_the_shutdown_device() {
++    let production = Production::new();
++    let id = production.id;
++    // Fixture trace.
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.cowork_runtime_fixture_trace = true;
++    assert!(!valid(id));
++    assert_eq!(krun_cowork_validate_production_profile(id), -libc::EINVAL);
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.cowork_runtime_fixture_trace = false;
++    assert!(valid(id));
++    // The HVC bootstrap stream variant instead of the generic runtime port.
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.cowork_runtime_port = false;
++    assert!(!valid(id));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.cowork_runtime_port = true;
++    assert!(valid(id));
++    // krun_get_shutdown_eventfd is what attaches the PL061 shutdown GPIO device; the admitted device
++    // inventory has none, so a context that asked for the eventfd is not production-admissible.
++    #[cfg(target_arch = "aarch64")]
++    {
++        let fd = krun_get_shutdown_eventfd(id);
++        assert!(fd >= 3);
++        assert!(!valid(id));
++        assert_eq!(krun_cowork_validate_production_profile(id), -libc::EINVAL);
++        assert_eq!(unsafe { libc::close(fd) }, 0);
++        CTX_MAP.lock().unwrap().get_mut(&id).unwrap().shutdown_efd = None;
++        assert!(valid(id));
++    }
++}
++
++#[test]
++fn production_gate_keeps_the_reviewed_fixture_refusals() {
++    // The unchanged reviewed checks still apply after the production ones.
++    let production = Production::new();
++    let id = production.id;
++    let refused = |mutate: &dyn Fn(&mut ContextConfig)| {
++        {
++            let mut map = CTX_MAP.lock().unwrap();
++            mutate(map.get_mut(&id).unwrap());
++        }
++        !valid(id)
++    };
++    assert!(refused(&|c| c.vmr.nested_enabled = true));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.nested_enabled = false;
++    assert!(refused(&|c| c.vsock_config = VsockConfig::default()));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vsock_config = VsockConfig::Disabled;
++    assert!(refused(&|c| c.vmr.disable_implicit_console = false));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.disable_implicit_console = true;
++    assert!(refused(&|c| c.vmr.serial_consoles.push(SerialConsoleConfig {
++        input_fd: -1,
++        output_fd: -1
++    })));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.serial_consoles.pop();
++    assert!(refused(&|c| c.vmr.external_kernel = None));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().vmr.external_kernel = Some(ExternalKernel::default());
++    assert!(refused(&|c| c.gpu_virgl_flags = Some(1)));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().gpu_virgl_flags = None;
++    assert!(valid(id));
++}
++
++#[test]
++fn production_workspace_setter_owns_two_duplicates_and_never_closes_the_callers() {
++    let (a, b) = (Volume::new(), Volume::new());
++    let before = open_fds();
++    let id = bare();
++    assert_eq!(krun_cowork_enable_production_profile(id), 0);
++    let raw = krun_cowork_create_runtime_port(id);
++    assert!(raw >= 3);
++    let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++    let with_port = open_fds();
++    // Null identity, unknown context, duplicate descriptor and a stale identity publish nothing.
++    assert_eq!(
++        unsafe {
++            krun_cowork_set_workspace_disks(id, a.file.as_raw_fd(), std::ptr::null(), b.file.as_raw_fd(), &b.expected)
++        },
++        -libc::EINVAL
++    );
++    assert_eq!(pair_production(u32::MAX, &a, &b), -libc::ENOENT);
++    assert_eq!(
++        unsafe {
++            krun_cowork_set_workspace_disks(id, a.file.as_raw_fd(), &a.expected, a.file.as_raw_fd(), &a.expected)
++        },
++        -libc::EINVAL
++    );
++    let mut stale = b.expected;
++    stale.inode ^= 1;
++    assert!(unsafe {
++        krun_cowork_set_workspace_disks(id, a.file.as_raw_fd(), &a.expected, b.file.as_raw_fd(), &stale)
++    } < 0);
++    assert_eq!(open_fds(), with_port);
++    assert_eq!(pair_production(id, &a, &b), 0);
++    assert_eq!(open_fds().len(), with_port.len() + 2);
++    assert_eq!(pair_production(id, &a, &b), -libc::EINVAL);
++    assert_eq!(open_fds().len(), with_port.len() + 2);
++    assert_eq!(krun_cowork_validate_production_profile(id), 0);
++    assert_eq!(krun_free_ctx(id), 0);
++    drop(peer);
++    assert_eq!(open_fds(), before);
++    a.file.metadata().unwrap();
++    b.file.metadata().unwrap();
++}
++
++/// Header declarations: the production API is visible without a macro, every fixture entry point only
++/// inside `#ifdef KRUN_COWORK_FIXTURE_ORACLE`, and the stated limits equal the gate's constants.
++#[test]
++fn production_header_exposes_the_production_api_and_hides_the_fixture_entry_points() {
++    let header = include_str!("../../../include/libkrun.h");
++    let define = |name: &str| -> usize {
++        header
++            .lines()
++            .find_map(|l| l.strip_prefix(&format!("#define {name} ")))
++            .unwrap_or_else(|| panic!("{name} missing"))
++            .trim()
++            .parse()
++            .unwrap()
++    };
++    assert_eq!(define("KRUN_COWORK_PRODUCTION_VCPUS"), COWORK_PRODUCTION_VCPUS as usize);
++    assert_eq!(define("KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB"), COWORK_PRODUCTION_MIN_MEMORY_MIB);
++    assert_eq!(define("KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB"), COWORK_PRODUCTION_MAX_MEMORY_MIB);
++    let mut inside_oracle = false;
++    let (mut production, mut fixture) = (Vec::new(), Vec::new());
++    for line in header.lines() {
++        match line.trim() {
++            "#ifdef KRUN_COWORK_FIXTURE_ORACLE" => inside_oracle = true,
++            l if l.starts_with("#endif /* KRUN_COWORK_FIXTURE_ORACLE") => inside_oracle = false,
++            l => {
++                let Some(call) = l.strip_prefix("int32_t krun_") else { continue };
++                let name = format!("krun_{}", call.split('(').next().unwrap());
++                if !name.contains("cowork") {
++                    continue;
++                }
++                if inside_oracle {
++                    fixture.push(name);
++                } else {
++                    production.push(name);
++                }
++            }
++        }
++    }
++    assert!(!inside_oracle);
++    production.sort();
++    fixture.sort();
++    assert_eq!(
++        production,
++        [
++            "krun_cowork_create_runtime_port",
++            "krun_cowork_enable_production_profile",
++            "krun_cowork_set_workspace_disks",
++            "krun_cowork_validate_production_profile",
++        ]
++    );
++    assert_eq!(
++        fixture,
++        [
++            "krun_create_cowork_bootstrap_stream",
++            "krun_create_cowork_runtime_stream",
++            "krun_enable_cowork_block_fixture_reclaim",
++            "krun_enable_cowork_runtime_port_fixture_trace",
++            "krun_set_cowork_bootstrap_stream",
++            "krun_set_cowork_workspace_disks",
++        ]
++    );
++    // No production name carries "fixture", and the shared struct sits outside the oracle block.
++    assert!(production.iter().all(|n| !n.contains("fixture")));
++    let struct_at = header.find("struct krun_cowork_volume_identity {").unwrap();
++    let oracle_at = header.find("#ifdef KRUN_COWORK_FIXTURE_ORACLE").unwrap();
++    assert!(struct_at < oracle_at);
++}
++
++/// The admitted device inventory and pin budget are not changed by the production profile.
++#[test]
++fn production_profile_keeps_the_admitted_pin_budget_and_device_inventory() {
++    assert_eq!((DATA_DEVICE, ENVIRONMENT_DEVICE, RUNTIME_DEVICE), (0, 1, 2));
++    assert_eq!(MAX_DEVICES, 3);
++    assert_eq!(MAX_PINS, 48);
++    assert_eq!(MAX_PINNED_BYTES, 8 * 1024 * 1024);
++    // The attach sequence of build_microvm, as written. A new device (the shutdown GPIO is the known
++    // candidate) must change this list in a reviewed patch; nothing in the production profile does.
++    let builder = include_str!("../../vmm/src/builder.rs");
++    let start = builder.find("pub fn build_microvm(").unwrap();
++    let body = &builder[start..];
++    let end = body.find("\n}\n").unwrap();
++    let body = &body[..end];
++    let mut sequence = Vec::new();
++    let mut rest = body;
++    while let Some(at) = rest.find("attach_") {
++        let tail = &rest[at..];
++        let name_end = tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap();
++        if tail[name_end..].starts_with('(') {
++            sequence.push(tail[..name_end].to_string());
++        }
++        rest = &tail[name_end..];
++    }
++    assert_eq!(
++        sequence,
++        [
++            "attach_legacy_devices",
++            "attach_legacy_devices",
++            "attach_legacy_devices",
++            "attach_legacy_devices",
++            "attach_balloon_device",
++            "attach_rng_device",
++            "attach_mmio_device",
++            "attach_mmio_device",
++            "attach_console_devices",
++            "attach_console_devices",
++            "attach_gpu_device",
++            "attach_input_devices",
++            "attach_fs_devices",
++            "attach_block_devices",
++            "attach_unixsock_vsock_device",
++            "attach_net_devices",
++            "attach_snd_device",
++        ]
++    );
++    // The one place the shutdown GPIO can be attached is the shutdown-eventfd branch of
++    // attach_legacy_devices, which the production gate closes by refusing the eventfd.
++    assert_eq!(builder.matches("register_mmio_gpio").count(), 1);
++    assert!(builder.contains("if let Some(shutdown_efd) = shutdown_efd"));
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 4d00269..daee83d 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -160,6 +160,9 @@ enum LegacyNetworkConfig {
+ struct ContextConfig {
+     krunfw: Option<KrunfwBindings>,
+     vmr: VmResources,
++    /// N2 production profile marker. Set only by `krun_cowork_enable_production_profile` on a
++    /// context that carries no fixture opt-in; the fixture entry points refuse a context that has it.
++    cowork_production: bool,
+     workdir: Option<String>,
+     exec_path: Option<String>,
+     env: Option<String>,
+@@ -2869,6 +2872,52 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
+     KRUN_SUCCESS
+ }
+ 
++/// N2 production profile limits, enforced inside the reviewed gate (`cowork_validate_profile_in_phase`).
++/// The reclaim barrier, drain and pin evidence were reviewed for exactly two vCPUs, so the vCPU
++/// ceiling of two is also the only admitted count. Memory is a range whose ceiling is the reviewed
++/// 1024 MiB; its floor is the one size the fixture evidence exists for. Raising either ceiling
++/// lifts the gate and needs a fresh drain and pin review (docs: N2-PRODUCTION-PROFILE.md).
++#[cfg(all(feature = "blk", target_os = "macos"))]
++pub(crate) const COWORK_PRODUCTION_VCPUS: u8 = 2;
++#[cfg(all(feature = "blk", target_os = "macos"))]
++pub(crate) const COWORK_PRODUCTION_MIN_MEMORY_MIB: usize = 768;
++#[cfg(all(feature = "blk", target_os = "macos"))]
++pub(crate) const COWORK_PRODUCTION_MAX_MEMORY_MIB: usize = 1024;
++/// The fixture profile's workspace-pair memory: exactly this, a developer bound.
++#[cfg(all(feature = "blk", target_os = "macos"))]
++const COWORK_FIXTURE_PAIR_MEMORY_MIB: usize = 768;
++
++#[cfg(all(feature = "blk", target_os = "macos"))]
++fn cowork_production_memory_admitted(memory: Option<usize>) -> bool {
++    memory.is_some_and(|m| (COWORK_PRODUCTION_MIN_MEMORY_MIB..=COWORK_PRODUCTION_MAX_MEMORY_MIB).contains(&m))
++}
++/// The workspace pair's memory rule: the production range, or the fixture's exact developer bound.
++#[cfg(all(feature = "blk", target_os = "macos"))]
++fn cowork_pair_memory_admitted(cfg: &ContextConfig) -> bool {
++    let memory = cfg.vmr.vm_config().mem_size_mib;
++    if cfg.cowork_production { cowork_production_memory_admitted(memory) } else { memory == Some(COWORK_FIXTURE_PAIR_MEMORY_MIB) }
++}
++/// Production-only admission, run FIRST inside the reviewed gate; the unchanged reviewed checks
++/// still run after it. Production is exactly: the admitted RAW pair, the generic runtime port, the
++/// reduced-device machinery switches the production enable set, two vCPUs and the memory range.
++/// No HVC bootstrap stream, no fixture trace and no shutdown eventfd (it attaches the PL061 GPIO
++/// device, which is not in the admitted device inventory).
++fn cowork_validate_production(cfg: &ContextConfig) -> Result<(), ()> {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = cfg; Err(()) }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        let r = &cfg.vmr;
++        if !r.cowork_fixture_reclaim || !r.cowork_guarded_block { return Err(()); }
++        if r.cowork_workspace_disks.is_none() || !r.cowork_runtime_port || r.cowork_stream.is_none()
++            || r.cowork_runtime_fixture_trace { return Err(()); }
++        if cfg.shutdown_efd.is_some() { return Err(()); }
++        if r.vm_config().vcpu_count != Some(COWORK_PRODUCTION_VCPUS)
++            || !cowork_production_memory_admitted(r.vm_config().mem_size_mib) { return Err(()); }
++        Ok(())
++    }
++}
++
+ #[derive(Clone, Copy)]
+ enum CoworkProfilePhase { BeforeConstruction, BeforeVmm }
+ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+@@ -2877,12 +2926,13 @@ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+ fn cowork_validate_profile_in_phase(cfg:&ContextConfig, phase:CoworkProfilePhase)->Result<(),()> {
+     let _ = phase;
+     let r=&cfg.vmr;
++    if cfg.cowork_production && cowork_validate_production(cfg).is_err() { return Err(()); }
+     #[cfg(feature="blk")]
+     if (r.cowork_runtime_fixture_trace && !r.cowork_runtime_port) || (r.cowork_runtime_port && r.cowork_stream.is_none()) || (r.cowork_stream.is_some() && (!r.cowork_fixture_reclaim || !r.cowork_guarded_block)){return Err(());}
+     #[cfg(all(feature="blk",target_os="macos"))]
+     if let Some(pair) = &r.cowork_workspace_disks {
+         if !r.cowork_fixture_reclaim || !r.cowork_guarded_block || !r.cowork_runtime_port || r.cowork_stream.is_none()
+-            || r.vm_config().mem_size_mib != Some(768) || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
++            || !cowork_pair_memory_admitted(cfg) || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
+             || cfg.data_block_cfg.is_some() || cfg.block_root.is_some()
+             || pair.validate().is_err() { return Err(()); }
+         match phase {
+@@ -3234,19 +3284,58 @@ mod test_shutdown_eventfd {
+     }
+ }
+ 
++// FIXTURE ORACLE. The `*_fixture_*` entry points below, and the fixture-only factories after them,
++// exist only in test builds and in builds with the `cowork-fixture-oracle` feature. A production
++// build exports none of them. They stay as a regression oracle for the reviewed fixture profile and
++// refuse any context that carries the production profile marker.
++#[cfg(any(test, feature = "cowork-fixture-oracle"))]
+ #[no_mangle]
+ pub extern "C" fn krun_enable_cowork_fixture_reclaim(ctx_id: u32) -> i32 {
+     match CTX_MAP.lock().unwrap().get_mut(&ctx_id) {
+-        Some(cfg) => { cfg.vmr.cowork_fixture_reclaim = true; 0 },
++        Some(cfg) => { if cfg.cowork_production { return -libc::EINVAL; } cfg.vmr.cowork_fixture_reclaim = true; 0 },
+         None => -libc::ENOENT,
+     }
+ }
+ 
++#[cfg(any(test, feature = "cowork-fixture-oracle"))]
+ #[no_mangle]
+ pub extern "C" fn krun_enable_cowork_block_fixture_reclaim(ctx_id:u32)->i32 {
+     #[cfg(not(feature="blk"))] {let _=ctx_id;return -libc::EINVAL;}
+     #[cfg(feature="blk")]
+-    match CTX_MAP.lock().unwrap().get_mut(&ctx_id){Some(cfg)=>{cfg.vmr.cowork_fixture_reclaim=true;cfg.vmr.cowork_guarded_block=true;0},None=>-libc::ENOENT}
++    match CTX_MAP.lock().unwrap().get_mut(&ctx_id){Some(cfg)=>{if cfg.cowork_production{return -libc::EINVAL;}cfg.vmr.cowork_fixture_reclaim=true;cfg.vmr.cowork_guarded_block=true;0},None=>-libc::ENOENT}
++}
++
++/// N2 production profile opt-in, separate from every fixture opt-in. Accepts only a context that
++/// carries no fixture opt-in and no production marker. It sets the reduced-device machinery
++/// switches the profile shares with the fixture, and the production marker that turns on the
++/// production admission (`cowork_validate_production`) and the explicit vCPU and memory limits.
++/// Production exposes no fixture trace, no HVC bootstrap stream and no shutdown device.
++#[no_mangle]
++pub extern "C" fn krun_cowork_enable_production_profile(ctx_id: u32) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = ctx_id; -libc::EINVAL }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    match CTX_MAP.lock().unwrap().get_mut(&ctx_id) {
++        Some(cfg) => {
++            if cfg.cowork_production || cfg.vmr.cowork_fixture_reclaim || cfg.vmr.cowork_guarded_block { return -libc::EINVAL; }
++            cfg.cowork_production = true;
++            cfg.vmr.cowork_fixture_reclaim = true;
++            cfg.vmr.cowork_guarded_block = true;
++            0
++        },
++        None => -libc::ENOENT,
++    }
++}
++
++/// Side-effect-free preflight of the production gate at its first (pre-construction) phase: zero
++/// when `krun_start_enter` would pass the same admission, `-EINVAL` otherwise. It starts nothing and
++/// opens nothing, so a worker can prove the profile before it hands over any descriptor it must keep.
++#[no_mangle]
++pub extern "C" fn krun_cowork_validate_production_profile(ctx_id: u32) -> i32 {
++    let contexts = CTX_MAP.lock().unwrap();
++    let Some(cfg) = contexts.get(&ctx_id) else { return -libc::ENOENT; };
++    if !cfg.cowork_production || cowork_validate_profile(cfg).is_err() { return -libc::EINVAL; }
++    0
+ }
+ 
+ #[cfg(all(test,feature="blk",target_os="macos"))]mod cowork_admission_tests {
+@@ -3275,12 +3364,14 @@ pub extern "C" fn krun_enable_cowork_block_fixture_reclaim(ctx_id:u32)->i32 {
+ }
+ 
+ /// Deprecated caller-FD intake is deliberately refused in the closed factory profile.
++#[cfg(any(test, feature = "cowork-fixture-oracle"))]
+ #[no_mangle]
+ pub extern "C" fn krun_set_cowork_bootstrap_stream(ctx_id: u32, fd: i32) -> i32 {
+     let _ = (ctx_id, fd);
+     -libc::EINVAL
+ }
+ /// Fixture-only closed socketpair factory; only the opposite PEER endpoint leaves this library.
++#[cfg(any(test, feature = "cowork-fixture-oracle"))]
+ #[no_mangle]
+ pub extern "C" fn krun_create_cowork_bootstrap_stream(ctx_id: u32) -> i32 {
+     #[cfg(not(all(feature = "blk", target_os = "macos")))]
+@@ -3295,7 +3386,8 @@ pub extern "C" fn krun_create_cowork_bootstrap_stream(ctx_id: u32) -> i32 {
+         let Some(cfg) = contexts.get_mut(&ctx_id) else {
+             return -libc::ENOENT;
+         };
+-        if !cfg.vmr.cowork_fixture_reclaim
++        if cfg.cowork_production
++            || !cfg.vmr.cowork_fixture_reclaim
+             || !cfg.vmr.cowork_guarded_block
+             || cfg.vmr.cowork_stream.is_some()
+         {
+@@ -3310,6 +3402,32 @@ pub extern "C" fn krun_create_cowork_bootstrap_stream(ctx_id: u32) -> i32 {
+         }
+     }
+ }
++/// Shared body of the fixture and production runtime-port factories. The profile marker must match
++/// the caller: a fixture entry point never serves a production context and the reverse.
++#[cfg(all(feature = "blk", target_os = "macos"))]
++fn cowork_create_runtime_port(ctx_id: u32, production: bool) -> i32 {
++    use std::os::fd::IntoRawFd;
++    let mut contexts = CTX_MAP.lock().unwrap();
++    let Some(cfg) = contexts.get_mut(&ctx_id) else {
++        return -libc::ENOENT;
++    };
++    if cfg.cowork_production != production
++        || !cfg.vmr.cowork_fixture_reclaim
++        || !cfg.vmr.cowork_guarded_block
++        || cfg.vmr.cowork_stream.is_some()
++    {
++        return -libc::EINVAL;
++    }
++    match devices::stream_io::ScopedStream::create_pair() {
++        Ok((device, peer)) => {
++            cfg.vmr.cowork_stream = Some(device);
++            cfg.vmr.cowork_runtime_port=true;
++            peer.into_raw_fd()
++        }
++        Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
++    }
++}
++#[cfg(any(test, feature = "cowork-fixture-oracle"))]
+ #[no_mangle]
+ pub extern "C" fn krun_create_cowork_runtime_stream(ctx_id: u32) -> i32 {
+     #[cfg(not(all(feature = "blk", target_os = "macos")))]
+@@ -3318,27 +3436,20 @@ pub extern "C" fn krun_create_cowork_runtime_stream(ctx_id: u32) -> i32 {
+         -libc::EINVAL
+     }
+     #[cfg(all(feature = "blk", target_os = "macos"))]
++    cowork_create_runtime_port(ctx_id, false)
++}
++/// Production runtime port: the one generic non-console virtio port, with no keys and no authority.
++/// Same closed contract as the fixture factory (only the opposite PEER fd is returned, owned by the
++/// caller, CLOEXEC), accepted only on a context that carries the production profile.
++#[no_mangle]
++pub extern "C" fn krun_cowork_create_runtime_port(ctx_id: u32) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
+     {
+-        use std::os::fd::IntoRawFd;
+-        let mut contexts = CTX_MAP.lock().unwrap();
+-        let Some(cfg) = contexts.get_mut(&ctx_id) else {
+-            return -libc::ENOENT;
+-        };
+-        if !cfg.vmr.cowork_fixture_reclaim
+-            || !cfg.vmr.cowork_guarded_block
+-            || cfg.vmr.cowork_stream.is_some()
+-        {
+-            return -libc::EINVAL;
+-        }
+-        match devices::stream_io::ScopedStream::create_pair() {
+-            Ok((device, peer)) => {
+-                cfg.vmr.cowork_stream = Some(device);
+-                cfg.vmr.cowork_runtime_port=true;
+-                peer.into_raw_fd()
+-            }
+-            Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
+-        }
++        let _ = ctx_id;
++        -libc::EINVAL
+     }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    cowork_create_runtime_port(ctx_id, true)
+ }
+ #[cfg(all(test, feature = "blk", target_os = "macos"))]
+ mod cowork_stream_api_tests {
+@@ -3443,12 +3554,13 @@ mod cowork_stream_api_tests {
+     }
+ }
+ 
++#[cfg(any(test, feature = "cowork-fixture-oracle"))]
+ #[no_mangle]
+ pub extern "C" fn krun_enable_cowork_runtime_port_fixture_trace(ctx_id:u32)->i32{
+     #[cfg(not(all(feature="blk",target_os="macos")))]{let _=ctx_id;-libc::EINVAL}
+     #[cfg(all(feature="blk",target_os="macos"))]{
+         let mut contexts=CTX_MAP.lock().unwrap();let Some(cfg)=contexts.get_mut(&ctx_id)else{return -libc::ENOENT;};
+-        if !cfg.vmr.cowork_runtime_port || cfg.vmr.cowork_stream.is_none() || !cfg.vmr.cowork_guarded_block || !cfg.vmr.cowork_fixture_reclaim{return -libc::EINVAL;}
++        if cfg.cowork_production || !cfg.vmr.cowork_runtime_port || cfg.vmr.cowork_stream.is_none() || !cfg.vmr.cowork_guarded_block || !cfg.vmr.cowork_fixture_reclaim{return -libc::EINVAL;}
+         cfg.vmr.cowork_runtime_fixture_trace=true;0
+     }
+ }
+@@ -3471,18 +3583,17 @@ pub extern "C" fn krun_enable_cowork_runtime_port_fixture_trace(ctx_id:u32)->i32
+  #[test]fn runtime_port_existing_hvc_factory_excludes_generic_variant(){let id=krun_create_ctx() as u32;assert_eq!(krun_enable_cowork_block_fixture_reclaim(id),0);let raw=krun_create_cowork_bootstrap_stream(id);assert!(raw>=3);let peer=unsafe{OwnedFd::from_raw_fd(raw)};assert_eq!(krun_create_cowork_runtime_stream(id),-libc::EINVAL);assert!(!CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.cowork_runtime_port);assert_eq!(krun_free_ctx(id),0);drop(peer);}
+ }
+ 
+-/// Developer-only atomic admitted-FD workspace profile. FDs are borrowed; duplicates are owned.
+-/// Caller identities corroborate immutable host admission, never grant native launch authority.
+-#[no_mangle]
+-#[allow(clippy::missing_safety_doc)]
++/// Atomic admitted-FD workspace profile body shared by the fixture oracle and production entry
++/// points. FDs are borrowed; duplicates are owned. Caller identities corroborate immutable host
++/// admission, never grant native launch authority. The profile marker must match the entry point.
+ #[cfg(all(feature="blk",target_os="macos"))]
+-pub unsafe extern "C" fn krun_set_cowork_workspace_disks(
+-    ctx_id: u32, data_fd: i32, data: *const devices::workspace_disks::ExpectedVolume,
++unsafe fn cowork_set_workspace_disks(
++    ctx_id: u32, production: bool, data_fd: i32, data: *const devices::workspace_disks::ExpectedVolume,
+     environment_fd: i32, environment: *const devices::workspace_disks::ExpectedVolume,
+ ) -> i32 {
+     let mut contexts = CTX_MAP.lock().unwrap();
+     let Some(cfg) = contexts.get_mut(&ctx_id) else { return -libc::ENOENT; };
+-    if data.is_null() || environment.is_null() || !cfg.vmr.cowork_fixture_reclaim || !cfg.vmr.cowork_guarded_block
++    if data.is_null() || environment.is_null() || cfg.cowork_production != production || !cfg.vmr.cowork_fixture_reclaim || !cfg.vmr.cowork_guarded_block
+         || cfg.vmr.cowork_workspace_disks.is_some() || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
+         || cfg.data_block_cfg.is_some() || cfg.block_root.is_some() || !cfg.vmr.block.cowork_unprepared()
+         || (cfg.vmr.cowork_stream.is_some() && !cfg.vmr.cowork_runtime_port) { return -libc::EINVAL; }
+@@ -3491,5 +3602,29 @@ pub unsafe extern "C" fn krun_set_cowork_workspace_disks(
+         Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
+     }
+ }
++/// Developer-only fixture oracle for the admitted pair (fixture profile only).
++#[no_mangle]
++#[allow(clippy::missing_safety_doc)]
++#[cfg(all(feature="blk",target_os="macos",any(test,feature="cowork-fixture-oracle")))]
++pub unsafe extern "C" fn krun_set_cowork_workspace_disks(
++    ctx_id: u32, data_fd: i32, data: *const devices::workspace_disks::ExpectedVolume,
++    environment_fd: i32, environment: *const devices::workspace_disks::ExpectedVolume,
++) -> i32 {
++    cowork_set_workspace_disks(ctx_id, false, data_fd, data, environment_fd, environment)
++}
++/// Production admitted workspace pair. Same contract as the fixture oracle, accepted only on a
++/// context that carries the production profile. It never authenticates a daemon, home, workspace,
++/// worker, incarnation or lease: the native launch adapter owns those.
++#[no_mangle]
++#[allow(clippy::missing_safety_doc)]
++#[cfg(all(feature="blk",target_os="macos"))]
++pub unsafe extern "C" fn krun_cowork_set_workspace_disks(
++    ctx_id: u32, data_fd: i32, data: *const devices::workspace_disks::ExpectedVolume,
++    environment_fd: i32, environment: *const devices::workspace_disks::ExpectedVolume,
++) -> i32 {
++    cowork_set_workspace_disks(ctx_id, true, data_fd, data, environment_fd, environment)
++}
+ #[cfg(all(test,feature="blk",target_os="macos"))]
+ mod cowork_workspace_disks_tests;
++#[cfg(all(test,feature="blk",target_os="macos"))]
++mod cowork_production_profile_tests;

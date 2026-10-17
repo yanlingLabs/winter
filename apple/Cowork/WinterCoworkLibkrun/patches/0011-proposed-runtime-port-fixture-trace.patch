@@ -1,0 +1,341 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index 699ad18..ac18265 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -1414,6 +1414,8 @@ int32_t krun_create_cowork_bootstrap_stream(uint32_t ctx_id);
+ /* Generic non-console port0; same private factory/no-fork caller contract; no keys/authority.
+  * VERSION_1+MULTIPORT required; fixed four queues; caller owns only returned opposite peer. */
+ int32_t krun_create_cowork_runtime_stream(uint32_t ctx_id);
++/* NONSECRET fixture only: opt-in64-row control used-ACK metadata; requires runtime-port factory. */
++int32_t krun_enable_cowork_runtime_port_fixture_trace(uint32_t ctx_id);
+ /* DEPRECATED TEST API: caller-supplied descriptors are always refused (-EINVAL). */
+ int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);
+ 
+diff --git a/src/devices/src/virtio/console/mod.rs b/src/devices/src/virtio/console/mod.rs
+index 7e6ddb3..9092b9a 100644
+--- a/src/devices/src/virtio/console/mod.rs
++++ b/src/devices/src/virtio/console/mod.rs
+@@ -51,3 +51,5 @@ type Result<T> = std::result::Result<T, ConsoleError>;
+ 
+ #[cfg(feature="blk")]pub mod runtime_port;
+ #[cfg(feature="blk")]mod runtime_port_control;
++
++#[cfg(feature="blk")]mod runtime_port_fixture_trace;
+diff --git a/src/devices/src/virtio/console/runtime_port.rs b/src/devices/src/virtio/console/runtime_port.rs
+index 2a739cb..3fd3c27 100644
+--- a/src/devices/src/virtio/console/runtime_port.rs
++++ b/src/devices/src/virtio/console/runtime_port.rs
+@@ -1,5 +1,6 @@
+ //! Guarded fixed generic port: closed MULTIPORT handshake; upstream worker/volatile I/O paths unused.
+ use super::runtime_port_control::{Control, Transition, CONTROL_BYTES, FEATURES};
++use super::runtime_port_fixture_trace::Trace;
+ use crate::reclaim_access::{Access, Device, Fault, Pin, Range};
+ use crate::stream_io::{ScopedStream, CHUNK, MAX_CHAIN, MAX_TX};
+ use crate::virtio::queue::fixture_chain;
+@@ -268,6 +269,7 @@ struct Worker {
+     control: Control,
+     transition: Option<Transition>,
+     response: Option<[u8; CONTROL_BYTES]>,
++    trace: Option<Trace>,
+     #[cfg(test)]
+     observe_tx: Option<(Arc<std::sync::atomic::AtomicUsize>, Arc<AtomicBool>)>,
+ }
+@@ -288,6 +290,9 @@ impl Worker {
+             match self.queues.complete_queue(false, true, frame) {
+                 Ok(()) => {
+                     let transition = self.transition.take().unwrap();
++                    if let Some(trace) = &self.trace {
++                        trace.used_ack(3, &frame.data)?;
++                    }
+                     self.response = transition.response;
+                     self.control.apply(transition);
+                     self.control_tx = None;
+@@ -310,6 +315,9 @@ impl Worker {
+                 frame.offset = CONTROL_BYTES;
+                 match self.queues.complete_queue(true, true, frame) {
+                     Ok(()) => {
++                        if let Some(trace) = &self.trace {
++                            trace.used_ack(2, response)?;
++                        }
+                         self.response = None;
+                         self.control_rx = None;
+                         self.interrupt.signal_used_queue();
+@@ -491,6 +499,7 @@ pub struct GuardedPort {
+     active: Option<Active>,
+     pending: Option<Pending>,
+     done: EventFd,
++    fixture_trace: Option<Trace>,
+     #[cfg(test)]
+     test_data_open: bool,
+ }
+@@ -501,6 +510,7 @@ impl GuardedPort {
+             device,
+             stream,
+             acked: 0,
++            fixture_trace: None,
+             #[cfg(test)]
+             test_data_open: false,
+             activated: false,
+@@ -509,6 +519,9 @@ impl GuardedPort {
+             done: EventFd::new(EFD_NONBLOCK).map_err(|_| Fault::Stopped)?,
+         })
+     }
++    pub fn enable_fixture_trace(&mut self) {
++        self.fixture_trace = Some(Trace::new());
++    }
+     fn initial_control(&self) -> Control {
+         #[cfg(test)]
+         if self.test_data_open {
+@@ -557,6 +570,7 @@ impl GuardedPort {
+                     control: self.initial_control(),
+                     transition: None,
+                     response: None,
++                    trace: self.fixture_trace.clone(),
+                     #[cfg(test)]
+                     observe_tx: None,
+                 };
+@@ -812,6 +826,7 @@ mod tests {
+             control: Control::opened_for_test(),
+             transition: None,
+             response: None,
++            trace: None,
+             observe_tx: None,
+         };
+         let thread = std::thread::spawn(move || worker.run());
+@@ -878,6 +893,7 @@ mod tests {
+                     control: Control::opened_for_test(),
+                     transition: None,
+                     response: None,
++                    trace: None,
+                     observe_tx: None,
+                 },
+                 result: Err(Fault::Stopped),
+@@ -991,6 +1007,7 @@ mod tests {
+             control: Control::opened_for_test(),
+             transition: None,
+             response: None,
++            trace: None,
+             observe_tx: None,
+         };
+         let thread = std::thread::spawn(move || worker.run());
+@@ -1033,6 +1050,7 @@ mod tests {
+                     control: Control::opened_for_test(),
+                     transition: None,
+                     response: None,
++                    trace: None,
+                     observe_tx: None,
+                 },
+                 result: Err(Fault::Stopped),
+@@ -1174,6 +1192,7 @@ mod tests {
+             control: Control::opened_for_test(),
+             transition: None,
+             response: None,
++            trace: None,
+             observe_tx: None,
+         };
+         let thread = std::thread::spawn(move || worker.run());
+@@ -1270,6 +1289,7 @@ mod tests {
+                     control: Control::opened_for_test(),
+                     transition: None,
+                     response: None,
++                    trace: None,
+                     observe_tx: None,
+                 },
+                 result: Err(Fault::Stopped),
+@@ -1411,6 +1431,7 @@ mod tests {
+                 control: Control::opened_for_test(),
+                 transition: None,
+                 response: None,
++                trace: None,
+                 observe_tx: Some((offset.clone(), short.clone())),
+             };
+             let thread = std::thread::spawn(move || {
+@@ -1552,6 +1573,7 @@ mod protocol_queue_tests {
+             control: Control::new(),
+             transition: None,
+             response: None,
++            trace: None,
+             observe_tx: None,
+         };
+         (w, memory, peer)
+@@ -1810,4 +1832,29 @@ mod protocol_queue_tests {
+         assert_eq!(after, super::super::runtime_port_control::frame(0, 1, 0));
+         assert!(worker.response.is_none());
+     }
++    #[test]
++    fn runtime_port_fixture_trace_frozen_control_has_no_rows_until_actual_used_ack() {
++        let (mut worker, memory, _peer) = fixture();
++        let trace = Trace::new();
++        worker.trace = Some(trace.clone());
++        packet(
++            &memory,
++            0,
++            &super::super::runtime_port_control::frame(u32::MAX, 0, 1),
++        );
++        worker.control_tx = worker.queues.capture_queue(false, true).unwrap();
++        let frozen = worker
++            .queues
++            .access
++            .freeze(1, Duration::from_secs(1))
++            .unwrap();
++        worker.control_turn().unwrap();
++        assert_eq!(trace.row_count(), 0);
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0xc002)).unwrap(), 0);
++        frozen.resume().unwrap();
++        worker.control_turn().unwrap();
++        assert_eq!(trace.row_count(), 2);
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0xc002)).unwrap(), 1);
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x6002)).unwrap(), 1);
++    }
+ }
+diff --git a/src/devices/src/virtio/console/runtime_port_fixture_trace.rs b/src/devices/src/virtio/console/runtime_port_fixture_trace.rs
+new file mode 100644
+index 0000000..1b70b53
+--- /dev/null
++++ b/src/devices/src/virtio/console/runtime_port_fixture_trace.rs
+@@ -0,0 +1,88 @@
++//! Opt-in fixture-only bounded control ACK metadata. Never logs data-lane bytes.
++use crate::reclaim_access::Fault;
++use std::sync::{
++    atomic::{AtomicUsize, Ordering},
++    Arc,
++};
++pub const MAX_ROWS: usize = 64;
++#[derive(Clone)]
++pub struct Trace {
++    rows: Arc<AtomicUsize>,
++}
++#[derive(PartialEq, Eq)]
++pub struct Ack {
++    pub row: usize,
++    pub queue: u8,
++    pub id: u32,
++    pub event: u16,
++    pub value: u16,
++}
++impl Trace {
++    pub fn new() -> Self {
++        Self {
++            rows: Arc::new(AtomicUsize::new(0)),
++        }
++    }
++    fn record(&self, queue: u8, bytes: &[u8]) -> Result<Ack, Fault> {
++        if bytes.len() != 8 || !matches!(queue, 2 | 3) {
++            return Err(Fault::InvalidRange);
++        }
++        let row = self
++            .rows
++            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
++                if n < MAX_ROWS {
++                    Some(n + 1)
++                } else {
++                    None
++                }
++            })
++            .map_err(|_| Fault::Limit)?;
++        Ok(Ack {
++            row,
++            queue,
++            id: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
++            event: u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
++            value: u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
++        })
++    }
++    #[cfg(test)]
++    pub fn row_count(&self) -> usize {
++        self.rows.load(Ordering::Acquire)
++    }
++    pub fn used_ack(&self, queue: u8, bytes: &[u8]) -> Result<(), Fault> {
++        let ack = self.record(queue, bytes)?;
++        eprintln!("{{\"kind\":\"runtime_control_used_ack\",\"row\":{},\"queue\":{},\"id\":{},\"event\":{},\"value\":{},\"usedAck\":true}}",ack.row,ack.queue,ack.id,ack.event,ack.value);
++        Ok(())
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn runtime_port_fixture_trace_exact_fields_and_strict_shared_cap() {
++        let trace = Trace::new();
++        let alias = trace.clone();
++        let bytes = super::super::runtime_port_control::frame(0, 6, 0);
++        for row in 0..MAX_ROWS {
++            let ack = alias.record(3, &bytes).unwrap();
++            assert_eq!(ack.row, row);
++            assert_eq!(ack.queue, 3);
++            assert_eq!(ack.id, 0);
++            assert_eq!(ack.event, 6);
++            assert_eq!(ack.value, 0);
++        }
++        assert!(trace.record(3, &bytes).is_err());
++        assert_eq!(trace.rows.load(Ordering::Acquire), MAX_ROWS);
++    }
++    #[test]
++    fn runtime_port_fixture_trace_rejects_data_queues_and_bad_sizes_without_rows() {
++        let trace = Trace::new();
++        for queue in [0, 1, 4, 255] {
++            assert!(trace.record(queue, &[0; 8]).is_err());
++        }
++        for length in [0, 7, 9, 4096] {
++            assert!(trace.record(3, &vec![0; length]).is_err());
++        }
++        assert_eq!(trace.rows.load(Ordering::Acquire), 0);
++    }
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 8e8ba9d..5f3fb9d 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2872,7 +2872,7 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
+ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+     let r=&cfg.vmr;
+     #[cfg(feature="blk")]
+-    if (r.cowork_runtime_port && r.cowork_stream.is_none()) || (r.cowork_stream.is_some() && (!r.cowork_fixture_reclaim || !r.cowork_guarded_block)){return Err(());}
++    if (r.cowork_runtime_fixture_trace && !r.cowork_runtime_port) || (r.cowork_runtime_port && r.cowork_stream.is_none()) || (r.cowork_stream.is_some() && (!r.cowork_fixture_reclaim || !r.cowork_guarded_block)){return Err(());}
+     if !r.cowork_fixture_reclaim{return Ok(());}
+     if cfg!(any(feature="init-blob",feature="net",feature="gpu",feature="snd",feature="input",feature="efi",feature="tee"))
+         || r.cowork_guarded_block!=cfg!(feature="blk")
+@@ -3403,6 +3403,19 @@ mod cowork_stream_api_tests {
+     }
+ }
+ 
++#[no_mangle]
++pub extern "C" fn krun_enable_cowork_runtime_port_fixture_trace(ctx_id:u32)->i32{
++    #[cfg(not(all(feature="blk",target_os="macos")))]{let _=ctx_id;-libc::EINVAL}
++    #[cfg(all(feature="blk",target_os="macos"))]{
++        let mut contexts=CTX_MAP.lock().unwrap();let Some(cfg)=contexts.get_mut(&ctx_id)else{return -libc::ENOENT;};
++        if !cfg.vmr.cowork_runtime_port || cfg.vmr.cowork_stream.is_none() || !cfg.vmr.cowork_guarded_block || !cfg.vmr.cowork_fixture_reclaim{return -libc::EINVAL;}
++        cfg.vmr.cowork_runtime_fixture_trace=true;0
++    }
++}
++#[cfg(all(test,feature="blk",target_os="macos"))]mod runtime_port_trace_api_tests{
++    use super::*;use std::os::fd::{FromRawFd,OwnedFd};
++    #[test]fn runtime_port_fixture_trace_requires_exact_opt_in(){let id=krun_create_ctx() as u32;assert_eq!(krun_enable_cowork_runtime_port_fixture_trace(id),-libc::EINVAL);assert_eq!(krun_enable_cowork_block_fixture_reclaim(id),0);assert_eq!(krun_enable_cowork_runtime_port_fixture_trace(id),-libc::EINVAL);let raw=krun_create_cowork_runtime_stream(id);assert!(raw>=3);let peer=unsafe{OwnedFd::from_raw_fd(raw)};assert_eq!(krun_enable_cowork_runtime_port_fixture_trace(id),0);assert!(CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.cowork_runtime_fixture_trace);assert_eq!(krun_free_ctx(id),0);drop(peer);assert_eq!(krun_enable_cowork_runtime_port_fixture_trace(id),-libc::ENOENT);}
++}
+ #[cfg(all(test,feature="blk",target_os="macos"))]mod runtime_port_api_tests{
+  use super::*;use std::os::fd::{AsRawFd,FromRawFd,OwnedFd};use std::io::Read;
+  #[test]fn runtime_port_public_factory_is_closed_opt_in_exclusive_and_peer_owned(){
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 353dc94..de64402 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -1009,6 +1009,7 @@ pub fn build_microvm(
+         let access=vmm.cowork_access.as_ref().expect("guarded stream access").clone();let token=access.register(1).expect("guarded stream registration");
+         if vm_resources.cowork_runtime_port{
+             let port=Arc::new(Mutex::new(devices::virtio::console::runtime_port::GuardedPort::new(access.clone(),token,stream.duplicate().map_err(|e|StartMicrovmError::Internal(Error::EventFd(e)))?).expect("guarded generic port")));
++            if vm_resources.cowork_runtime_fixture_trace{port.lock().unwrap().enable_fixture_trace();}
+             rng_guard_for_stream(&vmm,&access);
+             event_manager.add_subscriber(port.clone()).map_err(StartMicrovmError::RegisterEvent)?;vmm.exit_observers.push(port.clone());vmm.cowork_runtime_port=Some(port.clone());
+             attach_mmio_device(&mut vmm,"cowork-runtime-port".into(),intc.clone(),port).map_err(StartMicrovmError::RegisterConsoleDevice)?;
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index 70253a3..7d03cd2 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -133,6 +133,7 @@ pub struct VmResources {
+     pub cowork_guarded_block: bool,
+     #[cfg(feature="blk")]pub cowork_stream:Option<devices::stream_io::ScopedStream>,
+     #[cfg(feature="blk")]pub cowork_runtime_port:bool,
++    #[cfg(feature="blk")]pub cowork_runtime_fixture_trace:bool,
+     /// The vCpu and memory configuration for this microVM.
+     vm_config: VmConfig,
+     /// The firmware to be loaded into the microVM.

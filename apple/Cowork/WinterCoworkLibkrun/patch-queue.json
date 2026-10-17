@@ -1,0 +1,258 @@
+{
+  "_comment": "basePatches (0004-0013) are the admitted two-disk fixture queue, applied unchanged; newPatches (0014-0023) are the production profile. Every patch applies to the previous composed state, so the queue is a stack.",
+  "status": "native-source-only-independent-review-required",
+  "profile": "n2-production-admitted-raw-pair-and-generic-runtime-port",
+  "basePatches": [
+    {
+      "patchFile": "patches/0004-proposed-guarded-block-reviewed-fixes.patch",
+      "patchSha256": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481"
+    },
+    {
+      "patchFile": "patches/0005-proposed-guarded-block-producer-progress.patch",
+      "patchSha256": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775"
+    },
+    {
+      "patchFile": "patches/0006-proposed-raw-block-trace.patch",
+      "patchSha256": "00e169fb7e5c527d348269cc8211afc99daa800622bce6140a4b2b42c204951d"
+    },
+    {
+      "patchFile": "patches/0007-proposed-guarded-stream.patch",
+      "patchSha256": "4acf7d82622d98ca1265e6a57bcd167f6df1fd5efb6a63cc65a9f6b24f35e044"
+    },
+    {
+      "patchFile": "patches/0008-proposed-guarded-stream-reviewed-fixes.patch",
+      "patchSha256": "43331eedec8e73f735830932b56c28cb3eb311f1c9bcbf3535f497063a369378"
+    },
+    {
+      "patchFile": "patches/0009-proposed-guarded-stream-closed-factory.patch",
+      "patchSha256": "ae46b3d1732cf6e00b3cb451334be04b222093cd78418b91b706d2a33a4f35c4"
+    },
+    {
+      "patchFile": "patches/0010-proposed-generic-runtime-port.patch",
+      "patchSha256": "62298de5d9176725d6a4bf0f79183a141de6d3162ff6085bce42ecd43f235752"
+    },
+    {
+      "patchFile": "patches/0011-proposed-runtime-port-fixture-trace.patch",
+      "patchSha256": "fe41eb3b7891d4c7bb7fa61d43508d4173d9e72a27b9476bb4de0c64ea5815c0"
+    },
+    {
+      "patchFile": "patches/0012-proposed-admitted-workspace-disks.patch",
+      "patchSha256": "c956cfcedc99dcebee26784873fd22f7efd3fa1fb22b3beb937b974756efcba7"
+    },
+    {
+      "patchFile": "patches/0013-proposed-workspace-disks-startup-phases.patch",
+      "patchSha256": "f70c5b11586211c81b88a0acc27bdc357ed4437418bdffbf8cae0a2217c152ae"
+    }
+  ],
+  "newPatches": [
+    {
+      "patchFile": "patches/0014-proposed-krun-vmm-unit-harness.patch",
+      "allowedFiles": [
+        "src/libkrun/src/lib.rs",
+        "src/vmm/src/macos/vstate.rs",
+        "src/vmm/src/resources.rs"
+      ],
+      "purpose": "krun-vmm unit harness compiles again; tests that create a Hypervisor.framework VM or call krun_start_enter are #[ignore]; no production behavior changes",
+      "patchSha256": "b5bda53c97f86c1b130639340f3d97c9a96d37765a63820a6ca9c86664c88844"
+    },
+    {
+      "patchFile": "patches/0015-proposed-cowork-production-profile.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/libkrun/Cargo.toml",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "production profile gate separate from the fixture opt-ins, production C ABI names, explicit 2 vCPU / 768..1024 MiB limits inside the reviewed gate, fixture entry points behind cfg(test) or the cowork-fixture-oracle feature",
+      "patchSha256": "e3c6c42ab5e30f33586f8d07e5a6c5e6fcc38e5a5e20393c824d08edf5f90daf"
+    },
+    {
+      "patchFile": "patches/0016-proposed-production-block-trace-off.patch",
+      "allowedFiles": [
+        "src/devices/Cargo.toml",
+        "src/devices/src/block_trace.rs",
+        "src/libkrun/Cargo.toml",
+        "src/libkrun/src/cowork_production_trace_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "the fixture-only block trace rows and their 60000-row fatal process cap are compiled out of production builds",
+      "patchSha256": "97708943e9ac82db658fe0c322d5140f66966cab201bae4b33e3e56e334fbdf8"
+    },
+    {
+      "patchFile": "patches/0017-proposed-production-abi-v1-names.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "mechanical rename of the production entry points to the canonical _v1 names (enable_profile, create_runtime_port, set_workspace_disks, validate_profile)",
+      "patchSha256": "628c88a57fbb7216132eba089d1fd028ea706d7a1658ba3fe4c7765950d8a529"
+    },
+    {
+      "patchFile": "patches/0018-proposed-production-gate-matrix-tests.patch",
+      "allowedFiles": [
+        "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/src/resources.rs"
+      ],
+      "purpose": "running tests for every reviewed device-inventory refusal, a table of every device-adding public setter, exhaustive classification of the context types, the pre-VMM phase, and a start-free split of the normalized-gpu admission test",
+      "patchSha256": "311e58b4695d91703519c6173a484077b15977a5930eef453510cf7111a84d45"
+    },
+    {
+      "patchFile": "patches/0019-proposed-production-start-admission.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/libkrun/Cargo.toml",
+        "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/cowork_production_start_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "mandatory preflight recorded on the context and enforced at start; cowork-production-only feature: krun_start_enter refuses any context without the production profile",
+      "patchSha256": "805356bdf1f74146b0daa92d7c502107702d6b0520c9eb814fdf6c3bef30c82a"
+    },
+    {
+      "patchFile": "patches/0020-proposed-production-quiet-block-and-reclaim-paths.patch",
+      "allowedFiles": [
+        "src/devices/src/block_trace.rs",
+        "src/devices/src/virtio/block/cowork.rs",
+        "src/libkrun/Cargo.toml",
+        "src/libkrun/src/cowork_production_quiet_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/Cargo.toml",
+        "src/vmm/src/cowork_fixture.rs",
+        "src/vmm/src/lib.rs"
+      ],
+      "purpose": "production block requests have no fixture completion hold; the fixture reclaim rows (host virtual addresses) on stderr are compiled out of production builds",
+      "patchSha256": "8f395ba2db2cec9b7ba0551e3497ce5664c62ee85a76597ded93e52abb418590"
+    },
+    {
+      "patchFile": "patches/0021-proposed-production-flush-and-pin-counters.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/block_bounce.rs",
+        "src/devices/src/cowork_counters.rs",
+        "src/devices/src/lib.rs",
+        "src/devices/src/reclaim_access.rs",
+        "src/libkrun/src/cowork_production_counters_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs"
+      ],
+      "purpose": "process-global flush counters per disk and pin high-water counters, with krun_cowork_get_flush_counters_v1 and krun_cowork_get_pin_counters_v1",
+      "patchSha256": "f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a"
+    },
+    {
+      "patchFile": "patches/0022-proposed-production-exit-path-final-flush-and-hook.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/virtio/block/device.rs",
+        "src/hvf/src/lib.rs",
+        "src/libkrun/src/cowork_production_exit_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/src/builder.rs",
+        "src/vmm/src/cowork_exit.rs",
+        "src/vmm/src/cowork_fixture.rs",
+        "src/vmm/src/lib.rs",
+        "src/vmm/src/macos/vstate.rs",
+        "src/vmm/src/resources.rs"
+      ],
+      "purpose": "one exit path for every stop (reason recorded once: off, reset, vcpu error, terminal fault; PSCI reset distinguished from off), final flush observer for both volumes, exit hook registered last, fatal() routed through the same path",
+      "patchSha256": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a"
+    },
+    {
+      "patchFile": "patches/0023-proposed-production-exit-and-final-flush-pins.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/virtio/block/workspace_fd_tests.rs",
+        "src/devices/src/workspace_raw_storage.rs",
+        "src/vmm/src/builder.rs",
+        "src/vmm/src/cowork_exit.rs"
+      ],
+      "purpose": "tests that run the exit sequence for real in a child process (watchdog over a hung observer, status by reason, one claimant), the final flush on the real admitted-storage path (sync_all counted and failed through a test seam, real result, stop-fd wake), and the terminal-fault notifier; finish takes its budget as a parameter (production passes 20 s)",
+      "patchSha256": "0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc"
+    }
+  ],
+  "allAddedFiles": [
+    "src/devices/src/block_bounce.rs",
+    "src/devices/src/block_trace.rs",
+    "src/devices/src/reclaim_access.rs",
+    "src/devices/src/stream_io.rs",
+    "src/devices/src/virtio/block/cowork.rs",
+    "src/devices/src/virtio/block/workspace_fd_tests.rs",
+    "src/devices/src/virtio/console/cowork_stream.rs",
+    "src/devices/src/virtio/console/runtime_port.rs",
+    "src/devices/src/virtio/console/runtime_port_control.rs",
+    "src/devices/src/virtio/console/runtime_port_fixture_trace.rs",
+    "src/devices/src/workspace_disks.rs",
+    "src/devices/src/workspace_raw_storage.rs",
+    "src/libkrun/src/cowork_workspace_disks_tests.rs",
+    "src/vmm/src/cowork_barrier.rs",
+    "src/vmm/src/cowork_control.rs",
+    "src/vmm/src/cowork_coordinator.rs",
+    "src/vmm/src/cowork_fixture.rs",
+    "src/vmm/src/cowork_ops.rs",
+    "src/vmm/src/cowork_ranges.rs",
+    "src/vmm/src/vmm_config/workspace_disks_builder_tests.rs",
+    "src/libkrun/src/cowork_production_profile_tests.rs",
+    "src/libkrun/src/cowork_production_trace_tests.rs",
+    "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+    "src/libkrun/src/cowork_production_start_tests.rs",
+    "src/libkrun/src/cowork_production_quiet_tests.rs",
+    "src/devices/src/cowork_counters.rs",
+    "src/libkrun/src/cowork_production_counters_tests.rs",
+    "src/libkrun/src/cowork_production_exit_tests.rs",
+    "src/vmm/src/cowork_exit.rs"
+  ],
+  "forbiddenAddedText": [
+    "register_mmio_gpio(",
+    "Gpio::new(",
+    "legacy::Gpio",
+    "add_subscriber(",
+    "attach_mmio_device(&mut "
+  ],
+  "deviceForbiddenAddedText": [
+    "attach_",
+    "register_mmio",
+    "add_subscriber(",
+    "Gpio"
+  ],
+  "deviceForbiddenExemptFiles": [
+    "src/libkrun/src/cowork_production_[a-z_]+_tests\\.rs",
+    "src/libkrun/src/cowork_workspace_disks_tests\\.rs",
+    "src/libkrun/src/lib\\.rs"
+  ],
+  "features": {
+    "production": "blk,cowork-production-only",
+    "oracle": "blk,cowork-fixture-oracle"
+  },
+  "limits": {
+    "vcpus": 2,
+    "minMemoryMiB": 768,
+    "maxMemoryMiB": 1024,
+    "fixtureWorkspaceMemoryMiB": 768
+  },
+  "deviceInventory": {
+    "virtioIds": [
+      2,
+      2,
+      3,
+      4,
+      5
+    ],
+    "maxDevices": 3,
+    "maxPins": 48,
+    "maxPinnedBytes": 8388608,
+    "shutdownGpio": false
+  },
+  "productionReady": false,
+  "vmStarted": false,
+  "workerBuilt": false,
+  "fullResourceGatePassed": false,
+  "notProductionBecause": [
+    "No VM has run this profile; G4 (three-cycle reclaim on real ext4 at 2 vCPU and 768..1024 MiB) is required and needs owner approval.",
+    "Independent code review of this exact patch queue is required before any run.",
+    "Guest console output goes to the file descriptor the worker supplies; bounded capture and redaction belong to the worker."
+  ]
+}

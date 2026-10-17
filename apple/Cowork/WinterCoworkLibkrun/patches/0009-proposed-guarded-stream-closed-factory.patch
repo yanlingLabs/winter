@@ -1,0 +1,782 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index 97bf57e..24f98e8 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -1400,11 +1400,18 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
+  */
+ int32_t krun_start_enter(uint32_t ctx_id);
+ 
+-/* TEST-ONLY: add one guarded single-port bootstrap/runtime stream to the raw-block fixture.
+- * fd must be a pre-admitted unnamed connected AF_UNIX SOCK_STREAM endpoint >=3; it is
+- * duplicated with CLOEXEC and made nonblocking. No connect/path/credential authority is granted.
+- * Call only after krun_enable_cowork_block_fixture_reclaim; no keys/packet policy is implemented.
+- */
++/* TEST-ONLY closed single-port bootstrap/runtime stream factory; blk/macOS only.
++ * Call after krun_enable_cowork_block_fixture_reclaim. Returns only the opposite PEER fd
++ * (>=3, CLOEXEC) on success; caller owns it and must close it. Device endpoint and all
++ * aliases stay internal, CLOEXEC/nonblocking before publication. Caller may adjust peer
++ * flags; peer is a distinct socket/OFD. Negative errno on failure; publishes no FD and
++ * closes every endpoint created on that failure. Duplicate factory calls are refused.
++ * Production worker must deny process-fork/exec in its own sandbox BEFORE this call,
++ * and never fork afterward. CLOEXEC covers exec only; library alone cannot close fork
++ * inheritance or confine hostile same-process code. No credential/packet authority.
++ */
++int32_t krun_create_cowork_bootstrap_stream(uint32_t ctx_id);
++/* DEPRECATED TEST API: caller-supplied descriptors are always refused (-EINVAL). */
+ int32_t krun_set_cowork_bootstrap_stream(uint32_t ctx_id, int32_t fd);
+ 
+ #ifdef __cplusplus
+diff --git a/src/devices/src/stream_io.rs b/src/devices/src/stream_io.rs
+index 2dd0024..063d88a 100644
+--- a/src/devices/src/stream_io.rs
++++ b/src/devices/src/stream_io.rs
+@@ -4,12 +4,6 @@ use std::io::{self, ErrorKind};
+ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use utils::eventfd::EventFd;
+-// Darwin's public MSG_DONTWAIT controls sb-lock acquisition but sosendcheck's
+-// capacity wait checks this private per-call flag instead. Feasibility-only ABI:
+-// Apple XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea, bsd/sys/socket_private.h:569.
+-// The real alias/full-buffer subprocess regression must pass on the target host.
+-#[cfg(target_os = "macos")]
+-const DARWIN_MSG_NBIO: libc::c_int = 0x20000;
+ pub const CHUNK: usize = 16 * 1024;
+ pub const MAX_TX: usize = 64 * 1024;
+ pub const MAX_CHAIN: usize = 1024 * 1024;
+@@ -17,62 +11,43 @@ pub struct ScopedStream {
+     fd: OwnedFd,
+ }
+ impl ScopedStream {
+-    /// Only connected unnamed local socketpair endpoints, never stdio/TTY/path/connect.
+-    pub fn admit(fd: RawFd) -> io::Result<Self> {
+-        if fd < 3 {
+-            return Err(io::Error::from(ErrorKind::InvalidInput));
+-        }
+-        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+-        if duplicate < 0 {
++    /// Creates both endpoints internally. Only the opposite peer is published to the caller.
++    /// Production worker must deny process-fork/exec before this call and never fork afterward.
++    /// CLOEXEC covers exec only; this library is not a hostile-same-process boundary.
++    pub fn create_pair() -> io::Result<(Self, OwnedFd)> {
++        Self::create_pair_configured(|device, _peer| Self::configure_device(device))
++    }
++    fn create_pair_configured(
++        configure: impl FnOnce(RawFd, RawFd) -> io::Result<()>,
++    ) -> io::Result<(Self, OwnedFd)> {
++        let mut fds = [-1; 2];
++        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) } != 0 {
+             return Err(io::Error::last_os_error());
+         }
+-        let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
+-        let fd = owned.as_raw_fd(); // Validate the owned duplicate, not a replaceable caller fd.
+-        let mut kind = 0i32;
+-        let mut length = std::mem::size_of_val(&kind) as libc::socklen_t;
+-        if unsafe {
+-            libc::getsockopt(
+-                fd,
+-                libc::SOL_SOCKET,
+-                libc::SO_TYPE,
+-                &mut kind as *mut _ as *mut _,
+-                &mut length,
+-            )
+-        } != 0
+-            || kind != libc::SOCK_STREAM
+-        {
+-            return Err(io::Error::from(ErrorKind::InvalidInput));
+-        }
+-        for peer in [false, true] {
+-            let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+-            let mut size = std::mem::size_of_val(&address) as libc::socklen_t;
+-            let rc = unsafe {
+-                if peer {
+-                    libc::getpeername(fd, &mut address as *mut _ as *mut _, &mut size)
+-                } else {
+-                    libc::getsockname(fd, &mut address as *mut _ as *mut _, &mut size)
+-                }
+-            };
+-            let offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+-            if rc != 0
+-                || address.ss_family as i32 != libc::AF_UNIX
+-                || (size as usize) < offset
+-                || (size as usize) > std::mem::size_of_val(&address)
+-            {
+-                return Err(io::Error::from(ErrorKind::InvalidInput));
+-            }
+-            // Darwin reports an unnamed sockaddr with length16; require zero name bytes, not length2.
+-            let bytes = unsafe {
+-                std::slice::from_raw_parts(&address as *const _ as *const u8, size as usize)
+-            };
+-            if bytes[offset..].iter().any(|byte| *byte != 0) {
+-                return Err(io::Error::from(ErrorKind::InvalidInput));
++        // Owned immediately: every failure closes both endpoints. CLOEXEC is set before publication.
++        let device = unsafe { OwnedFd::from_raw_fd(fds[0]) };
++        let peer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
++        let device = Self::normalize_owned(device)?;
++        let peer = Self::normalize_owned(peer)?;
++        configure(device.as_raw_fd(), peer.as_raw_fd())?;
++        Ok((Self { fd: device }, peer))
++    }
++    fn normalize_owned(fd: OwnedFd) -> io::Result<OwnedFd> {
++        if fd.as_raw_fd() < 3 {
++            let duplicate = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
++            if duplicate < 0 {
++                return Err(io::Error::last_os_error());
+             }
++            return Ok(unsafe { OwnedFd::from_raw_fd(duplicate) });
+         }
+-        let flags = unsafe { libc::fcntl(duplicate, libc::F_GETFL) };
+-        if flags < 0
+-            || unsafe { libc::fcntl(duplicate, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
+-        {
++        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(fd)
++    }
++    fn configure_device(fd: RawFd) -> io::Result<()> {
++        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
++        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0 {
+             return Err(io::Error::last_os_error());
+         }
+         #[cfg(target_os = "macos")]
+@@ -80,7 +55,7 @@ impl ScopedStream {
+             let no_sigpipe = 1i32;
+             if unsafe {
+                 libc::setsockopt(
+-                    duplicate,
++                    fd,
+                     libc::SOL_SOCKET,
+                     libc::SO_NOSIGPIPE,
+                     &no_sigpipe as *const _ as *const _,
+@@ -91,13 +66,20 @@ impl ScopedStream {
+                 return Err(io::Error::last_os_error());
+             }
+         }
+-        Ok(Self { fd: owned })
++        Ok(())
+     }
+-    pub fn as_raw_fd(&self) -> RawFd {
++    pub(crate) fn as_raw_fd(&self) -> RawFd {
+         self.fd.as_raw_fd()
+     }
++    /// Internal alias only; no C API exposes a device-end descriptor.
+     pub fn duplicate(&self) -> io::Result<Self> {
+-        Self::admit(self.as_raw_fd())
++        let duplicate = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
++        if duplicate < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(Self {
++            fd: unsafe { OwnedFd::from_raw_fd(duplicate) },
++        })
+     }
+     pub fn read_owned(&self, target: &mut [u8]) -> io::Result<usize> {
+         if target.len() > CHUNK {
+@@ -122,8 +104,6 @@ impl ScopedStream {
+             return Err(io::Error::from(ErrorKind::InvalidInput));
+         }
+         let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+-        #[cfg(target_os = "macos")]
+-        let flags = flags | DARWIN_MSG_NBIO;
+         let result =
+             unsafe { libc::send(self.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), flags) };
+         if result < 0 {
+@@ -175,28 +155,52 @@ impl ScopedStream {
+     }
+ }
+ #[cfg(test)]
++pub(crate) fn test_pair() -> (ScopedStream, std::os::unix::net::UnixStream) {
++    let (device, peer) = ScopedStream::create_pair().unwrap();
++    (device, std::os::unix::net::UnixStream::from(peer))
++}
++#[cfg(test)]
+ mod tests {
+     use super::*;
+-    use std::os::unix::net::{UnixDatagram, UnixStream};
+     #[test]
+-    fn cowork_stream_fd_kind_owned_dup_cloexec_and_closure() {
+-        let (a, _b) = UnixStream::pair().unwrap();
+-        let original = a.as_raw_fd();
+-        let stream = ScopedStream::admit(original).unwrap();
+-        let duplicate = stream.as_raw_fd();
+-        assert!(duplicate != original);
+-        assert!(unsafe { libc::fcntl(duplicate, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
++    fn cowork_stream_factory_owned_dup_cloexec_and_closure() {
++        let (stream, peer) = ScopedStream::create_pair().unwrap();
++        let original = stream.as_raw_fd();
++        let peer_fd = peer.as_raw_fd();
++        assert!(original >= 3 && peer_fd >= 3 && original != peer_fd);
++        for fd in [original, peer_fd] {
++            assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
++        }
++        assert!(unsafe { libc::fcntl(original, libc::F_GETFL) } & libc::O_NONBLOCK != 0);
++        let duplicate = stream.duplicate().unwrap();
++        let duplicate_fd = duplicate.as_raw_fd();
++        assert!(duplicate_fd != original && duplicate_fd != peer_fd);
++        assert!(unsafe { libc::fcntl(duplicate_fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
+         drop(stream);
+-        assert!(unsafe { libc::fcntl(duplicate, libc::F_GETFD) } < 0);
+-        assert!(unsafe { libc::fcntl(original, libc::F_GETFD) } >= 0);
+-        assert!(ScopedStream::admit(0).is_err());
+-        let (a, _b) = UnixDatagram::pair().unwrap();
+-        assert!(ScopedStream::admit(a.as_raw_fd()).is_err());
++        assert!(unsafe { libc::fcntl(original, libc::F_GETFD) } < 0);
++        assert!(unsafe { libc::fcntl(peer_fd, libc::F_GETFD) } >= 0);
++        drop(duplicate);
++        assert!(unsafe { libc::fcntl(duplicate_fd, libc::F_GETFD) } < 0);
++        drop(peer);
++        assert!(unsafe { libc::fcntl(peer_fd, libc::F_GETFD) } < 0);
++    }
++    #[test]
++    fn cowork_stream_factory_failure_closes_private_and_peer_before_publication() {
++        let private = std::cell::Cell::new(-1);
++        let peer = std::cell::Cell::new(-1);
++        let result = ScopedStream::create_pair_configured(|device, opposite| {
++            private.set(device);
++            peer.set(opposite);
++            Err(io::Error::from(ErrorKind::Other))
++        });
++        assert!(result.is_err());
++        for fd in [private.get(), peer.get()] {
++            assert!(fd >= 3 && unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0);
++        }
+     }
+     #[test]
+     fn cowork_stream_io_bounds_reject_without_guest_or_payload_logging() {
+-        let (a, _b) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, _peer) = ScopedStream::create_pair().unwrap();
+         let mut bytes = vec![0; CHUNK + 1];
+         assert!(stream.read_owned(&mut bytes).is_err());
+         assert!(stream.write_owned(&bytes).is_err());
+@@ -205,30 +209,47 @@ mod tests {
+ #[cfg(test)]
+ mod adversarial_tests {
+     use super::*;
+-    use std::os::unix::net::{UnixListener, UnixStream};
+     use std::time::{Duration, Instant};
+     #[test]
+-    fn cowork_stream_alias_mutation_sigpipe_child() {
++    fn cowork_stream_peer_mutation_sigpipe_child() {
+         if std::env::var_os("COWORK_SIGPIPE_CHILD").is_none() {
+             return;
+         }
+-        let (a, peer) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, peer) = ScopedStream::create_pair().unwrap();
++        let alias = unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
++        assert!(alias >= 3);
++        let alias = unsafe { OwnedFd::from_raw_fd(alias) };
+         unsafe {
+-            let flags = libc::fcntl(a.as_raw_fd(), libc::F_GETFL);
+-            assert!(libc::fcntl(a.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) == 0);
++            let initial = libc::fcntl(alias.as_raw_fd(), libc::F_GETFL);
++            assert!(libc::fcntl(alias.as_raw_fd(), libc::F_SETFL, initial | libc::O_NONBLOCK) == 0);
++            assert!(libc::fcntl(peer.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK != 0);
++            let flags = libc::fcntl(peer.as_raw_fd(), libc::F_GETFL);
++            assert!(libc::fcntl(peer.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) == 0);
++            #[cfg(target_os = "macos")]
++            {
++                let enabled = 1i32;
++                assert!(
++                    libc::setsockopt(
++                        alias.as_raw_fd(),
++                        libc::SOL_SOCKET,
++                        libc::SO_NOSIGPIPE,
++                        &enabled as *const _ as *const _,
++                        4
++                    ) == 0
++                );
++            }
+             let disabled = 0i32;
+             #[cfg(target_os = "macos")]
+             assert!(
+                 libc::setsockopt(
+-                    a.as_raw_fd(),
++                    peer.as_raw_fd(),
+                     libc::SOL_SOCKET,
+                     libc::SO_NOSIGPIPE,
+                     &disabled as *const _ as *const _,
+                     4
+                 ) == 0
+             );
+-            assert!(libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK == 0);
++            assert!(libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK != 0);
+             #[cfg(target_os = "macos")]
+             {
+                 let mut value = 1i32;
+@@ -242,7 +263,7 @@ mod adversarial_tests {
+                         &mut size
+                     ) == 0
+                 );
+-                assert_eq!(value, 0);
++                assert_eq!(value, 1);
+             }
+             assert!(libc::signal(libc::SIGPIPE, libc::SIG_DFL) != libc::SIG_ERR);
+             let mut action: libc::sigaction = std::mem::zeroed();
+@@ -252,10 +273,17 @@ mod adversarial_tests {
+         let mut bytes = [0u8; 16];
+         assert!(stream.read_owned(&mut bytes).unwrap_err().kind() == ErrorKind::WouldBlock);
+         let small_buffer = 4096i32;
+-        assert!(unsafe {
+-            libc::setsockopt(a.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF,
+-                &small_buffer as *const _ as *const _, 4)
+-        } == 0);
++        assert!(
++            unsafe {
++                libc::setsockopt(
++                    stream.as_raw_fd(),
++                    libc::SOL_SOCKET,
++                    libc::SO_SNDBUF,
++                    &small_buffer as *const _ as *const _,
++                    4,
++                )
++            } == 0
++        );
+         let chunk = [0u8; CHUNK];
+         let mut saw_backpressure = false;
+         for _ in 0..64 {
+@@ -268,15 +296,19 @@ mod adversarial_tests {
+                 Err(_) => panic!("unexpected owned socket error"),
+             }
+         }
+-        assert!(saw_backpressure, "per-call send must remain nonblocking after alias mutation");
++        assert!(
++            saw_backpressure,
++            "private device endpoint must remain nonblocking after peer mutation"
++        );
++        drop(alias);
+         drop(peer);
+         assert!(stream.write_owned(&bytes).is_err());
+     }
+     #[test]
+-    fn cowork_stream_per_call_flags_survive_alias_mutation_with_sigpipe_default() {
++    fn cowork_stream_factory_peer_mutation_cannot_change_private_io_with_sigpipe_default() {
+         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+             .arg("--exact")
+-            .arg("stream_io::adversarial_tests::cowork_stream_alias_mutation_sigpipe_child")
++            .arg("stream_io::adversarial_tests::cowork_stream_peer_mutation_sigpipe_child")
+             .arg("--test-threads=1")
+             .env("COWORK_SIGPIPE_CHILD", "1")
+             .spawn()
+@@ -301,26 +333,6 @@ mod adversarial_tests {
+             std::thread::sleep(Duration::from_millis(5));
+         }
+     }
+-    #[test]
+-    fn cowork_stream_named_and_unconnected_fds_refused() {
+-        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+-        assert!(raw >= 3);
+-        let unconnected = unsafe { OwnedFd::from_raw_fd(raw) };
+-        assert!(ScopedStream::admit(unconnected.as_raw_fd()).is_err());
+-        let directory =
+-            std::env::temp_dir().join(format!("cowork-stream-fd-{}", std::process::id()));
+-        std::fs::create_dir(&directory).unwrap();
+-        let path = directory.join("socket");
+-        let listener = UnixListener::bind(&path).unwrap();
+-        assert!(ScopedStream::admit(listener.as_raw_fd()).is_err());
+-        let client = UnixStream::connect(&path).unwrap();
+-        let (server, _) = listener.accept().unwrap();
+-        assert!(ScopedStream::admit(client.as_raw_fd()).is_err());
+-        assert!(ScopedStream::admit(server.as_raw_fd()).is_err());
+-        drop((client, server, listener));
+-        std::fs::remove_file(&path).unwrap();
+-        std::fs::remove_dir(&directory).unwrap();
+-    }
+ }
+ #[cfg(all(test, target_os = "macos"))]
+ mod lifecycle_wait_tests {
+diff --git a/src/devices/src/virtio/console/cowork_stream.rs b/src/devices/src/virtio/console/cowork_stream.rs
+index be2c3c1..12d2150 100644
+--- a/src/devices/src/virtio/console/cowork_stream.rs
++++ b/src/devices/src/virtio/console/cowork_stream.rs
+@@ -576,7 +576,6 @@ mod tests {
+     use super::*;
+     use crate::virtio::Descriptor;
+     use std::io::{Read, Write};
+-    use std::os::unix::net::UnixStream;
+     use std::time::{Duration, Instant};
+     fn wait(mut ready: impl FnMut() -> bool) {
+         let deadline = Instant::now() + Duration::from_secs(2);
+@@ -647,8 +646,7 @@ mod tests {
+     #[test]
+     fn cowork_stream_actual_queue_socketpair_duplex_owned_io() {
+         let (access, _token, queues, events, memory) = fixture();
+-        let (a, mut peer) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, mut peer) = crate::stream_io::test_pair();
+         let stop = Arc::new(AtomicBool::new(false));
+         let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
+         let fd = stopfd.try_clone().unwrap();
+@@ -703,8 +701,7 @@ mod tests {
+     #[test]
+     fn cowork_stream_reset_retires_but_holds_ownership_until_actual_thread_completion() {
+         let (access, token, queues, events, memory) = fixture();
+-        let (a, peer) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, peer) = crate::stream_io::test_pair();
+         let mut device = GuardedConsole::new(access.clone(), token, stream).unwrap();
+         let stop = Arc::new(AtomicBool::new(false));
+         let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
+@@ -755,8 +752,7 @@ mod tests {
+     fn cowork_stream_actual_socket_backpressure_poll_is_stop_interruptible_without_ram_lease() {
+         let (access, _token, mut queues, _events, _) = fixture();
+         let frame = queues.capture(false).unwrap().unwrap();
+-        let (a, _peer) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, _peer) = crate::stream_io::test_pair();
+         let small = 4096i32;
+         unsafe {
+             libc::setsockopt(
+@@ -821,8 +817,7 @@ mod tests {
+     fn cowork_stream_actual_worker_rx_wait_survives_freeze_then_acks_after_resume() {
+         let (access, _token, queues, events, memory) = fixture();
+         memory.write_obj(0u16, GuestAddress(0x8002)).unwrap(); // No TX demand; RX owned wait alone.
+-        let (a, mut peer) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, mut peer) = crate::stream_io::test_pair();
+         let stop = Arc::new(AtomicBool::new(false));
+         let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
+         let mut worker = Worker {
+@@ -853,11 +848,11 @@ mod tests {
+     #[test]
+     fn cowork_stream_async_pending_reactivation_waits_old_owner_then_real_io() {
+         let (access, token, old_queues, events, _) = fixture();
+-        let (a, mut peer) = UnixStream::pair().unwrap();
++        let (stream, mut peer) = crate::stream_io::test_pair();
+         let mut device = GuardedConsole::new(
+             access.clone(),
+             token,
+-            ScopedStream::admit(a.as_raw_fd()).unwrap(),
++            stream,
+         )
+         .unwrap();
+         let (release, go) = std::sync::mpsc::sync_channel(0);
+@@ -949,7 +944,7 @@ mod tests {
+     #[test]
+     fn cowork_stream_peer_eof_terminal_notifier_never_acks_guest() {
+         let (access, token, queues, events, memory) = fixture();
+-        let (a, peer) = UnixStream::pair().unwrap();
++        let (stream, peer) = crate::stream_io::test_pair();
+         let notices = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+         let count = notices.clone();
+         access.set_terminal_notifier(Arc::new(move || {
+@@ -958,7 +953,7 @@ mod tests {
+         let mut device = GuardedConsole::new(
+             access.clone(),
+             token,
+-            ScopedStream::admit(a.as_raw_fd()).unwrap(),
++            stream,
+         )
+         .unwrap();
+         device.pending = Some(Pending {
+@@ -978,8 +973,7 @@ mod tests {
+     #[test]
+     fn cowork_stream_actual_worker_tx_backpressure_keeps_pin_stop_has_zero_old_ack() {
+         let (access, _token, queues, events, memory) = fixture();
+-        let (a, _peer) = UnixStream::pair().unwrap();
+-        let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
++        let (stream, _peer) = crate::stream_io::test_pair();
+         let small = 4096i32;
+         unsafe {
+             libc::setsockopt(
+@@ -1078,12 +1072,12 @@ mod tests {
+         use polly::event_manager::EventManager;
+         use std::sync::Mutex;
+         let (access, token, old_queues, old_events, _) = fixture();
+-        let (a, mut peer) = UnixStream::pair().unwrap();
++        let (stream, mut peer) = crate::stream_io::test_pair();
+         let console = Arc::new(Mutex::new(
+             GuardedConsole::new(
+                 access.clone(),
+                 token,
+-                ScopedStream::admit(a.as_raw_fd()).unwrap(),
++                stream,
+             )
+             .unwrap(),
+         ));
+@@ -1212,9 +1206,8 @@ mod tests {
+             memory
+                 .write_slice(&expected, GuestAddress(0x14000))
+                 .unwrap();
+-            let (a, mut peer) = UnixStream::pair().unwrap();
+-            let stream = ScopedStream::admit(a.as_raw_fd()).unwrap();
+-            let small = 4096i32;
++            let (stream, mut peer) = crate::stream_io::test_pair();
++                let small = 4096i32;
+             unsafe {
+                 libc::setsockopt(
+                     stream.as_raw_fd(),
+@@ -1228,6 +1221,7 @@ mod tests {
+             let short = Arc::new(AtomicBool::new(false));
+             let stop = Arc::new(AtomicBool::new(false));
+             let stopfd = EventFd::new(EFD_NONBLOCK).unwrap();
++            let retained_stream = stream.duplicate().unwrap();
+             let mut worker = Worker {
+                 queues,
+                 events,
+@@ -1254,7 +1248,7 @@ mod tests {
+                 let mut device = GuardedConsole::new(
+                     access.clone(),
+                     token,
+-                    ScopedStream::admit(a.as_raw_fd()).unwrap(),
++                    retained_stream,
+                 )
+                 .unwrap();
+                 device.active = Some(Active {
+diff --git a/src/devices/src/virtio/mmio.rs b/src/devices/src/virtio/mmio.rs
+index 5281bb6..665c2d2 100644
+--- a/src/devices/src/virtio/mmio.rs
++++ b/src/devices/src/virtio/mmio.rs
+@@ -1076,11 +1076,8 @@ mod cowork_stream_mmio_tests {
+     use crate::stream_io::ScopedStream;
+     use crate::virtio::console::cowork_stream::GuardedConsole;
+     use crate::BusDevice;
+-    use std::os::fd::AsRawFd;
+-    use std::os::unix::net::UnixStream;
+     use std::sync::atomic::{AtomicI32, Ordering};
+-    #[test]
+-    fn cowork_stream_actual_mmio_bad_activate_fails_terminal_without_poison() {
++    fn bad_activate(ready: bool) {
+         let memory = GuestMemoryMmap::from_ranges(&[
+             (GuestAddress(0), 0x2000),
+             (GuestAddress(0x2000), 0x1e000),
+@@ -1088,14 +1085,9 @@ mod cowork_stream_mmio_tests {
+         .unwrap();
+         let access = Access::new(2, 16, 4 * 1024 * 1024);
+         let token = access.register(1).unwrap();
+-        let (a, _peer) = UnixStream::pair().unwrap();
++        let (stream, _peer) = ScopedStream::create_pair().unwrap();
+         let console = Arc::new(Mutex::new(
+-            GuardedConsole::new(
+-                access.clone(),
+-                token,
+-                ScopedStream::admit(a.as_raw_fd()).unwrap(),
+-            )
+-            .unwrap(),
++            GuardedConsole::new(access.clone(), token, stream).unwrap(),
+         ));
+         let code = Arc::new(AtomicI32::new(0));
+         let seen = code.clone();
+@@ -1106,34 +1098,57 @@ mod cowork_stream_mmio_tests {
+             sender.write(1).unwrap();
+         }));
+         let mut mmio = MmioTransport::new(
+-            memory,
++            memory.clone(),
+             crate::legacy::DummyIrqChip::new().into(),
+             console.clone(),
+         )
+         .unwrap();
+-        for (index, table, avail, used) in [
+-            (0u32, 0x1fc0u32, 0x3000u32, 0x4000u32),
++        // Queue-register writes are accepted only after FEATURES_OK: prove the actual MMIO order.
++        for status in [1u32, 3, 11] {
++            mmio.write(0, 0x70, &status.to_le_bytes());
++        }
++        assert_eq!(mmio.device_status, 11);
++        let table = if ready { 0x1fc0u32 } else { 0x1000u32 };
++        for (index, desc, avail, used) in [
++            (0u32, table, 0x3000u32, 0x4000u32),
+             (1, 0x5000, 0x6000, 0x7000),
+         ] {
+             for (offset, value) in [
+                 (0x30, index),
+                 (0x38, 8),
+-                (0x80, table),
++                (0x80, desc),
+                 (0x90, avail),
+                 (0xa0, used),
+-                (0x44, 1),
++                (0x44, ready as u32),
+             ] {
+                 mmio.write(0, offset, &value.to_le_bytes());
+             }
++            let q = &mmio.queues.as_ref().unwrap()[index as usize];
++            assert_eq!(q.ready, ready);
++            assert_eq!(q.size, 8);
++            assert_eq!(q.desc_table, GuestAddress(desc as u64));
++            assert_eq!(q.avail_ring, GuestAddress(avail as u64));
++            assert_eq!(q.used_ring, GuestAddress(used as u64));
++            assert_eq!(q.is_valid(&memory), ready); // Legacy endpoint-only check admits the adjacent-region table.
++            let mut value = [0u8; 4];
++            mmio.read(0, 0x44, &mut value);
++            assert_eq!(u32::from_le_bytes(value), ready as u32);
+         }
+-        for status in [1u32, 3, 11, 15] {
+-            mmio.write(0, 0x70, &status.to_le_bytes());
+-        }
++        mmio.write(0, 0x70, &15u32.to_le_bytes());
+         assert!(mmio.device_status & device_status::FAILED != 0);
+         assert!(access.stopped());
+         assert_eq!(code.load(Ordering::Acquire), 77);
+         assert!(wake.read().unwrap() > 0);
+         assert!(!console.is_poisoned());
+         assert!(!console.lock().unwrap().is_activated());
++        assert_eq!(access.pinned_usage().0, 0); // Rejection acquires no lasting ring/request pins.
++    }
++    #[test]
++    fn cowork_stream_actual_mmio_nonready_fails_terminal_without_poison() {
++        bad_activate(false);
++    }
++    #[test]
++    fn cowork_stream_actual_mmio_ready_cross_region_fails_terminal_without_poison() {
++        bad_activate(true);
+     }
+ }
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index d0b9f89..952dc92 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -3234,16 +3234,141 @@ pub extern "C" fn krun_enable_cowork_block_fixture_reclaim(ctx_id:u32)->i32 {
+ 
+ }
+ 
+-/// Fixture-only inherited unnamed socketpair; transport safety grants no credential authority.
++/// Deprecated caller-FD intake is deliberately refused in the closed factory profile.
+ #[no_mangle]
+-pub extern "C" fn krun_set_cowork_bootstrap_stream(ctx_id:u32,fd:i32)->i32{
+- #[cfg(not(all(feature="blk",target_os="macos")))]{let _=(ctx_id,fd);return -libc::EINVAL;}
+- #[cfg(all(feature="blk",target_os="macos"))]
+- {let mut contexts=CTX_MAP.lock().unwrap();let Some(cfg)=contexts.get_mut(&ctx_id)else{return -libc::ENOENT;};if !cfg.vmr.cowork_fixture_reclaim || !cfg.vmr.cowork_guarded_block || cfg.vmr.cowork_stream.is_some(){return -libc::EINVAL;}
+- match devices::stream_io::ScopedStream::admit(fd){Ok(stream)=>{cfg.vmr.cowork_stream=Some(stream);0},Err(_)=>-libc::EINVAL}}
++pub extern "C" fn krun_set_cowork_bootstrap_stream(ctx_id: u32, fd: i32) -> i32 {
++    let _ = (ctx_id, fd);
++    -libc::EINVAL
+ }
+-
+-#[cfg(all(test,feature="blk",target_os="macos"))]mod cowork_stream_api_tests{
+- use super::*;use std::os::unix::net::{UnixStream,UnixDatagram};use std::os::fd::AsRawFd;
+- #[test]fn cowork_stream_public_opt_in_rejects_unadmitted_mode_stdio_and_duplicate_then_owns_cloexec(){let id=CTX_IDS.fetch_add(1,Ordering::SeqCst) as u32;CTX_MAP.lock().unwrap().insert(id,ContextConfig::default());let(a,_peer)=UnixStream::pair().unwrap();assert_eq!(krun_set_cowork_bootstrap_stream(id,a.as_raw_fd()),-libc::EINVAL);assert_eq!(krun_enable_cowork_block_fixture_reclaim(id),0);assert_eq!(krun_set_cowork_bootstrap_stream(id,1),-libc::EINVAL);let(datagram,_peer)=UnixDatagram::pair().unwrap();assert_eq!(krun_set_cowork_bootstrap_stream(id,datagram.as_raw_fd()),-libc::EINVAL);assert_eq!(krun_set_cowork_bootstrap_stream(id,a.as_raw_fd()),0);let fd=CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.cowork_stream.as_ref().unwrap().as_raw_fd();assert!(fd!=a.as_raw_fd());assert!(unsafe{libc::fcntl(fd,libc::F_GETFD)}&libc::FD_CLOEXEC!=0);assert_eq!(krun_set_cowork_bootstrap_stream(id,a.as_raw_fd()),-libc::EINVAL);assert_eq!(krun_free_ctx(id),0);assert!(unsafe{libc::fcntl(fd,libc::F_GETFD)}<0);}
++/// Fixture-only closed socketpair factory; only the opposite PEER endpoint leaves this library.
++#[no_mangle]
++pub extern "C" fn krun_create_cowork_bootstrap_stream(ctx_id: u32) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    {
++        let _ = ctx_id;
++        -libc::EINVAL
++    }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        use std::os::fd::IntoRawFd;
++        let mut contexts = CTX_MAP.lock().unwrap();
++        let Some(cfg) = contexts.get_mut(&ctx_id) else {
++            return -libc::ENOENT;
++        };
++        if !cfg.vmr.cowork_fixture_reclaim
++            || !cfg.vmr.cowork_guarded_block
++            || cfg.vmr.cowork_stream.is_some()
++        {
++            return -libc::EINVAL;
++        }
++        match devices::stream_io::ScopedStream::create_pair() {
++            Ok((device, peer)) => {
++                cfg.vmr.cowork_stream = Some(device);
++                peer.into_raw_fd()
++            }
++            Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
++        }
++    }
++}
++#[cfg(all(test, feature = "blk", target_os = "macos"))]
++mod cowork_stream_api_tests {
++    use super::*;
++    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++    use std::os::unix::net::{UnixListener, UnixStream};
++    #[test]
++    fn cowork_stream_public_factory_requires_opt_in_publishes_only_peer_and_refuses_duplicate() {
++        let id = CTX_IDS.fetch_add(1, Ordering::SeqCst) as u32;
++        CTX_MAP.lock().unwrap().insert(id, ContextConfig::default());
++        assert_eq!(krun_create_cowork_bootstrap_stream(id), -libc::EINVAL);
++        assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), 0);
++        let raw = krun_create_cowork_bootstrap_stream(id);
++        assert!(raw >= 3);
++        let peer = unsafe { OwnedFd::from_raw_fd(raw) };
++        assert!(unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
++        assert_eq!(krun_create_cowork_bootstrap_stream(id), -libc::EINVAL);
++        assert_eq!(
++            krun_set_cowork_bootstrap_stream(id, peer.as_raw_fd()),
++            -libc::EINVAL
++        );
++        {
++            let contexts = CTX_MAP.lock().unwrap();
++            let device = contexts
++                .get(&id)
++                .unwrap()
++                .vmr
++                .cowork_stream
++                .as_ref()
++                .unwrap();
++            assert_eq!(device.write_owned(&[0; 1]).unwrap(), 1);
++        }
++        let mut byte = [0; 1];
++        assert_eq!(
++            unsafe {
++                libc::recv(
++                    peer.as_raw_fd(),
++                    byte.as_mut_ptr().cast(),
++                    1,
++                    libc::MSG_DONTWAIT,
++                )
++            },
++            1
++        );
++        assert_eq!(krun_free_ctx(id), 0);
++        assert!(unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_GETFD) } >= 0); // Peer belongs to caller even after context closes.
++        assert_eq!(
++            unsafe {
++                libc::recv(
++                    peer.as_raw_fd(),
++                    byte.as_mut_ptr().cast(),
++                    1,
++                    libc::MSG_DONTWAIT,
++                )
++            },
++            0
++        );
++        drop(peer);
++        assert!(unsafe { libc::fcntl(raw, libc::F_GETFD) } < 0);
++        assert_eq!(krun_create_cowork_bootstrap_stream(id), -libc::ENOENT);
++    }
++    #[test]
++    fn cowork_stream_public_caller_fd_setter_refuses_stdio_unconnected_named_and_unnamed() {
++        let id = CTX_IDS.fetch_add(1, Ordering::SeqCst) as u32;
++        CTX_MAP.lock().unwrap().insert(id, ContextConfig::default());
++        assert_eq!(krun_enable_cowork_block_fixture_reclaim(id), 0);
++        let (raw, _peer) = UnixStream::pair().unwrap();
++        assert_eq!(
++            krun_set_cowork_bootstrap_stream(id, raw.as_raw_fd()),
++            -libc::EINVAL
++        );
++        assert_eq!(krun_set_cowork_bootstrap_stream(id, 1), -libc::EINVAL);
++        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
++        assert!(raw >= 3);
++        let unconnected = unsafe { OwnedFd::from_raw_fd(raw) };
++        assert_eq!(
++            krun_set_cowork_bootstrap_stream(id, unconnected.as_raw_fd()),
++            -libc::EINVAL
++        );
++        let directory =
++            std::env::temp_dir().join(format!("cowork-stream-v3-fd-{}", std::process::id()));
++        std::fs::create_dir(&directory).unwrap();
++        let path = directory.join("socket");
++        let listener = UnixListener::bind(&path).unwrap();
++        let client = UnixStream::connect(&path).unwrap();
++        let (server, _) = listener.accept().unwrap();
++        for fd in [listener.as_raw_fd(), client.as_raw_fd(), server.as_raw_fd()] {
++            assert_eq!(krun_set_cowork_bootstrap_stream(id, fd), -libc::EINVAL);
++        }
++        assert!(CTX_MAP
++            .lock()
++            .unwrap()
++            .get(&id)
++            .unwrap()
++            .vmr
++            .cowork_stream
++            .is_none());
++        drop((listener, client, server));
++        std::fs::remove_file(path).unwrap();
++        std::fs::remove_dir(directory).unwrap();
++        assert_eq!(krun_free_ctx(id), 0);
++    }
+ }

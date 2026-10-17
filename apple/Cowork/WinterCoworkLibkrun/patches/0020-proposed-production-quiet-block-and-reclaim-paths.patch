@@ -1,0 +1,202 @@
+diff --git a/src/devices/src/block_trace.rs b/src/devices/src/block_trace.rs
+index 315cea6..66a721c 100644
+--- a/src/devices/src/block_trace.rs
++++ b/src/devices/src/block_trace.rs
+@@ -19,6 +19,10 @@ static REQUESTS: AtomicU64 = AtomicU64::new(0);
+ pub const MAX_ROWS: u64 = 60000;
+ /// True only in builds that carry the trace (test and `cowork-fixture-trace`).
+ pub const COMPILED: bool = cfg!(any(test, feature = "cowork-fixture-trace"));
++/// The fixture's per-request completion hold (it widens the window in which a request is in flight so the
++/// reclaim fixture can observe it). It is a sleep after the host I/O of EVERY block request, so a production
++/// build must not carry it: zero outside test and `cowork-fixture-trace`.
++pub const COMPLETION_HOLD_MILLIS: u64 = if COMPILED { 25 } else { 0 };
+ #[cfg(any(test, feature = "cowork-fixture-trace"))]
+ pub fn clock_micros() -> u128 {
+     START.get_or_init(Instant::now).elapsed().as_micros()
+diff --git a/src/devices/src/virtio/block/cowork.rs b/src/devices/src/virtio/block/cowork.rs
+index aaa69c0..6cb227d 100644
+--- a/src/devices/src/virtio/block/cowork.rs
++++ b/src/devices/src/virtio/block/cowork.rs
+@@ -426,7 +426,7 @@ fn guarded_epoll_loop(
+             loop {
+                 match crate::block_bounce::service_next_fixture(access, device, port, disk, || {
+                     stop.load(Ordering::Acquire)
+-                },std::time::Duration::from_millis(25)) {
++                },std::time::Duration::from_millis(crate::block_trace::COMPLETION_HOLD_MILLIS)) {
+                     Ok(crate::block_bounce::Step::Completed) => completed(),
+                     Ok(crate::block_bounce::Step::Empty) => break,
+                     Ok(crate::block_bounce::Step::Stopped) => return Ok(()),
+diff --git a/src/libkrun/Cargo.toml b/src/libkrun/Cargo.toml
+index b8d7764..8eb8740 100644
+--- a/src/libkrun/Cargo.toml
++++ b/src/libkrun/Cargo.toml
+@@ -24,8 +24,8 @@ virgl_resource_map2 = ["devices/virgl_resource_map2"]
+ aws-nitro = ["vmm/aws-nitro", "devices/aws-nitro", "dep:aws-nitro", "dep:nitro-enclaves"]
+ # Cowork fixture regression oracle (N2). Off in every production build: with it, the reviewed
+ # `*_fixture_*` C entry points stay exported next to the production ones, and the fixture-only
+-# block trace rows are compiled in. It adds no dependency.
+-cowork-fixture-oracle = ["devices/cowork-fixture-trace"]
++# block trace rows, the 25 ms completion hold and the reclaim rows are compiled in. It adds no dependency.
++cowork-fixture-oracle = ["devices/cowork-fixture-trace", "vmm/cowork-fixture-trace"]
+ # Cowork production-only build (N2). krun_start_enter refuses any context that does not carry the
+ # production profile, so the stock libkrun device set (implicit vsock, virtiofs, ...) can never start.
+ # Mutually exclusive with cowork-fixture-oracle (compile error). It adds no dependency.
+diff --git a/src/libkrun/src/cowork_production_quiet_tests.rs b/src/libkrun/src/cowork_production_quiet_tests.rs
+new file mode 100644
+index 0000000..cae084b
+--- /dev/null
++++ b/src/libkrun/src/cowork_production_quiet_tests.rs
+@@ -0,0 +1,17 @@
++//! A production build carries none of the fixture's timing or output: no per-request completion hold, no
++//! reclaim rows on stderr. Pure, VM-free checks; run with `--test-threads=1`.
++
++/// The fixture sleeps 25 ms after the host I/O of every block request (an extra 25 ms of pinned time and
++/// at most about 40 requests per second per disk). Production must not.
++#[test]
++fn production_block_requests_have_no_completion_hold() {
++    let oracle = cfg!(feature = "cowork-fixture-oracle");
++    assert_eq!(devices::block_trace::COMPLETION_HOLD_MILLIS, if oracle { 25 } else { 0 });
++}
++
++/// The reclaim rows are written to stderr while every vCPU is parked, with host virtual addresses; a stalled
++/// reader would block the pause/resume path past its deadlines.
++#[test]
++fn production_reclaim_rows_are_compiled_out() {
++    assert_eq!(vmm::COWORK_FIXTURE_ROWS, cfg!(feature = "cowork-fixture-oracle"));
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index f2a3fa3..2e4a2cf 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -3663,3 +3663,5 @@ mod cowork_production_trace_tests;
+ mod cowork_production_gate_matrix_tests;
+ #[cfg(all(test,feature="blk",target_os="macos"))]
+ mod cowork_production_start_tests;
++#[cfg(all(test,feature="blk",target_os="macos"))]
++mod cowork_production_quiet_tests;
+diff --git a/src/vmm/Cargo.toml b/src/vmm/Cargo.toml
+index 7f691dc..e02473c 100644
+--- a/src/vmm/Cargo.toml
++++ b/src/vmm/Cargo.toml
+@@ -19,6 +19,8 @@ gpu = ["devices/gpu", "krun_display"]
+ snd = ["devices/snd"]
+ input = ["devices/input", "krun_input"]
+ aws-nitro = []
++# Fixture-only reclaim JSON rows on stderr; absent from production builds (see cowork_fixture.rs).
++cowork-fixture-trace = []
+ 
+ [dependencies]
+ crossbeam-channel = ">=0.5.15"
+diff --git a/src/vmm/src/cowork_fixture.rs b/src/vmm/src/cowork_fixture.rs
+index 2989a44..46af132 100644
+--- a/src/vmm/src/cowork_fixture.rs
++++ b/src/vmm/src/cowork_fixture.rs
+@@ -2,10 +2,18 @@
+ use super::{Vmm, vstate::{VcpuEvent, VcpuResponse}, cowork_barrier::Barrier, cowork_ranges::Extent};
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::time::{Duration, Instant};
++/// The fixture's JSON rows (`reclaim_*`) are written to stderr from inside the parked window, with host
++/// virtual addresses, and a reader that stalls would block the pause/resume path past its 1 s and 2 s
++/// deadlines. They exist for the fixture and its regression oracle only: compiled in under test and with
++/// `cowork-fixture-trace`, otherwise a no-op (the strings are removed from the production archive).
++pub(crate) const TRACE: bool = cfg!(any(test, feature = "cowork-fixture-trace"));
++macro_rules! row {
++    ($($arg:tt)*) => { if TRACE { eprintln!($($arg)*); } };
++}
+ static STOPPED: AtomicBool = AtomicBool::new(false);
+ pub(crate) fn mark_stop() { STOPPED.store(true, Ordering::Release); }
+ fn fatal(message:&str)->! {
+-    eprintln!("{{\"kind\":\"reclaim_failure\",\"message\":\"{}\",\"exitCode\":77}}",message);
++    row!("{{\"kind\":\"reclaim_failure\",\"message\":\"{}\",\"exitCode\":77}}",message);
+     unsafe { libc::_exit(77) }
+ }
+ fn alive(barrier:&mut Barrier) {
+@@ -64,7 +72,7 @@ impl Snapshot {
+         }
+         if self.vcpus_handles.iter().any(|h| h.response_receiver().try_recv().is_ok()) { fatal("duplicate pause ACK"); }
+         alive(&mut barrier);
+-        eprintln!("{{\"kind\":\"reclaim_parked\",\"epoch\":{},\"roster\":{:?},\"pauseMicros\":{}}}",epoch,ids,pause_started.elapsed().as_micros());
++        row!("{{\"kind\":\"reclaim_parked\",\"epoch\":{},\"roster\":{:?},\"pauseMicros\":{}}}",epoch,ids,pause_started.elapsed().as_micros());
+         #[cfg(feature="blk")]
+         let mut memory_freeze=self.cowork_access.as_ref().map(|access|checked(access.freeze(epoch,Duration::from_secs(1)),"block lease drain"));
+         #[cfg(feature="blk")]
+@@ -84,9 +92,9 @@ impl Snapshot {
+         let disposition=checked(super::cowork_coordinator::finish(&mut barrier,&self.cowork_owned,page as u64,&mut operations),"report transaction failed");
+         let span_count=match disposition {
+             super::cowork_coordinator::Disposition::Replaced{bytes,spans}=> {
+-                eprintln!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"replaced\",\"bytes\":{}}}",epoch,bytes);spans
++                row!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"replaced\",\"bytes\":{}}}",epoch,bytes);spans
+             },
+-            other=> {eprintln!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"{:?}\",\"bytes\":0}}",epoch,other);0},
++            other=> {row!("{{\"kind\":\"reclaim_disposition\",\"epoch\":{},\"disposition\":\"{:?}\",\"bytes\":0}}",epoch,other);0},
+         };
+         drop(balloon); drop(rng);
+         #[cfg(feature="blk")]
+@@ -101,7 +109,7 @@ impl Snapshot {
+                 _ => fatal("unexpected resume response"),
+             }
+         }
+-        eprintln!("{{\"kind\":\"reclaim_resumed\",\"epoch\":{},\"roster\":{:?},\"parkMicros\":{},\"spanCount\":{}}}",epoch,ids,pause_started.elapsed().as_micros(),span_count);
++        row!("{{\"kind\":\"reclaim_resumed\",\"epoch\":{},\"roster\":{:?},\"parkMicros\":{},\"spanCount\":{}}}",epoch,ids,pause_started.elapsed().as_micros(),span_count);
+         debug_assert_eq!(barrier.phase(),super::cowork_barrier::Phase::Finished);
+     }
+ }
+@@ -121,7 +129,7 @@ impl super::cowork_ops::ReplaceOps for HvfOps<'_> {
+     fn unmap(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
+         let len=usize::try_from(span.len).map_err(|_|())?;
+         let result=self.checked_operation(||unsafe { self.vm.fixture_unmap(span.gpa,len) })?;
+-        eprintln!("{{\"kind\":\"reclaim_unmap\",\"epoch\":{},\"gpa\":{},\"hva\":{},\"len\":{},\"return\":{}}}",self.epoch,span.gpa,span.hva,span.len,result);
++        row!("{{\"kind\":\"reclaim_unmap\",\"epoch\":{},\"gpa\":{},\"hva\":{},\"len\":{},\"return\":{}}}",self.epoch,span.gpa,span.hva,span.len,result);
+         if result==0 { Ok(()) } else { Err(()) }
+     }
+     fn replace(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
+@@ -130,14 +138,14 @@ impl super::cowork_ops::ReplaceOps for HvfOps<'_> {
+         // Atomic replacement of our OWNED mapping. No standalone munmap hole/allocator race.
+         let result=self.checked_operation(||unsafe { libc::mmap(hva,len,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_ANON|libc::MAP_PRIVATE|libc::MAP_FIXED,-1,0) })?;
+         let mmap_errno=std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+-        eprintln!("{{\"kind\":\"reclaim_replace\",\"epoch\":{},\"gpa\":{},\"sameHVA\":{},\"errnoIfFailed\":{}}}",self.epoch,span.gpa,result==hva,if result==hva {0}else{mmap_errno});
++        row!("{{\"kind\":\"reclaim_replace\",\"epoch\":{},\"gpa\":{},\"sameHVA\":{},\"errnoIfFailed\":{}}}",self.epoch,span.gpa,result==hva,if result==hva {0}else{mmap_errno});
+         if result==hva { Ok(()) } else { Err(()) }
+     }
+     fn map(&mut self,span:super::cowork_ranges::ReclaimSpan)->Result<(),()> {
+         let len=usize::try_from(span.len).map_err(|_|())?;
+         let hva=usize::try_from(span.hva).map_err(|_|())? as *mut libc::c_void;
+         let result=self.checked_operation(||unsafe { self.vm.fixture_map(hva,span.gpa,len) })?;
+-        eprintln!("{{\"kind\":\"reclaim_map\",\"epoch\":{},\"gpa\":{},\"sameHVA\":true,\"flags\":\"RWX\",\"return\":{}}}",self.epoch,span.gpa,result);
++        row!("{{\"kind\":\"reclaim_map\",\"epoch\":{},\"gpa\":{},\"sameHVA\":true,\"flags\":\"RWX\",\"return\":{}}}",self.epoch,span.gpa,result);
+         if result==0 { Ok(()) } else { Err(()) }
+     }
+ }
+@@ -157,7 +165,7 @@ impl super::cowork_coordinator::ReportOps for FixtureOps<'_> {
+         excluded.extend(self.rng.fixture_exclusions().map_err(|_|())?);
+         let mut exclusions:Vec<_>=excluded.into_iter().map(|(start,len)|Extent{start,len}).collect();
+         exclusions.extend(self.pinned.iter().copied());
+-        for extent in &exclusions {eprintln!("{{\"kind\":\"reclaim_exclusion\",\"epoch\":{},\"gpa\":{},\"len\":{}}}",self.epoch,extent.start,extent.len);}
++        for extent in &exclusions {row!("{{\"kind\":\"reclaim_exclusion\",\"epoch\":{},\"gpa\":{},\"len\":{}}}",self.epoch,extent.start,extent.len);}
+         if self.balloon.fixture_generation!=self.generation {
+             self.balloon.fixture_pending=false;return Ok(super::cowork_coordinator::Snapshot{exclusions,..Default::default()});
+         }
+@@ -167,7 +175,7 @@ impl super::cowork_coordinator::ReportOps for FixtureOps<'_> {
+     }
+     fn acknowledge(&mut self,indices:&[u16])->Result<(),()> {
+         self.mapping.checked_operation(||self.balloon.fixture_ack(indices))?.map_err(|_|())?;
+-        eprintln!("{{\"kind\":\"reclaim_used_ack\",\"epoch\":{},\"indices\":{:?}}}",self.epoch,indices);Ok(())
++        row!("{{\"kind\":\"reclaim_used_ack\",\"epoch\":{},\"indices\":{:?}}}",self.epoch,indices);Ok(())
+     }
+ }
+ 
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index c6f4a2f..5c8d5d7 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -472,6 +472,10 @@ impl Subscriber for Vmm {
+ #[cfg(target_os="macos")]
+ pub fn cowork_reclaim_tick(vmm:&Arc<Mutex<Vmm>>) {cowork_fixture::tick_unlocked(vmm);}
+ 
++/// True only in builds that carry the fixture's reclaim rows (test and `cowork-fixture-trace`).
++#[cfg(target_os="macos")]
++pub const COWORK_FIXTURE_ROWS: bool = cowork_fixture::TRACE;
++
+ #[cfg(all(target_os="macos",feature="blk"))]
+ pub fn cowork_checked_mapping_operation<T>(access:&devices::reclaim_access::Access,epoch:u64,operation:impl FnOnce()->T)->std::result::Result<T,()>{cowork_fixture::checked_mapping_operation(Some(access),epoch,operation)}
+ 

@@ -1,0 +1,283 @@
+diff --git a/src/devices/src/virtio/block/cowork.rs b/src/devices/src/virtio/block/cowork.rs
+index 9799794..bf5deef 100644
+--- a/src/devices/src/virtio/block/cowork.rs
++++ b/src/devices/src/virtio/block/cowork.rs
+@@ -115,6 +115,60 @@ impl ProtectedQueue {
+ }
+ impl Port for ProtectedQueue {
+     fn capture(&mut self, lease: &Lease) -> Result<Option<Captured>, Fault> {
++        self.capture_after_snapshot(lease, || {})
++    }
++    fn complete(
++        &mut self,
++        lease: &Lease,
++        request: &Captured,
++        outcome: &Outcome,
++    ) -> Result<(), Fault> {
++        lease.check(&self.access, self.device)?;
++        if request.queue_generation != self.generation {
++            return Err(Fault::Stale);
++        }
++        self.queue
++            .fixture_validate_report(&self.memory)
++            .map_err(|_| Fault::InvalidRange)?;
++        let (head, destinations, status) = self.completion.as_ref().ok_or(Fault::Duplicate)?;
++        if *head != request.head {
++            return Err(Fault::Stale);
++        }
++        if outcome.success && !outcome.data.is_empty() {
++            self.copy_to(destinations, &outcome.data)?;
++        }
++        self.memory
++            .write_obj(
++                if outcome.unsupported {
++                    2u8
++                } else if outcome.success {
++                    0u8
++                } else {
++                    1u8
++                },
++                GuestAddress(status.gpa),
++            )
++            .map_err(|_| Fault::InvalidRange)?;
++        let len = u32::try_from(if outcome.success {
++            outcome.data.len() + 1
++        } else {
++            1
++        })
++        .map_err(|_| Fault::Overflow)?;
++        self.queue
++            .add_used(&self.memory, *head, len)
++            .map_err(|_| Fault::InvalidRange)?;
++        self.completion = None;
++        Ok(())
++    }
++}
++
++impl ProtectedQueue {
++    fn capture_after_snapshot(
++        &mut self,
++        lease: &Lease,
++        after: impl FnOnce(),
++    ) -> Result<Option<Captured>, Fault> {
+         lease.check(&self.access, self.device)?;
+         if self.completion.is_some() {
+             return Err(Fault::Busy);
+@@ -131,7 +185,7 @@ impl Port for ProtectedQueue {
+             .collect();
+         let Some(head) = self
+             .queue
+-            .fixture_checked_pop(&self.memory)
++            .fixture_checked_pop_after_snapshot(&self.memory, after)
+             .map_err(|_| Fault::InvalidRange)?
+         else {
+             return Ok(None);
+@@ -215,50 +269,6 @@ impl Port for ProtectedQueue {
+             write_payload: payload,
+         }))
+     }
+-    fn complete(
+-        &mut self,
+-        lease: &Lease,
+-        request: &Captured,
+-        outcome: &Outcome,
+-    ) -> Result<(), Fault> {
+-        lease.check(&self.access, self.device)?;
+-        if request.queue_generation != self.generation {
+-            return Err(Fault::Stale);
+-        }
+-        self.queue
+-            .fixture_validate_report(&self.memory)
+-            .map_err(|_| Fault::InvalidRange)?;
+-        let (head, destinations, status) = self.completion.as_ref().ok_or(Fault::Duplicate)?;
+-        if *head != request.head {
+-            return Err(Fault::Stale);
+-        }
+-        if outcome.success && !outcome.data.is_empty() {
+-            self.copy_to(destinations, &outcome.data)?;
+-        }
+-        self.memory
+-            .write_obj(
+-                if outcome.unsupported {
+-                    2u8
+-                } else if outcome.success {
+-                    0u8
+-                } else {
+-                    1u8
+-                },
+-                GuestAddress(status.gpa),
+-            )
+-            .map_err(|_| Fault::InvalidRange)?;
+-        let len = u32::try_from(if outcome.success {
+-            outcome.data.len() + 1
+-        } else {
+-            1
+-        })
+-        .map_err(|_| Fault::Overflow)?;
+-        self.queue
+-            .add_used(&self.memory, *head, len)
+-            .map_err(|_| Fault::InvalidRange)?;
+-        self.completion = None;
+-        Ok(())
+-    }
+ }
+ 
+ impl crate::block_bounce::Disk for super::device::DiskProperties {
+@@ -878,4 +888,106 @@ mod tests {
+         assert_eq!(thread.join().unwrap(), Err(Fault::InvalidRange));
+         assert!(seen.load(Ordering::Acquire));
+     }
++    #[test]
++    fn cowork_block_actual_capture_guest_appends_second_request_both_complete() {
++        let (access, device, mut port) = fixture(false);
++        let memory = port.memory.clone();
++        let mut header = [0u8; 16];
++        header[8..].copy_from_slice(&1u64.to_le_bytes());
++        memory.write_slice(&header, GuestAddress(0x7000)).unwrap();
++        for (index, descriptor) in [
++            (
++                3,
++                crate::virtio::Descriptor {
++                    addr: 0x7000,
++                    len: 16,
++                    flags: 1,
++                    next: 4,
++                },
++            ),
++            (
++                4,
++                crate::virtio::Descriptor {
++                    addr: 0x8000,
++                    len: 512,
++                    flags: 3,
++                    next: 5,
++                },
++            ),
++            (
++                5,
++                crate::virtio::Descriptor {
++                    addr: 0x9000,
++                    len: 1,
++                    flags: 2,
++                    next: 0,
++                },
++            ),
++        ] {
++            memory
++                .write_obj(descriptor, GuestAddress(0x1000 + 16 * index))
++                .unwrap();
++        }
++        struct Appending<'a> {
++            port: &'a mut ProtectedQueue,
++            memory: GuestMemoryMmap,
++        }
++        impl Port for Appending<'_> {
++            fn capture(&mut self, lease: &Lease) -> Result<Option<Captured>, Fault> {
++                let memory = self.memory.clone();
++                self.port.capture_after_snapshot(lease, move || {
++                    memory.write_obj(3u16, GuestAddress(0x2006)).unwrap();
++                    std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
++                    memory.write_obj(2u16, GuestAddress(0x2002)).unwrap();
++                })
++            }
++            fn complete(
++                &mut self,
++                lease: &Lease,
++                request: &Captured,
++                outcome: &Outcome,
++            ) -> Result<(), Fault> {
++                self.port.complete(lease, request, outcome)
++            }
++        }
++        let mut disk = FakeDisk {
++            access: access.clone(),
++        };
++        let mut first = block_bounce::perform(
++            block_bounce::capture(
++                &access,
++                device,
++                &mut Appending {
++                    port: &mut port,
++                    memory: memory.clone(),
++                },
++            )
++            .unwrap()
++            .unwrap(),
++            &mut disk,
++        );
++        assert!(first.outcome.success);
++        block_bounce::complete(&access, &mut first, &mut port).unwrap();
++        let mut second = block_bounce::perform(
++            block_bounce::capture(&access, device, &mut port)
++                .unwrap()
++                .unwrap(),
++            &mut disk,
++        );
++        assert!(second.outcome.success);
++        block_bounce::complete(&access, &mut second, &mut port).unwrap();
++        assert!(block_bounce::capture(&access, device, &mut port)
++            .unwrap()
++            .is_none());
++        for status in [0x6000, 0x9000] {
++            assert_eq!(memory.read_obj::<u8>(GuestAddress(status)).unwrap(), 0);
++        }
++        for data in [0x5000, 0x8000] {
++            assert_eq!(memory.read_obj::<u8>(GuestAddress(data)).unwrap(), 0x6b);
++        }
++        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 2);
++        assert_eq!(memory.read_obj::<u32>(GuestAddress(0x3004)).unwrap(), 0);
++        assert_eq!(memory.read_obj::<u32>(GuestAddress(0x300c)).unwrap(), 3);
++        assert!(!access.stopped());
++    }
+ }
+diff --git a/src/devices/src/virtio/queue.rs b/src/devices/src/virtio/queue.rs
+index a44c59a..58ea418 100644
+--- a/src/devices/src/virtio/queue.rs
++++ b/src/devices/src/virtio/queue.rs
+@@ -1181,7 +1181,7 @@ impl Queue {
+     pub fn fixture_checked_pop<'a>(&mut self,mem:&'a GuestMemoryMmap)->Result<Option<DescriptorChain<'a>>,&'static str> {
+         self.fixture_checked_pop_after_snapshot(mem,||{})
+     }
+-    fn fixture_checked_pop_after_snapshot<'a>(&mut self,mem:&'a GuestMemoryMmap,after:impl FnOnce())->Result<Option<DescriptorChain<'a>>,&'static str> {
++    pub(crate) fn fixture_checked_pop_after_snapshot<'a>(&mut self,mem:&'a GuestMemoryMmap,after:impl FnOnce())->Result<Option<DescriptorChain<'a>>,&'static str> {
+         self.fixture_validate_report(mem)?;
+         let pending=self.len(mem);if pending==0{return Ok(None);}
+         let offset=4+2*(self.next_avail.0%self.actual_size());
+@@ -1190,8 +1190,12 @@ impl Queue {
+         let index=u16::from_le(mem.read_obj::<u16>(address).map_err(|_|"head read")?);
+         let head=DescriptorChain::checked_new(mem,self.desc_table,self.actual_size(),index).ok_or("malformed first head/NEXT")?;
+         after();
+-        // A changed first head/pending count is a malformed transaction, never an empty kick.
+-        if mem.read_obj::<u16>(address).map_err(|_|"head re-read")?!=index.to_le() || self.len(mem)!=pending{return Err("changing queue metadata");}
++        // The producer may append while this head is copied. Pending distance is modulo u16,
++        // bounded by the queue capacity; retreat/invalid wrap/overrun and head replacement fail.
++        fence(Ordering::Acquire);
++        let current=self.len(mem);
++        if mem.read_obj::<u16>(address).map_err(|_|"head re-read")?!=index.to_le()
++            || current<pending || current>self.actual_size(){return Err("changing queue metadata");}
+         self.next_avail+=Wrapping(1);Ok(Some(head))
+     }
+     pub fn fixture_validate_report(&self,mem:&GuestMemoryMmap)->Result<(),&'static str> {
+@@ -1260,11 +1264,17 @@ impl Queue {
+ 
+ #[cfg(test)]mod cowork_pop_tests {
+  use super::*;
+- #[test]fn cowork_block_checked_pop_rejects_changed_metadata(){
+-    for changed_head in [false,true]{
+-      let memory=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),0x10000)]).unwrap();let mut queue=Queue::new(8);queue.ready=true;queue.size=8;queue.desc_table=GuestAddress(0x1000);queue.avail_ring=GuestAddress(0x2000);queue.used_ring=GuestAddress(0x3000);
+-      memory.write_obj(crate::virtio::Descriptor{addr:0x4000,len:16,flags:0,next:0},GuestAddress(0x1000)).unwrap();memory.write_obj(1u16,GuestAddress(0x2002)).unwrap();memory.write_obj(0u16,GuestAddress(0x2004)).unwrap();
+-      assert!(queue.fixture_checked_pop_after_snapshot(&memory,||memory.write_obj(if changed_head{7u16}else{2u16},GuestAddress(if changed_head{0x2004}else{0x2002})).unwrap()).is_err());assert_eq!(queue.next_avail.0,0);assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(),0);
++ fn fixture(next:u16,pending:u16)->(Queue,GuestMemoryMmap){
++    let memory=GuestMemoryMmap::from_ranges(&[(GuestAddress(0),0x10000)]).unwrap();let mut queue=Queue::new(8);queue.ready=true;queue.size=8;queue.desc_table=GuestAddress(0x1000);queue.avail_ring=GuestAddress(0x2000);queue.used_ring=GuestAddress(0x3000);queue.next_avail=Wrapping(next);
++    memory.write_obj(crate::virtio::Descriptor{addr:0x4000,len:16,flags:0,next:0},GuestAddress(0x1000)).unwrap();memory.write_obj(next.wrapping_add(pending),GuestAddress(0x2002)).unwrap();memory.write_obj(0u16,GuestAddress(0x2004+2*u64::from(next%8))).unwrap();(queue,memory)
++ }
++ #[test]fn cowork_block_checked_pop_rejects_regression_overrun_invalid_wrap_and_head_replacement(){
++    for (next,pending,new_pending,replace_head) in [(0u16,2u16,1u16,false),(0,1,9,false),(0,1,u16::MAX,false),(u16::MAX,1,u16::MAX,false),(0,1,2,true)]{
++      let(mut queue,memory)=fixture(next,pending);let head_address=GuestAddress(0x2004+2*u64::from(next%8));
++      assert!(queue.fixture_checked_pop_after_snapshot(&memory,||{if replace_head{memory.write_obj(7u16,head_address).unwrap();}else{memory.write_obj(next.wrapping_add(new_pending),GuestAddress(0x2002)).unwrap();}}).is_err());assert_eq!(queue.next_avail.0,next);assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(),0);
+     }
+  }
++ #[test]fn cowork_block_checked_pop_allows_forward_progress_and_valid_u16_wrap(){
++    for next in [0u16,u16::MAX-1,u16::MAX]{let(mut queue,memory)=fixture(next,1);let head=queue.fixture_checked_pop_after_snapshot(&memory,||memory.write_obj(next.wrapping_add(2),GuestAddress(0x2002)).unwrap()).unwrap().unwrap();assert_eq!(head.index,0);assert_eq!(queue.next_avail.0,next.wrapping_add(1));assert_eq!(queue.len(&memory),1);}
++ }
+ }
