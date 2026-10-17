@@ -1,0 +1,192 @@
+{
+  "formatVersion": 1,
+  "status": "pinned-unbuilt",
+  "decision": "D6 (recommended): a reproducible build from the cached Apple/Kata base config WITHOUT the crypto fragment. Nothing here was built, booted or run.",
+  "kernel": {
+    "version": "6.18.35",
+    "url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.35.tar.xz",
+    "sha256": "f78602932219125e211c5f5bfd84edcfd4ec5ce88fc944f8248413f665bef236",
+    "signatureSha256": "3ab523660ccff4ee386a36aab368fc5d64bb7611afc21591a970a8bbeb9e5ca0",
+    "signerFingerprint": "647F28654894E3BD457199BE38DBBDC86092693E",
+    "publicKeySha256": "61b758f0d4a386fc83565b92cfd6c05879573df0e96d44b71a5a3e19e1a8581a",
+    "publicKeySource": "https://kernel.org/.well-known/openpgpkey/hu/e3n9xnm94c5apezqnj1pmrfuaoyfm8cf?l=gregkh",
+    "signaturePolicy": "Developer signature over decompressed tar; fingerprint from kernel.org signature page. WKD/TLS public-key retrieval; no live GPG home."
+  },
+  "baseConfig": {
+    "file": "base-apple-6.18.35.config",
+    "sha256": "a5dfc1ee37dcd4bc6d727e4de617bc45a40cf32e7ebc52fb6f0472c8fbf60c21",
+    "provenance": "Exact cached Apple/Kata feasibility config. Not production security selection."
+  },
+  "fragment": {
+    "file": "memory-fragment.config",
+    "symbols": {
+      "CONFIG_DEBUG_INFO_BTF": "n"
+    },
+    "why": "The only change from the base. BTF generation ran the offline builder out of memory at 2 GiB and at 4 GiB in the crypto comparison build; DWARF debug information stays. Every other difference between the base and a built config is a compiler-dependent symbol (GCC 11.4 in the base, LLVM 20.1.8 here) that olddefconfig resolves.",
+    "sha256": "61bb634247dc030f8ce6343a44064f2fab76375d53d9e582b0dd2e2782b33bad"
+  },
+  "cryptoFragment": null,
+  "toolchain": {
+    "version": "LLVM-20.1.8",
+    "url": "https://cdn.kernel.org/pub/tools/llvm/files/llvm-20.1.8-aarch64.tar.xz",
+    "archive": "llvm-20.1.8-aarch64.tar.xz",
+    "sha256": "945d22282d4bc623fd828fad50e14698fe7be070855f68f3d351a26305615ba7",
+    "bytes": 130509608,
+    "host": "aarch64-linux",
+    "sourceRevision": "llvmorg-20.1.8",
+    "sourceCommit": "87f0227cb60147a26a1eeb4fb06e3b505e9c7261",
+    "signatureFile": "llvm-20.1.8-aarch64.tar.sign",
+    "signatureSha256": "9e1bc425061af1b7512a70b9e5335fe4fb2373b59068e6a69429b80bd8c1ec0d",
+    "publicKeyFile": "nathan-public.key",
+    "publicKeySha256": "dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8",
+    "signerFingerprint": "7BE325C731319CCD01D8CA921D6B269171C01A96",
+    "primaryFingerprint": "2437CB76E544CB6AB3D9DFD399739260CB6CB716",
+    "publicKeySource": "https://kernel.org/.well-known/openpgpkey/hu/f4fk1gdgyoeakzdpeuk5smpgq6iygc1i?l=nathan",
+    "license": "Upstream Apache-2.0 WITH LLVM-exception; source license hash pinned, no bundled license in slim archive",
+    "licenseFile": "llvm-LICENSE.txt",
+    "licenseSha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+    "licenseProvenance": "Upstream LLVM20.1.8 source license; slim binary archive has no bundled license file."
+  },
+  "builder": {
+    "imageId": "sha256:8143f5c8e71574a89a9dc0cfbfa43cc4c491f02f6a08b3f0f8910329de137de8",
+    "imageDigestKind": "Docker immutable local image ID; exported image inspection and rootfs diffIDs identify its content",
+    "baseManifest": "sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7",
+    "dockerfile": "Builder.Dockerfile",
+    "dockerfileSha256": "673cd330a04d2d0caa61a6bac16d3953781c07ccddb8999d55772bbaf7718a07",
+    "rootFsDiffIds": [
+      "sha256:1e9178dc90058fa454a60803300219ee8c17e515be8718817ed824b96fa1207b",
+      "sha256:f08117ebb587325ed824b9657897e8d17d0b435a5737e548933ee94a31491030",
+      "sha256:23830f4f0fe151595ca1e82c6d4c6dadaad1bbd680390c940147f22c21ca3782"
+    ],
+    "snapshot": "20261011T000000Z",
+    "savedImageArchiveSha256": "85e8c23e31fc1f58c17a445379d23693924d4b70e1b0774812001dcfb19bef19"
+  },
+  "builderSource": {
+    "repository": "yanlingLabs/winter",
+    "commit": "9a588735402ce12a00a1a0cbe47d8a35efff9279",
+    "directory": "spikes/cowork-hvf/kernel",
+    "note": "These files live on the hvf fixture lineage (PR #19), not on the integration branch; where they end up is decision D7. They are pinned by digest so a copy can be verified.",
+    "files": {
+      "Builder.Dockerfile": "673cd330a04d2d0caa61a6bac16d3953781c07ccddb8999d55772bbaf7718a07",
+      "run_container_build.py": "51c972c9d0a7c825b569c4c27c09e3c2c723753d7d1f81f5a3ab9624aa6853c1",
+      "build_crypto.py": "d7ff972cce493b98d26c6db75c5d87af473cb5bc31bacbd3fd611e6b54673ee1",
+      "prepare_crypto.py": "9e5584c2902c810d8a8a035fac4d42c011f6e75f11e2df3379984fe49fa26d10",
+      "receipt_builder.py": "3c85491fdb402869f6b51e184c58a66a5c6d77c79943870621d50fe11f5592cb",
+      "builder-packages.json": "43e1f2438776ee1509463e92e3657f5bea125bb3bb4ff59a457332bff9863712",
+      "builder-package-archives.json": "33cca73cc68b52db412b069af5e4bce0a65cb2ff66a1f44d873c6bfbe9e6315b",
+      "toolchain-files.json": "a4213c847ac4d96a8282988d4963922337d5b39777b93ae5efe30f2731d0355c",
+      "kernel-licenses.json": "86393f8e19a101d4b9ac072802c923e005d1a380cca9af5e69ff647936aedbec",
+      "gregkh-public.key": "61b758f0d4a386fc83565b92cfd6c05879573df0e96d44b71a5a3e19e1a8581a",
+      "nathan-public.key": "dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8",
+      "linux-6.18.35.tar.sign": "3ab523660ccff4ee386a36aab368fc5d64bb7611afc21591a970a8bbeb9e5ca0",
+      "llvm-20.1.8-aarch64.tar.sign": "9e1bc425061af1b7512a70b9e5335fe4fb2373b59068e6a69429b80bd8c1ec0d",
+      "llvm-LICENSE.txt": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee"
+    }
+  },
+  "commands": [
+    [
+      "/usr/bin/make",
+      "-C",
+      "/build/src/linux-6.18.35",
+      "O=/build/output",
+      "ARCH=arm64",
+      "LLVM=/build/llvm/llvm-20.1.8-aarch64/bin/",
+      "LLVM_IAS=1",
+      "-j2",
+      "PAHOLE_FLAGS=--btf_gen_floats -j1 --skip_encoding_btf_inconsistent_proto --btf_gen_optimized",
+      "olddefconfig"
+    ],
+    [
+      "/usr/bin/make",
+      "-C",
+      "/build/src/linux-6.18.35",
+      "O=/build/output",
+      "ARCH=arm64",
+      "LLVM=/build/llvm/llvm-20.1.8-aarch64/bin/",
+      "LLVM_IAS=1",
+      "-j2",
+      "PAHOLE_FLAGS=--btf_gen_floats -j1 --skip_encoding_btf_inconsistent_proto --btf_gen_optimized",
+      "Image",
+      "vmlinux"
+    ]
+  ],
+  "environment": {
+    "PATH": "/build/llvm/llvm-20.1.8-aarch64/bin:/usr/bin",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "KBUILD_BUILD_USER": "cowork-fixture",
+    "KBUILD_BUILD_HOST": "isolated",
+    "KCONFIG_NOTIMESTAMP": "1",
+    "KBUILD_BUILD_VERSION": "1"
+  },
+  "environmentOpen": [
+    "SOURCE_DATE_EPOCH",
+    "KBUILD_BUILD_TIMESTAMP"
+  ],
+  "limits": {
+    "jobs": 2,
+    "memoryGiB": 4,
+    "network": "none",
+    "note": "same bounded isolated offline container as the crypto comparison build"
+  },
+  "requiredSymbols": {
+    "CONFIG_MODULES": "n",
+    "CONFIG_BLK_DEV_INITRD": "y",
+    "CONFIG_RD_GZIP": "y",
+    "CONFIG_DEVTMPFS": "y",
+    "CONFIG_TMPFS": "y",
+    "CONFIG_PROC_FS": "y",
+    "CONFIG_SYSFS": "y",
+    "CONFIG_VIRTIO": "y",
+    "CONFIG_VIRTIO_MMIO": "y",
+    "CONFIG_VIRTIO_BLK": "y",
+    "CONFIG_VIRTIO_CONSOLE": "y",
+    "CONFIG_VIRTIO_BALLOON": "y",
+    "CONFIG_PAGE_REPORTING": "y",
+    "CONFIG_EXT4_FS": "y",
+    "CONFIG_JBD2": "y",
+    "CONFIG_CRC32": "y",
+    "CONFIG_UNIX": "y",
+    "CONFIG_NET": "y",
+    "CONFIG_SERIAL_AMBA_PL011": "y",
+    "CONFIG_SERIAL_AMBA_PL011_CONSOLE": "y",
+    "CONFIG_BINFMT_ELF": "y",
+    "CONFIG_BINFMT_SCRIPT": "y",
+    "CONFIG_PID_NS": "y",
+    "CONFIG_USER_NS": "y",
+    "CONFIG_UTS_NS": "y",
+    "CONFIG_IPC_NS": "y",
+    "CONFIG_NET_NS": "y",
+    "CONFIG_SECCOMP": "y",
+    "CONFIG_SECURITY_LANDLOCK": "y",
+    "CONFIG_EPOLL": "y",
+    "CONFIG_EVENTFD": "y",
+    "CONFIG_SIGNALFD": "y",
+    "CONFIG_FHANDLE": "y",
+    "CONFIG_PAGE_POISONING": "n",
+    "CONFIG_INIT_ON_ALLOC_DEFAULT_ON": "n",
+    "CONFIG_INIT_ON_FREE_DEFAULT_ON": "n",
+    "CONFIG_DEBUG_INFO_BTF": "n",
+    "CONFIG_BLK_DEV_WRITE_MOUNTED": "y"
+  },
+  "mustBeAbsentFromTheBuild": [
+    "CONFIG_DM_CRYPT",
+    "CONFIG_DM_INTEGRITY",
+    "CONFIG_BLK_DEV_DM"
+  ],
+  "afterBuildVerify": "Every requiredSymbols entry must resolve to exactly the stated value in the .config that olddefconfig writes (a silently dropped symbol is a failure, as in build_crypto.py verify_config), and every mustBeAbsentFromTheBuild symbol must be unset or n.",
+  "expectedOutputs": {
+    "Image": null,
+    "vmlinux": null,
+    "resolvedConfig": null,
+    "note": "unbuilt: the first reviewed build records these"
+  },
+  "bootVerified": false,
+  "observedInTheBase": {
+    "CONFIG_CRYPTO_USER_API": "y",
+    "note": "The base already enables AF_ALG (the crypto user API). That is not something this slice adds or changes; whether tool code should be able to open AF_ALG sockets is a confinement-review item for the seccomp policy, not a kernel pin."
+  },
+  "requiredSymbolsNotes": {
+    "CONFIG_BLK_DEV_WRITE_MOUNTED": "The bootstrap helper keeps its read-write descriptors open while PID 1 replays a journal by a kernel mount of the same device; with this symbol off the kernel refuses such a mount."
+  }
+}

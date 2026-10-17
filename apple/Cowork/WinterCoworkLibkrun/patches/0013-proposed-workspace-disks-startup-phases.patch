@@ -1,0 +1,427 @@
+diff --git a/src/devices/src/virtio/block/device.rs b/src/devices/src/virtio/block/device.rs
+index b6afd68..d9e3820 100644
+--- a/src/devices/src/virtio/block/device.rs
++++ b/src/devices/src/virtio/block/device.rs
+@@ -214,6 +214,8 @@ unsafe impl ByteValued for VirtioBlkConfig {}
+ pub struct Block {
+     cowork_access: Option<(crate::reclaim_access::Access,crate::reclaim_access::Device)>,
+     cowork_stop: Arc<std::sync::atomic::AtomicBool>,
++    #[cfg(target_os="macos")]
++    cowork_volume_identity: Option<crate::workspace_disks::ExpectedVolume>,
+     // Host file and properties.
+     disk: Option<DiskProperties>,
+     cache_type: CacheType,
+@@ -299,6 +301,7 @@ impl Block {
+     /// Admitted descriptor path: RAW only, full sync, no filename/implicit backing opens.
+     #[cfg(target_os = "macos")]
+     pub fn new_cowork_fd(id: String, file: crate::workspace_disks::AdmittedVolume) -> io::Result<Block> {
++        let expected = file.expected_identity();
+         let mut disk_image_id = vec![0; VIRTIO_BLK_ID_BYTES as usize];
+         if id.is_empty() || id.len() > disk_image_id.len() { return Err(io::Error::from_raw_os_error(libc::EINVAL)); }
+         disk_image_id[..id.len()].copy_from_slice(id.as_bytes());
+@@ -306,7 +309,9 @@ impl Block {
+         let discard_alignment = file.discard_align();
+         let raw = Raw::<Box<dyn DynStorage>>::open_image_sync(Box::new(file), true)?;
+         let disk_image = SyncFormatAccess::new(raw)?;
+-        Self::from_storage(id, None, CacheType::Writeback, disk_image, disk_image_id, discard_alignment, false, SyncMode::Full)
++        let mut block = Self::from_storage(id, None, CacheType::Writeback, disk_image, disk_image_id, discard_alignment, false, SyncMode::Full)?;
++        block.cowork_volume_identity = Some(expected);
++        Ok(block)
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
+@@ -360,10 +365,21 @@ impl Block {
+             worker_thread: None,
+             cowork_access: None,
+             cowork_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++            #[cfg(target_os="macos")]
++            cowork_volume_identity: None,
+             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
+         })
+     }
+ 
++    /// Corroborate internally minted FD constructor provenance at the final pre-VMM boundary.
++    #[cfg(target_os="macos")]
++    pub fn matches_cowork_volume(&self, id: &str, expected: crate::workspace_disks::ExpectedVolume) -> bool {
++        self.cowork_volume_identity == Some(expected) && self.id == id
++            && self.config.capacity == expected.capacity_bytes / SECTOR_SIZE
++            && self.cache_type == CacheType::Writeback && self.worker_thread.is_none()
++            && !self.device_state.is_activated()
++    }
++
+     /// Provides the ID of this block device.
+     pub fn id(&self) -> &String {
+         &self.id
+diff --git a/src/devices/src/workspace_disks.rs b/src/devices/src/workspace_disks.rs
+index e431eca..635aecc 100644
+--- a/src/devices/src/workspace_disks.rs
++++ b/src/devices/src/workspace_disks.rs
+@@ -96,6 +96,9 @@ impl AdmittedVolume {
+             expected: self.expected,
+         })
+     }
++    pub fn expected_identity(&self) -> ExpectedVolume {
++        self.expected
++    }
+     pub(crate) fn into_storage(self) -> io::Result<crate::workspace_raw_storage::PinnedRawStorage> {
+         crate::workspace_raw_storage::PinnedRawStorage::new(self.file, self.expected)
+     }
+@@ -126,6 +129,9 @@ impl WorkspaceDisks {
+         validate(&self.data.file, self.data.expected)?;
+         validate(&self.environment.file, self.environment.expected)
+     }
++    pub fn expected_identities(&self) -> [ExpectedVolume; 2] {
++        [self.data.expected, self.environment.expected]
++    }
+     pub fn duplicate_for_blocks(&self) -> io::Result<[AdmittedVolume; 2]> {
+         let files = [self.data.duplicate()?, self.environment.duplicate()?];
+         self.validate()?;
+diff --git a/src/libkrun/src/cowork_workspace_disks_tests.rs b/src/libkrun/src/cowork_workspace_disks_tests.rs
+index 458df95..b6840dc 100644
+--- a/src/libkrun/src/cowork_workspace_disks_tests.rs
++++ b/src/libkrun/src/cowork_workspace_disks_tests.rs
+@@ -246,13 +246,19 @@ fn workspace_disks_api_incompatible_profile_refuses_before_kernel_disk_or_vm_con
+             }
+             assert!(cowork_validate_profile(cfg).is_err());
+         }
+-        assert_eq!(krun_start_enter(id), -libc::EINVAL);
++        {
++            let cfg = CTX_MAP.lock().unwrap();
++            assert!(cowork_validate_profile(cfg.get(&id).unwrap()).is_err());
++        }
+         assert_eq!(krun_free_ctx(id), 0);
+         drop(peer);
+     }
+     let id = context();
+     assert_eq!(intake(id, &a, &b), 0);
+-    assert_eq!(krun_start_enter(id), -libc::EINVAL);
++    {
++        let cfg = CTX_MAP.lock().unwrap();
++        assert!(cowork_validate_profile(cfg.get(&id).unwrap()).is_err());
++    }
+     assert_eq!(krun_free_ctx(id), 0);
+ }
+ #[test]
+@@ -263,7 +269,10 @@ fn workspace_disks_api_metadata_drift_refuses_start_without_permission_repair()
+     let peer = stream(id);
+     assert_eq!(intake(id, &a, &b), 0);
+     fs::set_permissions(&b.path, fs::Permissions::from_mode(0o644)).unwrap();
+-    assert_eq!(krun_start_enter(id), -libc::EINVAL);
++    {
++        let cfg = CTX_MAP.lock().unwrap();
++        assert!(cowork_validate_profile(cfg.get(&id).unwrap()).is_err());
++    }
+     assert_eq!(b.file.metadata().unwrap().mode() & 0o7777, 0o644);
+     assert_eq!(krun_free_ctx(id), 0);
+     drop(peer);
+@@ -308,3 +317,154 @@ fn workspace_disks_api_actual_two_block_construction_has_stable_ids_and_no_volum
+ #[allow(dead_code)]
+ #[path = "../../vmm/src/vmm_config/block.rs"]
+ mod actual_block_builder;
++
++#[test]
++fn workspace_disks_startup_preconstruct_postvalidate_sequence() {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    let before = open_fds();
++    let id = context();
++    let peer = stream(id);
++    assert_eq!(intake(id, &a, &b), 0);
++    let mut cfg = CTX_MAP.lock().unwrap().remove(&id).unwrap();
++    assert!(
++        cowork_prepare_blocks(&mut cfg).is_ok(),
++        "actual startup disk preparation rejected owned pair"
++    );
++    assert_eq!(cfg.vmr.block.list.len(), 2);
++    assert!(cowork_validate_profile_in_phase(&cfg, CoworkProfilePhase::BeforeVmm).is_ok());
++    assert!(
++        cowork_validate_profile(&cfg).is_err(),
++        "constructed devices cannot reenter preconstruction admission"
++    );
++    drop(cfg);
++    drop(peer);
++    assert_eq!(open_fds(), before);
++    a.file.metadata().unwrap();
++    b.file.metadata().unwrap();
++}
++
++#[test]
++fn workspace_disks_startup_postvalidation_requires_exact_owned_pair_order_and_provenance() {
++    for mutation in 0..7 {
++        let a = Fixture::new();
++        let b = Fixture::new();
++        let before = open_fds();
++        let id = context();
++        let peer = stream(id);
++        assert_eq!(intake(id, &a, &b), 0);
++        let mut cfg = CTX_MAP.lock().unwrap().remove(&id).unwrap();
++        cowork_prepare_blocks(&mut cfg).unwrap();
++        match mutation {
++            0 => {
++                cfg.vmr.block.list.pop_back();
++            }
++            1 => {
++                let first = cfg.vmr.block.list.front().unwrap().clone();
++                cfg.vmr.block.list.push_back(first);
++            }
++            2 => {
++                cfg.vmr.block.list.swap(0, 1);
++            }
++            3 => {
++                // A freshly constructed same-inode/tag/ID block is still a substituted object.
++                let [data, environment] = cfg
++                    .vmr
++                    .cowork_workspace_disks
++                    .as_ref()
++                    .unwrap()
++                    .duplicate_for_blocks()
++                    .unwrap();
++                drop(environment);
++                cfg.vmr.block.list[0] = std::sync::Arc::new(std::sync::Mutex::new(
++                    devices::virtio::Block::new_cowork_fd("winter-data".into(), data).unwrap(),
++                ));
++            }
++            4 => {
++                // The IDs/path contents alone cannot mint the private FD constructor provenance.
++                let mut config = path_disk();
++                config.block_id = "winter-data".into();
++                config.disk_image_path = a.path.to_string_lossy().into_owned();
++                cfg.vmr.block.list[0] = std::sync::Arc::new(std::sync::Mutex::new(
++                    vmm::vmm_config::block::BlockBuilder::create_block(config).unwrap(),
++                ));
++            }
++            5 => {
++                cfg.vmr
++                    .set_vm_config(&VmConfig {
++                        vcpu_count: Some(2),
++                        mem_size_mib: Some(512),
++                        ..Default::default()
++                    })
++                    .unwrap();
++            }
++            _ => {
++                fs::set_permissions(&b.path, fs::Permissions::from_mode(0o644)).unwrap();
++            }
++        }
++        assert!(cowork_validate_profile_in_phase(&cfg, CoworkProfilePhase::BeforeVmm).is_err());
++        drop(cfg);
++        drop(peer);
++        assert_eq!(open_fds(), before);
++        a.file.metadata().unwrap();
++        b.file.metadata().unwrap();
++    }
++}
++
++#[test]
++fn workspace_disks_startup_preparation_refuses_prebuilt_extra_or_retained_provenance_before_duplication(
++) {
++    for mutation in 0..3 {
++        let a = Fixture::new();
++        let b = Fixture::new();
++        let before = open_fds();
++        let id = context();
++        let peer = stream(id);
++        assert_eq!(intake(id, &a, &b), 0);
++        let mut cfg = CTX_MAP.lock().unwrap().remove(&id).unwrap();
++        cfg.vmr.block = vmm::vmm_config::block::BlockBuilder::from_cowork_workspace(
++            cfg.vmr.cowork_workspace_disks.as_ref().unwrap(),
++        )
++        .unwrap();
++        if mutation == 1 {
++            let first = cfg.vmr.block.list.front().unwrap().clone();
++            cfg.vmr.block.list.push_back(first);
++        }
++        if mutation == 2 {
++            cfg.vmr.block.list.clear();
++        }
++        let staged = open_fds();
++        assert!(cowork_prepare_blocks(&mut cfg).is_err());
++        assert_eq!(open_fds(), staged);
++        drop(cfg);
++        drop(peer);
++        assert_eq!(open_fds(), before);
++    }
++}
++
++#[test]
++fn workspace_disks_startup_postvalidation_rejects_pair_from_another_admission() {
++    let a = Fixture::new();
++    let b = Fixture::new();
++    let other_a = Fixture::new();
++    let other_b = Fixture::new();
++    let before = open_fds();
++    let id = context();
++    let peer = stream(id);
++    assert_eq!(intake(id, &a, &b), 0);
++    let mut cfg = CTX_MAP.lock().unwrap().remove(&id).unwrap();
++    cowork_prepare_blocks(&mut cfg).unwrap();
++    cfg.vmr.cowork_workspace_disks = Some(
++        devices::workspace_disks::WorkspaceDisks::intake(
++            other_a.file.as_raw_fd(),
++            other_a.expected,
++            other_b.file.as_raw_fd(),
++            other_b.expected,
++        )
++        .unwrap(),
++    );
++    assert!(cowork_validate_profile_in_phase(&cfg, CoworkProfilePhase::BeforeVmm).is_err());
++    drop(cfg);
++    drop(peer);
++    assert_eq!(open_fds(), before);
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 2696565..21f2705 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2869,7 +2869,13 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
+     KRUN_SUCCESS
+ }
+ 
++#[derive(Clone, Copy)]
++enum CoworkProfilePhase { BeforeConstruction, BeforeVmm }
+ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
++    cowork_validate_profile_in_phase(cfg, CoworkProfilePhase::BeforeConstruction)
++}
++fn cowork_validate_profile_in_phase(cfg:&ContextConfig, phase:CoworkProfilePhase)->Result<(),()> {
++    let _ = phase;
+     let r=&cfg.vmr;
+     #[cfg(feature="blk")]
+     if (r.cowork_runtime_fixture_trace && !r.cowork_runtime_port) || (r.cowork_runtime_port && r.cowork_stream.is_none()) || (r.cowork_stream.is_some() && (!r.cowork_fixture_reclaim || !r.cowork_guarded_block)){return Err(());}
+@@ -2877,8 +2883,13 @@ fn cowork_validate_profile(cfg:&ContextConfig)->Result<(),()> {
+     if let Some(pair) = &r.cowork_workspace_disks {
+         if !r.cowork_fixture_reclaim || !r.cowork_guarded_block || !r.cowork_runtime_port || r.cowork_stream.is_none()
+             || r.vm_config().mem_size_mib != Some(768) || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
+-            || cfg.data_block_cfg.is_some() || cfg.block_root.is_some() || !r.block.list.is_empty()
++            || cfg.data_block_cfg.is_some() || cfg.block_root.is_some()
+             || pair.validate().is_err() { return Err(()); }
++        match phase {
++            CoworkProfilePhase::BeforeConstruction if !r.block.cowork_unprepared() => return Err(()),
++            CoworkProfilePhase::BeforeVmm if r.block.validate_cowork_workspace(pair).is_err() => return Err(()),
++            _ => {},
++        }
+     }
+     if !r.cowork_fixture_reclaim{return Ok(());}
+     if cfg!(any(feature="init-blob",feature="net",feature="gpu",feature="snd",feature="input",feature="efi",feature="tee"))
+@@ -2910,6 +2921,22 @@ fn cowork_construct_blocks(guarded:bool,memory:Option<usize>,configs:Vec<BlockDe
+     for cfg in configs {opener(cfg)?;}Ok(())
+ }
+ 
++/// The actual startup disk-preparation path, independently exercised without VM allocation.
++#[cfg(feature="blk")]
++fn cowork_prepare_blocks(ctx_cfg: &mut ContextConfig) -> Result<(),()> {
++    cowork_validate_profile(ctx_cfg)?;
++    let guarded=ctx_cfg.vmr.cowork_guarded_block;
++    let memory=ctx_cfg.vmr.vm_config().mem_size_mib;
++    let configs=ctx_cfg.get_block_cfg();
++    #[cfg(target_os="macos")]
++    if let Some(pair) = &ctx_cfg.vmr.cowork_workspace_disks {
++        ctx_cfg.vmr.block = vmm::vmm_config::block::BlockBuilder::from_cowork_workspace(pair).map_err(|_|())?;
++    } else { cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|()))?; }
++    #[cfg(not(target_os="macos"))]
++    cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|()))?;
++    cowork_validate_profile_in_phase(ctx_cfg, CoworkProfilePhase::BeforeVmm)
++}
++
+ #[no_mangle]
+ #[allow(unreachable_code)]
+ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+@@ -2959,20 +2986,8 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+         }
+     }
+ 
+-    #[cfg(feature = "blk")]
+-    {
+-        let guarded=ctx_cfg.vmr.cowork_guarded_block;
+-        let memory=ctx_cfg.vmr.vm_config().mem_size_mib;
+-        let configs=ctx_cfg.get_block_cfg();
+-        #[cfg(target_os="macos")]
+-        if let Some(pair) = &ctx_cfg.vmr.cowork_workspace_disks {
+-            ctx_cfg.vmr.block = match vmm::vmm_config::block::BlockBuilder::from_cowork_workspace(pair) {
+-                Ok(blocks) => blocks, Err(_) => return -libc::EINVAL,
+-            };
+-        } else if cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|())).is_err(){return -libc::EINVAL;}
+-        #[cfg(not(target_os="macos"))]
+-        if cowork_construct_blocks(guarded,memory,configs,|config|ctx_cfg.vmr.add_block_device(config).map_err(|_|())).is_err(){return -libc::EINVAL;}
+-    }
++    #[cfg(feature="blk")]
++    if cowork_prepare_blocks(&mut ctx_cfg).is_err(){return -libc::EINVAL;}
+     /*
+      * Before krun_start_enter() is called in an encrypted context, the TEE
+      * config must have been set via krun_set_tee_config_file(). If the TEE
+@@ -3082,7 +3097,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+     }
+ 
+     // Re-check the normalized resources immediately before any identity change/allocation.
+-    if cowork_validate_profile(&ctx_cfg).is_err(){return -libc::EINVAL;}
++    if cowork_validate_profile_in_phase(&ctx_cfg, CoworkProfilePhase::BeforeVmm).is_err(){return -libc::EINVAL;}
+     if let Some(gid) = ctx_cfg.vmm_gid {
+         if unsafe { libc::setgid(gid) } != 0 {
+             error!("Failed to set gid {gid}");
+@@ -3464,7 +3479,7 @@ pub unsafe extern "C" fn krun_set_cowork_workspace_disks(
+     let Some(cfg) = contexts.get_mut(&ctx_id) else { return -libc::ENOENT; };
+     if data.is_null() || environment.is_null() || !cfg.vmr.cowork_fixture_reclaim || !cfg.vmr.cowork_guarded_block
+         || cfg.vmr.cowork_workspace_disks.is_some() || !cfg.block_cfgs.is_empty() || cfg.root_block_cfg.is_some()
+-        || cfg.data_block_cfg.is_some() || cfg.block_root.is_some() || !cfg.vmr.block.list.is_empty()
++        || cfg.data_block_cfg.is_some() || cfg.block_root.is_some() || !cfg.vmr.block.cowork_unprepared()
+         || (cfg.vmr.cowork_stream.is_some() && !cfg.vmr.cowork_runtime_port) { return -libc::EINVAL; }
+     match devices::workspace_disks::WorkspaceDisks::intake(data_fd, *data, environment_fd, *environment) {
+         Ok(pair) => { cfg.vmr.cowork_workspace_disks = Some(pair); 0 },
+diff --git a/src/vmm/src/vmm_config/block.rs b/src/vmm/src/vmm_config/block.rs
+index 6811d3d..a5b3334 100644
+--- a/src/vmm/src/vmm_config/block.rs
++++ b/src/vmm/src/vmm_config/block.rs
+@@ -42,15 +42,24 @@ pub struct BlockRootConfig {
+     pub options: Option<String>,
+ }
+ 
++#[cfg(target_os="macos")]
++struct WorkspaceBlockProvenance {
++    expected: [devices::workspace_disks::ExpectedVolume; 2],
++    blocks: [Arc<Mutex<Block>>; 2],
++}
+ #[derive(Default)]
+ pub struct BlockBuilder {
+     pub list: VecDeque<Arc<Mutex<Block>>>,
++    #[cfg(target_os="macos")]
++    cowork_owned_pair: Option<WorkspaceBlockProvenance>,
+ }
+ 
+ impl BlockBuilder {
+     pub fn new() -> Self {
+         Self {
+             list: VecDeque::<Arc<Mutex<Block>>>::new(),
++            #[cfg(target_os="macos")]
++            cowork_owned_pair: None,
+         }
+     }
+ 
+@@ -72,10 +81,25 @@ impl BlockBuilder {
+         let data = construct("winter-data", data).map_err(BlockConfigError::CreateBlockDevice)?;
+         let environment = construct("winter-environment", environment).map_err(BlockConfigError::CreateBlockDevice)?;
+         pair.validate().map_err(BlockConfigError::CreateBlockDevice)?;
+-        let mut list = VecDeque::new();
+-        list.push_back(Arc::new(Mutex::new(data)));
+-        list.push_back(Arc::new(Mutex::new(environment)));
+-        Ok(Self { list })
++        let blocks = [Arc::new(Mutex::new(data)), Arc::new(Mutex::new(environment))];
++        let list = VecDeque::from(blocks.clone());
++        Ok(Self { list, cowork_owned_pair: Some(WorkspaceBlockProvenance { expected: pair.expected_identities(), blocks }) })
++    }
++
++    #[cfg(target_os="macos")]
++    pub fn cowork_unprepared(&self) -> bool { self.list.is_empty() && self.cowork_owned_pair.is_none() }
++
++    #[cfg(target_os="macos")]
++    pub fn validate_cowork_workspace(&self, pair: &devices::workspace_disks::WorkspaceDisks) -> Result<()> {
++        pair.validate().map_err(BlockConfigError::CreateBlockDevice)?;
++        let refuse = || BlockConfigError::CreateBlockDevice(std::io::Error::from_raw_os_error(libc::EINVAL));
++        let provenance = self.cowork_owned_pair.as_ref().ok_or_else(refuse)?;
++        if self.list.len() != 2 || provenance.expected != pair.expected_identities() { return Err(refuse()); }
++        for (index, id) in ["winter-data", "winter-environment"].into_iter().enumerate() {
++            if !Arc::ptr_eq(&self.list[index], &provenance.blocks[index])
++                || !self.list[index].lock().unwrap().matches_cowork_volume(id, provenance.expected[index]) { return Err(refuse()); }
++        }
++        Ok(())
+     }
+ 
+     pub fn create_block(config: BlockDeviceConfig) -> Result<Block> {

@@ -62,6 +62,9 @@ enum DispatchPillMetrics {
     /// Transparent margin around everything, for the shadow. The mouse gate passes clicks there
     /// through to whatever is underneath.
     static let shadowPad: CGFloat = 24
+    /// Under the pointer the pill and everything above it grow by this much, from the pill's bottom edge, so the
+    /// stack moves and scales together (well inside `shadowPad`).
+    static let hoverScale: CGFloat = 1.03
     /// Gap between the stacked layers: cards → child pills → main pill.
     static let stackGap: CGFloat = 8
     /// A child pill is the main pill's own height (the user's call: same height, same shape).
@@ -417,6 +420,8 @@ enum DispatchPillLocalCommand: Equatable {
     /// `/spawn` — will open a Cowork session in a detached window. Not built yet: until it is, the pill
     /// says so (`dispatchPillSpawnComingSoon`).
     case spawn
+    /// `/terminal` — a plain interactive shell in its own terminal window (`CommandRunStore.startTerminal`).
+    case terminal
 }
 
 /// One command the `/` menu offers: its name (typed after the slash) and a short description.
@@ -431,6 +436,7 @@ let dispatchPillCommands: [DispatchPillCommandSpec] = [
     DispatchPillCommandSpec(name: "compact", summary: "Summarize older messages to free up context"),
     DispatchPillCommandSpec(name: "permissions", summary: "Choose how Dispatch asks before acting"),
     DispatchPillCommandSpec(name: "spawn", summary: "Open a Cowork window — coming soon"),
+    DispatchPillCommandSpec(name: "terminal", summary: "Open a terminal in this session's folder"),
 ]
 
 /// What each approval mode Dispatch can hold does, in a few words — the mode menu's second column.
@@ -587,7 +593,11 @@ func dispatchPillLocalCommand(_ text: String) -> DispatchPillLocalCommand? {
         guard let argument = permissions.argument, !argument.isEmpty else { return .permissions }
         return dispatchPillPermissionMode(argument).map(DispatchPillLocalCommand.setPermissions) ?? .unknownPermissions(argument)
     }
-    return trimmed.lowercased() == "/spawn" ? .spawn : nil
+    switch trimmed.lowercased() {
+    case "/spawn": return .spawn
+    case "/terminal": return .terminal
+    default: return nil
+    }
 }
 
 /// PURE: a running compaction's elapsed time — "0:07", "2:41", "1:02:05". Never negative (a clock that

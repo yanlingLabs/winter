@@ -83,6 +83,11 @@ export class FakeChrome implements ChromeApi {
   readonly debuggerOnDetach = event<(source: DebuggerTarget, reason: string) => void>();
   readonly tabsOnRemoved = event<(tabId: number) => void>();
   readonly tabsOnActivated = event<(info: { tabId: number; windowId: number }) => void>();
+  readonly tabsOnUpdated = event<(tabId: number, info: { url?: string; status?: string; title?: string }) => void>();
+  /** What an injected function answers (by its name — `wakeWatcher`, `drawOverlay`): the test plays the page. */
+  scriptAnswer?: (func: string, arg: unknown, target: { tabId: number }) => unknown;
+  /** An injection the browser refuses (a page that takes no script). */
+  scriptThrows = new Set<number>();
   readonly groupsOnRemoved = event<(group: { id: number }) => void>();
   readonly runtimeOnMessage = event<(message: unknown, sender: MessageSender, sendResponse: (r: unknown) => void) => boolean | undefined>();
   readonly actionOnClicked = event<(tab: ChromeTab) => void>();
@@ -234,6 +239,7 @@ export class FakeChrome implements ChromeApi {
     },
     onRemoved: this.tabsOnRemoved,
     onActivated: this.tabsOnActivated,
+    onUpdated: this.tabsOnUpdated,
   };
 
   tabGroups = {
@@ -331,9 +337,11 @@ export class FakeChrome implements ChromeApi {
   };
 
   scripting = {
-    executeScript: async (i: { target: { tabId: number }; world: "ISOLATED"; func: (arg: never) => void; args: [unknown] }) => {
+    executeScript: async (i: { target: { tabId: number }; world: "ISOLATED"; func: (arg: never) => unknown; args: [unknown] }) => {
       this.record("scripting.executeScript", { target: i.target, world: i.world, func: i.func.name, args: i.args });
-      return [];
+      if (this.scriptThrows.has(i.target.tabId)) throw new Error("Cannot access contents of the page.");
+      const answer = this.scriptAnswer?.(i.func.name, i.args[0], i.target);
+      return answer === undefined ? [] : [{ frameId: 0, result: answer }];
     },
   };
 

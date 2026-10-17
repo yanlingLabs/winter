@@ -278,6 +278,69 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertEqual(events.first?.callId, "c0", "named by the request that opened it")
     }
 
+    /// Round 19 (the controller's ruling; the model-based test's ordinary seed 35): the user, back on their own desktop
+    /// during a visit, ⌃-arrows into the visited desktop, and it lands 3 ms before the visit closes — not heard yet. The
+    /// visit's end judges what is in front FIRST: their switch into the visited desktop is their place, so no return is
+    /// issued and they stay there.
+    func testTheVisitsEndJudgesWhatIsInFrontBeforeItReturns() async throws {
+        world()
+        core.switchInputObservableOverride = true
+        XCTAssertTrue(core.startGuardian(privatePath: true))
+        defer { core.stopGuardian() }
+        _ = try await click(visit: true)
+        XCTAssertEqual(userView, CUUserView(space: 2, front: pid), "the visit arrived")
+        core.onActivation(pid: pid)                       // the arrival, heard: the visit's
+        show(1); sys.front = user                         // they are back on their own desktop during the visit
+        core.onActivation(pid: user)
+        core.onSpaceChange()
+        // Their ⌃-arrow into the visited desktop…
+        let t0 = core.clock.nowSeconds()
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskControl, now: t0)
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, flags: .maskControl, keycode: 124, now: t0 + 0.001)
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: t0 + 0.002)
+        // …lands (the visited desktop shows, its app in front) — and the visit closes a moment later, before it is heard.
+        show(2); sys.front = pid
+        try await Task.sleep(nanoseconds: 5_000_000)
+        let reports = try await close()
+        XCTAssertEqual(userView, CUUserView(space: 2, front: pid), "left where they went — no return to their old desktop")
+        XCTAssertFalse(fronted.contains("1:500"), "no return was issued: \(fronted)")
+        XCTAssertEqual(reports.first?.userMoved, true, "the report says they moved")
+    }
+
+    /// L2 (the review of round 19): the visit's end decides on what is in front AFTER it judges it. Their ⌃-arrow into
+    /// the visited desktop lands unheard, the end judges it theirs — and during that judge they swipe back to their own
+    /// desktop: the end must see them there, never leave them "where they went" on a view read before the judge.
+    func testTheVisitsEndDecidesOnTheViewAfterItsJudge() async throws {
+        world()
+        core.switchInputObservableOverride = true
+        XCTAssertTrue(core.startGuardian(privatePath: true))
+        defer { core.stopGuardian() }
+        _ = try await click(visit: true)
+        core.onActivation(pid: pid)
+        show(1); sys.front = user
+        core.onActivation(pid: user)
+        core.onSpaceChange()
+        let t0 = core.clock.nowSeconds()
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: .maskControl, now: t0)
+        core.noteTapEvent(type: .keyDown, sourcePid: 0, userData: 0, flags: .maskControl, keycode: 124, now: t0 + 0.001)
+        core.noteTapEvent(type: .flagsChanged, sourcePid: 0, userData: 0, flags: [], now: t0 + 0.002)
+        show(2); sys.front = pid
+        var swiped = false
+        core.moveJudged = { [unowned self] path, _, _ in
+            guard path == "a desktop visit's end", !swiped else { return }
+            swiped = true                                  // they swipe back while the end judges
+            core.noteSwitchInput(now: core.clock.nowSeconds(), .desktop)
+            show(1); sys.front = user
+        }
+        try await Task.sleep(nanoseconds: 5_000_000)
+        let reports = try await close()
+        core.moveJudged = nil
+        XCTAssertTrue(swiped)
+        XCTAssertEqual(userView, CUUserView(space: 1, front: user), "left where they are — never pulled back to the visited desktop")
+        XCTAssertEqual(core.guardianPlace(), CUGuardedView(app: user, space: 1), "their place is where they swiped to")
+        _ = reports
+    }
+
     func testTheVisitClosesAGraceAfterItsLastAction() async throws {
         world()
         core.visitGraceMs = CUCore.visitCloseGraceMs

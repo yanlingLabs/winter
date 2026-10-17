@@ -256,6 +256,26 @@ final class ServerHandshakeTests: XCTestCase {
         XCTAssertEqual(armed, [true, false])
     }
 
+    func testAClosedDaemonConnectionEndsTheWatchesItArmedAndAWatchEventReachesIt() async throws {
+        let watches = FakeWatches()
+        let rig = await Rig(watches: watches)
+        try await start(rig)
+        do {
+            let client = try LineClient(path: socketPath)
+            XCTAssertNotNil(client.hello(home: home)?["result"])
+            client.send(id: 2, method: "watch.arm", params: #"{"targetId":"t1","watchId":"wk_1","condition":{"kind":"clicked","ref":3}}"#)
+            XCTAssertEqual(client.response(id: 2)?["result"]?["targetLabel"], .string("Mail — Inbox"))
+            await MainActor.run { rig.coordinator.watchEvent(CUWatchEvent(watchId: "wk_1", outcome: .fired, at: 42, detail: "clicked")) }
+            let note = client.readLine()
+            XCTAssertEqual(note?["method"], .string("watchEvent"))
+            XCTAssertEqual(note?["params"], .object(["watchId": .string("wk_1"), "outcome": .string("fired"), "at": .number(42),
+                                                     "detail": .string("clicked")]))
+        } // the client closes here
+        let owner = try XCTUnwrap(watches.armed.first?.connection)
+        let closed = await eventually { watches.closedConnections == [owner] }
+        XCTAssertTrue(closed, "the watches of the closed connection end with it")
+    }
+
     func testASessionSharedByTwoConnectionsSurvivesUntilTheLastCloses() async throws {
         let rig = await Rig()
         try await start(rig)

@@ -393,14 +393,14 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
   // in SYMLINKS are symlinks — which release.ts's real callbacks filter out, because `find
   // -type f` neither counts nor traverses them.
   const SYMLINKS = new Set([
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Libraries",
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Resources",
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/Current",
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries",
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources",
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/Current",
   ]);
   const tree: Record<string, string[] | null> = {
     "": ["Contents"],
-    Contents: ["MacOS", "Resources", "Frameworks"],
+    Contents: ["MacOS", "Resources", "Frameworks", "Helpers"],
     "Contents/MacOS": ["Winter", "WinterHelper"],
     "Contents/MacOS/Winter": null,
     "Contents/MacOS/WinterHelper": null,
@@ -410,28 +410,33 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     "Contents/Resources/Licenses/CEF-LICENSE.txt": null,
     "Contents/Resources/Licenses/CREDITS.html": null,
     Frameworks: null, // unreachable; present only to prove absolute paths are used, not names
-    "Contents/Frameworks": ["Sparkle.framework", "Chromium Embedded Framework.framework"],
+    "Contents/Frameworks": ["Sparkle.framework"],
     "Contents/Frameworks/Sparkle.framework": ["Sparkle"],
     "Contents/Frameworks/Sparkle.framework/Sparkle": null,
+    // Winter's one Chromium, inside the nested Winter Headless helper.
+    "Contents/Helpers": ["Winter Headless.app"],
+    "Contents/Helpers/Winter Headless.app": ["Contents"],
+    "Contents/Helpers/Winter Headless.app/Contents": ["Frameworks"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks": ["Chromium Embedded Framework.framework"],
     // Framework root: the three top-level symlinks plus the real Versions/ dir.
-    "Contents/Frameworks/Chromium Embedded Framework.framework": ["Chromium Embedded Framework", "Libraries", "Resources", "Versions"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Libraries": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Resources": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions": ["A", "Current"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/Current": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A": ["Chromium Embedded Framework", "Libraries", "Resources", "_CodeSignature"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Chromium Embedded Framework": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/_CodeSignature": ["CodeResources"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/_CodeSignature/CodeResources": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries": ["libcef_sandbox.dylib"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries/libcef_sandbox.dylib": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources": ["resources.pak", "en.lproj", "sw.lproj"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/resources.pak": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/en.lproj": ["locale.pak"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/en.lproj/locale.pak": null,
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj": ["locale.pak"],
-    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj/locale.pak": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework": ["Chromium Embedded Framework", "Libraries", "Resources", "Versions"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Resources": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions": ["A", "Current"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/Current": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A": ["Chromium Embedded Framework", "Libraries", "Resources", "_CodeSignature"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Chromium Embedded Framework": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/_CodeSignature": ["CodeResources"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/_CodeSignature/CodeResources": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries": ["libcef_sandbox.dylib"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries/libcef_sandbox.dylib": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources": ["resources.pak", "en.lproj", "sw.lproj"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/resources.pak": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/en.lproj": ["locale.pak"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/en.lproj/locale.pak": null,
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj": ["locale.pak"],
+    "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj/locale.pak": null,
   };
   const ROOT = "/out/Winter.app";
   const rel = (absPath: string) => (absPath === ROOT ? "" : absPath.slice(ROOT.length + 1));
@@ -452,7 +457,7 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
 
   test("the shipped exclusion list removes the .lproj packs and NOTHING else", () => {
     const plan = nameScanPlan({ ...io, isExcluded });
-    const fw = `${ROOT}/Contents/Frameworks/Chromium Embedded Framework.framework`;
+    const fw = `${ROOT}/Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework`;
     expect(plan.excluded).toEqual([`${fw}/Versions/A/Resources/en.lproj`, `${fw}/Versions/A/Resources/sw.lproj`]);
     // Every real (non-symlink) leaf file except the two locale packs must be covered.
     const files = Object.entries(tree)
@@ -476,11 +481,12 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
 
   test("subtrees with nothing excluded are emitted whole, so the target list stays auditable", () => {
     const plan = nameScanPlan({ ...io, isExcluded });
-    // Sparkle and MacOS are untouched by the exclusion: one path each, not one per file.
-    expect(plan.targets).toContain(`${ROOT}/Contents/Frameworks/Sparkle.framework`);
+    // Sparkle (all of Winter.app's own Frameworks now) and MacOS are untouched by the exclusion: one path each, not one
+    // per file.
+    expect(plan.targets).toContain(`${ROOT}/Contents/Frameworks`);
     expect(plan.targets).toContain(`${ROOT}/Contents/MacOS`);
     // The CEF Mach-O, its dylibs and the non-locale resources are all still scanned.
-    const fw = `${ROOT}/Contents/Frameworks/Chromium Embedded Framework.framework`;
+    const fw = `${ROOT}/Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework`;
     expect(plan.targets).toContain(`${fw}/Versions/A/Chromium Embedded Framework`);
     expect(plan.targets).toContain(`${fw}/Versions/A/Libraries`);
     expect(plan.targets).toContain(`${fw}/Versions/A/Resources/resources.pak`);
@@ -508,7 +514,7 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
   });
 
   test("NAME_SCAN_EXCLUSIONS matches locale dirs only — not the framework, its binary, or CREDITS", () => {
-    const fw = "Contents/Frameworks/Chromium Embedded Framework.framework";
+    const fw = "Contents/Helpers/Winter Headless.app/Contents/Frameworks/Chromium Embedded Framework.framework";
     const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));
     expect(m(`${fw}/Versions/A/Resources/sw.lproj`)).toBe(true);
     expect(m(`${fw}/Versions/A/Resources/zh-TW.lproj`)).toBe(true);
@@ -525,6 +531,8 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     // The top-level `Resources` SYMLINK route is deliberately unmatched — the walker never
     // follows it, so matching it too would be dead policy hiding a walker regression.
     expect(m(`${fw}/Resources/sw.lproj`)).toBe(false);
+    // The old layout's path (Winter.app's own Frameworks) holds no Chromium any more: nothing there is excluded.
+    expect(m("Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj")).toBe(false);
   });
 
   test("NAME_SCAN_EXCLUSIONS matches vendored Monaco's vs/ tree only — not the app/ page shell or EditorAssets itself", () => {

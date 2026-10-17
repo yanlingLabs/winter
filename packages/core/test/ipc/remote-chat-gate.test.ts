@@ -14,7 +14,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 // updated). Slice C now ships the phone's own chat surface, so this file FLIPS: chat is remote-
 // eligible again, and the mechanism (assertRemoteMayUseSession + the session.list filter) is
 // proven to still generalize via a synthetic cowork-shaped session (mode written straight to the
-// store — cowork has no protocol/session.create support to register anywhere). Harness shape
+// store — `session.create` refuses cowork, so there is nothing to register anywhere). Harness shape
 // duplicated from remote-role.test.ts — this codebase's convention is no shared test-harness
 // module; every test/ipc/*.test.ts carries its own copy.
 
@@ -90,13 +90,12 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     return c;
   }
 
-  // A synthetic cowork-shaped session for the mechanism proof (T1 requirement 2). "cowork" has NO
-  // protocol/session.create support — SessionCreatedEvent's mode enum (protocol/src/events.ts)
-  // stays three-valued (code/dispatch/chat) — so store.createSession's own event-append path would
-  // reject it via SessionEvent.parse's zod validation (a real ZodError, not just a TS type error).
-  // Writing the store's `mode` column directly, bypassing the event log entirely, is exactly the
-  // "no registration needed" the mechanism proof calls for: nothing about "cowork" needs to be
-  // taught to the protocol for assertRemoteMayUseSession/session.list to refuse it anyway.
+  // A synthetic cowork-shaped session for the mechanism proof (T1 requirement 2). "cowork" is a RECOGNISED
+  // mode (protocol SESSION_MODES) but nothing can create one — `session.create` refuses it for every role
+  // and `store.createSession` throws — so the row is written straight to the store's `mode` column,
+  // bypassing the event log entirely. That is exactly the "no registration needed" the mechanism proof
+  // calls for: nothing about "cowork" needs to be taught to assertRemoteMayUseSession/session.list to
+  // refuse it anyway (the creation refusal itself: session-create-cowork.test.ts).
   function makeCoworkSession(store: SessionStore): string {
     const id = store.createSession("global");
     (store as any).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["cowork", id]);
@@ -105,8 +104,8 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
 
   // FLIP 1 (was "session.list omits chat sessions for remote, keeps them for local"): Slice C
   // lifts chat into remote's view. The narrow-not-blanket proof now uses a cowork-shaped session
-  // (mode written straight to the store — no session.create/protocol support for "cowork" exists,
-  // by design; see REMOTE_ELIGIBLE_SESSION_MODES's doc comment in server.ts) in place of the old
+  // (mode written straight to the store — `session.create` refuses "cowork", by design; see
+  // REMOTE_ELIGIBLE_SESSION_MODES's doc comment in server.ts) in place of the old
   // code-vs-chat contrast, since chat is no longer the mode being excluded.
   test("session.list now includes chat sessions for remote (Slice C), still excludes a cowork-shaped session", async () => {
     const { store, socketPath, harnessToken, remoteToken } = await boot();
@@ -185,8 +184,8 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
   });
 
   // The mechanism proof (T1 requirement 2): assertRemoteMayUseSession is GENERALIZED, not deleted.
-  // A cowork-shaped session — mode written directly to the store; there is no session.create or
-  // wire support for "cowork" to register anywhere, deliberately — is still refused for remote on
+  // A cowork-shaped session — mode written directly to the store; `session.create` refuses "cowork",
+  // so there is nothing to register anywhere, deliberately — is still refused for remote on
   // every one of the same eleven methods, exactly like chat used to be before this slice. The two sync
   // verbs (Chat Slice D task 2) run this gate BEFORE their own stricter chat-only check precisely
   // so they answer with the SAME "not available to remote clients" message as everything else here.

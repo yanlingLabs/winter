@@ -1,0 +1,27 @@
+{
+  "files": {
+    "bootstrap-order.json": {
+      "sha256": "36be531467c3ceb9d91f0f2cefb02ec40fba324878a021fe5247317a3c389ca4",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sourcePath": "packages/core/test/cowork/native/vectors/bootstrap-order.json",
+      "sourceRepository": "yanlingLabs/winter"
+    },
+    "mux-frames.json": {
+      "sha256": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sourcePath": "packages/core/test/cowork/native/vectors/mux-frames.json",
+      "sourceRepository": "yanlingLabs/winter"
+    },
+    "runtime-flow.json": {
+      "sha256": "c72950ed10d800447bb17bf14a6a076ddf995e4f9d4e2de968c8a218452727b7",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sourcePath": "packages/core/test/cowork/native/vectors/runtime-flow.json",
+      "sourceRepository": "yanlingLabs/winter"
+    }
+  },
+  "formatVersion": 1,
+  "note": "Byte-identical copies of the S1 golden vectors. The guest copies the contract, never the other way round; edit nothing here, re-copy from the contract branch and update this pin in the same change."
+}

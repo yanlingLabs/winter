@@ -10,6 +10,8 @@ protocol CUAXBackend: AnyObject {
     func application(_ pid: pid_t) -> AXUIElement
     func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef?
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]?
+    /// The attributes the element names; nil when the read failed (unknown — never taken for "none").
+    func attributeNames(_ e: AXUIElement) -> [String]?
     func actions(_ e: AXUIElement) -> [String]
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws
@@ -19,6 +21,12 @@ protocol CUAXBackend: AnyObject {
     /// The AX elements of windows `kAXWindowsAttribute` omits (another Space, full screen), by window id, in
     /// one remote-token walk that may stop at the first it finds; private.
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement]
+    /// The process an element belongs to; nil when it can't be told (the act's write guard then takes it for the
+    /// target's). Default: `AXUIElementGetPid` (CUCore+ActGuard).
+    func ownerPid(_ e: AXUIElement) -> pid_t?
+    /// The app's own hit test: the element at `point` (screen points) as the app answers it
+    /// (`AXUIElementCopyElementAtPosition` — WebKit's hit test sees `display:contents` and overflowing children).
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement?
 }
 
 extension CUAXBackend {
@@ -51,11 +59,17 @@ final class CULiveAX: CUAXBackend {
     func application(_ pid: pid_t) -> AXUIElement { AX.app(pid) }
     func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? { AX.attribute(e, name) }
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? { AX.copyMultiple(e, names) }
+    func attributeNames(_ e: AXUIElement) -> [String]? { AX.attributeNames(e) }
     func actions(_ e: AXUIElement) -> [String] { AX.actions(e) }
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool { AX.isSettable(e, name) }
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws { try AX.set(e, name, value) }
     func perform(_ e: AXUIElement, _ action: String) throws { try AX.perform(e, action) }
     func isAlive(_ e: AXUIElement) -> Bool { AX.isAlive(e) }
+    func elementAt(pid: pid_t, _ point: CGPoint) -> AXUIElement? {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AX.app(pid), Float(point.x), Float(point.y), &hit) == .success else { return nil }
+        return hit
+    }
     func windowID(_ e: AXUIElement) -> CGWindowID? { AX.windowID(e) }
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] {
         AX.windowsByRemoteToken(pid: pid, wanted: Set(windowIDs), stopAtFirst: true).found
@@ -115,16 +129,84 @@ protocol CUSystemBackend: AnyObject {
     /// The running app whose Dock tile is under `point` (the Dock, `dockPid`, read over accessibility: the tile's
     /// `AXURL` is the app's bundle), if any — so a Dock click is input for THAT app.
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t?
+    /// What a click in the Dock where no RUNNING app's tile is would do (R18-a): true — the tile of an app that is not
+    /// running (it launches it) or Launchpad; false — the Trash, a stack, a folder, a minimized window, a separator; nil —
+    /// unreadable (an accessibility timeout), never a launcher.
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool?
+    /// What a double-click in a Finder window at `point` opens (R18-a): true — an application or a document; false — a
+    /// folder (it opens in Finder); nil — unreadable.
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool?
+    /// The running instances of macOS's Open/Save panel service (`com.apple.appkit.xpc.openAndSavePanelService`), each
+    /// with the app responsible for it (nil: unreadable) and its age. Read only when a key goes into a sheet.
+    func openSavePanelServices() -> [CUPanelService]
+}
+
+/// One running instance of the Open/Save panel service.
+struct CUPanelService: Equatable {
+    var pid: pid_t
+    /// The app it serves (`responsibility_get_pid_responsible_for_pid`); nil when that can't be read.
+    var responsible: pid_t?
+    /// Seconds since it started; nil when unreadable.
+    var age: TimeInterval?
 }
 
 extension CUSystemBackend {
+    func openSavePanelServices() -> [CUPanelService] { [] }
     func processAge(pid: pid_t) -> TimeInterval? { nil }
     func isRegularApp(_ pid: pid_t) -> Bool? { nil }
     func runningPid(bundleId: String) -> pid_t? { nil }
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? { nil }
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? { nil }
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? { nil }
 }
 
 final class CULiveSystem: CUSystemBackend {
+    /// The file URL of the item under `point` in `pid`'s accessibility tree (its own `AXURL`, or its parent's — a Finder
+    /// icon's name sits in its row or cell); `.failure` when accessibility did not answer.
+    private func itemURL(at point: CGPoint, pid: pid_t) -> Result<URL?, Error> {
+        struct Unread: Error {}
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)  // the session tap's thread: never held up by a busy app
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success, var item = hit else {
+            return .failure(Unread())
+        }
+        for _ in 0..<3 {
+            AXUIElementSetMessagingTimeout(item, 0.1)
+            var raw: CFTypeRef?
+            let e = AXUIElementCopyAttributeValue(item, "AXURL" as CFString, &raw)
+            if e == .success, let v = raw {
+                let url: URL? = CFGetTypeID(v) == CFURLGetTypeID() ? (v as! URL) : (v as? String).flatMap(URL.init(string:))
+                return .success(url)
+            }
+            if e == .cannotComplete { return .failure(Unread()) }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(item, kAXParentAttribute as CFString, &parent) == .success, let p = parent,
+                  CFGetTypeID(p) == AXUIElementGetTypeID() else { return .success(nil) }
+            item = p as! AXUIElement
+        }
+        return .success(nil)
+    }
+
+    func dockItemLaunches(at point: CGPoint, dockPid: pid_t) -> Bool? {
+        guard case .success(let u) = itemURL(at: point, pid: dockPid) else { return nil }
+        guard let url = u?.standardizedFileURL.resolvingSymlinksInPath(), url.pathExtension == "app" else { return false }
+        // Launchpad is drawn by the Dock itself (no process of its own): a click on its tile opens it — a launcher.
+        let running = NSWorkspace.shared.runningApplications.contains {
+            !$0.isTerminated && $0.bundleURL?.standardizedFileURL.resolvingSymlinksInPath() == url
+        }
+        return !running
+    }
+
+    func finderItemLaunches(at point: CGPoint, finderPid: pid_t) -> Bool? {
+        guard case .success(let u) = itemURL(at: point, pid: finderPid) else { return nil }
+        guard let url = u, url.isFileURL else { return false }
+        if url.pathExtension == "app" { return true }
+        var dir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &dir) else { return nil }
+        return !dir.boolValue  // a document opens in its app; a folder opens in Finder
+    }
+
     func dockItemApp(at point: CGPoint, dockPid: pid_t) -> pid_t? {
         let dock = AXUIElementCreateApplication(dockPid)
         AXUIElementSetMessagingTimeout(dock, 0.1)  // the session tap's thread: never held up by a busy Dock
@@ -210,6 +292,11 @@ final class CULiveSystem: CUSystemBackend {
                                      parent: CUProcessFacts.parentPid(pid), executable: CUProcessFacts.executablePath(pid),
                                      appBundle: NSRunningApplication(processIdentifier: appPid)?.bundleURL?.resolvingSymlinksInPath().path)
     }
+    func openSavePanelServices() -> [CUPanelService] {
+        CUProcessFacts.pids(executableNamed: CUProcessFacts.panelServiceExecutable).map {
+            CUPanelService(pid: $0, responsible: CUProcessFacts.responsiblePid($0), age: processAge(pid: $0))
+        }
+    }
     func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
     func warpCursor(to p: CGPoint) {
         CGWarpMouseCursorPosition(p)
@@ -285,6 +372,24 @@ enum CUProcessFacts {
         guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
         let ppid = info.kp_eproc.e_ppid
         return ppid > 1 ? ppid : nil
+    }
+
+    /// The Open/Save panel service's executable name (AppKit's XPC service; a file panel of a sandboxed app — and, measured
+    /// 2026-10-14 on macOS 26, of Chrome — is drawn by it).
+    static let panelServiceExecutable = "com.apple.appkit.xpc.openAndSavePanelService"
+
+    /// Every running process whose executable file is named `name`.
+    static func pids(executableNamed name: String) -> [pid_t] {
+        let n = proc_listallpids(nil, 0)
+        guard n > 0 else { return [] }
+        var all = [pid_t](repeating: 0, count: Int(n) + 64)
+        let got = proc_listallpids(&all, Int32(all.count * MemoryLayout<pid_t>.stride))
+        guard got > 0 else { return [] }
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        return all.prefix(Int(got)).filter { pid in
+            guard pid > 0, proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return false }
+            return (String(cString: buf) as NSString).lastPathComponent == name
+        }
     }
 
     static func executablePath(_ pid: pid_t) -> String? {

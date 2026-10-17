@@ -566,7 +566,7 @@ describe("the description and the schema", () => {
       expect(d).toContain("  save(name: string, fn: (...args: any[]) => unknown): Promise<void>;");
       expect(d).toContain("Saved scripts can't be listed or read back: remember the names and parameters you will need.");
       expect(d).toContain("keeps a function for the rest of this session (until Winter restarts)");
-      expect(d).toContain("(`apps`, `browsers`, `screen`, `scripts`, `print`, `sleep`, `timeLeft`)");
+      expect(d).toContain("(`apps`, `browsers`, `screen`, `scripts`, `wakes`, `print`, `sleep`, `timeLeft`)");
       expect(d.indexOf("declare const scripts")).toBeGreaterThan(d.indexOf("declare const browsers"));
     });
   }

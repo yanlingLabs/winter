@@ -11,6 +11,8 @@
 // "Fixture Web" (WKWebView), "Fixture Canvas" (no accessibility), "Fixture Offspace" (full screen = its own Space).
 // Handles persist across calls in the session's runtime (`win()` binds a window once and keeps it).
 import { check, eventsSince, lastValue, MARKER, MIXED_TEXT, type Check, type FixtureEvent } from "./lib";
+import type { WakeObservation } from "./wake";
+import type { ChromeNeed, ChromeObservation, PageEvent } from "./chrome";
 
 export const FIXTURE_APP = "Winter CU Fixture";
 export const FIXTURE_BUNDLE = "dev.cu-live.fixture";
@@ -42,6 +44,12 @@ export interface VerifyContext {
   shots: readonly ImageStats[];
   /** A `desktopSwitch` scenario: what the runner saw of the desktop-switch prompt (absent otherwise). */
   prompt?: PromptObservation;
+  /** A `wake` scenario (`wake.ts`): what the runner saw of the wake trigger after the action (absent otherwise). */
+  wake?: WakeObservation;
+  /** A `chrome` scenario (`chrome.ts`): what its page POSTed to the runner since the scenario started… */
+  page?: readonly PageEvent[];
+  /** …and what the runner saw of the browser instance (its profile, remote debugging, the dialog). */
+  chrome?: ChromeObservation;
 }
 
 /**
@@ -126,6 +134,22 @@ export interface Scenario {
   desktopSwitch?: { answer: "allow" | "refuse"; afterMs: number };
   /** With `allowExcursionMs`: at most this many separate excursions (the open visit's "not back and forth", 5d). */
   maxExcursions?: number;
+  /**
+   * WAKE TRIGGERS (`wake.ts`): after the action's turn (and its 3 s watch), the runner — when `userClicks` names an
+   * element — brings the fixture to the front as the USER, counts the helper's new on-screen windows (the ring and the
+   * pill), and has the live-test helper click that element for the user (`test.userClick`; `stamp: "winter"` marks it as
+   * Winter's own instead); then it waits up to `withinMs` for the session's `computer-wake` turn (`VerifyContext.wake`),
+   * and runs `cleanup` (ComputerV2 code, after the prelude) as one more turn in the same session.
+   */
+  wake?: { userClicks?: string; window?: string; stamp?: "user" | "winter"; withinMs: number; cleanup?: string };
+  /**
+   * THE CHROME GROUP (`chrome.ts`): the Chrome for Testing instance this scenario needs — the runner launches it on a
+   * temp profile (a fresh one whenever the key changes), puts the user's app back in front, and adds `CHROME_PRELUDE`.
+   */
+  chrome?: ChromeNeed;
+  /** The chrome group's diagnostic row: the runner dumps the Size combo box's and the Title field's accessibility
+   *  attributes before the action and traces the app's focus every 50 ms through it (`ChromeObservation.attrs/trace`). */
+  chromeTrace?: boolean;
   verify(ctx: VerifyContext): Check[];
 }
 
@@ -461,7 +485,10 @@ report({ ok: true });`,
     // follows the REAL cursor; posted moves, before and after the synthetic activation, never reached its mouseEntered).
     // The Form window's "Native Hover Area" would show "Native Hidden Item": the hover's answer says nothing appeared and
     // the way out, and nothing is clicked in its place.
-    name: "hover on a native view in the background: nothing appears, and the answer says so", group: "click",
+    // Round 14: the round-12/13 live run saw the area's mouseEntered TWICE once (not reproduced since — run130: four
+    // background hovers, the area under the resting real cursor too, none). The row holds the ANSWER to what happened
+    // (nothing appeared → it says so and the way out; something appeared → it says what), and never a click or a move.
+    name: "hover on a native view in the background: the answer says what appeared (nothing, as measured)", group: "click",
     session: "fresh",
     before: [{ role: "main", cmd: "reset" }],
     code: `
@@ -470,9 +497,9 @@ const area = await pick(form, "Native Hover Area");
 await form.hover(area.ref, { ms: 600 });
 report({ ok: true });`,
     verify: (ctx) => [ok(ctx),
-      check("no mouseEntered reached the area (tracking follows the real cursor)", eventsSince(ctx.events, ctx.since, "form.hover").length === 0,
-        JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hover"))),
-      check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the window/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(0, 400)),
+      ...(eventsSince(ctx.events, ctx.since, "form.hover").length === 0
+        ? [check("the hover's answer says nothing appeared, and the way out", /nothing new appeared in the window/.test(ctx.output) && /requestForeground\(reason\) for a real hover/.test(ctx.output), ctx.output.slice(-600))]
+        : [check("the area's mouseEntered came (unexpected — reported): the answer says what appeared", /new element\(s\) appeared in the window/.test(ctx.output), `${JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hover"))} ${ctx.output.slice(-600)}`)]),
       check("nothing was clicked in its place", eventsSince(ctx.events, ctx.since, "form.hoveritem").length === 0,
         JSON.stringify(eventsSince(ctx.events, ctx.since, "form.hoveritem"))),
       check("the Form window's bind says nothing about hover (no web page in it)", !/don't react to hover/.test(ctx.output), ctx.output.slice(0, 300))],

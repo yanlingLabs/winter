@@ -41,6 +41,8 @@ test("actual use-point recheck refuses storage enabled by host preparation befor
 for (const mode of ["live", "retired", "daemon"]) test(mode === "daemon" ? "real daemon wiring rejects active embedded topology, direct host spawn and captured closure" : `real ${mode} embedded Worker closes resumably before storage activation without third-party descendant debt`, async () => {
   const child = Bun.spawn([process.execPath, "run", "--preload", join(import.meta.dir, "../preload.ts"), join(import.meta.dir, "fixtures/embedded-floor.ts"), mode], { env: process.env, stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  // A failing fixture says why: its exit code alone hid the cause of an intermittent CI failure.
+  if (code !== 0 || stderr.includes("error:")) console.error(`embedded-floor fixture (${mode}) exited ${code}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`);
   expect(code).toBe(0);
   expect(stderr).not.toContain("error:");
   expect(stdout.endsWith("embedded descendant gate verified\n")).toBe(true);

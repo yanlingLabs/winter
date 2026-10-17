@@ -61,6 +61,7 @@ struct ExpandedPillAccessoryButtons: View {
             .frame(width: DispatchPillMetrics.accessoryButtonSize, height: DispatchPillMetrics.accessoryButtonSize)
             .background(Circle().fill(Color.white.opacity(0.12)))
             .contentShape(Circle())
+            .pillHoverGlow(Color.white)
     }
 
     private func moreRow(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {

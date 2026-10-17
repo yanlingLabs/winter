@@ -39,6 +39,8 @@ export class FakeHelper {
   private nextSnap = 1;
   private nextShot = 1;
   readonly targets = new Map<string, FakeApp>();
+  /** Watches armed (`watch.arm`) and not cancelled. */
+  readonly watches = new Set<string>();
   /** Per-method overrides (throw `FakeHelperError` for a typed error). */
   readonly handlers: Record<string, Handler> = {};
   private readonly conns = new Set<{ deliver(line: string): void; close(): void }>();
@@ -161,6 +163,16 @@ export class FakeHelper {
       case "cancel":
         // `cancel {callId}` stops that call's in-flight requests (here: an on-screen prompt the daemon closed).
         for (const p of this.prompts) if (!p.closed && p.params.callId === params.callId) p.cancel();
+        return {};
+      // helper 1.17.0: a watch armed on a bound target answers its labels; cancel is idempotent.
+      case "watch.arm": {
+        const app = this.targets.get(String(params.targetId));
+        if (app === undefined) throw new FakeHelperError("target_lost", "gone", { reason: "unknown" });
+        this.watches.add(String(params.watchId));
+        return { element: { role: "button", name: "Send" }, targetLabel: `${app.name} — ${app.name} window` };
+      }
+      case "watch.cancel":
+        this.watches.delete(String(params.watchId));
         return {};
       case "target.release":
       case "turn.ended":

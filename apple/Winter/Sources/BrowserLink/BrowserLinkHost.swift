@@ -17,7 +17,8 @@ import WinterKit
 ///    rules), refused `not_allowed` before CEF sees it;
 ///  * **what leaves** — only subscribed, allowlisted events, `Network.*` params stripped;
 ///  * **no native UI from a held tab** — `BrowserNativeUIPolicy` flags on the tab while it is held, and
-///    the JS dialog the tab holds answered when DevTools cannot;
+///    the JS dialog the tab holds answered when DevTools cannot; none of it for a WATCH-ONLY hold (feature
+///    `watchOnly`: a wake trigger waiting on the user there, who keeps the tab's native UI);
 ///  * **telling the daemon a held tab went away** by a route the daemon did not take (`tabGone`).
 @MainActor
 final class BrowserLinkHost: BrowserLinkHandler {
@@ -78,6 +79,9 @@ final class BrowserLinkHost: BrowserLinkHandler {
     var onPresent: ((_ sessionId: String, _ tabId: String) -> Void)?
     /// When each download last reported progress (one report per `downloadProgressInterval`).
     private var lastProgress: [String: Date] = [:]
+    /// ComputerV2 Phase 4 (lane H3), feature `headless`: where `headless.show`/`hide`/`tabs` go — the app's
+    /// headless presentations (`HeadlessPresentStore`). Set by `BrowserLinkStarter`. `nil`: refused.
+    var headless: HeadlessPresentStore?
 
     init(runtime: BrowserRuntime, driver: BrowserLinkCEFDriver = .production, clock: Clock = .production,
          replan: (() -> Void)? = nil, downloadsRoot: String? = nil) {
@@ -99,11 +103,27 @@ final class BrowserLinkHost: BrowserLinkHandler {
         // Nothing can be held across links; `browserLinkLost` already let go. Belt for a lost that
         // never came.
         releaseEverything()
+        headless?.linkChanged()
     }
 
     func browserLinkLost() {
         linkId = nil
         releaseEverything()
+        headless?.linkChanged()
+    }
+
+    /// Feature `headless`: a headless tab shown in (or taken from) the panel, or the session's list of them. None of
+    /// it touches CEF here — the page lives in Winter Headless and reaches the panel over its own Mach channel.
+    func browserLinkHeadlessCommand(_ command: BrowserLinkHeadlessCommand, reply: BrowserLinkReplier) {
+        guard !runtime.isQuiescent else {
+            reply(.failure(code: .quiescent, message: "Winter is quitting"))
+            return
+        }
+        guard let headless else {
+            reply(.failure(code: .notAllowed, message: "this Winter can't show a headless tab"))
+            return
+        }
+        headless.handle(command, reply: reply)
     }
 
     func browserLinkCommand(_ command: BrowserLinkCommand, reply: BrowserLinkReplier) {
@@ -113,7 +133,7 @@ final class BrowserLinkHost: BrowserLinkHandler {
         }
         switch command.op {
         case .tabEnsure(let sessionId, let tabId, let url):
-            ensure(sessionId: sessionId, tabId: tabId, url: url, reply: reply)
+            ensure(sessionId: sessionId, tabId: tabId, url: url, watchOnly: command.watchOnly, reply: reply)
         case .tabRelease(let tabId):
             if release(tabId) { replan() }
             reply(.empty)
@@ -244,7 +264,10 @@ final class BrowserLinkHost: BrowserLinkHandler {
 
     // MARK: - tab.ensure
 
-    private func ensure(sessionId: String, tabId: String, url: String?, reply: BrowserLinkReplier) {
+    /// `watchOnly` (feature `watchOnly`, wake triggers): the hold sets none of the native-UI flags — the tab's dialogs,
+    /// prompts, file choosers, downloads, menus, keys and focus stay the user's while a wake trigger waits on it. It is a
+    /// hold all the same (it counts toward `maxHeldTabs`); a later `tab.ensure` without it takes the full hold back.
+    private func ensure(sessionId: String, tabId: String, url: String?, watchOnly: Bool = false, reply: BrowserLinkReplier) {
         let isNewHold = gates[tabId] == nil
         if isNewHold, gates.count >= Self.maxHeldTabs {
             reply(.failure(code: .notAllowed,
@@ -259,7 +282,7 @@ final class BrowserLinkHost: BrowserLinkHandler {
             reply(.failure(code: .notLive, message: "Winter could not make a browser for this tab"))
             return
         }
-        install(tabId: tabId, container: container)
+        install(tabId: tabId, container: container, watchOnly: watchOnly)
         if crashed.remove(tabId) != nil {
             driver.reload(container)
         }
@@ -267,9 +290,9 @@ final class BrowserLinkHost: BrowserLinkHandler {
                        reply: reply)
     }
 
-    private func install(tabId: String, container: PanelCEFContainerView) {
+    private func install(tabId: String, container: PanelCEFContainerView, watchOnly: Bool = false) {
         if gates[tabId] == nil { gates[tabId] = CDPTabGate() }
-        driver.setNativeUI(container, BrowserNativeUIPolicy.flags(held: true))
+        driver.setNativeUI(container, BrowserNativeUIPolicy.flags(held: !watchOnly))
         driver.setEventObserver(container) { [weak self] method, params, session in
             self?.event(tabId: tabId, method: method, params: params, cdpSessionId: session)
         }
@@ -434,7 +457,12 @@ final class BrowserLinkHost: BrowserLinkHandler {
                     reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
                     return
                 }
-                let result = Self.decode(payload) ?? .object([:])
+                // Unreadable here (Swift's decoder refuses a lone surrogate the browser may write): an error, never a
+                // silently empty result the engine would take for "nothing there".
+                guard let result = Self.decode(payload) else {
+                    reply(Self.unreadableResult(method))
+                    return
+                }
                 gates[tabId]?.noteResult(method: method, params: params, cdpSessionId: cdpSessionId, result: result)
                 reply(.ok(.object(["result": result])))
             } else if method == "Network.getResponseBody" {
@@ -443,8 +471,11 @@ final class BrowserLinkHost: BrowserLinkHandler {
                     reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
                     return
                 }
-                let result = CDPTabGate.filterResult(method: method, result: Self.decode(payload) ?? .object([:]))
-                reply(.ok(.object(["result": result])))
+                guard let decoded = Self.decode(payload) else {
+                    reply(Self.unreadableResult(method))
+                    return
+                }
+                reply(.ok(.object(["result": CDPTabGate.filterResult(method: method, result: decoded)])))
             } else {
                 reply(.okRaw(key: "result", json: payload))
             }
@@ -498,6 +529,12 @@ final class BrowserLinkHost: BrowserLinkHandler {
     }
 
     // MARK: - JSON
+
+    /// The answer for a browser result this side must read but can't: the browser's own `-32603` shape.
+    static func unreadableResult(_ method: String) -> BrowserLinkReply {
+        .failure(code: .cdpError, message: "the browser's answer to \(method) could not be read",
+                 data: .object(["cdpCode": .number(-32603), "cdpMessage": .string("unreadable result")]))
+    }
 
     static func decode(_ text: String) -> JSONValue? { decode(Data(text.utf8)) }
     static func decode(_ data: Data) -> JSONValue? { try? JSONDecoder().decode(JSONValue.self, from: data) }

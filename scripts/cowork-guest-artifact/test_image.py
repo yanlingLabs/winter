@@ -1,8 +1,12 @@
-import io, json, lzma, struct, tarfile, tempfile, unittest
+import hashlib, importlib.util, io, json, lzma, os, struct, subprocess, sys, tarfile, tempfile, unittest
 from unittest.mock import patch
 from pathlib import Path
+import image
 from image import Tree, elf, ar_members, add_deb, control_fields
 from packages import version_compare, closure, verify_release, HERE, bounded_file, download, xz_chunks, index_paragraphs, sha
+import verify as cpio_verify
+GUEST=HERE.parents[1]/'apple/Cowork/WinterCoworkGuest'
+PINS=json.loads((HERE/'pins.json').read_text())
 
 class ImageTests(unittest.TestCase):
     def test_cached_size_refuses_before_read_or_hash(self):
@@ -90,4 +94,496 @@ class ImageTests(unittest.TestCase):
         self.assertEqual([e['Package'] for e in closure(index,['root'])],['lib','root'])
         index['lib']['Version']='1'
         with self.assertRaises(ValueError):closure(index,['root'])
+
+
+TOOL_SOURCE_GOOD="""
+struct tool_device { const char *name; unsigned int minor; };
+static const struct tool_device tool_devices[]={
+    {"/dev/null",3},{"/dev/zero",5},{"/dev/full",7},{"/dev/random",8},{"/dev/urandom",9}
+};
+#define TOOL_DEVICE_COUNT (sizeof tool_devices/sizeof tool_devices[0])
+"""
+
+def load_guest_build():
+    spec=importlib.util.spec_from_file_location('guest_build',GUEST/'build.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+class GuestStartupTests(unittest.TestCase):
+    INIT=b'\x7fELF-init-bytes'
+    def tree(self,**changes):
+        tree=Tree();tree.add('init','file',changes.get('init',self.INIT),True,'winter-guest:init')
+        tree.add('opt/winter/libexec/linux-supervisor.py','file',b'x',False)
+        return tree
+    def test_exactly_the_pinned_init_is_accepted(self):
+        image.check_startup(self.tree(),sha(self.INIT))
+    def test_a_missing_or_different_init_is_refused(self):
+        with self.assertRaises(ValueError):image.check_startup(Tree(),sha(self.INIT))
+        with self.assertRaises(ValueError):image.check_startup(self.tree(init=b'other'),sha(self.INIT))
+    def test_init_must_be_a_regular_0555_file(self):
+        tree=Tree();tree.add('init','file',self.INIT,False)
+        with self.assertRaises(ValueError):image.check_startup(tree,sha(self.INIT))
+        tree=Tree();tree.add('init','symlink',b'opt/winter/x')
+        with self.assertRaises(ValueError):image.check_startup(tree,sha(self.INIT))
+        # a symlink whose target bytes happen to hash to the pinned digest is still not a regular file
+        with self.assertRaises(ValueError):image.check_startup(tree,sha(b'opt/winter/x'))
+        # a directory is 0555 too, and empty bytes hash to whatever digest is pinned for them: only the kind check refuses it
+        tree=Tree();tree.add('init','directory')
+        with self.assertRaises(ValueError):image.check_startup(tree,sha(b''))
+    def test_every_other_startup_path_is_still_refused(self):
+        for name in image.STARTUP_PATHS:
+            for kind,data in (('file',b'#!/bin/sh'),('symlink',b'nowhere'),('directory',b'')):
+                with self.subTest(name=name,kind=kind):
+                    tree=self.tree();tree.add(name,kind,data,kind=='file')
+                    with self.assertRaises(ValueError):image.check_startup(tree,sha(self.INIT))
+    def test_a_startup_program_behind_a_root_alias_is_refused(self):
+        tree=self.tree();tree.add('opt/winter/environment/base/sbin/init','file',b'x',True);tree.add('sbin','symlink',b'opt/winter/environment/base/sbin')
+        with self.assertRaises(ValueError):image.check_startup(tree,sha(self.INIT))
+
+class ToolDeviceTests(unittest.TestCase):
+    def test_the_five_devices(self):
+        self.assertEqual(image.check_tool_devices(TOOL_SOURCE_GOOD),image.TOOL_DEVICES_EXPECTED)
+    def test_a_virtio_port_block_device_or_kmsg_is_refused(self):
+        for extra in ('{"/dev/vport0p0",0}','{"/dev/vport1p0",0}','{"/dev/vda",0}','{"/dev/kmsg",11}','{"/dev/hvc0",0}'):
+            with self.subTest(extra):
+                with self.assertRaises(ValueError):image.check_tool_devices(TOOL_SOURCE_GOOD.replace('{"/dev/urandom",9}','{"/dev/urandom",9},'+extra))
+    def test_a_replaced_or_missing_entry_or_unfindable_inventory_is_refused(self):
+        with self.assertRaises(ValueError):image.check_tool_devices(TOOL_SOURCE_GOOD.replace('"/dev/full"','"/dev/vport0p1"'))
+        with self.assertRaises(ValueError):image.check_tool_devices(TOOL_SOURCE_GOOD.replace('{"/dev/full",7},',''))
+        with self.assertRaises(ValueError):image.check_tool_devices('int main(void){return 0;}')
+
+class BaseConfigTests(unittest.TestCase):
+    DIGESTS={'file-worker':'a'*64,'process-worker':'b'*64,'linux-tool-compartment':'c'*64}
+    def test_the_static_part_is_canonical_one_line_and_names_the_image_paths(self):
+        data=image.supervisor_base_config(self.DIGESTS)
+        config=json.loads(data)
+        self.assertEqual(data,json.dumps(config,sort_keys=True,separators=(',',':')).encode())
+        self.assertNotIn(b'\n',data)
+        self.assertEqual(config['artifacts']['launcher'],{'path':'/opt/winter/helpers/linux-tool-compartment','sha256':'c'*64})
+        self.assertEqual(config['artifacts']['fileWorker']['path'],'/opt/winter/helpers/file-worker')
+        self.assertEqual(config['artifacts']['processWorker']['sha256'],'b'*64)
+        self.assertEqual((config['environment'],config['controlDirectory'],config['protectedStoreDirectories']),('/opt/winter/environment/base','/run/winter/control',[]))
+    def test_it_does_not_carry_what_pid_1_supplies(self):
+        data=image.supervisor_base_config(self.DIGESTS)
+        self.assertNotIn(b'guestBootId',data);self.assertNotIn(b'conversations',data)
+    def test_it_fits_pid_1s_static_ceiling(self):
+        self.assertLess(len(image.supervisor_base_config(self.DIGESTS)),8192)
+
+class ExpectedArtifactTests(unittest.TestCase):
+    RECEIPT={'runtimeSha256':'1','cpioSha256':'2','rootManifestSha256':'3','sourceHelpers':{'file-worker.c':{'binarySha256':'4'}}}
+    EXPECTED={'runtimeSha256':'1','cpioSha256':'2','rootManifestSha256':'3','helperBinarySha256':{'file-worker.c':'4'}}
+    def test_unpinned_is_reported_never_silently_accepted(self):
+        self.assertEqual(image.check_expected(self.RECEIPT,None),['expectedArtifact is not pinned'])
+    def test_a_match_is_clean_and_each_mismatch_is_named(self):
+        self.assertEqual(image.check_expected(self.RECEIPT,self.EXPECTED),[])
+        for key in ('runtimeSha256','cpioSha256','rootManifestSha256'):
+            changed=dict(self.EXPECTED,**{key:'x'})
+            self.assertIn(key,image.check_expected(self.RECEIPT,changed)[0])
+        changed=dict(self.EXPECTED,helperBinarySha256={'file-worker.c':'x'})
+        self.assertIn('file-worker.c',image.check_expected(self.RECEIPT,changed)[0])
+
+class PinTests(unittest.TestCase):
+    def test_the_sdk_pin_is_a_full_commit_and_records_what_it_replaced(self):
+        self.assertRegex(PINS['sdkCommit'],r'^[0-9a-f]{40}$')
+        self.assertRegex(PINS['sdkPin']['previousCommit'],r'^[0-9a-f]{40}$')
+        self.assertNotEqual(PINS['sdkCommit'],PINS['sdkPin']['previousCommit'])
+        self.assertEqual(PINS['sdkCommit'],PINS['sdkPin']['mainAt'])
+        self.assertEqual(PINS['sdkCommit'],'7e71929d0231be2d77645bfa47ee2b550f3add22')
+        self.assertIn(29,PINS['sdkPin']['mergedPullRequests']);self.assertIn(30,PINS['sdkPin']['mergedPullRequests'])
+        self.assertRegex(PINS['sdkPin']['supervisorSha256'],r'^[0-9a-f]{64}$')
+    def test_the_current_artifact_is_pinned_and_the_last_real_one_before_the_re_pin_is_kept(self):
+        self.assertEqual(set(PINS['expectedArtifact']),{'runtimeSha256','cpioSha256','rootManifestSha256','helperBinarySha256'})
+        for key in ('runtimeSha256','cpioSha256','rootManifestSha256'):self.assertRegex(PINS['expectedArtifact'][key],r'^[0-9a-f]{64}$')
+        self.assertNotEqual(PINS['expectedArtifact']['cpioSha256'],PINS['previousExpectedArtifact']['expectedArtifact']['cpioSha256'])
+        self.assertEqual(PINS['previousExpectedArtifact']['sdkCommit'],PINS['sdkPin']['previousCommit'])
+        self.assertEqual(set(PINS['previousExpectedArtifact']['expectedArtifact']),{'runtimeSha256','cpioSha256','rootManifestSha256','helperBinarySha256'})
+    def test_no_util_linux_and_no_blkid_dependency(self):
+        lock=json.loads((HERE/'packages.lock.json').read_text())
+        names={entry['Package'] for entry in lock['packages']}
+        self.assertNotIn('util-linux',PINS['packages']);self.assertNotIn('util-linux',names)
+        self.assertNotIn('util-linux-extra',names);self.assertNotIn('mount',names)
+        self.assertTrue({'e2fsprogs','libext2fs2'}<=names)
+        self.assertNotIn('blkid',image.__doc__ or '')
+    def test_every_guest_pin_is_a_real_digest_of_the_current_sources(self):
+        build=load_guest_build()
+        for name,entry in PINS['guest']['programs'].items():
+            self.assertRegex(entry['binarySha256'],r'^[0-9a-f]{64}$');self.assertNotEqual(entry['binarySha256'],'0'*64)
+            self.assertEqual(entry['sourceSha256'],build.source_digest(build.PROGRAMS[name]+build.HEADERS),name+' source changed: rebuild and re-pin')
+        for name,entry in PINS['guest']['scripts'].items():
+            path=GUEST/PINS['guest']['scriptPaths'][name]
+            self.assertEqual(entry['sha256'],hashlib.sha256(path.read_bytes()).hexdigest(),name+' changed: re-pin')
+    def test_the_pinned_zig_is_the_one_the_guest_build_demands(self):
+        build=load_guest_build()
+        self.assertEqual(PINS['zig']['version'],build.ZIG_VERSION);self.assertEqual(PINS['guest']['zig'],build.ZIG_VERSION)
+    def test_build_digests_are_checked_against_a_real_build_when_zig_is_provided(self):
+        zig=os.environ.get('WINTER_PINNED_ZIG')
+        if not zig:self.skipTest('set WINTER_PINNED_ZIG to the pinned Zig 0.14.1 to rebuild and compare')
+        with tempfile.TemporaryDirectory() as folder:
+            programs,scripts,receipt=image.build_guest(Path(zig),Path(folder)/'guest',PINS)
+        self.assertEqual(sha(programs['init']),PINS['guest']['programs']['init']['binarySha256'])
+
+class GuestBuildCheckTests(unittest.TestCase):
+    def fake_build(self,receipt):
+        def run(command,**kwargs):
+            out=Path(command[command.index('--out')+1]);out.mkdir(parents=True)
+            for name in receipt['programs']:(out/name).write_bytes(name.encode())
+            (out/'receipt.json').write_text(json.dumps(receipt));return subprocess.CompletedProcess(command,0,'','')
+        return run
+    def receipt(self,**changes):
+        pins=PINS['guest'];base={'programs':{n:dict(e) for n,e in pins['programs'].items()},'scripts':{n:dict(e) for n,e in pins['scripts'].items()},'zig':'0.14.1'}
+        for key,value in changes.items():base[key]=value
+        return base
+    def build(self,receipt):
+        with tempfile.TemporaryDirectory() as folder,patch.object(image.subprocess,'run',self.fake_build(receipt)):
+            return image.build_guest(Path('zig'),Path(folder)/'guest',PINS)
+    def test_a_matching_build_is_accepted(self):
+        programs,scripts,_=self.build(self.receipt())
+        self.assertEqual(set(programs),set(PINS['guest']['programs']));self.assertEqual(set(scripts),set(PINS['guest']['scripts']))
+    def test_a_different_binary_or_drifted_source_or_script_is_refused(self):
+        receipt=self.receipt();receipt['programs']['init']['binarySha256']='f'*64
+        with self.assertRaises(ValueError):self.build(receipt)
+        receipt=self.receipt();receipt['programs']['winter-guest-relay']['sourceSha256']='f'*64
+        with self.assertRaises(ValueError):self.build(receipt)
+        receipt=self.receipt();receipt['scripts']['guest_bootstrap.py']['sha256']='f'*64
+        with self.assertRaises(ValueError):self.build(receipt)
+    def test_a_failed_build_is_an_error(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(image.subprocess,'run',lambda *a,**k:subprocess.CompletedProcess(a,1,'','boom')):
+            with self.assertRaises(ValueError):image.build_guest(Path('zig'),Path(folder)/'guest',PINS)
+
+class GuestFilesTests(unittest.TestCase):
+    PROGRAMS={'init':b'\x7fELF-init','winter-guest-relay':b'\x7fELF-relay'}
+    SCRIPTS={'guest_bootstrap.py':b'print(1)\n'}
+    DIGESTS={'file-worker':'a'*64,'process-worker':'b'*64,'linux-tool-compartment':'c'*64}
+    def tree(self):
+        tree=Tree();image.add_guest_files(tree,self.PROGRAMS,self.SCRIPTS,self.DIGESTS);return tree
+    def test_the_guest_files_land_where_pid_1_looks_for_them(self):
+        tree=self.tree()
+        self.assertEqual((tree.nodes['init']['mode'],tree.nodes['init']['kind']),(0o555,'file'))
+        self.assertEqual(tree.nodes['opt/winter/libexec/winter-guest-relay']['mode'],0o555)
+        self.assertEqual(tree.nodes['opt/winter/libexec/guest_bootstrap.py']['mode'],0o444)
+        self.assertEqual(tree.nodes['opt/winter/etc/supervisor-base.json']['mode'],0o444)
+        for path in ('winter-guest-relay','guest_bootstrap.py'):self.assertIn('opt/winter/libexec/'+path,tree.nodes)
+    def test_the_added_init_passes_exactly_the_pinned_check(self):
+        image.check_startup(self.tree(),sha(self.PROGRAMS['init']))
+        with self.assertRaises(ValueError):image.check_startup(self.tree(),sha(b'other'))
+    def test_the_static_config_is_written_with_a_trailing_newline_that_pid_1_strips(self):
+        data=self.tree().nodes['opt/winter/etc/supervisor-base.json']['data']
+        self.assertTrue(data.endswith(b'}\n'));self.assertEqual(data.count(b'\n'),1)
+    def test_the_required_programs_include_the_probe_tool_and_not_blkid(self):
+        self.assertIn('/sbin/dumpe2fs',image.REQUIRED_PROGRAMS);self.assertIn('/sbin/mke2fs',image.REQUIRED_PROGRAMS);self.assertIn('/sbin/e2fsck',image.REQUIRED_PROGRAMS)
+        self.assertFalse(any('blkid' in path for path in image.REQUIRED_PROGRAMS))
+    def test_a_blkid_in_the_image_is_refused(self):
+        for path in ('sbin/blkid','opt/winter/environment/base/sbin/blkid','blkid'):
+            with self.subTest(path):
+                tree=Tree();tree.add(path,'file',b'x',True)
+                with self.assertRaises(ValueError):image.refuse_blkid(tree)
+        image.refuse_blkid(Tree())
+
+class CpioReadbackTests(unittest.TestCase):
+    """A tiny root through the real emitter and the independent reader (verify.py)."""
+    INIT=b'\x7fELF-pinned-init'
+    def write(self,folder,tree,init_digest=None,present=True,pinned=True):
+        folder.mkdir(exist_ok=True)
+        tree.cpio(folder/'immutable-root.cpio');(folder/'root.manifest.json').write_text(json.dumps(tree.manifest()))
+        (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':init_digest or sha(self.INIT),'initPresent':present,'reproducibilityPinned':pinned}))
+    def tree(self,init=None):
+        tree=Tree();tree.add('bin/tool','file',b'tool-content-0123456789',True);tree.add('proc','directory')
+        if init is not None:tree.add('init','file',init,True)
+        return tree
+    def test_a_root_with_exactly_the_pinned_init_verifies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.write(root,self.tree(self.INIT))
+            result=cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            self.assertTrue(result['startupPresent']);self.assertEqual(result['startupEntries'],['init'])
+    def test_an_unpinned_receipt_is_refused_unless_the_flag_names_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for value in (False, None, 'true', 1):
+                root=Path(folder)/str(value);self.write(root,self.tree(self.INIT),pinned=value)
+                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+                self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),allow_unpinned=True)['startupPresent'])
+            root=Path(folder)/'missing';self.write(root,self.tree(self.INIT));receipt=json.loads((root/'receipt.json').read_text());del receipt['reproducibilityPinned'];(root/'receipt.json').write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            root=Path(folder)/'ok';self.write(root,self.tree(self.INIT))
+            self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT))['startupPresent'])
+    def test_the_command_line_needs_the_named_flag_for_an_unpinned_receipt(self):
+        script=Path(cpio_verify.__file__)
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'unpinned';self.write(root,self.tree(self.INIT),pinned=False)
+            refused=subprocess.run([sys.executable,'-I','-S','-B',str(script),str(root),'--no-init'],capture_output=True,text=True)
+            self.assertNotEqual(refused.returncode,0);self.assertIn('ValueError: receipt is not reproducibility-pinned',refused.stderr)
+            # --no-init only changes the startup rule; the flag is what accepts the unpinned receipt (this root has an init, so it still fails there)
+            named=subprocess.run([sys.executable,'-I','-S','-B',str(script),str(root),'--allow-unpinned','--no-init'],capture_output=True,text=True)
+            self.assertIn('cpio carries a startup program',named.stderr)
+            self.assertNotIn('ValueError: receipt is not reproducibility-pinned',named.stderr)
+    def test_a_different_init_missing_init_or_extra_startup_entry_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'a';self.write(root,self.tree(b'other'))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            root=Path(folder)/'b';self.write(root,self.tree())
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            tree=self.tree(self.INIT);tree.add('linuxrc','file',b'#!/bin/sh',True);root=Path(folder)/'c';self.write(root,tree)
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+    def test_a_receipt_that_does_not_describe_the_init_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'a';self.write(root,self.tree(self.INIT),init_digest='0'*64)
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            root=Path(folder)/'b';self.write(root,self.tree(self.INIT),present=False)
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+    def test_the_no_init_mode_still_demands_that_there_is_none(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'a';self.write(root,self.tree())
+            self.assertFalse(cpio_verify.verify(root,require_init=False)['startupPresent'])
+            root=Path(folder)/'b';self.write(root,self.tree(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,require_init=False)
+    def test_an_init_that_is_not_executable_is_refused_even_with_the_pinned_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            tree=self.tree();tree.add('init','file',self.INIT,False)   # same bytes, mode 0444
+            root=Path(folder);self.write(root,tree)
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+    def test_a_member_whose_bytes_changed_is_caught_even_when_the_whole_file_digest_was_updated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.write(root,self.tree(self.INIT))
+            data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
+            receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+    def test_a_changed_member_other_than_init_is_caught_by_its_own_digest(self):
+        # init is also held to the pinned digest by the startup rule, so only a member the rule does not cover shows that each member is read back
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.write(root,self.tree(self.INIT))
+            data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(b'tool-content')]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
+            receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+    def test_a_tampered_cpio_byte_is_caught(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.write(root,self.tree(self.INIT))
+            data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+
+
+
+SDK_CLI=json.loads((HERE/'sdk-supervisor-cli.json').read_text())
+class SupervisorCliContract(unittest.TestCase):
+    """The pinned SDK supervisor accepts the two command lines PID 1 uses. Checked by importing only
+    parse_arguments from the pinned source (never run as root, nothing started)."""
+    def test_fixture_is_for_the_pinned_commit_and_file(self):
+        self.assertEqual(SDK_CLI['sdkCommit'],PINS['sdkCommit'])
+        self.assertEqual(SDK_CLI['supervisorSha256'],PINS['sdkPin']['supervisorSha256'])
+    def test_pid1_command_lines_are_accepted_and_the_wrong_ones_refused(self):
+        accepted={tuple(case['argv']) for case in SDK_CLI['accepted']}
+        self.assertIn(('--trusted-config-fd','3'),accepted)
+        self.assertIn(('--trusted-config-fd','3','--runtime-ports-fds','4,5,6'),accepted)
+        self.assertIn(('--trusted-config-fd','3','--runtime-ports-fds','4,5'),[tuple(r) for r in SDK_CLI['refused']])
+        self.assertIn(('--runtime-ports-fds','4,5,6'),[tuple(r) for r in SDK_CLI['refused']])
+    def test_the_guest_init_builds_exactly_those_argv_forms(self):
+        text=(GUEST/'init/init_linux.c').read_text()
+        self.assertIn('--runtime-ports-fds',text);self.assertIn('--trusted-config-fd',text)
+    def test_fixture_agrees_with_the_sdk_source_when_a_checkout_is_given(self):
+        checkout=os.environ.get('WINTER_SDK_CHECKOUT')
+        if not checkout:self.skipTest('set WINTER_SDK_CHECKOUT to an SDK clone to re-derive')
+        data=subprocess.check_output(['git','-C',checkout,'show',PINS['sdkCommit']+':packages/runtime/src/guest/linux-supervisor.py'])
+        self.assertEqual(sha(data),PINS['sdkPin']['supervisorSha256'])
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'sup.py';path.write_bytes(data)
+            spec=importlib.util.spec_from_file_location('sup',path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            for case in SDK_CLI['accepted']:
+                result=module.parse_arguments(['x',*case['argv']])
+                self.assertEqual([result[0],list(result[1]) if result[1] else None],case['result'])
+            for argv in SDK_CLI['refused']:
+                with self.assertRaises(SystemExit):module.parse_arguments(['x',*argv])
+
+# ---- the host-query runtime artifacts (N2) -----------------------------------------------------------------------------------------------------
+
+def runtime_files(**changes):
+    """A well-formed image view: the three artifacts at their fixed paths plus the config that pins them."""
+    digests={'launcher':sha(b'launcher-bytes'),'executable':sha(b'executable-bytes'),'ownerLibrary':sha(b'owner-bytes')}
+    config=image.runtime_artifacts_config(digests)+b'\n'
+    base={'kind':'file','mode':0o555,'uid':0,'gid':0,'nlink':1}
+    files={path:base|{'size':len(data),'sha256':sha(data)} for path,data in ((cpio_verify.RUNTIME_ARTIFACT_PATHS['launcher'],b'launcher-bytes'),(cpio_verify.RUNTIME_ARTIFACT_PATHS['executable'],b'executable-bytes'),(cpio_verify.RUNTIME_ARTIFACT_PATHS['ownerLibrary'],b'owner-bytes'))}
+    files['/'+cpio_verify.RUNTIME_ARTIFACTS_PATH]=base|{'mode':0o444,'size':len(config),'sha256':sha(config)}
+    for path,update in changes.items():
+        if path=='config':config=update;continue
+        files[path]=files[path]|update if update is not None else None
+    return {key:value for key,value in files.items() if value is not None},config
+
+class RuntimeArtifactTests(unittest.TestCase):
+    L,E,O=(cpio_verify.RUNTIME_ARTIFACT_PATHS[k] for k in ('launcher','executable','ownerLibrary'))
+    def test_the_config_is_exactly_the_shape_pid_1_splices_and_the_supervisor_reads(self):
+        files,config=runtime_files()
+        self.assertEqual(config,b'{"artifacts":{"executable":{"path":"/opt/winter/runtime/winter-host-query","sha256":"'+sha(b'executable-bytes').encode()+b'"},"launcher":{"path":"/opt/winter/helpers/linux-runtime-compartment","sha256":"'+sha(b'launcher-bytes').encode()+b'"},"ownerLibrary":{"path":"/opt/winter/helpers/linux-session-owner.so","sha256":"'+sha(b'owner-bytes').encode()+b'"}}}\n')
+        self.assertEqual(cpio_verify.check_runtime_artifacts(files,config),{'launcher':sha(b'launcher-bytes'),'executable':sha(b'executable-bytes'),'ownerLibrary':sha(b'owner-bytes')})
+    def test_each_readback_rule_refuses_its_defect(self):
+        cases={'mode 0755':{self.E:{'mode':0o755}},'mode 0444':{self.L:{'mode':0o444}},'mode 0557':{self.O:{'mode':0o557}},'writable by group':{self.E:{'mode':0o575}},
+               'owner':{self.E:{'uid':1000}},'group':{self.L:{'gid':1}},'two links':{self.E:{'nlink':2}},'no links':{self.O:{'nlink':0}},'empty':{self.L:{'size':0}},
+               'one byte over 128 MiB':{self.E:{'size':128*1024*1024+1}},'wrong digest':{self.O:{'sha256':sha(b'other')}},'symlink':{self.L:{'kind':'symlink'}},
+               'directory':{self.O:{'kind':'directory'}},'missing launcher':{self.L:None},'missing executable':{self.E:None},'missing owner':{self.O:None}}
+        for label,change in cases.items():
+            with self.subTest(label):
+                files,config=runtime_files(**change)
+                with self.assertRaises(ValueError):cpio_verify.check_runtime_artifacts(files,config)
+        files,config=runtime_files(**{self.E:{'size':128*1024*1024}})
+        cpio_verify.check_runtime_artifacts(files,config)   # exactly 128 MiB is the supervisor's own bound and is accepted
+    def test_the_config_file_itself_is_checked(self):
+        files,config=runtime_files()
+        path='/'+cpio_verify.RUNTIME_ARTIFACTS_PATH
+        for label,change in {'missing':None,'writable':{'mode':0o644},'owner':{'uid':5},'links':{'nlink':3},'symlink':{'kind':'symlink'}}.items():
+            with self.subTest(label):
+                changed,config=runtime_files(**{path:change})
+                with self.assertRaises(ValueError):cpio_verify.check_runtime_artifacts(changed,config)
+    def test_the_config_json_must_be_canonical_complete_and_exactly_these_members(self):
+        files,config=runtime_files()
+        document=json.loads(config)
+        def variant(edit):
+            value=json.loads(config);edit(value);return json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
+        bad={'extra top-level key':variant(lambda v:v.__setitem__('extra',1)),'no artifacts key':b'{}\n','extra artifact':variant(lambda v:v['artifacts'].__setitem__('providerWorker',v['artifacts']['launcher'])),
+             'missing artifact':variant(lambda v:v['artifacts'].pop('ownerLibrary')),'extra member':variant(lambda v:v['artifacts']['launcher'].__setitem__('mode','0555')),
+             'wrong path':variant(lambda v:v['artifacts']['launcher'].__setitem__('path','/opt/winter/helpers/other')),'upper case digest':variant(lambda v:v['artifacts']['launcher'].__setitem__('sha256',sha(b'launcher-bytes').upper())),
+             'short digest':variant(lambda v:v['artifacts']['launcher'].__setitem__('sha256',sha(b'launcher-bytes')[:63])),'digest not text':variant(lambda v:v['artifacts']['launcher'].__setitem__('sha256',7)),
+             'spaces':json.dumps(document,sort_keys=True).encode()+b'\n','no newline':config[:-1],'two newlines':config+b'\n','unsorted':json.dumps(document,separators=(',',':')).encode()[:0]+json.dumps({'artifacts':dict(reversed(list(document['artifacts'].items())))},separators=(',',':')).encode()+b'\n',
+             'not json':b'nope\n','not an object':b'[]\n','duplicate key':config.replace(b'"launcher"',b'"launcher":{"path":"x","sha256":"y"},"launcher"',1),'non-ascii':config.replace(b'/opt',b'/\xc3\xa4pt',1),'too large':b'{"artifacts":{},"x":"'+b'a'*4096+b'"}\n'}
+        for label,body in bad.items():
+            with self.subTest(label):
+                with self.assertRaises(ValueError):cpio_verify.check_runtime_artifacts(files,body)
+    def test_the_image_builder_writes_the_same_bytes_the_readback_demands(self):
+        digests={'launcher':'a'*64,'executable':'b'*64,'ownerLibrary':'c'*64}
+        self.assertEqual(image.runtime_artifacts_config(digests),json.dumps({'artifacts':{k:{'path':cpio_verify.RUNTIME_ARTIFACT_PATHS[k],'sha256':v} for k,v in digests.items()}},sort_keys=True,separators=(',',':')).encode())
+        tree=Tree()
+        for key,path in cpio_verify.RUNTIME_ARTIFACT_PATHS.items():tree.add(path.lstrip('/'),'file',key.encode(),True)
+        image.add_guest_files(tree,{'init':b'i','winter-guest-relay':b'r'},{'guest_bootstrap.py':b'p'},{'linux-tool-compartment':'0'*64,'file-worker':'1'*64,'process-worker':'2'*64},{key:sha(key.encode()) for key in cpio_verify.RUNTIME_ARTIFACT_PATHS})
+        cpio_verify.check_runtime_artifacts(image.tree_files(tree),tree.nodes[cpio_verify.RUNTIME_ARTIFACTS_PATH]['data'])
+        node=tree.nodes[cpio_verify.RUNTIME_ARTIFACTS_PATH]
+        self.assertEqual((node['kind'],node['mode']),('file',0o444))
+        image.refuse_provider_bridge(tree)
+    def test_a_real_cpio_round_trip_checks_the_artifacts_and_the_receipt(self):
+        tree=Tree()
+        for key,path in cpio_verify.RUNTIME_ARTIFACT_PATHS.items():tree.add(path.lstrip('/'),'file',(key*20).encode(),True)
+        digests={key:sha((key*20).encode()) for key in cpio_verify.RUNTIME_ARTIFACT_PATHS}
+        tree.add(cpio_verify.RUNTIME_ARTIFACTS_PATH,'file',image.runtime_artifacts_config(digests)+b'\n')
+        tree.add('init','file',b'INIT',True)
+        def write(folder,receipt_extra,tree=tree):
+            folder.mkdir()
+            tree.cpio(folder/'immutable-root.cpio');(folder/'root.manifest.json').write_text(json.dumps(tree.manifest()))
+            (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':sha(b'INIT'),'initPresent':True,'reproducibilityPinned':True,**receipt_extra}))
+        with tempfile.TemporaryDirectory() as folder:
+            good=Path(folder)/'good';write(good,{'hostQuery':{'artifacts':{key:{'sha256':value} for key,value in digests.items()}}})
+            self.assertEqual(cpio_verify.verify(good,pinned_init=sha(b'INIT'))['runtimeArtifacts'],digests)
+            lying=Path(folder)/'lying';write(lying,{'hostQuery':{'artifacts':{key:{'sha256':'0'*64} for key in digests}}})
+            with self.assertRaisesRegex(ValueError,'receipt does not describe'):cpio_verify.verify(lying,pinned_init=sha(b'INIT'))
+            # an artifact whose bytes no longer match the pin in the same cpio
+            other=Tree()
+            for node_path,node in tree.nodes.items():other.add(node_path,node['kind'],node['data'] if node_path!=cpio_verify.RUNTIME_ARTIFACT_PATHS['executable'].lstrip('/') else b'tampered',node['kind']=='file' and node['mode']==0o555)
+            tampered=Path(folder)/'tampered';write(tampered,{'hostQuery':{'artifacts':{key:{'sha256':value} for key,value in digests.items()}}},other)
+            with self.assertRaisesRegex(ValueError,'do not match their pin|bytes'):cpio_verify.verify(tampered,pinned_init=sha(b'INIT'))
+            # no artifacts file at all in a root whose receipt claims a host-query runtime
+            bare=Tree();bare.add('init','file',b'INIT',True)
+            missing=Path(folder)/'missing';write(missing,{'hostQuery':{'artifacts':{}}},bare)
+            with self.assertRaisesRegex(ValueError,'missing from the cpio'):cpio_verify.verify(missing,pinned_init=sha(b'INIT'))
+            # a root without a host-query claim is unaffected
+            plain=Path(folder)/'plain';write(plain,{},bare)
+            self.assertIsNone(cpio_verify.verify(plain,pinned_init=sha(b'INIT'))['runtimeArtifacts'])
+
+class TwoPassTests(unittest.TestCase):
+    def test_two_passes_must_agree_byte_for_byte(self):
+        self.assertEqual(image.require_reproducible(b'same',b'same','x'),b'same')
+        for first,second in ((b'a',b'b'),(b'abc',b'ab'),(b'',b'x'),(b'x'*100,b'x'*99+b'y')):
+            with self.subTest(first=first[:3],second=second[:3]):
+                with self.assertRaisesRegex(ValueError,'x is not reproducible'):image.require_reproducible(first,second,'x')
+    def test_the_image_builder_runs_each_artifact_twice_and_compares(self):
+        source=(HERE/'image.py').read_text()
+        self.assertEqual(source.count('require_reproducible('),3)   # its definition, the executable and the native artifacts
+        self.assertIn("for attempt in (1,2):",source)
+        self.assertIn("second=out/'runtime-pass2'/'winter-host-query'",source)   # the output name is embedded in the bundle, so both passes use it
+
+class ProviderBridgeAbsenceTests(unittest.TestCase):
+    """Decision D10: the first Mac worker has no provider bridge, so the image has no component for one."""
+    def base(self):
+        tree=Tree()
+        for key,path in cpio_verify.RUNTIME_ARTIFACT_PATHS.items():tree.add(path.lstrip('/'),'file',key.encode(),True)
+        digests={key:sha(key.encode()) for key in cpio_verify.RUNTIME_ARTIFACT_PATHS}
+        tree.add(cpio_verify.RUNTIME_ARTIFACTS_PATH,'file',image.runtime_artifacts_config(digests)+b'\n')
+        return tree
+    def test_the_expected_image_passes(self):
+        image.refuse_provider_bridge(self.base())
+    def test_no_winter_file_may_be_a_provider_credential_or_host_client_component(self):
+        for path in ('opt/winter/helpers/provider-worker','opt/winter/runtime/providerWorker','opt/winter/libexec/provider.sock','opt/winter/helpers/Provider','opt/winter/etc/credentials.json','opt/winter/libexec/credential-broker','opt/winter/runtime/host-client','opt/winter/runtime/hostClient'):
+            with self.subTest(path):
+                tree=self.base();tree.add(path,'file',b'x',True)
+                with self.assertRaises(ValueError):image.refuse_provider_bridge(tree)
+    def test_the_distributions_own_files_are_not_judged(self):
+        tree=self.base();tree.add('opt/winter/environment/base/usr/lib/git-core/git-credential','file',b'x',True)
+        image.refuse_provider_bridge(tree)
+    def test_the_main_entry_runtime_is_gone_and_the_artifacts_are_exactly_three(self):
+        tree=self.base();tree.add('opt/winter/runtime/winter','file',b'main-entry',True)
+        with self.assertRaises(ValueError):image.refuse_provider_bridge(tree)
+        tree=self.base();del tree.nodes[cpio_verify.RUNTIME_ARTIFACTS_PATH]
+        with self.assertRaises(ValueError):image.refuse_provider_bridge(tree)
+        tree=self.base();document=json.loads(tree.nodes[cpio_verify.RUNTIME_ARTIFACTS_PATH]['data']);document['artifacts']['providerWorker']=document['artifacts']['launcher']
+        tree.nodes[cpio_verify.RUNTIME_ARTIFACTS_PATH]['data']=json.dumps(document,sort_keys=True,separators=(',',':')).encode()+b'\n'
+        with self.assertRaises(ValueError):image.refuse_provider_bridge(tree)
+        self.assertNotIn('/opt/winter/runtime/winter',image.REQUIRED_PROGRAMS)
+    def test_nothing_the_builder_compiles_or_names_is_a_provider_component(self):
+        names=[*image.NATIVE_STATIC,*image.NATIVE_SHARED,image.HOST_QUERY_ENTRY,*cpio_verify.RUNTIME_ARTIFACT_PATHS.values()]
+        self.assertFalse([name for name in names if 'provider' in name.lower() or 'credential' in name.lower() or 'host-client' in name.lower()])
+        self.assertEqual(image.HOST_QUERY_ENTRY,'scripts/guest-host-query/runtime.ts')
+        source=(HERE/'image.py').read_text()
+        for needle in ('providerWorker','provider.ts','host-client.ts','compile.ts'):self.assertNotIn(needle,source.replace('providerWorker\',',''))
+    def test_the_guest_side_has_no_provider_socket_or_provider_class_traffic(self):
+        for path in list((GUEST/'init').glob('*.[ch]'))+[GUEST/'relay/relay.c',GUEST/'bootstrap/guest_bootstrap.py']:
+            text=path.read_text()
+            self.assertNotIn('provider.sock',text,path.name)
+            self.assertNotIn('AF_UNIX',text.replace('/* AF_UNIX */',''),path.name)
+
+class RuntimeArtifactPinTests(unittest.TestCase):
+    """pins.json, the file the image writes for PID 1, and the supervisor's own reading of it must say the same thing."""
+    SDK=os.environ.get('WINTER_SDK_CHECKOUT')
+    def pinned(self):
+        block=PINS['runtimeArtifacts']
+        return {'launcher':block['launcher']['binarySha256'],'executable':block['executable']['sha256'],'ownerLibrary':block['ownerLibrary']['binarySha256']}
+    def test_every_artifact_has_a_pinned_hash_and_the_image_json_is_made_from_them(self):
+        block=PINS['runtimeArtifacts']
+        self.assertEqual(set(block),{'launcher','executable','ownerLibrary'})
+        for key,digest in self.pinned().items():self.assertRegex(digest,r'^[0-9a-f]{64}$',key)
+        self.assertEqual(len(set(self.pinned().values())),3)
+        self.assertEqual(block['launcher']['source'],'linux-runtime-compartment.c');self.assertEqual(block['ownerLibrary']['source'],'linux-session-owner.c')
+        self.assertEqual(block['ownerLibrary']['target'],'aarch64-linux-gnu.2.36');self.assertEqual(block['launcher']['target'],'aarch64-linux-musl')
+        self.assertEqual(block['executable']['entry'],image.HOST_QUERY_ENTRY)
+        for key in ('launcher','executable','ownerLibrary'):self.assertEqual(block[key]['path'],cpio_verify.RUNTIME_ARTIFACT_PATHS[key])
+        config=json.loads(image.runtime_artifacts_config(self.pinned()))
+        self.assertEqual({key:value['sha256'] for key,value in config['artifacts'].items()},self.pinned())
+    def test_the_expected_artifact_and_the_runtime_pins_agree(self):
+        expected=PINS['expectedArtifact']
+        self.assertIsNotNone(expected)
+        self.assertEqual(expected['runtimeSha256'],PINS['runtimeArtifacts']['executable']['sha256'])
+        self.assertEqual(expected['helperBinarySha256']['linux-runtime-compartment.c'],PINS['runtimeArtifacts']['launcher']['binarySha256'])
+        self.assertEqual(expected['helperBinarySha256']['linux-session-owner.c'],PINS['runtimeArtifacts']['ownerLibrary']['binarySha256'])
+        self.assertEqual(set(expected['helperBinarySha256']),set(image.NATIVE_STATIC)|set(image.NATIVE_SHARED))
+    def test_pid_1_reads_the_file_the_image_writes(self):
+        text=(GUEST/'init/init_linux.c').read_text()
+        self.assertIn('#define RUNTIME_ARTIFACTS_PATH "/'+cpio_verify.RUNTIME_ARTIFACTS_PATH+'"',text)
+    def test_the_native_sources_are_the_pinned_sdk_files_when_a_checkout_is_given(self):
+        if not self.SDK:self.skipTest('set WINTER_SDK_CHECKOUT to an SDK clone to re-derive')
+        for key,source in (('launcher','linux-runtime-compartment.c'),('ownerLibrary','linux-session-owner.c')):
+            data=subprocess.check_output(['git','-C',self.SDK,'show',PINS['sdkCommit']+':packages/runtime/src/guest/'+source])
+            self.assertEqual(sha(data),PINS['runtimeArtifacts'][key]['sourceSha256'],key)
+        self.assertTrue(subprocess.run(['git','-C',self.SDK,'cat-file','-e',PINS['sdkCommit']+':'+image.HOST_QUERY_ENTRY]).returncode==0)
+    def test_the_pinned_supervisor_reads_exactly_this_shape_when_a_checkout_is_given(self):
+        if not self.SDK:self.skipTest('set WINTER_SDK_CHECKOUT to an SDK clone to re-derive')
+        text=subprocess.check_output(['git','-C',self.SDK,'show',PINS['sdkCommit']+':packages/runtime/src/guest/linux-supervisor.py'],text=True)
+        self.assertIn("set(config[runtime_key])!={'artifacts'} or set(config[runtime_key]['artifacts'])!={'launcher','executable','ownerLibrary'}",text)
+        self.assertIn("if set(value)!={'path','sha256'} or not re.fullmatch('[a-f0-9]{64}',value['sha256']):raise Refusal('artifact_pin')",text)
+        self.assertIn("st.st_uid!=0 or st.st_nlink!=1 or st.st_mode&0o222 or st.st_size>128*1024*1024",text)
+        self.assertIn("RUNTIME_KEYS=(('fresh','freshRuntime'),('host-query-v1','hostQueryRuntime'),(GUIDED_PROFILE,'hostQueryGuidedRuntime'))",text)
+
+@unittest.skipUnless(os.environ.get('WINTER_PINNED_ZIG') and os.environ.get('WINTER_SDK_CHECKOUT'),'set WINTER_PINNED_ZIG and WINTER_SDK_CHECKOUT to rebuild the native runtime artifacts twice')
+class NativeRuntimeArtifactReproducibilityTests(unittest.TestCase):
+    def test_the_launcher_and_the_owner_library_rebuild_byte_identically_to_their_pins(self):
+        zig=os.environ['WINTER_PINNED_ZIG'];sdk=os.environ['WINTER_SDK_CHECKOUT']
+        with tempfile.TemporaryDirectory() as folder:
+            snapshot=Path(folder)/'sdk';image.source_snapshot(Path(sdk),PINS['sdkCommit'],snapshot)
+            built={}
+            for attempt in (1,2):
+                for source in ('linux-runtime-compartment.c','linux-session-owner.c'):
+                    data,_=image.native_build(zig,Path(folder)/f'cache{attempt}',snapshot/'packages/runtime/src/guest',snapshot,source,Path(folder)/f'out{attempt}')
+                    built.setdefault(source,[]).append(data)
+            for source,key in (('linux-runtime-compartment.c','launcher'),('linux-session-owner.c','ownerLibrary')):
+                self.assertEqual(built[source][0],built[source][1])
+                self.assertEqual(sha(built[source][0]),PINS['runtimeArtifacts'][key]['binarySha256'],key)
+
 if __name__=='__main__':unittest.main()

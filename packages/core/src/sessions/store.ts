@@ -8,6 +8,7 @@ import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, SESSION_TITLE_MAX_CHARS, type
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
+import { isUnrunnableSessionMode, type RunnableSessionMode } from "./session-mode";
 import { outdirPath } from "./outdir";
 import { BashEditPairer, bashCommandOf } from "./bash-edits";
 import { removeSessionDiffs } from "../diffs/store";
@@ -510,7 +511,10 @@ export class SessionStore {
     // is the CALLER's job, exactly as it is for `model`: which levels a model accepts is provider
     // knowledge, and only `session.create`'s handler knows the session's mode (the tier gate).
     opts: {
-      cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat";
+      // `RunnableSessionMode`, NOT the protocol's wider `SessionMode`: a Cowork session cannot be minted here
+      // (type-level) and `cowork` smuggled past the type is refused below, before the scope directory, the
+      // row or the log exist (`sessions/session-mode.ts`).
+      cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: RunnableSessionMode;
       parentSessionId?: string; model?: string; effort?: string;
       // Winter Phase 8c (P8c-5): the seq-1 `session_created`'s runtime annotation. EVENT-ONLY —
       // no index column, no reset-on-rebuild concern (unlike `mode` above): a row is never queried
@@ -521,6 +525,9 @@ export class SessionStore {
       runtimeKind?: "claude-agent" | "winter-agent"; providerId?: string; modelRef?: string;
     } = {},
   ): string {
+    // Defence in depth behind `session.create`'s own refusal: no store write, no directory, no log for a mode
+    // nothing can run. A future Cowork door will mint its sessions through its own transaction.
+    if (isUnrunnableSessionMode(opts.mode)) throw new CoworkError("unsupported_topology");
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
     mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });

@@ -468,7 +468,7 @@ struct ComposerPolicyChip: View {
 
 /// **Cowork's composer is a named slot, not a built one.**
 ///
-/// `SessionMode.isAvailable == false`, `session.create` excludes Cowork, and `SpawnSession`
+/// `SessionMode.isAvailable == false`, `session.create` refuses Cowork (`unsupported_topology`), and `SpawnSession`
 /// pre-flight-rejects its reserved argument. Supported create paths cannot produce a live Cowork
 /// session; string-based row/chrome handling remains future-compatible. The new-chat page lets
 /// its segment preview this design while `newChatSendBlockedReason` refuses to send.

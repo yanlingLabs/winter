@@ -69,6 +69,9 @@ export function nextVersion(current: string, mode: string): string {
 
 const PKGS = ["cli", "core", "protocol", "plugin-sdk"];
 
+/** The generated Info.plists (in apple/Winter/Support) that carry WINTER's version: the app's and Winter Headless's. */
+export const WINTER_INFO_PLISTS = ["Info.plist", "WinterHeadless-Info.plist"] as const;
+
 /** Stamp the canonical version into every source. Returns the files written. */
 export function stampAll(v: string): string[] {
   const twin = semverTwin(v);
@@ -100,8 +103,10 @@ export function stampAll(v: string): string[] {
   //    with its generated Info.plist — by `syncHelperVersion` instead.
   const yml = join(ROOT, "apple", "Winter", "project.yml");
   put(yml, stampProjectYml(readFileSync(yml, "utf8"), v));
-  const plist = join(ROOT, "apple", "Winter", "Support", "Info.plist");
-  put(plist, stampInfoPlist(readFileSync(plist, "utf8"), v));
+  for (const name of WINTER_INFO_PLISTS) {
+    const plist = join(ROOT, "apple", "Winter", "Support", name);
+    put(plist, stampInfoPlist(readFileSync(plist, "utf8"), v));
+  }
   files.push(...syncHelperVersion());
   return files;
 }

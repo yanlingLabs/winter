@@ -44,6 +44,7 @@
 
 import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@yanlinglabs/winter-protocol";
 import { DISPATCH_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
+import { COMPUTER_WAKE_CLIENT_NAME, endedWords, stoppedWords, waitingWords, type ArmedWakeFacts } from "../wake-words";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
@@ -148,6 +149,11 @@ export interface TuiState {
   // the first event arrives; App may seed an initial value from the resume route's session.list
   // row instead. Drives the chrome's "backgrounded"/"archived" chip.
   activity?: SessionActivity;
+  /** ComputerV2 wake triggers (2026-10-12): the triggers armed in this session (from `wake_armed`, gone at
+   *  `wake_ended`), and the endings the next `computer-wake` message reports — the note it becomes reads from
+   *  these, never from the message (which is the model's text). Absent = none. */
+  wakes?: Record<string, ArmedWakeFacts>;
+  wakeNews?: string[];
 }
 
 /** One live background shell task (TUI renderer T5) — the two fields the running-work line needs. */
@@ -312,7 +318,40 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
 
 function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
   switch (e.type) {
+    case "wake_armed": {
+      // ComputerV2 wake triggers: Winter waits for the user — said once, as a note.
+      if (e.threadId !== MAIN) return s;
+      // The pair reaches an attached client twice (its session's fan-out and the global broadcast, same seq): said once.
+      if (s.wakes?.[str(e.wakeId)] !== undefined) return s;
+      const facts: ArmedWakeFacts = { condition: str(e.condition), targetLabel: str(e.targetLabel), ...(typeof e.elementLabel === "string" ? { elementLabel: e.elementLabel } : {}) };
+      return { ...s, wakes: { ...(s.wakes ?? {}), [str(e.wakeId)]: facts }, committed: [...s.committed, { kind: "note", text: `⏳ waiting for ${waitingWords(facts)}` }] };
+    }
+
+    case "wake_ended": {
+      if (e.threadId !== MAIN) return s;
+      const id = str(e.wakeId);
+      const facts = s.wakes?.[id];
+      const { [id]: _gone, ...rest } = s.wakes ?? {};
+      const reason = str(e.reason);
+      const next: TuiState = { ...s, wakes: rest };
+      if (facts === undefined) return next;
+      // An ending that wakes the session (`woken` — never judged from the reason) is said with the wake message's
+      // note; one that does not (cancelled, the setting off, a silent expiry) is said now, and never held for a later
+      // wake's note.
+      if (e.woken === true) return { ...next, wakeNews: [...(s.wakeNews ?? []), endedWords(facts, reason)] };
+      return { ...next, committed: [...s.committed, { kind: "note", text: `⏹ stopped waiting for ${waitingWords(facts)} (${stoppedWords(reason)})` }] };
+    }
+
     case "user_message": {
+      // ComputerV2 wake triggers: the daemon's wake (`computer-wake`) is never the user's bubble — a note saying what
+      // happened, from the pair (the message itself is the model's `<computer-wake>` text).
+      if (e.clientName === COMPUTER_WAKE_CLIENT_NAME) {
+        const news = s.wakeNews ?? [];
+        const block: Block = { kind: "note", text: news.length === 0 ? "↻ a wake trigger ended — Winter continues" : `↻ Winter continued: ${news.join("; ")}` };
+        if (e.threadId !== MAIN) return { ...s, childBlocks: withChildBlock(s.childBlocks, str(e.threadId), block) };
+        const { wakeNews: _said, ...rest } = s;
+        return { ...rest, committed: [...s.committed, block] };
+      }
       // Same Block shape for both destinations (child-transcript-view T2: a steer-drain/thread.send
       // echo lands here with a non-MAIN threadId — previously silently committed to the MAIN
       // transcript regardless of thread; now routed to that child's own block list instead).

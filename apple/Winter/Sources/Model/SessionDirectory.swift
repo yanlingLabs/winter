@@ -38,8 +38,15 @@ final class SessionDirectory: ObservableObject {
     /// timeout) leaves `rows` exactly as they were — a transient failure must never blank the
     /// sidebar out from under the user.
     func refresh() async {
-        guard let fetched = try? await lister() else { return }
+        await refreshReportingSuccess()
+    }
+
+    /// `refresh()`, saying whether the list was fetched (false: the rows are as they were).
+    @discardableResult
+    func refreshReportingSuccess() async -> Bool {
+        guard let fetched = try? await lister() else { return false }
         rows = fetched.sorted { $0.createdAt > $1.createdAt }
+        return true
     }
 
     /// FINAL-REVIEW FIX (M1): the wirers' (`AppModel.init` / `DetachedWindowController.init`) own
@@ -98,6 +105,18 @@ final class SessionDirectory: ObservableObject {
             }
             Task { await refresh() }
         case .sessionCreated:
+            Task { await refresh() }
+        case .wakeArmed(let v):
+            // ComputerV2 wake triggers: the "waiting for you" mark appears at once, then the list confirms it.
+            if let idx = rows.firstIndex(where: { $0.sessionId == v.sessionId }) {
+                rows[idx].wakesArmed = (rows[idx].wakesArmed ?? 0) + 1
+            }
+            Task { await refresh() }
+        case .wakeEnded(let v):
+            if let idx = rows.firstIndex(where: { $0.sessionId == v.sessionId }) {
+                let left = (rows[idx].wakesArmed ?? 1) - 1
+                rows[idx].wakesArmed = left > 0 ? left : nil
+            }
             Task { await refresh() }
         case .childUpdate:
             // Dispatch (Phase 7): a child session just spawned/finished — refresh so the list
@@ -231,5 +250,9 @@ struct SessionSummary: Equatable, Identifiable {
     /// older daemon, a record-less session, or simply "the leg is known but the provider isn't
     /// (yet)" — never fabricated from `runtimeKind`.
     var providerId: String? = nil
+    /// ComputerV2 wake triggers (2026-10-12): how many triggers the session has ARMED — Winter is waiting for the user
+    /// there; the row shows a small "waiting for you" mark. Threaded through from `listSessions()` and kept live by
+    /// `handle`'s `.wakeArmed`/`.wakeEnded` (every harness receives them). `nil` = none (or an older daemon).
+    var wakesArmed: Int? = nil
     var id: String { sessionId }
 }

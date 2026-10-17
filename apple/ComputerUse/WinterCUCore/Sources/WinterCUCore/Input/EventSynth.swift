@@ -220,11 +220,18 @@ struct CUEventSynth {
             for type in [t.down, t.up] {
                 guard let e = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: point, mouseButton: t.cg)
                 else { continue }
-                try check(type, point)
+                // A check that stops the click between its down and its up still lets the up go — never a button left
+                // down in the app (round 17b: the user's work now stops a click there too) — then says why.
+                var stop: Error?
+                do { try check(type, point) } catch {
+                    guard type == t.up else { throw error }
+                    stop = error
+                }
                 e.setIntegerValueField(.mouseEventClickState, value: Int64(i))
                 e.flags = flags
                 stampRouting(e, pid: pid, windowID: wid, location: point, route: route, clickGroup: group)
                 used = poster.post(e, pid: pid, route: route, authenticate: false)
+                if let stop { throw stop }
                 sleep(type == t.down ? 8 : (i < n ? 60 : 0))
             }
         }

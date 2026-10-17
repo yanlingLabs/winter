@@ -259,7 +259,7 @@ export function removeMcpServerInScope(t: McpScopeTarget, name: string): boolean
 // condition — every intermediate state is at least as strict as the one before. A rename INTO a name
 // something else already uses, or one that already holds stored values or rules, is refused: the renamed
 // server would silently take over another server's settings. A sign-in is keyed by the server's URL
-// (`mcp-oauth:<url>`), never its name, so it follows a rename by itself and a remove leaves it for a re-add.
+// (`mcp-oauth:<id>`, the id derived from the URL), never its name, so it follows a rename by itself and a remove leaves it for a re-add.
 //
 // CLAUDE-GRAMMAR RULES (`permissions.allow/ask/deny`, in `sdk/settings.json`, a project's settings files or the
 // approved-rules record) are NEVER rewritten or dropped — claude parity, and because a rule cannot be moved

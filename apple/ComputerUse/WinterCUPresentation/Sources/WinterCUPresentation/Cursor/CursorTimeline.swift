@@ -90,6 +90,10 @@ struct CursorTimeline {
     private(set) var busyUntil: TimeInterval = -.infinity
     /// Where the cursor will rest once every scheduled glide has run.
     private(set) var restPosition: CGPoint?
+    /// The moment the last place-bound event (move, target, press, type, key, scroll, drag) takes effect on screen:
+    /// the cursor at its point, glide done, a reticle settled through its dwell, the press pulse starting. The
+    /// helper holds the real action until then (the arrival gate, `PresentationController.cursorArrival`).
+    private(set) var actionAt: TimeInterval?
     private var origin: CGPoint = .zero
     private var glides: [Glide] = []
     private var squashes: [Squash] = []
@@ -114,7 +118,8 @@ struct CursorTimeline {
 
     // MARK: Events
 
-    /// Schedules `kind` at `point` (window-local points) on the timeline. Returns the time its segment starts.
+    /// Schedules `kind` at `point` (window-local points) on the timeline. Returns the time its segment starts; a
+    /// place-bound kind also sets `actionAt`.
     @discardableResult
     mutating func receive(_ kind: CUCursorKind, at point: CGPoint, now: TimeInterval) -> TimeInterval {
         collectGarbage(now: now)
@@ -131,50 +136,60 @@ struct CursorTimeline {
         switch kind {
         case .move:
             end = moveTo(point, at: start, speed: speed)
+            actionAt = end
         case .target(let rect):
             let arrive = moveTo(point, at: start, speed: speed)
             let settle = max(start, arrive - Timing.reticleLead * speed)
             reticles.append(ReticleEvent(rect: rect, start: settle, end: nil, autoEnd: arrive + Timing.reticleUnclaimed))
             end = arrive + Timing.reticleDwell * speed
+            actionAt = end
         case .press:
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             tap(at: t0, ring: .click)
             claimReticle(at: t0 + 0.12)
             end = t0 + 0.16 * speed
         case .doubleClick:
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             tap(at: t0, ring: .click)
             tap(at: t0 + Timing.doubleGap * speed, ring: .double)
             claimReticle(at: t0 + 0.2)
             end = t0 + (Timing.doubleGap + 0.16) * speed
         case .rightClick:
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             tap(at: t0, ring: .context)
             badges.append(BadgeEvent(kind: .menu, start: t0, end: t0 + Timing.menuBadge))
             claimReticle(at: t0 + 0.12)
             end = t0 + 0.16 * speed
         case .type:
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             badges.append(BadgeEvent(kind: .caret, start: t0, end: t0 + Timing.caretBadge))
             claimReticle(at: t0 + 0.2)
             end = t0 + 0.12 * speed
         case .key(let combo):
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             badges.append(BadgeEvent(kind: .key(KeyComboLabel.format(combo)), start: t0, end: t0 + Timing.keyBadge))
             claimReticle(at: t0 + 0.2)
             end = t0 + 0.12 * speed
         case .scroll:
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             badges.append(BadgeEvent(kind: .scroll(nil), start: t0, end: t0 + Timing.scrollBadge))
             claimReticle(at: t0 + 0.12)
             end = t0 + 0.2 * speed
         case .scrollToward(let direction):
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0
             badges.append(BadgeEvent(kind: .scroll(direction), start: t0, end: t0 + Timing.scrollBadge))
             claimReticle(at: t0 + 0.12)
             end = t0 + 0.2 * speed
         case .drag(let to):
             let t0 = moveTo(point, at: start, speed: speed)
+            actionAt = t0  // the button goes down here; the real drag's own steps carry it on
             claimReticle(at: t0)
             let from = restPosition ?? point
             let travel = t0 + Timing.dragPress * speed
@@ -593,6 +608,7 @@ struct CursorTimeline {
         paths.removeAll { $0.start > now }
         reticles.removeAll { $0.start > now }
         busyUntil = now
+        if let a = actionAt, a > now { actionAt = now }
     }
 
     /// Drops events that ended long ago, so the lists stay short on a long session.

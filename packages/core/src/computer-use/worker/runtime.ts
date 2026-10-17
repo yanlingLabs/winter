@@ -10,7 +10,7 @@
 // Sloppy mode, deliberately — `with` and block-level function hoisting need it.
 import { AUTOMATION_ERROR_KINDS, type AutomationErrorKind } from "../errors";
 import { savedScriptShapeOk, savedScriptShapeProblem } from "./saved-shape";
-import { SAVED_SCRIPT_MAX_BYTES, savedScriptNameOk, savedScriptTooLarge, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WorkerToHost } from "./bridge";
+import { SAVED_SCRIPT_MAX_BYTES, savedScriptNameOk, savedScriptTooLarge, type AppHandle, type HostToWorker, type ImageHandle, type SavedScriptSource, type TabHandle, type WakeHandle, type WorkerToHost } from "./bridge";
 import { prepareScript, type PreparedScript } from "./repl";
 
 export interface AutomationRuntimeDeps {
@@ -77,7 +77,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   const plain = (v: unknown): unknown => {
     if (v === undefined) return undefined;
-    try { return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? Number(x) : x instanceof App || x instanceof Tab ? undefined : x))); } catch { return undefined; }
+    try { return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? Number(x) : x instanceof App || x instanceof Tab || x instanceof Wake ? undefined : x))); } catch { return undefined; }
   };
 
   const call = (primitive: string, target: string | undefined, args: Record<string, unknown> = {}): Promise<unknown> => {
@@ -190,6 +190,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     waitForIdle(o?: unknown) { return call("waitForIdle", tid(this), opts(o)); }
     applescript(source: unknown, o?: unknown) { return call("applescript", tid(this), { source, ...opts(o) }); }
     scriptingDictionary(o?: unknown) { return call("scriptingDictionary", tid(this), opts(o)); }
+    wakeWhen(c: unknown, o?: unknown) { return call("wakeWhen", tid(this), { cond: c, ...opts(o) }).then(toWake); }
     toString(): string { return `[App ${(this as unknown as { name: string }).name}]`; }
   }
   const toApp = (v: unknown): App => new App(v as AppHandle);
@@ -240,9 +241,26 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     callTool(name: unknown, input?: unknown, o?: unknown) { return call("callTool", tid(this), { name, ...(input === undefined ? {} : { input }), ...opts(o) }); }
     handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }
+    wakeWhen(c: unknown, o?: unknown) { return call("wakeWhen", tid(this), { cond: c, ...opts(o) }).then(toWake); }
     toString(): string { return `[Tab ${(this as unknown as { id: string }).id}]`; }
   }
   const toTab = (v: unknown): Tab => new Tab(v as TabHandle);
+
+  // Wake triggers (2026-10-12): what `wakeWhen` returns once the trigger is armed — the script and the turn go on; the
+  // trigger lives in the daemon. `cancel()` ends it (no wake); keep the handle in a top-level const to cancel it later.
+  class Wake {
+    constructor(h: WakeHandle) {
+      Object.defineProperties(this, { id: { value: String(h?.id ?? ""), enumerable: true }, expiresAt: { value: typeof h?.expiresAt === "number" ? h.expiresAt : 0, enumerable: true } });
+      Object.freeze(this);
+    }
+    cancel() { return call("wakes.cancel", undefined, { id: (this as unknown as { id: string }).id }).then(nothing); }
+    toString(): string { return `[Wake ${(this as unknown as { id: string }).id}]`; }
+  }
+  const toWake = (v: unknown): Wake => new Wake(v as WakeHandle);
+  const wakes = Object.freeze({
+    list: (o?: unknown) => call("wakes.list", undefined, opts(o)),
+    cancel: (id: unknown) => call("wakes.cancel", undefined, { id }).then(nothing),
+  });
 
   const apps = Object.freeze({
     list: (o?: unknown) => call("apps.list", undefined, opts(o)),
@@ -281,12 +299,12 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     if (typeof v === "bigint") return `${v}n`;
     if (typeof v === "symbol") return v.toString();
     if (v instanceof Error) return `${v.name}: ${v.message}`;
-    if (v instanceof Image || v instanceof App || v instanceof Tab) return String(v);
+    if (v instanceof Image || v instanceof App || v instanceof Tab || v instanceof Wake) return String(v);
     const seen = new WeakSet<object>();
     try {
       const s = JSON.stringify(v, (_k, x) => {
         if (typeof x === "bigint") return `${x}n`;
-        if (x instanceof Image || x instanceof App || x instanceof Tab) return String(x);
+        if (x instanceof Image || x instanceof App || x instanceof Tab || x instanceof Wake) return String(x);
         if (x !== null && typeof x === "object") { if (seen.has(x)) return "[Circular]"; seen.add(x); }
         return x;
       }, 2);
@@ -428,7 +446,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   // reassign them for the next call — though a top-level declaration of the same name shadows one, by choice).
   /** The ms this run has left (its deadline, as extended, minus what has run; a card's wait does not count). */
   const timeLeft = (): Promise<unknown> => call("timeLeft", undefined, {});
-  const API: Record<string, unknown> = { apps, browsers, screen, scripts, print, show, sleep, timeLeft, App, Tab, Image, AutomationError, ...errorClasses };
+  const API: Record<string, unknown> = { apps, browsers, screen, scripts, wakes, print, show, sleep, timeLeft, App, Tab, Image, AutomationError, ...errorClasses };
   const API_NAMES = Object.keys(API);
   const PARAMS = ["__scope", "__store", ...API_NAMES, ...SHADOWED];
 

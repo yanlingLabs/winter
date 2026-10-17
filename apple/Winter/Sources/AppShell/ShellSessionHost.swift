@@ -3569,6 +3569,24 @@ final class ShellSessionHost: ObservableObject {
         // (`FieldStateAdapter.onInterrupt` is optional and nil everywhere else, so no pre-existing
         // window changes). Both surfaces come through this one closure.
         adapter.onInterrupt = { [weak self] in self?.interruptAttachedTurn() }
+        // ComputerV2 wake triggers: the "Waiting for you" pill's [Stop waiting].
+        adapter.onStopWaiting = { [weak self] wakeId in
+            guard let self else { return "this window closed" }
+            return await self.stopWaiting(wakeId)
+        }
+    }
+
+    /// ComputerV2 wake triggers (2026-10-12): the user's [Stop waiting] on the attached session's pill —
+    /// `computerUse.wakes.cancel`. The pill leaves when the daemon's `wake_ended` lands; a failure comes back as the
+    /// sentence the pill shows. `attachedSessionId` read FRESH.
+    func stopWaiting(_ wakeId: String) async -> String? {
+        guard let live = attachment, let sid = attachedSessionId else { return "Winter isn't connected" }
+        do {
+            _ = try await live.feed.client.cancelWake(sessionId: sid, wakeId: wakeId)
+            return nil
+        } catch {
+            return wakeStopFailure(error)
+        }
     }
 
     /// office-live-ux Job 1 — **stop the attached session's running turn.** The composer's stop
@@ -3618,7 +3636,9 @@ final class ShellSessionHost: ObservableObject {
     /// staging refusal shows on the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let live = attachment, let sid = attachedSessionId else { return }
+        // Attachments alone are a message too: each chip is a character of the draft (a marker, its
+        // placeholder on the wire), so a draft of chips is never empty.
+        guard let live = attachment, let sid = attachedSessionId, !trimmed.isEmpty else { return }
         let wasRunning = live.session.state.turnRunning
         let client = live.feed.client
         let adapter = live.adapter
@@ -3633,20 +3653,23 @@ final class ShellSessionHost: ObservableObject {
             // Whether this daemon announced (hello) that it takes a FILE's own path in `images`: if not, the path
             // goes in the text, as it always did for an older daemon.
             let originalPaths = await client.supportsOriginalImagePaths
-            guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: originalPaths, stage: stage) else { return }
+            // Likewise for `files` (`attachment-files`): an older daemon is sent each file's path in the text.
+            let attachmentFiles = await client.supportsAttachmentFiles
+            guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: originalPaths,
+                                                                   attachmentFiles: attachmentFiles, stage: stage) else { return }
             // A FILE attachment is never staged, so the daemon's checks of it (its model backstop, a file that
             // vanished or sits where macOS keeps it from the daemon) answer HERE, on the send. An unreadable file is
             // read by this app instead and staged (`composerSend`); any other refusal's sentence lands on the
             // composer's notice line, beside the draft that stays put.
             let ok = await adapter.composerSend(outgoing, send: { out in
                 if wasRunning {
-                    _ = try await client.steer(sessionId: sid, text: out.text, images: out.images)
+                    _ = try await client.steer(sessionId: sid, text: out.text, images: out.images, files: out.files)
                 } else {
-                    _ = try await client.send(sessionId: sid, text: out.text, images: out.images)
+                    _ = try await client.send(sessionId: sid, text: out.text, images: out.images, files: out.files)
                 }
             }, stage: stage)
             // Clears only what was sent — edits made during the round trip stay.
-            if ok { adapter.composerSendSucceeded(sentDraft: text) }
+            if ok { adapter.composerSendSucceeded(sentDraft: text, sentAttachments: outgoing.sentAttachmentIDs) }
         }
     }
 

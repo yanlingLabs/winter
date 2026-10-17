@@ -34,7 +34,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import { coldResumeRunHomeFor, createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { coldResumeRunHomeFor, createWinterSessionDrivers, modeOf, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
 import { updateSdkSettings } from "../../src/sdk-files";
 import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
@@ -2364,6 +2364,109 @@ describe("WS-23: a legacy claude-agent record is adopted onto the Winter leg at 
       expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
       expect(t.records.get(sid)!.runtimeKind).toBe("winter-agent");
       await resumed.end();
+    } finally { t.close(); }
+  });
+
+  // Cowork (session door): adoption MUTATES — `adoptLegacyRecord` rewrites the record and `rekeyForCanonicalCwd`
+  // MOVES the transcript — and both run before `modeOf`. A stored cowork row must be refused before either, or
+  // a session nothing can run would still have its transcript relocated and its record rewritten as a
+  // Winter-leg Code session by a refused resume.
+  test("a cowork row with an official-leg record is refused BEFORE adoption: record untouched, transcript not moved", async () => {
+    const t = table();
+    try {
+      const { sid, workdir, officialKey, projects, id } = legacySession(t, { provider: "anthropic", cwdless: true });
+      (t.store as unknown as { db: { run(sql: string, params: unknown[]): void } }).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["cowork", sid]);
+      const before = structuredClone(t.records.get(sid)!);
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      expect(winterKey).not.toBe(officialKey); // a cwd-less session's Winter key differs: adoption WOULD move the transcript
+      const refusal = { name: "WinterLegRefusal", code: "unsupported_topology", message: "Cowork unavailable" };
+      // `runTurn` reaches `resume()` directly (not through `ensure()`), so this pins `resume`'s own guard.
+      await expect(t.drivers.runTurn(sid, "hello", "fixture")).rejects.toMatchObject(refusal);
+      await expect(t.drivers.ensure(sid)).rejects.toMatchObject(refusal);
+      expect(t.records.get(sid)).toEqual(before);                 // not adopted: still the claude-agent record, byte for byte
+      expect(t.drivers.legOf(sid)).toBe("official");
+      expect(existsSync(join(projects, officialKey, `${id}.jsonl`))).toBe(true); // not re-keyed
+      expect(existsSync(join(projects, winterKey))).toBe(false);
+      expect(t.queries).toHaveLength(0);
+      expect(t.runHomes.built).toHaveLength(0);
+      rmSync(workdir, { recursive: true, force: true });
+    } finally { t.close(); }
+  });
+});
+
+// Cowork (session door): a STORED session whose mode is `cowork` — `session.create` refuses to mint one, so
+// this is a rolled-back newer daemon's row, a rebuilt log's, or a hand-edited index's — must be refused
+// typed BEFORE anything runs. `modeOf` used to read every mode but chat/dispatch as Code, so such a row
+// resumed as a Code session; now it answers `unsupported_topology` with no record read or adopted, no run
+// home built and no child spawned.
+describe("modeOf — the one place a stored mode string becomes a runnable mode", () => {
+  test("absent/null is code, a runnable string is itself", () => {
+    expect(modeOf(undefined)).toBe("code");
+    expect(modeOf(null)).toBe("code");
+    for (const mode of ["code", "dispatch", "chat"] as const) expect(modeOf(mode)).toBe(mode);
+  });
+
+  test("cowork THROWS the typed refusal (it used to read as code); so does any string that is not a runnable mode", () => {
+    expect(() => modeOf("cowork")).toThrow(expect.objectContaining({ name: "WinterLegRefusal", code: "unsupported_topology", message: "Cowork unavailable" }));
+    for (const unknown of ["something-new", "", "Code", "CHAT", "plan"]) {
+      // The stored value is never echoed in the message: it can be anything a hand-edited index holds.
+      let thrown: unknown;
+      try { modeOf(unknown); } catch (err) { thrown = err; }
+      expect(thrown).toMatchObject({ name: "WinterLegRefusal", code: "unsupported_topology", message: "This session's mode is not supported by this Winter" });
+      expect(String((thrown as Error).message)).not.toContain(unknown === "" ? "\u0000" : unknown);
+    }
+  });
+});
+
+describe("createWinterSessionDrivers — a stored cowork row is refused, never read as Code", () => {
+  const asCowork = (t: ReturnType<typeof table>, sid: string): string => {
+    (t.store as unknown as { db: { run(sql: string, params: unknown[]): void } }).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["cowork", sid]);
+    return sid;
+  };
+  const refusal = { name: "WinterLegRefusal", code: "unsupported_topology", message: "Cowork unavailable" };
+
+  test("create / ensure / runTurn on a record-less cowork row all refuse typed; nothing is recorded, built or spawned", async () => {
+    const t = table();
+    try {
+      const sid = asCowork(t, t.store.createSession("t", { mode: "code", model: "winter-test/echo" }));
+      await expect(t.drivers.create(sid)).rejects.toMatchObject(refusal);
+      // `ensure` used to answer `undefined` for a record-less row (the IPC layer then said "phone-owned session").
+      await expect(t.drivers.ensure(sid)).rejects.toMatchObject(refusal);
+      await expect(t.drivers.runTurn(sid, "hello", "fixture")).rejects.toMatchObject(refusal);
+      expect(t.records.get(sid)).toBeUndefined();
+      expect(t.drivers.get(sid)).toBeUndefined();
+      expect(t.queries).toHaveLength(0);
+      expect(t.runHomes.built).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("a recorded session flipped to cowork is refused at its next resume — the old driver's death does not reopen it as Code", async () => {
+    const t = table();
+    try {
+      const cwd = mkdtempSync(join(tmpdir(), "winter-cowork-flip-"));
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd });
+      await t.drivers.create(sid);
+      expect(t.queries).toHaveLength(1);
+      expect(t.runHomes.built).toHaveLength(1);
+      await t.drivers.evict(sid);
+      asCowork(t, sid);
+      await expect(t.drivers.ensure(sid)).rejects.toMatchObject(refusal);
+      await expect(t.drivers.runTurn(sid, "again", "fixture")).rejects.toMatchObject(refusal);
+      expect(t.drivers.get(sid)).toBeUndefined();
+      expect(t.queries).toHaveLength(1);        // no second child
+      expect(t.runHomes.built).toHaveLength(1); // no second run home
+      rmSync(cwd, { recursive: true, force: true });
+    } finally { t.close(); }
+  });
+
+  test("the refusal costs the table nothing: an unknown id still answers undefined, and a Code session still opens", async () => {
+    const t = table();
+    try {
+      expect(await t.drivers.ensure("s_nope")).toBeUndefined();
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(t.queries).toHaveLength(1);
+      await session.end();
     } finally { t.close(); }
   });
 });
