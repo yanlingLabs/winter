@@ -756,11 +756,19 @@ describe("the review's smaller findings", () => {
       names: { "a.example": ["93.184.216.34"] },
       pages: {
         "a.example/ru": () => new Response(new Uint8Array([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]), { headers: { "content-type": "text/plain; charset=windows-1251" } }),
-        "a.example/meta": () => new Response(Buffer.from('<html><head><meta charset="koi8-r"></head><body>x</body></html>'), { headers: { "content-type": "text/html" } }),
+        "a.example/meta": () => new Response(Buffer.concat([Buffer.from('<html><head><meta charset="koi8-r"></head><body><p>'), Buffer.from([0xd0, 0xd2, 0xc9, 0xd7, 0xc5, 0xd4]), Buffer.from("</p></body></html>")]), { headers: { "content-type": "text/html" } }),
       },
     });
     expect((await t.read("https://a.example/ru", { emit: false })).text).toBe("Привет");
-    expect((await t.read("https://a.example/meta", { emit: false })).text).toBe("x");
+    expect((await t.read("https://a.example/meta", { emit: false })).text).toBe("привет"); // koi8-r bytes d0 d2 c9 d7 c5 d4
+  });
+
+  test("the WHATWG `replacement` encoding is refused, not decoded to U+FFFD (Bun 1.3.14 decoded it; 1.4 throws)", async () => {
+    const t = setup({
+      names: { "a.example": ["93.184.216.34"] },
+      pages: { "a.example/r": () => new Response(new Uint8Array([0x61, 0x62]), { headers: { "content-type": "text/plain; charset=replacement" } }) },
+    });
+    expect((await failure(t.read("https://a.example/r"))).message).toBe("the page is in a character set browsers.read() can't decode (replacement) — open it in a tab");
   });
 
   test("0.0.0.0 points at localhost; the audit names every hop's host", async () => {
