@@ -17,6 +17,8 @@ const allSources = readdirSync(packages, { withFileTypes: true }).filter(entry =
 const OTHER_SLICES = ["admission-probes", "free-space", "pressure", "resource-observer"];
 const everyNativeSource = sourceFiles(nativeDirectory);
 const nativeSources = everyNativeSource.filter(file => !OTHER_SLICES.includes(basename(file, ".ts")));
+// N2 S7: the ONE module outside cowork/native/ that may import it. It is lazy and inert; the daemon is its only importer. Both facts are pinned below.
+const WIRING = join(packages, "core", "src", "cowork", "native-wiring.ts");
 const scriptSources = existsSync(join(repositoryRoot, "scripts")) ? sourceFiles(join(repositoryRoot, "scripts")) : [];
 
 /** Every module specifier a source text names: static imports and re-exports (any form, multi-line included), bare `import "x"`, `import("x")`,
@@ -65,8 +67,8 @@ test("the module set is exactly the reviewed one and has no barrel", () => {
 test("no source file outside cowork/native imports, names or constructs anything from it", () => {
   const needles = ["cowork/native", "CoworkNativeHost", "CoworkNativeAuthority", "CoworkNativeRecovery", "CoworkNativePower", "CoworkNativeStopRegistry", "CoworkLauncherPort", "CoworkLauncherSession", "CoworkNativeImagePins",
     "CoworkNativeDurableReceiptPort", "CoworkNativeOwnerRecoverPort", "parseCoworkNativeLauncherLine", "parseCoworkNativeEnvelope", "parseCoworkNativeMuxFrame", "FdLineChannel", "FdReceiver", "spawnWithChannel", "COWORK_LIBKRUN_"];
-  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate))) {
-    const text = readFileSync(file, "utf8");
+  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING)) {
+    const text = readFileSync(file, "utf8").split("cowork/native-wiring").join("");
     for (const needle of needles) expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
   }
 });
@@ -119,11 +121,25 @@ test("no module under cowork/native reads anything at import time", () => {
 
 test("no file anywhere (every package's src, and scripts/) imports from cowork/native, however the specifier is written", () => {
   const offenders: string[] = [];
-  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate)))
+  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING))
     for (const specifier of specifiersOf(readFileSync(file, "utf8"))) if (reachesNative(file, specifier)) offenders.push(`${relative(repositoryRoot, file)} -> ${specifier}`);
   expect(offenders).toEqual([]);
   expect(scriptSources.length).toBeGreaterThan(5);
   expect(allSources.length).toBeGreaterThan(100);
+});
+
+test("N2 S7: the wiring is the only importer of cowork/native, the daemon is the only importer of the wiring, and the wiring is lazy and reaches no process, socket, setting or environment", () => {
+  const wiringText = readFileSync(WIRING, "utf8"), code = wiringText.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+  expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/host", "./native/power", "./native/protocol", "./native/recovery", "./native/stop-proof"]);
+  const importers = allSources.filter(file => file !== WIRING && specifiersOf(readFileSync(file, "utf8")).some(specifier => /(^|\/)native-wiring(\.ts|\.js)?$/.test(specifier))).map(file => relative(packages, file).split(sep).join("/"));
+  expect(importers).toEqual(["core/src/daemon.ts"]);
+  for (const forbidden of ["Bun.spawn", "child_process", "Bun.connect(", "Bun.listen(", "node:net", "process.env", "Bun.secrets", "Keychain", "readFileSync", "writeFileSync", "mkdirSync", "setInterval", "dlopen(", "krun_", "Hypervisor", "sandbox_init", "pmset"])
+    expect(`${forbidden}:${code.includes(forbidden)}`).toBe(`${forbidden}:false`);
+  // Nothing is built or scheduled at import time or at construction: the host appears only inside the private `host()` builder.
+  expect(code.match(/new CoworkNativeHost\(/g)).toHaveLength(1);
+  expect(code.indexOf("new CoworkNativeHost(")).toBeGreaterThan(code.indexOf("private host()"));
+  expect(code.indexOf("constructor(private readonly options")).toBeLessThan(code.indexOf("private host()"));
+  expect(/constructor\(private readonly options: CoworkNativeWiringOptions\) \{\}/.test(code)).toBe(true);
 });
 
 test("the specifier scanner sees every form of import, and resolves it relative to the file that wrote it", () => {
