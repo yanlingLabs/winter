@@ -22,6 +22,8 @@ struct IslandStripView: View {
     let size: CGSize
     /// The housing's width, nil without one (the icon and the count then sit side by side).
     let housingWidth: CGFloat?
+    /// The pointer is over it: it glows dark, softly — the Dispatch pill buttons' glow, in black (user 2026-10-17).
+    var hovered = false
 
     var body: some View {
         let shape = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: IslandLayout.stripCorner,
@@ -29,6 +31,9 @@ struct IslandStripView: View {
                                            style: .continuous)
         ZStack {
             shape.fill(Color.black)
+                .shadow(color: Color.black.opacity(hovered ? PillHoverGlowMetrics.near : 0), radius: PillHoverGlowMetrics.nearRadius)
+                .shadow(color: Color.black.opacity(hovered ? PillHoverGlowMetrics.far : 0), radius: PillHoverGlowMetrics.farRadius)
+                .animation(.easeOut(duration: 0.15), value: hovered)
             if !model.showsWings {
                 // Idle: exactly the housing, black on black — nothing drawn beside it.
                 EmptyView()

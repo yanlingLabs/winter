@@ -121,6 +121,33 @@ final class IslandPanel: NSPanel {
 final class IslandHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The pointer came over (true) or left (false) `hoverArea`. A tracking area, active even while the panel is not
+    /// key (it never is) — event-driven, nothing runs while the pointer is elsewhere.
+    var onHover: ((Bool) -> Void)?
+    /// Where `onHover` watches (this view's own coordinates); nil: nowhere.
+    var hoverArea: CGRect? {
+        didSet { if hoverArea != oldValue { updateTrackingAreas() } }
+    }
+    private var hoverTracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        hoverTracking = nil
+        guard let hoverArea, onHover != nil else { return }
+        let area = NSTrackingArea(rect: hoverArea, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if event.trackingArea === hoverTracking { onHover?(true) } else { super.mouseEntered(with: event) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if event.trackingArea === hoverTracking { onHover?(false) } else { super.mouseExited(with: event) }
+    }
+
     /// Files dragged over this view: file URLs only, read exactly as the composer reads them.
     var fileDrop: IslandFileDrop? {
         didSet {

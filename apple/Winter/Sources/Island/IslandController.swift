@@ -34,6 +34,7 @@ final class IslandController {
     let tabModels: IslandTabModels
 
     private let stripPanel = IslandPanel(level: .statusBar)
+    private let stripHover = IslandStripHover()
     private let topPanel = IslandPanel(level: .statusBar)
     private let islandPanel = IslandPanel(level: .statusBar)
     private var shape = IslandScreenShape(housing: nil, menuBarHeight: 24)
@@ -324,20 +325,27 @@ final class IslandController {
             stripPanel.orderOut(nil)
             return
         }
-        let view = IslandStripRoot(store: store, size: strip.size, housingWidth: shape.housing?.width) { [weak self] point in
+        let view = IslandStripRoot(store: store, hover: stripHover, size: strip.size, housingWidth: shape.housing?.width) { [weak self] point in
             self?.stripClicked(at: point)
         } onPart: { [weak self] part in
             self?.stripPartChosen(part)
         }
-        if let host = stripPanel.contentView as? IslandHostingView<IslandStripRoot> {
-            host.rootView = view
+        let host: IslandHostingView<IslandStripRoot>
+        if let existing = stripPanel.contentView as? IslandHostingView<IslandStripRoot> {
+            existing.rootView = view
+            host = existing
         } else {
-            let host = IslandHostingView(rootView: view)
+            host = IslandHostingView(rootView: view)
             host.sizingOptions = []
             host.fileDrop = fileDrop
+            host.onHover = { [weak self] over in self?.stripHover.hovered = over }
             stripPanel.contentView = host
         }
-        stripPanel.setFrame(panelFrame(for: strip), display: true)
+        let m = IslandLayout.stripGlowMargin
+        let panelRect = CGRect(x: strip.minX - m, y: strip.minY, width: strip.width + 2 * m, height: strip.height + m)
+        stripPanel.setFrame(panelFrame(for: panelRect), display: true)
+        // The strip inside its panel (this view's coordinates: y-up unless the hosting view is flipped).
+        host.hoverArea = CGRect(x: m, y: host.isFlipped ? 0 : m, width: strip.width, height: strip.height)
         if !stripPanel.isVisible { stripPanel.orderFrontRegardless() }
     }
 
@@ -744,21 +752,33 @@ final class IslandController {
 /// the working wing Sessions, the housing toggles (`IslandStripPart`); VoiceOver gets the same as named actions.
 struct IslandStripRoot: View {
     @ObservedObject var store: IslandStore
+    @ObservedObject var hover: IslandStripHover
     let size: CGSize
     let housingWidth: CGFloat?
     let onClick: (CGPoint) -> Void
     let onPart: (IslandStripPart) -> Void
 
     var body: some View {
-        IslandStripView(model: store.strip, size: size, housingWidth: housingWidth)
+        IslandStripView(model: store.strip, size: size, housingWidth: housingWidth, hovered: hover.hovered)
             .onTapGesture(coordinateSpace: .local) { location in
                 onClick(CGPoint(x: location.x - size.width / 2, y: location.y))
             }
             .accessibilityAction { onPart(.housing) }
             .accessibilityAction(named: "Show what needs you") { onPart(.waitingWing) }
             .accessibilityAction(named: "Show sessions") { onPart(.workingWing) }
+            // Room for the hover glow: the panel is the strip plus this margin at the sides and below (never above —
+            // the top is the screen's edge). Transparent while not hovered, so clicks there reach the menu bar.
+            .padding(.horizontal, IslandLayout.stripGlowMargin)
+            .padding(.bottom, IslandLayout.stripGlowMargin)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .environment(\.colorScheme, .dark)
     }
+}
+
+/// Whether the pointer is over the strip (its panel's tracking area writes it).
+@MainActor
+final class IslandStripHover: ObservableObject {
+    @Published var hovered = false
 }
 
 /// The top panel's content: the card on top (and the one going back up), and the waiting pill under it.

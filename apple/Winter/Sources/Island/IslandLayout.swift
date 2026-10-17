@@ -56,6 +56,9 @@ enum IslandLayout {
     /// Without a housing: a short black tab hanging from the top centre.
     static let stripWidthWithoutHousing: CGFloat = 112
     static let stripCorner: CGFloat = 10
+    /// Around the strip's panel (the sides and below): room for its dark hover glow (`PillHoverGlowMetrics.farRadius`
+    /// plus a little). Transparent while not hovered, so a click there reaches the menu bar.
+    static let stripGlowMargin: CGFloat = 14
 
     // A card on top.
     static let cardWidth: CGFloat = 400
