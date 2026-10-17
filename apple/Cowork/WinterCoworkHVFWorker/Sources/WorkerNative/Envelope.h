@@ -25,7 +25,9 @@ typedef enum { CW_ENV_TO_WORKER = 0, CW_ENV_TO_LAUNCHER = 1 } cw_env_direction;
 /* STATUS states (wire values). Informational for the launcher; never release evidence. */
 enum {
     CW_STATUS_SANDBOXED = 1, CW_STATUS_VOLUMES_ACCEPTED = 2, CW_STATUS_VM_RUNNING = 3, CW_STATUS_GUEST_HELLO = 4,
-    CW_STATUS_DRAINING = 5, CW_STATUS_DRAIN_ACKED = 6, CW_STATUS_GUEST_HALTED = 7, CW_STATUS_EXITING = 8
+    CW_STATUS_DRAINING = 5, CW_STATUS_DRAIN_ACKED = 6, CW_STATUS_GUEST_HALTED = 7, CW_STATUS_EXITING = 8,
+    CW_STATUS_HALTING = 9,      /* the guest's control-up `halting` arrived AFTER its drain_ack, with the drain's nonce */
+    CW_STATUS_GUEST_FAULT = 10  /* a control-up `fault` arrived: after it no Class A can exist for the run */
 };
 /* FAULT codes (wire values). TRUNCATED_RIGHTS has no sender: the contract says a truncated control buffer exits at once
  * without acknowledging, so the worker leaves it unsaid and exits 79. SECOND_DRAIN answers a second DRAIN envelope; the first one's nonce and
@@ -135,5 +137,9 @@ typedef struct {
 void cw_l2_out_init(cw_l2_out *out, int fd);
 int cw_l2_send_status(cw_l2_out *out, uint32_t state, const uint64_t requested[2], const uint64_t completed[2]);
 int cw_l2_send_fault(cw_l2_out *out, uint32_t code);
+/* For the VMM exit hook, which must not block: ONE non-blocking attempt, no retry, no poll, and the lock is only tried. Returns 0 when the datagram
+ * was sent and -1 when it was not (the lock was busy, the socket was full, the peer is gone); nothing is queued and no sequence number is spent on a
+ * failure. A lost status is acceptable: a lost `guest_halted` is Class B. */
+int cw_l2_send_status_once(cw_l2_out *out, uint32_t state, const uint64_t requested[2], const uint64_t completed[2]);
 
 #endif

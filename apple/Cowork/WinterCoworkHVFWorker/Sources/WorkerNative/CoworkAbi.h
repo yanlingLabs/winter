@@ -1,18 +1,14 @@
 /* CoworkAbi.h: the ONE file that knows the libkrun production ABI as the linked archive really has it.
  *
- * Since S4's review round (PR #55, patch 0017, now through 0023 at commit 3a8f24d2) the library exports the contract's `_v1` names, so the names need no
- * mapping any more. What differs from S1's contract text (docs/cowork-native-worker.md section 8) is the SHAPE of three of them, and
- * the worker codes against the header it links, because that is what runs. Every difference is listed here and in the research note
- * for S1 and S4 to reconcile:
+ * Since S4's review round (PR #55, patch 0017, now through 0023, vendored in PR #62 at apple/Cowork/WinterCoworkLibkrun) the library exports the contract's `_v1` names, and since contract
+ * round 3 (S1 1313040a) the contract's ABI section is this header's own: nothing is mapped and nothing differs. The worker codes against the header
+ * it links, and pins.json pins every declaration it relies on, so a header change stops the build.
  *
- *   exit hook      contract: `void (*)(void *user, int32_t reason)`, reasons off=0 reset=1 vcpu-error=2 terminal-fault=3.
- *                  library:  `void (*)(void *user_data, uint32_t reason)`, KRUN_COWORK_EXIT_NONE=0 OFF=1 RESET=2 VCPU_ERROR=3 TERMINAL_FAULT=4.
- *                  The worker uses the header's SYMBOLS, never a number, so the shifted values cannot invert off and reset. Only
- *                  KRUN_COWORK_EXIT_OFF may ever lead to `guest_halted`.
- *   flush counters contract: `get_flush_counters_v1(uint32_t ctx_id, {4 x u64} *out)`.
- *                  library:  `get_flush_counters_v1(struct {size, device_count, device[2]{requested, completed, final_sync_attempted,
- *                  final_sync_completed}} *out)`: process-global, no ctx_id, and it carries the FINAL flush the STATUS payload has no field for.
- *   pin counters   library only: `krun_cowork_get_pin_counters_v1`. Not called by the worker (G4 reads it); not in the contract.
+ *   exit hook      `void (*)(void *user_data, uint32_t reason)`; KRUN_COWORK_EXIT_NONE=0 OFF=1 RESET=2 VCPU_ERROR=3 TERMINAL_FAULT=4. The worker
+ *                  uses the header's SYMBOLS, never a number. Only KRUN_COWORK_EXIT_OFF may ever lead to `guest_halted`.
+ *   flush counters `get_flush_counters_v1(struct {size, device_count, device[2]{requested, completed, final_sync_attempted, final_sync_completed}} *)`:
+ *                  process-global, no ctx_id, and it carries the FINAL flush the STATUS payload has no field for.
+ *   pin counters   `krun_cowork_get_pin_counters_v1`: optional diagnostics (G4 reads it). Not called by the worker; it feeds no decision.
  *
  * What is UNCERTAIN, and therefore never `guest_halted` (a Class A candidate): reason NONE or any unknown value; reset, vcpu error and
  * terminal fault; no counters, or counters of another size or device count; a final flush not both attempted and completed on both
@@ -40,10 +36,10 @@
 #include "Relay.h"
 
 #if !defined(KRUN_COWORK_PRODUCTION_VCPUS) || !defined(KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB) || !defined(KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB)
-#error "libkrun.h does not declare the production profile limits: link S4's header (cowork/n2-libkrun-profile 3a8f24d2 or later)"
+#error "libkrun.h does not declare the production profile limits: link S4's header (apple/Cowork/WinterCoworkLibkrun, PR #62)"
 #endif
 #if !defined(KRUN_COWORK_EXIT_OFF) || !defined(KRUN_COWORK_EXIT_RESET) || !defined(KRUN_COWORK_EXIT_VCPU_ERROR) || !defined(KRUN_COWORK_EXIT_TERMINAL_FAULT)
-#error "libkrun.h does not declare the exit reasons: link S4's header (cowork/n2-libkrun-profile 3a8f24d2 or later)"
+#error "libkrun.h does not declare the exit reasons: link S4's header (apple/Cowork/WinterCoworkLibkrun, PR #62)"
 #endif
 
 /* The flush evidence the Class A receipt needs is part of the library now. Always on; there is no fallback. */

@@ -2,6 +2,7 @@
  * worker's own record, and the decision made on it. Compiled with -isystem <libkrun include dir>; links no archive. */
 #include "CoworkAbi.h"
 #include "test_support.h"
+#include "vectors.h"
 
 static struct krun_cowork_flush_counters_v1 healthy(void) {
     struct krun_cowork_flush_counters_v1 c;
@@ -70,13 +71,64 @@ static void counters(void) {
     CHECK(!cw_exit_report_halted(&r) && r.counters_valid && r.requested[0] == 41 && r.completed[0] == 40); /* completed < requested: uncertain */
     c = healthy(); c.device[1].completed = 9;
     cw_exit_report_from_library(KRUN_COWORK_EXIT_OFF, 0, &c, &r);
-    CHECK(cw_exit_report_halted(&r));
+    CHECK(!cw_exit_report_halted(&r) && r.completed[1] == 9);    /* completed ABOVE requested cannot be believed either */
 }
 
 static void limits(void) {
     CHECK(CW_GATE_VCPUS == 2 && CW_GATE_MIN_MEMORY_MIB == 768 && CW_GATE_MAX_MEMORY_MIB == 1024);
     CHECK(CW_SCOPE_MIN_MEMORY_MIB == CW_GATE_MIN_MEMORY_MIB && CW_SCOPE_MAX_MEMORY_MIB == CW_GATE_MAX_MEMORY_MIB);
     CHECK(CW_ABI_FLUSH_EVIDENCE == 1);
+}
+
+/* S1's guest-stop.json (round 3). The vectors give the order of the L2 statuses the launcher saw, the exit reason and the counters, and the launcher's verdict.
+ * The worker's part is narrower: whether `guest_halted` may be among them. Two properties tie the files together:
+ *   1. the numbers the file calls none/off/reset/vcpu-error/terminal-fault are the header's constants (so the contract and the library cannot drift apart);
+ *   2. wherever the contract's verdict is ORDERLY (the only case that can lead to a Class A), the worker's own decision says halted; and wherever the worker's
+ *      decision says not halted, the verdict is never orderly, whatever the statuses in the file claim. */
+static void stop_vectors_drift(void) {
+    CHECK(stop_reason_none == KRUN_COWORK_EXIT_NONE && stop_reason_off == KRUN_COWORK_EXIT_OFF && stop_reason_reset == KRUN_COWORK_EXIT_RESET
+          && stop_reason_vcpu_error == KRUN_COWORK_EXIT_VCPU_ERROR && stop_reason_terminal_fault == KRUN_COWORK_EXIT_TERMINAL_FAULT);
+    CHECK(STOP_VECTOR_COUNT == 23);
+    unsigned orderly = 0, withheld = 0;
+    for (size_t i = 0; i < STOP_VECTOR_COUNT; i++) {
+        const cw_stop_vector *v = &stop_vectors[i];
+        struct krun_cowork_flush_counters_v1 counters;
+        memset(&counters, 0, sizeof counters);
+        counters.size = (uint32_t)sizeof counters;
+        counters.device_count = 2;
+        for (int disk = 0; disk < 2; disk++)
+            counters.device[disk] = (struct krun_cowork_flush_device_v1){ v->counters[disk][0], v->counters[disk][1], v->counters[disk][2], v->counters[disk][3] };
+        cw_exit_report report;
+        if (v->reason < 0) memset(&report, 0, sizeof report); /* the hook never ran: there is no report at all, and the relay is never asked */
+        else cw_exit_report_from_library((uint32_t)v->reason, v->counters_valid ? 0 : -22, &counters, &report);
+        bool halted = v->reason >= 0 && cw_exit_report_halted(&report);
+        bool is_orderly = strstr(v->states, "halting") != NULL && v->halting && v->halted && !v->guest_fault && strcmp(v->name, "orderly") == 0;
+        if (is_orderly) { orderly++; CHECK(halted); }
+        if (!halted) { withheld++; CHECK(strcmp(v->name, "orderly") != 0); }
+        /* the cases that are not orderly because of the exit hook alone */
+        if (strcmp(v->name, "reset-instead-of-off") == 0 || strcmp(v->name, "vcpu-error") == 0 || strcmp(v->name, "terminal-fault") == 0 || strcmp(v->name, "reason-none") == 0
+            || strcmp(v->name, "no-reason-delivered") == 0 || strcmp(v->name, "flush-requested-never-completed") == 0 || strcmp(v->name, "final-sync-failed-exit-status-unchanged") == 0
+            || strcmp(v->name, "final-sync-never-attempted") == 0 || strcmp(v->name, "counters-unreadable") == 0)
+            CHECK(!halted);
+    }
+    /* The two round 3 final vectors: the WORKER may send guest_halted after a mux quarantine or with no drain_ack (the hook knows nothing of either); it is the
+     * launcher's drain rule that makes both Class B. So the worker's own decision for them is "halted", and the verdict file must not call them orderly. */
+    unsigned launcher_rule = 0;
+    for (size_t i = 0; i < STOP_VECTOR_COUNT; i++) {
+        if (strcmp(stop_vectors[i].name, "guest-halted-after-mux-quarantine") != 0 && strcmp(stop_vectors[i].name, "guest-halted-without-drain-ack") != 0) continue;
+        launcher_rule++;
+        struct krun_cowork_flush_counters_v1 counters;
+        memset(&counters, 0, sizeof counters);
+        counters.size = (uint32_t)sizeof counters;
+        counters.device_count = 2;
+        for (int disk = 0; disk < 2; disk++)
+            counters.device[disk] = (struct krun_cowork_flush_device_v1){ stop_vectors[i].counters[disk][0], stop_vectors[i].counters[disk][1], stop_vectors[i].counters[disk][2], stop_vectors[i].counters[disk][3] };
+        cw_exit_report report;
+        cw_exit_report_from_library((uint32_t)stop_vectors[i].reason, 0, &counters, &report);
+        CHECK(cw_exit_report_halted(&report) && stop_vectors[i].halted);
+    }
+    CHECK(launcher_rule == 2);
+    CHECK(orderly == 1 && withheld >= 9);
 }
 
 /* The hook the worker registers has the library's type; a function of any other signature is refused at compile time by
@@ -88,6 +140,7 @@ int main(void) {
     reasons();
     counters();
     limits();
+    stop_vectors_drift();
     krun_cowork_exit_hook_v1 typed = accepted_hook;
     CHECK(typed != NULL);
     return cw_test_finish("test_abi");

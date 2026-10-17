@@ -19,7 +19,9 @@
  *   owner loss      L2 or L3 closed, or the parent changed, or the parent was ALREADY gone when the worker started (getppid() == 1): the
  *                   worker starts its own drain (origin owner-loss, 30 s budget, a fresh nonce) and ends itself when the budget plus a
  *                   grace period passes.
- *   drain deadline  budget + CW_STOP_GRACE_MS passed without a power-off: exit CW_EXIT_DRAIN_TIMEOUT.
+ *   drain deadline  the DRAIN's own budget (layer G of the contract's stop timeline; CW_STOP_GRACE_MS is 0) passed without a power-off: exit CW_EXIT_DRAIN_TIMEOUT.
+ *   guest fault     a control-up `fault` is reported once as the L2 status `guest_fault`; a `halting` after it is a mux violation. A `halting` after the
+ *                   drain_ack with the drain's nonce is reported as the status `halting`.
  */
 #ifndef WINTER_COWORK_WORKER_RELAY_H
 #define WINTER_COWORK_WORKER_RELAY_H
@@ -91,14 +93,14 @@ typedef struct {
 } cw_exit_report;
 
 /* True when the worker may say `guest_halted`: a guest power-off (reason off), counters read, and the final flush of BOTH volumes both
- * attempted and completed, and no flush request left unfinished (completed >= requested). The envelope has no field for the final flush,
+ * attempted and completed, and no flush request left unfinished (completed == requested). The envelope has no field for the final flush,
  * so the only way to state it is to withhold the claim when it did not happen. Anything uncertain (reason NONE or unknown, no counters, a
- * missing final flush, completed < requested) withholds the claim and reports `fault vm_failed` plus the real counters; a process that ends
+ * missing final flush, completed < requested) withholds the claim and reports `exiting` alone, with the real counters; a process that ends
  * without the hook ever running reports nothing at all. */
 bool cw_exit_report_halted(const cw_exit_report *report);
 
 /* The VMM exit hook ran after the block devices' final flush. Reports `guest_halted` (with counters) and `exiting` on L2 only when
- * cw_exit_report_halted; otherwise `fault vm_failed` and `exiting`. Callable from the VMM thread. */
+ * cw_exit_report_halted; otherwise `exiting` ALONE (no fault: the launcher simply has no halted report). Callable from the VMM thread. */
 void cw_relay_vmm_exit(cw_relay *relay, const cw_exit_report *report);
 /* Queue a liveness ping toward the guest (not used by the worker's own loop; the guest answers with pong). 0 or -1. */
 int cw_relay_ping(cw_relay *relay, uint32_t n);

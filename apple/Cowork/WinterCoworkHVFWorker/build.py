@@ -263,11 +263,10 @@ def cmd_worker(ctx: Context, include: Path, archive: Path) -> None:
     report = {
         "archiveSha256": sha256(archive), "headerSha256": sha256(include / "libkrun.h"), "libkrunReferences": sorted(referenced),
         "workerSha256": sha256(stripped), "vmStarted": False, "workerExecuted": False,
-        "contractDifferences": PINS["abi"]["differences"],
+        "contractContract": "S1 1313040a: the contract's ABI section equals the pinned header declarations (pins.json abi.headerDeclarations)",
     }
     (out / "build-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({k: v for k, v in report.items() if k != "contractDifferences"}))
-    print(f"{len(report['contractDifferences'])} places where the header the worker links differs from S1's contract text (pins.json abi.differences)")
+    print(json.dumps(report))
 
 
 # --------------------------------------------------------------------------------------------------------------- inspect

@@ -132,6 +132,12 @@ static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {
     case CW_STOP_REPORT_ACKED:
         (void)cw_l2_send_status(r->out, CW_STATUS_DRAIN_ACKED, NULL, NULL);
         break;
+    case CW_STOP_REPORT_HALTING:
+        (void)cw_l2_send_status(r->out, CW_STATUS_HALTING, NULL, NULL);
+        break;
+    case CW_STOP_REPORT_FAULT:
+        (void)cw_l2_send_status(r->out, CW_STATUS_GUEST_FAULT, NULL, NULL);
+        break;
     case CW_STOP_VIOLATION:
         violation(r, now);
         break;
@@ -323,22 +329,24 @@ bool cw_exit_report_halted(const cw_exit_report *report) {
     if (!report->reason_off || !report->counters_valid) return false;
     for (int disk = 0; disk < 2; disk++) {
         if (report->final_attempted[disk] != 1 || report->final_completed[disk] != 1) return false;
-        if (report->completed[disk] < report->requested[disk]) return false; /* an unfinished flush: the final flush is uncertain, never Class A */
+        if (report->completed[disk] != report->requested[disk]) return false; /* fewer completed than requested is an unfinished flush; MORE is counters that cannot be believed: either way never Class A */
     }
     return true;
 }
 
 void cw_relay_vmm_exit(cw_relay *r, const cw_exit_report *report) {
-    pthread_mutex_lock(&r->lock);
-    cw_stop_halted(&r->stop);
-    pthread_mutex_unlock(&r->lock);
+    /* This runs on libkrun's exit path, whose header says the hook must not block: the relay lock is only TRIED (the process is about to end, so
+     * a phase update that loses the race changes nothing) and each status gets ONE non-blocking attempt, no retry loop. A lost `guest_halted`
+     * is only Class B; a hook that waited for a launcher that is not reading would hold libkrun's exit path for seconds. */
+    if (pthread_mutex_trylock(&r->lock) == 0) {
+        cw_stop_halted(&r->stop);
+        pthread_mutex_unlock(&r->lock);
+    }
     static const uint64_t zero[2] = { 0, 0 };
     const uint64_t *requested = report->counters_valid ? report->requested : zero;
     const uint64_t *completed = report->counters_valid ? report->completed : zero;
-    if (cw_exit_report_halted(report)) {
-        (void)cw_l2_send_status(r->out, CW_STATUS_GUEST_HALTED, requested, completed);
-    } else {
-        (void)cw_l2_send_fault(r->out, CW_FAULT_VM_FAILED);
-    }
-    (void)cw_l2_send_status(r->out, CW_STATUS_EXITING, requested, completed);
+    /* guest_halted only for reason OFF with both final syncs complete; otherwise `exiting` ALONE (contract section 5): the launcher then
+     * has no halted report and cannot issue a Class A. */
+    if (cw_exit_report_halted(report)) (void)cw_l2_send_status_once(r->out, CW_STATUS_GUEST_HALTED, requested, completed);
+    (void)cw_l2_send_status_once(r->out, CW_STATUS_EXITING, requested, completed);
 }

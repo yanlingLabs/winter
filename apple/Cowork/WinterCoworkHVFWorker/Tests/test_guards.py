@@ -113,6 +113,31 @@ class MainOrder(unittest.TestCase):
         self.assertLess(main.index("launcher_pid == 1"), main.index("resolve_artifacts("))
         self.assertIn("launcher_pid, &env)", main, "the same pid reaches the relay's watchdog")
 
+    def test_the_stop_timeline_and_the_round_3_statuses(self):
+        stop = (SOURCES / "OwnedStop.h").read_text()
+        self.assertRegex(stop, r"#define CW_STOP_GRACE_MS 0u\b", "layer G: the worker exits 75 at the DRAIN's own budget")
+        self.assertIn("now_ms + budget_ms + CW_STOP_GRACE_MS", code(SOURCES / "OwnedStop.c"))
+        envelope = (SOURCES / "Envelope.h").read_text()
+        self.assertRegex(envelope, r"CW_STATUS_HALTING = 9\b")
+        self.assertRegex(envelope, r"CW_STATUS_GUEST_FAULT = 10\b")
+        self.assertIn("s->state > CW_STATUS_GUEST_FAULT", code(SOURCES / "Envelope.c"))
+        owned = code(SOURCES / "OwnedStop.c")
+        halting = function_body(owned, "cw_stop_guest_control")
+        self.assertLess(halting.index("case CW_CTL_HALTING:"), halting.index("guest_faulted) return CW_STOP_VIOLATION"), "halting after a fault is refused")
+        relay = code(SOURCES / "Relay.c")
+        exit_body = function_body(relay, "void cw_relay_vmm_exit(")
+        self.assertNotIn("cw_l2_send_fault", exit_body, "a withheld guest_halted is `exiting` alone, never a fault")
+        self.assertEqual(exit_body.count("CW_STATUS_EXITING"), 1)
+        self.assertNotIn("cw_l2_send_status(", exit_body, "the hook must not block: one non-blocking attempt per status, no retry loop")
+        self.assertIn("pthread_mutex_trylock(&r->lock)", exit_body)
+        self.assertNotRegex(exit_body, r"pthread_mutex_lock\(")
+        self.assertIn("report->completed[disk] != report->requested[disk]", relay, "completed above requested is withheld too")
+        self.assertIn("CW_STATUS_HALTING", function_body(relay, "static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {"))
+        self.assertIn("CW_STATUS_GUEST_FAULT", function_body(relay, "static void apply(cw_relay *r, cw_stop_action action, uint64_t now) {"))
+        mux = code(SOURCES / "Mux.c")
+        self.assertIn('IS_TYPE("fault")', mux)
+        self.assertRegex(mux, r'direction == CW_MUX_UP && IS_TYPE\("fault"\)', "fault travels up only")
+
     def test_the_flush_counters_are_asked_for_with_their_size(self):
         abi = code(SOURCES / "CoworkAbi.h")
         reader = function_body(abi, "static inline int32_t cw_read_flush_counters(")
@@ -271,11 +296,14 @@ class Package(unittest.TestCase):
 
     def test_the_fixtures_are_the_pinned_s1_vectors(self):
         pins = json.loads((TESTS / "fixtures" / "PINS.json").read_text())
-        self.assertEqual(sorted(pins["files"]), ["envelopes.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"])
-        self.assertEqual(pins["source"]["head"], "a7160f9fe35ca731be170ff205a77bc2ff16d28a")
+        self.assertEqual(sorted(pins["files"]), ["envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-image.json", "stop-receipts.json"])
+        self.assertEqual(pins["source"]["head"], "86a0629f70935d6392442f5f2fc0672de1d5ec19")
         for name, expected in pins["files"].items():
             self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
-        self.assertEqual(len(pins["relayBlind"]["vectors"]), 6)
+        self.assertEqual(pins["source"]["lastCommitTouchingTheseFiles"], pins["source"]["head"])
+        self.assertEqual(len(pins["relayBlind"]["vectors"]), len(set(pins["relayBlind"]["vectors"])))
+        self.assertEqual(len(pins["relayBlind"]["vectors"]), 80)
+        self.assertFalse([name for name in pins["relayBlind"]["vectors"] if name.startswith("control-")], "control frames are the worker's own: none of them is passed through")
 
     def test_every_test_source_is_run_and_none_touches_the_sandbox_or_a_vm(self):
         build = (PACKAGE / "build.py").read_text()

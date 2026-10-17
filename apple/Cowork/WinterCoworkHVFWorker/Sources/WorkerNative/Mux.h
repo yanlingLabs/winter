@@ -39,14 +39,18 @@ size_t cw_mux_encode(cw_mux_class cls, uint32_t seq, const uint8_t *payload, siz
 
 /* ---- control messages ---------------------------------------------------------------------------------------------------
  *   down  drain {stopNonce, budgetMs, origin}   ping {n}
- *   up    drain_ack {stopNonce}   halting {stopNonce}   pong {n} */
-typedef enum { CW_CTL_DRAIN = 1, CW_CTL_PING = 2, CW_CTL_DRAIN_ACK = 3, CW_CTL_HALTING = 4, CW_CTL_PONG = 5 } cw_control_type;
+ *   up    drain_ack {stopNonce}   halting {stopNonce}   pong {n}   fault {code, stopNonce | null} */
+typedef enum { CW_CTL_DRAIN = 1, CW_CTL_PING = 2, CW_CTL_DRAIN_ACK = 3, CW_CTL_HALTING = 4, CW_CTL_PONG = 5, CW_CTL_FAULT = 6 } cw_control_type;
+/* Control-up `fault` codes (contract section 6): the guest says it is failing. */
+typedef enum { CW_GUEST_FAULT_UNMOUNT_FAILED = 1, CW_GUEST_FAULT_SUPERVISOR_LOST = 2, CW_GUEST_FAULT_PROTOCOL_VIOLATION = 3, CW_GUEST_FAULT_INTERNAL = 4 } cw_guest_fault;
 typedef struct {
     cw_control_type type;
     uint8_t nonce[16];  /* drain, drain_ack, halting */
     uint32_t budget_ms; /* drain */
     uint32_t origin;    /* drain: CW_ORIGIN_* */
     uint32_t n;         /* ping, pong */
+    uint32_t fault_code; /* fault: CW_GUEST_FAULT_* */
+    bool nonce_null;     /* fault: stopNonce was null (the nonce field is then zero) */
 } cw_control;
 
 /* Parse the JSON payload of a control frame for one direction. Keys must appear in the contract's order, with no whitespace,

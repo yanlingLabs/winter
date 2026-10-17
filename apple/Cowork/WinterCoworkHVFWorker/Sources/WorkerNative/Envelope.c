@@ -177,7 +177,7 @@ static bool encode_drain(const cw_drain *d, uint8_t *p) {
 }
 
 static bool status_ok(const cw_status *s) {
-    if (s->state < CW_STATUS_SANDBOXED || s->state > CW_STATUS_EXITING) return false;
+    if (s->state < CW_STATUS_SANDBOXED || s->state > CW_STATUS_GUEST_FAULT) return false;
     for (int i = 0; i < 2; i++) if (s->requested[i] > CW_MAX_SAFE_INTEGER || s->completed[i] > CW_MAX_SAFE_INTEGER) return false;
     return true;
 }
@@ -338,17 +338,18 @@ void cw_l2_out_init(cw_l2_out *out, int fd) {
     pthread_mutex_init(&out->lock, NULL);
 }
 
-static int l2_send_locked(cw_l2_out *out, cw_envelope *envelope) {
+static int l2_send_locked(cw_l2_out *out, cw_envelope *envelope, int attempts) {
     if (out->gone) return -1;
     envelope->seq = out->seq + 1;
     uint8_t datagram[CW_ENV_MAX_BYTES];
     size_t length = cw_env_encode(envelope, datagram, sizeof datagram);
     if (length == 0) return -1;
-    for (int attempt = 0; attempt < 20; attempt++) {
+    for (int attempt = 0; attempt < attempts; attempt++) {
         ssize_t sent = send(out->fd, datagram, length, MSG_DONTWAIT);
         if (sent == (ssize_t)length) { out->seq = envelope->seq; return 0; }
         if (sent >= 0) return -1;
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+            if (attempts == 1) return -1; /* the bounded variant never waits */
             struct pollfd wait = { .fd = out->fd, .events = POLLOUT, .revents = 0 };
             (void)poll(&wait, 1, 100);
             continue;
@@ -370,7 +371,7 @@ int cw_l2_send_status(cw_l2_out *out, uint32_t state, const uint64_t requested[2
         envelope.u.status.completed[i] = completed != NULL ? completed[i] : 0;
     }
     pthread_mutex_lock(&out->lock);
-    int result = l2_send_locked(out, &envelope);
+    int result = l2_send_locked(out, &envelope, 20);
     pthread_mutex_unlock(&out->lock);
     return result;
 }
@@ -381,7 +382,22 @@ int cw_l2_send_fault(cw_l2_out *out, uint32_t code) {
     envelope.kind = CW_ENV_FAULT;
     envelope.u.fault = code;
     pthread_mutex_lock(&out->lock);
-    int result = l2_send_locked(out, &envelope);
+    int result = l2_send_locked(out, &envelope, 20);
+    pthread_mutex_unlock(&out->lock);
+    return result;
+}
+
+int cw_l2_send_status_once(cw_l2_out *out, uint32_t state, const uint64_t requested[2], const uint64_t completed[2]) {
+    cw_envelope envelope;
+    memset(&envelope, 0, sizeof envelope);
+    envelope.kind = CW_ENV_STATUS;
+    envelope.u.status.state = state;
+    for (int i = 0; i < 2; i++) {
+        envelope.u.status.requested[i] = requested != NULL ? requested[i] : 0;
+        envelope.u.status.completed[i] = completed != NULL ? completed[i] : 0;
+    }
+    if (pthread_mutex_trylock(&out->lock) != 0) return -1;
+    int result = l2_send_locked(out, &envelope, 1);
     pthread_mutex_unlock(&out->lock);
     return result;
 }

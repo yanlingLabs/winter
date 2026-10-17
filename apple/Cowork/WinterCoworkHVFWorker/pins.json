@@ -1,15 +1,15 @@
 {
-  "note": "The libkrun inputs the worker is built and checked against. build.py refuses to build unless the archive and the header match. The archive is S4's STRIPPED production archive (the raw one carries the Rust project's own CI Xcode path in its debug stabs). S3 did not rebuild it: S4 built it from its recipe (rustc 1.90.0, offline crate cache, --remap-path-prefix, ZERO_AR_DATE=1 strip, features blk,cowork-production-only) and recorded that it is bit-identical when produced twice at different absolute paths. S4's committed evidence records the ARCHIVE hash but no header hash, so the header hash below is DERIVED, not copied from a build directory: `build.py verify-header` applies the include/libkrun.h hunks of S4's committed patch queue (each patch file pinned below by the hash S4 committed) to the pristine upstream header and requires this value.",
+  "note": "The libkrun inputs the worker is built and checked against. build.py refuses to build unless the archive and the header match. The archive is S4's STRIPPED production archive (the raw one carries the Rust project's own CI Xcode path in its debug stabs). S3 did not rebuild it: S4 built it from its recipe (rustc 1.90.0, offline crate cache, --remap-path-prefix, ZERO_AR_DATE=1 strip, features blk,cowork-production-only) and recorded that it is bit-identical when produced twice at different absolute paths. S4's committed evidence records the ARCHIVE hash but no header hash, so the header hash below is DERIVED, not copied from a build directory: `build.py verify-header` applies the include/libkrun.h hunks of the vendored patch queue (PR #62, apple/Cowork/WinterCoworkLibkrun/patches) (each patch file pinned below by the hash S4 committed) to the pristine upstream header and requires this value.",
   "libkrun": {
-    "archiveSha256": "d9d06a17c6f3c5cc48933b7eb540baf23fec75a07159b7b11c4c4891b848c825",
+    "archiveSha256": "e4433efe447fd123bb72989d024013d9c913d380d2a1190bc3e181d1f69a89b3",
     "headerSha256": "6b4d06085ad931eafc563aed4b4bcd31632d49a58273b1b342cf18c3a4754ca9",
     "pristineHeaderSha256": "aa0687e3f7f6e6133311e6279f040f39efdfd5255819b6171a835e9220f3d58b",
-    "fromPullRequest": 55,
-    "fromBranch": "cowork/n2-libkrun-profile",
-    "fromCommit": "3a8f24d2aa414cd2f75a31fbdfe4f74404e818b4",
-    "recipe": "spikes/cowork-hvf/N2-PRODUCTION-PROFILE.md, section 'Reproducible build'",
+    "fromPullRequest": 62,
+    "fromBranch": "cowork/n2-libkrun-vendored",
+    "fromCommit": "02c3a0f35fafe6d870a3b02acc270b051a6aec28",
+    "recipe": "apple/Cowork/WinterCoworkLibkrun/scripts/build_archive.py (README.md there); the reference hashes are apple/Cowork/WinterCoworkLibkrun/expected-hashes.json",
     "libkrunSource": "v1.19.6 227b2de6ed323fe180e02f871c5f325a90c13cc2 plus patch queue 0004-0023",
-    "evidence": "spikes/cowork-hvf/results/2026-10-17-n2-production-profile-build.json (production.strippedArchiveSha256, reproduction.strippedArchiveSha256 x2) and production-profile-candidate.json (basePatches, newPatches) (commit 3a8f24d2a: production.strippedArchiveSha256 and reproduction.strippedArchiveSha256 x2 are d9d06a17...)",
+    "evidence": "apple/Cowork/WinterCoworkLibkrun/expected-hashes.json: productionArchive.strippedSha256 (linkThis: stripped), rawSha256 ca876b12..., composedSourceDiffSha256 3826aa68...; the build reproduces at two locations",
     "patchSha256": {
       "0004-proposed-guarded-block-reviewed-fixes.patch": "8d4dc9165f5fab67985280fc70e06054ccf62b43a0fd46f595aa63ebe7caf481",
       "0005-proposed-guarded-block-producer-progress.patch": "0a70eaae09b1b6db09b804c7983b455731deec069b82bf88b0565b1bfe381775",
@@ -30,7 +30,7 @@
       "0020-proposed-production-quiet-block-and-reclaim-paths.patch": "8f395ba2db2cec9b7ba0551e3497ce5664c62ee85a76597ded93e52abb418590",
       "0021-proposed-production-flush-and-pin-counters.patch": "f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a",
       "0022-proposed-production-exit-path-final-flush-and-hook.patch": "965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a",
-      "0023-proposed-production-exit-and-final-flush-pins.patch": "fdf42d0dc80d784865166771e12af9806fe2f8adb932e9a77efee23be7db6ccb"
+      "0023-proposed-production-exit-and-final-flush-pins.patch": "0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc"
     }
   },
   "requiredExports": [
@@ -55,34 +55,7 @@
     "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor"
   ],
   "abi": {
-    "note": "Where S1's contract text (a7160f9f) and the header the worker links differ. The worker follows the header. Each \"libkrun\" entry is pinned: if the header changes, the build stops.",
-    "differences": [
-      {
-        "symbol": "krun_cowork_set_exit_hook_v1",
-        "contract": "int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, void (*hook)(void *user, int32_t reason), void *user)",
-        "libkrun": "typedef void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason); int32_t krun_cowork_set_exit_hook_v1(uint32_t ctx_id, krun_cowork_exit_hook_v1 hook, void *user_data);"
-      },
-      {
-        "symbol": "krun_cowork_get_flush_counters_v1",
-        "contract": "int32_t krun_cowork_get_flush_counters_v1(uint32_t ctx_id, struct krun_cowork_flush_counters_v1 *out)",
-        "libkrun": "int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_flush_counters_v1 *out);"
-      },
-      {
-        "symbol": "KRUN_COWORK_EXIT_*",
-        "contract": "off=0 reset=1 vcpu-error=2 terminal-fault=3",
-        "libkrun": "NONE=0 OFF=1 RESET=2 VCPU_ERROR=3 TERMINAL_FAULT=4"
-      },
-      {
-        "symbol": "struct krun_cowork_flush_counters_v1",
-        "contract": "{data_requested, data_completed, environment_requested, environment_completed}",
-        "libkrun": "{size, device_count, device[2]{requested, completed, final_sync_attempted, final_sync_completed}}"
-      },
-      {
-        "symbol": "krun_cowork_get_pin_counters_v1",
-        "contract": "(absent)",
-        "libkrun": "int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out);"
-      }
-    ],
+    "note": "Since contract round 3 (S1 1313040a) the contract's ABI section IS the header the worker links: the exit hook is `void (*)(void *user_data, uint32_t reason)` with NONE=0 OFF=1 RESET=2 VCPU_ERROR=3 TERMINAL_FAULT=4, the flush counters are S4's `{size, device_count, device[2]{requested, completed, final_sync_attempted, final_sync_completed}}`, and `krun_cowork_get_pin_counters_v1` is optional diagnostics. There is no remaining difference to record. Each declaration below is pinned: if the header changes, the build stops.",
     "headerDeclarations": [
       "int32_t krun_cowork_enable_profile_v1(uint32_t ctx_id);",
       "int32_t krun_cowork_create_runtime_port_v1(uint32_t ctx_id);",
@@ -95,7 +68,8 @@
       "#define KRUN_COWORK_EXIT_RESET 2",
       "#define KRUN_COWORK_EXIT_VCPU_ERROR 3",
       "#define KRUN_COWORK_EXIT_TERMINAL_FAULT 4",
-      "#define KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB 768"
+      "#define KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB 768",
+      "int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out);"
     ]
   }
 }

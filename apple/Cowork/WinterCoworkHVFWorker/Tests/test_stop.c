@@ -27,7 +27,7 @@ static void orderly_stop(void) {
     CHECK(stop.phase == CW_PH_DRAINING);
     CHECK(cw_stop_guest_control(&stop, &ack) == CW_STOP_REPORT_ACKED);
     CHECK(cw_stop_guest_control(&stop, &ack) == CW_STOP_VIOLATION);              /* a second ack */
-    CHECK(cw_stop_guest_control(&stop, &halting) == CW_STOP_ACCEPTED);
+    CHECK(cw_stop_guest_control(&stop, &halting) == CW_STOP_REPORT_HALTING);
     CHECK(stop.phase == CW_PH_HALTING);
     cw_stop_halted(&stop);
     CHECK(stop.phase == CW_PH_HALTED && stop.deadline_ms == 0);
@@ -127,7 +127,58 @@ static void pings(void) {
     CHECK(cw_stop_guest_control(&stop, &pong) == CW_STOP_VIOLATION);             /* answered once */
 }
 
+static cw_control guest_fault(const uint8_t nonce[16]) {
+    cw_control c = control(CW_CTL_FAULT, nonce, 0);
+    c.fault_code = CW_GUEST_FAULT_UNMOUNT_FAILED;
+    c.nonce_null = nonce == NULL;
+    return c;
+}
+
+/* Round 3: a control-up fault is reported once as guest_fault, binds to the running drain's nonce, and makes any later halting a violation. */
+static void guest_faults(void) {
+    CHECK(CW_STOP_GRACE_MS == 0u); /* layer G: the worker's own deadline is the DRAIN's budget */
+    cw_stop stop;
+    cw_stop_init(&stop);
+    cw_stop_vm_started(&stop);
+    cw_control outside = guest_fault(NULL), bound = guest_fault(NONCE_A), other = guest_fault(NONCE_B);
+    CHECK(cw_stop_guest_control(&stop, &bound) == CW_STOP_VIOLATION);             /* a nonce with no drain running */
+    static const uint8_t ZERO[16] = { 0 };
+    cw_control zero_nonce = guest_fault(ZERO);                                    /* ... even one equal to the (unset) stored nonce */
+    CHECK(cw_stop_guest_control(&stop, &zero_nonce) == CW_STOP_VIOLATION);
+    CHECK(!stop.guest_faulted);
+    CHECK(cw_stop_guest_control(&stop, &outside) == CW_STOP_REPORT_FAULT);        /* null nonce outside any drain */
+    CHECK(stop.guest_faulted);
+    CHECK(cw_stop_guest_control(&stop, &outside) == CW_STOP_ACCEPTED);            /* reported once */
+    CHECK(cw_stop_request(&stop, 0, NONCE_A, 30000, CW_ORIGIN_HOST_STOP) == CW_STOP_SEND_DRAIN);
+    CHECK(cw_stop_guest_control(&stop, &other) == CW_STOP_VIOLATION);             /* another drain's nonce */
+    CHECK(cw_stop_guest_control(&stop, &bound) == CW_STOP_ACCEPTED);
+    cw_control ack = control(CW_CTL_DRAIN_ACK, NONCE_A, 0), halting = control(CW_CTL_HALTING, NONCE_A, 0);
+    CHECK(cw_stop_guest_control(&stop, &ack) == CW_STOP_REPORT_ACKED);
+    CHECK(cw_stop_guest_control(&stop, &halting) == CW_STOP_VIOLATION);           /* halting after a fault is not believable */
+    CHECK(stop.phase == CW_PH_ACKED);
+
+    /* a fault during a drain, before any halting, then the usual order is refused only at halting */
+    cw_stop_init(&stop);
+    cw_stop_vm_started(&stop);
+    CHECK(cw_stop_request(&stop, 0, NONCE_A, 30000, CW_ORIGIN_HOST_STOP) == CW_STOP_SEND_DRAIN);
+    CHECK(cw_stop_guest_control(&stop, &bound) == CW_STOP_REPORT_FAULT);
+    CHECK(cw_stop_guest_control(&stop, &ack) == CW_STOP_REPORT_ACKED);
+    /* a fault after halting is still a fault, and still reported */
+    cw_stop_init(&stop);
+    cw_stop_vm_started(&stop);
+    CHECK(cw_stop_request(&stop, 0, NONCE_A, 30000, CW_ORIGIN_HOST_STOP) == CW_STOP_SEND_DRAIN);
+    CHECK(cw_stop_guest_control(&stop, &ack) == CW_STOP_REPORT_ACKED);
+    CHECK(cw_stop_guest_control(&stop, &halting) == CW_STOP_REPORT_HALTING);
+    CHECK(cw_stop_guest_control(&stop, &bound) == CW_STOP_REPORT_FAULT);
+    /* the deadline is exactly the budget */
+    cw_stop_init(&stop);
+    cw_stop_vm_started(&stop);
+    CHECK(cw_stop_request(&stop, 1000, NONCE_A, 30000, CW_ORIGIN_HOST_STOP) == CW_STOP_SEND_DRAIN);
+    CHECK(cw_stop_tick(&stop, 1000 + 30000 - 1) == CW_STOP_NOTHING && cw_stop_tick(&stop, 1000 + 30000) == CW_STOP_TIMEOUT);
+}
+
 int main(void) {
+    guest_faults();
     orderly_stop();
     wrong_nonce_and_unsolicited();
     second_request();

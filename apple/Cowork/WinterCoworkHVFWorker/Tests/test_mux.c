@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 
 static void golden_vectors(void) {
-    CHECK(MUX_VECTOR_COUNT == 42); /* 15 positive + 27 negative in the pinned file */
+    CHECK(MUX_VECTOR_COUNT == 131); /* 26 positive + 105 negative in the pinned file */
     unsigned blind_seen = 0;
     for (size_t i = 0; i < MUX_VECTOR_COUNT; i++) {
         const cw_mux_vector *v = &mux_vectors[i];
@@ -35,13 +35,15 @@ static void golden_vectors(void) {
             blind_seen++;
             /* The TypeScript parser refuses it for its PAYLOAD (v->error). The worker never reads that payload. */
             CHECK(rc == CW_OK);
-            CHECK(header.cls == CW_CLASS_BOOTSTRAP);
+            CHECK(header.cls == CW_CLASS_BOOTSTRAP || header.cls == CW_CLASS_RUNTIME); /* never a control frame: those are the worker's own */
         } else {
             if (strcmp(cw_error_name(rc), v->error) != 0) fprintf(stderr, "vector %s: got %s want %s\n", v->name, cw_error_name(rc), v->error);
             CHECK_STR(cw_error_name(rc), v->error);
         }
     }
-    CHECK(blind_seen == 6); /* plan-protocol-2, plan-unsorted-nested-keys, hello-wrong-serial, bootstrap-invalid-utf8, plan-travelling-up, bom-mux-bootstrap */
+    /* Every name in PINS.json's relayBlind list: the round 1 six (plan-protocol-2, plan-unsorted-nested-keys, hello-wrong-serial, bootstrap-invalid-utf8,
+     * plan-travelling-up, bom-mux-bootstrap) and round 3's conversation-set, runtime-ready, bootstrap-fault and runtime-stream negatives. */
+    CHECK(blind_seen == MUX_BLIND_COUNT);
 }
 
 static int control_error(const char *text, cw_mux_dir direction) {
@@ -303,7 +305,43 @@ static void reader_socket(void) {
     close(pair[1]);
 }
 
+/* Round 3: the control-up fault, code by code. */
+static void guest_fault_message(void) {
+    static const char *const codes[] = { NULL, "unmount_failed", "supervisor_lost", "protocol_violation", "internal" };
+    const char *nonce = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+    char text[200];
+    cw_control control;
+    for (uint32_t code = 1; code <= 4; code++) {
+        snprintf(text, sizeof text, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":\"%s\"}", codes[code], nonce);
+        CHECK(cw_control_parse((const uint8_t *)text, strlen(text), CW_MUX_UP, &control) == CW_OK && control.type == CW_CTL_FAULT && control.fault_code == code && !control.nonce_null && control.nonce[3] == 0x0f);
+        uint8_t again[CW_MUX_CONTROL_MAX];
+        size_t length = cw_control_encode(&control, again, sizeof again);
+        CHECK(length == strlen(text) && memcmp(again, text, length) == 0);
+        snprintf(text, sizeof text, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":null}", codes[code]);
+        CHECK(cw_control_parse((const uint8_t *)text, strlen(text), CW_MUX_UP, &control) == CW_OK && control.nonce_null && control.fault_code == code);
+        length = cw_control_encode(&control, again, sizeof again);
+        CHECK(length == strlen(text) && memcmp(again, text, length) == 0);
+    }
+    /* refusals: another code, a code in the wrong case, a nonce spelled null in capitals, a trailing key, a down direction, a numeric code */
+    const char *bad[] = {
+        "{\"v\":1,\"t\":\"fault\",\"code\":\"Internal\",\"stopNonce\":null}", "{\"v\":1,\"t\":\"fault\",\"code\":\"\",\"stopNonce\":null}",
+        "{\"v\":1,\"t\":\"fault\",\"code\":\"internal\",\"stopNonce\":NULL}", "{\"v\":1,\"t\":\"fault\",\"code\":\"internal\",\"stopNonce\":null,\"x\":1}",
+        "{\"v\":1,\"t\":\"fault\",\"code\":1,\"stopNonce\":null}", "{\"v\":1,\"t\":\"fault\",\"stopNonce\":null,\"code\":\"internal\"}",
+        "{\"v\":1,\"t\":\"fault\",\"code\":\"internal\",\"stopNonce\":nullx}", "{\"v\":1,\"t\":\"fault\",\"code\":\"internal\",\"stopNonce\":\"0f\"}" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) CHECK(cw_control_parse((const uint8_t *)bad[i], strlen(bad[i]), CW_MUX_UP, &control) != CW_OK);
+    snprintf(text, sizeof text, "{\"v\":1,\"t\":\"fault\",\"code\":\"internal\",\"stopNonce\":null}");
+    CHECK(cw_control_parse((const uint8_t *)text, strlen(text), CW_MUX_DOWN, &control) == CW_E_UNKNOWN_TYPE);
+    memset(&control, 0, sizeof control);
+    control.type = CW_CTL_FAULT;
+    control.fault_code = 5;
+    uint8_t out[CW_MUX_CONTROL_MAX];
+    CHECK(cw_control_encode(&control, out, sizeof out) == 0);
+    control.fault_code = 0;
+    CHECK(cw_control_encode(&control, out, sizeof out) == 0);
+}
+
 int main(void) {
+    guest_fault_message();
     golden_vectors();
     control_grammar();
     provider_and_limits();

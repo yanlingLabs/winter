@@ -5,6 +5,8 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 
@@ -297,7 +299,8 @@ static void orderly_drain(void) {
     CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_DRAIN_ACKED));
     guest_control(2, "halting", 0x0f);
     for (int i = 0; i < 5; i++) (void)cw_relay_step(&relay, 0);
-    CHECK(collect_l2(events, 8) == 0 && !relay.quarantined);
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_HALTING) && !relay.quarantined);   /* reported once the ack and the nonce fit */
     /* Power-off: the VMM exit hook reports the flush counters. */
     cw_exit_report report = good_report();
     cw_relay_vmm_exit(&relay, &report);
@@ -307,6 +310,174 @@ static void orderly_drain(void) {
     CHECK(seq_increases(events, count));
     CHECK(relay.stop.phase == CW_PH_HALTED);
     CHECK(!relay.done); /* the process ends by itself (libkrun exits); the relay does not */
+    rig_down();
+}
+
+/* A control-up fault from the guest: `code` plus a nonce (or null when nonce_byte == 0). */
+static void guest_fault_frame(uint32_t seq, const char *code, int nonce_byte) {
+    char json[200], hex[33];
+    for (int i = 0; i < 16; i++) snprintf(hex + 2 * i, 3, "%02x", nonce_byte);
+    int n = nonce_byte == 0 ? snprintf(json, sizeof json, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":null}", code)
+                            : snprintf(json, sizeof json, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":\"%s\"}", code, hex);
+    uint8_t bytes[CW_MUX_HEADER + 200];
+    size_t length = frame(bytes, sizeof bytes, CW_CLASS_CONTROL, seq, json, (size_t)n);
+    send_all(rig.l4[0], bytes, length);
+}
+static void run_relay(void) { for (int i = 0; i < 6; i++) (void)cw_relay_step(&relay, 0); }
+
+/* Round 3: guest_fault and halting are L2 statuses; a halting after a fault is a mux violation; a power-off after a fault still reports guest_halted
+ * from the hook alone (the launcher's verdict, not the worker's, refuses the Class A). */
+static void guest_fault_and_halting(void) {
+    l2_event events[8];
+    size_t count;
+    /* a fault outside any drain (null nonce) */
+    rig_up(getppid(), 3);
+    guest_fault_frame(1, "supervisor_lost", 0);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_FAULT) && !relay.quarantined);
+    guest_fault_frame(2, "internal", 0);                         /* reported once */
+    run_relay();
+    CHECK(collect_l2(events, 8) == 0 && !relay.quarantined);
+    rig_down();
+    /* a fault during a drain, then the guest keeps going: drain_ack is still fine, halting is a violation */
+    rig_up(getppid(), 3);
+    send_drain_envelope(3, 0x0f, 30000, CW_ORIGIN_HOST_STOP);
+    run_relay();
+    cw_control control;
+    uint32_t seq = 0;
+    CHECK(read_control_down(&control, &seq));
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_DRAINING));
+    guest_fault_frame(1, "unmount_failed", 0x0f);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_FAULT));
+    guest_control(2, "drain_ack", 0x0f);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_STATUS, CW_STATUS_DRAIN_ACKED));
+    guest_control(3, "halting", 0x0f);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_MUX_VIOLATION) && !has(events, count, CW_ENV_STATUS, CW_STATUS_HALTING) && relay.quarantined);
+    cw_exit_report report = good_report();
+    cw_relay_vmm_exit(&relay, &report);                           /* the hook still speaks for itself */
+    count = collect_l2(events, 8);
+    CHECK(count == 2 && events[0].value == CW_STATUS_GUEST_HALTED && events[1].value == CW_STATUS_EXITING);
+    rig_down();
+    /* a fault that names another drain's nonce, or a nonce when no drain runs, is a violation and reports nothing */
+    rig_up(getppid(), 3);
+    guest_fault_frame(1, "internal", 0xa5);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_MUX_VIOLATION) && relay.quarantined);
+    rig_down();
+    rig_up(getppid(), 3);
+    send_drain_envelope(3, 0x0f, 30000, CW_ORIGIN_HOST_STOP);
+    run_relay();
+    (void)collect_l2(events, 8);
+    guest_fault_frame(1, "internal", 0xa5);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_MUX_VIOLATION) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_FAULT));
+    rig_down();
+    /* a fault code outside the contract's four is a violation */
+    rig_up(getppid(), 3);
+    guest_fault_frame(1, "meltdown", 0);
+    run_relay();
+    count = collect_l2(events, 8);
+    CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_MUX_VIOLATION));
+    rig_down();
+    /* a fault travelling down is not a thing: the launcher side has no fault type */
+    rig_up(getppid(), 3);
+    {
+        char json[160];
+        int n = snprintf(json, sizeof json, "{\"v\":1,\"t\":\"fault\",\"code\":\"internal\",\"stopNonce\":null}");
+        uint8_t bytes[CW_MUX_HEADER + 160];
+        size_t length = frame(bytes, sizeof bytes, CW_CLASS_CONTROL, 1, json, (size_t)n);
+        send_all(rig.l3[0], bytes, length);
+        run_relay();
+        count = collect_l2(events, 8);
+        CHECK(count == 1 && has(events, count, CW_ENV_FAULT, CW_FAULT_MUX_VIOLATION));
+    }
+    rig_down();
+    /* runtime frames carry a 4 byte stream prefix the worker never reads: all three streams, the end flag and an unknown conversation pass untouched */
+    rig_up(getppid(), 3);
+    {
+        const uint8_t prefixes[][4] = { { 0, 1, 0, 0 }, { 15, 3, 1, 0 }, { 200, 9, 7, 9 } };   /* the last one is garbage the TypeScript parser refuses */
+        for (size_t i = 0; i < 3; i++) {
+            uint8_t payload[8] = { prefixes[i][0], prefixes[i][1], prefixes[i][2], prefixes[i][3], 'a', 'b', 'c', 'd' };
+            uint8_t bytes[CW_MUX_HEADER + 8], got[CW_MUX_HEADER + 8];
+            size_t length = frame(bytes, sizeof bytes, CW_CLASS_RUNTIME, (uint32_t)i + 1, (const char *)payload, sizeof payload);
+            send_all(rig.l4[0], bytes, length);
+            run_relay();
+            CHECK(read_exact(rig.l3[0], got, length) == length && memcmp(got, bytes, length) == 0);
+        }
+        CHECK(!relay.quarantined);
+    }
+    rig_down();
+}
+
+/* The exhaustive truth table of cw_exit_report_halted: 2 (reason) x 2 (counters valid) x 3^2 (final attempted: 0, 1, 2) x 3^2 (final completed) x 3^2
+ * (completed <, ==, > requested on each disk) = 2,916 reports. Exactly ONE says halted: reason OFF, counters valid, final attempted and completed == 1 on
+ * both disks, completed == requested on both. */
+static void halted_truth_table(void) {
+    unsigned halted = 0, total = 0;
+    for (unsigned reason = 0; reason < 2; reason++) for (unsigned valid = 0; valid < 2; valid++)
+    for (unsigned a0 = 0; a0 < 3; a0++) for (unsigned a1 = 0; a1 < 3; a1++) for (unsigned f0 = 0; f0 < 3; f0++) for (unsigned f1 = 0; f1 < 3; f1++)
+    for (unsigned r0 = 0; r0 < 3; r0++) for (unsigned r1 = 0; r1 < 3; r1++) {
+        cw_exit_report report;
+        memset(&report, 0, sizeof report);
+        report.reason_off = reason == 1;
+        report.counters_valid = valid == 1;
+        report.final_attempted[0] = a0; report.final_attempted[1] = a1;
+        report.final_completed[0] = f0; report.final_completed[1] = f1;
+        const unsigned relation[2] = { r0, r1 }; /* 0: completed < requested, 1: equal, 2: completed > requested */
+        for (int disk = 0; disk < 2; disk++) {
+            report.requested[disk] = 41;
+            report.completed[disk] = relation[disk] == 0 ? 40 : relation[disk] == 1 ? 41 : 42;
+        }
+        bool expected = reason == 1 && valid == 1 && a0 == 1 && a1 == 1 && f0 == 1 && f1 == 1 && r0 == 1 && r1 == 1;
+        CHECK(cw_exit_report_halted(&report) == expected);
+        if (cw_exit_report_halted(&report)) halted++;
+        total++;
+    }
+    CHECK(total == 2916 && halted == 1);
+}
+
+/* The exit hook must not block (libkrun's header): with L2 not read and full, or its lock held, it returns promptly and loses only the statuses. */
+static uint64_t wall_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000; }
+static void exit_hook_does_not_block(void) {
+    l2_event events[8];
+    /* L2 full: the launcher is not reading. Fill the socket until a send fails. */
+    rig_up(getppid(), 3);
+    int filled = 0;
+    while (filled < 100000 && cw_l2_send_status(&l2_out, CW_STATUS_GUEST_HELLO, NULL, NULL) == 0) filled++;
+    CHECK(filled > 0 && filled < 100000);
+    cw_exit_report report = good_report();
+    uint64_t started = wall_ms();
+    uint32_t seq_before = l2_out.seq;
+    cw_relay_vmm_exit(&relay, &report);
+    CHECK(l2_out.seq == seq_before);                       /* a status that was not sent spends no sequence number */
+    CHECK(wall_ms() - started < 150);                      /* the old path retried 20 x 100 ms per status, three statuses */
+    rig_down();
+    /* The L2 sender's lock held by another thread of the process (the relay thread mid-send): the hook gives up at once. */
+    rig_up(getppid(), 3);
+    CHECK(pthread_mutex_lock(&l2_out.lock) == 0);
+    started = wall_ms();
+    cw_relay_vmm_exit(&relay, &report);
+    CHECK(wall_ms() - started < 150);
+    CHECK(pthread_mutex_unlock(&l2_out.lock) == 0);
+    CHECK(collect_l2(events, 8) == 0);                     /* nothing was sent, and no sequence number was spent */
+    rig_down();
+    /* The relay's own lock held: the phase update is skipped, the statuses still go. */
+    rig_up(getppid(), 3);
+    CHECK(pthread_mutex_lock(&relay.lock) == 0);
+    cw_relay_vmm_exit(&relay, &report);
+    CHECK(pthread_mutex_unlock(&relay.lock) == 0);
+    size_t count = collect_l2(events, 8);
+    CHECK(count == 2 && events[0].value == CW_STATUS_GUEST_HALTED && events[1].value == CW_STATUS_EXITING && events[1].seq == events[0].seq + 1);
     rig_down();
 }
 
@@ -327,8 +498,8 @@ static void exit_reports(void) {
     report.reason_off = false;
     cw_relay_vmm_exit(&relay, &report);
     count = collect_l2(events, 8);
-    CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
-    CHECK(events[1].value == CW_STATUS_EXITING && relay.stop.phase == CW_PH_HALTED);
+    CHECK(count == 1 && events[0].kind == CW_ENV_STATUS && events[0].value == CW_STATUS_EXITING && !has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+    CHECK(relay.stop.phase == CW_PH_HALTED);
     rig_down();
     /* Counters that could not be read: no claim, and the EXITING status carries zeros rather than invented numbers. */
     rig_up(getppid(), 3);
@@ -336,8 +507,8 @@ static void exit_reports(void) {
     report.counters_valid = false;
     cw_relay_vmm_exit(&relay, &report);
     count = collect_l2(events, 8);
-    CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
-    CHECK(events[1].requested[0] == 0 && events[1].completed[0] == 0);
+    CHECK(count == 1 && events[0].kind == CW_ENV_STATUS && events[0].value == CW_STATUS_EXITING && !has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+    CHECK(events[0].requested[0] == 0 && events[0].completed[0] == 0);
     rig_down();
     /* The final flush of either volume not attempted, or not completed, withholds the claim. */
     for (int disk = 0; disk < 2; disk++) {
@@ -347,26 +518,26 @@ static void exit_reports(void) {
             if (which == 0) report.final_attempted[disk] = 0; else report.final_completed[disk] = 0;
             cw_relay_vmm_exit(&relay, &report);
             count = collect_l2(events, 8);
-            CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+            CHECK(count == 1 && events[0].kind == CW_ENV_STATUS && events[0].value == CW_STATUS_EXITING && !has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
             rig_down();
         }
     }
-    /* completed < requested after a stop is an uncertain final flush: no guest_halted, a vm_failed fault, and the real counters still shown on exiting. */
+    /* completed < requested after a stop is an uncertain final flush: no guest_halted, `exiting` ALONE (no fault), and the real counters still shown on exiting. */
     rig_up(getppid(), 3);
     report = good_report();
     report.completed[0] = 40;
     cw_relay_vmm_exit(&relay, &report);
     count = collect_l2(events, 8);
-    CHECK(count == 2 && has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
-    CHECK(events[1].value == CW_STATUS_EXITING && events[1].requested[0] == 41 && events[1].completed[0] == 40);
+    CHECK(count == 1 && events[0].kind == CW_ENV_STATUS && events[0].value == CW_STATUS_EXITING && !has(events, count, CW_ENV_FAULT, CW_FAULT_VM_FAILED) && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED));
+    CHECK(events[0].requested[0] == 41 && events[0].completed[0] == 40);
     rig_down();
-    /* completed above requested is not an unfinished flush */
+    /* completed ABOVE requested is counters that cannot be believed: also withheld (the reviewer's truth table found it reported as halted) */
     rig_up(getppid(), 3);
     report = good_report();
     report.completed[1] = 8;
     cw_relay_vmm_exit(&relay, &report);
     count = collect_l2(events, 8);
-    CHECK(count == 2 && events[0].value == CW_STATUS_GUEST_HALTED);
+    CHECK(count == 1 && events[0].value == CW_STATUS_EXITING && !has(events, count, CW_ENV_STATUS, CW_STATUS_GUEST_HALTED) && events[0].completed[1] == 8);
     rig_down();
     /* the hook never observed (the process ended some other way): the relay itself reports no halt and no clean exit */
     rig_up(getppid(), 3);
@@ -704,6 +875,9 @@ int main(void) {
     descriptor_on_a_mux_stream();
     orderly_drain();
     exit_reports();
+    halted_truth_table();
+    exit_hook_does_not_block();
+    guest_fault_and_halting();
     wrong_acknowledgement();
     second_drain();
     a_bad_launcher_envelope_starts_an_owner_loss_drain();

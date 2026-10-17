@@ -138,6 +138,22 @@ static int take_nonce(cursor *c, uint8_t out[16]) {
     }
     return CW_OK;
 }
+/* `null`, or a nonce. */
+static int take_nullable_nonce(cursor *c, uint8_t out[16], bool *is_null) {
+    *is_null = false;
+    if (take(c, "null")) { *is_null = true; return CW_OK; }
+    return take_nonce(c, out);
+}
+static const char *const guest_fault_names[] = { NULL, "unmount_failed", "supervisor_lost", "protocol_violation", "internal" };
+static int take_guest_fault(cursor *c, uint32_t *out) {
+    const uint8_t *text;
+    size_t length;
+    int rc = take_string(c, &text, &length);
+    if (rc != CW_OK) return rc;
+    for (uint32_t code = 1; code <= 4; code++)
+        if (strlen(guest_fault_names[code]) == length && memcmp(guest_fault_names[code], text, length) == 0) { *out = code; return CW_OK; }
+    return CW_E_BAD_FIELD;
+}
 static int take_origin(cursor *c, uint32_t *out) {
     const uint8_t *text;
     size_t length;
@@ -203,6 +219,12 @@ int cw_control_parse(const uint8_t *payload, size_t length, cw_mux_dir direction
         out->type = CW_CTL_PONG;
         if ((rc = take_key(&c, "n")) != CW_OK || (rc = take_uint(&c, 0xffffffffull, &out->n)) != CW_OK) return rc;
         rc = take_end(&c, known);
+    } else if (direction == CW_MUX_UP && IS_TYPE("fault")) {
+        static const char *const known[] = { "v", "t", "code", "stopNonce", NULL };
+        out->type = CW_CTL_FAULT;
+        if ((rc = take_key(&c, "code")) != CW_OK || (rc = take_guest_fault(&c, &out->fault_code)) != CW_OK) return rc;
+        if ((rc = take_key(&c, "stopNonce")) != CW_OK || (rc = take_nullable_nonce(&c, out->nonce, &out->nonce_null)) != CW_OK) return rc;
+        rc = take_end(&c, known);
     } else {
         /* A well-formed type this direction does not carry (drain travelling up, explode) is unknown_type. The text after it
          * is not looked at: an unknown type has no schema. */
@@ -238,6 +260,12 @@ size_t cw_control_encode(const cw_control *control, uint8_t *out, size_t capacit
     case CW_CTL_PONG: made = snprintf((char *)out, capacity, "{\"v\":1,\"t\":\"pong\",\"n\":%u}", (unsigned)control->n); break;
     case CW_CTL_DRAIN_ACK: made = snprintf((char *)out, capacity, "{\"v\":1,\"t\":\"drain_ack\",\"stopNonce\":\"%s\"}", hex); break;
     case CW_CTL_HALTING: made = snprintf((char *)out, capacity, "{\"v\":1,\"t\":\"halting\",\"stopNonce\":\"%s\"}", hex); break;
+    case CW_CTL_FAULT:
+        if (control->fault_code < 1 || control->fault_code > 4) return 0;
+        made = control->nonce_null
+            ? snprintf((char *)out, capacity, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":null}", guest_fault_names[control->fault_code])
+            : snprintf((char *)out, capacity, "{\"v\":1,\"t\":\"fault\",\"code\":\"%s\",\"stopNonce\":\"%s\"}", guest_fault_names[control->fault_code], hex);
+        break;
     default: return 0;
     }
     if (made <= 0 || (size_t)made >= capacity) return 0;

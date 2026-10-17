@@ -14,9 +14,10 @@
 #include "Envelope.h"
 #include "Mux.h"
 
-/* Slack after the drain budget before the worker ends itself. The launcher kills at the budget; the worker's own deadline
- * only matters when the launcher is gone. */
-#define CW_STOP_GRACE_MS 5000u
+/* Slack after the drain budget before the worker ends itself. NONE: the contract's stop timeline (section 5, layers G, X, K, H) has the worker
+ * exit 75 (drain_timeout) at G, the DRAIN's own budget, measured from the moment the DRAIN arrived; the launcher kills later, at G + 20 s (the
+ * libkrun exit watchdog) + 5 s. Kept as a named zero so the figure is one edit, and pinned by a test and a guard. */
+#define CW_STOP_GRACE_MS 0u
 /* After a mux violation with no stop requested, the worker ends itself this long after the violation. */
 #define CW_QUARANTINE_MS 30000u
 
@@ -36,6 +37,8 @@ typedef enum {
     CW_STOP_IGNORED_SAME,     /* the same stop again: harmless */
     CW_STOP_CONFLICT,         /* a different nonce while a stop is running: fault internal, keep the first */
     CW_STOP_REPORT_ACKED,     /* report DRAIN_ACKED */
+    CW_STOP_REPORT_HALTING,   /* report HALTING (the guest said so AFTER its drain_ack, with the drain's nonce) */
+    CW_STOP_REPORT_FAULT,     /* report GUEST_FAULT (first control-up fault only) */
     CW_STOP_ACCEPTED,         /* accepted, nothing to report */
     CW_STOP_VIOLATION,        /* wrong order, wrong nonce, unsolicited: the mux stream is over */
     CW_STOP_TIMEOUT           /* the deadline passed: the worker ends itself */
@@ -50,6 +53,7 @@ typedef struct {
     bool ping_outstanding;
     uint32_t ping_n;
     bool quarantined;
+    bool guest_faulted;        /* a control-up fault arrived: from now on a `halting` is a violation and no Class A can exist */
 } cw_stop;
 
 void cw_stop_init(cw_stop *stop);

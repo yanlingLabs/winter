@@ -46,7 +46,7 @@ static int mutated64(const char *vector, size_t offset, uint64_t value) {
 #define H CW_ENV_HEADER
 
 static void golden_vectors(void) {
-    CHECK(ENV_VECTOR_COUNT == 38); /* 8 positive + 30 negative in the pinned file */
+    CHECK(ENV_VECTOR_COUNT == 40); /* 10 positive + 30 negative in the pinned file */
     for (size_t i = 0; i < ENV_VECTOR_COUNT; i++) {
         const cw_env_vector *v = &env_vectors[i];
         cw_envelope e;
@@ -176,9 +176,9 @@ static void other_payloads(void) {
     CHECK(mutated32("drain-host-stop", p + 20, 2) == CW_OK);
     CHECK(mutated32("drain-host-stop", p + 20, 3) == CW_E_BAD_FIELD);
     CHECK(mutated32("drain-host-stop", p + 24, 1) == CW_E_BAD_FIELD);
-    for (uint32_t state = 0; state <= 9; state++) {
+    for (uint32_t state = 0; state <= 11; state++) {
         int rc = mutated32("status-sandboxed", p + 0, state);
-        CHECK(rc == (state >= 1 && state <= 8 ? CW_OK : CW_E_BAD_FIELD));
+        CHECK(rc == (state >= 1 && state <= 10 ? CW_OK : CW_E_BAD_FIELD));
     }
     CHECK(mutated32("status-sandboxed", p + 4, 1) == CW_E_BAD_FIELD);
     CHECK(mutated64("status-guest-halted-with-flush", p + 8, (1ull << 53) - 1) == CW_OK);
@@ -278,8 +278,12 @@ static void outbound_sender(void) {
     uint64_t too_big[2] = { 1ull << 53, 0 };
     CHECK(cw_l2_send_status(&out, CW_STATUS_EXITING, too_big, NULL) == -1); /* refused; no datagram, no sequence number spent */
     CHECK(cw_l2_send_status(&out, CW_STATUS_EXITING, NULL, NULL) == 0);
+    CHECK(cw_l2_send_status(&out, CW_STATUS_HALTING, NULL, NULL) == 0);      /* round 3: the wire values are 9 and 10, and nothing above */
+    CHECK(cw_l2_send_status(&out, CW_STATUS_GUEST_FAULT, NULL, NULL) == 0);
+    CHECK(CW_STATUS_HALTING == 9 && CW_STATUS_GUEST_FAULT == 10);
+    CHECK(cw_l2_send_status(&out, 11, NULL, NULL) == -1);
     unsigned expected_seq = 1;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         cw_inbound in;
         CHECK(cw_env_recv(pair[1], &in, 0) == CW_RECV_OK);
         cw_envelope e;
@@ -287,6 +291,8 @@ static void outbound_sender(void) {
         CHECK(e.seq == expected_seq++); /* one counter, from 1, +1 per datagram */
         if (i == 1) CHECK(e.u.fault == CW_FAULT_MUX_VIOLATION);
         if (i == 2) CHECK(e.u.fault == CW_FAULT_SECOND_DRAIN);
+        if (i == 5) CHECK(e.u.status.state == CW_STATUS_HALTING);
+        if (i == 6) CHECK(e.u.status.state == CW_STATUS_GUEST_FAULT);
         if (i == 3) CHECK(e.u.status.state == CW_STATUS_GUEST_HALTED && e.u.status.requested[1] == 9 && e.u.status.completed[1] == 8);
     }
     cw_inbound none;

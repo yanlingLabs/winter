@@ -65,12 +65,33 @@ def main() -> None:
             is_blind = 1 if (not positive and vector["name"] in blind) else 0
             mux_rows.append(f'  {{ {json.dumps(vector["name"])}, {direction}, {symbol}, {len(data)}, {error}, {cls}, {seq}, {is_blind} }},\n')
     out.append("static const cw_mux_vector mux_vectors[] = {\n" + "".join(mux_rows) + "};\n")
+    out.append(f"#define MUX_BLIND_COUNT {len(blind)}\n")
     out.append(f"#define MUX_VECTOR_COUNT {len(mux_rows)}\n#define MUX_POSITIVE_COUNT {len(mux['positive'])}\n")
     # runtime-image.json: the digest of SHA-256(kernel) || SHA-256(initramfs), each part raw. Hex strings are kept as text for the C side to decode.
     rows = ",\n".join(f'  {{ {json.dumps(v["name"])}, {json.dumps(v["kernelSha256"])}, {json.dumps(v["initramfsSha256"])}, {json.dumps(v["runtimeImageDigest"])} }}' for v in image["positive"])
     out.append("\ntypedef struct { const char *name; const char *kernel_sha256; const char *initramfs_sha256; const char *digest; } cw_image_vector;\n")
     out.append("static const cw_image_vector image_vectors[] = {\n" + rows + "\n};\n")
     out.append(f"#define IMAGE_VECTOR_COUNT {len(image['positive'])}\n")
+    # guest-stop.json: what the worker's exit hook decides. `states` is the order the launcher saw; the worker's own part is whether `guest_halted` is among them,
+    # given the exit reason and the counters. The verdict (halting, drain_ack order) is the launcher's and is not tested here.
+    stop = docs["guest-stop.json"]
+    reasons = stop["exitReasons"]
+    stop_rows = []
+    for case in stop["cases"]:
+        counters = case["counters"]
+        if counters is None:
+            counter_text, valid = "{ { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }", 0
+        else:
+            valid = 1
+            counter_text = "{ " + ", ".join("{ %d, %d, %d, %d }" % (c["requested"], c["completed"], c["finalSyncAttempted"], c["finalSyncCompleted"]) for c in counters) + " }"
+        reason = -1 if case["exitReason"] is None else reasons[case["exitReason"]]
+        halted = 1 if "guest_halted" in case["states"] else 0
+        states = ",".join(case["states"])
+        stop_rows.append(f'  {{ {json.dumps(case["name"])}, {reason}, {valid}, {counter_text}, {halted}, {1 if "halting" in case["states"] else 0}, {1 if "guest_fault" in case["states"] else 0}, {json.dumps(states)} }}')
+    out.append("\ntypedef struct { const char *name; int reason; int counters_valid; uint64_t counters[2][4]; int halted; int halting; int guest_fault; const char *states; } cw_stop_vector;\n")
+    out.append("static const cw_stop_vector stop_vectors[] = {\n" + ",\n".join(stop_rows) + "\n};\n")
+    out.append(f"#define STOP_VECTOR_COUNT {len(stop_rows)}\n")
+    out.append("static const int stop_reason_none = %d, stop_reason_off = %d, stop_reason_reset = %d, stop_reason_vcpu_error = %d, stop_reason_terminal_fault = %d;\n" % (reasons["none"], reasons["off"], reasons["reset"], reasons["vcpu-error"], reasons["terminal-fault"]))
     missing = blind - {v["name"] for v in mux["negative"]}
     if missing:
         raise SystemExit(f"relayBlind names unknown vectors: {sorted(missing)}")

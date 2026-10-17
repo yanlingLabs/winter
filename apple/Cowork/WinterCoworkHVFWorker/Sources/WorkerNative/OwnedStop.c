@@ -39,8 +39,18 @@ cw_stop_action cw_stop_guest_control(cw_stop *stop, const cw_control *control) {
         return CW_STOP_REPORT_ACKED;
     case CW_CTL_HALTING:
         if (stop->phase != CW_PH_ACKED || memcmp(control->nonce, stop->nonce, 16) != 0) return CW_STOP_VIOLATION;
+        if (stop->guest_faulted) return CW_STOP_VIOLATION; /* after a fault no halting is believable */
         stop->phase = CW_PH_HALTING;
-        return CW_STOP_ACCEPTED;
+        return CW_STOP_REPORT_HALTING;
+    case CW_CTL_FAULT:
+        /* The nonce, when there is one, must be the running drain's; a fault outside any drain carries null. */
+        if (!control->nonce_null) {
+            bool draining = stop->phase == CW_PH_DRAINING || stop->phase == CW_PH_ACKED || stop->phase == CW_PH_HALTING;
+            if (!draining || memcmp(control->nonce, stop->nonce, 16) != 0) return CW_STOP_VIOLATION;
+        }
+        if (stop->guest_faulted) return CW_STOP_ACCEPTED; /* reported once */
+        stop->guest_faulted = true;
+        return CW_STOP_REPORT_FAULT;
     case CW_CTL_PONG:
         if (!stop->ping_outstanding || control->n != stop->ping_n) return CW_STOP_VIOLATION;
         stop->ping_outstanding = false;
