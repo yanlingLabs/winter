@@ -41,7 +41,7 @@ export function coworkRequirement(identifier: string, teamId: string = COWORK_NA
 }
 
 /** Without these a release build carries the builder's absolute source paths (the linker's debug map), which the release name scan
- *  rejects: no debug info from swiftc, and `-S -x` at the link (measured: 903 kB offset of `/Users/…/Sources/…` paths gone). */
+ *  rejects: no debug info from swiftc, and `-S -x` at the link (measured: without them the binary carries absolute source paths under the builder's home; with them it carries none). */
 export const LAUNCHER_PATH_HYGIENE_FLAGS = ["-Xswiftc", "-gnone", "-Xlinker", "-S", "-Xlinker", "-x"] as const;
 
 /** `swift build` for the launcher: release, into a scratch path the caller owns, product only. */

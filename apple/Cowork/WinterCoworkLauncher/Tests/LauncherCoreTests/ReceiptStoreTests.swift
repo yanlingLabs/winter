@@ -63,7 +63,7 @@ final class ReceiptStoreTests: XCTestCase {
         let link = target.appendingPathExtension("link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target); defer { try? FileManager.default.removeItem(at: link) }
         XCTAssertThrowsError(try DirectoryReceiptStore(directory: link.path), "a symlink is not a directory")
-        for refused in ["relative/path", "/tmp/../etc", "/Users/someone/.winter/cowork", "/Users/someone/.winter-dev/x", "/tmp/.winter/receipts", "/tmp/a\0b"] {
+        for refused in ["relative/path", "/tmp/../etc", "/var/example/.winter/cowork", "/var/example/.winter-dev/x", "/tmp/.winter/receipts", "/tmp/a\0b"] {
             XCTAssertThrowsError(try DirectoryReceiptStore(directory: refused), refused) { XCTAssertEqual($0 as? ReceiptStoreFailure, .unsafeDirectory) }
         }
     }
