@@ -18,6 +18,7 @@ import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
 import { isHumanTurnOrigin } from "../sessions/turn-origins";
+import { coworkCardPrefix, coworkDeniedMessage, projectCoworkCall, type CoworkApprovalPorts } from "./cowork-approval";
 import { connectorDenialMessage, connectorFactsFor, connectorVerdict, isConnectorToolName, statedServerFromCanUseTool, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -126,6 +127,14 @@ export interface CanUseToolDeps {
    * dispatch keep their gate verdicts.
    */
   connectors?: ConnectorPermissionSource;
+  /**
+   * COWORK (behind the refusal): the host's ports for ONE Cowork conversation. When present, EVERY request except
+   * `AskUserQuestion` takes its decision from the Cowork host policy matrix (`cowork-approval.ts`), never from the gate, the connector matrix or the Mac-path
+   * fences (they judge Mac paths and host-session classes; a guest path is judged by the matrix and the mount views).
+   * Production never supplies it: Cowork sessions are refused at the door (`unsupported_topology`) and by the driver, so
+   * no Code, chat or dispatch session can reach that branch. Tests build the path with fakes.
+   */
+  cowork?: CoworkApprovalPorts;
   /**
    * The capability server KEYS (`sessions`, `browser`, …) the session's CURRENT incarnation built, read per
    * call. An `mcp__winter__<key>__<tool>` name is the daemon's own — stripped to its host name for the gate
@@ -487,11 +496,53 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     }
   };
 
+  /**
+   * The Cowork route (`deps.cowork`). The decision is `projectCoworkCall`'s; this maps it onto the approval events clients
+   * already understand: a deny is a typed result with no event, an allow is silent, an ask is `approval_requested` /
+   * `approval_resolved` (plain Allow/Deny, a card that names the workspace, source revision and agent). Plan's own
+   * presentation (`ExitPlanMode`) still goes through the plan bridge. An unattended turn (any origin that is not a person's)
+   * keeps its policy: the card is raised and bounded, and times out to a typed deny - never to an allow. An approval is
+   * revalidated when it lands: a policy that narrowed meanwhile turns the answer into a deny (`by: "policy-changed"`).
+   */
+  const coworkCanUse = async (ports: CoworkApprovalPorts, toolName: string, input: Record<string, unknown>, ctx: Parameters<CanUseTool>[2]): Promise<PermissionResult> => {
+    if (ctx.signal.aborted) {
+      return { behavior: "deny", message: `${toolName} was not run — the turn was aborted before the approval could be raised.` };
+    }
+    if (toolName === "ExitPlanMode" && deps.planBridge) {
+      return await deps.planBridge.onExitPlanMode(planRequestFor(deps, toolName, gateToolNameFor(toolName), input, ctx, now));
+    }
+    const liveKeys = deps.capabilityKeys?.();
+    const project = () => projectCoworkCall(ports, { toolName, input, ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}), ctx, ...(deps.connectors !== undefined ? { connectors: deps.connectors } : {}), ...(liveKeys !== undefined ? { liveKeys } : {}) });
+    const projection = project();
+    if (projection.kind === "deny") {
+      log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${projection.policy} reason=cowork-${projection.reason}`);
+      const message = projection.reason === "policy_table" && projection.connector !== undefined
+        && (projection.connector.setting !== undefined && projection.connector.setting !== "allow" || projection.policy === "plan")
+        ? connectorDenialMessage(projection.connector.server, projection.connector.tool, { setting: projection.connector.setting, policy: projection.policy })
+        : projection.reason === "policy_table" && (projection.policy === "plan" || projection.policy === "dont-ask")
+        ? deniedByPolicyMessage(projection.policy)
+        : coworkDeniedMessage(toolName, projection.reason);
+      return { behavior: "deny", message };
+    }
+    if (projection.kind === "allow") return { behavior: "allow", updatedInput: input };
+    let human = false;
+    try { human = isHumanTurnOrigin(deps.turnOrigin?.()); } catch { human = false; }
+    return await raiseCard(deps, {
+      log, now, threadId, policy: projection.policy, state, plainCard: true,
+      summaryPrefix: coworkCardPrefix(ports, ctx.agentID),
+      ...(human ? {} : { parkMs: DISPATCH_CHILD_APPROVAL_TIMEOUT_MS }),
+      revalidate: () => (project().kind === "deny" ? coworkDeniedMessage(toolName, "policy_changed") : undefined),
+    }, toolName, gateToolNameFor(toolName, liveKeys), input, ctx);
+  };
+
   const canUse: CanUseTool = async (toolName, input, ctx): Promise<PermissionResult> => {
     // (1) A question, not a permission.
     if (toolName === ASK_USER_QUESTION_TOOL) {
       return await askQuestion(ctx.toolUseID, input, ctx);
     }
+
+    // (1c) COWORK: the host policy matrix decides, off the gate entirely. See `CanUseToolDeps.cowork`.
+    if (deps.cowork !== undefined) return await coworkCanUse(deps.cowork, toolName, input, ctx);
 
     // (2) THE CONTROL-PLANE FENCE (P8b-27b) — before the gate, under EVERY policy, `bypass`
     // included.
@@ -870,6 +921,12 @@ async function raiseCard(
     privateTarget?: { host: string; reason: string };
     /** WS-26: a connector card that must offer no rule-bearing option (see the call site). */
     plainCard?: boolean;
+    /** COWORK: words that lead the card's summary (workspace, source revision, agent). */
+    summaryPrefix?: string;
+    /** COWORK: an explicit bound for this card (an unattended turn's), overriding the dispatch family's. */
+    parkMs?: number;
+    /** COWORK: re-checked when an APPROVAL lands; a message means the answer no longer stands (the policy narrowed). */
+    revalidate?: () => string | undefined;
   },
   toolName: string,
   gateToolName: string,
@@ -921,7 +978,7 @@ async function raiseCard(
   // "bash rm -rf x" today — approving a command they were never shown.
   //
   // Revisit only when a per-call semantic is observed on a live child, never on the field name.
-  const summary = approvalCardSummary({ name: gateToolName, argsJson });
+  const summary = `${env.summaryPrefix ?? ""}${approvalCardSummary({ name: gateToolName, argsJson })}`;
   // **A PRIVATE-ADDRESS CARD OFFERS ALLOW-ONCE AND NOTHING ELSE** (whole-branch review B1, and the
   // NIT beside it). Every rule-bearing option is dropped — which for `web_fetch` means exactly the
   // SDK's own suggestion, `WebFetch(domain:<host>)`, since `approvalOptionsFor` offers rules for
@@ -945,7 +1002,7 @@ async function raiseCard(
   // A dispatch-family card — a relayed child's, or a dispatch session's own — is bounded (Dispatch's
   // prompt promises the user an auto-deny) unless a person started the turn; every other card waits
   // for its human (P8b-19).
-  const parkMs = dispatchCardTimeoutMs(deps) ?? NO_PARK_TIMEOUT_MS;
+  const parkMs = env.parkMs ?? dispatchCardTimeoutMs(deps) ?? NO_PARK_TIMEOUT_MS;
   const expiresAt = issuedAt + parkMs;
   const record: BridgedApprovalRequest = {
     sessionId, callId, toolName, gateToolName,
@@ -1004,8 +1061,11 @@ async function raiseCard(
 
   // Fail closed on a broker that answered with nothing at all (P8b-19): `null`/`undefined` is
   // never a silent allow.
-  const approved = !!res && typeof res === "object" && res.approved === true;
-  const by = (res && typeof res === "object" && typeof res.by === "string" && res.by) || "unknown";
+  let approved = !!res && typeof res === "object" && res.approved === true;
+  let by = (res && typeof res === "object" && typeof res.by === "string" && res.by) || "unknown";
+  // COWORK: an approval is only as good as the policy it lands under (see `coworkCanUse`).
+  const stale = approved ? env.revalidate?.() : undefined;
+  if (stale !== undefined) { approved = false; by = "policy-changed"; }
   const optionId = res && typeof res === "object" ? res.optionId : undefined;
 
   // A stale invocation whose card was already withdrawn by the SUPERSEDING one must not emit a
@@ -1031,7 +1091,7 @@ async function raiseCard(
     // an emit failure is "nobody answered", not "the user refused" — and the classification is a
     // signal the runtime may act on, so mislabelling a machine outcome as a rejection risks
     // turn-ending behaviour on a case today's engine simply reports as an `isError` tool result.
-    const machine = by === "timeout" || by === "aborted" || by === "superseded" || by === "emit-failure" || by === "unknown";
+    const machine = by === "timeout" || by === "aborted" || by === "superseded" || by === "emit-failure" || by === "unknown" || by === "policy-changed";
     // `interrupt: true` on a HUMAN denial only (`PermissionResult`'s deny arm,
     // `permissions/types.d.ts:64`). Today an explicit human "no" ENDS the turn
     // (`engine.ts:5876-5882`), and the comment there states the reason: without it the model
@@ -1041,7 +1101,9 @@ async function raiseCard(
     return {
       behavior: "deny",
       ...(machine ? {} : { interrupt: true as const }),
-      message: by === "timeout"
+      message: by === "policy-changed" && stale !== undefined
+        ? stale
+        : by === "timeout"
         ? `${gateToolName} was not run — nobody answered the approval request.`
         : by === "aborted"
         ? `${gateToolName} was not run — the turn was aborted while the approval was pending.`
