@@ -56,7 +56,14 @@ describe("agy's /usage, parsed", () => {
     expect(variant((o) => { o.usage.output_tokens = 3; })).toBe("guard");
     expect(variant((o) => { o.command.name = "chat"; })).toBe("guard");
     expect(variant((o) => { o.conversation_id = "c-1"; })).toBe("guard");
-    expect(variant((o) => { delete o.command; })).toBe("no-command");
+    // No command but a successful answer with text: the model answered "/usage" as a prompt.
+    expect(variant((o) => { delete o.command; })).toBe("guard");
+    expect(variant((o) => { delete o.command; o.response = ""; })).toBe("no-command");
+    expect(variant((o) => { delete o.command; o.status = "ERROR"; })).toBe("no-command");
+    // A missing count never reads as zero.
+    expect(variant((o) => { delete o.num_turns; })).toBe("unverified");
+    expect(variant((o) => { delete o.usage; })).toBe("unverified");
+    expect(variant((o) => { delete o.conversation_id; })).toBe("unverified");
     expect(variant((o) => { o.status = "ERROR"; })).toBe("error");
     expect(variant((o) => { o.command.data.groups = []; })).toBe("no-report");
   });
@@ -89,7 +96,7 @@ describe("the Antigravity plan", () => {
     expect(marks(fake.markerPath)).toHaveLength(2);
   });
 
-  for (const mode of ["turns", "tokens", "other-command", "conversation"] as const satisfies readonly FakeAgyMode[]) {
+  for (const mode of ["turns", "tokens", "other-command", "conversation", "answered"] as const satisfies readonly FakeAgyMode[]) {
     test(`a /usage that reached the model loop (${mode}) LATCHES the binary: one warning, no content, not asked again until it changes`, async () => {
       const fake = fakeAgy(tempDir("bin"), mode);
       const home = tempDir("home");
@@ -108,7 +115,7 @@ describe("the Antigravity plan", () => {
     });
   }
 
-  for (const mode of ["no-json", "no-command", "exit-1"] as const satisfies readonly FakeAgyMode[]) {
+  for (const mode of ["no-json", "no-command", "no-telemetry", "exit-1"] as const satisfies readonly FakeAgyMode[]) {
     test(`an ordinary failure (${mode}) is cached for the throttle, then retried — never latched`, async () => {
       const fake = fakeAgy(tempDir("bin"), mode);
       let now = NOW;
@@ -124,11 +131,20 @@ describe("the Antigravity plan", () => {
     });
   }
 
-  test("a hung agy is killed at the timeout: none, not latched", async () => {
+  test("a hung agy (it ignored its own --print-timeout) is killed at Winter's deadline and not asked again for hours", async () => {
     const fake = fakeAgy(tempDir("bin"), "hang");
-    const { svc, db } = service({ agyExecutable: () => fake.path, agyCliTimeoutMs: 1_200 });
+    let now = NOW;
+    const { svc, db } = service({ agyExecutable: () => fake.path, agyCliTimeoutMs: 2_000, now: () => now });
     expect((await svc.antigravityPlan()).source).toBe("none");
     expect(db.latch(binaryKey("agy", fake.path)!)).toBeUndefined();
+    const ran = () => marks(fake.markerPath).length;
+    const first = ran();
+    now += 60 * 60_000;
+    await svc.antigravityPlan();
+    expect(ran()).toBe(first);
+    now += 5 * 3_600_000 + 60_000;
+    await svc.antigravityPlan();
+    expect(ran()).toBe(first + 1);
   });
 
   test("not on this Mac: no slot; tracking off: nothing spawned", async () => {

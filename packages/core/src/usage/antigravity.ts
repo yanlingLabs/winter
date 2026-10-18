@@ -16,10 +16,12 @@ import { probeEnv, runLines } from "./spawn-lines";
 export const AGY_USAGE_ARGS = ["-p", "/usage", "--output-format", "json", "--print-timeout", "20s"] as const;
 /** Above agy's own `--print-timeout 20s`, so it is never killed just before it answers. */
 export const AGY_USAGE_TIMEOUT_MS = 25_000;
+/** A run that outlived even that (agy ignored its own `--print-timeout`) is not asked again for this long. */
+export const AGY_TIMEOUT_BACKOFF_MS = 6 * 3_600_000;
 
 /** Why a `/usage` run was refused. `guard` means it reached the model loop (a turn, tokens, another command, a
  *  conversation left behind): the caller latches the binary off. Everything else is ordinary, retried after the throttle. */
-export type AgyCliFailure = "guard" | "no-command" | "error" | "no-report" | "no-json" | "timeout" | "spawn-failed" | "too-large";
+export type AgyCliFailure = "guard" | "no-command" | "unverified" | "error" | "no-report" | "no-json" | "timeout" | "spawn-failed" | "too-large";
 
 /** PURE: a group's name, shortly — "Gemini Models" → "Gemini", "Claude and GPT models" → "Claude & GPT"; an unknown
  *  group keeps its name (without a trailing "models"). */
@@ -64,21 +66,26 @@ export function windowsFromAgyUsage(data: unknown, at: number, now: number): Pla
 }
 
 /**
- * PURE: judge agy's whole answer. Accepted ONLY when it was the `usage` command, ran no turn and counted no token. The
- * `guard` failure (the caller latches the binary) needs POSITIVE evidence of the model loop: turns or a token count
- * above 0, another command, or a conversation left behind. No command at all, an error status, no groups: ordinary.
+ * PURE: judge agy's whole answer. Accepted ONLY when it was the `usage` command and PROVES it ran no turn: `num_turns`
+ * present and 0, a `usage` block present with every count 0, `conversation_id` present and empty — a missing field
+ * never reads as zero (`unverified`, not accepted). The `guard` failure (the caller latches the binary) needs POSITIVE
+ * evidence of the model loop: turns or a token count above 0, another command, a conversation left behind, or a
+ * successful answer with text and no command at all (the model answered "/usage" as a prompt). No command and no
+ * answer, an error status, no groups: ordinary.
  */
 export function judgeAgyUsage(parsed: unknown, at: number): { reading?: PlanReading; failure?: AgyCliFailure } {
   if (!isObj(parsed)) return { failure: "no-json" };
-  const turns = typeof parsed.num_turns === "number" ? parsed.num_turns : 0;
-  const usage = isObj(parsed.usage) ? parsed.usage : {};
-  const tokens = Object.values(usage).some((v) => tokenCount(v) > 0);
+  const turns = typeof parsed.num_turns === "number" ? parsed.num_turns : undefined;
+  const usage = isObj(parsed.usage) ? parsed.usage : undefined;
+  const tokens = usage !== undefined && Object.values(usage).some((v) => tokenCount(v) > 0);
   const command = isObj(parsed.command) ? parsed.command : undefined;
   const name = command === undefined ? undefined : command.name;
   const other = typeof name === "string" && name !== "usage";
   const conversation = typeof parsed.conversation_id === "string" && parsed.conversation_id.length > 0;
-  if (turns > 0 || tokens || other || conversation) return { failure: "guard" };
+  const answered = command === undefined && parsed.status === "SUCCESS" && typeof parsed.response === "string" && parsed.response.trim().length > 0;
+  if ((turns ?? 0) > 0 || tokens || other || conversation || answered) return { failure: "guard" };
   if (name !== "usage") return { failure: "no-command" };
+  if (turns !== 0 || usage === undefined || parsed.conversation_id !== "") return { failure: "unverified" };
   if (typeof parsed.status === "string" && parsed.status !== "SUCCESS") return { failure: "error" };
   const windows = windowsFromAgyUsage(command!.data, at, at);
   if (windows.length === 0) return { failure: "no-report" };
