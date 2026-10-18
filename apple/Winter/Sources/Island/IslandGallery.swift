@@ -180,7 +180,8 @@ enum IslandGallery {
         let store = sampleStore()
 
         for (tab, name) in [(IslandTabRegistry.sessions, "sessions"), (IslandTabRegistry.shelf, "shelf"),
-                            (IslandTabRegistry.usage, "usage"), (IslandTabRegistry.devices, "devices")] {
+                            (IslandTabRegistry.usage, "usage"), (IslandTabRegistry.devices, "devices"),
+                            (IslandTabRegistry.servers, "servers")] {
             store.tabs.select(tab.id)
             out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id), directory,
                                  "island-tab-\(name)@2x.png"))
@@ -194,6 +195,13 @@ enum IslandGallery {
         emptyModels.shelf.dropTargeted = true
         out.append(try write(openScene(store: store, models: emptyModels, shape: shape, tab: IslandTabRegistry.shelf.id),
                              directory, "island-tab-shelf-drop@2x.png"))
+
+        // The Servers tab with nothing listening.
+        let noServers = IslandTabModels(shelf: emptyModels.shelf, servers: IslandServersModel())
+        noServers.servers.apply([])
+        store.tabs.select(IslandTabRegistry.servers.id)
+        out.append(try write(openScene(store: store, models: noServers, shape: shape, tab: IslandTabRegistry.servers.id),
+                             directory, "island-tab-servers-empty@2x.png"))
 
         // The strip with waiting AND working counts, and with working only.
         for (name, waiting, working) in [("strip-housing-waiting-working", 2, 3), ("strip-housing-working", 0, 1)] {
@@ -281,7 +289,34 @@ enum IslandGallery {
         try? FileManager.default.removeItem(at: urls[3])
         shelf.resolveAllNow()
         shelf.selectedId = shelf.items.first?.id
-        return IslandTabModels(sessions: sessions, shelf: shelf, usage: usage, devices: devices)
+        return IslandTabModels(sessions: sessions, shelf: shelf, usage: usage, devices: devices,
+                               servers: sampleServers(now: now))
+    }
+
+    /// Servers: a node bot with a worker, a Python module, a Bun app — from a made-up process list (never a scan).
+    static func sampleServers(now: Date) -> IslandServersModel {
+        let start = { (ago: TimeInterval) in UInt64(now.timeIntervalSince1970 - ago) }
+        let home = "/Users/sample"
+        func process(_ pid: Int32, parent: Int32 = 1, ago: TimeInterval, path: String, args: [String]? = nil, cwd: String,
+                     tcp: [UInt16] = [], unix: [String] = []) -> ServerProcess {
+            ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
+                          ppid: parent, path: path, cwd: cwd, tcpPorts: tcp, unixSockets: unix, arguments: args)
+        }
+        let model = IslandServersModel()
+        model.user = 501
+        model.ownPid = 0
+        model.home = home
+        model.apply([
+            process(400, ago: 3 * 3600 + 12 * 60, path: "/opt/homebrew/bin/node", args: ["node", "bot.js", "remote"],
+                    cwd: "\(home)/Code/Discord Waifus", tcp: [3888]),
+            process(401, parent: 400, ago: 3 * 3600, path: "/opt/homebrew/bin/node", args: ["node", "worker.js"],
+                    cwd: "\(home)/Code/Discord Waifus", tcp: [61010]),
+            process(410, ago: 25 * 60, path: "/usr/bin/python3", args: ["python3", "-m", "http.server", "8000"],
+                    cwd: "\(home)/Sites/portfolio", tcp: [8000]),
+            process(420, ago: 2 * 86400, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
+                    cwd: "\(home)/Code/dashboard", tcp: [3000], unix: ["/tmp/dashboard.sock"]),
+        ])
+        return model
     }
 
     /// Three sample cards: an approval, a question and a view request (plus a link request).
