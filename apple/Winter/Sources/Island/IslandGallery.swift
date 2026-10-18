@@ -252,7 +252,7 @@ enum IslandGallery {
                            contextWindow: 200_000, model: "example/model-large")),
             roles: ["titles.model": ModelRoleValue(model: "example/model-small", explicit: false, constraint: "any", permitted: [],
                                                    problem: ModelRoleProblem(reason: "rate-limited", model: "example/model-small"))],
-            sessionTitle: "Ship the island")
+            sessionTitle: "Ship the island", summary: UsageGallery.sampleSummary(now: now))
 
         // Devices.
         let devices = IslandDevicesModel()

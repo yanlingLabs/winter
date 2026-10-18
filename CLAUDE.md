@@ -67,6 +67,7 @@ Plain links, not `@` imports — read the file whose area you are about to touch
 | [island.md](docs/claude/island.md) | Before touching `apple/Winter/Sources/Island/`, `packages/core/src/island/`, the hello's `capabilities`/`tty`, `island.pending`, or where an approval, question or desktop-switch prompt shows on the Mac. |
 | [computer-use-browsers.md](docs/claude/computer-use-browsers.md) | Before touching `computer-use/browser/**`, `extensions/winter-for-chrome/**`, `apple/ComputerUse/WinterBrowserHost/**` or the browser link — tabs, readers, downloads, the sign-in hand-off, WebMCP. |
 | [headless.md](docs/claude/headless.md) | Before touching the `headless` backend, the Winter Headless helper, its local-network rules or the Chromium embed layout. |
+| [usage.md](docs/claude/usage.md) | Before touching usage and cost tracking: `packages/core/src/usage/`, the projector's `onTurnUsage`, `usage.*`, `settings.usage`, reading the user's Codex/Claude Code files or plans, `apple/Winter/Sources/Usage/`. |
 | [testing.md](docs/claude/testing.md) | Before running or writing tests, a verify gate, the live computer-use suite, or anything reading daemon logs/temp dirs. |
 | [release.md](docs/claude/release.md) | Before bumping a version, writing release notes or cutting a release. |
 

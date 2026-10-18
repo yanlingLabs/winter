@@ -169,6 +169,13 @@ final class IslandUsageModel: ObservableObject {
     @Published private(set) var roles: [String: ModelRoleValue] = [:]
     @Published private(set) var sessionTitle: String?
     @Published private(set) var failed = false
+    /// Usage and cost tracking (`docs/claude/usage.md`): the plans and the selected range's cost.
+    @Published private(set) var summary: UsageSummary?
+    @Published var range: UsageRange = .day { didSet { if range != oldValue { Task { await refreshSummary() } } } }
+
+    var fetchSummary: (UsageRange) async throws -> UsageSummary? = { _ in nil }
+    /// "Open usage": the Usage window.
+    var openUsage: () -> Void = {}
 
     var fetch: (_ sessionId: String?) async throws -> IslandUsageSnapshot = { _ in
         IslandUsageSnapshot(windows: [], background: .init(limited: false, inputTokens: 0, outputTokens: 0))
@@ -188,11 +195,20 @@ final class IslandUsageModel: ObservableObject {
         }
         sessionTitle = current?.title
         if let r = try? await fetchRoles() { roles = r }
+        await refreshSummary()
+    }
+
+    func refreshSummary() async {
+        let asked = range
+        guard let s = try? await fetchSummary(asked), asked == range else { return }
+        summary = s
     }
 
     /// Test seam: set what a refresh would.
-    func setForTesting(_ snapshot: IslandUsageSnapshot?, roles: [String: ModelRoleValue] = [:], sessionTitle: String? = nil) {
+    func setForTesting(_ snapshot: IslandUsageSnapshot?, roles: [String: ModelRoleValue] = [:], sessionTitle: String? = nil,
+                       summary: UsageSummary? = nil) {
         self.snapshot = snapshot
+        self.summary = summary
         self.roles = roles
         self.sessionTitle = sessionTitle
     }
@@ -219,20 +235,17 @@ struct IslandUsageTab: View {
         let background = IslandUsagePresentation.background(snapshot.background, now: now)
         let notes = IslandUsagePresentation.notes(model.roles, now: now)
         VStack(alignment: .leading, spacing: 12) {
-            section("Plan limits")
-            if gauges.isEmpty {
-                Text("No plan window reported yet. Winter shows one when your provider reports how much of it is used.")
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 6)
-            } else {
-                // Two per row (a plain stack: the offscreen renderer draws no lazy grid).
+            // Usage and cost (`docs/claude/usage.md`), compact: the plans, the range's cost, the top models, the window.
+            IslandUsageCompact(model: model, now: now)
+            // Other providers' runtime-reported windows (the Codex ones are in the Codex slot above).
+            let others = gauges.filter { g in !(snapshot.windows.contains { $0.provider == "codex-oauth" && "window-\($0.rateLimitType ?? "plan")" == g.id }) }
+            if !others.isEmpty {
+                section("Other plan windows")
                 VStack(spacing: 8) {
-                    ForEach(Array(stride(from: 0, to: gauges.count, by: 2)), id: \.self) { i in
+                    ForEach(Array(stride(from: 0, to: others.count, by: 2)), id: \.self) { i in
                         HStack(spacing: 8) {
-                            IslandUsageGaugeTile(gauge: gauges[i])
-                            if i + 1 < gauges.count { IslandUsageGaugeTile(gauge: gauges[i + 1]) } else { Color.clear.frame(maxWidth: .infinity) }
+                            IslandUsageGaugeTile(gauge: others[i])
+                            if i + 1 < others.count { IslandUsageGaugeTile(gauge: others[i + 1]) } else { Color.clear.frame(maxWidth: .infinity) }
                         }
                     }
                 }
@@ -352,5 +365,77 @@ struct IslandUsageContextRow: View {
             }
             .padding(10)
         }
+    }
+}
+
+/// The Usage tab's compact top (`docs/claude/usage.md`): Codex's and Claude Code's plan rings, the selected range's
+/// cost with a tiny sparkline, the top models, and "Open usage" for the full window.
+struct IslandUsageCompact: View {
+    @ObservedObject var model: IslandUsageModel
+    let now: Date
+
+    var body: some View {
+        let summary = model.summary
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: summary?.codexPlan, now: now), compact: true)
+                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: summary?.claudeCodePlan, now: now), compact: true)
+            }
+            IslandHoverSurface { _ in
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        UsageRangePicker(range: $model.range, compact: true)
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(UsagePresentation.cost(summary?.totals.costUsd ?? 0))
+                                .font(Typography.heading(.semibold))
+                                .foregroundStyle(Color.white)
+                            Text(costDetail(summary)).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    UsageSparkline(values: summary?.spark ?? [])
+                        .frame(width: 150, height: 34)
+                }
+                .padding(10)
+            }
+            if let top = summary?.topModels, !top.isEmpty {
+                VStack(spacing: 4) {
+                    ForEach(top.prefix(3)) { row in
+                        HStack(spacing: 8) {
+                            Text(UsagePresentation.modelName(row.model)).font(Typography.captionMono()).foregroundStyle(Color.white.opacity(0.9))
+                                .lineLimit(1).truncationMode(.middle)
+                            Text(UsagePresentation.sourceTitle(row.source)).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                            Spacer(minLength: 6)
+                            Text(row.costBasis == "unknown" ? UsagePresentation.tokens(row.totals.tokens) + " tok" : UsagePresentation.cost(row.totals.costUsd))
+                                .font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white.opacity(0.85))
+                        }
+                        .padding(.horizontal, 10)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button(action: model.openUsage) {
+                    HStack(spacing: 5) {
+                        Text("Open usage").font(Typography.caption(.semibold))
+                        Image(systemName: "arrow.up.right").font(Typography.tiny(.semibold))
+                    }
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .padding(.horizontal, 12)
+                    .frame(height: 26)
+                    .background(Capsule().fill(Color.white.opacity(0.1)))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .pillHoverGlow(Color.white)
+            }
+        }
+    }
+
+    private func costDetail(_ s: UsageSummary?) -> String {
+        guard let t = s?.totals, t.tokens > 0 else { return UsagePresentation.rangeTitle(model.range).lowercased() }
+        var parts = ["\(UsagePresentation.tokens(t.input + t.output)) tokens"]
+        if t.cacheRead > 0 { parts.append("\(UsagePresentation.tokens(t.cacheRead)) cached") }
+        return parts.joined(separator: " · ")
     }
 }

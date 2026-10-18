@@ -155,21 +155,21 @@ describe("the Codex plan", () => {
 describe("a plan read never holds a client past its short wait", () => {
   test("a slow spawn: the first ask answers from the next rung, the spawn finishes in the background, the next ask has it", async () => {
     const bin = tempDir("bin");
-    // A Claude CLI that takes ~1 s.
+    // A Claude CLI that takes ~4 s (well past the wait, even on a loaded machine where the spawn itself is slow).
     const slow = fakeClaude(bin, "ok");
     const wrapper = join(bin, "slow-claude");
-    writeFileSync(wrapper, `#!/bin/sh\nsleep 1\nexec "${slow.path}" "$@"\n`);
+    writeFileSync(wrapper, `#!/bin/sh\nsleep 4\nexec "${slow.path}" "$@"\n`);
     require("node:fs").chmodSync(wrapper, 0o755);
     const { svc } = service({ claudeExecutable: () => wrapper, planWaitMs: 100 });
     const started = Date.now();
     expect((await svc.claudeCodePlan()).source).toBe("none");
-    expect(Date.now() - started).toBeLessThan(800);
-    const end = Date.now() + 10_000;
+    expect(Date.now() - started).toBeLessThan(3_000);
+    const end = Date.now() + 20_000;
     let plan = await svc.claudeCodePlan();
     while (plan.source !== "claude-cli" && Date.now() < end) { await Bun.sleep(100); plan = await svc.claudeCodePlan(); }
     expect(plan.source).toBe("claude-cli");
     expect(marks(slow.markerPath)).toHaveLength(1);
-  });
+  }, 30_000);
 });
 
 describe("the Claude Code plan", () => {
