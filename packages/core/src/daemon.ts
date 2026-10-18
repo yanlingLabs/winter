@@ -123,6 +123,7 @@ import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-
 import { IslandRegistry, type IslandHost, type IslandSessionFacts } from "./island/registry";
 import { IslandActivity } from "./island/activity";
 import { IslandUsageRegistry } from "./island/usage";
+import { createUsageService, type UsageInjection } from "./usage/wiring";
 import { rowForTag } from "./runtime-sdk/provider-selection";
 import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
@@ -430,6 +431,9 @@ export async function startDaemon(opts: {
    *  engine's backends; the rest replace this profile's extension ids, the host's designated requirement and the
    *  Security.framework check of the host's pid (the opt-in extension e2e runs a test-build host). Production sets none. */
   browserHost?: BrowserHostInjection;
+  /** Usage tracking TEST SEAM (`docs/claude/usage.md`): the Codex / Claude Code roots and executables. Absent: the env
+   *  overrides (`WINTER_USAGE_*`, which both test preloads point at nothing), else the user's real installs. */
+  usage?: UsageInjection;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -1289,6 +1293,10 @@ export async function startDaemon(opts: {
   hub.addObserver((event) => islandRegistry.observe(event));
   // The island's Usage tab (`island.usage`): plan windows the runtime reported, per-session token counts since start,
   // and Winter's background jobs' quota — all read from what the daemon already sees.
+  /** The provider a session's model tag names (the island's plan windows are tagged with it). */
+  const islandProviderOf = (sid: string): string | undefined => {
+    try { const m = store.meta(sid).model; return m === undefined || !m.includes("/") ? undefined : splitTag(m).providerId; } catch { return undefined; }
+  };
   const islandUsage = new IslandUsageRegistry({
     background: () => ({ ...quota.state(), ...quota.usage() }),
     subscription: () => quota.subscriptionQuota(),
@@ -1300,6 +1308,12 @@ export async function startDaemon(opts: {
     },
   });
   hub.addObserver((event) => islandUsage.observe(event));
+  // Usage and cost tracking (`usage.*`, `docs/claude/usage.md`): Winter's own turns as they end, the user's Codex and
+  // Claude Code usage ingested ON DEMAND. Its own SQLite file (`<home>/usage/usage.db`), never runtime-state.db.
+  const usage = createUsageService({
+    home: winterHome, settings: () => settings, islandUsage, version: CORE_VERSION,
+    ...(opts.usage === undefined ? {} : { injection: opts.usage }),
+  });
 
   const computerUseRuntime = createComputerUseRuntime({
     island: islandRegistry,
@@ -2125,7 +2139,12 @@ export async function startDaemon(opts: {
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); dispatchChildren?.onTurnSettled(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
-    onRateLimit: (sid, info) => islandUsage.noteRateLimit(sid, info),
+    onRateLimit: (sid, info) => islandUsage.noteRateLimit(sid, info, islandProviderOf(sid)),
+    onTurnUsage: (sid, u) => {
+      let mode: string | undefined;
+      try { mode = store.meta(sid).mode; } catch { mode = undefined; }
+      usage?.service.recordWinterTurn(sid, mode, u.sourceId, u.rows);
+    },
     ...(titler === undefined ? {} : { titler }),
     // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
     // `.winter/mcp.json`; the repo-root `.mcp.json` is no longer read) reach the child under the
@@ -3063,6 +3082,7 @@ export async function startDaemon(opts: {
     island: islandRegistry,
     islandActivity,
     islandUsage,
+    ...(usage === undefined ? {} : { usage: usage.service }),
     tasks: undefined,
     // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
     // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`
@@ -3234,6 +3254,7 @@ export async function startDaemon(opts: {
           .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
       const closeRest = (): void | Promise<void> => {
         dispatchChildren?.stop();
+        usage?.close();
         store.close();
         if (!runtime) { lock.release(); return; }
         return runtime.close().then(() => lock.release(), () => lock.release());

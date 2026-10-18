@@ -596,6 +596,7 @@ export const IslandUsageWindowSchema = z.object({
   resetsAt: z.number().optional(),
   at: z.number(),
   sessionId: z.string(),
+  provider: z.string().optional(),
 });
 /** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the
  *  latest report per window kind since the daemon started; `subscription` — Winter's background jobs' subscription
@@ -603,6 +604,38 @@ export const IslandUsageWindowSchema = z.object({
  *  numbers as `quota.state`); `session` — one session's token counts summed from its `turn_completed` events since
  *  the daemon started, its last measured context size, and its model's context window when the catalog knows it.
  *  HARNESS role only. */
+/** Usage and cost tracking (`docs/claude/usage.md`) — HARNESS role only, local clients; never remote, never plugins.
+ *  `range`: last hour, 24 h, 7 days, 30 days, all time. `sources`: Winter's own sessions, the user's Codex CLI/app,
+ *  the user's Claude Code (default all three). Costs are USD; `costBasis` says whether a figure is the runtime's own
+ *  list price, Winter's list-price estimate (a subscription's tokens, another app's usage) or unknown. */
+export const UsageRangeSchema = z.enum(["1h", "24h", "7d", "30d", "all"]);
+export const UsageSourceSchema = z.enum(["winter", "codex", "claude-code"]);
+export const UsageSummaryParams = z.object({
+  range: UsageRangeSchema.default("24h"),
+  sources: z.array(UsageSourceSchema).max(3).optional(),
+  /** Read the plans too (default true). */
+  plans: z.boolean().optional(),
+});
+export const UsageSeriesParams = z.object({
+  range: UsageRangeSchema.default("7d"),
+  sources: z.array(UsageSourceSchema).max(3).optional(),
+});
+export const UsageSubscriptionInput = z.object({
+  id: z.string().min(1).max(64).optional(),
+  name: z.string().trim().min(1).max(80),
+  provider: z.string().trim().min(1).max(40),
+  price: z.number().finite().min(0).max(100_000),
+  currency: z.string().trim().min(3).max(3).transform((c) => c.toUpperCase()),
+  cadence: z.enum(["monthly", "yearly"]),
+  renewalDay: z.number().int().min(1).max(31),
+  renewalMonth: z.number().int().min(1).max(12).optional(),
+  covers: z.array(z.string().regex(/^(codex|claude-code|winter|winter:[a-z0-9-]{1,40})$/)).max(8).default([]),
+});
+export const UsageSubscriptionsSetParams = z.object({ subscription: UsageSubscriptionInput });
+/** Writes `settings.usage.<app>.enabled` (live: the next ask honours it, no restart). */
+export const UsageSetTrackingParams = z.object({ codex: z.boolean().optional(), claudeCode: z.boolean().optional() });
+export const UsageSubscriptionsRemoveParams = z.object({ id: z.string().min(1).max(64) });
+
 export const IslandUsageParams = z.object({ sessionId: z.string().min(1).optional() });
 export const IslandUsageResult = z.object({
   windows: z.array(IslandUsageWindowSchema),
@@ -3488,6 +3521,13 @@ export const METHODS = {
   // The island's Sessions and Usage tabs. HARNESS role only.
   islandHosts: "island.hosts",
   islandUsage: "island.usage",
+  // Usage and cost tracking (`docs/claude/usage.md`): the Usage tab and the Usage window. HARNESS role only.
+  usageSummary: "usage.summary",
+  usageSeries: "usage.series",
+  usageSubscriptionsList: "usage.subscriptions.list",
+  usageSubscriptionsSet: "usage.subscriptions.set",
+  usageSubscriptionsRemove: "usage.subscriptions.remove",
+  usageSetTracking: "usage.setTracking",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",

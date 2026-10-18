@@ -775,6 +775,14 @@ export const Settings = z.object({
    */
   providers: z.record(z.string(), z.object({ baseUrl: z.string().url().optional() })).optional(),
   legacy: z.object({ readLegacyProjectFiles: z.boolean().default(true) }).optional(),
+  /** Usage and cost tracking (`docs/claude/usage.md`): whether Winter may read the user's OWN Codex and Claude Code
+   *  usage (their local session files, and their plan windows through the user's own `codex` / `claude`). Default on;
+   *  `false` stops every read and every spawn for that app at the next ask — no restart. The ONE reader is
+   *  `usageTrackingFrom`. */
+  usage: z.object({
+    codex: z.object({ enabled: z.boolean().optional() }).optional(),
+    claudeCode: z.object({ enabled: z.boolean().optional() }).optional(),
+  }).optional(),
   /** WS-20: user-overridable per-slot model pins for the daemon's own callers (dispatch, dreaming, the
    *  session cleaner, and `research` — `WebFetch`'s page digest inside the runtime child since
    *  2026-09-18) — every key is optional; an absent key (or an absent block) falls back to `pinsFor`'s
@@ -911,6 +919,11 @@ export function pinsFor(settings: Settings | null | undefined): {
 
 /** Phase 9c (P9c-4): the ONE reader of `legacy.readLegacyProjectFiles` — absent block or absent key
  *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
+/** The ONE reader of `settings.usage`: which of the user's other apps Winter may read usage from (default both). */
+export function usageTrackingFrom(settings: Settings | null | undefined): { codex: boolean; claudeCode: boolean } {
+  return { codex: settings?.usage?.codex?.enabled ?? true, claudeCode: settings?.usage?.claudeCode?.enabled ?? true };
+}
+
 export function legacyProjectFilesReadEnabled(settings: Settings | null | undefined): boolean {
   return settings?.legacy?.readLegacyProjectFiles ?? true;
 }
