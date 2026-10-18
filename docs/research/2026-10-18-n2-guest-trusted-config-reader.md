@@ -40,4 +40,4 @@ The image ships the supervisor pinned at SDK `7e71929d` (`sdkPin.supervisorSha25
 
 ## Tests and mutation
 
-See the PR for counts. The new mutants in `tests/test_mutants.py` run in both CI jobs; the new C guards (the parser, the path and uid rules, the dependency overlap rule, the guidance count) each have a mutant that the suite kills.
+102 mutants are listed (55 before, 47 new); the new mutants in `tests/test_mutants.py` run in both CI jobs; the new C guards (the parser, the path and uid rules, the dependency overlap rule, the guidance count) each have a mutant that the suite kills.
