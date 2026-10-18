@@ -180,7 +180,7 @@ export class UsageDb {
   private migrate(): void {
     const v = this.schemaVersion();
     if (v > USAGE_DB_SCHEMA_VERSION) throw new Error(`usage.db is schema ${v}, newer than this Winter (${USAGE_DB_SCHEMA_VERSION})`);
-    if (v === USAGE_DB_SCHEMA_VERSION) return;
+    if (v === USAGE_DB_SCHEMA_VERSION) { this.ensureAlarmsTable(); return; }
     if (v < 1) this.migrateTo1();
     if (v < 2) {
       this.db.transaction(() => {
@@ -209,22 +209,49 @@ export class UsageDb {
     }
     if (v < 5) {
       this.db.transaction(() => {
-        // `fired_at` / `notice`: set once when it fires; the row stays until its notice is acknowledged.
-        this.db.run(`CREATE TABLE IF NOT EXISTS usage_alarms (
-          id TEXT PRIMARY KEY,
-          provider TEXT NOT NULL,
-          window_key TEXT NOT NULL,
-          threshold INTEGER NOT NULL,
-          created_at INTEGER NOT NULL,
-          fired_at INTEGER,
-          notice TEXT
-        )`);
-        // One ARMED alarm per plan, window and threshold: a double click sets one, and a tick's removal removes it whole;
-        // a fired one waiting for its acknowledgement never blocks setting the same alarm again.
-        this.db.run("CREATE UNIQUE INDEX IF NOT EXISTS usage_alarms_armed ON usage_alarms(provider, window_key, threshold) WHERE fired_at IS NULL");
+        this.ensureAlarmsTable();
         this.db.run("PRAGMA user_version = 5");
       })();
     }
+  }
+
+  /**
+   * The v5 table, idempotently — run on every open at schema 5 too: a usage.db made by an earlier build of schema 5
+   * (alarms deleted when they fired, a table-wide UNIQUE) gets `fired_at` / `notice` and the armed-only index. That
+   * table's UNIQUE (provider, window_key, threshold) would block arming an alarm again while its fired notice waits, so
+   * such a table is rebuilt (rows kept); otherwise only the missing columns are added (`PRAGMA table_info`).
+   */
+  private ensureAlarmsTable(): void {
+    this.db.transaction(() => {
+      // `fired_at` / `notice`: set once when it fires; the row stays until its notice is acknowledged.
+      const create = (name: string): string => `CREATE TABLE IF NOT EXISTS ${name} (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        threshold INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        fired_at INTEGER,
+        notice TEXT
+      )`;
+      const existing = this.db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'usage_alarms'").get() as { sql: string } | null;
+      if (existing === null) {
+        this.db.run(create("usage_alarms"));
+      } else {
+        const columns = new Set((this.db.query("PRAGMA table_info(usage_alarms)").all() as Array<{ name: string }>).map((c) => c.name));
+        if (!columns.has("fired_at")) this.db.run("ALTER TABLE usage_alarms ADD COLUMN fired_at INTEGER");
+        if (!columns.has("notice")) this.db.run("ALTER TABLE usage_alarms ADD COLUMN notice TEXT");
+        if (/UNIQUE\s*\(/i.test(existing.sql)) {
+          this.db.run(create("usage_alarms_rebuilt"));
+          this.db.run(`INSERT INTO usage_alarms_rebuilt (id, provider, window_key, threshold, created_at, fired_at, notice)
+            SELECT id, provider, window_key, threshold, created_at, fired_at, notice FROM usage_alarms`);
+          this.db.run("DROP TABLE usage_alarms");
+          this.db.run("ALTER TABLE usage_alarms_rebuilt RENAME TO usage_alarms");
+        }
+      }
+      // One ARMED alarm per plan, window and threshold: a double click sets one, and a tick's removal removes it whole;
+      // a fired one waiting for its acknowledgement never blocks setting the same alarm again.
+      this.db.run("CREATE UNIQUE INDEX IF NOT EXISTS usage_alarms_armed ON usage_alarms(provider, window_key, threshold) WHERE fired_at IS NULL");
+    })();
   }
 
   private migrateTo1(): void {

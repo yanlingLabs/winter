@@ -84,6 +84,31 @@ describe("the usage_alarms table (schema 5)", () => {
     db.close();
   });
 
+  test("a usage.db already at schema 5 from an earlier build (no fired_at / notice, a table-wide UNIQUE) is repaired on open, its rows kept", () => {
+    const path = join(tempDir("v5-old"), "usage", "usage.db");
+    let db = new UsageDb(path);
+    db.db.run("DROP TABLE usage_alarms");
+    db.db.run(`CREATE TABLE usage_alarms (id TEXT PRIMARY KEY, provider TEXT NOT NULL, window_key TEXT NOT NULL, threshold INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, UNIQUE (provider, window_key, threshold))`);
+    db.db.run("INSERT INTO usage_alarms (id, provider, window_key, threshold, created_at) VALUES ('old', 'codex', 'weekly', 70, 1)");
+    expect(db.schemaVersion()).toBe(5);
+    db.close();
+    db = new UsageDb(path);
+    const columns = (db.db.query("PRAGMA table_info(usage_alarms)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain("fired_at");
+    expect(columns).toContain("notice");
+    expect(db.alarms().map((a) => a.id)).toEqual(["old"]);
+    // Fired, then armed again at the same threshold while its notice waits: the old UNIQUE is gone.
+    expect(db.fireAlarm("old", 2, { kind: "weekly", usedPercent: 71 })).toBe(true);
+    expect(db.addAlarm({ id: "new", provider: "codex", windowKey: "weekly", thresholdPercent: 70, createdAt: 3 }).id).toBe("new");
+    expect(db.firedAlarms().map((a) => a.id)).toEqual(["old"]);
+    db.close();
+    // And a second open changes nothing.
+    db = new UsageDb(path);
+    expect(db.alarms().map((a) => a.id)).toEqual(["new"]);
+    db.close();
+  });
+
   test("a fired alarm is marked once (single-flight), leaves the ticks, waits for its acknowledgement, and frees its threshold", () => {
     const db = new UsageDb(join(tempDir("fired"), "usage", "usage.db"));
     db.addAlarm({ id: "a1", provider: "claude-code", windowKey: "weekly", thresholdPercent: 80, createdAt: 2 });
