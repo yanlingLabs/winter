@@ -23,6 +23,8 @@ struct UsagePlanRing: Identifiable, Equatable {
     let stale: Bool
     /// Inside the line under the pointer (user 2026-10-18): "Resets Oct 19 at 2pm", or "Resets 11:10pm" the same day.
     var resetsHover: String? = nil
+    /// The window's stable key — what its alarms name (`UsagePresentation.windowKey`).
+    var alarmKey: String = ""
 }
 
 /// A plan's slot: Codex now, Claude Code beside it — its rings, where the numbers came from and how old they are, or
@@ -206,8 +208,35 @@ enum UsagePresentation {
                 let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
                 return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: min(1, max(0, w.usedPercent / 100)),
                                      resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale,
-                                     resetsHover: reset.map { hoverResetWords($0, now: now) })
+                                     resetsHover: reset.map { hoverResetWords($0, now: now) }, alarmKey: windowKey(w))
             }
+    }
+
+    /// PURE: a window's stable key — the daemon's own (`planWindowKey`, carried as `windowKey`), else the same rule: its
+    /// kind and its scope lower-cased ("weekly_scoped:fable"); a window of another length adds its minutes ("other@1440").
+    static func windowKey(_ w: UsagePlanWindow) -> String {
+        if let key = w.windowKey, !key.isEmpty { return key }
+        let base = w.kind == "other" ? w.windowMinutes.map { "other@\(Int($0.rounded()))" } ?? "other" : w.kind
+        let scope = w.scope?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+        return scope.isEmpty ? base : "\(base):\(scope)"
+    }
+
+    // MARK: alarms
+
+    /// PURE: a fired alarm's notification, its first line — the plan, its window as the plan's line names it, and the
+    /// threshold: "Claude Code · Weekly at 80%", "Antigravity · Other W at 80%".
+    static func alarmNoticeTitle(_ item: IslandUsageAlarmItem) -> String {
+        let window = UsagePlanWindow(id: item.windowKey, kind: item.kind, windowMinutes: item.windowMinutes, usedPercent: item.usedPercent,
+                                     scope: item.scope)
+        return "\(planTitle(provider: item.provider)) · \(windowTitle(window)) at \(item.thresholdPercent)%"
+    }
+
+    /// PURE: its second line — when the window resets, in the hovered line's words ("Resets Oct 19 at 2pm"); nil without
+    /// a reset still ahead.
+    static func alarmNoticeDetail(_ item: IslandUsageAlarmItem, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String? {
+        guard let ms = item.resetsAt else { return nil }
+        let reset = Date(timeIntervalSince1970: ms / 1000)
+        return reset > now ? hoverResetWords(reset, now: now, calendar: calendar, locale: locale) : nil
     }
 
     /// PURE: when a window resets — a short one as a countdown ("in 2 h 14 min"), a day-long or longer one as its day

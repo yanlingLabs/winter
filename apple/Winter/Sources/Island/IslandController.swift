@@ -585,6 +585,12 @@ final class IslandController {
 
     func toggle() { isOpen ? close() : open() }
 
+    /// Opens the island on `tab` (already open: switches to it) — a fired plan alarm's notification opens Usage.
+    func open(tab: String) {
+        store.tabs.select(tab)
+        if !isOpen { open() }
+    }
+
     func open() {
         guard !isOpen else { return }
         isOpen = true

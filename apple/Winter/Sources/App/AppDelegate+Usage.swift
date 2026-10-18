@@ -19,6 +19,8 @@ extension AppDelegate {
         model.setTracking = { codex, claudeCode, antigravity, opencode in
             try await client.usageSetTracking(codex: codex, claudeCode: claudeCode, antigravity: antigravity, opencode: opencode)
         }
+        model.setAlarm = { provider, key, pct in try await client.usageSetAlarm(provider: provider, windowKey: key, thresholdPercent: pct) }
+        model.removeAlarm = { id in try await client.usageRemoveAlarm(id: id) }
         let controller = UsageWindowController(model: model)
         controller.onClosed = { [weak self] in self?.usageWindow = nil }
         usageWindow = controller

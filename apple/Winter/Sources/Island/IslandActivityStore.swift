@@ -14,6 +14,8 @@ final class IslandActivityStore: ObservableObject {
     @Published private(set) var results = IslandResultQueue()
     /// The results the queue holds, by id.
     @Published private(set) var resultItems: [String: IslandResultItem] = [:]
+    /// The fired plan alarms the queue holds, by id (the same queue as the results).
+    @Published private(set) var alarmItems: [String: IslandUsageAlarmItem] = [:]
     /// Every armed computer-use watch, oldest first (the Watches tab).
     @Published private(set) var watches: [IslandWatchItem] = []
     /// Computer-use sessions whose host is in front (their pill is not shown: the user sees the work there).
@@ -42,6 +44,8 @@ final class IslandActivityStore: ObservableObject {
     /// Moves the app's view to a session (a result's Open) — the Sessions tab's own resolution: its window, its exact
     /// terminal, Dispatch's view, else a new detached window. (session, its hosts, is it the Dispatch session)
     var openSession: (_ sessionId: String, _ hosts: [IslandHost], _ isDispatch: Bool) -> Void = { _, _, _ in }
+    /// Opens the island on its Usage tab (a fired plan alarm's notification).
+    var openUsageTab: () -> Void = {}
     /// `computerUse.wakes.cancel`.
     var disarm: (_ sessionId: String, _ wakeId: String) async -> Bool = { _, _ in false }
     /// Told after every change of what the activity panel may draw.
@@ -58,6 +62,7 @@ final class IslandActivityStore: ObservableObject {
     /// Rung 4 somewhere: the agent's hardware pointer is in use — the island's slot and detached mirrors step aside.
     var usingRealMouse: Bool { cu.usingRealMouse }
     var currentResult: IslandResultItem? { results.current.flatMap { resultItems[$0.id] } }
+    var currentAlarm: IslandUsageAlarmItem? { results.current.flatMap { alarmItems[$0.id] } }
 
     // MARK: Refresh
 
@@ -118,7 +123,7 @@ final class IslandActivityStore: ObservableObject {
 
         // Results: born once, or dropped once (never deferred); one the daemon no longer lists (the session moved on)
         // goes.
-        let listed = Set(snapshot.results.map(\.id))
+        let listed = Set(snapshot.results.map(\.id) + snapshot.usageAlarms.map(\.id))
         for id in [results.current?.id, results.held?.id].compactMap({ $0 }) where !listed.contains(id) { results.dismiss(id) }
         for item in snapshot.results where !results.seen.contains(item.id) {
             let placement = IslandRouter.placement(sessionId: item.sessionId, facts: item.session, hosts: item.hosts, focus: f)
@@ -126,6 +131,16 @@ final class IslandActivityStore: ObservableObject {
             if IslandResultQueue.shouldBear(placement: placement, ageSeconds: age) {
                 results.arrive(item.id, busy: cardOnTop, now: now)
                 resultItems[item.id] = item
+            } else {
+                results.markSeen(item.id)
+            }
+        }
+        // A fired plan alarm: no session, so no host to be in front of — always on top, when fresh.
+        for item in snapshot.usageAlarms where !results.seen.contains(item.id) {
+            let age = wallClock() - Double(item.at) / 1000
+            if IslandResultQueue.shouldBear(placement: .top, ageSeconds: age) {
+                results.arrive(item.id, busy: cardOnTop, now: now, showFor: IslandResultQueue.alarmShowFor)
+                alarmItems[item.id] = item
             } else {
                 results.markSeen(item.id)
             }
@@ -187,9 +202,10 @@ final class IslandActivityStore: ObservableObject {
         changed()
     }
 
-    /// Open on a result: the app shows the session; the card goes.
+    /// Open on a result: the app shows the session (a plan alarm's notification: the island's Usage tab); the card goes.
     func openResult(_ id: String) {
         if let item = resultItems[id] { openSession(item.sessionId, item.hosts, item.session.mode == "dispatch") }
+        if alarmItems[id] != nil { openUsageTab() }
         dismissResult(id)
     }
 
@@ -224,6 +240,7 @@ final class IslandActivityStore: ObservableObject {
     private func pruneResultItems() {
         let keep = Set([results.current?.id, results.held?.id].compactMap { $0 })
         if resultItems.keys.contains(where: { !keep.contains($0) }) { resultItems = resultItems.filter { keep.contains($0.key) } }
+        if alarmItems.keys.contains(where: { !keep.contains($0) }) { alarmItems = alarmItems.filter { keep.contains($0.key) } }
     }
 
     private func changed() {

@@ -1235,6 +1235,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             island?.tabModels.sessions.openFromIsland(sid, hosts: hosts, isDispatch: isDispatch)
         }
         activity.disarm = { sid, wakeId in (try? await client.cancelWake(sessionId: sid, wakeId: wakeId)) ?? false }
+        // A fired plan alarm's notification opens the island on its Usage tab.
+        activity.openUsageTab = { [weak island] in island?.open(tab: IslandTabRegistry.usage.id) }
         let coordinator = mirrorCoordinator
         activity.onCursorSessionsChange = { [weak coordinator] ids in coordinator?.setIslandCursorSessions(ids) }
         coordinator?.onIslandCursor = { [weak activity] sid, kind, text, app in
@@ -1292,6 +1294,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usage.fetch = { sid in try await client.islandUsage(sessionId: sid) }
         usage.fetchRoles = { try await client.settingsModelRoles() }
         usage.fetchSummary = { range in try await client.usageSummary(range: range) }
+        usage.setAlarm = { provider, key, pct in try await client.usageSetAlarm(provider: provider, windowKey: key, thresholdPercent: pct) }
+        usage.removeAlarm = { id in try await client.usageRemoveAlarm(id: id) }
         usage.openUsage = { [weak self, weak island] in
             island?.close()
             self?.showUsageWindow()

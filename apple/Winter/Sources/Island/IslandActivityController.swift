@@ -85,7 +85,7 @@ final class IslandActivityController {
         store.setCardOnTop(cardOnTop)
         let cu = store.cuPresentation
         decision = IslandActivityArbiter.decide(cardOnTop: cardOnTop, islandOpen: island.isOpen,
-                                                result: store.currentResult?.id, computerUse: cu?.sessionId,
+                                                result: store.currentResult?.id ?? store.currentAlarm?.id, computerUse: cu?.sessionId,
                                                 mirrorOpen: store.mirrorOpen, realMouse: store.usingRealMouse)
         // The in-island mirror's pictures flow only while it is on screen.
         if case .computerUse(let sid, true) = decision.slot { mirrors?.setIslandMirror(sid) } else { mirrors?.setIslandMirror(nil) }
@@ -128,11 +128,18 @@ final class IslandActivityController {
         let shape = island.screenShape
         let geometry: DesktopIslandGeometry
         var result: IslandResultItem?
+        var alarm: IslandUsageAlarmItem?
         switch decision.slot {
         case .result:
-            guard let item = store.currentResult else { return nil }
-            result = item
-            geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+            if let item = store.currentResult {
+                result = item
+                geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+            } else if let item = store.currentAlarm {
+                alarm = item
+                geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+            } else {
+                return nil
+            }
         case .computerUse:
             geometry = IslandLayout.cardGeometry(shape, size: CGSize(width: IslandActivityLayout.cuPillWidth,
                                                                       height: DesktopIslandGeometry.pillHeight), rounded: false)
@@ -148,11 +155,16 @@ final class IslandActivityController {
                 self?.layout()
             }
         }
-        return IslandActivityShown(key: key, geometry: geometry, state: state, result: result, lastCU: store.cuPresentation)
+        return IslandActivityShown(key: key, geometry: geometry, state: state, result: result, alarm: alarm, lastCU: store.cuPresentation)
     }
 
     private func measure(_ item: IslandResultItem) -> CGSize {
         let host = NSHostingView(rootView: IslandResultContent(item: item, onOpen: {}, onDismiss: {}).environment(\.colorScheme, .dark))
+        return CGSize(width: IslandLayout.cardWidth, height: max(ceil(host.fittingSize.height), DesktopIslandGeometry.pillHeight))
+    }
+
+    private func measure(_ item: IslandUsageAlarmItem) -> CGSize {
+        let host = NSHostingView(rootView: IslandUsageAlarmContent(item: item, now: Date(), onOpen: {}, onDismiss: {}).environment(\.colorScheme, .dark))
         return CGSize(width: IslandLayout.cardWidth, height: max(ceil(host.fittingSize.height), DesktopIslandGeometry.pillHeight))
     }
 
@@ -355,17 +367,20 @@ final class IslandActivityShown: ObservableObject {
     let geometry: DesktopIslandGeometry
     let state: DesktopIslandState
     let result: IslandResultItem?
+    /// A fired plan alarm's notification (in the result's slot).
+    let alarm: IslandUsageAlarmItem?
     /// The computer-use pill's last words (kept while it goes back up, when the store has none any more).
     @Published var lastCU: IslandCUPresentation?
     @Published var expanded = false
     @Published var hovered = false
 
     init(key: String, geometry: DesktopIslandGeometry, state: DesktopIslandState, result: IslandResultItem?,
-         lastCU: IslandCUPresentation?) {
+         alarm: IslandUsageAlarmItem? = nil, lastCU: IslandCUPresentation?) {
         self.key = key
         self.geometry = geometry
         self.state = state
         self.result = result
+        self.alarm = alarm
         self.lastCU = lastCU
     }
 }
@@ -486,6 +501,8 @@ struct IslandActivitySlotView: View {
     private func content(expanded: Bool) -> some View {
         if let item = shown.result {
             IslandResultContent(item: item, onOpen: { onOpenResult(item.id) }, onDismiss: { onDismissResult(item.id) })
+        } else if let item = shown.alarm {
+            IslandUsageAlarmContent(item: item, now: Date(), onOpen: { onOpenResult(item.id) }, onDismiss: { onDismissResult(item.id) })
         } else if let p = presentation {
             ZStack {
                 if expanded {

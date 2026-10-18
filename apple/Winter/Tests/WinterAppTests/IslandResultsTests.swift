@@ -122,6 +122,39 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertEqual(asked.first?.isDispatch, false)
     }
 
+    func testAFiredPlanAlarmIsBornOnTopShowsLongerAndOpensTheUsageTab() {
+        let store = makeStore()
+        var usageOpened = 0
+        store.openUsageTab = { usageOpened += 1 }
+        let alarm = IslandUsageAlarmItem(id: "al-1", provider: "claude-code", windowKey: "weekly", kind: "weekly", windowMinutes: 10_080,
+                                         thresholdPercent: 80, usedPercent: 81, resetsAt: (wall + 86_400) * 1000, at: Int((wall - 2) * 1000))
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm]))
+        XCTAssertEqual(store.currentAlarm, alarm)
+        XCTAssertNil(store.currentResult)
+        XCTAssertEqual(IslandActivityArbiter.decide(cardOnTop: false, islandOpen: false, result: store.currentAlarm?.id, computerUse: nil,
+                                                   mirrorOpen: false).slot, .result("al-1"))
+        XCTAssertEqual(wakes.last ?? nil, now + IslandResultQueue.alarmShowFor, "it shows longer than a turn's result")
+        // A second listing never bears it again; one first seen long after it fired is not born.
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm]))
+        store.openResult("al-1")
+        XCTAssertEqual(usageOpened, 1)
+        XCTAssertNil(store.currentAlarm)
+        XCTAssertTrue(store.alarmItems.isEmpty)
+        let old = IslandUsageAlarmItem(id: "al-2", provider: "codex", windowKey: "five_hour", kind: "five_hour", thresholdPercent: 50,
+                                       usedPercent: 50, at: Int((wall - IslandResultQueue.maxAgeAtBirth - 1) * 1000))
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm, old]))
+        XCTAssertNil(store.currentAlarm)
+        // A card needing an answer on top holds it; it is born when the top frees.
+        let held = IslandUsageAlarmItem(id: "al-3", provider: "codex", windowKey: "weekly", kind: "weekly", thresholdPercent: 90,
+                                        usedPercent: 92, at: Int(wall * 1000))
+        store.setCardOnTop(true)
+        store.apply(IslandActivitySnapshot(usageAlarms: [held]))
+        XCTAssertNil(store.currentAlarm)
+        store.setCardOnTop(false)
+        XCTAssertEqual(store.currentAlarm?.id, "al-3")
+        XCTAssertEqual(store.results.current?.dismissAt, now + IslandResultQueue.alarmShowFor)
+    }
+
     func testOpenGoesExactlyWhereASessionsRowsClickGoes() {
         let sessions = IslandSessionsModel()
         var targets: [IslandSessionTarget] = []

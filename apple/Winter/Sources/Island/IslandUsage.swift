@@ -177,8 +177,15 @@ final class IslandUsageModel: ObservableObject {
     /// Usage and cost tracking (`docs/claude/usage.md`): the plans and the selected range's cost.
     @Published private(set) var summary: UsageSummary?
     @Published var range: UsageRange = .day { didSet { if range != oldValue { Task { await refreshSummary() } } } }
+    /// The plan alarms (their ticks); nil before an answer or from a daemon with none (the lines then take no clicks).
+    @Published private(set) var alarms: [UsageAlarm]?
 
     var fetchSummary: (UsageRange) async throws -> UsageSummary? = { _ in nil }
+    /// `usage.alarms.set` / `.remove`, each answering the whole list.
+    var setAlarm: (_ provider: String, _ windowKey: String, _ thresholdPercent: Int) async throws -> [UsageAlarm] = { _, _, _ in [] }
+    var removeAlarm: (_ id: String) async throws -> [UsageAlarm] = { _ in [] }
+    /// Bumped by every alarm edit: a summary asked for before one does not overwrite its answer.
+    private var alarmEdits = 0
     /// "Open usage": the Usage window.
     var openUsage: () -> Void = {}
 
@@ -205,8 +212,27 @@ final class IslandUsageModel: ObservableObject {
 
     func refreshSummary() async {
         let asked = range
+        let edits = alarmEdits
         guard let s = try? await fetchSummary(asked), asked == range else { return }
         summary = s
+        if edits == alarmEdits { alarms = s.alarms }
+    }
+
+    /// What a click on a plan line does (`UsageAlarmRules`) — nil while the daemon has no alarms.
+    var alarmActions: UsageAlarmActions? {
+        guard alarms != nil else { return nil }
+        return UsageAlarmActions(
+            set: { [weak self] provider, key, pct in self?.editAlarms { try await $0.setAlarm(provider, key, pct) } },
+            remove: { [weak self] id in self?.editAlarms { try await $0.removeAlarm(id) } })
+    }
+
+    private func editAlarms(_ edit: @escaping (IslandUsageModel) async throws -> [UsageAlarm]) {
+        alarmEdits += 1
+        Task { [weak self] in
+            guard let self, let list = try? await edit(self) else { return }
+            self.alarmEdits += 1
+            self.alarms = list
+        }
     }
 
     /// Test seam: set what a refresh would.
@@ -214,6 +240,7 @@ final class IslandUsageModel: ObservableObject {
                        summary: UsageSummary? = nil) {
         self.snapshot = snapshot
         self.summary = summary
+        self.alarms = summary?.alarms
         self.roles = roles
         self.sessionTitle = sessionTitle
     }
@@ -390,7 +417,8 @@ struct IslandUsageCompact: View {
             let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) }, compact: true)
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(slots) { slot in
-                    UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth)
+                    UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth, alarms: model.alarms ?? [],
+                                      alarmActions: model.alarmActions)
                 }
             }
             .padding(.horizontal, 6)

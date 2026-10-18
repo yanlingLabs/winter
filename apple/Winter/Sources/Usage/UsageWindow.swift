@@ -167,7 +167,7 @@ struct UsageWindowContent: View {
         return VStack(alignment: .leading, spacing: 18) {
             ForEach(slots) { slot in
                 VStack(alignment: .leading, spacing: 6) {
-                    UsagePlanSlotCard(slot: slot, titleWidth: titleWidth)
+                    UsagePlanSlotCard(slot: slot, titleWidth: titleWidth, alarms: model.alarms ?? [], alarmActions: model.alarmActions)
                     if slot.id == "claude-code", let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
                         Text(line).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
                     }
@@ -486,6 +486,9 @@ struct UsagePlanSlotCard: View {
     var compact = false
     /// The lines' title column (`UsagePresentation.titleColumnWidth`, shared by every slot of a block); nil = this slot's own.
     var titleWidth: CGFloat? = nil
+    /// Every plan alarm (this slot draws its own plan's), and what a click on a line does with them (nil: nothing).
+    var alarms: [UsageAlarm] = []
+    var alarmActions: UsageAlarmActions? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 5 : 8) {
@@ -506,7 +509,8 @@ struct UsagePlanSlotCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 UsagePlanLineGroup(rings: slot.rings, color: UsagePlanColor.of(provider: slot.id), compact: compact,
-                                   titleWidth: titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact))
+                                   titleWidth: titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact),
+                                   provider: slot.id, alarms: alarms.filter { $0.provider == slot.id }, alarmActions: alarmActions)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -520,6 +524,10 @@ struct UsagePlanLineGroup: View {
     var compact = false
     /// The title column; nil = the floor (52 pt compact, 72 in the window).
     var titleWidth: CGFloat? = nil
+    /// The plan ("codex", "claude-code", "antigravity"), its alarms, and what a click does (nil: nothing).
+    var provider = ""
+    var alarms: [UsageAlarm] = []
+    var alarmActions: UsageAlarmActions? = nil
     @State private var localHover = false
 
     var body: some View {
@@ -527,7 +535,10 @@ struct UsagePlanLineGroup: View {
         IslandPointerReader { islandHovered in
             VStack(alignment: .leading, spacing: compact ? 5 : 8) {
                 ForEach(rings) { ring in
-                    UsagePlanLine(ring: ring, color: color, compact: compact, hovered: islandHovered || localHover, titleWidth: titleWidth)
+                    UsagePlanLine(ring: ring, color: color, compact: compact, hovered: islandHovered || localHover, titleWidth: titleWidth,
+                                  alarms: alarms.filter { $0.windowKey == ring.alarmKey },
+                                  onSetAlarm: alarmActions.map { actions in { actions.set(provider, ring.alarmKey, $0) } },
+                                  onRemoveAlarm: alarmActions?.remove)
                 }
             }
         }
@@ -595,38 +606,81 @@ struct UsagePlanLine: View {
         return (used, 100 - used)
     }
 
+    /// This window's alarms (their ticks), and what a click does — nil: the line takes no clicks (`UsageAlarmRules`).
+    var alarms: [UsageAlarm] = []
+    var onSetAlarm: ((Int) -> Void)? = nil
+    var onRemoveAlarm: ((String) -> Void)? = nil
+
+    /// The row's own space: the track's resting frame and the pointer are both read in it.
+    private static let rowSpace = "usagePlanLineRow"
+    /// The track's RESTING frame in the row, and the row's frame in the island's canvas (for the island's pointer).
+    @State private var slot: CGRect = .zero
+    @State private var rowInCanvas: CGRect = .zero
+    /// The window's pointer over this row (x in the row), from `onContinuousHover`.
+    @State private var windowPointerX: CGFloat?
+    /// "Already past" at the spot clicked, for a moment.
+    @State private var pastFlash: PastFlash?
+
+    private struct PastFlash: Equatable { let x: CGFloat; let token: Int }
+
     var body: some View {
+        // The island's panels are never key: its own pointer (in the canvas) says where it is; in the window, the hover.
+        IslandPointerLocationReader { canvasPoint in
+            line(pointerX: islandPointerX(canvasPoint) ?? windowPointerX)
+        }
+    }
+
+    /// The island's pointer as an x in this row, when it is over the row.
+    private func islandPointerX(_ p: CGPoint?) -> CGFloat? {
+        guard let p, rowInCanvas.contains(p) else { return nil }
+        return p.x - rowInCanvas.minX
+    }
+
+    private func line(pointerX: CGFloat?) -> some View {
         let used = min(1, max(0, ring.fraction))
         let pct = Self.percents(ring.fraction)
         let height = Self.thickness(compact: compact, hovered: hovered)
+        // The marker: under the pointer, on the hovered track (x along it, from its grown start).
+        let marker = hovered ? pointerX.flatMap { UsageAlarmRules.trackPoint(rowX: $0, slot: slot, hovered: true) } : nil
+        let flash = hovered ? pastFlash : nil
         return HStack(spacing: Self.titleGap(compact: compact)) {
             Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(hovered ? 1 : 0.85)).lineLimit(1)
                 .scaleEffect(Self.titleScale(hovered: hovered), anchor: .leading)
                 .frame(width: titleWidth ?? (compact ? 52 : 72), alignment: .leading)
             GeometryReader { proxy in
+                let resetWidth = Self.resetWidth(ring.resetsHover)
+                let at = flash?.x ?? marker?.x
+                let aside = at.map { UsageAlarmRules.markerLayout(x: $0, width: proxy.size.width, fraction: used, compact: compact, resetWidth: resetWidth) }
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.08))
                     Capsule().fill(ring.stale ? Color(nsColor: .systemGray) : color)
                         .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
+                    ForEach(alarms) { alarm in
+                        UsageAlarmTick(x: UsageAlarmRules.tickX(alarm.thresholdPercent, width: proxy.size.width), height: height, hovered: hovered)
+                    }
                     if hovered {
-                        // A lighter weight than the titles: the figures sit in the line, they do not shout.
-                        let layout = Self.figureLayout(width: proxy.size.width, fraction: used, compact: compact,
-                                                       resetWidth: Self.resetWidth(ring.resetsHover))
+                        // A lighter weight than the titles: the figures sit in the line, they do not shout. Under the marker
+                        // (or its label) a figure or the reset words step aside.
+                        let layout = Self.figureLayout(width: proxy.size.width, fraction: used, compact: compact, resetWidth: resetWidth)
                         ZStack(alignment: .leading) {
                             HStack(spacing: 0) {
                                 if layout.reset == .fill, let words = ring.resetsHover {
                                     Text(words).foregroundStyle(Color.white.opacity(0.85)).padding(.leading, 6)
+                                        .opacity(aside?.hidesReset == true ? 0 : 1)
                                 }
                                 Spacer(minLength: 4)
                                 Text("\(pct.used)%").foregroundStyle(Color.white).padding(.trailing, 6)
+                                    .opacity(aside?.hidesUsed == true ? 0 : 1)
                             }
                             .frame(width: layout.usedSlot)
                             if layout.showsLeft {
                                 HStack(spacing: 8) {
                                     if layout.reset == .grey, let words = ring.resetsHover {
                                         Text(words).foregroundStyle(Color.white.opacity(0.6))
+                                            .opacity(aside?.hidesReset == true ? 0 : 1)
                                     }
                                     Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
+                                        .opacity(aside?.hidesLeft == true ? 0 : 1)
                                 }
                                 .padding(.trailing, 6)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -635,18 +689,53 @@ struct UsagePlanLine: View {
                         .font(Typography.tinyDigits(.regular))
                         .lineLimit(1)
                         .transition(.opacity)
+                        if let at, let aside {
+                            UsageAlarmMarker(x: at, height: height,
+                                             text: flash != nil ? "Already past" : "\(UsageAlarmRules.percent(x: at, width: proxy.size.width))%",
+                                             onRight: flash != nil ? at + 80 <= proxy.size.width : aside.labelOnRight)
+                        }
                     }
                 }
             }
             .frame(height: height)
             .padding(.horizontal, -Self.lengthGrowth(hovered: hovered) / 2)
+            // The padding's own frame is the track's RESTING slot in the row (the reader inside reaches past it).
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.rowSpace)) } action: { slot = $0 }
             .opacity(ring.stale ? 0.6 : 1)
         }
+        .coordinateSpace(.named(Self.rowSpace))
         .frame(height: Self.thickness(compact: compact, hovered: true))
         .contentShape(Rectangle())
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(DispatchPillView.canvasSpace)) } action: { rowInCanvas = $0 }
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            switch phase {
+            case .active(let p): windowPointerX = p.x
+            case .ended: windowPointerX = nil
+            }
+        }
+        .gesture(SpatialTapGesture(coordinateSpace: .local).onEnded { tapped(rowX: $0.location.x) }, including: onSetAlarm == nil ? .none : .all)
         .animation(HoverGrowth.animation, value: hovered)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(ring.title): \(pct.used)% used, \(pct.left)% left\(ring.resets.map { ", \($0)" } ?? "")")
+        .accessibilityLabel("\(ring.title): \(pct.used)% used, \(pct.left)% left\(ring.resets.map { ", \($0)" } ?? "")"
+            + (alarms.isEmpty ? "" : ", alarm at " + alarms.map { "\($0.thresholdPercent)%" }.joined(separator: ", ")))
+    }
+
+    /// A click on the line: on a tick, that alarm goes; at or below what is used, "Already past"; else an alarm there.
+    private func tapped(rowX: CGFloat) {
+        guard let onSetAlarm, let point = UsageAlarmRules.trackPoint(rowX: rowX, slot: slot, hovered: hovered) else { return }
+        switch UsageAlarmRules.tap(x: point.x, width: point.width, usedPercent: ring.fraction * 100, alarms: alarms) {
+        case .remove(let id):
+            onRemoveAlarm?(id)
+        case .set(let pct):
+            onSetAlarm(pct)
+        case .alreadyPast:
+            let flash = PastFlash(x: point.x, token: (pastFlash?.token ?? 0) + 1)
+            pastFlash = flash
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(UsageAlarmRules.pastFlashSeconds * 1_000_000_000))
+                if pastFlash == flash { pastFlash = nil }
+            }
+        }
     }
 }
 
