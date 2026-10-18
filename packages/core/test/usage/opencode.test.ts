@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { UsageDb } from "../../src/usage/db";
 import {
-  dayMinus, daysBefore, localDay, localNoon, opencodeDaysArgs, opencodeDifference, parseOpencodeStats, OPENCODE_ALL_ARGS,
+  dayMinus, daysBefore, localDay, localDayStart, localNoon, opencodeDaysArgs, opencodeDifference, parseOpencodeStats, OPENCODE_ALL_ARGS,
 } from "../../src/usage/opencode";
 import { UsagePricer } from "../../src/usage/pricing";
 import { UsageService, type UsageServiceDeps } from "../../src/usage/service";
@@ -116,7 +116,7 @@ describe("OpenCode in the usage DB", () => {
     // Nothing of the decoys anywhere.
     const everything = JSON.stringify(s) + readFileSync(db.path).toString("latin1");
     for (const x of SECRETS) expect(everything.includes(x)).toBe(false);
-  });
+  }, 30_000);
 
   test("before noon, today's row sits at NOW (never in the future, so every range shows it)", async () => {
     const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("big-pickle", 10)] } });
@@ -125,9 +125,9 @@ describe("OpenCode in the usage DB", () => {
     await svc.ingest(true);
     expect(rows(db)[0]!.at).toBe(clock.now);
     expect(svc.series("1h", ["opencode"]).totals.input).toBe(10);
-  });
+  }, 30_000);
 
-  test("after midnight, yesterday is finalized ONCE from `--days 2` − `--days 1`; today starts fresh", async () => {
+  test("after midnight, yesterday is read from `--days 2` − `--days 1` and finalized once two batches agree; today starts fresh", async () => {
     const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("big-pickle", 100)] } });
     const clock = { now: AFTERNOON };
     const { db, svc } = service({ opencodeExecutable: () => fake.path, clock });
@@ -138,14 +138,41 @@ describe("OpenCode in the usage DB", () => {
     clock.now = localNoon(tomorrow) + 3_600_000;
     await svc.ingest(true);
     expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 180], [tomorrow, 5]]);
-    // `--days 2` once per local day (the first pass finalized the day before TODAY), never again for the same day.
     const twos = () => runs(fake.markerPath).filter((a) => a === opencodeDaysArgs(2).join(" ")).length;
-    expect(twos()).toBe(2);
+    // The second read, a batch later, agrees: finalized — and never asked again.
     clock.now += 11 * 60_000;
     await svc.ingest(true);
-    expect(twos()).toBe(2);
+    const after = twos();
+    clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    expect(twos()).toBe(after);
     expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 180], [tomorrow, 5]]);
-  });
+  }, 30_000);
+
+  test("a message spanning midnight (filed under the day it started): yesterday is never finalized short", async () => {
+    const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 100)] } });
+    const clock = { now: AFTERNOON };
+    const { db, svc } = service({ opencodeExecutable: () => fake.path, clock });
+    await svc.ingest(true);
+    const tomorrow = dayMinus(TODAY, -1);
+    // 00:05: a message begun at 23:58 is still running — yesterday has part of it, today nothing; today never moves.
+    fake.write({ daily: { 0: [], 1: [m("a", 160)] } });
+    clock.now = localDayStart(tomorrow) + 5 * 60_000;
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 160]]);
+    // 00:16: it finished — yesterday grew. The two reads differ: still not final.
+    fake.write({ daily: { 0: [m("b", 3)], 1: [m("a", 190)] } });
+    clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 190], [tomorrow, 3]]);
+    // 00:27: the same again — final. Whatever comes later for that day is never read.
+    clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    fake.write({ daily: { 0: [m("b", 3)], 1: [m("a", 999)] } });
+    clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 190], [tomorrow, 3]]);
+  }, 30_000);
 
   test("the backfill: every active day by differences, newest first, under a spawn budget — resumed next pass until done", async () => {
     // Usage 1, 2, 3, 5 and 6 days ago (4 days ago idle) plus today.
@@ -158,8 +185,8 @@ describe("OpenCode in the usage DB", () => {
     const clock = { now: AFTERNOON };
     const { db, svc } = service({ opencodeExecutable: () => fake.path, clock, opencodeSpawnBudget: 7 });
     await svc.ingest(true);
-    // Pass 1: today's opening run, --all, 1 day ago (`--days 2` then `--days 1`, back to back), 2 days ago (`--days 3`
-    // then `--days 2`) — then only the closing run fits.
+    // Pass 1: today, --all, 1 day ago (`--days 2` then `--days 1` — its narrow run is today's run after it), 2 days ago
+    // (`--days 3`, `--days 2`, then today again) — the budget is spent.
     expect(runs(fake.markerPath)).toEqual([
       opencodeDaysArgs(1), [...OPENCODE_ALL_ARGS], opencodeDaysArgs(2), opencodeDaysArgs(1), opencodeDaysArgs(3), opencodeDaysArgs(2), opencodeDaysArgs(1),
     ].map((a) => a.join(" ")));
@@ -173,19 +200,21 @@ describe("OpenCode in the usage DB", () => {
     }
     expect(byDay.has(dayMinus(TODAY, 4))).toBe(false);
     expect(runs(fake.markerPath).filter((a) => a.includes("--all"))).toHaveLength(1);
-    // Done: a later pass asks for today (opening and closing) and nothing old.
+    // A batch later every day is read again, agrees and is final; after that a pass asks for today alone.
+    clock.now += 11 * 60_000;
+    await svc.catchUp();
     const count = runs(fake.markerPath).length;
     clock.now += 11 * 60_000;
     await svc.ingest(true);
-    expect(runs(fake.markerPath).slice(count)).toEqual([opencodeDaysArgs(1).join(" "), opencodeDaysArgs(1).join(" ")]);
-  });
+    expect(runs(fake.markerPath).slice(count)).toEqual([opencodeDaysArgs(1).join(" ")]);
+  }, 30_000);
 
-  test("OpenCode in use DURING a batch: only today is written (from the closing run); the finished days wait, never counted twice", async () => {
+  test("OpenCode in use DURING a batch: today moved around yesterday's pair, so only today is written; yesterday waits, never counted twice", async () => {
     const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 100)], 1: [m("a", 50)] }, activity: [dayMinus(TODAY, 1), TODAY], grow: 1 });
     const clock = { now: AFTERNOON };
     const { db, svc, logs } = service({ opencodeExecutable: () => fake.path, clock });
     await svc.ingest(true);
-    // Every run saw a bigger today: nothing finalized, today's row is the closing run's figure.
+    // Every run saw a bigger today: yesterday not written, today's row is the last run's figure.
     const first = rows(db);
     expect(first.map((r) => r.day)).toEqual([TODAY]);
     expect(first[0]!.input).toBe(100 + runs(fake.markerPath).length);
@@ -196,7 +225,7 @@ describe("OpenCode in the usage DB", () => {
     await svc.ingest(true);
     expect(rows(db).map((r) => [r.day, r.input])).toEqual([[dayMinus(TODAY, 1), 50], [TODAY, 130]]);
     expect(svc.series("30d", ["opencode"]).totals.input).toBe(180);
-  });
+  }, 30_000);
 
   test("every run gets TZ: the zone Winter counts its days in", async () => {
     const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 1)] } });
@@ -208,7 +237,7 @@ describe("OpenCode in the usage DB", () => {
     expect(localDay(Date.parse("2026-03-08T07:30:00Z"), "Asia/Tokyo")).toBe("2026-03-08");
     // The DST day in Los Angeles is 23 hours; its noon is 19:00 UTC.
     expect(localNoon("2026-03-08", "America/Los_Angeles")).toBe(Date.parse("2026-03-08T19:00:00Z"));
-  });
+  }, 30_000);
 
   test("asleep for days: the active days between the last batch and yesterday are asked for once (`--all` again)", async () => {
     const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 1)] }, activity: [TODAY] });
@@ -222,7 +251,7 @@ describe("OpenCode in the usage DB", () => {
     await svc.ingest(true);
     expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 1], [dayMinus(later, 2), 22], [later, 4]]);
     expect(runs(fake.markerPath).filter((a) => a.includes("--all"))).toHaveLength(2);
-  });
+  }, 30_000);
 
   test("the backfill resumes after a restart from the saved list (never asking --all again)", async () => {
     const daily: Record<number, OpencodeDayModel[]> = { 0: [m("a", 1)], 3: [m("a", 3)], 9: [m("a", 9)] };
@@ -238,13 +267,13 @@ describe("OpenCode in the usage DB", () => {
       }) };
     };
     const first = mk();
-    await first.svc.ingest(true); // today, --all, yesterday (--days 2, --days 1), the closing run: the budget is spent
+    await first.svc.ingest(true); // today, --all, yesterday (--days 2, --days 1): 3 days ago does not fit
     first.db.close();
     const second = mk();
     await second.svc.catchUp();
     expect(rows(second.db).map((r) => [r.day, r.input])).toEqual([[dayMinus(TODAY, 9), 9], [dayMinus(TODAY, 3), 3], [TODAY, 1]]);
     expect(runs(fake.markerPath).filter((a) => a.includes("--all"))).toHaveLength(1);
-  });
+  }, 30_000);
 
   test("a failing opencode: nothing written, never `more` (the catch-up does not loop), retried after the throttle", async () => {
     const fake = fakeOpencode(tempDir("bin"), { daily: {}, fail: true });
@@ -257,7 +286,21 @@ describe("OpenCode in the usage DB", () => {
     clock.now += 11 * 60_000;
     await svc.ingest(true);
     expect(runs(fake.markerPath)).toHaveLength(2);
-  });
+  }, 30_000);
+
+  test("a run failing mid-batch keeps the 10-minute throttle (no re-batch every pass)", async () => {
+    const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 1)] }, activity: [TODAY], failFrom: 3 });
+    const clock = { now: AFTERNOON };
+    const { svc } = service({ opencodeExecutable: () => fake.path, clock });
+    await svc.ingest(true); // today, --all, then yesterday's `--days 2` fails
+    expect(runs(fake.markerPath)).toHaveLength(3);
+    clock.now += 30_000;
+    await svc.catchUp();
+    expect(runs(fake.markerPath)).toHaveLength(3);
+    clock.now += 10 * 60_000;
+    await svc.ingest(true);
+    expect(runs(fake.markerPath)).toHaveLength(4);
+  }, 30_000);
 
   test("not on this Mac: nothing run, and the summary says so; tracking off: nothing run", async () => {
     const clock = { now: AFTERNOON };
@@ -269,5 +312,5 @@ describe("OpenCode in the usage DB", () => {
     await off.svc.ingest(true);
     expect(runs(fake.markerPath)).toHaveLength(0);
     expect((await off.svc.summary("24h", undefined, { plans: false })).installed.opencode).toBe(true);
-  });
+  }, 30_000);
 });

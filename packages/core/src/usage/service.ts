@@ -9,7 +9,7 @@ import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import {
   OPENCODE_ALL_ARGS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
-  opencodeDifference, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
+  opencodeDifference, opencodeFingerprint, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
 import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
@@ -412,22 +412,25 @@ export class UsageService {
 
   /**
    * OpenCode's usage, from its own `opencode stats` (`usage/opencode.ts`) — at most one batch per `opencodeEveryMs`
-   * (10 min) unless its backfill ran out of budget. Each batch, in order:
-   *  1. TODAY's opening run, `--days 1`;
-   *  2. every day to FINALIZE, newest first, as `--days k+1` − `--days k`, the two runs back to back (never one shared
-   *     with another day, so no day's pair straddles more than a moment): yesterday once after midnight, the last day
-   *     written as "today" (the daemon may have slept through midnights — then `--all` is asked once more for the active
-   *     days in between), and the one-time backfill — every active date `--all` lists, kept as a `pending` list until
-   *     done, so an interrupted backfill resumes. A finalized day is never asked again (`done`, the last two weeks kept);
-   *  3. TODAY's closing run, `--days 1` again. Every difference above is only right if no message of today finished
-   *     during the batch (it would be counted in a wider run and not a narrower one — in yesterday's row AND today's).
-   *     So if the closing run differs from the opening one, ONLY today's row is written (from the closing run) and every
-   *     finalization is left for the next batch; else today's row and every finalized day are written.
-   * At most `opencodeSpawnBudget` runs per batch, the closing run reserved: out of budget = `more` (the next pass skips
-   * both throttles); a failed run ends the batch (an ordinary failure, retried after the throttle — never `more`, so a
-   * broken binary never loops the catch-up), and so does a batch that saw today move. A local midnight crossed
-   * mid-batch discards it whole. Every day is a calendar day in the zone resolved for this batch, which every run gets as
-   * `TZ`. Returns `more`.
+   * (10 min) unless its backfill ran out of budget. Each batch:
+   *  - TODAY: `--days 1`, and again after every day's pair (below); today's row is the last one, REPLACING the day's rows.
+   *  - every past day still to FINALIZE, newest first, as `--days k+1` − `--days k`, the two runs back to back (never one
+   *    shared with another day): yesterday, the last day written as "today" (the daemon may have slept through midnights —
+   *    then `--all` is asked once more for the active days in between), every day read but not finalized yet, and the
+   *    one-time backfill — every active date `--all` lists, kept as a `pending` list until done (an interrupted backfill
+   *    resumes).
+   *  - A pair counts only when today did not move around it: the `--days 1` runs either side of it agree (for yesterday
+   *    the pair's own narrow run is the one after). Else a message of today finished during the pair — it would sit in
+   *    the wider run and not the narrower, in that day's row AND today's — and the day waits for the next batch; the
+   *    other days are judged on their own.
+   *  - A day is FINALIZED (written, `done`, never asked again; the last two weeks kept) only when two batches at least
+   *    half a throttle apart read the same pair (`reads`: the day's last fingerprint and when). OpenCode files a message
+   *    under the day it STARTED: one begun at 23:58 and still running after midnight keeps growing yesterday's pair, which
+   *    is never finalized short. Until then each read is written as the day's rows (provisional).
+   * At most `opencodeSpawnBudget` runs per batch: out of budget = `more` (the next pass skips both throttles; a day read
+   * moments ago is skipped, not re-read); a failed run ends the batch (an ordinary failure, retried after the throttle —
+   * never `more`, so a broken binary never loops the catch-up). A local midnight crossed mid-batch discards it whole.
+   * Every day is a calendar day in the zone resolved for this batch, which every run gets as `TZ`. Returns `more`.
    */
   private async ingestOpencode(exe: string): Promise<boolean> {
     const now = this.now();
@@ -443,6 +446,15 @@ export class UsageService {
     let pending = strings(saved.pending);
     let listed = saved.listed === true;
     const lastToday = typeof saved.lastToday === "string" ? saved.lastToday : undefined;
+    // Each day read but not finalized yet: its pair's fingerprint, and when it was read.
+    const reads = new Map<string, { fp: string; at: number }>();
+    if (typeof saved.reads === "object" && saved.reads !== null && !Array.isArray(saved.reads)) {
+      for (const [d, v] of Object.entries(saved.reads as Record<string, unknown>)) {
+        const r = v as { fp?: unknown; at?: unknown } | null;
+        if (r !== null && typeof r === "object" && typeof r.fp === "string" && typeof r.at === "number") reads.set(d, { fp: r.fp, at: r.at });
+      }
+    }
+    const settleMs = (this.deps.opencodeEveryMs ?? 600_000) / 2;
     let budget = this.deps.opencodeSpawnBudget ?? 40;
     let allRun: OpencodeStats | undefined;
     const run = async (args: string[]): Promise<OpencodeStats | undefined> => {
@@ -455,8 +467,9 @@ export class UsageService {
     };
     const all = async (): Promise<OpencodeStats | undefined> => (allRun ??= await run([...OPENCODE_ALL_ARGS]));
     const days = (k: number): Promise<OpencodeStats | undefined> => run(opencodeDaysArgs(k));
-    const opening = await days(1);
-    if (opening === undefined) return false;
+    // Today's latest run: every pair is judged against the one before it and the one after it.
+    let current = await days(1);
+    if (current === undefined) return false;
     let failed = false;
     if (!listed) {
       const a = await all();
@@ -467,38 +480,47 @@ export class UsageService {
     const yesterday = dayMinus(today, 1);
     due.add(yesterday);
     if (lastToday !== undefined) due.add(lastToday);
+    for (const d of reads.keys()) due.add(d);
     // Asleep for days (no batch since before yesterday): the active days in between are asked for once, via `--all`.
     if (!failed && lastToday !== undefined && lastToday < yesterday) {
       const a = await all();
       if (a === undefined) failed = true;
       for (const d of a?.activity ?? []) if (d > lastToday && d < today && !done.has(d)) due.add(d);
     }
-    const finals: Array<{ day: string; rows: UsageRecordInput[] }> = [];
+    const writes: Array<{ day: string; rows: UsageRecordInput[] }> = [];
+    let moved = false;
     for (const day of [...due].filter((d) => d < today && !done.has(d)).sort().reverse()) {
       if (failed) break;
-      // Two runs for the day, and the closing run kept in reserve.
-      if (budget < 3) { this.opencodeMore = true; break; }
+      const prior = reads.get(day);
+      // Read moments ago (a catch-up pass): its next read must be a batch apart, so it waits — not counted as `more`.
+      if (prior !== undefined && now - prior.at < settleMs) continue;
       const k = daysBefore(day, today);
+      // The pair, and today's run after it (yesterday's narrow run is that run).
+      if (budget < (k === 1 ? 2 : 3)) { this.opencodeMore = true; break; }
+      const before = current;
       const wide = await days(k + 1);
       const narrow = wide === undefined ? undefined : await days(k);
-      if (wide === undefined || narrow === undefined) { failed = true; break; }
-      finals.push({ day, rows: opencodeDayRecords(opencodeDifference(wide, narrow), day, localNoon(day, tz), this.deps.pricer) });
+      const after = narrow === undefined ? undefined : k === 1 ? narrow : await days(1);
+      if (wide === undefined || narrow === undefined || after === undefined) { failed = true; break; }
+      current = after;
+      if (!sameOpencodeStats(before, after)) { moved = true; continue; }
+      const diff = opencodeDifference(wide, narrow);
+      const fp = opencodeFingerprint(diff);
+      writes.push({ day, rows: opencodeDayRecords(diff, day, localNoon(day, tz), this.deps.pricer) });
+      if (prior !== undefined && prior.fp === fp) { done.add(day); reads.delete(day); } else reads.set(day, { fp, at: now });
     }
-    const closing = await days(1);
-    // Every `--days` run counts from the local midnight of its moment: across a midnight the differences are wrong.
-    if (closing === undefined || localDay(this.now(), tz) !== today) { this.opencodeAt = 0; this.opencodeMore = false; return false; }
-    this.replaceOpencodeDay(today, opencodeDayRecords(closing, today, Math.min(localNoon(today, tz), this.now()), this.deps.pricer), tz);
-    const settled = sameOpencodeStats(opening, closing);
-    if (settled) {
-      for (const f of finals) { this.replaceOpencodeDay(f.day, f.rows, tz); done.add(f.day); }
-    } else if (finals.length > 0) {
-      // Today moved while the days were read: their differences may hold some of today's tokens. Asked again next batch.
-      this.deps.log?.info?.("[usage] opencode was in use during the read; its finished days are read again next time");
-    }
-    if (!settled || failed) this.opencodeMore = false;
+    // Every `--days` run counts from the local midnight of its moment: across a midnight the differences are wrong. (Only
+    // then is the throttle reset: a failed run keeps it.)
+    if (localDay(this.now(), tz) !== today) { this.opencodeAt = 0; this.opencodeMore = false; return false; }
+    this.replaceOpencodeDay(today, opencodeDayRecords(current, today, Math.min(localNoon(today, tz), this.now()), this.deps.pricer), tz);
+    for (const w of writes) this.replaceOpencodeDay(w.day, w.rows, tz);
+    // Today moved around a day's pair: that day's difference may hold some of today's tokens. Read again next batch.
+    if (moved) this.deps.log?.info?.("[usage] opencode was in use during the read; some finished days are read again next time");
+    if (failed) this.opencodeMore = false;
     const keepFrom = dayMinus(today, 14);
     this.deps.db.setSourceState(key, "opencode", {
       done: [...done].filter((d) => d >= keepFrom).sort(), pending: pending.filter((d) => !done.has(d)), listed,
+      reads: Object.fromEntries([...reads].filter(([d]) => !done.has(d))),
       // A day not finalized yet stays "the last today" until it is — so it is asked for again.
       lastToday: lastToday !== undefined && lastToday < today && !done.has(lastToday) ? lastToday : today,
     }, this.now());
@@ -642,6 +664,13 @@ export class UsageService {
         // The latch, as for Claude Code: a binary whose `/usage` once reached the model loop is not asked again until it changes.
         const key = binaryKey("agy", exe);
         if (key === undefined || this.deps.db.latch(key) !== undefined) { this.agyCache = { at: this.now(), failure: "latched" }; return; }
+        // The timeout back-off, persisted (a restart does not shorten it), per exact binary, with its own expiry.
+        const backoffKey = binaryKey("agy-timeout", exe);
+        const backoff = backoffKey === undefined ? undefined : this.deps.db.latch(backoffKey);
+        if (backoff !== undefined && this.now() - backoff.at < (this.deps.agyTimeoutBackoffMs ?? AGY_TIMEOUT_BACKOFF_MS)) {
+          this.agyCache = { at: this.now(), failure: "backoff" };
+          return;
+        }
         const r = await this.inProbeDir((cwd) => antigravityPlanFromCli(exe, {
           cwd, now: this.now,
           ...(this.deps.agyCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.agyCliTimeoutMs }),
@@ -650,6 +679,9 @@ export class UsageService {
         if (r.failure === "guard") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
           this.deps.log?.warn?.("[usage] agy /usage did not come back as the read-only command; not asked again until Antigravity changes");
+        } else if (r.failure === "timeout") {
+          try { if (backoffKey !== undefined) this.deps.db.setLatch(backoffKey, "timeout", this.now()); } catch { /* the in-memory throttle still holds it back */ }
+          this.deps.log?.info?.("[usage] agy /usage outlived its own --print-timeout; not asked again for hours");
         } else if (r.failure !== undefined) {
           this.deps.log?.info?.("[usage] agy /usage gave no plan reading", { reason: r.failure });
         }

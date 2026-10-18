@@ -222,6 +222,8 @@ export interface OpencodeHistory {
   fail?: boolean;
   /** Live use: every run adds `grow` × (its run number) input tokens to today's first model — today moves between runs. */
   grow?: number;
+  /** Runs from this run number on fail (garbage, exit 1). */
+  failFrom?: number;
 }
 
 /**
@@ -240,6 +242,7 @@ if (data.fail) { log("Error: SECRET-PROMPT-7f3a"); process.exit(1); }
 const countPath = ${JSON.stringify(dataPath)} + ".count";
 const count = (fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) : 0) + 1;
 fs.writeFileSync(countPath, String(count));
+if (data.failFrom && count >= data.failFrom) { log("Error: SECRET-PROMPT-7f3a"); process.exit(1); }
 if (data.grow && data.daily[0] && data.daily[0][0]) data.daily[0][0].input += data.grow * count;
 const all = argv.includes("--all");
 const n = all ? Infinity : Math.max(1, Number(argv[argv.indexOf("--days") + 1]));

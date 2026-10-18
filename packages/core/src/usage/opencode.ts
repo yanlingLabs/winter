@@ -161,6 +161,12 @@ export const daysBefore = (day: string, today: string): number => {
 /** The calendar date `k` days before `today` (negative `k`: after). */
 export const dayMinus = (today: string, k: number): string => { const [y, m, d] = parts(today); return new Date(Date.UTC(y, m - 1, d - k)).toISOString().slice(0, 10); };
 
+/** PURE: a day's numbers as one short string (every model's counts and cost, sorted) — what two batches compare. */
+export function opencodeFingerprint(s: OpencodeStats): string {
+  return JSON.stringify([...s.models].sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, m]) => [k, m.input, m.output, m.reasoning, m.cacheRead, m.cacheWrite, Math.round(m.cost * 1e9)]));
+}
+
 /** PURE: two runs counted the same (every model, every count, the cost). */
 export function sameOpencodeStats(a: OpencodeStats, b: OpencodeStats): boolean {
   if (a.models.size !== b.models.size) return false;
