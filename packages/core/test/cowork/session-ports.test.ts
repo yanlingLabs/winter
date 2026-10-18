@@ -62,7 +62,7 @@ test("session-ports is TYPES ONLY: it exports nothing at runtime and imports onl
   for (const needle of ["cowork/native", "./native/", "session-profile", "provider-broker"]) expect([needle, source.includes(needle)]).toEqual([needle, false]);
 });
 
-test("only ipc/server.ts and cowork/service.ts import session-ports in src (D1: behind the refusal)", () => {
+test("every src importer of session-ports takes types only (the ports are implemented elsewhere, never constructed here)", () => {
   const packages = join(import.meta.dir, "..", "..", "..");
   const files = readdirSync(packages).flatMap(name => {
     const src = join(packages, name, "src");
@@ -70,7 +70,15 @@ test("only ipc/server.ts and cowork/service.ts import session-ports in src (D1: 
     return readdirSync(src, { recursive: true }).map(String).map(file => join(src, file)).filter(file => /\.(ts|tsx|js|mjs)$/.test(file) && statSync(file).isFile());
   });
   expect(files.length).toBeGreaterThan(100);
-  const importers = files.filter(file => /["'`][^"'`]*session-ports["'`]/.test(readFileSync(file, "utf8")))
-    .map(file => relative(packages, file).split(sep).join("/")).sort();
-  expect(importers).toEqual(["core/src/cowork/service.ts", "core/src/ipc/server.ts"]);
+  const naming = files.filter(file => /["'`][^"'`]*session-ports["'`]/.test(readFileSync(file, "utf8")));
+  // D1's two consumers. Other lanes add importers (S7B's native seams, APPROVALS' port) without editing this test,
+  // as long as each import is type-only: the module has no runtime exports, and the door's construction is pinned off
+  // by session-door-off.test.ts.
+  const names = naming.map(file => relative(packages, file).split(sep).join("/"));
+  for (const expected of ["core/src/cowork/service.ts", "core/src/ipc/server.ts"]) expect(names).toContain(expected);
+  for (const file of naming) {
+    const statements = readFileSync(file, "utf8").match(/\b(?:import|export)\b[^;]*?["'`][^"'`]*session-ports["'`]/g) ?? [];
+    expect(statements.length).toBeGreaterThan(0);
+    for (const statement of statements) expect([relative(packages, file), /^(?:import|export) type \{/.test(statement.trim())]).toEqual([relative(packages, file), true]);
+  }
 });

@@ -27,7 +27,7 @@ class Client {
   private decoder = new LineDecoder(); private next = 1;
   private pending = new Map<number, { resolve(value: any): void; timer: ReturnType<typeof setTimeout> }>();
   private socket!: Awaited<ReturnType<typeof Bun.connect>>; private writer!: ConnWriter;
-  static async connect(path: string, token: string, role: string): Promise<Client> {
+  static async connect(path: string, token: string, role: string, hello?: { reply?: any }): Promise<Client> {
     const client = new Client();
     client.socket = await Bun.connect({ unix: path, socket: {
       data(_socket, bytes) {
@@ -39,7 +39,8 @@ class Client {
       drain() { client.writer.onDrain(); },
     } });
     client.writer = new ConnWriter(client.socket as unknown as WritableSocket);
-    expect((await client.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, token, role, clientName: `fixture-${role}` })).error).toBeUndefined();
+    const reply = await client.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, token, role, clientName: `fixture-${role}` });
+    if (hello) hello.reply = reply; else expect(reply.error).toBeUndefined();
     return client;
   }
   request(method: string, params: unknown = {}): Promise<any> {
@@ -99,6 +100,14 @@ describe("1. a production-shaped daemon refuses a well-formed Cowork create", ()
     const remote = await Client.connect(socket, daemon.tokens.remote, "remote");
     const observer = await Client.connect(socket, daemon.tokens.harness, "harness");
     clients.push(harness, admin, remote, observer);
+    // The fourth role cannot even connect: no plugin token verifies (auth/tokens.ts), whichever token it presents, so no
+    // plugin connection reaches session.create (and part 3 pins that its method gate excludes it too).
+    for (const token of [daemon.tokens.harness, daemon.tokens.admin, daemon.tokens.remote]) {
+      const attempt: { reply?: any } = {}, plugin = await Client.connect(socket, token, "plugin", attempt);
+      clients.push(plugin);
+      expect(attempt.reply?.error).toBeDefined();
+      expect(attempt.reply?.result).toBeUndefined();
+    }
     for (const [role, client] of [["harness", harness], ["admin", admin], ["remote", remote]] as const) {
       expect([role, (await client.request(METHODS.sessionCreate, request(workspaceId, sourceId, `create-${role}`))).error]).toEqual([role, UNSUPPORTED]);
       expect([role, (await client.request(METHODS.sessionCreate, outputsRequest(workspaceId, `outputs-${role}`))).error]).toEqual([role, UNSUPPORTED]);
@@ -250,25 +259,40 @@ const allSources = (): string[] => readdirSync(PACKAGES).flatMap(name => {
 });
 const shown = (path: string) => relative(PACKAGES, path).split(sep).join("/");
 
+/** Source text with comments removed, so a pin judges code, not prose. */
+const code = (path: string) => readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+/** What `daemon.ts` may say about the door before the flip: S7B's pass-through of a host-only option, and nothing else. */
+const DAEMON_PASS_THROUGH = [/\bcoworkSessions\?\s*:\s*CoworkSessionDoor\b/g, /\bcoworkSessions\s*:\s*opts\.coworkSessions\b/g, /\bopts\.coworkSessions\b/g, /\bimport type \{[^}]*\bCoworkSessionDoor\b[^}]*\} from "\.\/cowork\/session-ports";/g];
+const beyondPassThrough = (text: string) => DAEMON_PASS_THROUGH.reduce((rest, allowed) => rest.replace(allowed, ""), text);
+
 describe("3. source pins: the switch stays off", () => {
   test("the CLI never names the door option", () => {
     expect(sourcesUnder(join(PACKAGES, "cli", "src")).filter(path => readFileSync(path, "utf8").includes("coworkSessions")).map(shown)).toEqual([]);
   });
 
-  test("daemon.ts does not name the door option yet (S7B adds only the pass-through of a host-only option; this pin then names it)", () => {
-    expect(readFileSync(join(PACKAGES, "core", "src", "daemon.ts"), "utf8").includes("coworkSessions")).toBe(false);
+  test("daemon.ts names the door only as the pass-through of a host-only option (today: not at all)", () => {
+    const daemonCode = code(join(PACKAGES, "core", "src", "daemon.ts"));
+    // S7B's pass-through (design section 10 item 4) is the only form allowed before D6: the option's declaration, its
+    // type-only import and `coworkSessions: opts.coworkSessions`. Constructing a door here IS the flip.
+    expect(beyondPassThrough(daemonCode).includes("coworkSessions")).toBe(false);
+    expect(beyondPassThrough(daemonCode).includes("CoworkSessionDoor")).toBe(false);
+    // The rule itself: the pass-through forms are allowed, anything else is not.
+    expect(beyondPassThrough("coworkSessions?: CoworkSessionDoor; ... coworkSessions: opts.coworkSessions,").includes("coworkSessions")).toBe(false);
+    expect(beyondPassThrough("coworkSessions: buildDoor(stores)").includes("coworkSessions")).toBe(true);
   });
 
-  test("only ipc/server.ts names the door option, and no src module builds a door", () => {
+  test("outside ipc/server.ts and the spine, only that pass-through names the door, and no src module builds one", () => {
     const sources = allSources();
     expect(sources.length).toBeGreaterThan(100);
-    // session-ports.ts names it only in its header comment (which module consumes the door).
-    expect(sources.filter(path => readFileSync(path, "utf8").includes("coworkSessions")).map(shown).sort()).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts"]);
-    expect(readFileSync(join(PACKAGES, "core", "src", "cowork", "session-ports.ts"), "utf8").split("coworkSessions").length - 1).toBe(1);
-    // The protocol names it only in a comment (the refusal holds while none is constructed).
-    expect(sources.filter(path => readFileSync(path, "utf8").includes("CoworkSessionDoor")).map(shown).sort()).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts", "protocol/src/cowork.ts"]);
-    // Nothing implements or constructs one: no `implements`, no `: CoworkSessionDoor =`, no `satisfies`.
-    for (const path of sources) expect([shown(path), /(?:implements|satisfies)\s+CoworkSessionDoor\b|:\s*CoworkSessionDoor\s*=/.test(readFileSync(path, "utf8"))]).toEqual([shown(path), false]);
+    const daemon = "core/src/daemon.ts";
+    // session-ports.ts names the option only in its header comment; the protocol names the door only in a comment.
+    const naming = (needle: string) => sources.filter(path => readFileSync(path, "utf8").includes(needle)).map(shown).filter(name => name !== daemon).sort();
+    expect(naming("coworkSessions")).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts"]);
+    expect(code(join(PACKAGES, "core", "src", "cowork", "session-ports.ts")).includes("coworkSessions")).toBe(false);
+    expect(naming("CoworkSessionDoor")).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts", "protocol/src/cowork.ts"]);
+    expect(code(join(PACKAGES, "protocol", "src", "cowork.ts")).includes("CoworkSessionDoor")).toBe(false);
+    // Nothing implements or constructs one: no `implements`, no `satisfies`, no `: CoworkSessionDoor =`, no cast.
+    for (const path of sources) expect([shown(path), /(?:implements|satisfies|as)\s+CoworkSessionDoor\b|:\s*CoworkSessionDoor\s*=/.test(code(path))]).toEqual([shown(path), false]);
   });
 
   test("a plugin connection never reaches session.create (the role gate precedes the switch)", () => {

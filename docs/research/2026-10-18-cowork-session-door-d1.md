@@ -47,19 +47,31 @@ The migration is idempotent: a table that already has `location_kind` is left al
 ## Tests
 
 - `packages/core/test/cowork/session-door-off.test.ts`, the off test, in three parts:
-  1. A production-shaped `startDaemon` with a seeded ready source: harness, admin and remote each get `unsupported_topology` for the source and outputs locations, for the bare mode and for every host-derived field. Afterwards there is no session, no conversation row, the incarnation is null and power `stopped`, `coworkNative.built === false`, `workspace.capabilities.get` reports `execution: false`, and nothing is broadcast.
-  2. The positive control: the same request is accepted by a stub door through `startIpcServer`, along with every rule above.
-  3. Source pins: the CLI and `daemon.ts` never name `coworkSessions`, only `ipc/server.ts` uses it, no module implements a door, and the plugin role gate precedes `session.create`.
+  1. A production-shaped `startDaemon` with a seeded ready source. Harness, admin and remote each get `unsupported_topology` for the source and outputs locations, for the bare mode and for every host-derived field. A plugin cannot even connect: no plugin token verifies, whichever token it presents. Afterwards there is no session and no conversation row, the incarnation is null, power is `stopped`, `coworkNative.built === false`, `workspace.capabilities.get` reports `execution: false`, and nothing is broadcast.
+  2. The positive control. A stub door through `startIpcServer` accepts the same request. Every rule above is checked: the caller's own role and connection id, remote refused, missing binding, raw host-derived fields, a binding beside another mode, malformed bindings, and typed door refusals.
+  3. Source pins:
+     - the CLI never names `coworkSessions`;
+     - `daemon.ts` may name it only as S7B's pass-through: the option's declaration, its type-only import, and `coworkSessions: opts.coworkSessions`;
+     - otherwise only `ipc/server.ts` and the spine name the door;
+     - no module implements, casts or constructs one;
+     - the plugin method gate excludes `session.create`.
 - `packages/core/test/cowork/session-ports.test.ts`:
   - each structural copy is assignable both ways to its native twin (compile-time pins, enforced by `bun run typecheck`);
   - the readiness keys equal the profile's own;
   - the provider route scope equals the broker's scope;
-  - the module is types only and imported only by `ipc/server.ts` and `cowork/service.ts`.
+  - the module is types only, and every src importer imports it type-only. Other lanes may add importers without editing this test.
 - `packages/core/test/cowork/session-binding-schema.test.ts` covers migration 18: the fresh shape, the CHECKs, an in-place upgrade from v17 that keeps rows, dependents and the index, idempotence, and the downgrade ladder.
 - `packages/protocol/test/cowork-session-door.test.ts` covers the wire schemas.
 - The literal schema pins in the peer-inbox, lifecycle, outputs and instructions tests move to 18. The positional insert in the retention test now names its columns.
 
-Mutations: 48 mutants over the guards, the protocol refinements, migration 18, the downgrade helpers, the bind insert, the source pins and the port copies (the type-level ones under `tsc`). 47 were killed. The one survivor is equivalent: widening `location_kind`'s column CHECK is still refused by the table CHECK.
+Mutations: 51 mutants in one catalogue run. They cover the guards, the protocol refinements, migration 18, the downgrade helpers, the bind insert, the source pins and the port copies (the type-level ones under `tsc`). 50 were killed. The one survivor is equivalent: widening `location_kind`'s column CHECK is still refused by the table CHECK, which already admits only the two shapes.
+
+### Where the off test differs from design section 6
+
+Both differences need an owner decision.
+
+1. **No `plugin` send.** Section 6 lists `plugin` among the roles that send the request. No plugin connection can exist: `TokenAuthority.verify` refuses every plugin token ("plugin tokens arrive in Phase 4"). The test therefore asserts that a plugin hello is refused for each of the three real tokens, and pins that `PLUGIN_ALLOWED_METHODS` excludes `session.create`. Recommendation: accept, and send as `plugin` once plugin tokens exist.
+2. **A thinner positive control.** Section 6's control expects three things: "a row exists, the binding is `active`, a fake launcher is called only at the first send". None of those can exist before a real door. A stub cannot mint a Cowork row, because `SessionStore.createSession` refuses the mode without a reservation, and the reservation is D3's. The D1 control instead proves the same request reaches an injected door verbatim and is answered `{sessionId, trusted: false}`. Recommendation: accept, and move the row, binding and launcher assertions to D3, where the real door and driver land.
 
 ## Not in D1
 
