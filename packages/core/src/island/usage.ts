@@ -29,6 +29,8 @@ export interface IslandUsageWindow {
   resetsAt?: number;
   at: number;
   sessionId: string;
+  /** The provider the reporting session's model names (`codex-oauth`, …), when known. */
+  provider?: string;
 }
 
 export interface IslandSessionUsage {
@@ -84,20 +86,25 @@ export class IslandUsageRegistry {
   constructor(private readonly sources: IslandUsageSources, private readonly now: () => number = Date.now) {}
 
   /** A `rate_limit_event`'s info, from a session's projector. Only the four named scalars are read. */
-  noteRateLimit(sessionId: string, info: RateLimitInfo): void {
+  noteRateLimit(sessionId: string, info: RateLimitInfo, provider?: string): void {
     const status = str(info.status);
     if (status === undefined) return;
     const rateLimitType = str(info.rateLimitType);
-    const key = rateLimitType ?? "unspecified";
+    const key = `${provider ?? ""}\u0000${rateLimitType ?? "unspecified"}`;
     const utilization = num(info.utilization);
     const resetsAt = epochMs(info.resetsAt);
     this.windows.delete(key);
     this.windows.set(key, {
       ...(rateLimitType === undefined ? {} : { rateLimitType }), status,
       ...(utilization === undefined ? {} : { utilization }), ...(resetsAt === undefined ? {} : { resetsAt }),
-      at: this.now(), sessionId,
+      at: this.now(), sessionId, ...(provider === undefined ? {} : { provider: provider.slice(0, 64) }),
     });
     while (this.windows.size > MAX_WINDOWS) this.windows.delete(this.windows.keys().next().value as string);
+  }
+
+  /** The windows a provider's sessions reported (the usage tab's Codex fallback: `codex-oauth`), newest first. */
+  windowsFor(provider: string): IslandUsageWindow[] {
+    return [...this.windows.values()].filter((w) => w.provider === provider).sort((a, b) => b.at - a.at);
   }
 
   /** Every appended event (`SessionHub.addObserver`): a turn's token counts. */

@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, UsageSummaryParams, UsageSeriesParams, UsageSubscriptionsSetParams, UsageSubscriptionsRemoveParams, UsageSetTrackingParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -84,6 +84,7 @@ import { SessionHub, type HubClient } from "../sessions/hub";
 import type { IslandClient, IslandRegistry } from "../island/registry";
 import type { IslandActivity } from "../island/activity";
 import type { IslandUsageRegistry } from "../island/usage";
+import type { UsageService } from "../usage/service";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
@@ -130,7 +131,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, computerUseMirrorFrom, type McpServerSettingsEntry } from "../settings";
+import { DEFAULT_PROVIDER, usageTrackingFrom, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, computerUseMirrorFrom, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -526,6 +527,8 @@ export interface IpcServerOptions {
   islandActivity?: IslandActivity;
   /** The island's Usage tab (`island/usage.ts`, `island.usage`). */
   islandUsage?: IslandUsageRegistry;
+  /** Usage and cost tracking (`usage/service.ts`, `usage.*`; `docs/claude/usage.md`). */
+  usage?: UsageService;
   tasks?: TaskStore;         // session task lists; task.list
   plans?: PlanBridge;        // in-flight exit_plan_mode plans; plan.respond
   peripheral?: PeripheralBroker; // lease machinery; peripheral.* verbs (Phase 2f)
@@ -3508,6 +3511,52 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.islandUsage !== undefined) return opts.islandUsage.snapshot(p.sessionId);
         const state = opts.quota?.state() ?? { kind: "ok" as const };
         return { windows: [], background: { ...state, ...(opts.quota?.usage() ?? { inputTokens: 0, outputTokens: 0 }) } };
+      }
+      case METHODS.usageSummary:
+      case METHODS.usageSeries:
+      case METHODS.usageSubscriptionsList:
+      case METHODS.usageSubscriptionsSet:
+      case METHODS.usageSubscriptionsRemove:
+      case METHODS.usageSetTracking: {
+        // Usage and cost tracking (`docs/claude/usage.md`): the user's own usage across Winter, Codex and Claude Code.
+        // LOCAL harness clients only — never a phone, never a plugin.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to local clients only`);
+        if (method === METHODS.usageSetTracking) {
+          const p = parseParams(UsageSetTrackingParams, params);
+          if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "usage.setTracking is not available on this server (no winterHome configured)");
+          const settingsPath = join(opts.winterHome, "settings.json");
+          const settings = loadSettings(settingsPath);
+          const next: Settings = {
+            ...settings,
+            usage: {
+              ...settings.usage,
+              ...(p.codex === undefined ? {} : { codex: { ...settings.usage?.codex, enabled: p.codex } }),
+              ...(p.claudeCode === undefined ? {} : { claudeCode: { ...settings.usage?.claudeCode, enabled: p.claudeCode } }),
+            },
+          };
+          saveSettings(settingsPath, next);
+          return { tracking: usageTrackingFrom(next) };
+        }
+        const usage = opts.usage;
+        if (usage === undefined) throw new RpcFailure(ERR.INTERNAL, "usage tracking is unavailable");
+        if (method === METHODS.usageSummary) {
+          const p = parseParams(UsageSummaryParams, params);
+          return await usage.summary(p.range, p.sources, { ...(p.plans === undefined ? {} : { plans: p.plans }) });
+        }
+        if (method === METHODS.usageSeries) {
+          const p = parseParams(UsageSeriesParams, params);
+          await usage.ingestWithin(1_500);
+          return usage.series(p.range, p.sources);
+        }
+        if (method === METHODS.usageSubscriptionsList) return { subscriptions: usage.subscriptions() };
+        if (method === METHODS.usageSubscriptionsSet) {
+          const p = parseParams(UsageSubscriptionsSetParams, params);
+          const { renewalMonth, id, ...rest } = p.subscription;
+          const saved = usage.setSubscription({ ...rest, ...(id === undefined ? {} : { id }), ...(renewalMonth === undefined ? {} : { renewalMonth }) });
+          return { subscription: saved, subscriptions: usage.subscriptions() };
+        }
+        const p = parseParams(UsageSubscriptionsRemoveParams, params);
+        return { removed: usage.removeSubscription(p.id), subscriptions: usage.subscriptions() };
       }
       case METHODS.elicitationUrl: {
         // WS-27: the full url of a PENDING card, for the local client about to open it — the url is

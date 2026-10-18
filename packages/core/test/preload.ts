@@ -38,6 +38,18 @@ process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
 // agents) — this turns that off for every in-process boot AND every daemon subprocess a test spawns
 // (they inherit `process.env`). A test that exercises the resolution injects a fake runner instead.
 process.env.WINTER_LOGIN_SHELL_PATH = "off";
+// Usage tracking (`src/usage/wiring.ts`, docs/claude/usage.md): no test may read the developer's REAL Codex sessions,
+// Claude Code transcripts or `~/.claude.json`, nor spawn their real `codex` / `claude`. Every root points at an empty
+// throwaway directory and both executables are "off" (authoritative: never a fall-through to $PATH). A test that
+// exercises them injects fixture roots and a fake executable through `startDaemon({ usage })` or the service itself.
+{
+  const none = mkdtempSync(join(tmpdir(), "winter-test-usage-none-"));
+  process.env.WINTER_USAGE_CODEX_HOME = join(none, "codex");
+  process.env.WINTER_USAGE_CLAUDE_HOME = join(none, "claude");
+  process.env.WINTER_USAGE_CLAUDE_JSON = join(none, "claude.json");
+  process.env.WINTER_USAGE_CODEX_EXECUTABLE = "off";
+  process.env.WINTER_USAGE_CLAUDE_EXECUTABLE = "off";
+}
 // WS-21 (L3.5): saving an "in this project" answer appends to the user's GLOBAL git excludes, resolved
 // through `git config --global core.excludesfile` (claude parity, `agent/git-exclude.ts`). No test may
 // read or write the developer's real global git config, so every git a test (or a daemon it boots)

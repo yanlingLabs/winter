@@ -372,6 +372,8 @@ export interface WinterLegDeps {
   onSupportedAgents?: (sessionId: string, agents: import("@yanlinglabs/winter-agent-sdk").AgentInfo[]) => void;
   /** The island's Usage tab: a session's `rate_limit_event` report (the projector's `onRateLimit`). */
   onRateLimit?: (sessionId: string, info: Record<string, unknown>) => void;
+  /** The usage DB (`docs/claude/usage.md`): each model's share of a projected turn (the projector's `onTurnUsage`). */
+  onTurnUsage?: (sessionId: string, usage: { sourceId: string; rows: import("../projector/terminal").TurnModelUsageRow[] }) => void;
   /**
    * Fix wave (review row 4): Winter's `SessionTitler` — P8b-10 keeps it on Winter's OWN provider
    * layer (never `sdk.query()`). Fired fire-and-forget after every MAIN-thread `turn_completed`
@@ -1290,6 +1292,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // is withdrawn before that result lands — this SDK never cancels the pending `canUseTool`.
         onToolResults: (callIds) => { for (const callId of callIds) canUseTool.withdrawPending(callId); },
         ...(deps.onRateLimit === undefined ? {} : { onRateLimit: (info: Record<string, unknown>) => deps.onRateLimit!(sessionId, info) }),
+        ...(deps.onTurnUsage === undefined ? {} : { onTurnUsage: (u: { sourceId: string; rows: import("../projector/terminal").TurnModelUsageRow[] }) => deps.onTurnUsage!(sessionId, u) }),
         checkpoint: checkpoints,
         now: () => new Date().toISOString(),
         log: {
