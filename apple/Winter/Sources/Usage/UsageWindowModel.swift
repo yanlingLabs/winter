@@ -21,7 +21,7 @@ final class UsageWindowModel: ObservableObject {
     var fetchSubscriptions: () async throws -> [UsageSubscription] = { [] }
     var saveSubscription: (UsageSubscription) async throws -> [UsageSubscription] = { _ in [] }
     var deleteSubscription: (String) async throws -> [UsageSubscription] = { _ in [] }
-    var setTracking: (_ codex: Bool?, _ claudeCode: Bool?) async throws -> Void = { _, _ in }
+    var setTracking: (_ codex: Bool?, _ claudeCode: Bool?, _ antigravity: Bool?, _ opencode: Bool?) async throws -> Void = { _, _, _, _ in }
     var now: () -> Date = { Date() }
 
     static let refreshInterval: TimeInterval = 15
@@ -29,7 +29,9 @@ final class UsageWindowModel: ObservableObject {
 
     func toggle(_ source: UsageSource) {
         if sources.contains(source) {
-            guard sources.count > 1 else { return } // never nothing at all
+            // Never nothing at all — counting only the toggles shown (a hidden OpenCode toggle cannot be turned back on).
+            let shown = sources.filter { UsagePresentation.showsToggle($0, summary: summary) }
+            guard shown.count > 1 else { return }
             sources.remove(source)
         } else {
             sources.insert(source)
@@ -38,10 +40,16 @@ final class UsageWindowModel: ObservableObject {
     }
 
     func refresh() async {
+        await refresh(again: true)
+    }
+
+    private func refresh(again: Bool) async {
         let range = range, sources = sources
+        // Never a source the daemon has not said it knows (`UsagePresentation.requestSources`).
+        let asked = UsagePresentation.requestSources(sources, summary: summary)
         do {
-            async let s = fetchSeries(range, sources)
-            async let m = fetchSummary(range, sources)
+            async let s = fetchSeries(range, asked)
+            async let m = fetchSummary(range, asked)
             let (series, summary) = try await (s, m)
             // A newer choice while these were in flight: theirs wins.
             guard range == self.range, sources == self.sources else { return }
@@ -50,6 +58,11 @@ final class UsageWindowModel: ObservableObject {
             failed = false
         } catch {
             failed = series == nil
+        }
+        // The first answer said OpenCode is known: ask once more with it, so its stored rows show at once.
+        if again, UsagePresentation.requestSources(sources, summary: summary) != asked {
+            await refresh(again: false)
+            return
         }
         if let subs = try? await fetchSubscriptions() { subscriptions = subs }
     }
@@ -69,8 +82,8 @@ final class UsageWindowModel: ObservableObject {
         do { subscriptions = try await deleteSubscription(id) } catch { subscriptionError = "Couldn’t remove the plan." }
     }
 
-    func setTrack(codex: Bool? = nil, claudeCode: Bool? = nil) async {
-        try? await setTracking(codex, claudeCode)
+    func setTrack(codex: Bool? = nil, claudeCode: Bool? = nil, antigravity: Bool? = nil, opencode: Bool? = nil) async {
+        try? await setTracking(codex, claudeCode, antigravity, opencode)
         await refresh()
     }
 

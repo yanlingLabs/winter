@@ -42,6 +42,8 @@ enum Typography {
     static func badge(_ weight: Font.Weight = .regular) -> Font { sans(badgeSize, weight) }
     /// Timestamps, micro-labels under rows, the quietest text that is still text.
     static func tiny(_ weight: Font.Weight = .regular) -> Font { sans(tinySize, weight) }
+    /// `tiny` with tabular digits: the usage lines' hover figures, which change in place.
+    static func tinyDigits(_ weight: Font.Weight = .regular) -> Font { tiny(weight).monospacedDigit() }
     /// The small-meta workhorse: tool rows, chips, pills, section labels (91 sites at adoption).
     static func caption(_ weight: Font.Weight = .regular) -> Font { sans(captionSize, weight) }
     /// `caption` with tabular digits, for a figure that changes in place (a countdown) without its width jumping.

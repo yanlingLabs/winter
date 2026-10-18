@@ -14,24 +14,28 @@ final class IslandTabModels {
     let thumbnails: IslandShelfThumbnails
     let usage: IslandUsageModel
     let devices: IslandDevicesModel
+    let servers: IslandServersModel
 
     init(sessions: IslandSessionsModel? = nil, shelf: IslandShelfStore? = nil, thumbnails: IslandShelfThumbnails? = nil,
-         usage: IslandUsageModel? = nil, devices: IslandDevicesModel? = nil) {
+         usage: IslandUsageModel? = nil, devices: IslandDevicesModel? = nil, servers: IslandServersModel? = nil) {
         self.sessions = sessions ?? IslandSessionsModel()
         self.shelf = shelf ?? IslandShelfStore(persistence: .appDefault())
         self.thumbnails = thumbnails ?? IslandShelfThumbnails()
         self.usage = usage ?? IslandUsageModel()
         self.devices = devices ?? IslandDevicesModel()
+        self.servers = servers ?? IslandServersModel()
     }
 
     /// Refreshes the data the tab with this id shows (on open and when the tab is shown; `periodic` — the open island's
-    /// light refresh — skips the Shelf, which resolves on open, on a tab change and on a drop).
+    /// light refresh — skips the Shelf, which resolves on open, on a tab change and on a drop). Servers scans the
+    /// process table only here: while the island is open on it, never in the background.
     func refresh(tab id: String?, periodic: Bool = false) async {
         switch id {
         case IslandTabRegistry.sessions.id?: await sessions.refresh()
         case IslandTabRegistry.shelf.id?: if !periodic { await shelf.resolveAll() }
         case IslandTabRegistry.usage.id?: await usage.refresh()
         case IslandTabRegistry.devices.id?: await devices.refresh()
+        case IslandTabRegistry.servers.id?: await servers.refresh()
         default: break
         }
     }
@@ -199,6 +203,8 @@ struct IslandTabBody: View {
             IslandTabScroll(scrolls: scrolls) { IslandUsageTab(model: models.usage) }
         case IslandTabRegistry.devices.id:
             IslandTabScroll(scrolls: scrolls) { IslandDevicesTab(model: models.devices) }
+        case IslandTabRegistry.servers.id:
+            IslandServersTab(model: models.servers, scrolls: scrolls)
         default:
             Spacer()
         }

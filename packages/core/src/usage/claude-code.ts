@@ -213,9 +213,9 @@ export const CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024;
  * Claude Code runs). The file holds unrelated config (possibly MCP env secrets): it is parsed in memory and ONLY that
  * one key is read; nothing else of it is kept, logged or sent.
  */
-export async function claudePlanFromCacheFile(path: string, now: number, maxBytes = CLAUDE_JSON_MAX_BYTES): Promise<PlanReading | "over-cap" | undefined> {
-  // The cap is enforced on the bytes actually READ (at most cap + 1), whatever a stat said a moment before.
-  let text: string;
+/** A whole small file as text — the cap enforced on the bytes actually READ (at most cap + 1), whatever a stat said a
+ *  moment before. `undefined` = missing or unreadable. */
+export async function readCapped(path: string, maxBytes: number): Promise<string | "over-cap" | undefined> {
   try {
     const fh = await open(path, "r");
     try {
@@ -227,14 +227,49 @@ export async function claudePlanFromCacheFile(path: string, now: number, maxByte
         read += bytesRead;
       }
       if (read > maxBytes) return "over-cap";
-      text = buf.subarray(0, read).toString("utf8");
+      return buf.subarray(0, read).toString("utf8");
     } finally {
       await fh.close().catch(() => undefined);
     }
   } catch { return undefined; }
+}
+
+export async function claudePlanFromCacheFile(path: string, now: number, maxBytes = CLAUDE_JSON_MAX_BYTES): Promise<PlanReading | "over-cap" | undefined> {
+  const r = await claudeCacheFile(path, now, maxBytes);
+  return r === undefined || r === "over-cap" ? r : r.reading;
+}
+
+/** PURE: the plan's size from the account's rate-limit tier — "default_claude_max_20x" → "20x"; anything else none. */
+export function claudeTierMultiple(tier: unknown): string | undefined {
+  const m = typeof tier === "string" ? /_(\d{1,3})x$/.exec(tier) : null;
+  return m === null ? undefined : `${m[1]}x`;
+}
+
+/** `~/.claude.json`, read ONCE for its two plan facts — the plan cache (`cachedUsageUtilization`) and the plan's size
+ *  (`oauthAccount.organizationRateLimitTier`, else `userRateLimitTier`: "…_max_20x"; user 2026-10-18 "Max 20x").
+ *  Nothing else in the file is kept, logged or sent. */
+export async function claudeCacheFile(path: string, now: number, maxBytes = CLAUDE_JSON_MAX_BYTES):
+  Promise<{ reading?: PlanReading; multiple?: string } | "over-cap" | undefined> {
+  const read = await readCapped(path, maxBytes);
+  if (read === undefined || read === "over-cap") return read;
+  let text = read;
   let cached: unknown;
-  try { cached = (JSON.parse(text) as Record<string, unknown>).cachedUsageUtilization; } catch { return undefined; }
+  let multiple: string | undefined;
+  try {
+    const all = JSON.parse(text) as Record<string, unknown>;
+    cached = all.cachedUsageUtilization;
+    const account = all.oauthAccount;
+    if (typeof account === "object" && account !== null) {
+      const a = account as Record<string, unknown>;
+      multiple = claudeTierMultiple(a.organizationRateLimitTier) ?? claudeTierMultiple(a.userRateLimitTier);
+    }
+  } catch { return undefined; }
   text = "";
+  const reading = claudeCacheReading(cached, now);
+  return { ...(reading === undefined ? {} : { reading }), ...(multiple === undefined ? {} : { multiple }) };
+}
+
+function claudeCacheReading(cached: unknown, now: number): PlanReading | undefined {
   if (typeof cached !== "object" || cached === null) return undefined;
   const c = cached as Record<string, unknown>;
   const at = typeof c.fetchedAtMs === "number" && Number.isFinite(c.fetchedAtMs) ? c.fetchedAtMs : undefined;

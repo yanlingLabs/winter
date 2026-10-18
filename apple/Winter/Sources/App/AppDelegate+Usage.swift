@@ -16,7 +16,9 @@ extension AppDelegate {
         model.fetchSubscriptions = { try await client.usageSubscriptions() }
         model.saveSubscription = { s in try await client.usageSetSubscription(s) }
         model.deleteSubscription = { id in try await client.usageRemoveSubscription(id: id) }
-        model.setTracking = { codex, claudeCode in try await client.usageSetTracking(codex: codex, claudeCode: claudeCode) }
+        model.setTracking = { codex, claudeCode, antigravity, opencode in
+            try await client.usageSetTracking(codex: codex, claudeCode: claudeCode, antigravity: antigravity, opencode: opencode)
+        }
         let controller = UsageWindowController(model: model)
         controller.onClosed = { [weak self] in self?.usageWindow = nil }
         usageWindow = controller
