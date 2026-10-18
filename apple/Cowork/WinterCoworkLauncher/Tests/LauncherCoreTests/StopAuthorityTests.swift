@@ -3,7 +3,7 @@ import XCTest
 
 /// Class A means "terminated AND flushed AND consistent". Each row below breaks exactly one link and must come out Class B.
 final class StopAuthorityTests: XCTestCase {
-    private let context = StopContext(scope: Fixture.scope, homeId: Fixture.homeId, launcherInstanceId: Fixture.launcherInstanceId, hostBootId: Fixture.bootId, workerPid: 4242, workerStartToken: "1760000000.000001")
+    private let context = StopContext(scope: Fixture.scope, homeId: Fixture.homeId, launcherInstanceId: Fixture.launcherInstanceId, hostBootId: Fixture.bootId, workerPid: 4242, workerStartToken: "1760000000.000001", receiptKey: Fixture.receiptKey)
     private let pair = [VolumeIdentity(purpose: .data, device: "16777234", inode: "111", uid: 501, capacityBytes: 16 << 20), VolumeIdentity(purpose: .environment, device: "16777234", inode: "222", uid: 501, capacityBytes: 16 << 20)]
     private let one = FlushCounters(requested: 1, completed: 1)
 

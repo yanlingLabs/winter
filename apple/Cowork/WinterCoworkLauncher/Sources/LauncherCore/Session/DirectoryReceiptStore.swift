@@ -107,7 +107,7 @@ public final class DirectoryReceiptStore: DurableReceiptStore {
         return buffer
     }
 
-    public func load(_ scope: ReceiptScope) throws -> StopReceipt? {
+    public func load(_ scope: ReceiptScope, key: ReceiptKey) throws -> StopReceipt? {
         let bytes: [UInt8]
         do { bytes = try readExisting(Self.fileName(scope)) } catch ReceiptStoreFailure.ioFailed(let e) where e == ENOENT { return nil }
         let receipt = try StopReceipt.parse(bytes)
@@ -118,6 +118,8 @@ public final class DirectoryReceiptStore: DurableReceiptStore {
         case .uncertain(let r): named = ReceiptScope(workspaceId: r.workspaceId, incarnationId: r.incarnationId, leaseEpoch: r.leaseEpoch)
         }
         guard named == scope else { throw ReceiptStoreFailure.unsafeDirectory }
+        // Same-user writable, so the file proves nothing until its MAC does.
+        if case .orderly(let r) = receipt, !r.macVerifies(under: key) { throw ReceiptStoreFailure.macInvalid }
         return receipt
     }
 

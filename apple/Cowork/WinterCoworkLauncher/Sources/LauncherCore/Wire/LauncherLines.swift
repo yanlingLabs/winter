@@ -23,7 +23,8 @@ public enum LineToDaemon: Equatable, Sendable {
 
 public enum LineToLauncher: Equatable, Sendable {
     /// `homeId` is the ONE source of the home identity: the launcher stamps it into every receipt. It does not travel on L2.
-    case begin(id: String, homeId: String, scope: Scope)
+    /// `receiptKey` is the installation's receipt MAC key (a secret; kept in memory only, redacted in every printed form).
+    case begin(id: String, homeId: String, scope: Scope, receiptKey: ReceiptKey)
     /// Arrives with exactly two descriptors (data, environment); the descriptors travel beside this value, never inside it.
     case volumes(id: String, scopeDigest: String, volumes: [VolumeIdentity])
     case muxDown(frame: [UInt8])
@@ -46,7 +47,7 @@ public enum LauncherLineCodec {
         "fault": ["code"],
     ]
     private static let toLauncherKeys: [String: [String]] = [
-        "begin": ["id", "homeId"] + Scope.keys,
+        "begin": ["id", "homeId"] + Scope.keys + ["receiptKey"],
         "volumes": ["id", "scopeDigest", "volumes"],
         "mux_down": ["frame"],
         "stop": ["id", "stopNonce", "reason", "budgetMs"],
@@ -64,7 +65,7 @@ public enum LauncherLineCodec {
         let f = try Fields(members, keys: ["v", "t"] + toLauncherKeys[type]!)
         let typed: LineToLauncher
         switch type {
-        case "begin": typed = .begin(id: try V.token(f["id"]), homeId: try V.token(f["homeId"]), scope: try Scope.decode(f))
+        case "begin": typed = .begin(id: try V.token(f["id"]), homeId: try V.token(f["homeId"]), scope: try Scope.decode(f), receiptKey: try ReceiptKey.decode(f["receiptKey"]))
         case "volumes": typed = .volumes(id: try V.token(f["id"]), scopeDigest: try V.digest(f["scopeDigest"]), volumes: try VolumeIdentity.readPair(f["volumes"]))
         case "mux_down": typed = .muxDown(frame: try muxField(f["frame"]))
         case "stop":
@@ -111,7 +112,7 @@ public enum LauncherLineCodec {
         guard own[type] != nil else { throw other[type] != nil ? WireFailure.bad_direction : WireFailure.unknown_type }
         guard raw.count <= (carriers.contains(type) ? WireLimits.muxLineBytes : WireLimits.controlLineBytes) else { throw WireFailure.oversize }
         guard rights == (type == "volumes" ? WireLimits.volumeRights : 0) else { throw WireFailure.bad_rights }
-        guard case .integer(1)? = members.first(where: { $0.key == "v" })?.value else { throw WireFailure.version }
+        guard case .integer(let version)? = members.first(where: { $0.key == "v" })?.value, version == Int64(WireLimits.textVersion) else { throw WireFailure.version }
         return (type, members)
     }
 
@@ -134,7 +135,7 @@ public enum LauncherLineCodec {
 
     public static func serialize(_ message: LineToDaemon) throws -> [UInt8] {
         var w = JSONWriter()
-        w.beginObject(); w.key("v"); w.integer(1); w.key("t")
+        w.beginObject(); w.key("v"); w.integer(WireLimits.textVersion); w.key("t")
         switch message {
         case .hello(let instance, let boot):
             try require(V.isLabel(instance) && V.isLabel(boot))
@@ -159,11 +160,14 @@ public enum LauncherLineCodec {
 
     public static func serialize(_ message: LineToLauncher) throws -> [UInt8] {
         var w = JSONWriter()
-        w.beginObject(); w.key("v"); w.integer(1); w.key("t")
+        w.beginObject(); w.key("v"); w.integer(WireLimits.textVersion); w.key("t")
         switch message {
-        case .begin(let id, let homeId, let scope):
+        case .begin(let id, let homeId, let scope, let receiptKey):
             try require(V.isToken(id) && V.isToken(homeId)); try scope.validate()
             w.string("begin"); w.key("id"); w.string(id); w.key("homeId"); w.string(homeId); scope.write(&w)
+            // The one place the key's text is produced: onto the wire, for the launcher. A zeroed key cannot be sent.
+            guard let text = receiptKey.revealBase64() else { throw WireFailure.bad_field }
+            w.key("receiptKey"); w.string(text)
         case .volumes(let id, let digest, let volumes):
             try require(V.isToken(id) && V.isLowerHex(digest, count: 64) && volumes.count == 2)
             try VolumeIdentity.requireDistinctFiles(volumes)
