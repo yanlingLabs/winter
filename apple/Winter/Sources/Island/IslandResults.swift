@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import WinterKit
 
@@ -209,6 +210,23 @@ struct IslandScreenPresence: Equatable {
     private(set) var locked = false
     private(set) var displaysAsleep = false
     private(set) var sessionInactive = false
+
+    init(locked: Bool = false, displaysAsleep: Bool = false, sessionInactive: Bool = false) {
+        self.locked = locked
+        self.displaysAsleep = displaysAsleep
+        self.sessionInactive = sessionInactive
+    }
+
+    /// What the system says NOW — the notifications only tell changes, so a launch behind a locked screen (Sparkle's
+    /// relaunch) starts from this: the session's lock flag, the main display's sleep, whether the session is on the
+    /// console. No session dictionary (no window-server session to ask): nothing known, so present.
+    static func system() -> IslandScreenPresence {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        let onConsole = (session?[kCGSessionOnConsoleKey as String] as? Bool) ?? true
+        return IslandScreenPresence(locked: (session?["CGSSessionScreenIsLocked"] as? Bool) ?? false,
+                                    displaysAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+                                    sessionInactive: session != nil && !onConsole)
+    }
 
     /// Nobody can see the screen: locked, its displays asleep, or another user's session in front.
     var away: Bool { locked || displaysAsleep || sessionInactive }

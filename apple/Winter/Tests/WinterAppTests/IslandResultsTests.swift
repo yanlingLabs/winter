@@ -243,6 +243,33 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertEqual(acked(), ["al-1"], "acknowledged only after its whole time on a screen someone could see")
     }
 
+    func testAnAppStartedBehindALockedScreenHoldsItsNotices() {
+        // Sparkle relaunched the app while the screen was locked: no `screenIsLocked` comes, only the reading at start.
+        for away in [IslandScreenPresence(locked: true), IslandScreenPresence(displaysAsleep: true), IslandScreenPresence(sessionInactive: true)] {
+            let (store, acked, _) = alarmStore()
+            store.readScreen = { away }
+            store.screenAtStart()
+            store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1")]))
+            XCTAssertNil(store.currentAlarm)
+            now += 3_600
+            store.tick()
+            XCTAssertEqual(acked(), [], "never acknowledged unseen")
+            store.screenSignal(.unlocked)
+            store.screenSignal(.displaysWoke)
+            store.screenSignal(.sessionActivated)
+            XCTAssertEqual(store.alarms.current?.dismissAt, now + IslandAlarmQueue.showFor)
+            now += IslandAlarmQueue.showFor
+            store.tick()
+            XCTAssertEqual(acked(), ["al-1"])
+        }
+        // Started with someone in front: shown at once.
+        let (store, _, _) = alarmStore()
+        store.readScreen = { IslandScreenPresence() }
+        store.screenAtStart()
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-2")]))
+        XCTAssertEqual(store.currentAlarm?.id, "al-2")
+    }
+
     func testScreenPresenceNeedsEverySignalBack() {
         var screen = IslandScreenPresence()
         XCTAssertFalse(screen.away)

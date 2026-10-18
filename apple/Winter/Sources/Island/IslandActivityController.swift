@@ -364,6 +364,8 @@ final class IslandActivityController {
             }
             screenObservers.append((center, token))
         }
+        // …and where it stands now: a launch behind a locked screen (Sparkle's relaunch) must not start "present".
+        store.screenAtStart()
     }
 
     // MARK: The wake-up

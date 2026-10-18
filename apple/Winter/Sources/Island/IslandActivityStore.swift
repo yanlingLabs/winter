@@ -47,6 +47,8 @@ final class IslandActivityStore: ObservableObject {
     var openSession: (_ sessionId: String, _ hosts: [IslandHost], _ isDispatch: Bool) -> Void = { _, _, _ in }
     /// Opens the island on its Usage tab (a fired plan alarm's notification).
     var openUsageTab: () -> Void = {}
+    /// Who can see the screen right now (`IslandScreenPresence.system`; tests start the app locked through it).
+    var readScreen: () -> IslandScreenPresence = { IslandScreenPresence.system() }
     /// `usage.alarms.ack`: a notice was dismissed, opened or shown its whole time — the daemon forgets it.
     var ackAlarm: (_ id: String) -> Void = { _ in }
     /// `computerUse.wakes.cancel`.
@@ -190,6 +192,15 @@ final class IslandActivityStore: ObservableObject {
     func setIslandOpen(_ open: Bool) {
         guard open != islandOpen else { return }
         islandOpen = open
+        changed()
+    }
+
+    /// Where the screen stands at start (the signals below are changes only): read through `readScreen` by the
+    /// controller's `start()`, once its observers are in — a launch behind a locked screen starts away.
+    func screenAtStart() {
+        let now = readScreen()
+        guard now != screen else { return }
+        screen = now
         changed()
     }
 
