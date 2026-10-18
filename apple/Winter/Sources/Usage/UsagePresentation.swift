@@ -11,16 +11,18 @@ struct UsagePlanRing: Identifiable, Equatable {
     let id: String
     /// "5-hour", "Weekly", "Fable" (a per-model weekly limit is named by its model alone).
     let title: String
-    /// 0…1: what is LEFT of the window (user 2026-10-18: show the usage left, not used) — the ring and its number.
+    /// 0…1: what is USED of the window — the line's fill, and its number on hover (user 2026-10-18: back to used).
     let fraction: Double
-    /// 0…1: what is used — only the colour reads it (amber, then red, as the window runs out).
-    var used: Double { 1 - fraction }
+    /// The same (kept for readers that name it).
+    var used: Double { fraction }
     /// "resets in 2 h 14 min"; a window a day or longer says WHEN — "resets Thu 9:00" (user 2026-10-18: the weekly reset
     /// date). Nil without a reset, or once it passed.
     let resets: String?
     /// The same, short enough for the island's compact ring: "2 h 14 min", "Thu 9:00".
     var resetsShort: String? = nil
     let stale: Bool
+    /// Inside the line under the pointer (user 2026-10-18): "Resets Oct 19 at 2pm", or "Resets 11:10pm" the same day.
+    var resetsHover: String? = nil
 }
 
 /// A plan's slot: Codex now, Claude Code beside it — its rings, where the numbers came from and how old they are, or
@@ -79,7 +81,20 @@ enum UsagePresentation {
         case .winter: return "Winter"
         case .codex: return "Codex"
         case .claudeCode: return "Claude Code"
+        case .opencode: return "OpenCode"
         }
+    }
+
+    /// PURE: whether a source gets its toggle — OpenCode has no plan slot to say "not on this Mac", so its toggle shows
+    /// only when the daemon says it is installed (its stored rows still count in the history either way).
+    static func showsToggle(_ source: UsageSource, summary: UsageSummary?) -> Bool {
+        source != .opencode || summary?.opencodeInstalled == true
+    }
+
+    /// PURE: the sources a request may name — `opencode` only once the daemon has said it knows that source (an older
+    /// daemon refuses an unknown source, and with it the whole summary).
+    static func requestSources(_ sources: Set<UsageSource>, summary: UsageSummary?) -> Set<UsageSource> {
+        summary?.opencodeInstalled == nil ? sources.subtracting([.opencode]) : sources
     }
 
     /// PURE: USD as words — "$0", "<$0.01", "$3.42", "$1,284".
@@ -108,9 +123,26 @@ enum UsagePresentation {
         switch basis {
         case "list": return ""
         case "estimate": return "est."
+        case "reported": return "reported"
         case "mixed": return "part est."
         default: return "unpriced"
         }
+    }
+
+    /// PURE: a model row's cost mark — "est." with a "*" when some of its days are Claude Code `/stats` estimates.
+    static func basisMark(_ row: UsageModelRow) -> String {
+        let mark = basisMark(row.costBasis)
+        return row.totals.syntheticRecords > 0 ? mark + "*" : mark
+    }
+
+    /// PURE: the Claude Code section's history line ("History before 1 Oct 2026 from Claude Code’s /stats"), or nil.
+    /// `before` is noon UTC of the first transcript day: the same calendar date in every zone the app runs in.
+    static func statsHistoryLine(before: Double?) -> String? {
+        guard let before else { return nil }
+        let utc = TimeZone(identifier: "UTC") ?? .current
+        var style = Date.FormatStyle(date: .abbreviated, time: .omitted)
+        style.timeZone = utc
+        return "History before \(Date(timeIntervalSince1970: before / 1000).formatted(style)) from Claude Code’s /stats"
     }
 
     /// PURE: a plan source as words.
@@ -121,6 +153,7 @@ enum UsagePresentation {
         case "winter-codex-oauth": return "From Winter’s ChatGPT sign-in"
         case "claude-cli": return "From Claude Code"
         case "claude-cache": return "From Claude Code’s cache"
+        case "agy-cli": return "From Antigravity"
         case "disabled": return "Tracking off"
         default: return "Not found"
         }
@@ -129,8 +162,16 @@ enum UsagePresentation {
     // MARK: plans
 
     static func windowTitle(_ w: UsagePlanWindow) -> String {
-        // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
-        if let scope = w.scope, !scope.isEmpty { return scopeName(scope) }
+        if let scope = w.scope, !scope.isEmpty {
+            // A model GROUP's own windows (Antigravity's): its main group, Gemini, reads like every other plan ("5-hour",
+            // "Weekly"); any other group is "Other" — short beside the rest (user 2026-10-18: "Other 5h", "Other W").
+            if w.kind == "five_hour" || w.kind == "weekly" {
+                if scope.caseInsensitiveCompare("Gemini") == .orderedSame { return w.kind == "five_hour" ? "5-hour" : "Weekly" }
+                return w.kind == "five_hour" ? "Other 5h" : "Other W"
+            }
+            // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
+            return scopeName(scope)
+        }
         switch w.kind {
         case "five_hour": return "5-hour"
         case "weekly", "weekly_scoped": return "Weekly"
@@ -148,17 +189,24 @@ enum UsagePresentation {
         return scope.prefix(1).uppercased() + scope.dropFirst()
     }
 
-    /// PURE: a reading's rings, the 5-hour first, then weekly, then per-model weekly.
+    /// PURE: a reading's rings, the 5-hour first, then weekly, then per-model weekly — a model group's windows
+    /// (Antigravity's) together, the groups in the order the source gave them.
     static func rings(_ reading: UsagePlanReading?, now: Date) -> [UsagePlanRing] {
         guard let reading else { return [] }
         let order: [String: Int] = ["five_hour": 0, "weekly": 1, "weekly_scoped": 2]
+        var groups: [String] = []
+        for w in reading.windows where w.kind != "weekly_scoped" {
+            if let scope = w.scope, !groups.contains(scope) { groups.append(scope) }
+        }
+        let group = { (w: UsagePlanWindow) -> Int in w.kind == "weekly_scoped" ? 0 : w.scope.flatMap { groups.firstIndex(of: $0) } ?? 0 }
         return reading.windows
-            .sorted { (order[$0.kind] ?? 3, $0.id) < (order[$1.kind] ?? 3, $1.id) }
+            .sorted { (group($0), order[$0.kind] ?? 3, $0.id) < (group($1), order[$1.kind] ?? 3, $1.id) }
             .map { w in
                 let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? $0 : nil }
                 let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
-                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: 1 - min(1, max(0, w.usedPercent / 100)),
-                                     resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale)
+                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: min(1, max(0, w.usedPercent / 100)),
+                                     resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale,
+                                     resetsHover: reset.map { hoverResetWords($0, now: now) })
             }
     }
 
@@ -174,9 +222,74 @@ enum UsagePresentation {
         return f.string(from: reset)
     }
 
-    /// PURE: a plan's slot. `provider` is "codex" or "claude-code" (its reading may be nil before the first answer).
+    /// PURE: the reset inside a hovered line (user 2026-10-18) — "Resets 11:10pm" when it falls today, else
+    /// "Resets Oct 19 at 2pm"; the minutes only when they are not :00.
+    static func hoverResetWords(_ reset: Date, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        let parts = calendar.dateComponents([.hour, .minute], from: reset)
+        let hour = parts.hour ?? 0, minute = parts.minute ?? 0
+        let clock = "\(hour % 12 == 0 ? 12 : hour % 12)\(minute == 0 ? "" : String(format: ":%02d", minute))\(hour < 12 ? "am" : "pm")"
+        if calendar.isDate(reset, inSameDayAs: now) { return "Resets \(clock)" }
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.locale = locale
+        f.dateFormat = "MMM d"
+        return "Resets \(f.string(from: reset)) at \(clock)"
+    }
+
+    /// PURE: a plan's badge (user 2026-10-18) — Codex's own names spelled out ("prolite" → "Pro Lite", "promax" → "Pro
+    /// Max"), a plan with its size ("max_20x" → "Max 20x"), else its words capitalised ("plus" → "Plus").
+    static func planBadge(_ raw: String) -> String {
+        let spelled: [String: String] = ["prolite": "Pro Lite", "promax": "Pro Max"]
+        if let name = spelled[raw.lowercased()] { return name }
+        if let m = raw.range(of: #"_(\d{1,3})x$"#, options: .regularExpression) {
+            let name = String(raw[..<m.lowerBound])
+            return "\(planBadge(name)) \(raw[raw.index(after: m.lowerBound)...])"
+        }
+        return raw.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    /// PURE: whether a plan gets a slot at all — not when its app is not on this Mac (user 2026-10-18). Before the
+    /// first answer it shows ("Reading…").
+    static func showsSlot(_ reading: UsagePlanReading?) -> Bool { reading?.source != "not-installed" }
+
+    /// The plans in the order both surfaces show them: Codex, Claude Code, Antigravity.
+    static func plans(_ summary: UsageSummary?) -> [(provider: String, reading: UsagePlanReading?)] {
+        [("codex", summary?.codexPlan), ("claude-code", summary?.claudeCodePlan), ("antigravity", summary?.antigravityPlan)]
+    }
+
+    static func planTitle(provider: String) -> String {
+        switch provider {
+        case "codex": return "Codex"
+        case "antigravity": return "Antigravity"
+        default: return "Claude Code"
+        }
+    }
+
+    /// PURE: the plan lines' title column — the floor (52 pt in the island, 72 in the window), wider only when a title
+    /// needs it ("Claude & GPT week"), so no title truncates and every line of a block starts at one x. Under the pointer
+    /// the title grows (`UsagePlanLine.titleScale`) while the track reaches left by half its growth
+    /// (`UsagePlanLine.lengthGrowth`): the column leaves room for both, so the widest title never touches the track.
+    static func titleColumnWidth(_ titles: [String], compact: Bool) -> CGFloat {
+        let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
+        let widest = titles.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        return max(compact ? 52 : 72, (max(widest, hoverTitleReach(titles, compact: compact)) + 1).rounded(.up))
+    }
+
+    /// PURE: how far right of the column's start the widest title reaches under the pointer, measured against the
+    /// track's hovered start (the column's width + the gap − the leftward growth): the column is wide enough when this
+    /// is at most its width.
+    static func hoverTitleReach(_ titles: [String], compact: Bool) -> CGFloat {
+        let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
+        let widest = titles.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        return widest * UsagePlanLine.titleScale(hovered: true) + UsagePlanLine.lengthGrowth(hovered: true) / 2
+            - UsagePlanLine.titleGap(compact: compact)
+    }
+
+    /// PURE: a plan's slot. `provider` is "codex", "claude-code" or "antigravity" (its reading may be nil before the
+    /// first answer).
     static func slot(provider: String, reading: UsagePlanReading?, now: Date) -> UsagePlanSlot {
-        let title = provider == "codex" ? "Codex" : "Claude Code"
+        let title = planTitle(provider: provider)
         guard let reading else {
             return UsagePlanSlot(id: provider, title: title, rings: [], sourceLine: "", emptyLine: "Reading…", planType: nil)
         }
@@ -184,7 +297,7 @@ enum UsagePresentation {
         var parts = [planSourceWords(reading.source)]
         if let at = reading.at { parts.append(islandRelativePast(Date(timeIntervalSince1970: at / 1000), now: now)) }
         if rings.contains(where: \.stale) { parts.append("stale") }
-        let planType = reading.planType.map { $0.replacingOccurrences(of: "_", with: " ").capitalized }
+        let planType = reading.planType.map(planBadge)
         if !rings.isEmpty {
             return UsagePlanSlot(id: provider, title: title, rings: rings, sourceLine: parts.joined(separator: " · "), emptyLine: nil, planType: planType)
         }
@@ -198,7 +311,7 @@ enum UsagePresentation {
         case "disabled":
             empty = "Tracking is off"
         default:
-            empty = provider == "codex" ? "Codex not found on this Mac" : "No plan report from Claude Code"
+            empty = provider == "codex" ? "Codex not found on this Mac" : "No plan report from \(title)"
         }
         return UsagePlanSlot(id: provider, title: title, rings: [], sourceLine: parts.joined(separator: " · "), emptyLine: empty, planType: planType)
     }
@@ -314,7 +427,8 @@ enum UsagePresentation {
 
     /// What a plan can cover, with words.
     static let coverOptions: [(id: String, title: String)] = [
-        ("codex", "Codex"), ("claude-code", "Claude Code"), ("winter:codex-oauth", "Winter on ChatGPT"), ("winter", "All of Winter"),
+        ("codex", "Codex"), ("claude-code", "Claude Code"), ("opencode", "OpenCode"), ("winter:codex-oauth", "Winter on ChatGPT"),
+        ("winter", "All of Winter"),
     ]
 
     /// PURE: a provider's default covers ("openai" → Codex + Winter on ChatGPT).
