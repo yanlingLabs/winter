@@ -297,24 +297,25 @@ enum IslandGallery {
     static func sampleServers(now: Date) -> IslandServersModel {
         let start = { (ago: TimeInterval) in UInt64(now.timeIntervalSince1970 - ago) }
         let home = "/Users/sample"
-        func process(_ pid: Int32, parent: Int32 = 1, ago: TimeInterval, path: String, args: [String]? = nil, cwd: String,
-                     tcp: [UInt16] = [], unix: [String] = []) -> ServerProcess {
+        // The bot and its worker share a process group (one row); the others each have their own.
+        func process(_ pid: Int32, parent: Int32 = 1, group: Int32, ago: TimeInterval, path: String, args: [String]? = nil,
+                     cwd: String, tcp: [UInt16]) -> ServerProcess {
             ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
-                          ppid: parent, path: path, cwd: cwd, tcpPorts: tcp, unixSockets: unix, arguments: args)
+                          ppid: parent, pgid: group, path: path, cwd: cwd, tcpPorts: tcp, arguments: args)
         }
         let model = IslandServersModel()
         model.user = 501
         model.ownPid = 0
         model.home = home
         model.apply([
-            process(400, ago: 3 * 3600 + 12 * 60, path: "/opt/homebrew/bin/node", args: ["node", "bot.js", "remote"],
+            process(400, group: 400, ago: 3 * 3600 + 12 * 60, path: "/opt/homebrew/bin/node", args: ["node", "bot.js", "remote"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [3888]),
-            process(401, parent: 400, ago: 3 * 3600, path: "/opt/homebrew/bin/node", args: ["node", "worker.js"],
+            process(401, parent: 400, group: 400, ago: 3 * 3600, path: "/opt/homebrew/bin/node", args: ["node", "worker.js"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [61010]),
-            process(410, ago: 25 * 60, path: "/usr/bin/python3", args: ["python3", "-m", "http.server", "8000"],
+            process(410, group: 410, ago: 25 * 60, path: "/usr/bin/python3", args: ["python3", "-m", "http.server", "8000"],
                     cwd: "\(home)/Sites/portfolio", tcp: [8000]),
-            process(420, ago: 2 * 86400, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
-                    cwd: "\(home)/Code/dashboard", tcp: [3000], unix: ["/tmp/dashboard.sock"]),
+            process(420, group: 420, ago: 2 * 86400, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
+                    cwd: "\(home)/Code/dashboard", tcp: [3000, 3001]),
         ])
         return model
     }
