@@ -36,13 +36,32 @@ final class UsageWindowTests: XCTestCase {
         let slot = UsagePresentation.slot(provider: "codex", reading: reading, now: now)
         XCTAssertEqual(slot.title, "Codex")
         XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly"])
-        XCTAssertEqual(slot.rings.map(\.fraction), [0.02, 0.34])
+        // The rings show what is LEFT (2 % and 34 % used → 98 % and 66 % left); the colour reads what is used.
+        for (ring, (left, used)) in zip(slot.rings, [(0.98, 0.02), (0.66, 0.34)]) {
+            XCTAssertEqual(ring.fraction, left, accuracy: 1e-9)
+            XCTAssertEqual(ring.used, used, accuracy: 1e-9)
+        }
         XCTAssertNil(slot.rings[0].resets, "a passed reset says nothing")
-        XCTAssertEqual(slot.rings[1].resets, "resets in 1 d")
+        // The weekly window says WHEN it resets (its day and time), not a countdown.
+        XCTAssertEqual(slot.rings[1].resets.map { $0.hasPrefix("resets ") && !$0.hasPrefix("resets in") }, true)
+        XCTAssertEqual(slot.rings[1].resets, slot.rings[1].resetsShort.map { "resets \($0)" })
         XCTAssertTrue(slot.rings[0].stale)
         XCTAssertEqual(slot.sourceLine, "From Codex’s last session · 3 h ago · stale")
         XCTAssertEqual(slot.planType, "Plus")
         XCTAssertNil(slot.emptyLine)
+    }
+
+    func testResetWordsCountDownAShortWindowAndDateALongOne() {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let en = Locale(identifier: "en_US")
+        // now = Fri 2027-01-15 08:00 UTC.
+        let tomorrow = UsagePresentation.resetWords(now.addingTimeInterval(86_400), windowMinutes: 10_080, now: now, calendar: utc, locale: en)
+        XCTAssertTrue(tomorrow.hasPrefix("Sat") && tomorrow.contains("8:00"), tomorrow)
+        let farOff = UsagePresentation.resetWords(now.addingTimeInterval(10 * 86_400), windowMinutes: 43_200, now: now, calendar: utc, locale: en)
+        XCTAssertEqual(farOff, "Jan 25")
+        let fiveHour = UsagePresentation.resetWords(now.addingTimeInterval(7_200), windowMinutes: 300, now: now, calendar: utc, locale: en)
+        XCTAssertEqual(fiveHour, islandRelativeFuture(now.addingTimeInterval(7_200), now: now))
     }
 
     func testTheClaudeCodeSlotNamesThePerModelWindowAndTheFallbacksAreWorded() {
@@ -52,7 +71,10 @@ final class UsageWindowTests: XCTestCase {
             UsagePlanWindow(id: "weekly_all:1", kind: "weekly", windowMinutes: 10_080, usedPercent: 61),
         ])
         let slot = UsagePresentation.slot(provider: "claude-code", reading: reading, now: now)
-        XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly", "Weekly · Opus"])
+        XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly", "Opus"])
+        XCTAssertEqual(UsagePresentation.scopeName("claude-fable-5-1"), "Fable")
+        XCTAssertEqual(UsagePresentation.scopeName("fable"), "Fable")
+        XCTAssertEqual(UsagePresentation.scopeName("custom"), "Custom")
         XCTAssertEqual(slot.sourceLine, "From Claude Code · just now")
 
         let status = UsagePlanReading(provider: "codex", source: "winter-codex-oauth", at: ms(-60),

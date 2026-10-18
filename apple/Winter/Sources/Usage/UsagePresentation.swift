@@ -9,12 +9,17 @@ import WinterKit
 /// One plan ring: a window of the user's own Codex or Claude Code plan.
 struct UsagePlanRing: Identifiable, Equatable {
     let id: String
-    /// "5-hour", "Weekly", "Weekly · Opus".
+    /// "5-hour", "Weekly", "Fable" (a per-model weekly limit is named by its model alone).
     let title: String
-    /// 0…1.
+    /// 0…1: what is LEFT of the window (user 2026-10-18: show the usage left, not used) — the ring and its number.
     let fraction: Double
-    /// "resets in 2 h 14 min" (nil without a reset, or once it passed).
+    /// 0…1: what is used — only the colour reads it (amber, then red, as the window runs out).
+    var used: Double { 1 - fraction }
+    /// "resets in 2 h 14 min"; a window a day or longer says WHEN — "resets Thu 9:00" (user 2026-10-18: the weekly reset
+    /// date). Nil without a reset, or once it passed.
     let resets: String?
+    /// The same, short enough for the island's compact ring: "2 h 14 min", "Thu 9:00".
+    var resetsShort: String? = nil
     let stale: Bool
 }
 
@@ -124,14 +129,23 @@ enum UsagePresentation {
     // MARK: plans
 
     static func windowTitle(_ w: UsagePlanWindow) -> String {
-        let base: String
+        // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
+        if let scope = w.scope, !scope.isEmpty { return scopeName(scope) }
         switch w.kind {
-        case "five_hour": base = "5-hour"
-        case "weekly", "weekly_scoped": base = "Weekly"
-        default: base = w.windowMinutes.map { $0 >= 1_440 ? "\(Int($0 / 1_440))-day" : "\(Int($0 / 60))-hour" } ?? "Window"
+        case "five_hour": return "5-hour"
+        case "weekly", "weekly_scoped": return "Weekly"
+        default: return w.windowMinutes.map { $0 >= 1_440 ? "\(Int($0 / 1_440))-day" : "\(Int($0 / 60))-hour" } ?? "Window"
         }
-        if let scope = w.scope, !scope.isEmpty { return "\(base) · \(scope.prefix(1).uppercased())\(scope.dropFirst())" }
-        return base
+    }
+
+    /// PURE: a limit's model scope as a name — the model family when it is one ("claude-fable-5-1", "fable" → "Fable"),
+    /// else the scope capitalised.
+    static func scopeName(_ scope: String) -> String {
+        let lower = scope.lowercased()
+        for family in ["fable", "opus", "sonnet", "haiku"] where lower.contains(family) {
+            return family.prefix(1).uppercased() + family.dropFirst()
+        }
+        return scope.prefix(1).uppercased() + scope.dropFirst()
     }
 
     /// PURE: a reading's rings, the 5-hour first, then weekly, then per-model weekly.
@@ -141,11 +155,23 @@ enum UsagePresentation {
         return reading.windows
             .sorted { (order[$0.kind] ?? 3, $0.id) < (order[$1.kind] ?? 3, $1.id) }
             .map { w in
-                let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }
-                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: min(1, max(0, w.usedPercent / 100)),
-                                     resets: reset.flatMap { $0 > now ? "resets \(islandRelativeFuture($0, now: now))" : nil },
-                                     stale: w.stale)
+                let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? $0 : nil }
+                let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
+                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: 1 - min(1, max(0, w.usedPercent / 100)),
+                                     resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale)
             }
+    }
+
+    /// PURE: when a window resets — a short one as a countdown ("in 2 h 14 min"), a day-long or longer one as its day
+    /// and time ("Thu 9:00", in the user's locale and time zone), or its date once more than a week away ("Oct 30").
+    static func resetWords(_ reset: Date, windowMinutes: Double, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        guard windowMinutes >= 1_440 else { return islandRelativeFuture(reset, now: now) }
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.locale = locale
+        f.setLocalizedDateFormatFromTemplate(reset.timeIntervalSince(now) < 6.5 * 86_400 ? "EEEjmm" : "MMMd")
+        return f.string(from: reset)
     }
 
     /// PURE: a plan's slot. `provider` is "codex" or "claude-code" (its reading may be nil before the first answer).

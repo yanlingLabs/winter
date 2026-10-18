@@ -159,7 +159,7 @@ struct UsageWindowContent: View {
     // MARK: plans
 
     private func plans(now: Date) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 18) {
             UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: model.summary?.codexPlan, now: now))
             UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
         }
@@ -433,13 +433,23 @@ struct UsageTile: View {
     }
 }
 
-/// A plan's slot: the rings (or why there are none), the source and its age.
+/// The plan lines' colours (user 2026-10-18): Codex green, Claude Code Claude's own clay.
+enum UsagePlanColor {
+    static let codex = Color(red: 0.063, green: 0.639, blue: 0.498)
+    static let claudeCode = Color(red: 0.851, green: 0.467, blue: 0.341)
+
+    static func of(provider: String) -> Color { provider == "codex" ? codex : claudeCode }
+}
+
+/// A plan's slot (user 2026-10-18): the plan's name, then one LINE per window filling left to right with what is LEFT
+/// (Codex green, Claude Code clay; grey while stale) — or why there are none — then the source and its age. No card
+/// behind it.
 struct UsagePlanSlotCard: View {
     let slot: UsagePlanSlot
     var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 6 : 10) {
+        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
             HStack(spacing: 6) {
                 Text(slot.title).font(compact ? Typography.caption(.semibold) : Typography.label(.semibold)).foregroundStyle(Color.white)
                 if let plan = slot.planType {
@@ -447,34 +457,53 @@ struct UsagePlanSlotCard: View {
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Capsule().fill(Color.white.opacity(0.08)))
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                if !slot.sourceLine.isEmpty {
+                    Text(slot.sourceLine).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                }
             }
             if let empty = slot.emptyLine {
                 Text(empty).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(2)
-                    .frame(maxWidth: .infinity, minHeight: compact ? 30 : 56, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                HStack(alignment: .top, spacing: compact ? 10 : 16) {
-                    ForEach(slot.rings) { ring in
-                        VStack(spacing: 3) {
-                            IslandRing(fraction: ring.fraction, size: compact ? 32 : 52, line: compact ? 3.5 : 5,
-                                       color: ring.stale ? Color(nsColor: .systemGray) : islandFillColor(ring.fraction))
-                                .opacity(ring.stale ? 0.6 : 1)
-                            Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.8)).lineLimit(1)
-                            if !compact, let r = ring.resets {
-                                Text(r).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                            }
-                        }
-                        .fixedSize()
-                    }
+                ForEach(slot.rings) { ring in
+                    UsagePlanLine(ring: ring, color: UsagePlanColor.of(provider: slot.id), compact: compact)
                 }
             }
-            if !slot.sourceLine.isEmpty {
-                Text(slot.sourceLine).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// One window as a line: its name, the bar (what is LEFT, from the left), "66% left", and when it resets.
+struct UsagePlanLine: View {
+    let ring: UsagePlanRing
+    let color: Color
+    var compact = false
+
+    var body: some View {
+        let pct = Int((min(1, max(0, ring.fraction)) * 100).rounded())
+        HStack(spacing: compact ? 8 : 12) {
+            Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.85)).lineLimit(1)
+                .frame(width: compact ? 52 : 72, alignment: .leading)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule().fill(ring.stale ? Color(nsColor: .systemGray) : color)
+                        .frame(width: max(ring.fraction > 0 ? 4 : 0, proxy.size.width * min(1, max(0, ring.fraction))))
+                }
+            }
+            .frame(height: compact ? 5 : 7)
+            .opacity(ring.stale ? 0.6 : 1)
+            Text("\(pct)% left").font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white).lineLimit(1)
+                .frame(width: compact ? 58 : 70, alignment: .trailing)
+            if let r = compact ? ring.resetsShort : ring.resets {
+                Text(r).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                    .frame(width: compact ? 70 : 130, alignment: .leading)
             }
         }
-        .padding(compact ? 10 : 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: compact ? IslandLayout.rowCorner : 16, style: .continuous).fill(Color.white.opacity(compact ? 0.06 : 0.05)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(ring.title): \(pct)% left\(ring.resets.map { ", \($0)" } ?? "")")
     }
 }
 

@@ -383,10 +383,12 @@ struct IslandUsageCompact: View {
     var body: some View {
         let summary = model.summary
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
+            // Codex and its lines, then Claude Code and its lines (user 2026-10-18).
+            VStack(alignment: .leading, spacing: 10) {
                 UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: summary?.codexPlan, now: now), compact: true)
                 UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: summary?.claudeCodePlan, now: now), compact: true)
             }
+            .padding(.horizontal, 6)
             IslandHoverSurface { _ in
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
