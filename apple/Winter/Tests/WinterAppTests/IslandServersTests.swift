@@ -68,13 +68,10 @@ final class IslandServersTests: XCTestCase {
             process(135, path: "/Users/me/.local/share/claude/versions/2.1.299", tcp: [63614]),
             process(136, path: "/Users/me/.local/bin/cursor-agent", tcp: [63615]),
             process(137, path: node, args: ["node", "/opt/homebrew/lib/node_modules/@github/copilot/index.js"], tcp: [63616]),
-            // Started by Winter (an MCP server under the daemon, a tool under this app): never a row.
+            // Winter's infrastructure (an MCP server under the daemon, a helper under this app): never a row.
             process(140, path: "/Users/me/winter/dist/dev/winter-core"),
             process(141, parent: 140, path: node, args: ["node", "mcp-server.js"], tcp: [4800]),
             process(142, parent: ownPid, path: "/usr/local/bin/helper-server", tcp: [4900]),
-            process(143, path: "/Applications/Winter.app/Contents/MacOS/Winter"),
-            process(144, parent: 145, path: "/opt/homebrew/bin/bun", args: ["bun", "tool.ts"], tcp: [4950]),
-            process(145, parent: 143, path: "/bin/zsh"),
         ]
         XCTAssertEqual(Set(rows(list).map(\.name)), ["bot", "http.server", "uvicorn", "mydaemon", "serve", "waifus", "notebook"])
         // Each rule on its own.
@@ -96,6 +93,35 @@ final class IslandServersTests: XCTestCase {
         XCTAssertTrue(IslandServers.isWinter(path: "/Applications/Winter Dev.app/Contents/Helpers/x", command: ""))
         XCTAssertTrue(IslandServers.isWinter(path: "", command: "winter-core"))
         XCTAssertFalse(IslandServers.isWinter(path: "/Users/me/winter-docs/server", command: "server"))
+    }
+
+    /// Winter's own infrastructure is hidden; a server a Winter session ran through its shell is the user's: shown.
+    func testAServerASessionRanThroughItsShellIsListedButWintersInfrastructureIsNot() {
+        let node = "/opt/homebrew/bin/node"
+        let list = [
+            // winter-core → node mcp-server: no shell between — hidden.
+            process(200, path: "/Users/me/.winter/bin/winter-core"),
+            process(201, parent: 200, path: node, args: ["node", "mcp-server.js"], tcp: [4800]),
+            // winter-core → node → node: still no shell — hidden.
+            process(202, parent: 200, path: node, args: ["node", "launcher.js"]),
+            process(203, parent: 202, path: node, args: ["node", "inspector.js"], tcp: [4801]),
+            // winter (a code session) → bash -c … → bun dev: the user's dev server — shown.
+            process(210, parent: 200, path: "/Users/me/.winter/bin/winter"),
+            process(211, parent: 210, path: "/bin/bash", args: nil),
+            process(212, parent: 211, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
+                    cwd: "/Users/me/shop", tcp: [5173]),
+            // Winter.app → zsh (the Dispatch pill's terminal) → python: shown; this app → a helper directly: hidden.
+            process(220, path: "/Applications/Winter.app/Contents/MacOS/Winter"),
+            process(221, parent: 220, path: "/bin/zsh"),
+            process(222, parent: 221, path: "/usr/bin/python3", args: ["python3", "-m", "http.server"], tcp: [8000]),
+            process(223, parent: ownPid, path: "/usr/local/bin/helper-server", tcp: [4900]),
+            process(224, parent: ownPid, path: "/bin/sh", command: "sh"),
+            process(225, parent: 224, path: "/usr/local/bin/devd", tcp: [4901]),
+        ]
+        XCTAssertEqual(Set(rows(list).map(\.name)), ["shop", "http.server", "devd"])
+        XCTAssertTrue(IslandServers.isShell(process(1, path: "/opt/homebrew/bin/fish")))
+        XCTAssertTrue(IslandServers.isShell(process(1, path: "", command: "dash")))
+        XCTAssertFalse(IslandServers.isShell(process(1, path: "/opt/homebrew/bin/tmux")))
     }
 
     // MARK: Names

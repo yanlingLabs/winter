@@ -15,8 +15,9 @@ import WinterCUPresentation
 //     on this tab (the open island's refresh beat) — never in the background.
 //   - EXCLUDED: Apple's and the system's (`/System`, `/usr/libexec`, `/usr/sbin`, `/usr/bin`, `/bin`, `/sbin`,
 //     `/Library/Apple`, `/Library/Developer` — Xcode's tools and the simulators), anything inside a `.app` bundle (a GUI
-//     app's ports are not a server you started), Winter's own and everything Winter started (`winter-core`, `winter`,
-//     its helpers, this app — and their descendants), the coding-agent CLIs (`agentCLIs`), `launchd`. An interpreter
+//     app's ports are not a server you started), Winter's own infrastructure (`winter-core`, `winter`, its helpers,
+//     this app, and what they start with no shell in between — a server a session ran through its shell IS listed),
+//     the coding-agent CLIs (`agentCLIs`), `launchd`. An interpreter
 //     (node, bun, deno, python, ruby, java, php, perl) under `/usr/bin` or `/Library/Developer`, or in a framework's
 //     `Python.app` (Homebrew's, Xcode's), IS listed.
 //   - ONE ROW per server: a listener goes under its nearest listening ancestor only when it is that server's own —
@@ -130,6 +131,13 @@ enum IslandServers {
         let base = (path as NSString).lastPathComponent
         if winterNames.contains(base) || winterNames.contains(command) { return true }
         return path.split(separator: "/").contains { $0.hasPrefix("Winter") && $0.hasSuffix(".app") }
+    }
+
+    /// The shells: one between Winter and a listener makes that listener a server a session ran for the user.
+    static let shells: Set<String> = ["sh", "bash", "zsh", "fish", "dash"]
+
+    static func isShell(_ p: ServerProcess) -> Bool {
+        shells.contains(executableName(p)) || shells.contains(p.command)
     }
 
     /// A coding-agent CLI (`agentCLIs`): its executable or short command, an interpreter's script or package, or a
@@ -354,12 +362,13 @@ enum IslandServers {
 
     // MARK: Rows
 
-    /// The rows, newest first. A listener started under Winter (a server an agent session or an MCP launch made) is
-    /// never one. Each other listener is its own row unless its NEAREST listening ancestor is the same server — the
-    /// same process group or the same executable (forked workers) —, in which case it joins that one's row. The walk
-    /// up goes through parents that listen on nothing (`npm run dev` → `node server.js`) but never past a coding agent
-    /// (hidden, it heads nothing), and stops at launchd or a process that is not the user's: a shell, tmux or an agent
-    /// session that started two servers never makes them one row, so Stop never reaches the other.
+    /// The rows, newest first. Winter's own infrastructure (a listener with Winter up its tree and no shell in
+    /// between — an MCP server) is never one. Each other listener is its own row unless its NEAREST listening ancestor
+    /// is the same server — the same process group or the same executable (forked workers) —, in which case it joins
+    /// that one's row. The walk up goes through parents that listen on nothing (`npm run dev` → `node server.js`) but
+    /// never past a coding agent (hidden, it heads nothing), and stops at launchd or a process that is not the user's:
+    /// a shell, tmux or an agent session that started two servers never makes them one row, so Stop never reaches the
+    /// other.
     static func rows(_ processes: [ServerProcess], user: uid_t, ownPid: Int32, home: String) -> [IslandServerRow] {
         let mine = processes.filter { $0.uid == user }
         var byPid: [Int32: ServerProcess] = [:]
@@ -376,8 +385,21 @@ enum IslandServers {
             }
             return out
         }
-        let underWinter = { (p: ServerProcess) in
-            ancestors(p).contains { $0.pid == ownPid || isWinter(path: $0.path, command: $0.command) }
+        // Winter's own infrastructure: a Winter process (or this app) up the tree with NO shell in between (an MCP
+        // server the daemon started). A server a session ran through its shell (`winter → bash -c … → bun dev`) is the
+        // user's, started on their behalf: listed.
+        let underWinter = { (p: ServerProcess) -> Bool in
+            var seen: Set<Int32> = [p.pid]
+            var parent = p.ppid
+            while parent > 1 {
+                // This app, whether or not the scan listed it.
+                if parent == ownPid { return true }
+                guard let a = byPid[parent], seen.insert(parent).inserted else { return false }
+                if isWinter(path: a.path, command: a.command) { return true }
+                if isShell(a) { return false }
+                parent = a.ppid
+            }
+            return false
         }
         let qualifying = Set(mine.filter { qualifies($0, user: user, ownPid: ownPid) && !underWinter($0) }.map(\.pid))
 
