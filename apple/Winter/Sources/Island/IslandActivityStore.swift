@@ -60,6 +60,8 @@ final class IslandActivityStore: ObservableObject {
     private(set) var cardOnTop = false
     /// The island is open: its tabs show it all, so an alarm's notice waits for it to close.
     private(set) var islandOpen = false
+    /// Whether anyone can see the screen (locked, displays asleep, another session): away, a notice waits.
+    private(set) var screen = IslandScreenPresence()
 
     // MARK: Reading
 
@@ -191,6 +193,13 @@ final class IslandActivityStore: ObservableObject {
         changed()
     }
 
+    /// The screen was locked or unlocked, its displays slept or woke, the session resigned or came back.
+    func screenSignal(_ signal: IslandScreenPresence.Signal) {
+        let before = screen
+        screen.note(signal)
+        if screen != before { changed() }
+    }
+
     func tick() {
         let now = clock()
         cu.tick(now: now)
@@ -272,8 +281,9 @@ final class IslandActivityStore: ObservableObject {
             mirrorOpen = false
             mirrorSessionId = nil
         }
-        // The notices wait while the top is not theirs: a card needing an answer, the open island, the agent's mouse.
-        let blocked = cardOnTop || islandOpen || cu.usingRealMouse
+        // The notices wait while the top is not theirs — a card needing an answer, the open island, the agent's mouse —
+        // or nobody can see it (locked, asleep, another session): their 12 s count only while really seen.
+        let blocked = cardOnTop || islandOpen || cu.usingRealMouse || screen.away
         if blocked != alarms.blocked { alarms.setBlocked(blocked, now: clock()) }
         let deadlines = [cu.nextDeadline, results.nextDeadline, alarms.nextDeadline].compactMap { $0 }
         scheduleWake(deadlines.min())

@@ -196,6 +196,35 @@ struct IslandAlarmQueue: Equatable {
     }
 }
 
+/// Whether anyone can see the screen (review 2026-10-18): an alarm's notice counts its time only on an awake, unlocked
+/// screen in the active console session — away, it waits (`IslandAlarmQueue.setBlocked`), so one that fires while the
+/// user is gone is never acknowledged unseen. Fed by the system's own signals (`IslandActivityController`): the screen
+/// lock's `com.apple.screenIsLocked`/`Unlocked` (DistributedNotificationCenter), `NSWorkspace`'s `screensDidSleep`/
+/// `screensDidWake` and `sessionDidResignActive`/`sessionDidBecomeActive`. Pure (`IslandResultsTests`).
+struct IslandScreenPresence: Equatable {
+    enum Signal: Equatable {
+        case locked, unlocked, displaysSlept, displaysWoke, sessionResigned, sessionActivated
+    }
+
+    private(set) var locked = false
+    private(set) var displaysAsleep = false
+    private(set) var sessionInactive = false
+
+    /// Nobody can see the screen: locked, its displays asleep, or another user's session in front.
+    var away: Bool { locked || displaysAsleep || sessionInactive }
+
+    mutating func note(_ signal: Signal) {
+        switch signal {
+        case .locked: locked = true
+        case .unlocked: locked = false
+        case .displaysSlept: displaysAsleep = true
+        case .displaysWoke: displaysAsleep = false
+        case .sessionResigned: sessionInactive = true
+        case .sessionActivated: sessionInactive = false
+        }
+    }
+}
+
 // MARK: - Who owns the top
 
 /// What the island's activity panel draws under the housing.

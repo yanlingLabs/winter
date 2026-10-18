@@ -52,11 +52,14 @@ final class IslandActivityController {
         started = true
         store.onChange = { [weak self] in self?.layout() }
         store.scheduleWake = { [weak self] deadline in self?.armWake(deadline) }
+        observeScreen()
         layout()
     }
 
     func stop() {
         started = false
+        for (center, token) in screenObservers { center.removeObserver(token) }
+        screenObservers = []
         wake?.cancel()
         removePointerMonitors()
         panel.orderOut(nil)
@@ -337,6 +340,30 @@ final class IslandActivityController {
         }
         panel.ignoresMouseEvents = !over
         if case .result = decision.slot { store.hoverResult(over) }
+    }
+
+    // MARK: Who can see the screen
+
+    private var screenObservers: [(NotificationCenter, NSObjectProtocol)] = []
+
+    /// The screen lock, the displays' sleep and the console session (`IslandScreenPresence`): an alarm's notice counts its
+    /// time only while someone can see it. Event-driven: nothing runs between the system's own notifications.
+    private func observeScreen() {
+        guard screenObservers.isEmpty else { return }
+        let signals: [(NotificationCenter, Notification.Name, IslandScreenPresence.Signal)] = [
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"), .locked),
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsUnlocked"), .unlocked),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidSleepNotification, .displaysSlept),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidWakeNotification, .displaysWoke),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.sessionDidResignActiveNotification, .sessionResigned),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.sessionDidBecomeActiveNotification, .sessionActivated),
+        ]
+        for (center, name, signal) in signals {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.store.screenSignal(signal) }
+            }
+            screenObservers.append((center, token))
+        }
     }
 
     // MARK: The wake-up

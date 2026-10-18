@@ -214,6 +214,51 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertEqual(acked(), ["al-1"])
     }
 
+    func testANoticeCountsItsTimeOnlyWhileSomeoneCanSeeTheScreen() {
+        let (store, acked, _) = alarmStore()
+        // Fired while the screen was locked: it waits, however long, and is never acknowledged unseen.
+        store.screenSignal(.locked)
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1")]))
+        XCTAssertNil(store.currentAlarm)
+        now += 3_600
+        store.tick()
+        XCTAssertEqual(acked(), [])
+        store.screenSignal(.unlocked)
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        // The displays sleep mid-way: cut short, it is shown whole again once they wake.
+        now += 8
+        store.screenSignal(.displaysSlept)
+        XCTAssertNil(store.currentAlarm)
+        now += 600
+        store.tick()
+        XCTAssertEqual(acked(), [])
+        store.screenSignal(.displaysWoke)
+        XCTAssertEqual(store.alarms.current?.dismissAt, now + IslandAlarmQueue.showFor)
+        // Another user's session in front (fast user switching): the same.
+        store.screenSignal(.sessionResigned)
+        XCTAssertNil(store.currentAlarm)
+        store.screenSignal(.sessionActivated)
+        now += IslandAlarmQueue.showFor
+        store.tick()
+        XCTAssertEqual(acked(), ["al-1"], "acknowledged only after its whole time on a screen someone could see")
+    }
+
+    func testScreenPresenceNeedsEverySignalBack() {
+        var screen = IslandScreenPresence()
+        XCTAssertFalse(screen.away)
+        screen.note(.locked)
+        screen.note(.displaysSlept)
+        XCTAssertTrue(screen.away)
+        screen.note(.displaysWoke)
+        XCTAssertTrue(screen.away, "still locked")
+        screen.note(.unlocked)
+        XCTAssertFalse(screen.away)
+        screen.note(.sessionResigned)
+        XCTAssertTrue(screen.away)
+        screen.note(.sessionActivated)
+        XCTAssertFalse(screen.away)
+    }
+
     func testTheAlarmQueueAlone() {
         var q = IslandAlarmQueue()
         q.sync(["a", "b"], now: 0)
