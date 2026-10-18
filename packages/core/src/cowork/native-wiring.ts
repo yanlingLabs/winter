@@ -132,17 +132,22 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
    * environment nothing is written at all. Never throws. */
   reconcileAtBoot(): CoworkNativeBootReport {
     const { records } = this.options;
-    // The cheap, read-only scan first. The release order in the host's recovery (volumes, then the admission row, then `power`, and `power`
-    // refuses `stopped` while an owner is held) means a workspace whose power is `stopped` holds no owner and no live admission row, so
-    // only a workspace that is NOT stopped can need settling. When none does, nothing is built, opened or asked of the environment.
+    // The cheap, read-only scan first. A retained workspace needs settling when its power is not `stopped` OR any of its volumes still names an
+    // owner, whatever its power says (the host's recovery uses the same two facts, plus the admission row). An admission row exists only for a
+    // workspace that was ever launched (`incarnationId` set), so with an environment injected a launched workspace is also handed to the host,
+    // whose recovery reads the ledger; a database where nothing was ever launched builds and asks for nothing.
     const pending: CoworkNativeRecoveryReport[] = [];
+    let launched = false;
     try {
+      const owned = new Set(this.options.db.db.query<{ workspace_id: string }, []>("SELECT DISTINCT workspace_id FROM cowork_volumes WHERE owner_json IS NOT NULL").all().map(row => row.workspace_id));
       for (const workspace of records.list()) {
-        if (workspace.state !== "retained" || workspace.power === "stopped") continue;
+        if (workspace.state !== "retained") continue;
+        if (workspace.incarnationId !== null) launched = true;
+        if (workspace.power === "stopped" && !owned.has(workspace.workspaceId)) continue;
         pending.push({ workspaceId: workspace.workspaceId, action: "retained", evidence: null, power: workspace.power, ownerRetained: true, admission: "none", reason: "native host unavailable; ownership kept" });
       }
     } catch (error) { console.error(`cowork: native boot scan failed (${describeNativeError(error)})`); return { source: "records", reports: [] }; }
-    if (pending.length === 0 || !this.options.environment) return { source: "records", reports: pending };
+    if (!this.options.environment || (pending.length === 0 && !launched)) return { source: "records", reports: pending };
     try { return { source: "host", reports: this.host().bootReconcile() }; }
     catch (error) {
       console.error(`cowork: native boot reconcile failed (${describeNativeError(error)}); ownership kept`);

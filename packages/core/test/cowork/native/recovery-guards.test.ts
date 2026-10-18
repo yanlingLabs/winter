@@ -67,6 +67,14 @@ describe("a retained Class A receipt is evidence only while both guards pass", (
     expect(owners(h).every(owner => owner !== null)).toBe(true);
   });
 
+  test("a launch journal that cannot be read fails closed: no retained source, no release", async () => {
+    const h = await crashedWithReceipt();
+    (h.recovery["deps"] as { journal?: unknown }).journal = { record: () => {}, forget: () => {}, load: () => { throw new Error("journal unreadable"); } };
+    expect(h.host.recover(h.workspaceId)).toMatchObject({ action: "retained", ownerRetained: true, reason: expect.stringContaining("guard probes") });
+    expect(h.calls.volumeRelease).toBe(0);
+    expect(owners(h).every(owner => owner !== null)).toBe(true);
+  });
+
   test("a guard that throws, or answers anything but true, refuses", async () => {
     const h = await crashedWithReceipt();
     const real = h.guards;

@@ -294,3 +294,60 @@ test("a boot reconcile that cannot run is recorded and refused: it never throws 
   expect(boot.reports).toMatchObject([{ workspaceId: h.workspaceId, action: "retained", ownerRetained: true }]);
   expect(snapshot(h)).toBe(before);
 });
+
+// ================================================================================================ boot scan predicate and failure modes
+
+test("the boot scan fails closed: a records read that throws neither crashes boot nor reports a release", () => {
+  const h = createHarness();
+  const broken = { ...h.records, list: () => { throw new Error("unreadable"); } } as unknown as typeof h.records;
+  let asked = 0;
+  const wiring = createCoworkNativeWiring({ db: h.db, records: broken, home: h.home, environment: () => { asked += 1; return envFor(h); } });
+  expect(wiring.reconcileAtBoot()).toEqual({ source: "records", reports: [] });
+  expect(asked).toBe(0);
+});
+
+test("the boot scan examines a workspace that is not stopped OR whose volumes still name an owner, and skips the rest", async () => {
+  const h = createHarness();
+  const idle = h.addWorkspace();
+  const wiring = createCoworkNativeWiring({ db: h.db, records: h.records, home: h.home });
+  // both workspaces are stopped and free: nothing to examine
+  expect(wiring.reconcileAtBoot().reports).toEqual([]);
+  // an owner that outlives a `stopped` power (not reachable through the host's own release order, but the scan must not rely on that)
+  await expect(h.host.start(h.workspaceId)).resolves.toBeDefined();
+  h.db.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [h.workspaceId]);
+  expect(owners(h).every(owner => owner !== null)).toBe(true);
+  const reports = wiring.reconcileAtBoot().reports;
+  expect(reports.map(report => report.workspaceId)).toEqual([h.workspaceId]);
+  expect(reports[0]).toMatchObject({ action: "retained", ownerRetained: true, power: "stopped" });
+  expect(reports.some(report => report.workspaceId === idle)).toBe(false);
+  // a workspace that is not `retained` (archived) is never examined, whatever its power says
+  h.db.db.run("UPDATE cowork_workspaces SET state='archived' WHERE workspace_id=?", [h.workspaceId]);
+  expect(wiring.reconcileAtBoot().reports).toEqual([]);
+  h.db.db.run("UPDATE cowork_workspaces SET state='retained' WHERE workspace_id=?", [h.workspaceId]);
+  // a workspace that is not stopped is examined even though its volumes are free
+  h.db.db.run("UPDATE cowork_volumes SET owner_json=NULL WHERE workspace_id=?", [h.workspaceId]);
+  expect(wiring.reconcileAtBoot().reports).toEqual([]);
+  h.db.db.run("UPDATE cowork_workspaces SET power='uncertain' WHERE workspace_id=?", [idle]);
+  expect(wiring.reconcileAtBoot().reports.map(report => report.workspaceId)).toEqual([idle]);
+});
+
+test("with an environment, a workspace that was ever launched is handed to the host even when it looks stopped and free", async () => {
+  const h = createHarness();
+  await (await h.host.start(h.workspaceId)).stop();
+  let asked = 0;
+  const wiring = createCoworkNativeWiring({ db: h.db, records: h.records, home: h.home, imagePins: pins(h), environment: () => { asked += 1; return envFor(h); } });
+  expect(wiring.reconcileAtBoot()).toMatchObject({ source: "host" });
+  expect(asked).toBe(1);
+});
+
+test("a guest whose stop rejects does not fail the drain, and the drain still settles", async () => {
+  const h = createHarness();
+  const wiring = wiringFor(h);
+  await wiring.start(h.workspaceId);
+  const host = (wiring as unknown as { hostInstance: { stop: () => Promise<never> } }).hostInstance;
+  host.stop = async () => { throw new Error("stop failed"); };
+  const drained = wiring.beginShutdown();
+  expect(drained).toBeInstanceOf(Promise);
+  await expect(drained).resolves.toBeUndefined();
+  h.dispose();
+});

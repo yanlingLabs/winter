@@ -67,6 +67,19 @@ test("a live guest is drained by daemon.stop() BEFORE the stores close: its rele
   after.db.close();
 });
 
+test("a guest whose stop rejects does not stop the daemon from closing its stores and releasing its lock", async () => {
+  const { existsSync } = await import("node:fs");
+  const h = createHarness(); const asked = { count: 0 };
+  const d = await boot(h, { environment: environment(h, asked), imagePins: pinned as never });
+  await d.coworkNative!.start(h.workspaceId);
+  (d.coworkNative as unknown as { hostInstance: { stop: () => Promise<never> } }).hostInstance.stop = async () => { throw new Error("stop failed"); };
+  await d.stop(); daemon = undefined;
+  expect(existsSync(join(h.home, "run/core.sock"))).toBe(false); // the lock was released after the stores closed
+  const after = reopen(h); // the runtime database was closed cleanly and can be reopened
+  expect(after.owners.every(owner => owner !== null)).toBe(true); // nothing was released on the strength of a failed stop
+  after.db.close();
+});
+
 test("a daemon restarted over a crashed start keeps the owner: without an environment it only reports", async () => {
   const h = createHarness({ crashAt: "volumes-opened" });
   await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);

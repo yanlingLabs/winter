@@ -128,11 +128,35 @@ test("no file anywhere (every package's src, and scripts/) imports from cowork/n
   expect(allSources.length).toBeGreaterThan(100);
 });
 
+/** Every string a source can spell as a compile-time constant: literals, templates and `+` chains of them, folded (`"native-" + "wiring"`, `` `native-${"wiring"}` ``).
+ * LIMIT: a name built at run time (a variable, a call) cannot be folded; the collapsed-text needle in `namesTheWiring` is the second net (it ignores quotes, `+`, `$`, braces and
+ * whitespace, so split spellings that survive as text are caught, comments included), and neither net is a defence against deliberate evasion. */
+export function foldedStrings(source: string): string[] {
+  const found: string[] = [];
+  const fold = (node: ts.Node): string | undefined => {
+    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isParenthesizedExpression(node)) return fold(node.expression);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) { const left = fold(node.left), right = fold(node.right); return left !== undefined && right !== undefined ? left + right : undefined; }
+    if (ts.isTemplateExpression(node)) {
+      let text = node.head.text;
+      for (const span of node.templateSpans) { const inner = fold(span.expression); if (inner === undefined) return undefined; text += inner + span.literal.text; }
+      return text;
+    }
+    return undefined;
+  };
+  const visit = (node: ts.Node): void => { const value = fold(node); if (value !== undefined) found.push(value); ts.forEachChild(node, visit); };
+  visit(ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true));
+  return found;
+}
+export function namesTheWiring(source: string): boolean {
+  return foldedStrings(source).some(value => value.includes("native-wiring")) || source.replace(/[\s"'`+${}]/g, "").includes("native-wiring");
+}
+
 test("N2 S7: the wiring is the only importer of cowork/native, the daemon is the only importer of the wiring, and the wiring is lazy and reaches no process, socket, setting or environment", () => {
   const wiringText = readFileSync(WIRING, "utf8"), code = wiringText.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
   expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/host", "./native/power", "./native/protocol", "./native/recovery", "./native/stop-proof"]);
-  const importers = allSources.filter(file => file !== WIRING && specifiersOf(readFileSync(file, "utf8")).some(specifier => /(^|\/)native-wiring(\.ts|\.js)?$/.test(specifier))).map(file => relative(packages, file).split(sep).join("/"));
-  expect(importers).toEqual(["core/src/daemon.ts"]);
+  const importers = [...allSources, ...scriptSources].filter(file => file !== WIRING && namesTheWiring(readFileSync(file, "utf8"))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
+  expect(importers).toEqual(["packages/core/src/daemon.ts"]);
   for (const forbidden of ["Bun.spawn", "child_process", "Bun.connect(", "Bun.listen(", "node:net", "process.env", "Bun.secrets", "Keychain", "readFileSync", "writeFileSync", "mkdirSync", "setInterval", "dlopen(", "krun_", "Hypervisor", "sandbox_init", "pmset"])
     expect(`${forbidden}:${code.includes(forbidden)}`).toBe(`${forbidden}:false`);
   // Nothing is built or scheduled at import time or at construction: the host appears only inside the private `host()` builder.
@@ -194,4 +218,32 @@ test("the test-only `unsafeTestTimeouts` switch is spelled nowhere under package
   // The documented limit: a deliberate evasion is not seen.
   expect(spellsToken('const k = "unsafeTest" + "Timeouts";', "unsafeTestTimeouts")).toBe(false);
   expect(spellsToken("// unsafeTestTimeouts is mentioned only here\nconst a = 1;", "unsafeTestTimeouts")).toBe(false);
+});
+
+/** True when an identifier, property name, string literal or template part IS exactly `name` (not merely contains it). */
+export function spellsExactly(source: string, name: string): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && node.text === name) found = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true));
+  return found;
+}
+test("N2 S7: `coworkNative` (the injection option) is spelled only by daemon.ts, in every package's src and in scripts/", () => {
+  const holders = [...allSources, ...scriptSources].filter(file => spellsExactly(readFileSync(file, "utf8"), "coworkNative")).map(file => relative(repositoryRoot, file).split(sep).join("/"));
+  expect(holders).toEqual(["packages/core/src/daemon.ts"]);
+  expect(scriptSources.length).toBeGreaterThan(5);
+  // the scanner sees the option as a property, a quoted key, a shorthand and a destructured name, and ignores comments and longer names
+  for (const planted of ["start({ coworkNative: {} });", 'start({ "coworkNative": {} });', "const coworkNative = 1;", "const { coworkNative } = opts;", "opts.coworkNative;"]) expect(spellsExactly(planted, "coworkNative")).toBe(true);
+  for (const clean of ["// coworkNative", "const coworkNativeHostStopWaitMs = 1;", "const createCoworkNativeWiring = 2;"]) expect(spellsExactly(clean, "coworkNative")).toBe(false);
+});
+
+test("the importer scanner folds concatenations and templates, and keeps a collapsed-text needle for what it cannot fold", () => {
+  for (const planted of ['import x from "./native-wiring";', 'await import("./native-" + "wiring");', 'await import(`./native-${"wiring"}`);', 'const n = ("native" + "-") + "wiring"; require(n);', 'import x from "./cowork/native-wiring.ts";'])
+    expect(namesTheWiring(planted)).toBe(true);
+  // not foldable (a run-time value), yet the text still gives it away once quotes and plus signs are ignored
+  expect(namesTheWiring('const p = "native-" + prefix + "wir" + "ing"; import(p);')).toBe(false); // the documented limit: a run-time part defeats both nets
+  expect(namesTheWiring("const q = `${a}native-wiring`;")).toBe(true);
+  expect(namesTheWiring('import x from "./native-adapter";')).toBe(false);
 });
