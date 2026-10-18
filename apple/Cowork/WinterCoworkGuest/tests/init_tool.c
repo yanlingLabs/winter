@@ -165,6 +165,20 @@ int main(int argc, char **argv) {
         free(art);
         return 0;
     }
+    if (strcmp(argv[1], "runtimeblock") == 0 && argc == 4) {   /* PROFILE FILE: is the object a valid runtime block for the profile */
+        size_t length = 0;
+        char *text = slurp(argv[3], &length);
+        printf("%d\n", wg_runtime_block_valid((unsigned)atoi(argv[2]), text, length));
+        free(text);
+        return 0;
+    }
+    if (strcmp(argv[1], "guidance") == 0 && argc == 5) {   /* PROFILE COUNT FILE: do the conversations carry the guidanceDirectory the profile needs */
+        size_t length = 0;
+        char *text = slurp(argv[4], &length);
+        printf("%d\n", wg_guidance_members_ok((unsigned)atoi(argv[2]), (unsigned)atoi(argv[3]), text, length));
+        free(text);
+        return 0;
+    }
     if (strcmp(argv[1], "convparse") == 0 && argc == 3) {
         size_t length = strlen(argv[2]) / 2;
         uint8_t *bytes = malloc(length + 1);
