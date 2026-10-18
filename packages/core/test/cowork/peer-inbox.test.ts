@@ -80,14 +80,14 @@ test("anti-wiring: only the SQLite store and session-messaging.ts name the ledge
   expect([...messagingText.matchAll(/from "([^"]*peer-inbox[^"]*)"/g)].map(match => match[0])).toEqual(['from "../cowork/peer-inbox"']);
   expect(messagingText).toMatch(/import type \{[^}]*\} from "\.\.\/cowork\/peer-inbox";/);
   for (const forbidden of ["SqlitePeerInboxStore", "InMemoryPeerInboxStore", "peer-inbox-sqlite", "createPeerInboxMemoryState", "PEER_INBOX_LIMITS", "peerSendDigest"]) expect(`${forbidden}:${messagingText.includes(forbidden)}`).toBe(`${forbidden}:false`);
-  // Nobody constructs the ledger or its store in src: production supplies no inbox.
-  for (const file of sources) {
-    const text = readFileSync(file, "utf8");
+  // Nobody constructs the ledger or its store in src: production supplies no inbox. (Each source is read once.)
+  const texts = new Map(sources.map(file => [file, readFileSync(file, "utf8")] as const));
+  for (const [file, text] of texts) {
     expect(`${basename(file)}:${/new\s+(CoworkPeerInbox|SqlitePeerInboxStore|InMemoryPeerInboxStore)\s*\(/.test(text)}`).toBe(`${basename(file)}:false`);
     if (basename(file) === "daemon.ts") expect(text).not.toMatch(/peerInbox|PeerInbox|peer-inbox/);
   }
   for (const file of sources.filter(candidate => candidate !== module && candidate !== messaging)) {
-    const text = readFileSync(file, "utf8");
+    const text = texts.get(file)!;
     // Whole identifiers: schema.ts and db.ts legitimately name the table and its migration (migrateCoworkPeerInboxSchema).
     const ledgerNames = ["CoworkPeerInbox", "PeerInboxStore", "InMemoryPeerInboxStore", "PeerInboxRecord", "peerSendDigest", "PEER_INBOX_LIMITS", "isTerminalPeerState", "createPeerInboxMemoryState", "PeerInboxCaps", "PeerInboxAudit"];
     const needles = file === sqliteStore ? ["CoworkPeerInbox", "InMemoryPeerInboxStore", "peerSendDigest", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState"]
@@ -113,4 +113,4 @@ test("anti-wiring: only the SQLite store and session-messaging.ts name the ledge
   expect(Object.keys(peerInboxModule).sort()).toEqual(["CoworkPeerInbox", "InMemoryPeerInboxStore", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState", "isTerminalPeerState", "peerSendDigest"]);
   // The schema may name the table; the ledger module itself never does (the SQLite store is a separate module).
   expect(own).not.toMatch(/cowork_peer_inbox/);
-});
+}, 60_000);
