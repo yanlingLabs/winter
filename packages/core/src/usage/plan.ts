@@ -19,6 +19,8 @@ export interface PlanWindow {
   severity?: string;
   stale: boolean;
   staleReason?: "older_than_window" | "reset_passed";
+  /** The window's STABLE key (`planWindowKey`) — what an alarm names; set on every reading the service answers. */
+  windowKey?: string;
 }
 
 /** A status-only window (Winter's own codex-oauth report: no percentage). */
@@ -49,6 +51,15 @@ export interface PlanReading {
   limitReached?: string;
   /** Why a rung could not answer, in words safe to show (never content from another app's file). */
   note?: string;
+}
+
+/** PURE: a window's stable key — its kind and, when it has one, its scope (lower-cased): the same window whichever rung
+ *  read it and whatever index the source gave it ("five_hour", "weekly", "weekly_scoped:fable", "weekly:gemini"). A
+ *  window of another length adds its minutes ("other@1440"). */
+export function planWindowKey(w: Pick<PlanWindow, "kind" | "scope" | "windowMinutes">): string {
+  const base = w.kind === "other" && w.windowMinutes !== undefined ? `other@${Math.round(w.windowMinutes)}` : w.kind;
+  const scope = w.scope?.trim().toLowerCase();
+  return scope === undefined || scope.length === 0 ? base : `${base}:${scope}`;
 }
 
 /** PURE: a window kind from its length (300 min = 5 h, 10 080 = a week). */

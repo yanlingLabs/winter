@@ -5,18 +5,19 @@ import { AGY_TIMEOUT_BACKOFF_MS, antigravityPlanFromCli } from "./antigravity";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
 import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
-import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
+import { USAGE_SOURCES, type AlarmProvider, type Subscription, type SyntheticRow, type UsageAlarm, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import {
   OPENCODE_ALL_ARGS, OPENCODE_SETTLE_AFTER_DAY_MS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
   opencodeDifference, opencodeFingerprint, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
-import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
+import { planWindowKey, staleness, type PlanReading, type PlanStatusWindow, type PlanWindowKind } from "./plan";
 import type { UsagePricer } from "./pricing";
 
 // The usage service (`docs/claude/usage.md`): records Winter's own turns as they end, ingests the user's Codex and
 // Claude Code usage ON DEMAND (when a Usage surface asks — no watcher, no timer: an idle daemon does nothing), reads
-// the plans (Codex, Claude Code, Antigravity) through their source ladders, and answers the `usage.*` RPCs.
+// the plans (Codex, Claude Code, Antigravity) through their source ladders, keeps the user's one-shot plan alarms (every
+// plan read judges them; a background beat reads the plans — `startBackground`), and answers the `usage.*` RPCs.
 
 export type UsageRange = "1h" | "24h" | "7d" | "30d" | "all";
 export const USAGE_RANGES: readonly UsageRange[] = ["1h", "24h", "7d", "30d", "all"];
@@ -75,7 +76,44 @@ export interface UsageServiceDeps {
   claudeJsonMaxBytes?: number;
   /** Claude Code's `stats-cache.json` over this is not read (default 8 MiB). */
   claudeStatsMaxBytes?: number;
+  /** A plan alarm fired — it is already deleted (the island's notification, `IslandActivity.usageAlarmFired`). */
+  onAlarmFired?: (fired: UsageAlarmFired) => void;
+  /** The background plan checks (`startBackground`): every installed and tracked plan every `backgroundEveryMs`
+   *  (default 30 min), and a plan with an alarm on its own beat (`alarmBeatMs`; default its throttle — Codex 60 s, Claude
+   *  Code and Antigravity 5 min). Tests shorten them. */
+  backgroundEveryMs?: number;
+  alarmBeatMs?: Partial<Record<AlarmProvider, number>>;
+  /** Test seam: a repeating timer; returns its cancel. */
+  setInterval?: (fn: () => void, ms: number) => () => void;
 }
+
+/** A plan alarm that fired: the alarm (deleted), the window it watched in words a client can name, and the reading. */
+export interface UsageAlarmFired {
+  id: string;
+  provider: AlarmProvider;
+  windowKey: string;
+  kind: PlanWindowKind;
+  scope?: string;
+  windowMinutes?: number;
+  thresholdPercent: number;
+  /** The reading's used share (0…100) that met it. */
+  usedPercent: number;
+  /** Epoch ms. */
+  resetsAt?: number;
+  /** When it fired, epoch ms. */
+  at: number;
+}
+
+/** The plans in their slots' order (what the background beat reads). */
+export const PLAN_PROVIDERS: readonly AlarmProvider[] = ["codex", "claude-code", "antigravity"];
+/** The background beat's period (user 2026-10-18: every installed and tracked plan, alarm or not). */
+export const USAGE_BACKGROUND_EVERY_MS = 30 * 60_000;
+
+const defaultInterval = (fn: () => void, ms: number): (() => void) => {
+  const t = setInterval(fn, ms);
+  (t as { unref?: () => void }).unref?.();
+  return () => clearInterval(t);
+};
 
 /** A binary's identity for a probe latch: its realpath, mtime and size (an update is a new binary). */
 export function binaryKey(tool: string, exe: string): string | undefined {
@@ -246,6 +284,9 @@ export class UsageService {
   private statsLogged = new Set<string>();
   /** Test seam: how many times `stats-cache.json` was parsed. */
   claudeStatsParses = 0;
+  /** The background beat (`startBackground`): the slow one's cancel, and each alarmed plan's fast one. */
+  private cancelSlowBeat: (() => void) | undefined;
+  private readonly fastBeats = new Map<AlarmProvider, () => void>();
 
   constructor(private readonly deps: UsageServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -574,13 +615,18 @@ export class UsageService {
 
   // ── plans ───────────────────────────────────────────────────────────────────────────────────────
 
-  /** The Codex plan: Codex's app-server → the newest rollout's `rate_limits` → Winter's own codex-oauth report. */
-  async codexPlan(): Promise<PlanReading> {
+  /** The Codex plan: Codex's app-server → the newest rollout's `rate_limits` → Winter's own codex-oauth report. Every
+   *  answer judges the plan's alarms. `minAgeMs`: a fast beat's own floor for a fresh spawn (below the throttle). */
+  async codexPlan(minAgeMs?: number): Promise<PlanReading> {
+    return this.answered(await this.readCodexPlan(minAgeMs));
+  }
+
+  private async readCodexPlan(minAgeMs?: number): Promise<PlanReading> {
     if (!this.deps.tracking().codex) return { provider: "codex", source: "disabled", windows: [] };
     // Not on this Mac: no slot at all (user 2026-10-18), whatever an old rollout or Winter's own sign-in could say.
     if (this.deps.codexExecutable() === undefined) return { provider: "codex", source: "not-installed", windows: [] };
     const now = this.now();
-    const every = this.deps.codexAppServerEveryMs ?? 60_000;
+    const every = minAgeMs ?? this.deps.codexAppServerEveryMs ?? 60_000;
     if (this.codexRun !== undefined) {
       await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.codexCache === undefined || now - this.codexCache.at >= every) {
@@ -592,6 +638,8 @@ export class UsageService {
           ...(this.deps.appServerTimeoutMs === undefined ? {} : { timeoutMs: this.deps.appServerTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as string, reading: undefined }));
         this.codexCache = { at: this.now(), ...r };
+        // Judged as it lands: a read that stopped waiting (`planWaitMs` — a background beat's) answered the cache before.
+        this.judgeAlarms(r.reading);
         if (r.failure !== undefined) this.deps.log?.info?.("[usage] codex app-server gave no plan reading", { reason: r.failure });
       })().finally(() => { this.codexRun = undefined; });
       await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
@@ -610,12 +658,17 @@ export class UsageService {
     return { provider: "codex", source: "none", windows: [] };
   }
 
-  /** The Claude Code plan (`ClaudeCodePlanUsageSource`): Claude Code's own `/usage` → `~/.claude.json`'s cache. */
-  async claudeCodePlan(): Promise<PlanReading> {
+  /** The Claude Code plan (`ClaudeCodePlanUsageSource`): Claude Code's own `/usage` → `~/.claude.json`'s cache. Every
+   *  answer judges the plan's alarms. */
+  async claudeCodePlan(minAgeMs?: number): Promise<PlanReading> {
+    return this.answered(await this.readClaudeCodePlan(minAgeMs));
+  }
+
+  private async readClaudeCodePlan(minAgeMs?: number): Promise<PlanReading> {
     if (!this.deps.tracking().claudeCode) return { provider: "claude-code", source: "disabled", windows: [] };
     if (this.deps.claudeExecutable() === undefined) return { provider: "claude-code", source: "not-installed", windows: [] };
     const now = this.now();
-    const every = this.deps.claudeCliEveryMs ?? 300_000;
+    const every = minAgeMs ?? this.deps.claudeCliEveryMs ?? 300_000;
     if (this.claudeRun !== undefined) {
       await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.claudeCache === undefined || now - this.claudeCache.at >= every) {
@@ -635,6 +688,7 @@ export class UsageService {
           ...(this.deps.claudeCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.claudeCliTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
         this.claudeCache = { at: this.now(), ...r };
+        this.judgeAlarms(r.reading);
         if (r.failure === "guard" || r.failure === "guard-model-turn") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
           this.deps.log?.warn?.("[usage] claude /usage did not come back as the local command; not asked again until Claude Code changes");
@@ -654,13 +708,19 @@ export class UsageService {
     return { provider: "claude-code", source: "none", windows: [] };
   }
 
-  /** The Antigravity plan: `agy`'s own `/usage` (no other rung — nothing else of agy's is read). */
-  async antigravityPlan(): Promise<PlanReading> {
+  /** The Antigravity plan: `agy`'s own `/usage` (no other rung — nothing else of agy's is read). Every answer judges
+   *  the plan's alarms. */
+  async antigravityPlan(minAgeMs?: number): Promise<PlanReading> {
+    return this.answered(await this.readAntigravityPlan(minAgeMs));
+  }
+
+  private async readAntigravityPlan(minAgeMs?: number): Promise<PlanReading> {
     if (!this.deps.tracking().antigravity) return { provider: "antigravity", source: "disabled", windows: [] };
     if (this.deps.agyExecutable?.() === undefined) return { provider: "antigravity", source: "not-installed", windows: [] };
     const now = this.now();
-    // A run killed at Winter's own deadline (agy ignored its `--print-timeout`) backs off for hours, not minutes.
-    const every = this.agyCache?.failure === "timeout" ? (this.deps.agyTimeoutBackoffMs ?? AGY_TIMEOUT_BACKOFF_MS) : (this.deps.agyCliEveryMs ?? 300_000);
+    // A run killed at Winter's own deadline (agy ignored its `--print-timeout`) backs off for hours, not minutes — a
+    // beat's floor never shortens that.
+    const every = this.agyCache?.failure === "timeout" ? (this.deps.agyTimeoutBackoffMs ?? AGY_TIMEOUT_BACKOFF_MS) : (minAgeMs ?? this.deps.agyCliEveryMs ?? 300_000);
     if (this.agyRun !== undefined) {
       await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.agyCache === undefined || now - this.agyCache.at >= every) {
@@ -682,6 +742,7 @@ export class UsageService {
           ...(this.deps.agyCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.agyCliTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
         this.agyCache = { at: this.now(), ...r };
+        this.judgeAlarms(r.reading);
         if (r.failure === "guard") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
           this.deps.log?.warn?.("[usage] agy /usage did not come back as the read-only command; not asked again until Antigravity changes");
@@ -697,6 +758,135 @@ export class UsageService {
     const cached = this.agyCache?.reading;
     if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
     return { provider: "antigravity", source: "none", windows: [] };
+  }
+
+  // ── plan alarms ─────────────────────────────────────────────────────────────────────────────────
+
+  /** A reading as answered: each window carries its stable key, and the plan's alarms are judged against it. */
+  private answered(reading: PlanReading): PlanReading {
+    const keyed: PlanReading = { ...reading, windows: reading.windows.map((w) => ({ ...w, windowKey: planWindowKey(w) })) };
+    this.judgeAlarms(keyed);
+    return keyed;
+  }
+
+  /** Every alarm, oldest first. */
+  alarms(): UsageAlarm[] {
+    return this.deps.db.alarms();
+  }
+
+  /** Set an alarm (whole percent); one already set for the same window and threshold is answered instead. The plan's
+   *  fast beat starts with its first alarm. Whether the window is already past it is the client's rule: the daemon
+   *  keeps it, and the next fresh reading that meets it fires it. */
+  setAlarm(input: { provider: AlarmProvider; windowKey: string; thresholdPercent: number }): UsageAlarm {
+    const alarm = this.deps.db.addAlarm({
+      id: randomUUID(), provider: input.provider, windowKey: input.windowKey,
+      thresholdPercent: Math.min(100, Math.max(1, Math.round(input.thresholdPercent))), createdAt: this.now(),
+    });
+    this.rescheduleBeats();
+    return alarm;
+  }
+
+  /** Remove an alarm; the plan's fast beat stops with its last one. */
+  removeAlarm(id: string): boolean {
+    const removed = this.deps.db.removeAlarm(id);
+    this.rescheduleBeats();
+    return removed;
+  }
+
+  /**
+   * Fire the alarms a reading meets — ONCE each: a window that is not stale, in a reading measured no earlier than the
+   * alarm was set (an older one is no news about it), whose used share is at the threshold or above. The alarm is
+   * deleted first and fires only when THIS call deleted it (`UsageDb.removeAlarm`), so two reads of the same reading —
+   * a spawn landing while a client's read answers the cache, concurrent asks — fire it once. Not installed or tracking
+   * off: the reading has no windows, nothing fires, the alarms stay.
+   */
+  private judgeAlarms(reading: PlanReading | undefined): void {
+    if (reading === undefined || reading.at === undefined || reading.windows.length === 0) return;
+    let alarms: UsageAlarm[];
+    try { alarms = this.deps.db.alarms().filter((a) => a.provider === reading.provider); } catch { return; }
+    let fired = false;
+    for (const a of alarms) {
+      if (reading.at < a.createdAt) continue;
+      const w = reading.windows.find((x) => !x.stale && planWindowKey(x) === a.windowKey && x.usedPercent >= a.thresholdPercent);
+      if (w === undefined) continue;
+      try { if (!this.deps.db.removeAlarm(a.id)) continue; } catch { continue; }
+      fired = true;
+      this.deps.log?.info?.("[usage] plan alarm fired", { provider: a.provider, window: a.windowKey, threshold: a.thresholdPercent });
+      try {
+        this.deps.onAlarmFired?.({
+          id: a.id, provider: a.provider, windowKey: a.windowKey, kind: w.kind, ...(w.scope === undefined ? {} : { scope: w.scope }),
+          ...(w.windowMinutes === undefined ? {} : { windowMinutes: w.windowMinutes }), thresholdPercent: a.thresholdPercent,
+          usedPercent: w.usedPercent, ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: this.now(),
+        });
+      } catch { /* the notification's failure is its own; the alarm is spent */ }
+    }
+    if (fired) this.rescheduleBeats();
+  }
+
+  // ── the background plan checks ──────────────────────────────────────────────────────────────────
+
+  /**
+   * The background beat (user 2026-10-18, reversing "no background plan polling"): every installed and tracked plan is
+   * read every `backgroundEveryMs` (30 min), alarm or not; a plan with at least one alarm is ALSO read on its own fast
+   * beat — its throttle (Codex 60 s, Claude Code and Antigravity 5 min) — which stops with its last alarm. Each read is
+   * the plan's own ladder (not installed or tracking off answers at once: nothing spawned, nothing fired), and every read
+   * judges the alarms. Unref'd timers: they never hold the daemon. No read at start.
+   */
+  startBackground(): void {
+    if (this.cancelSlowBeat !== undefined) return;
+    this.cancelSlowBeat = this.interval(() => { void this.checkPlans(PLAN_PROVIDERS); }, this.deps.backgroundEveryMs ?? USAGE_BACKGROUND_EVERY_MS);
+    this.rescheduleBeats();
+  }
+
+  stopBackground(): void {
+    this.cancelSlowBeat?.();
+    this.cancelSlowBeat = undefined;
+    for (const cancel of this.fastBeats.values()) cancel();
+    this.fastBeats.clear();
+  }
+
+  /** Test seam: the background beat is running. */
+  get backgroundRunning(): boolean {
+    return this.cancelSlowBeat !== undefined;
+  }
+
+  /** Test seam: the plans on a fast beat now. */
+  get beating(): AlarmProvider[] {
+    return PLAN_PROVIDERS.filter((p) => this.fastBeats.has(p));
+  }
+
+  /** Read these plans now (each answer judges their alarms) — the beats' entry; a failure is the next beat's to retry.
+   *  `fast`: a fast beat ticks just as its cache comes of age, so half its period is the floor and each tick reads. */
+  async checkPlans(providers: readonly AlarmProvider[], fast = false): Promise<void> {
+    await Promise.all(providers.map((p) => {
+      const floor = fast ? this.beatMs(p) / 2 : undefined;
+      const read = p === "codex" ? this.codexPlan(floor) : p === "claude-code" ? this.claudeCodePlan(floor) : this.antigravityPlan(floor);
+      return read.catch(() => undefined);
+    }));
+  }
+
+  private beatMs(p: AlarmProvider): number {
+    const own = this.deps.alarmBeatMs?.[p];
+    if (own !== undefined) return own;
+    if (p === "codex") return this.deps.codexAppServerEveryMs ?? 60_000;
+    return p === "claude-code" ? (this.deps.claudeCliEveryMs ?? 300_000) : (this.deps.agyCliEveryMs ?? 300_000);
+  }
+
+  private interval(fn: () => void, ms: number): () => void {
+    return (this.deps.setInterval ?? defaultInterval)(fn, ms);
+  }
+
+  /** A fast beat for each plan with an alarm, none for the rest — only while the background runs. */
+  private rescheduleBeats(): void {
+    if (this.cancelSlowBeat === undefined) return;
+    let wanted: Set<AlarmProvider>;
+    try { wanted = new Set(this.deps.db.alarms().map((a) => a.provider)); } catch { wanted = new Set(); }
+    for (const [p, cancel] of [...this.fastBeats]) {
+      if (!wanted.has(p)) { cancel(); this.fastBeats.delete(p); }
+    }
+    for (const p of PLAN_PROVIDERS) {
+      if (wanted.has(p) && !this.fastBeats.has(p)) this.fastBeats.set(p, this.interval(() => { void this.checkPlans([p], true); }, this.beatMs(p)));
+    }
   }
 
   /** `~/.claude.json`'s plan cache: re-parsed only when the file's mtime or size changed; never read over the cap
@@ -810,9 +1000,15 @@ export class UsageService {
       spark: s.buckets.map((b) => b.costUsd), sparkTokens: s.buckets.map((b) => b.tokens),
       ...(plans === undefined ? {} : { plans }),
       tracking: this.deps.tracking(), ingest: this.ingestState(), history: s.history,
+      // The plan alarms, so both surfaces draw their ticks from the answer they already ask for.
+      alarms: this.alarmsSafe(),
       // A source with no plan slot to say "not installed": OpenCode's toggle shows only when it is on this Mac.
       installed: { opencode: this.deps.opencodeExecutable?.() !== undefined },
     };
+  }
+
+  private alarmsSafe(): UsageAlarm[] {
+    try { return this.deps.db.alarms(); } catch { return []; }
   }
 
   /** Run (or join) an ingest pass, waiting at most `ms` for it — what is stored by then is answered. */

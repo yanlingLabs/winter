@@ -22,8 +22,11 @@ import { dirname } from "node:path";
 //  - `reported` (v4): a cost the other app itself recorded (OpenCode's own per-model cost) — `cost_basis` "reported",
 //    counted in the rollup's `reported_records`. OpenCode's rows are one per model per local day, REPLACED as the day
 //    grows (`replaceDay`); its progress lives in `ingest_files` under a key of its own (`sourceState`).
+//  - `usage_alarms` (v5): the user's one-shot plan alarms — a plan, one of its windows by a STABLE key (its kind and
+//    scope, the same window across readings and rungs), a whole-percent threshold and when it was set. A fired alarm is
+//    DELETED (`removeAlarm` answers whether this call removed it: the single-flight).
 
-export const USAGE_DB_SCHEMA_VERSION = 4;
+export const USAGE_DB_SCHEMA_VERSION = 5;
 
 export type UsageSource = "winter" | "codex" | "claude-code" | "opencode";
 export const USAGE_SOURCES: readonly UsageSource[] = ["winter", "codex", "claude-code", "opencode"];
@@ -100,6 +103,20 @@ export interface IngestFileState {
   state: Record<string, unknown>;
 }
 
+/** The plans an alarm can watch (the plan slots, not the usage sources). */
+export type AlarmProvider = "codex" | "claude-code" | "antigravity";
+
+/** A one-shot plan alarm: fires once when a window's used share reaches `thresholdPercent`, and is then deleted. */
+export interface UsageAlarm {
+  id: string;
+  provider: AlarmProvider;
+  /** The window's stable key (`planWindowKey`: its kind and scope). */
+  windowKey: string;
+  /** 1…100, whole. */
+  thresholdPercent: number;
+  createdAt: number;
+}
+
 export interface Subscription {
   id: string;
   name: string;
@@ -169,6 +186,20 @@ export class UsageDb {
       this.db.transaction(() => {
         this.db.run("ALTER TABLE usage_hourly ADD COLUMN reported_records INTEGER NOT NULL DEFAULT 0");
         this.db.run("PRAGMA user_version = 4");
+      })();
+    }
+    if (v < 5) {
+      this.db.transaction(() => {
+        // One alarm per plan, window and threshold: a double click sets one, and a tick's removal removes it whole.
+        this.db.run(`CREATE TABLE IF NOT EXISTS usage_alarms (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          window_key TEXT NOT NULL,
+          threshold INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          UNIQUE (provider, window_key, threshold)
+        )`);
+        this.db.run("PRAGMA user_version = 5");
       })();
     }
   }
@@ -474,6 +505,30 @@ export class UsageDb {
   setLatch(key: string, reason: string, at: number): void {
     this.db.query("INSERT INTO probe_latches (key, reason, at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET reason = excluded.reason, at = excluded.at")
       .run(key, reason, at);
+  }
+
+  // ── plan alarms ─────────────────────────────────────────────────────────────────────────────────
+
+  /** Every alarm, oldest first. */
+  alarms(): UsageAlarm[] {
+    const rows = this.db.query("SELECT * FROM usage_alarms ORDER BY created_at, id").all() as Array<Record<string, unknown>>;
+    return rows.flatMap((r) => {
+      const provider = r.provider === "codex" || r.provider === "claude-code" || r.provider === "antigravity" ? r.provider : undefined;
+      if (provider === undefined) return [];
+      return [{ id: String(r.id), provider, windowKey: String(r.window_key), thresholdPercent: n(r.threshold), createdAt: n(r.created_at) }];
+    });
+  }
+
+  /** Store an alarm; one already set for the same plan, window and threshold is kept (and answered) instead. */
+  addAlarm(a: UsageAlarm): UsageAlarm {
+    this.db.query("INSERT OR IGNORE INTO usage_alarms (id, provider, window_key, threshold, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(a.id, a.provider, a.windowKey, a.thresholdPercent, a.createdAt);
+    return this.alarms().find((x) => x.provider === a.provider && x.windowKey === a.windowKey && x.thresholdPercent === a.thresholdPercent) ?? a;
+  }
+
+  /** Delete an alarm. True only for the call that removed it — a fire happens once, whoever else read the same reading. */
+  removeAlarm(id: string): boolean {
+    return this.db.query("DELETE FROM usage_alarms WHERE id = ?").run(id).changes > 0;
   }
 
   // ── subscriptions ───────────────────────────────────────────────────────────────────────────────

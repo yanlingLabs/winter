@@ -5,7 +5,7 @@ import type { IslandUsageRegistry } from "../island/usage";
 import { usageTrackingFrom, type Settings } from "../settings";
 import { UsageDb } from "./db";
 import { UsagePricer } from "./pricing";
-import { UsageService } from "./service";
+import { UsageService, type UsageAlarmFired } from "./service";
 import { resolveExecutable } from "./spawn-lines";
 
 // Boot wiring for usage tracking (`docs/claude/usage.md`). Where the user's other apps keep their files:
@@ -15,7 +15,8 @@ import { resolveExecutable } from "./spawn-lines";
 //  - the executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` /
 //    `$WINTER_USAGE_AGY_EXECUTABLE` / `$WINTER_USAGE_OPENCODE_EXECUTABLE` (authoritative: a missing path or "off" means none) → the usual install places
 //    → `$PATH`.
-// Both test preloads point every `WINTER_USAGE_*` at nothing, so no test daemon ever reads or spawns the real ones.
+// Both test preloads point every `WINTER_USAGE_*` at nothing, so no test daemon ever reads or spawns the real ones, and
+// switch the background plan checks off (`WINTER_USAGE_BACKGROUND=off`).
 
 export interface UsageInjection {
   codexHome?: string | null;
@@ -30,6 +31,10 @@ export interface UsageInjection {
   catchUp?: boolean;
   catchUpFirstMs?: number;
   catchUpEveryMs?: number;
+  /** The background plan checks and the alarms' fast beats (`UsageService.startBackground`): false = off; its timings. */
+  background?: boolean;
+  backgroundEveryMs?: number;
+  alarmBeatMs?: { codex?: number; "claude-code"?: number; antigravity?: number };
 }
 
 /** The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle). */
@@ -73,6 +78,8 @@ export function createUsageService(opts: {
   islandUsage?: IslandUsageRegistry;
   version?: string;
   injection?: UsageInjection;
+  /** A plan alarm fired (the island's notification). */
+  onAlarmFired?: (fired: UsageAlarmFired) => void;
   log?: { warn?: (msg: string, meta?: Record<string, unknown>) => void; info?: (msg: string, meta?: Record<string, unknown>) => void };
 }): { service: UsageService; close(): void } | undefined {
   const env = process.env;
@@ -109,6 +116,9 @@ export function createUsageService(opts: {
     probeRoot: () => probeRoot,
     ...(opts.version === undefined ? {} : { version: opts.version }),
     ...(inj.now === undefined ? {} : { now: inj.now }),
+    ...(opts.onAlarmFired === undefined ? {} : { onAlarmFired: opts.onAlarmFired }),
+    ...(inj.backgroundEveryMs === undefined ? {} : { backgroundEveryMs: inj.backgroundEveryMs }),
+    ...(inj.alarmBeatMs === undefined ? {} : { alarmBeatMs: inj.alarmBeatMs }),
     log: opts.log ?? {
       warn: (msg, meta) => console.error(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`),
       info: (msg, meta) => console.error(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`),
@@ -126,9 +136,13 @@ export function createUsageService(opts: {
     every.unref?.();
     timers.push(first, every);
   }
+  // The background plan checks (user 2026-10-18): every installed and tracked plan every 30 min, and a plan with an
+  // alarm on its own throttle. Unref'd; off with the env switch (both test preloads) or the injection.
+  if (inj.background !== false && env.WINTER_USAGE_BACKGROUND !== "off") service.startBackground();
   return {
     service,
     close: () => {
+      service.stopBackground();
       for (const t of timers) clearTimeout(t);
       db.close();
     },

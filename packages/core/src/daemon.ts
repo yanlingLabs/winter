@@ -123,6 +123,7 @@ import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-
 import { IslandRegistry, type IslandHost, type IslandSessionFacts } from "./island/registry";
 import { IslandActivity } from "./island/activity";
 import { IslandUsageRegistry } from "./island/usage";
+import type { UsageAlarmFired } from "./usage/service";
 import { createUsageService, type UsageInjection } from "./usage/wiring";
 import { rowForTag } from "./runtime-sdk/provider-selection";
 import type { WakeRegistry } from "./computer-use/wakes/registry";
@@ -1310,9 +1311,12 @@ export async function startDaemon(opts: {
   hub.addObserver((event) => islandUsage.observe(event));
   // Usage and cost tracking (`usage.*`, `docs/claude/usage.md`): Winter's own turns as they end, the user's Codex and
   // Claude Code usage ingested ON DEMAND. Its own SQLite file (`<home>/usage/usage.db`), never runtime-state.db.
+  // A fired plan alarm is the island's notification pill — late-bound: the island's activity is built further down.
+  let usageAlarmFired: ((fired: UsageAlarmFired) => void) | undefined;
   const usage = createUsageService({
     home: winterHome, settings: () => settings, islandUsage, version: CORE_VERSION,
     ...(opts.usage === undefined ? {} : { injection: opts.usage }),
+    onAlarmFired: (fired) => usageAlarmFired?.(fired),
   });
 
   const computerUseRuntime = createComputerUseRuntime({
@@ -1361,6 +1365,7 @@ export async function startDaemon(opts: {
     hasPendingCard: (sid) => islandRegistry.list().some((i) => i.answerSessionId === sid || i.sessionId === sid),
   });
   hub.addObserver((event) => islandActivity.observe(event));
+  usageAlarmFired = (fired) => islandActivity.usageAlarmFired(fired);
 
   // ComputerV2 Phase 2 — Winter for Chrome's door into this daemon: `<home>/run/browser.sock`, where
   // `winter-browser-host` (inside the Winter Computer Use bundle) connects for each browser profile running the extension.

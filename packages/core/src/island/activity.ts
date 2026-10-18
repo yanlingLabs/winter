@@ -13,6 +13,9 @@ import type { IslandClient, IslandHost, IslandSessionFacts } from "./registry";
 //     autonomous loop's next turn) means the session did not stop, and nothing is published. Turns another agent or
 //     Dispatch started (`messaging`, `dispatch`) publish nothing — Dispatch reports its children itself.
 //   - `watches`: every ARMED ComputerV2 wake trigger (`wakeWhen`), read from the wake registry itself.
+//   - `usageAlarms`: a plan alarm that just FIRED (`UsageService`'s `onAlarmFired`, `docs/claude/usage.md`) — the
+//     island's notification pill ("Claude Code · Weekly at 80%"); no session behind it. Held `ISLAND_RESULT_TTL_MS`
+//     whether or not an island client is connected (the alarm itself is already spent).
 //
 // `island.activity` answers from here; `island.activityChanged` (bare, once per burst) tells the island clients to ask
 // again. No timer runs unless a turn just ended while an island client is connected (one one-shot per such turn).
@@ -89,10 +92,29 @@ export interface IslandWatchItem extends IslandWatchSource {
   session: IslandSessionFacts;
 }
 
+/** A plan alarm that fired: which plan and window (its kind, scope and length, so the client names it as its plan lines
+ *  do), the threshold, the used share that met it and when the window resets. */
+export interface IslandUsageAlarmItem {
+  /** The alarm's own id (stable: it fires once). */
+  id: string;
+  provider: "codex" | "claude-code" | "antigravity";
+  windowKey: string;
+  kind: string;
+  scope?: string;
+  windowMinutes?: number;
+  thresholdPercent: number;
+  usedPercent: number;
+  /** Epoch ms. */
+  resetsAt?: number;
+  /** Epoch ms: when it fired. */
+  at: number;
+}
+
 export interface IslandActivitySnapshot {
   computerUse: IslandComputerUseItem[];
   results: IslandResultItem[];
   watches: IslandWatchItem[];
+  usageAlarms: IslandUsageAlarmItem[];
 }
 
 export interface IslandActivityDeps {
@@ -138,6 +160,7 @@ export class IslandActivity {
   private readonly cu = new Map<string, CUEntry>();
   private readonly followed = new Map<string, Followed>();
   private readonly results = new Map<string, Omit<IslandResultItem, "session" | "hosts">>();
+  private readonly usageAlarms = new Map<string, IslandUsageAlarmItem>();
   private readonly clients = new Set<IslandClient>();
   private notifyScheduled = false;
 
@@ -228,6 +251,9 @@ export class IslandActivity {
     for (const [id, r] of [...this.results]) {
       if (now - r.at > ISLAND_RESULT_TTL_MS) this.results.delete(id);
     }
+    for (const [id, a] of [...this.usageAlarms]) {
+      if (now - a.at > ISLAND_RESULT_TTL_MS) this.usageAlarms.delete(id);
+    }
     const computerUse = [...this.cu].map(([sessionId, e]): IslandComputerUseItem => ({
       sessionId, startedAt: e.startedAt, lastAt: e.lastAt, running: e.running.size > 0,
       ...(e.title === undefined ? {} : { title: e.title }), apps: [...e.apps],
@@ -240,7 +266,16 @@ export class IslandActivity {
     let sources: IslandWatchSource[] = [];
     try { sources = this.deps.watches?.() ?? []; } catch { sources = []; }
     const watches = sources.map((w): IslandWatchItem => ({ ...w, session: this.factsOf(w.sessionId) }));
-    return { computerUse, results, watches };
+    return { computerUse, results, watches, usageAlarms: [...this.usageAlarms.values()] };
+  }
+
+  /** A plan alarm fired (`UsageService`'s `onAlarmFired`): the island's notification pill. Held whether or not an
+   *  island client is connected — one connecting within the TTL still lists it (the app shows only a fresh one). */
+  usageAlarmFired(item: IslandUsageAlarmItem): void {
+    this.usageAlarms.delete(item.id);
+    this.usageAlarms.set(item.id, item);
+    while (this.usageAlarms.size > ISLAND_RESULTS_MAX) this.usageAlarms.delete(this.usageAlarms.keys().next().value as string);
+    this.changed();
   }
 
   private factsOf(sid: string): IslandSessionFacts {

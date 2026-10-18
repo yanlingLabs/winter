@@ -369,7 +369,7 @@ describe("schema 3", () => {
     db.db.run("PRAGMA user_version = 2");
     db.close();
     db = new UsageDb(path);
-    expect(db.schemaVersion()).toBe(4);
+    expect(db.schemaVersion()).toBe(5);
     expect(db.db.query("SELECT dedupe, synthetic FROM usage_records").all()).toEqual([{ dedupe: "cc:m1:r1", synthetic: 0 }]);
     expect(db.earliestReal("claude-code")).toBe(NOW);
     expect(db.hourly(0, NOW + 1, ["claude-code"])[0]).toMatchObject({ records: 1, syntheticRecords: 0 });

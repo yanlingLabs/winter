@@ -51,4 +51,6 @@ process.env.WINTER_LOGIN_SHELL_PATH = "off";
   process.env.WINTER_USAGE_CLAUDE_EXECUTABLE = "off";
   process.env.WINTER_USAGE_AGY_EXECUTABLE = "off";
   process.env.WINTER_USAGE_OPENCODE_EXECUTABLE = "off";
+  // No background plan checks either (the 30-min beat, the alarms' fast beats): a test that wants them starts them.
+  process.env.WINTER_USAGE_BACKGROUND = "off";
 }

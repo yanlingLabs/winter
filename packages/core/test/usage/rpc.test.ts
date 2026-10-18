@@ -55,7 +55,8 @@ class TestClient {
   close(): void { this.socket.end(); }
 }
 
-const USAGE_METHODS = [METHODS.usageSummary, METHODS.usageSeries, METHODS.usageSubscriptionsList, METHODS.usageSubscriptionsSet, METHODS.usageSubscriptionsRemove, METHODS.usageSetTracking];
+const USAGE_METHODS = [METHODS.usageSummary, METHODS.usageSeries, METHODS.usageSubscriptionsList, METHODS.usageSubscriptionsSet, METHODS.usageSubscriptionsRemove, METHODS.usageSetTracking,
+  METHODS.usageAlarmsList, METHODS.usageAlarmsSet, METHODS.usageAlarmsRemove];
 
 describe("usage.* over the socket", () => {
   let stop: (() => void) | undefined;
@@ -114,6 +115,28 @@ describe("usage.* over the socket", () => {
     expect(upd.subscriptions[0]).toMatchObject({ price: 200, cadence: "yearly", monthlyCost: 200 / 12 });
     expect((await app.request(METHODS.usageSubscriptionsList, {})).result.subscriptions).toHaveLength(1);
     expect((await app.request(METHODS.usageSubscriptionsRemove, { id: set.subscription.id })).result).toMatchObject({ removed: true, subscriptions: [] });
+    app.close();
+  });
+
+  test("alarms: set (validated; the same window and threshold once), list, remove; the summary carries them", async () => {
+    const { socketPath, tokens } = await boot();
+    const app = await TestClient.connect(socketPath);
+    await app.hello(tokens.harness, "orb");
+    for (const bad of [{ provider: "opencode", windowKey: "weekly", thresholdPercent: 50 }, { provider: "codex", windowKey: "", thresholdPercent: 50 },
+      { provider: "codex", windowKey: "weekly", thresholdPercent: 0 }, { provider: "codex", windowKey: "weekly", thresholdPercent: 101 },
+      { provider: "codex", windowKey: "weekly", thresholdPercent: 45.5 }]) {
+      expect((await app.request(METHODS.usageAlarmsSet, bad)).error?.code).toBe(ERR.INVALID_PARAMS);
+    }
+    const set = (await app.request(METHODS.usageAlarmsSet, { provider: "claude-code", windowKey: "weekly_scoped:fable", thresholdPercent: 80 })).result;
+    expect(set.alarm).toMatchObject({ provider: "claude-code", windowKey: "weekly_scoped:fable", thresholdPercent: 80 });
+    expect(typeof set.alarm.createdAt).toBe("number");
+    const again = (await app.request(METHODS.usageAlarmsSet, { provider: "claude-code", windowKey: "weekly_scoped:fable", thresholdPercent: 80 })).result;
+    expect(again.alarm.id).toBe(set.alarm.id);
+    await app.request(METHODS.usageAlarmsSet, { provider: "codex", windowKey: "five_hour", thresholdPercent: 50 });
+    expect((await app.request(METHODS.usageAlarmsList, {})).result.alarms).toHaveLength(2);
+    expect((await app.request(METHODS.usageSummary, { range: "1h", plans: false })).result.alarms).toHaveLength(2);
+    expect((await app.request(METHODS.usageAlarmsRemove, { id: set.alarm.id })).result).toMatchObject({ removed: true, alarms: [{ provider: "codex" }] });
+    expect((await app.request(METHODS.usageAlarmsRemove, { id: set.alarm.id })).result.removed).toBe(false);
     app.close();
   });
 

@@ -295,6 +295,33 @@ async function until(check: () => boolean, ms = 2000): Promise<void> {
   }
 }
 
+describe("IslandActivity — plan alarms", () => {
+  const fired = (id: string, at = 1_000_000) => ({
+    id, provider: "claude-code" as const, windowKey: "weekly", kind: "weekly", windowMinutes: 10_080, thresholdPercent: 80, usedPercent: 81,
+    resetsAt: 2_000_000, at,
+  });
+
+  test("a fired alarm is listed (the island's notification) and the clients are told; held its TTL, at most 32", async () => {
+    const { activity, told } = harness();
+    activity.usageAlarmFired(fired("a1"));
+    await flush();
+    expect(told()).toBe(1);
+    expect(activity.list().usageAlarms).toEqual([fired("a1")]);
+    expect(IslandActivityResult.parse({ computerUse: [], results: [], watches: [], usageAlarms: activity.list().usageAlarms }).usageAlarms).toHaveLength(1);
+    for (let i = 0; i < 40; i++) activity.usageAlarmFired(fired(`b${i}`));
+    expect(activity.list().usageAlarms.map((a) => a.id)).toEqual(Array.from({ length: 32 }, (_, i) => `b${i + 8}`));
+    const later = harness({ now: () => 1_000_000 + 10 * 60_000 + 1 });
+    later.activity.usageAlarmFired(fired("old"));
+    expect(later.activity.list().usageAlarms).toEqual([]);
+  });
+
+  test("held with no island client connected (the alarm is spent either way)", () => {
+    const activity = new IslandActivity({ facts: () => ({}), hosts: () => [], now: () => 1_000_000 });
+    activity.usageAlarmFired(fired("a1"));
+    expect(activity.list().usageAlarms.map((a) => a.id)).toEqual(["a1"]);
+  });
+});
+
 describe("island.activity over the socket", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
@@ -321,6 +348,7 @@ describe("island.activity over the socket", () => {
     expect(parsed.computerUse.map((c) => [c.sessionId, c.title])).toEqual([[sid, "Filing it"]]);
     expect(parsed.results).toEqual([]);
     expect(parsed.watches).toEqual([]);
+    expect(parsed.usageAlarms).toEqual([]);
 
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.islandActivity)).toBe(false);
     const remote = await TestClient.connect(socketPath);
