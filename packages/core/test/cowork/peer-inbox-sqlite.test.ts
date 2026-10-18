@@ -452,7 +452,21 @@ test("doctor restore-backup raw-copy snapshot carries no inbox body, no row, and
   } finally { probe.close(); }
 });
 
-test("doctor restore-backup refuses, deletes the snapshot and leaves the store alone when a SQLite file cannot be scrubbed", async () => {
+// OWNER DECISION (2026-10-18): a pre-restore copy that cannot be opened or scrubbed is KEPT untouched and the restore RUNS.
+function expectKeptUnscrubbed(result: { applied: boolean; detail: string; warning?: string }, original: Buffer<ArrayBuffer>, home: string) {
+  expect(result.applied).toBe(true);
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(basename(snapshot)).toMatch(/^pre-restore-/);
+  expect(readFileSync(snapshot)).toEqual(original); // byte-identical: the failed scrub never touched it
+  expect(readdirSync(join(home, "runtimes", "backups")).filter(name => name.includes(".scrub"))).toEqual([]); // no working copy left
+  for (const text of [result.detail, result.warning ?? ""]) {
+    expect(text).toContain("undelivered Cowork peer messages"); expect(text).toContain(snapshot);
+    expect(text).toContain("could not be opened to clear it"); expect(text).toContain("raw copy");
+  }
+  expect(result.detail).toContain("WARNING");
+}
+
+test("doctor restore-backup keeps the raw copy untouched, runs the restore and warns when a SQLite-header file cannot be scrubbed", async () => {
   const home = tempHome();
   const { rs, store } = opened(home);
   put(store, 1, `${MARKER}-structured`);
@@ -461,27 +475,31 @@ test("doctor restore-backup refuses, deletes the snapshot and leaves the store a
   // A valid SQLite header with a destroyed schema page: door 1 refuses and the raw copy cannot be opened to scrub.
   const bytes = readFileSync(dest); bytes.fill(0xff, 100, 4096);
   writeFileSync(dest, bytes); rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
-  const before = readFileSync(dest), filesBefore = readdirSync(join(home, "runtimes", "backups")).sort();
+  const original = readFileSync(dest);
   const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
-  expect(result.applied).toBe(false);
-  expect(result.detail).toContain("could not be cleared of owed peer messages");
-  expect(readFileSync(dest)).toEqual(before);
-  expect(readdirSync(join(home, "runtimes", "backups")).sort()).toEqual(filesBefore); // no pre-restore-* left, body-bearing or not
+  expectKeptUnscrubbed(result, original, home);
+  const reopened = openRuntimeStateDb(home); cleanup.push(() => reopened.close()); // and the restore really ran
+  expect(reopened.integrity().ok).toBe(true);
 });
 
-test("doctor restore-backup over a file that is not a database restores, and keeps no copy of the unreadable bytes", async () => {
+test("doctor restore-backup over garbage bytes restores and keeps the copy, with the warning", async () => {
   const home = tempHome();
   const { rs } = opened(home);
   const backup = rs.backup(); const dest = rs.path; rs.close();
   writeFileSync(dest, Buffer.concat([Buffer.from(`${MARKER} not a database `), Buffer.alloc(8_192, 7)]));
   rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
-  const filesBefore = readdirSync(join(home, "runtimes", "backups")).sort();
+  const original = readFileSync(dest);
   const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
-  expect(result.applied).toBe(true);
-  expect(result.detail).toContain("was not a readable database and was not kept");
-  expect(readdirSync(join(home, "runtimes", "backups")).sort()).toEqual(filesBefore);
+  expectKeptUnscrubbed(result, original, home);
   const reopened = openRuntimeStateDb(home); cleanup.push(() => reopened.close());
   expect(reopened.integrity().ok).toBe(true);
+});
+
+test("doctor restore-backup says nothing about an unscrubbed copy when the copy was scrubbed", async () => {
+  const f = liveStoreThatWillNotOpen();
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup });
+  expect(result.applied).toBe(true);
+  expect(result.warning).toBeUndefined(); expect(result.detail).not.toContain("WARNING");
 });
 
 test("a backup fails closed: if the exclusion cannot be proven the copy is deleted and the backup throws", () => {

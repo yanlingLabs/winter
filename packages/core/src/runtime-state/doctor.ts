@@ -92,6 +92,8 @@ export type RepairOp =
 export interface RepairResult {
   applied: boolean;
   detail: string;
+  /** Set when the repair left something the operator must know about (restore-backup: an unscrubbed pre-restore copy). */
+  warning?: string;
 }
 
 export const DAEMON_RUNNING_REFUSAL = "daemon is running; stop it first";
@@ -879,17 +881,6 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  the source must live in THIS home's backup directory (realpath'd, so a symlink cannot point out
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
-/** True when the file starts with SQLite's 16-byte magic. */
-function hasSqliteHeader(path: string): boolean {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, "r");
-    const header = Buffer.alloc(16);
-    return readSync(fd, header, 0, 16, 0) === 16 && header.toString("latin1") === "SQLite format 3\u0000";
-  } catch { return true; } // cannot tell: treat it as structured data (refuse rather than destroy)
-  finally { if (fd !== undefined) closeSync(fd); }
-}
-
 function restoreBackup(home: string, backupPath: string): RepairResult {
   // The lock probe moved up to `repairRuntimeState`, which now gates EVERY op — it is kept here as
   // well because this is the one irreversible repair, and a future caller reaching it directly must
@@ -949,10 +940,8 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
    *  `VACUUM INTO` reads THROUGH the connection, so its output already contains every committed
    *  frame — that door represents them all. */
   let sidecarsCaptured = true;
-  /** The byte-copy snapshot of a SQLite file could not be scrubbed of owed peer-message bodies. */
-  let scrubFailed = false;
-  /** The replaced file was not a database and its bytes were deliberately not kept (they may hold an owed body). */
-  let discardedUnreadable = false;
+  /** The byte-copy snapshot could not be opened and scrubbed, so it was kept as the raw copy it is. */
+  let keptUnscrubbed = false;
   if (existsSync(dest)) {
     try {
       const current = openRuntimeStateDb(home, { readonly: true });
@@ -993,22 +982,23 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
         for (const suffix of ["", "-wal", "-shm"]) rmSync(`${snapshot}${suffix}`, { force: true });
         snapshot = undefined;
       }
-      // A BYTE COPY CARRIES OWED PEER-MESSAGE BODIES, and "excluded from backups" covers this snapshot as much as a
-      // `backup()` copy (a snapshot outlives the delivery that deletes a body from the live file). Scrub it the same way
-      // (empty the inbox tables, checkpoint, vacuum, prove). If that is not possible we cannot say the copy holds no
-      // body, so the conservative choice is taken: the snapshot is DELETED, never kept as a labelled "evidence copy".
-      // What happens next depends on what the replaced file is:
-      //   - a SQLite file (valid header) that still would not scrub is structured data this tool must not destroy
-      //     unsnapshotted: REFUSE, nothing overwritten, the operator moves it aside by hand (the existing rule);
-      //   - a file with no SQLite header is not a database any reader can interpret (a truncated, zeroed or
-      //     overwritten file, the usual reason to restore at all): the restore proceeds without a snapshot, and the
-      //     unreadable bytes, which might hold an owed body, are not kept. The corruption itself was already reported
-      //     by the diagnosis; the cost is that those bytes are gone after the restore.
+      // A BYTE COPY CAN CARRY OWED PEER-MESSAGE BODIES, and "excluded from backups" would cover this snapshot too. So when
+      // the copy CAN be opened, scrub it (empty the inbox tables, checkpoint, vacuum, prove) like a `backup()` copy. The
+      // scrub runs on a WORKING COPY of the snapshot and replaces the snapshot only on success, so a failed scrub never
+      // touches the raw copy. OWNER DECISION (2026-10-18): when the copy cannot be opened or scrubbed, whether or not it has
+      // a valid SQLite header, the raw copy is KEPT byte-for-byte and the restore RUNS: the file may be corrupt or written
+      // by a newer Winter, and the copy can be the user's only good data. The result then says plainly that the copy is
+      // unscrubbed and may hold undelivered Cowork peer messages, and where it is.
       if (snapshot !== undefined) {
-        try { scrubExcludedTables(snapshot); } catch {
-          for (const suffix of ["", "-wal", "-shm"]) rmSync(`${snapshot}${suffix}`, { force: true });
-          snapshot = undefined;
-          if (hasSqliteHeader(dest)) scrubFailed = true; else discardedUnreadable = true;
+        const work = `${snapshot}.scrub`, sidecars = ["", "-wal", "-shm"];
+        try {
+          for (const suffix of sidecars) if (existsSync(`${snapshot}${suffix}`)) copyFileSync(`${snapshot}${suffix}`, `${work}${suffix}`);
+          scrubExcludedTables(work);
+          for (const suffix of sidecars) rmSync(`${snapshot}${suffix}`, { force: true });
+          for (const suffix of sidecars) if (existsSync(`${work}${suffix}`)) renameSync(`${work}${suffix}`, `${snapshot}${suffix}`);
+        } catch {
+          for (const suffix of sidecars) rmSync(`${work}${suffix}`, { force: true });
+          keptUnscrubbed = existsSync(snapshot);
         }
       }
     }
@@ -1029,12 +1019,6 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
       detail: `refusing to overwrite ${dest}: its write-ahead log could not be snapshotted, and restoring would discard it. Move the store and its -wal aside by hand and re-run.`,
     };
   }
-  if (scrubFailed) {
-    return {
-      applied: false,
-      detail: `refusing to overwrite ${dest}: its pre-restore snapshot could not be cleared of owed peer messages, and a copy that still holds them is not kept. Move the store and its -wal aside by hand and re-run.`,
-    };
-  }
   for (const path of [`${dest}-wal`, `${dest}-shm`]) rmSync(path, { force: true });
   copyFileSync(real, dest);
   // AND THE SOURCE'S OWN SIDECARS COME ALONG (re-review NEW-10). A byte-copy snapshot — the exact
@@ -1046,9 +1030,13 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
   for (const suffix of ["-wal", "-shm"]) {
     if (existsSync(`${real}${suffix}`)) copyFileSync(`${real}${suffix}`, `${dest}${suffix}`);
   }
+  const warning = keptUnscrubbed && snapshot
+    ? `the pre-restore copy ${snapshot} could not be opened to clear it, so it was kept as the raw copy and may contain undelivered Cowork peer messages (message bodies); protect or delete it accordingly`
+    : undefined;
   return {
     applied: true,
-    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : discardedUnreadable ? "the replaced file was not a readable database and was not kept" : "there was no file to replace"}`,
+    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}${warning ? `. WARNING: ${warning}` : ""}`,
+    ...(warning ? { warning } : {}),
   };
 }
 

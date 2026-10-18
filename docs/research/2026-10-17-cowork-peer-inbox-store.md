@@ -44,15 +44,14 @@ authority (and the ledger tests run the store over a database separate from the 
   `doctor restore-backup` refuses a `.tmp` as incomplete. Export manifests are built from named rows and never read
   these tables (a test pins it). Migration B treats any row as Cowork authority through `COWORK_TABLES` and refuses
   the copy.
-- **The doctor's raw-copy snapshot.** When `doctor restore-backup` cannot open the current file it byte-copies it (plus
-  `-wal`/`-shm`) before overwriting. That copy would hold owed bodies, so it is scrubbed with the same routine
-  (`scrubExcludedTables`). If it cannot be scrubbed, the snapshot is DELETED, never kept as a labelled "evidence copy":
-  a snapshot outlives the delivery that deletes a body from the live file, so a copy that may hold bodies is the
-  retention the owner ruled out. What follows depends on the replaced file. A file with a valid SQLite header that
-  still will not scrub is structured data the tool will not destroy unsnapshotted, so the restore REFUSES (nothing
-  overwritten; the operator moves it aside by hand). A file with no SQLite header (a truncated, zeroed or overwritten
-  file, the usual reason to restore at all) is not a database any reader can interpret, so the restore proceeds
-  without a snapshot and says so; the cost is that those unreadable bytes are not preserved as evidence.
+- **The doctor's raw-copy snapshot (owner decision, 2026-10-18).** When `doctor restore-backup` cannot open the current
+  file it byte-copies it (plus `-wal`/`-shm`) before overwriting. That copy can hold owed bodies, so when it CAN be
+  opened it is scrubbed with the same routine (`scrubExcludedTables`), on a working copy that replaces the snapshot
+  only on success. When it cannot be opened or scrubbed, with or without a valid SQLite header, the raw copy is KEPT
+  byte-for-byte and the restore RUNS: the file may be corrupt or written by a newer Winter, and the copy can be the
+  user's only good data. The command output (`detail`, and the additive `warning` field of the result) then says
+  plainly that the pre-restore copy is unscrubbed, may contain undelivered Cowork peer messages, and gives its path.
+  An earlier revision deleted such a copy or refused the restore; the owner overruled both.
 - **Downgrade.** A populated inbox is owed delivery and is retained, like every Cowork table: both downgrade
   functions refuse while any inbox row exists. An empty inbox is dropped with the rest. Counter rows alone do not
   block it (they carry no authority; a drained inbox keeps them so numbers are not reused).
@@ -84,8 +83,9 @@ nothing else names the store.
    the next checkpoint; a TRUNCATE checkpoint clears them (tested). This unwired store adds no checkpoint calls.
    **Known point for the wiring slice:** decide whether delivery should be followed by a checkpoint, or accept WAL
    residue until the normal one.
-2. **The pre-restore snapshot excludes the inbox on both paths.** The `backup()` path and, after the scrub above, the
-   raw-copy path. The replaced file's owed messages are therefore not recoverable from either snapshot.
+2. **The pre-restore snapshot excludes the inbox when it can.** The `backup()` path always; the raw-copy path whenever
+   the copy can be opened. A copy that cannot be opened is kept unscrubbed and flagged (see above), so it may still
+   hold owed messages.
 3. **Restore empties the inbox, the counters and the dedupe records.** Re-read against the ledger
    (`peer-inbox.ts`): it promises no exactly-once execution, says plainly that a pruned send identity is forgotten
    and that a restarted sender's replay is a new send, and keeps terminal dedupe records only boundedly (24 h, last
