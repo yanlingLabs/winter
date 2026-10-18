@@ -31,7 +31,7 @@ All eight files are copied byte-identically from `packages/core/test/cowork/nati
 
 ## Verification
 
-13 C test binaries, 48,644 checks (unchanged: no worker behaviour moved), the same under ASAN+UBSan, and 27 Python guards, all passing against the vendored libkrun archive `e4433efe` (unchanged on integration). Mutation: 18 of 18 new-guard mutants killed (the key identifiers in four spellings, each of the four worker-layer files edited and re-pinned, the host-side files edited without a re-pin, `receiptKey` and version 2 removed from the host-side vectors, a control payload at text version 2, the pin head and last commit moved, a stray referrer, the contract-document allowance removed). The earlier catalogue is unaffected because no worker source changed.
+13 C test binaries, 48,644 checks (unchanged: no worker behaviour moved), the same under ASAN+UBSan, and 27 Python guards, all passing against the vendored libkrun archive `e4433efe` (unchanged on integration). Mutation: 23 of 23 new-guard mutants killed (the frozen set itself is asserted, and dropping or adding an entry is killed; the key identifiers in four spellings, each of the four worker-layer files edited and re-pinned, the host-side files edited without a re-pin, `receiptKey` and version 2 removed from the host-side vectors, a control payload at text version 2, the pin head and last commit moved, a stray referrer, the contract-document allowance removed). The earlier catalogue is unaffected because no worker source changed.
 
 ## NEEDS FROM OTHER LANE
 

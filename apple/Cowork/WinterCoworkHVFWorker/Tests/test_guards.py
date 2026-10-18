@@ -349,6 +349,7 @@ class Package(unittest.TestCase):
     }
 
     def test_the_worker_layer_vectors_did_not_move_with_text_version_2(self):
+        self.assertEqual(sorted(self.WORKER_LAYER_VECTORS), ["envelopes.json", "guest-stop.json", "mux-frames.json", "runtime-image.json"], "the frozen set itself is pinned")
         for name, expected in self.WORKER_LAYER_VECTORS.items():
             self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
         # and the host-side files DID move to version 2: begin carries receiptKey last, a receipt carries mac last
