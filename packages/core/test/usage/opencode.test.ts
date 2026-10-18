@@ -156,10 +156,13 @@ describe("OpenCode in the usage DB", () => {
     const activity = [6, 5, 3, 2, 1, 0].map((k) => dayMinus(TODAY, k));
     const fake = fakeOpencode(tempDir("bin"), { daily, activity });
     const clock = { now: AFTERNOON };
-    const { db, svc } = service({ opencodeExecutable: () => fake.path, clock, opencodeSpawnBudget: 4 });
+    const { db, svc } = service({ opencodeExecutable: () => fake.path, clock, opencodeSpawnBudget: 7 });
     await svc.ingest(true);
-    // Pass 1: today, --all, then 1 and 2 days ago (`--days 2`, `--days 3`) — the budget is spent.
-    expect(runs(fake.markerPath)).toEqual([opencodeDaysArgs(1), [...OPENCODE_ALL_ARGS], opencodeDaysArgs(2), opencodeDaysArgs(3)].map((a) => a.join(" ")));
+    // Pass 1: today's opening run, --all, 1 day ago (`--days 2` then `--days 1`, back to back), 2 days ago (`--days 3`
+    // then `--days 2`) — then only the closing run fits.
+    expect(runs(fake.markerPath)).toEqual([
+      opencodeDaysArgs(1), [...OPENCODE_ALL_ARGS], opencodeDaysArgs(2), opencodeDaysArgs(1), opencodeDaysArgs(3), opencodeDaysArgs(2), opencodeDaysArgs(1),
+    ].map((a) => a.join(" ")));
     expect(new Set(rows(db).map((r) => r.day))).toEqual(new Set([0, 1, 2].map((k) => dayMinus(TODAY, k))));
     // The catch-up runs on while the budget ran out (no 10-minute wait), and resumes from the saved list.
     await svc.catchUp();
@@ -170,11 +173,41 @@ describe("OpenCode in the usage DB", () => {
     }
     expect(byDay.has(dayMinus(TODAY, 4))).toBe(false);
     expect(runs(fake.markerPath).filter((a) => a.includes("--all"))).toHaveLength(1);
-    // Done: a later pass asks for today (and nothing old) again.
+    // Done: a later pass asks for today (opening and closing) and nothing old.
     const count = runs(fake.markerPath).length;
     clock.now += 11 * 60_000;
     await svc.ingest(true);
-    expect(runs(fake.markerPath).slice(count)).toEqual([opencodeDaysArgs(1).join(" ")]);
+    expect(runs(fake.markerPath).slice(count)).toEqual([opencodeDaysArgs(1).join(" "), opencodeDaysArgs(1).join(" ")]);
+  });
+
+  test("OpenCode in use DURING a batch: only today is written (from the closing run); the finished days wait, never counted twice", async () => {
+    const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 100)], 1: [m("a", 50)] }, activity: [dayMinus(TODAY, 1), TODAY], grow: 1 });
+    const clock = { now: AFTERNOON };
+    const { db, svc, logs } = service({ opencodeExecutable: () => fake.path, clock });
+    await svc.ingest(true);
+    // Every run saw a bigger today: nothing finalized, today's row is the closing run's figure.
+    const first = rows(db);
+    expect(first.map((r) => r.day)).toEqual([TODAY]);
+    expect(first[0]!.input).toBe(100 + runs(fake.markerPath).length);
+    expect(logs.some((l) => l.includes("read again next time"))).toBe(true);
+    // Quiet again: the next batch finalizes yesterday exactly, today once.
+    fake.write({ daily: { 0: [m("a", 130)], 1: [m("a", 50)] }, activity: [dayMinus(TODAY, 1), TODAY] });
+    clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[dayMinus(TODAY, 1), 50], [TODAY, 130]]);
+    expect(svc.series("30d", ["opencode"]).totals.input).toBe(180);
+  });
+
+  test("every run gets TZ: the zone Winter counts its days in", async () => {
+    const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 1)] } });
+    const { svc } = service({ opencodeExecutable: () => fake.path, clock: { now: AFTERNOON } });
+    await svc.ingest(true);
+    const marks = readFileSync(fake.markerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { env: string[] });
+    for (const mk of marks) expect(mk.env).toContain("TZ");
+    expect(localDay(Date.parse("2026-03-08T07:30:00Z"), "America/Los_Angeles")).toBe("2026-03-07");
+    expect(localDay(Date.parse("2026-03-08T07:30:00Z"), "Asia/Tokyo")).toBe("2026-03-08");
+    // The DST day in Los Angeles is 23 hours; its noon is 19:00 UTC.
+    expect(localNoon("2026-03-08", "America/Los_Angeles")).toBe(Date.parse("2026-03-08T19:00:00Z"));
   });
 
   test("asleep for days: the active days between the last batch and yesterday are asked for once (`--all` again)", async () => {
@@ -205,7 +238,7 @@ describe("OpenCode in the usage DB", () => {
       }) };
     };
     const first = mk();
-    await first.svc.ingest(true); // today, --all, yesterday (--days 2), 3 days ago (--days 4, --days 3): the budget is spent
+    await first.svc.ingest(true); // today, --all, yesterday (--days 2, --days 1), the closing run: the budget is spent
     first.db.close();
     const second = mk();
     await second.svc.catchUp();

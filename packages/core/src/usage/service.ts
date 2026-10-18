@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
-import { antigravityPlanFromCli } from "./antigravity";
+import { AGY_TIMEOUT_BACKOFF_MS, antigravityPlanFromCli } from "./antigravity";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
 import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import {
-  OPENCODE_ALL_ARGS, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs, opencodeDifference,
-  runOpencodeStats, type OpencodeStats,
+  OPENCODE_ALL_ARGS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
+  opencodeDifference, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
 import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
@@ -55,6 +55,8 @@ export interface UsageServiceDeps {
   appServerTimeoutMs?: number;
   claudeCliTimeoutMs?: number;
   agyCliEveryMs?: number;
+  /** After a timed-out agy run (default 6 h). */
+  agyTimeoutBackoffMs?: number;
   agyCliTimeoutMs?: number;
   /** OpenCode's stats runs: at most one batch per `opencodeEveryMs` (default 10 min), at most `opencodeSpawnBudget`
    *  runs per pass (default 40; a backfill that needs more continues next pass), each killed at `opencodeTimeoutMs`. */
@@ -411,21 +413,29 @@ export class UsageService {
   /**
    * OpenCode's usage, from its own `opencode stats` (`usage/opencode.ts`) — at most one batch per `opencodeEveryMs`
    * (10 min) unless its backfill ran out of budget. Each batch, in order:
-   *  1. TODAY = `--days 1`, written as one row per model per variant for today's local date, REPLACING the day's rows;
-   *  2. every day to FINALIZE, newest first, as `--days k+1` − `--days k` (a run is shared by two neighbouring days):
-   *     yesterday once after midnight, the last day written as "today" (the daemon may have slept through midnights —
-   *     then `--all` is asked once more for the active days in between), and the one-time backfill — every active date `--all` lists, kept as a `pending` list until done, so an
-   *     interrupted backfill resumes. A finalized day is never asked again (`done`, the last two weeks kept).
-   * At most `opencodeSpawnBudget` runs per batch: out of budget = `more` (the next pass skips both throttles); a failed
-   * run ends the batch (an ordinary failure, retried after the throttle — never `more`, so a broken binary never loops
-   * the catch-up). A local midnight crossed mid-batch discards it. Returns `more`.
+   *  1. TODAY's opening run, `--days 1`;
+   *  2. every day to FINALIZE, newest first, as `--days k+1` − `--days k`, the two runs back to back (never one shared
+   *     with another day, so no day's pair straddles more than a moment): yesterday once after midnight, the last day
+   *     written as "today" (the daemon may have slept through midnights — then `--all` is asked once more for the active
+   *     days in between), and the one-time backfill — every active date `--all` lists, kept as a `pending` list until
+   *     done, so an interrupted backfill resumes. A finalized day is never asked again (`done`, the last two weeks kept);
+   *  3. TODAY's closing run, `--days 1` again. Every difference above is only right if no message of today finished
+   *     during the batch (it would be counted in a wider run and not a narrower one — in yesterday's row AND today's).
+   *     So if the closing run differs from the opening one, ONLY today's row is written (from the closing run) and every
+   *     finalization is left for the next batch; else today's row and every finalized day are written.
+   * At most `opencodeSpawnBudget` runs per batch, the closing run reserved: out of budget = `more` (the next pass skips
+   * both throttles); a failed run ends the batch (an ordinary failure, retried after the throttle — never `more`, so a
+   * broken binary never loops the catch-up), and so does a batch that saw today move. A local midnight crossed
+   * mid-batch discards it whole. Every day is a calendar day in the zone resolved for this batch, which every run gets as
+   * `TZ`. Returns `more`.
    */
   private async ingestOpencode(exe: string): Promise<boolean> {
     const now = this.now();
     if (!this.opencodeMore && this.opencodeAt > 0 && now - this.opencodeAt < (this.deps.opencodeEveryMs ?? 600_000)) return false;
     this.opencodeAt = now;
     this.opencodeMore = false;
-    const today = localDay(now);
+    const tz = currentTimeZone();
+    const today = localDay(now, tz);
     const key = "opencode:progress";
     const saved = this.deps.db.sourceState(key) ?? {};
     const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
@@ -434,68 +444,71 @@ export class UsageService {
     let listed = saved.listed === true;
     const lastToday = typeof saved.lastToday === "string" ? saved.lastToday : undefined;
     let budget = this.deps.opencodeSpawnBudget ?? 40;
-    const runs = new Map<string, OpencodeStats>();
-    let failed = false;
+    let allRun: OpencodeStats | undefined;
     const run = async (args: string[]): Promise<OpencodeStats | undefined> => {
-      const id = args.join(" ");
-      const hit = runs.get(id);
-      if (hit !== undefined) return hit;
       budget -= 1;
       const r = await this.inProbeDir((cwd) => runOpencodeStats(exe, args, {
-        cwd, ...(this.deps.opencodeTimeoutMs === undefined ? {} : { timeoutMs: this.deps.opencodeTimeoutMs }),
+        cwd, tz, ...(this.deps.opencodeTimeoutMs === undefined ? {} : { timeoutMs: this.deps.opencodeTimeoutMs }),
       })).catch(() => ({ failure: "spawn-failed" as const, stats: undefined }));
-      if (r.stats === undefined) {
-        failed = true;
-        this.deps.log?.info?.("[usage] opencode stats gave no reading", { reason: r.failure ?? "no-json" });
-        return undefined;
-      }
-      runs.set(id, r.stats);
+      if (r.stats === undefined) this.deps.log?.info?.("[usage] opencode stats gave no reading", { reason: r.failure ?? "no-json" });
       return r.stats;
     };
+    const all = async (): Promise<OpencodeStats | undefined> => (allRun ??= await run([...OPENCODE_ALL_ARGS]));
     const days = (k: number): Promise<OpencodeStats | undefined> => run(opencodeDaysArgs(k));
-    const writes: Array<{ day: string; rows: UsageRecordInput[] }> = [];
-    const todayStats = await days(1);
-    if (todayStats === undefined) return false;
-    writes.push({ day: today, rows: opencodeDayRecords(todayStats, today, Math.min(localNoon(today), now), this.deps.pricer) });
+    const opening = await days(1);
+    if (opening === undefined) return false;
+    let failed = false;
     if (!listed) {
-      const all = await run([...OPENCODE_ALL_ARGS]);
-      if (all !== undefined) { pending = all.activity.filter((d) => d < today && !done.has(d)); listed = true; }
+      const a = await all();
+      if (a === undefined) failed = true;
+      else { pending = a.activity.filter((d) => d < today && !done.has(d)); listed = true; }
     }
     const due = new Set(pending);
     const yesterday = dayMinus(today, 1);
     due.add(yesterday);
     if (lastToday !== undefined) due.add(lastToday);
     // Asleep for days (no batch since before yesterday): the active days in between are asked for once, via `--all`.
-    if (lastToday !== undefined && lastToday < yesterday) {
-      const all = await run([...OPENCODE_ALL_ARGS]);
-      for (const d of all?.activity ?? []) if (d > lastToday && d < today && !done.has(d)) due.add(d);
+    if (!failed && lastToday !== undefined && lastToday < yesterday) {
+      const a = await all();
+      if (a === undefined) failed = true;
+      for (const d of a?.activity ?? []) if (d > lastToday && d < today && !done.has(d)) due.add(d);
     }
-    const order = [...due].filter((d) => d < today && !done.has(d)).sort().reverse();
-    for (const day of order) {
+    const finals: Array<{ day: string; rows: UsageRecordInput[] }> = [];
+    for (const day of [...due].filter((d) => d < today && !done.has(d)).sort().reverse()) {
       if (failed) break;
+      // Two runs for the day, and the closing run kept in reserve.
+      if (budget < 3) { this.opencodeMore = true; break; }
       const k = daysBefore(day, today);
-      const needed = [k + 1, k].filter((n) => !runs.has(opencodeDaysArgs(n).join(" "))).length;
-      if (needed > budget) { this.opencodeMore = true; break; }
       const wide = await days(k + 1);
       const narrow = wide === undefined ? undefined : await days(k);
-      if (wide === undefined || narrow === undefined) break;
-      writes.push({ day, rows: opencodeDayRecords(opencodeDifference(wide, narrow), day, localNoon(day), this.deps.pricer) });
-      done.add(day);
+      if (wide === undefined || narrow === undefined) { failed = true; break; }
+      finals.push({ day, rows: opencodeDayRecords(opencodeDifference(wide, narrow), day, localNoon(day, tz), this.deps.pricer) });
     }
+    const closing = await days(1);
     // Every `--days` run counts from the local midnight of its moment: across a midnight the differences are wrong.
-    if (localDay(this.now()) !== today) { this.opencodeAt = 0; this.opencodeMore = false; return false; }
-    for (const w of writes) this.replaceOpencodeDay(w.day, w.rows);
+    if (closing === undefined || localDay(this.now(), tz) !== today) { this.opencodeAt = 0; this.opencodeMore = false; return false; }
+    this.replaceOpencodeDay(today, opencodeDayRecords(closing, today, Math.min(localNoon(today, tz), this.now()), this.deps.pricer), tz);
+    const settled = sameOpencodeStats(opening, closing);
+    if (settled) {
+      for (const f of finals) { this.replaceOpencodeDay(f.day, f.rows, tz); done.add(f.day); }
+    } else if (finals.length > 0) {
+      // Today moved while the days were read: their differences may hold some of today's tokens. Asked again next batch.
+      this.deps.log?.info?.("[usage] opencode was in use during the read; its finished days are read again next time");
+    }
+    if (!settled || failed) this.opencodeMore = false;
     const keepFrom = dayMinus(today, 14);
     this.deps.db.setSourceState(key, "opencode", {
-      done: [...done].filter((d) => d >= keepFrom).sort(), pending: pending.filter((d) => !done.has(d)), listed, lastToday: today,
+      done: [...done].filter((d) => d >= keepFrom).sort(), pending: pending.filter((d) => !done.has(d)), listed,
+      // A day not finalized yet stays "the last today" until it is — so it is asked for again.
+      lastToday: lastToday !== undefined && lastToday < today && !done.has(lastToday) ? lastToday : today,
     }, this.now());
     return this.opencodeMore;
   }
 
   /** Replace one local day of OpenCode rows — written only when something differs (a re-read of an unchanged day writes nothing). */
-  private replaceOpencodeDay(day: string, rows: readonly UsageRecordInput[]): void {
-    const from = localDayStart(day);
-    const to = localDayEnd(day);
+  private replaceOpencodeDay(day: string, rows: readonly UsageRecordInput[], tz: string): void {
+    const from = localDayStart(day, tz);
+    const to = localDayEnd(day, tz);
     const stored = new Map(this.deps.db.storedRows("opencode", false, from, to).map((r) => [r.dedupe, r]));
     if (stored.size === rows.length && rows.every((r) => { const s = stored.get(r.dedupe); return s !== undefined && !differs(s, r); })) return;
     this.deps.db.replaceDay("opencode", from, to, rows);
@@ -618,7 +631,8 @@ export class UsageService {
     if (!this.deps.tracking().antigravity) return { provider: "antigravity", source: "disabled", windows: [] };
     if (this.deps.agyExecutable?.() === undefined) return { provider: "antigravity", source: "not-installed", windows: [] };
     const now = this.now();
-    const every = this.deps.agyCliEveryMs ?? 300_000;
+    // A run killed at Winter's own deadline (agy ignored its `--print-timeout`) backs off for hours, not minutes.
+    const every = this.agyCache?.failure === "timeout" ? (this.deps.agyTimeoutBackoffMs ?? AGY_TIMEOUT_BACKOFF_MS) : (this.deps.agyCliEveryMs ?? 300_000);
     if (this.agyRun !== undefined) {
       await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.agyCache === undefined || now - this.agyCache.at >= every) {

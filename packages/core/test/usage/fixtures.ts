@@ -185,7 +185,8 @@ else {
 export const AGY_USAGE = JSON.parse(readFileSync(join(import.meta.dir, "shapes", "agy-usage.json"), "utf8")) as Record<string, unknown>;
 
 /** A fake `agy -p /usage --output-format json`. Modes as named; the answer is pretty-printed, like agy's. */
-export type FakeAgyMode = "ok" | "banner" | "turns" | "tokens" | "other-command" | "conversation" | "no-command" | "no-json" | "exit-1" | "hang";
+export type FakeAgyMode = "ok" | "banner" | "turns" | "tokens" | "other-command" | "conversation" | "answered" | "no-command" | "no-telemetry"
+  | "no-json" | "exit-1" | "hang";
 
 export function fakeAgy(dir: string, mode: FakeAgyMode): { path: string; markerPath: string } {
   const base = JSON.parse(JSON.stringify(AGY_USAGE)) as Record<string, any>;
@@ -194,7 +195,11 @@ export function fakeAgy(dir: string, mode: FakeAgyMode): { path: string; markerP
   if (mode === "tokens") base.usage.input_tokens = 1200;
   if (mode === "other-command") base.command.name = "chat";
   if (mode === "conversation") base.conversation_id = "conv-123";
-  if (mode === "no-command") delete base.command;
+  // The model answered "/usage" as a prompt: success, text, no command.
+  if (mode === "answered") delete base.command;
+  if (mode === "no-command") { delete base.command; base.response = ""; }
+  // An answer that does not say how many turns or tokens it took: never read as zero.
+  if (mode === "no-telemetry") { delete base.num_turns; delete base.usage; delete base.conversation_id; }
   return fakeExecutable(dir, "agy", `
 const mode = ${JSON.stringify(mode)};
 if (mode === "hang") { setInterval(() => {}, 1000); }
@@ -211,7 +216,13 @@ else {
 export interface OpencodeDayModel { id: string; providerID: string; variant?: string; input: number; output: number; reasoning?: number; read?: number; write?: number; cost?: number }
 /** A fake OpenCode's history: `daily[k]` = the models' numbers k local days ago (0 = today); `activity` = what `--all`
  *  lists; `fail` = answer garbage and exit 1. */
-export interface OpencodeHistory { daily: Record<number, OpencodeDayModel[]>; activity?: string[]; fail?: boolean }
+export interface OpencodeHistory {
+  daily: Record<number, OpencodeDayModel[]>;
+  activity?: string[];
+  fail?: boolean;
+  /** Live use: every run adds `grow` × (its run number) input tokens to today's first model — today moves between runs. */
+  grow?: number;
+}
 
 /**
  * A fake `opencode stats --standalone …`, answering BY ARGV from a data file it re-reads every run (`write` changes
@@ -226,6 +237,10 @@ export function fakeOpencode(dir: string, history: OpencodeHistory): { path: str
 const data = JSON.parse(fs.readFileSync(${JSON.stringify(dataPath)}, "utf8"));
 const argv = process.argv.slice(2);
 if (data.fail) { log("Error: SECRET-PROMPT-7f3a"); process.exit(1); }
+const countPath = ${JSON.stringify(dataPath)} + ".count";
+const count = (fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+if (data.grow && data.daily[0] && data.daily[0][0]) data.daily[0][0].input += data.grow * count;
 const all = argv.includes("--all");
 const n = all ? Infinity : Math.max(1, Number(argv[argv.indexOf("--days") + 1]));
 const models = new Map();

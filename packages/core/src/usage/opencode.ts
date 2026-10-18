@@ -112,31 +112,76 @@ export function opencodeDayRecords(stats: OpencodeStats, day: string, at: number
   return out;
 }
 
-// ── local calendar days (OpenCode's `--days` are the child's local days; the probe passes `TZ` along) ──────────────
+// ── local calendar days ───────────────────────────────────────────────────────────────────────────────────────────
+// OpenCode's `--days` are the CHILD's local days: every run gets `TZ` = the zone resolved at that moment
+// (`currentTimeZone`), and every day here is computed in that same zone, resolved at call time — never a value cached
+// when the process started.
+
+/** The system's time zone now (IANA name). */
+export const currentTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const pad = (n: number): string => String(n).padStart(2, "0");
-/** The local calendar date of `ms`. */
-export const localDay = (ms: number): string => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const parts = (day: string): [number, number, number] => day.split("-").map(Number) as [number, number, number];
+
+/** Wall-clock fields of `ms` in `tz`. */
+function wall(ms: number, tz: string): { y: number; m: number; d: number; h: number; min: number; s: number } {
+  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const p = Object.fromEntries(f.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { y: Number(p.year), m: Number(p.month), d: Number(p.day), h: Number(p.hour) % 24, min: Number(p.minute), s: Number(p.second) };
+}
+
+/** The calendar date of `ms` in `tz` (default: the zone now). */
+export const localDay = (ms: number, tz = currentTimeZone()): string => { const w = wall(ms, tz); return `${w.y}-${pad(w.m)}-${pad(w.d)}`; };
+
+/** The instant `day` `hour`:00 is on the wall clock in `tz` (a skipped DST hour resolves just after the gap). */
+function zoned(day: string, hour: number, tz: string): number {
+  const [y, m, d] = parts(day);
+  const target = Date.UTC(y, m - 1, d, hour);
+  let guess = target;
+  for (let i = 0; i < 3; i++) {
+    const w = wall(guess, tz);
+    const diff = Date.UTC(w.y, w.m - 1, w.d, w.h, w.min, w.s) - target;
+    if (diff === 0) break;
+    guess -= diff;
+  }
+  return guess;
+}
+
 /** Local midnight starting `day`, and the next one (a DST day is 23 or 25 hours). */
-export const localDayStart = (day: string): number => { const [y, m, d] = parts(day); return new Date(y, m - 1, d).getTime(); };
-export const localDayEnd = (day: string): number => { const [y, m, d] = parts(day); return new Date(y, m - 1, d + 1).getTime(); };
+export const localDayStart = (day: string, tz = currentTimeZone()): number => zoned(day, 0, tz);
+export const localDayEnd = (day: string, tz = currentTimeZone()): number => zoned(dayMinus(day, -1), 0, tz);
 /** Local noon of `day`: a row's `at`, inside its own local day bucket whatever the DST shift. */
-export const localNoon = (day: string): number => { const [y, m, d] = parts(day); return new Date(y, m - 1, d, 12).getTime(); };
-/** How many local days `day` lies before `today` (0 = today). */
-export const daysBefore = (day: string, today: string): number => Math.round((localNoon(today) - localNoon(day)) / 86_400_000);
-/** The local date `k` days before `today`. */
-export const dayMinus = (today: string, k: number): string => { const [y, m, d] = parts(today); return localDay(new Date(y, m - 1, d - k, 12).getTime()); };
+export const localNoon = (day: string, tz = currentTimeZone()): number => zoned(day, 12, tz);
+/** How many calendar days `day` lies before `today` (0 = today). */
+export const daysBefore = (day: string, today: string): number => {
+  const [a, b, c] = parts(day);
+  const [x, y, z] = parts(today);
+  return Math.round((Date.UTC(x, y - 1, z) - Date.UTC(a, b - 1, c)) / 86_400_000);
+};
+/** The calendar date `k` days before `today` (negative `k`: after). */
+export const dayMinus = (today: string, k: number): string => { const [y, m, d] = parts(today); return new Date(Date.UTC(y, m - 1, d - k)).toISOString().slice(0, 10); };
+
+/** PURE: two runs counted the same (every model, every count, the cost). */
+export function sameOpencodeStats(a: OpencodeStats, b: OpencodeStats): boolean {
+  if (a.models.size !== b.models.size) return false;
+  for (const [key, x] of a.models) {
+    const y = b.models.get(key);
+    if (y === undefined || x.input !== y.input || x.output !== y.output || x.reasoning !== y.reasoning || x.cacheRead !== y.cacheRead
+      || x.cacheWrite !== y.cacheWrite || Math.abs(x.cost - y.cost) > 1e-12) return false;
+  }
+  return true;
+}
 
 export type OpencodeFailure = "no-json" | "exited" | "timeout" | "spawn-failed" | "too-large";
 
-/** One `opencode stats` run (stdin from /dev/null, the probes' allowlisted environment plus its XDG dirs and `TZ`). */
-export async function runOpencodeStats(executable: string, args: readonly string[], opts: { cwd: string; timeoutMs?: number; env?: Record<string, string> }):
+/** One `opencode stats` run (stdin from /dev/null, the probes' allowlisted environment plus its XDG dirs, and ALWAYS
+ *  `TZ` = `tz` — the zone Winter counts its days in, so the child's `--days` are the same days). */
+export async function runOpencodeStats(executable: string, args: readonly string[], opts: { cwd: string; tz: string; timeoutMs?: number; env?: Record<string, string> }):
   Promise<{ stats?: OpencodeStats; failure?: OpencodeFailure }> {
   const lines: string[] = [];
   const outcome = await runLines(executable, {
     args: [...args], cwd: opts.cwd, stdin: "ignore", timeoutMs: opts.timeoutMs ?? OPENCODE_STATS_TIMEOUT_MS, maxBytes: 4 * 1024 * 1024,
-    env: opts.env ?? probeEnv(["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TZ"]),
+    env: { ...(opts.env ?? probeEnv(["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"])), TZ: opts.tz },
     onLine: (line) => { lines.push(line); return undefined; },
   });
   if (outcome.kind !== "exited") return { failure: outcome.kind === "done" ? "no-json" : outcome.kind };
