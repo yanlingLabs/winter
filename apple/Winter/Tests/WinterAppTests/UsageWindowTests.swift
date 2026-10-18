@@ -70,7 +70,19 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: true, hovered: true), UsagePlanLine.thickness(compact: true, hovered: false))
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: false, hovered: true), UsagePlanLine.thickness(compact: false, hovered: false))
         XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: false), 0)
-        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 9.48, accuracy: 0.01)
+        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 18.96, accuracy: 0.01)
+        XCTAssertGreaterThan(UsagePlanLine.titleScale(hovered: true), UsagePlanLine.titleScale(hovered: false))
+    }
+
+    func testTheUsedFigureSitsAtTheFillsEndAndTheLeftOneOnlyWhereItFits() {
+        // Half used on a 300 pt track: the used slot ends where the fill ends; the grey after it holds the left one.
+        let half = UsagePlanLine.figureLayout(width: 300, fraction: 0.5, compact: true)
+        XCTAssertEqual(half.usedSlot, 150)
+        XCTAssertTrue(half.showsLeft)
+        // A sliver of fill: the used slot never squeezes below a figure's width.
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.01, compact: true).usedSlot, UsagePlanLine.figureSlot(compact: true))
+        // Nearly full: no room for the left one.
+        XCTAssertFalse(UsagePlanLine.figureLayout(width: 300, fraction: 0.97, compact: true).showsLeft)
     }
 
     func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
