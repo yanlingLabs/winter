@@ -597,7 +597,7 @@ export function latestRecoveryAttempts(home: string): RecoveryAttemptSummary[] {
  * trace in exactly the broken-home state the verb exists for. Unlike the recovery path, a message is
  * safe to carry here: nothing on this path ever touches a message body or a transcript body.
  */
-export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore; tmpDirOf?: (sessionId: string) => string } = {}): Promise<RepairResult> {
+export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore; tmpDirOf?: (sessionId: string) => string; /** test seam: the rename that promotes a scrubbed pre-restore copy */ renameSnapshot?: typeof renameSync } = {}): Promise<RepairResult> {
   try {
     // EVERY repair refuses while the daemon holds the lock, not just `restore-backup` (whole-branch
     // review, M3). This function is exported on the package barrel, so the CLI's own probe is not
@@ -616,7 +616,7 @@ export async function repairRuntimeState(home: string, op: RepairOp, deps: { sto
       case "detach-backend":
         return detachBackend(home, op.winterSessionId);
       case "restore-backup":
-        return restoreBackup(home, op.backupPath);
+        return restoreBackup(home, op.backupPath, deps.renameSnapshot ?? renameSync);
       case "memory-keys-rollback":
         return repairMemoryKeysRollback(home);
       case "adopt-legacy-session":
@@ -881,7 +881,7 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  the source must live in THIS home's backup directory (realpath'd, so a symlink cannot point out
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
-function restoreBackup(home: string, backupPath: string): RepairResult {
+function restoreBackup(home: string, backupPath: string, promote: typeof renameSync = renameSync): RepairResult {
   // The lock probe moved up to `repairRuntimeState`, which now gates EVERY op — it is kept here as
   // well because this is the one irreversible repair, and a future caller reaching it directly must
   // not be the exception (M3).
@@ -942,6 +942,8 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
   let sidecarsCaptured = true;
   /** The byte-copy snapshot could not be opened and scrubbed, so it was kept as the raw copy it is. */
   let keptUnscrubbed = false;
+  /** The snapshot was scrubbed and promoted, but a leftover could not be cleaned up. */
+  let cleanupWarning: string | undefined;
   if (existsSync(dest)) {
     try {
       const current = openRuntimeStateDb(home, { readonly: true });
@@ -990,15 +992,25 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
       // by a newer Winter, and the copy can be the user's only good data. The result then says plainly that the copy is
       // unscrubbed and may hold undelivered Cowork peer messages, and where it is.
       if (snapshot !== undefined) {
-        const work = `${snapshot}.scrub`, sidecars = ["", "-wal", "-shm"];
+        const work = `${snapshot}.scrub`, sidecars = ["-wal", "-shm", "-journal"];
+        const dropWork = () => { for (const suffix of ["", ...sidecars]) rmSync(`${work}${suffix}`, { force: true }); };
+        let promoted = false;
         try {
-          for (const suffix of sidecars) if (existsSync(`${snapshot}${suffix}`)) copyFileSync(`${snapshot}${suffix}`, `${work}${suffix}`);
+          for (const suffix of ["", ...sidecars]) if (existsSync(`${snapshot}${suffix}`)) copyFileSync(`${snapshot}${suffix}`, `${work}${suffix}`);
           scrubExcludedTables(work);
+          // THE ATOMIC STEP: a rename over the existing path. Until it succeeds the raw copy is untouched; if anything above
+          // or this rename throws, only the working copy is deleted and the raw copy stays (keptUnscrubbed, warning shown).
+          promote(work, snapshot);
+          promoted = true;
+          // The scrubbed main file is now the snapshot. Its old sidecars describe the RAW copy and must not sit beside it;
+          // the scrub checkpointed, so the working copy normally has none, and any it does have belong with it.
           for (const suffix of sidecars) rmSync(`${snapshot}${suffix}`, { force: true });
-          for (const suffix of sidecars) if (existsSync(`${work}${suffix}`)) renameSync(`${work}${suffix}`, `${snapshot}${suffix}`);
+          for (const suffix of sidecars) if (existsSync(`${work}${suffix}`)) promote(`${work}${suffix}`, `${snapshot}${suffix}`);
         } catch {
-          for (const suffix of sidecars) rmSync(`${work}${suffix}`, { force: true });
-          keptUnscrubbed = existsSync(snapshot);
+          dropWork();
+          // After the rename the snapshot IS the scrubbed copy, whatever failed later: report that, not "unscrubbed".
+          keptUnscrubbed = !promoted && existsSync(snapshot);
+          if (promoted) cleanupWarning = `the pre-restore copy ${snapshot} was scrubbed, but removing its stale write-ahead sidecars failed; delete ${snapshot}-wal, ${snapshot}-shm and ${snapshot}-journal by hand if they exist`;
         }
       }
     }
@@ -1032,7 +1044,7 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
   }
   const warning = keptUnscrubbed && snapshot
     ? `the pre-restore copy ${snapshot} could not be opened to clear it, so it was kept as the raw copy and may contain undelivered Cowork peer messages (message bodies); protect or delete it accordingly`
-    : undefined;
+    : cleanupWarning;
   return {
     applied: true,
     detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}${warning ? `. WARNING: ${warning}` : ""}`,

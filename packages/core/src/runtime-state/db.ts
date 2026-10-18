@@ -299,6 +299,7 @@ export function downgradeCoworkRuntimeStateToV7(home: string): { from: 8 | 9 | 1
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
   try {
+    db.run("PRAGMA secure_delete = FAST");
     db.run("PRAGMA busy_timeout=5000"); db.run("PRAGMA foreign_keys=ON");
     return db.transaction(() => {
       const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
@@ -330,6 +331,7 @@ export function downgradeRuntimeStateToV6(home: string): { from: 7 | 8 | 9 | 10 
   if (!existsSync(path)) return "not-needed";
   const db = new Database(path);
   try {
+    db.run("PRAGMA secure_delete = FAST");
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
     if (version <= 6) return "not-needed";
     if (version > 17) throw new RuntimeStateUnavailableError(path, "newer-schema");

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
@@ -138,6 +138,12 @@ test("an owed or retained inbox row is Cowork authority: both downgrades refuse 
     const raw = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
     try { expect(raw.query("SELECT count(*) AS n FROM cowork_peer_inbox").get()).toEqual({ n: 1 }); } finally { raw.close(); }
   }
+});
+
+test("the downgrade functions and Migration C's raw handle pin secure_delete too (source pin)", () => {
+  const read = (path: string) => readFileSync(join(import.meta.dir, "..", "..", "src", path), "utf8");
+  expect([...read("runtime-state/db.ts").matchAll(/PRAGMA secure_delete = FAST/g)].length).toBeGreaterThanOrEqual(4); // open, scrub, v7 and v6 downgrades
+  expect(read("migration/migrate-c.ts")).toContain('PRAGMA secure_delete = FAST');
 });
 
 test("a schema newer than 17 is refused by the downgrade ladder", () => {
@@ -493,6 +499,40 @@ test("doctor restore-backup over garbage bytes restores and keeps the copy, with
   expectKeptUnscrubbed(result, original, home);
   const reopened = openRuntimeStateDb(home); cleanup.push(() => reopened.close());
   expect(reopened.integrity().ok).toBe(true);
+});
+
+test("a failing rename of the scrubbed copy leaves the raw copy byte-identical, removes only the working copy, warns, and the restore still runs", async () => {
+  const f = liveStoreThatWillNotOpen();
+  f.rs.db.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+  const liveMain = readFileSync(f.dest), liveWal = readFileSync(`${f.dest}-wal`); // what the raw copy will be a copy of
+  const calls: string[] = [];
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup }, { renameSnapshot: (from) => { calls.push(String(from)); throw new Error("injected rename failure"); } });
+  expect(calls).toHaveLength(1); expect(calls[0]).toMatch(/\.scrub$/); // the atomic promotion was the first and only rename tried
+  expect(result.applied).toBe(true);
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(readFileSync(snapshot)).toEqual(liveMain);
+  expect(readFileSync(`${snapshot}-wal`)).toEqual(liveWal); // the raw copy's sidecar was not removed either
+  expect(readdirSync(join(f.home, "runtimes", "backups")).filter(name => name.includes(".scrub"))).toEqual([]);
+  expect(result.warning).toContain("undelivered Cowork peer messages"); expect(result.detail).toContain("WARNING");
+  const reopened = openRuntimeStateDb(f.home); cleanup.push(() => reopened.close());
+  expect(reopened.integrity().ok).toBe(true); // and the restore itself ran
+});
+
+test("a successful scrub promotes the working copy over the snapshot and leaves no working file or stale sidecar", async () => {
+  const f = liveStoreThatWillNotOpen();
+  f.rs.db.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+  const seen: Array<[string, string]> = [];
+  const rawWal = readFileSync(`${f.dest}-wal`);
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup }, { renameSnapshot: (from, to) => { seen.push([String(from), String(to)]); renameSync(from, to); } });
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(seen[0]).toEqual([`${snapshot}.scrub`, snapshot]);
+  expect(result.warning).toBeUndefined();
+  expect(readdirSync(join(f.home, "runtimes", "backups")).filter(name => name.includes(".scrub"))).toEqual([]);
+  expect(readFileSync(snapshot).includes(MARKER)).toBe(false);
+  // The raw copy's write-ahead log must not sit beside the scrubbed main (any sidecar left is the working copy's own).
+  if (existsSync(`${snapshot}-wal`)) { expect(readFileSync(`${snapshot}-wal`)).not.toEqual(rawWal); expect(readFileSync(`${snapshot}-wal`).includes(MARKER)).toBe(false); }
+  const probe = new Database(snapshot, { readonly: true });
+  try { expect(probe.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" }); } finally { probe.close(); }
 });
 
 test("doctor restore-backup says nothing about an unscrubbed copy when the copy was scrubbed", async () => {

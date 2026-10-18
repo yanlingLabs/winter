@@ -46,8 +46,9 @@ authority (and the ledger tests run the store over a database separate from the 
   the copy.
 - **The doctor's raw-copy snapshot (owner decision, 2026-10-18).** When `doctor restore-backup` cannot open the current
   file it byte-copies it (plus `-wal`/`-shm`) before overwriting. That copy can hold owed bodies, so when it CAN be
-  opened it is scrubbed with the same routine (`scrubExcludedTables`), on a working copy that replaces the snapshot
-  only on success. When it cannot be opened or scrubbed, with or without a valid SQLite header, the raw copy is KEPT
+  opened it is scrubbed with the same routine (`scrubExcludedTables`), on a working copy that is promoted over the
+  snapshot by one atomic `rename` (the raw copy's stale sidecars are removed only after it succeeds; any failure before
+  the rename deletes just the working copy and keeps the raw copy). When it cannot be opened or scrubbed, with or without a valid SQLite header, the raw copy is KEPT
   byte-for-byte and the restore RUNS: the file may be corrupt or written by a newer Winter, and the copy can be the
   user's only good data. The command output (`detail`, and the additive `warning` field of the result) then says
   plainly that the pre-restore copy is unscrubbed, may contain undelivered Cowork peer messages, and gives its path.
@@ -77,7 +78,7 @@ nothing else names the store.
 
 ## Open points
 
-1. **Freed pages and the WAL.** `PRAGMA secure_delete=FAST` is pinned on every runtime-state open (it is this
+1. **Freed pages and the WAL.** `PRAGMA secure_delete=FAST` is pinned on every writable runtime-state handle (`openRuntimeStateDb`, both downgrade functions, Migration C's raw handle) (it is this
    runtime's default, SQLite 3.51; the pin stops a different build from silently turning it off). With it, the body
    pages freed at delivery are zeroed in the main file. The WAL keeps the OLD frames (which can hold the body) until
    the next checkpoint; a TRUNCATE checkpoint clears them (tested). This unwired store adds no checkpoint calls.
