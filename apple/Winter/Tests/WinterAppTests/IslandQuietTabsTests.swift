@@ -9,6 +9,27 @@ import WinterKit
 final class IslandQuietTabsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    // MARK: Devices
+
+    func testADevicesLineIsAllOrNothingAndTheHelpersIsItsTwoPermissions() {
+        XCTAssertEqual(IslandDevicesPresentation.lineFraction(.ok), 1)
+        XCTAssertEqual(IslandDevicesPresentation.lineFraction(.warning), 1)
+        XCTAssertEqual(IslandDevicesPresentation.lineFraction(.off), 0, "nothing estimated: off is the grey track")
+        let granted = IslandDevicesPresentation.chip("Accessibility", true)
+        let denied = IslandDevicesPresentation.chip("Screen Recording", false)
+        let unknown = IslandDevicesPresentation.chip("Accessibility", nil)
+        XCTAssertEqual(IslandDevicesPresentation.chipWords(granted), "✓ Accessibility")
+        XCTAssertEqual(IslandDevicesPresentation.chipWords(denied), "✕ Screen Recording")
+        XCTAssertEqual(IslandDevicesPresentation.chipWords(unknown), "? Accessibility")
+        XCTAssertEqual(IslandDevicesPresentation.chipColor(.granted), islandToneColor(.ok))
+        XCTAssertEqual(IslandDevicesPresentation.chipColor(.denied), pillReviewAmber)
+        let row = IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper", detail: "Running · 1.4.0",
+                                  tone: .warning, chips: [granted, denied])
+        XCTAssertEqual(IslandDevicesPresentation.accessibilityLabel(row),
+                       "Computer Use helper, Running · 1.4.0, Accessibility: granted, Screen Recording: not granted",
+                       "VoiceOver still hears what the row showed at rest before")
+    }
+
     // MARK: Shelf
 
     func testTheSelectedFileIsMarkedByALineUnlessItIsMissing() {
