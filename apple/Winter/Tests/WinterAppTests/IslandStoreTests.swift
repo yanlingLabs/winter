@@ -148,6 +148,16 @@ final class IslandStoreTests: XCTestCase {
         XCTAssertEqual(islandBodyText(card), "Winter needs your view for a sec on Mail")
     }
 
+    func testAnUntitledCardSaysWhatKindOfSessionAsked() {
+        XCTAssertEqual(approval("a", facts: IslandSessionFacts(mode: "dispatch")).sessionLabel, "Dispatch")
+        XCTAssertEqual(approval("b", facts: IslandSessionFacts(mode: "chat")).sessionLabel, "Chat")
+        XCTAssertEqual(approval("c", facts: IslandSessionFacts(mode: "cowork")).sessionLabel, "Workspace")
+        XCTAssertEqual(approval("d", facts: IslandSessionFacts(mode: "code", origin: "dispatch-child")).sessionLabel, "Dispatch task")
+        XCTAssertEqual(approval("e", facts: IslandSessionFacts(mode: "code")).sessionLabel, "Session")
+        XCTAssertEqual(approval("f", facts: IslandSessionFacts(mode: "cowork", title: " Q3 plan ")).sessionLabel, "Q3 plan",
+                       "a title wins over the kind")
+    }
+
     func testWhileTypingNoNewCardOrRerouteTakesTheCardAway() async {
         var focus = IslandFocus()
         let store = IslandStore()
