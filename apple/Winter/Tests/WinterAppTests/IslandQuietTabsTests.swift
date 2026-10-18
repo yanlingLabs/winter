@@ -9,6 +9,14 @@ import WinterKit
 final class IslandQuietTabsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    // MARK: Shelf
+
+    func testTheSelectedFileIsMarkedByALineUnlessItIsMissing() {
+        XCTAssertTrue(IslandShelfTab.showsSelectionLine(selected: true, missing: false))
+        XCTAssertFalse(IslandShelfTab.showsSelectionLine(selected: true, missing: true), "a missing file says Missing there")
+        XCTAssertFalse(IslandShelfTab.showsSelectionLine(selected: false, missing: false))
+    }
+
     // MARK: The cost block
 
     private func modelRow(_ model: String, _ source: UsageSource, cost: Double, tokens: Double = 1_000, basis: String = "list") -> UsageModelRow {
