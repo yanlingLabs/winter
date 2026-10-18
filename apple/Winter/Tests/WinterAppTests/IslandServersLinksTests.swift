@@ -494,6 +494,18 @@ final class IslandServersLinksTests: XCTestCase {
     }
 
     /// A tiny PNG of `size` × `size`.
+    func testAnIconIsDecodedOnlyFromAnImageType() throws {
+        // A one-page PDF ImageIO would read is no icon.
+        let pdf = NSMutableData()
+        var box = CGRect(x: 0, y: 0, width: 16, height: 16)
+        let consumer = try XCTUnwrap(CGDataConsumer(data: pdf as CFMutableData))
+        let ctx = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &box, nil))
+        ctx.beginPDFPage(nil); ctx.fill(box); ctx.endPDFPage(); ctx.closePDF()
+        XCTAssertNil(IslandServerIcons.thumbnail(pdf as Data))
+        // A PNG is.
+        XCTAssertNotNil(IslandServerIcons.thumbnail(Self.png()))
+    }
+
     static func png(_ size: Int = 4) -> Data { png(width: size, height: size) }
 
     static func png(width: Int, height: Int) -> Data {
@@ -574,4 +586,5 @@ final class LoopbackTestServer {
         head += "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         return Data(head.utf8) + body
     }
+
 }

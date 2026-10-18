@@ -337,10 +337,16 @@ enum IslandServerIcons {
     /// Where they are looked for in a folder: itself, then these — no deeper.
     static let projectFolders = ["", "public", "static", "assets", "resources"]
 
+    /// The only formats an icon is decoded from (UTIs): an icon link or a project file that is anything else — a PDF,
+    /// a RAW, a movie ImageIO happens to read — is no icon.
+    static let iconTypes: Set<String> = ["public.png", "com.microsoft.ico", "com.apple.icns", "public.jpeg",
+                                         "com.compuserve.gif", "org.webmproject.webp"]
+
     /// A small thumbnail of untrusted image bytes — ImageIO, off the main thread (this runs on `IslandServerProbes`'
-    /// queue); nil when it is not an image ImageIO reads, or any side is over `maxDimension`.
+    /// queue); nil when it is not one of `iconTypes`, or any side is over `maxDimension`.
     static func thumbnail(_ data: Data) -> CGImage? {
         guard !data.isEmpty, let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let type = CGImageSourceGetType(source) as String?, iconTypes.contains(type),
               CGImageSourceGetCount(source) > 0,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
