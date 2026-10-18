@@ -428,7 +428,7 @@ test("boot reconcile READS the key, never creates it: with the key a retained re
 });
 
 test("the key is never printed: captured console and stream output, thrown errors, the launcher's message log and the host's event log hold none of its spellings", async () => {
-  const secrets = [syntheticKey.reveal(), Buffer.from(SYNTHETIC).toString("hex"), SYNTHETIC, encodeURIComponent(syntheticKey.reveal())];
+  const secrets: string[] = [syntheticKey.reveal(), Buffer.from(SYNTHETIC).toString("hex"), SYNTHETIC, encodeURIComponent(syntheticKey.reveal())];
   const captured: string[] = [];
   const realConsole = { log: console.log, error: console.error, warn: console.warn, info: console.info, debug: console.debug };
   const realOut = process.stdout.write.bind(process.stdout), realErr = process.stderr.write.bind(process.stderr);
@@ -436,6 +436,7 @@ test("the key is never printed: captured console and stream output, thrown error
   process.stdout.write = ((chunk: unknown) => { captured.push(String(chunk)); return true; }) as never;
   process.stderr.write = ((chunk: unknown) => { captured.push(String(chunk)); return true; }) as never;
   const errors: unknown[] = [];
+  const generated: string[] = []; // every key text the store tried to persist in step 5
   let h: Harness | undefined;
   try {
     // 1. a full start and stop with the synthetic key in the slot
@@ -457,12 +458,17 @@ test("the key is never printed: captured console and stream output, thrown error
     errors.push(...[crashed].flatMap(() => []));
     // 4. a Keychain that fails while holding the key in a message
     await wiringFor(h, { secrets: { get: async () => { throw new Error(`denied ${syntheticKey.reveal()}`); }, set: async () => {} } }).start(h.workspaceId).catch(error => errors.push(error));
+    // 5. a Keychain that reads empty but refuses the write: the key just generated must not end up in anything we throw or print
+    await wiringFor(h, { secrets: { get: async () => null, set: async (_name: string, value: string) => { generated.push(value); throw new Error("denied"); } } }).start(h.workspaceId).catch(error => errors.push(error));
   } finally {
     Object.assign(console, realConsole);
     process.stdout.write = realOut as never; process.stderr.write = realErr as never;
   }
   const logs = JSON.stringify(h!.launcher.sessions.map(session => session.received)) + inspect(h!.launcher.sessions.map(session => session.received), { depth: 10 }) + JSON.stringify(h!.events) + captured.join("\n");
   for (const secret of secrets) expect(logs.includes(secret)).toBe(false);
+  expect(generated).toHaveLength(1);
+  secrets.push(generated[0]!, Buffer.from(generated[0]!, "base64").toString("hex"));
+  expect(logs.includes(generated[0]!)).toBe(false);
   // the error from step 4 was built by the test itself from the key, so it is excluded from the claim about OUR errors; every other error is ours
   const ours = errors.filter(error => !String((error as Error)?.message ?? "").includes("denied"));
   for (const error of ours) for (const secret of secrets) expect(`${(error as Error).message}${(error as Error).stack}${inspect(error, { depth: 8 })}`.includes(secret)).toBe(false);

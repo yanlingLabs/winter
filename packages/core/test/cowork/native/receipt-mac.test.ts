@@ -81,6 +81,11 @@ describe("the key value never prints", () => {
     const begin = parseCoworkNativeLauncherLine(lineVectors.positive.find(entry => entry.name === "begin")!.line, "to-launcher") as unknown as Record<string, unknown>;
     for (const bad of [vectors.keyBase64, Buffer.from(vectors.keyUtf8), { reveal: () => vectors.keyBase64 }, null, undefined]) expect(code(() => serializeCoworkNativeLauncherLine({ ...begin, receiptKey: bad } as never, "to-launcher"))).toBe("bad_field");
   });
+  test("verification never throws and never says yes when its input cannot be hashed", () => {
+    const mac = computeCoworkNativeReceiptMac(key, "x");
+    for (const input of [{}, 42, null, undefined, Symbol("x")]) expect(verifyCoworkNativeReceiptMac(key, input as never, mac)).toBe(false);
+    for (const receipt of [null, undefined, {}, { mac }, 7]) expect(verifyCoworkNativeOrderlyReceiptMac(receipt as never, key)).toBe(false);
+  });
   test("a key of the wrong length cannot be built, and the helpers fail closed", () => {
     for (const length of [0, 16, 31, 33, 64]) expect(() => CoworkNativeReceiptKey.fromBytes(new Uint8Array(length))).toThrow("receipt_key_length");
     for (const text of [null, 7, "", "abc", Buffer.alloc(31).toString("base64"), Buffer.alloc(33).toString("base64"), vectors.keyHex, vectors.keyBase64.replace(/=+$/, "")]) { expect(CoworkNativeReceiptKey.fromBase64(text)).toBeNull(); expect(isCanonicalBase64Of32Bytes(text)).toBe(false); }
@@ -122,7 +127,17 @@ describe("the Keychain slot", () => {
   });
   test("ensure replaces a malformed value, but never overwrites a slot it could not READ", async () => {
     const malformed = slotOf({ [COWORK_NATIVE_RECEIPT_KEY_ACCOUNT]: "garbage" });
-    const made = await new CoworkNativeReceiptKeyStore(malformed).ensure();
+    const lines: string[] = [], realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    let made: CoworkNativeReceiptKey;
+    try { made = await new CoworkNativeReceiptKeyStore(malformed).ensure(); } finally { console.error = realError; }
+    // exactly one fixed-code line, carrying neither the old value nor the new key
+    expect(lines).toEqual(["cowork: receipt key replaced (malformed)"]);
+    for (const secret of [made.reveal(), "garbage", Buffer.from(made.reveal(), "base64").toString("hex")]) expect(lines.join("\n").includes(secret)).toBe(false);
+    // an empty slot is a first creation, not a replacement: no line
+    lines.length = 0; console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try { await new CoworkNativeReceiptKeyStore(slotOf()).ensure(); await new CoworkNativeReceiptKeyStore(slotOf({ [COWORK_NATIVE_RECEIPT_KEY_ACCOUNT]: made.reveal() })).ensure(); } finally { console.error = realError; }
+    expect(lines).toEqual([]);
     expect(malformed.values.get(COWORK_NATIVE_RECEIPT_KEY_ACCOUNT)).toBe(made.reveal());
     let wrote = false;
     const locked = { get: async () => { throw new Error("keychain locked"); }, set: async () => { wrote = true; } };

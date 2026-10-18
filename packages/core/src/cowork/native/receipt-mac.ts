@@ -89,6 +89,8 @@ export class CoworkNativeReceiptKeyStore {
     try { stored = await this.slot.get(this.account); } catch { throw new CoworkNativeReceiptKeyError("receipt_key_unreadable"); }
     const existing = CoworkNativeReceiptKey.fromBase64(stored);
     if (existing !== null) return existing;
+    // One fixed line, never the value: a replaced key makes every receipt signed under the old one Class B, and a person debugging that should be able to see why.
+    if (stored !== null) console.error("cowork: receipt key replaced (malformed)");
     // Empty, or a value that is not a canonical 32-byte key (corruption, or an older format): replace it. Receipts signed under the lost value are
     // Class B from now on, which is where an unreadable key would have left them anyway.
     const fresh = CoworkNativeReceiptKey.generate();
