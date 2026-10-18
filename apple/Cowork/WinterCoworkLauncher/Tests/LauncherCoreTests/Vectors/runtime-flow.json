@@ -146,6 +146,99 @@
       "refusedAt": null
     },
     {
+      "name": "an-empty-out-end-frame-clears-nothing",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 0,
+          "end": true
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        }
+      ],
+      "refusedAt": 2
+    },
+    {
+      "name": "an-empty-err-end-frame-clears-nothing",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "err",
+          "bytes": 0,
+          "end": true
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        }
+      ],
+      "refusedAt": 2
+    },
+    {
+      "name": "a-one-byte-out-frame-clears-it",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "a-one-byte-out-frame-with-end-clears-it",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 1,
+          "end": true
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "a-one-byte-err-frame-clears-it",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "err",
+          "bytes": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
       "name": "two-chunks-then-more-than-the-rest",
       "steps": [
         {

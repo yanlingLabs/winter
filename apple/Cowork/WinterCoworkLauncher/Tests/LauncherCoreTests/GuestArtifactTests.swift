@@ -55,6 +55,27 @@ final class GuestArtifactTests: XCTestCase {
         let j = try fresh(); try FileManager.default.removeItem(atPath: j.guestDirectory + "/kernel"); try FileManager.default.createDirectory(atPath: j.guestDirectory + "/kernel", withIntermediateDirectories: false); refused(j, "a directory")
         let k = try fresh(kernel: "", initramfs: "x"); refused(k, "an empty kernel")
     }
+    /// A FIFO must be refused WITHOUT waiting for a writer (a plain blocking open would hang `begin` for ever): run the check on a thread and give it seconds.
+    func testAFifoAsAnArtifactIsRefusedAtOnceAndNeverHangs() throws {
+        for name in ["kernel", "initramfs.cpio"] {
+            let g = try fresh()
+            try FileManager.default.removeItem(atPath: g.guestDirectory + "/" + name)
+            XCTAssertEqual(mkfifo(g.guestDirectory + "/" + name, 0o600), 0)
+            let done = DispatchSemaphore(value: 0); var threw = false
+            Thread.detachNewThread { threw = (try? GuestArtifactVerifier(workerPath: g.workerPath).computeDigest()) == nil; done.signal() }
+            XCTAssertEqual(done.wait(timeout: .now() + 5), .success, "a FIFO as \(name) must not stall the launcher")
+            XCTAssertTrue(threw, "a FIFO as \(name) is not a regular file")
+        }
+    }
+    func testAnArtifactLargerThanTheGuestsRamCeilingIsRefusedBeforeItIsRead() throws {
+        XCTAssertEqual(GuestArtifactVerifier.maximumArtifactBytes, 1 << 30, "1 GiB: the guest's RAM ceiling")
+        let g = try fresh()
+        let fd = open(g.guestDirectory + "/kernel", O_WRONLY); defer { close(fd) }
+        XCTAssertEqual(ftruncate(fd, off_t(GuestArtifactVerifier.maximumArtifactBytes + 1)), 0)   // sparse: nothing is written
+        let started = Date()
+        XCTAssertThrowsError(try verifier(g).computeDigest(), "a kernel over the ceiling is not hashed at all (the digest itself, not just its comparison, is refused)")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "refused from fstat, not after hashing a gibibyte")
+    }
     func testTheHashIsOfTheDescriptorNotOfAPathThatChangedAfterwards() throws {
         // `sha256(ofFileNamed:in:)` opens relative to an already-open directory descriptor: renaming the directory away afterwards
         // does not change what the descriptor reads.

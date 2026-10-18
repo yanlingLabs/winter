@@ -28,9 +28,14 @@ Ported by reading, never by editing: `CleanStopAuthority` (`OrderlyStopAuthority
 
 ## Contract pin and what changed in the fix rounds
 
-Pinned to S1's contract round 3: `cowork/n2-host-adapter` at `6c1f04e807df3a10579d6f14a15e39652bd1c7a6` (the vectors' last commit is that SHA too; earlier contract
-commits were `abb2f361`, `1313040a5` and `86a0629f`). Vectors are eight files (`envelopes`, `launcher-lines`, `mux-frames`, `stop-receipts`, `runtime-image`, `guest-stop`, `bootstrap-order`, `runtime-flow`)
-with SHA-256 pins in `PINS.json`, which also records the contract document's own SHA-256 at that head.
+Pinned to the contract as merged on `cowork/output-integration` (contract round 3 by S1, `cowork/n2-host-adapter` @ `6c1f04e807df3a10579d6f14a15e39652bd1c7a6`, plus the later
+fold that says an empty OUT/ERR frame no longer clears the runtime IN count). This branch merges that integration head (merge commit `3463208927fc`); the vectors are copied from the merged
+tree, byte-identically, and the last commit touching them is `4f2f0c7258c8`.
+
+**Deliberately NOT here: the receipt MAC and the v2 receipt text.** Integration has since moved on (the daemon side of the receipt MAC: a v2 receipt text and `begin.receiptKey`). This
+branch stays on the pre-v2 contract of the merge above. The Swift side (the launcher minting v2 receipts with the MAC key from `begin`, and the vectors for them) is the next slice
+after this PR merges; nothing in it is half-done here. Vectors are eight files (`envelopes`, `launcher-lines`, `mux-frames`, `stop-receipts`, `runtime-image`, `guest-stop`, `bootstrap-order`, `runtime-flow`)
+with SHA-256 pins in `PINS.json`, which also records the contract document's own SHA-256 at the copied head.
 
 Earlier in this round: `homeId` is on `begin` (after `id`) and is its ONLY source (no `--home-id`); memory floor 768 MiB; WorkerFault code 8 `second_drain`;
 the shipped daemon's signing identifier is `winter-core` (`apple/ComputerUse/PROTOCOL.md` section 2.2), dev stays `com.winter.core.dev`.
@@ -47,7 +52,9 @@ the shipped daemon's signing identifier is `winter-core` (`apple/ComputerUse/PRO
 - **What the launcher cannot see.** It sees statuses, not libkrun's exit reason or the final-sync flags. The worker reports `guest_halted` only for reason `off` with a
   completed final sync on both disks, so `GuestStop.observed` feeds the function `off` and complete syncs exactly when `guest_halted` arrived. A test replays every vector
   that way: the CLASS (orderly, not booted, uncertain) always equals the vector's. Only a reason code can differ (a `reset` or `vcpu-error` exit is `flush-uncertain`
-  here, `guest-fault` in the vector), and neither is ever Class A. S3 owns the other half of the drift test.
+  here, `guest-fault` in the vector), and neither is ever Class A. S3 owns the other half of the drift test. (A contract-prose observation, no code change: this `flush-uncertain` versus `guest-fault`
+  difference is the only place the launcher's reason code can differ from the TypeScript's; on every input the launcher can actually produce the two agree. The verdict itself matches
+  the TypeScript on the full truth table, as the reviewer checked.)
 - **Receipt:** `guest` is `{drain, halting, powerOff}`; all three are `acked` / `observed` / `observed` or all `not-booted` (`invariantsHold`).
 - **Layered stop timeline**, every figure from the moment the worker is handed the DRAIN: guest budget G (the DRAIN's `budgetMs`, default 30 s), libkrun exit watchdog
   X = 20 s, launcher kill K = G + 20 s + 5 s (55 s by default), daemon wait H = K + 10 s (65 s). The launcher's drain timer is K, for a host stop and for owner loss
@@ -66,12 +73,17 @@ the shipped daemon's signing identifier is `winter-core` (`apple/ComputerUse/PRO
 ## New security logic (REVIEW NEEDED): `runtimeImageDigest`
 
 `GuestArtifacts.swift` recomputes SHA-256(SHA-256(kernel) || SHA-256(initramfs.cpio)) over `<worker dir>/cowork-guest/{kernel,initramfs.cpio}`
-and refuses the scope with `code_identity_mismatch` before anything is spawned. The directory and both files are opened with `O_NOFOLLOW`,
-must be regular, singly linked and not group/other writable, and are hashed from the descriptors.
+and refuses the scope with `code_identity_mismatch` before anything is spawned. The directory and both files are opened with `O_NOFOLLOW` and `O_NONBLOCK`
+(a FIFO at either path must be refused, not waited on), judged by `fstat` before any read (regular, singly linked, not group/other writable, at most 1 GiB), then hashed from the descriptors
+with blocking reads restored. The 1 GiB cap is the guest's RAM ceiling (`maxMemoryMiB` 1024): a kernel or initramfs the guest could not load is no boot artifact, and an
+unbounded file would stall the launcher's serial queue (the real ones are tens of MiB).
 
-Remaining window: libkrun opens the same files BY PATH inside the worker, after this hash. A same-user process able to replace `kernel` in that
-gap wins the race. Proposal to close it (a contract change, S3/S4): the launcher keeps the two verified descriptors open and passes them down,
-the worker hands libkrun `/dev/fd/N` paths, and libkrun reads only those. Not built here.
+**Open item: the hash-then-load window.** libkrun opens the same files BY PATH inside the worker, after this hash. A same-user process that can write `kernel` or `initramfs.cpio`
+in that gap wins the race. This is NOT closed here, and the earlier idea of handing the worker `/dev/fd/N` paths is withdrawn: a held read-only descriptor pins the inode, not its
+bytes, so an in-place write through any other descriptor or path still changes what is read; on macOS `/dev/fd/N` is a dup that shares the file offset, which libkrun's own reads would
+disturb; and it would change the worker's fixed descriptor table (0 to 4). What would close it: the launcher (or the installer) puts the artifacts where a same-user process cannot write
+them (a root-owned or immutable location inside the signed bundle's protected path), or the launcher makes a PRIVATE unlinked copy it alone can reach (a copy of `kernel` and
+`initramfs.cpio` in an `O_EXCL` 0600 file it hashed after writing, and then passes by descriptor, as the data the worker maps rather than a path). Either is a decision for the owner and S3/S4.
 
 ## Where the contract is silent (REVIEW NEEDED)
 
@@ -97,15 +109,21 @@ the worker hands libkrun `/dev/fd/N` paths, and libkrun reads only those. Not bu
 10. **Profile selection is not an argument.** The launcher reads which daemon it serves from its OWN code signature (identifier
     `com.winter.cowork.launcher.dev` selects `com.winter.core.dev`; anything else, including unsigned, is production and fails closed). A true
     compile-time switch would need a second build of the binary; the signed identifier is already enforced by the production requirement the
-    daemon places on the launcher, so nothing argument-selectable remains.
+    daemon places on the launcher, so nothing argument-selectable remains. The identifier is read from the KERNEL's copy (`SecTaskCreateFromSelf` +
+    `SecTaskCopySigningIdentifier`, i.e. `csops`), not by `SecCodeCopySelf` + `SecCodeCopyStaticCode`, which re-read the executable's path: a file swapped under the
+    running process cannot change the profile. It still fails closed to production.
 11. **`DEVELOPMENT_TEAM` versus the compiled team.** `apple/Winter/project.yml` builds with `DEVELOPMENT_TEAM: 37N77U9RSZ` while the launcher
     compiles `certificate leaf[subject.OU] = "37N77U9RSZ"` into its requirements. They agree today; they are two copies of one fact, pinned
     equal by `scripts/embed-cowork-native.test.ts`. A team change must move both, and the embed gate checks the recorded requirement.
 12. **Exit judging.** A single `WNOHANG` probe at the process-exit event returned 0 in 0.3 to 0.65 percent of exits. A "still running" answer now
     retries on a bounded 10 ms timer (`exitProbeAttempts`), and a coarse 1 s backstop probe runs while a worker exists and re-arms itself, so no
     exit goes unjudged.
-13. **Back-pressure.** The outbound L1 queue pauses L3 reads at a 4 MiB soft limit and resumes below it; only the hard cap (soft limit plus
-    1 MiB terminal reserve) still kills, so a slow daemon no longer costs a healthy worker.
+13. **Back-pressure, both directions.** DOWN (daemon to worker): the L3 backlog pauses L1 reads at a 4 MiB soft limit and resumes below half of it; a worker that accepts not one
+    byte for the stall window (30 s), or any single pause that outlasts the total cap (120 s, progress or not: a trickling worker may not hold `stop` and the daemon's EOF behind the bulk
+    for ever), is killed, and so is a backlog over the 32 MiB hard cap. UP (worker to daemon): the outbound L1 queue pauses L3 reads at its 4 MiB soft limit and resumes
+    below it. The relay ceiling sits one largest line (1.5 MiB) plus two reads above that threshold, so the pause is reachable: an earlier version put the ceiling AT the threshold, which
+    a refused enqueue always reached first, so a slow daemon was treated as lost and a healthy VM got an owner-loss drain. Only the hard cap (ceiling plus the 1 MiB terminal reserve)
+    ends the channel now. The terminal lines (`stopped`, `uncertain`, `fault`) keep their reserve.
 14. **Retained receipt attestation** (below).
 
 ## The retained-receipt path (D1) and a storage proposal
@@ -118,8 +136,9 @@ symlinked ancestor or `.WINTER-x` is caught). The in-memory double lives in the 
 Proposed production directory: a user-level directory OUTSIDE the Winter home that survives a home wipe, named per `homeId`, created by the
 daemon with mode 0700 and passed as `--receipt-dir`.
 
-**Mandatory guard probes.** For `source: retained`, S1's two live guard probes, process absent and images unlocked, are REQUIRED before the
-daemon releases anything. A retained Class A without both is not proof. S1 implements the mint side; this launcher only writes the file.
+**Guard probes are S7's to make mandatory.** For `source: retained`, the two live guard probes (process absent, images unlocked) must run before the daemon releases anything, and a retained
+Class A without both is not proof. That is NOT what the code at the integration head does today: `mintOrderlyStopProof` takes `{kind: "retained"}` with no probes, and `recovery.ts` mints from
+a port that returns `attested: true` which nothing implements yet. S7 (the production ports) must implement that port with both probes, and solve retire (below). This launcher only writes the file.
 
 **Authenticity.** A file the same user can write is not authentic: any same-user process can forge a retained Class A, and the probes above
 are what stands between a forgery and a release. A MAC over the line, with a key held in the Keychain under an access list naming the launcher,
@@ -128,7 +147,7 @@ spawned, SecCode-verified launcher to read its own store, needs new L1 lines (a 
 contract revision.
 
 **Retire gap.** After an owner-loss exit nothing can retire the file over L1 (the socket is gone), and Class B files are never retired. Proposal
-(S1/S7, daemon side, no contract line needed): the next daemon, after it has accepted a retained receipt AND the two probes pass AND the disks are
+(S7, daemon side, no contract line needed): the next daemon, after it has accepted a retained receipt AND the two probes pass AND the disks are
 released, deletes the file by its exact scope name, and sweeps Class B files of a scope once a later Class A for the same workspace is accepted or
 the owner chooses Recover. Until then the files are inert write-once records; a stale file cannot release a newer incarnation because the name and
 content carry the scope and epoch.
@@ -139,8 +158,8 @@ Commands (all from the repository root; scratch paths of your choice):
 
 ```
 swift build --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build
-swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build                         # 210 tests
-swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build-test -Xswiftc -DWINTER_COWORK_TEST_BUILD   # 215 tests
+swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build                         # 214 tests
+swift test  --package-path apple/Cowork/WinterCoworkLauncher --scratch-path <scratch>/build-test -Xswiftc -DWINTER_COWORK_TEST_BUILD   # 219 tests
 bun test scripts/embed-cowork-native.test.ts                                                                         # 21 tests
 ```
 
@@ -162,8 +181,8 @@ key; `codesign --verify --strict` passes; `otool -L` lists only `/usr/lib/...` a
 CoreFoundation, libSystem, and the `/usr/lib/swift` runtime). A first release build carried the builder's absolute source paths in the linker's
 debug map and the embed gate refused it by name; `-Xswiftc -gnone -Xlinker -S -Xlinker -x` (now in `launcherBuildArgs`) removes them.
 
-Mutation checks (the catalogue and runners are in the author's scratch, not committed): 139 mutations (131 in Swift and C, 8 on `embed-cowork-native.sh`), each applied to the source, run against
-the named tests and reverted. 134 are killed (126 in Swift and C, and all 8 on `embed-cowork-native.sh`: marker check, foreign-dylib check, entitlements
+Mutation checks (the catalogue and runners are in the author's scratch, not committed): 147 mutations (139 in Swift and C, 8 on `embed-cowork-native.sh`), each applied to the source, run against
+the named tests and reverted. 142 are killed (134 in Swift and C, and all 8 on `embed-cowork-native.sh`: marker check, foreign-dylib check, entitlements
 set, signing order, `--deep`, the non-Release skip, the recorded-requirement check). Areas: parent authentication (requirement skipped, pid unchecked, unnamed-pair unchecked, token
 failure accepted, dev or wrong-team requirement), worker image (check before resume, check after READY, executed cdhash, pinned digest, requirement
 ignored), natives (probe before kill, kill after a confirmed exit, sole-reaper policy, suspended spawn, `CLOEXEC_DEFAULT`, colliding child
@@ -175,7 +194,7 @@ disks, scope before validation, one `begin`), stop authority (flush, exit status
 transfer, invariants), receipt store (write-once, directory mode, `.winter*`, symlinks, name against content), power (veto, assertion), runtime
 (ECONNRESET, SIGTERM) and the test pin (present in a normal build).
 
-Five mutations survive on their own BY DESIGN (the three below, plus two defence-in-depth checks: the receipt store's second location vetting after the parent was already vetted and the name checked, and the guest artifact `S_IFREG` test next to the size, link-count and writability tests), each because a second, independent guard covers the same case: a non-canonical base64 carrier
+Five mutations survive on their own BY DESIGN (the three below, plus two defence-in-depth checks: the receipt store's second location vetting after the parent was already vetted and the name checked, and the guest artifact `S_IFREG` test next to the size, link-count and writability tests, which also refuse a FIFO or a directory), each because a second, independent guard covers the same case: a non-canonical base64 carrier
 (the line's final re-serialization compare also refuses it, and removing THAT compare is a killed mutation, so the pair is covered but the base64
 check alone cannot be isolated), a second `begin` (the phase check and the reservation both refuse it; both dropped is killed), and a flush
 shortfall (the stop authority's counter check and the receipt's own `invariantsHold` both produce `flush-uncertain`; both dropped is killed). The first pass also found one real gap (a stray descriptor without

@@ -57,9 +57,14 @@ public struct OutboundQueue {
     public let hardLimit: Int
     /// Relay traffic may use at most `hardLimit - terminalReserve`.
     public let terminalReserve: Int
+    /// How far past `softLimit` relay traffic may still be queued before it is refused: the pause threshold must be REACHABLE, so the relay
+    /// ceiling (`softLimit + relayHeadroom`) is at least one largest line plus one read above it. The reader is paused at `softLimit`; whatever
+    /// it had already read still fits.
+    public let relayHeadroom: Int
 
-    public init(softLimit: Int = 4 << 20, terminalReserve: Int = 1 << 20) {
-        self.softLimit = softLimit; self.terminalReserve = terminalReserve; self.hardLimit = softLimit + terminalReserve
+    public init(softLimit: Int = 4 << 20, terminalReserve: Int = 1 << 20, relayHeadroom: Int = 0) {
+        self.softLimit = softLimit; self.terminalReserve = terminalReserve; self.relayHeadroom = relayHeadroom
+        self.hardLimit = softLimit + relayHeadroom + terminalReserve
     }
     public var isEmpty: Bool { lines.isEmpty }
     /// Relay reads pause here; they resume once the daemon has drained below it.

@@ -94,7 +94,7 @@ final class RuntimeRig {
 
     /// `guest`: run against a scratch worker directory with REAL guest artifacts and the real verifier (default: a double that accepts).
     init(mode: String = "ok", workerRequirement: String? = nil, guest: GuestWorkerDirectory? = nil, artifacts: GuestArtifactVerifying? = nil,
-         relayLimits: (soft: Int, hard: Int, stallMs: Int)? = nil, tune: (inout SessionConfig) -> Void = { _ in }) throws {
+         relayLimits: (soft: Int, hard: Int, stallMs: Int)? = nil, relayPauseCapMs: Int? = nil, tune: (inout SessionConfig) -> Void = { _ in }) throws {
         let (d, l) = try Sock.pair(.stream)
         let launcherEnd = try Sock.relocate(l, above: 5)
         try Sock.setNonBlocking(launcherEnd)
@@ -112,7 +112,7 @@ final class RuntimeRig {
         runtime = LauncherRuntime(l1: launcherEnd, spawner: NativeWorkerSpawner(verifier: image), onFinish: { semaphore.signal() })
         var cfg = Fixture.config(); tune(&cfg); config = cfg
         scope = guest?.scope(mode: mode) ?? Fixture.scope(mode: mode)
-        runtime.start(config: config, dependencies: SessionDependencies(store: store, artifacts: self.artifacts, power: power), observePower: false, relayLimits: relayLimits)
+        runtime.start(config: config, dependencies: SessionDependencies(store: store, artifacts: self.artifacts, power: power), observePower: false, relayLimits: relayLimits, relayPauseCapMs: relayPauseCapMs)
     }
     deinit { try? FileManager.default.removeItem(at: storeDirectory) }
 
@@ -329,6 +329,42 @@ final class RuntimeIntegrationTests: XCTestCase {
         rig.daemon.send(.stop(id: "req-stop", stopNonce: Fixture.nonce, reason: .user, budgetMs: 10_000))
         let receipt = try XCTUnwrap(rig.daemon.next { if case .stopped(_, let r) = $0 { r } else { nil } })
         XCTAssertTrue(receipt.invariantsHold)
+    }
+    func testASlowDaemonReadingEchoedFramesPausesTheWorkersStreamAndLosesNothing() throws {
+        // The UP direction: the daemon does not read L1 while the worker echoes 6 MiB. The queue's pause threshold (4 MiB) must be reachable: L3 reads pause, the worker
+        // blocks on its own socket, and nothing is "lost" or killed. (Before: a refusal at the soft limit ended the channel and a healthy VM got an owner-loss drain.)
+        let rig = try RuntimeRig(mode: "ok")
+        XCTAssertTrue(rig.hello()); let (pid, _) = try XCTUnwrap(rig.begin()); XCTAssertTrue(try rig.attach(try DiskPair()))
+        let payload = [UInt8](repeating: 0x61, count: 1_000_000), total = 8   // lines of about 1.3 MB: the headroom must hold one whole line past the pause threshold
+        let sent = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            for seq in 1...total { _ = rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.runtime, seq: UInt32(seq), payload: [0, 1, 0, 0] + payload)), timeout: 60) }
+            sent.signal()
+        }
+        // The daemon reads nothing; wait (a debug build parses slowly) until the launcher has paused, or fails the test.
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline, rig.runtime.queue.sync(execute: { rig.runtime.upPauses == 0 && !rig.runtime.session.daemonGone }) { Thread.sleep(forTimeInterval: 0.1) }
+        XCTAssertFalse(rig.runtime.queue.sync { rig.runtime.session.daemonGone }, "a slow daemon is not a lost daemon")
+        XCTAssertGreaterThan(rig.runtime.queue.sync { rig.runtime.upPauses }, 0, "L3 reads paused instead")
+        XCTAssertEqual(kill(Int32(pid), 0), 0, "the worker is alive")
+        var received = 0, lastSeq = 0
+        while received < total, let line = rig.daemon.next(timeout: 30, { (line: LineToDaemon) -> [UInt8]? in
+            if case .muxUp(let f) = line, f[5] == MuxClass.runtime.rawValue, f.count > 900_000 { f } else { nil } }) {
+            let seq = Int(line[8]) | Int(line[9]) << 8 | Int(line[10]) << 16 | Int(line[11]) << 24; XCTAssertGreaterThan(seq, lastSeq, "in order"); lastSeq = seq; received += 1
+        }
+        XCTAssertEqual(received, total, "every echoed frame arrived once the daemon read")
+        XCTAssertEqual(sent.wait(timeout: .now() + 60), .success)
+        XCTAssertFalse(rig.runtime.queue.sync { rig.runtime.session.daemonGone })
+    }
+    func testAWorkerTricklingForeverIsStillCutOffByTheTotalPauseCap() throws {
+        // One CONTINUOUS pause: a 1 MiB frame lands in a backlog whose soft limit is 512 KiB, and the worker takes 64 KiB per 50 ms, so L1 stays paused for about 0.6 s while the
+        // worker ALWAYS progresses (the 100 ms stall window never trips). The total cap (300 ms) ends it. Without the cap this worker is simply slow and survives.
+        let rig = try RuntimeRig(mode: "trickle", relayLimits: (soft: 512 << 10, hard: 32 << 20, stallMs: 100), relayPauseCapMs: 300)
+        XCTAssertTrue(rig.hello()); let (pid, _) = try XCTUnwrap(rig.begin()); XCTAssertTrue(try rig.attach(try DiskPair()))
+        let payload = [UInt8](repeating: 0x64, count: 1_048_576)
+        DispatchQueue.global().async { for seq in 1...2 { _ = rig.daemon.sendAll(.muxDown(frame: MuxFormat.frame(.runtime, seq: UInt32(seq), payload: payload)), timeout: 30) } }
+        XCTAssertEqual(rig.daemon.nextFault(), .worker_channel_lost, "paused past the total cap with progress all along")
+        XCTAssertTrue(rig.processGone(pid))
     }
     func testAWorkerThatIsSlowButAlwaysProgressingSurvivesEveryStallWindow() throws {
         // 2 MiB at 64 KiB per 50 ms is well over a second; the stall window is 250 ms, so the stall timer fires several times, and each time

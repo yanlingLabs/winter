@@ -28,7 +28,11 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private let spawner: WorkerSpawning
     private let onFinish: @Sendable () -> Void
     private var framer = LineFramer()
-    private var outbound = OutboundQueue()
+    /// The up direction (worker to daemon): L3 reads pause at the queue's soft limit, and the relay ceiling is a whole largest line (plus two reads) above it, so the pause
+    /// is reachable and only a worker that outruns the HARD cap (never the soft one) makes the channel "lost".
+    private var outbound = OutboundQueue(relayHeadroom: WireLimits.muxLineBytes + 2 * 64 * 1024)
+    /// How many times L3 reads were paused for the daemon's sake (diagnostics and tests).
+    public private(set) var upPauses = 0
     private var head: [UInt8]?
     private var headOffset = 0
     private var l1Gone = false
@@ -54,6 +58,10 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private var l3SoftLimit = 4 << 20
     private var l3HardLimit = 32 << 20
     private var relayStallMs = 30_000
+    /// The most one CONTINUOUS pause of L1 may last, progress or not: a worker that accepts a trickle forever must not hold `stop` and the daemon's EOF
+    /// behind the bulk indefinitely. 120 s moves a 2 MiB drain (soft limit down to its resume point) at 17 KB/s.
+    private var relayPauseCapMs = 120_000
+    private var pauseStartedNs: UInt64 = 0
     private var l1ReadSuspended = false
     /// How many times L1 was paused for the relay's sake (diagnostics and tests).
     public private(set) var backpressurePauses = 0
@@ -75,9 +83,10 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     /// Builds the session and starts reading L1. Call once; everything after runs on `queue`.
     /// `relayLimits` is for tests (small numbers); production uses the defaults.
     public func start(config: SessionConfig, dependencies: SessionDependencies, observePower: Bool, handleTerminationSignals: Bool = false,
-                      relayLimits: (soft: Int, hard: Int, stallMs: Int)? = nil) {
+                      relayLimits: (soft: Int, hard: Int, stallMs: Int)? = nil, relayPauseCapMs: Int? = nil) {
         queue.async { [self] in
             if let relayLimits { l3SoftLimit = relayLimits.soft; l3HardLimit = relayLimits.hard; relayStallMs = relayLimits.stallMs }
+            if let relayPauseCapMs { self.relayPauseCapMs = relayPauseCapMs }
             session = LauncherSession(config: config, ports: self, dependencies: dependencies)
             let read = DispatchSource.makeReadSource(fileDescriptor: l1.raw, queue: queue)
             read.setEventHandler { [weak self] in self?.l1Readable() }
@@ -238,7 +247,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
             }
         }
     }
-    private func pauseL3Reads() { if !l3ReadSuspended, let source = l3Read { source.suspend(); l3ReadSuspended = true } }
+    private func pauseL3Reads() { if !l3ReadSuspended, let source = l3Read { source.suspend(); l3ReadSuspended = true; upPauses += 1 } }
     private func resumeL3Reads() { if l3ReadSuspended, let source = l3Read { l3ReadSuspended = false; source.resume() } }
 
     private func workerExited() {
@@ -269,6 +278,7 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private func pauseL1ForBackpressure() {
         guard !l1ReadSuspended, let source = l1Read, !l1Gone, !l1Closing else { return }
         source.suspend(); l1ReadSuspended = true; backpressurePauses += 1
+        pauseStartedNs = DispatchTime.now().uptimeNanoseconds
         armStallTimer()
     }
     private func resumeL1AfterBackpressure() {
@@ -283,10 +293,12 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
         stallTimer?.cancel()
         let written = l3BytesWritten
         let source = DispatchSource.makeTimerSource(queue: queue)
-        source.schedule(deadline: .now() + .milliseconds(relayStallMs))
+        source.schedule(deadline: .now() + .milliseconds(relayStallMs))   // the cap is judged at each window's end (so within one stall window of being exceeded)
         source.setEventHandler { [weak self] in
             guard let self, self.l1ReadSuspended else { return }
-            if self.l3BytesWritten == written { self.stallTimer = nil; self.session.workerNotDraining() } else { self.armStallTimer() }
+            let pausedMs = Int((DispatchTime.now().uptimeNanoseconds - self.pauseStartedNs) / 1_000_000)
+            // Not one byte accepted in the stall window, or paused past the total cap whatever the progress: the worker is not draining L3.
+            if self.l3BytesWritten == written || pausedMs >= self.relayPauseCapMs { self.stallTimer = nil; self.session.workerNotDraining() } else { self.armStallTimer() }
         }
         stallTimer = source; source.resume()
     }

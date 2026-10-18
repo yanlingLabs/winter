@@ -39,12 +39,13 @@ public enum LauncherProfile: String, Sendable {
     public static func resolve(signingIdentifier: String?) -> LauncherProfile { signingIdentifier == WinterCodeIdentity.devLauncherIdentifier ? .dev : .production }
 
     /// The profile of the running process, from its own code signature. Fails closed to production.
-    public static func ofRunningProcess() -> LauncherProfile {
-        var me: SecCode?, staticCode: SecStaticCode?, information: CFDictionary?
-        guard SecCodeCopySelf([], &me) == errSecSuccess, let me, SecCodeCopyStaticCode(me, [], &staticCode) == errSecSuccess, let staticCode,
-              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
-              let dictionary = information as? [String: Any] else { return .production }
-        return resolve(signingIdentifier: dictionary[kSecCodeInfoIdentifier as String] as? String)
+    public static func ofRunningProcess() -> LauncherProfile { resolve(signingIdentifier: runningSigningIdentifier()) }
+
+    /// The signing identifier the KERNEL holds for this process (`csops`, through `SecTask`). `SecCodeCopySelf` followed by `SecCodeCopyStaticCode` re-reads the
+    /// executable's path, so a file swapped under a running process would change the answer; the kernel's copy was taken when the image was executed.
+    public static func runningSigningIdentifier() -> String? {
+        guard let task = SecTaskCreateFromSelf(nil) else { return nil }
+        return SecTaskCopySigningIdentifier(task, nil) as String?
     }
 }
 

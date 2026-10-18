@@ -26,6 +26,7 @@ final class IdentityTests: XCTestCase {
         }
         // The test host is not signed as a dev launcher.
         XCTAssertEqual(LauncherProfile.ofRunningProcess(), .production)
+        XCTAssertNotNil(LauncherProfile.runningSigningIdentifier(), "the kernel knows the running process's signing identifier (SecTask), without reading the executable again")
         XCTAssertEqual(WinterCodeIdentity.distDaemonIdentifier, "winter-core")
         XCTAssertEqual(WinterCodeIdentity.devDaemonIdentifier, "com.winter.core.dev")
     }

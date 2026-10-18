@@ -16,7 +16,7 @@ final class GoldenVectorTests: XCTestCase {
 
     func testVectorCopiesMatchTheirPinnedHashes() throws {
         let pins = try loadVector("PINS.json")
-        XCTAssertEqual(pins["sourceBranch"] as? String, "cowork/n2-host-adapter")
+        XCTAssertEqual(pins["sourceBranch"] as? String, "cowork/output-integration", "the vectors are read from the integration branch, where the contract was merged")
         XCTAssertEqual((pins["lastCommitTouchingVectors"] as? String)?.count, 40)
         let hashes = try XCTUnwrap(pins["sha256"] as? [String: String])
         XCTAssertEqual(Set(hashes.keys), ["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-flow.json", "runtime-image.json", "stop-receipts.json"])
@@ -291,14 +291,14 @@ final class GoldenVectorTests: XCTestCase {
         let flow = try loadVector("runtime-flow.json")
         XCTAssertEqual(flow["limitBytes"] as? Int, 1_048_576)
         let cases = try XCTUnwrap(flow["cases"] as? [[String: Any]])
-        XCTAssertEqual(cases.count, 8)
+        XCTAssertEqual(cases.count, 13)
         var refused = 0
         for c in cases {
             if c["refusedAt"] as? Int != nil { refused += 1 }
             for (index, step) in (c["steps"] as! [[String: Any]]).enumerated() {
                 let stream: UInt8 = ["in": 1, "out": 2, "err": 3][step["stream"] as! String]!
                 let data = step["bytes"] as! Int
-                let payload = [0, stream, 0, 0] + [UInt8](repeating: 0x61, count: data)
+                let payload = [0, stream, (step["end"] as? Bool) == true ? 1 : 0, 0] + [UInt8](repeating: 0x61, count: data)
                 let frame = MuxFormat.frame(.runtime, seq: UInt32(index + 1), payload: payload)
                 // The relay's only bound is the class ceiling, prefix included (a sender chunks at 256 KiB); the 1 MiB IN flow bound is not its business.
                 if payload.count <= MuxClass.runtime.payloadCeiling { XCTAssertEqual(try MuxFormat.parseRelayable(frame).muxClass, .runtime, c["name"] as! String) }

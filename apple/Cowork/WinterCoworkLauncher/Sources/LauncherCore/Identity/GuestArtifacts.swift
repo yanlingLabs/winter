@@ -37,6 +37,9 @@ public struct GuestArtifactVerifier: GuestArtifactVerifying {
     public static let directoryName = "cowork-guest"
     public static let kernelName = "kernel"
     public static let initramfsName = "initramfs.cpio"
+    /// The most one artifact may weigh: 1 GiB, the guest's RAM ceiling (`maxMemoryMiB`, 1024). A kernel or an initramfs the guest could not even load cannot
+    /// be a boot artifact, and an unbounded file would stall the launcher's serial queue while it is hashed (the real kernel and cpio are tens of MiB).
+    static let maximumArtifactBytes = Int64(WireLimits.maxMemoryMiB) << 20
 
     /// The directory of the worker executable (the pinned worker's own directory).
     public let workerDirectory: String
@@ -65,13 +68,17 @@ public struct GuestArtifactVerifier: GuestArtifactVerifying {
     /// Hash FROM THE DESCRIPTOR: open (no symlink), check what it is, read it to the end. A file that is not regular, is writable by
     /// anyone but its owner, has another name, or changes size while it is read, is refused.
     static func sha256(ofFileNamed name: String, in directory: Int32) throws -> String {
-        let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // O_NONBLOCK: opening a FIFO for reading would otherwise wait for a writer for ever and hang `begin`. Whatever it is gets judged
+        // by fstat BEFORE anything is read, and the flag is cleared only for a regular file.
+        let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw IdentityFailure("a guest boot artifact is missing or is a symlink") }
         defer { close(fd) }
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1, info.st_mode & (S_IWGRP | S_IWOTH) == 0, info.st_size > 0 else {
             throw IdentityFailure("a guest boot artifact is not a plain, singly-linked, owner-writable-only file")
         }
+        guard info.st_size <= maximumArtifactBytes else { throw IdentityFailure("a guest boot artifact is larger than any boot artifact can be") }
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
         var hasher = SHA256()
         var buffer = [UInt8](repeating: 0, count: 1 << 20)
         var total: Int64 = 0
