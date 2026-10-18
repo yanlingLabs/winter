@@ -3,8 +3,8 @@
   "source": {
     "repository": "yanlingLabs/winter",
     "pullRequest": 56,
-    "branch": "cowork/n2-host-adapter",
-    "head": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+    "branch": "cowork/output-integration",
+    "head": "8b52ef83d1ba721a4dd80cdbb205c617f8656555",
     "contractCommits": [
       "d216c9d936958c260a3f4cf0dac29f07014f0f6a",
       "40ec9f2a0a8a5f4e8a751e7ac594f0e7e3e60d1d",
@@ -13,21 +13,25 @@
       "7b87df80ea666511a0294903c03a0264d026e088",
       "1313040a5164292d0900a609a88e1640cf611a71",
       "86a0629f70935d6392442f5f2fc0672de1d5ec19",
-      "6c1f04e807df3a10579d6f14a15e39652bd1c7a6"
+      "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "7b8114b3267970ce478893bcf56e5357c56bc61a",
+      "4f2f0c7258c81983ce12f49c63a0d82342770042",
+      "80252cf5fdf75c4abeccb9bca281303a53534f3c",
+      "324eb08da1612516feef1df3b0ed2b96c7adc6bd"
     ],
-    "lastCommitTouchingTheseFiles": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+    "lastCommitTouchingTheseFiles": "324eb08da1612516feef1df3b0ed2b96c7adc6bd",
     "directory": "packages/core/test/cowork/native/vectors",
-    "note": "Final contract head (round 3 plus: the verdict requires vm_running before draining, flush counts exactly equal, unixId 1000-65533, runtime IN in-flight bound of 1 MiB). envelopes, launcher-lines, mux-frames and guest-stop are additive over the 86a0629f copies; bootstrap-order and runtime-flow are new and are the host's (carried so drift is caught at the pin)."
+    "note": "Contract as merged into cowork/output-integration (8b52ef83; the contract branch of PR #56 has merged). Text version 2 (receipt MAC, 324eb08da) and the empty OUT/ERR frame rule (7b8114b32) changed only launcher-lines.json, stop-receipts.json and runtime-flow.json; envelopes, mux-frames, guest-stop, runtime-image, bootstrap-order are byte-identical to the 6c1f04e8 copies. The worker's layers (L2 WEV1, L3/L4 WMX1, the bootstrap/runtime JSON inside mux frames) keep version 1."
   },
   "files": {
     "bootstrap-order.json": "36be531467c3ceb9d91f0f2cefb02ec40fba324878a021fe5247317a3c389ca4",
     "envelopes.json": "115be96ae7021cecfb6e1bb72260e21d3cce6e230133e54da6b3a5f915ac9ffb",
     "guest-stop.json": "beba7550e5b6dfdaee71345f723a4b17329f39d89533e9860baddb4fc3628a72",
-    "launcher-lines.json": "785d88c4cee0a70d5d985d2c7668c45077b7f29e0a635cf22922fc4a4280c92a",
+    "launcher-lines.json": "1b9c23efa706007183bb44bb3a5155fa26c9f9ba7415217f059c391b8ecc629c",
     "mux-frames.json": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
-    "runtime-flow.json": "c72950ed10d800447bb17bf14a6a076ddf995e4f9d4e2de968c8a218452727b7",
+    "runtime-flow.json": "93cda633df4228cb7e66e10a13048ba01d3b574d8d64871da8b8da7a1b4ee52c",
     "runtime-image.json": "2929af10fe5593a748b4f9d8c1506f2a1393c62b6e4fe4ffc0dba429f4496858",
-    "stop-receipts.json": "9c9a5385e38a5ec632141700962dec87f2cfc707e79db77e6a23bac801091435"
+    "stop-receipts.json": "aee2831ae17ae8380d8e8424041aa286eb2a8639b6ab056eccbfbd2cbe86b358"
   },
   "usedByTheWorkerTests": [
     "envelopes.json",
@@ -126,8 +130,8 @@
   },
   "hostSideOnly": {
     "bootstrap-order.json": "host adapter bootstrap sequencing",
-    "runtime-flow.json": "host-side runtime IN in-flight bound (1 MiB); the worker relays runtime frames blind and needs nothing from it",
-    "launcher-lines.json": "L1",
-    "stop-receipts.json": "launcher receipts"
+    "runtime-flow.json": "host-side runtime IN in-flight bound (1 MiB; since 7b8114b32 only an OUT/ERR frame with payload BYTES clears the count, an empty end-flag frame does not); the worker relays runtime frames blind and needs nothing from it",
+    "launcher-lines.json": "L1 (daemon and launcher), text version 2: begin carries receiptKey; the worker never sees L1",
+    "stop-receipts.json": "launcher receipts, text version 2 with the MAC; minted by the launcher, never by the worker"
   }
 }
