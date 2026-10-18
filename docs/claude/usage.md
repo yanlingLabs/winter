@@ -1,0 +1,68 @@
+# Usage and cost tracking
+
+*Read this before touching `packages/core/src/usage/`, the projector's `onTurnUsage`, the `usage.*` RPCs, `settings.usage`, `apple/Winter/Sources/Usage/`, or the island's Usage tab ([island](./island.md)).*
+
+Tokens and cost for every model — cache reads and writes kept apart, because the savings matter — from three sources: **Winter**'s own sessions, the user's own **Codex** (CLI and desktop app) and the user's own **Claude Code**; plus the user's **plan windows** for Codex and Claude Code, and the **subscriptions** they enter. Everything is local: nothing is fetched by Winter from a provider, and no other app's credential is ever read.
+
+## Storage (`usage/db.ts`)
+
+- Its OWN SQLite file, `<WINTER_HOME>/usage/usage.db` (0600, WAL), its own `PRAGMA user_version` (`USAGE_DB_SCHEMA_VERSION` = 1). Never a table in `runtime-state.db`, whose schema other branches move.
+- `usage_records`: one row per model per Winter turn, per Codex `token_count` increment, per Claude Code assistant message — `source`, `at`, `session_id`, `mode` (Winter only), `provider`, `model`, `input` (UNCACHED), `output`, `cache_read`, `cache_write`, `reasoning` (Codex; a subset of output), `cost_usd` (NULL = unpriced), `cost_basis` (`list` | `estimate` | `unknown`), `cache_savings_usd`. `dedupe` is UNIQUE: a re-read never counts twice. All-time history is kept.
+- `usage_hourly`: the same numbers per hour × source × provider × model, written in the record's transaction only when the record was new. Ranges ≤ 24 h read records; 7 d / 30 d / all read the rollup.
+- `ingest_files`: per-file read state — keyed by a SHA-256 of the path (the plaintext path names the user's project), with the inode, byte offset and the per-file carry (Codex's last cumulative totals, model, session id).
+- `subscriptions`: the plans the user entered.
+
+## Winter's own turns
+
+- The runtime's `result` carries `modelUsage`: a session-CUMULATIVE ledger per model row (`inputTokens` uncached, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `costUSD`, `costBasis: "list"` only on a priced row, `canonicalModel`, `provider`), unpriced rows included at `costUSD: 0` (agent SDK `engine.ts`'s cost ledger; prices from `@yanlinglabs/winter-provider-runtime`'s `estimateCostUsd` over the pinned catalog's `official-doc` pricing). Reasoning tokens are not on it.
+- `projector/terminal.ts`'s `turnModelUsageOf` differences each row against the previous result's copy (a row that went DOWN is a fresh ledger — a new incarnation — and counts whole); a result with no ledger but claude's per-turn `usage` block is its own figure, keyed on the session's model. The projector calls `deps.onTurnUsage({sourceId, rows})` INSIDE the terminal's claim, so a replayed prefix never calls it twice; `session-driver.ts` adds the session id, `daemon.ts` the mode, and `UsageService.recordWinterTurn` stores it (`dedupe` = `winter:<session>:<rs:…>:<model>`). `turn_completed` is unchanged: no protocol event changed.
+- A runtime-priced row keeps the runtime's price (`list`). An unpriced row (a subscription row such as `codex-oauth/*`) gets Winter's estimate at its API twin's list price (`openai/<model>`; `estimate`); a row nothing prices stays `unknown` (never a guess).
+
+## Pricing (`usage/pricing.ts`)
+
+The SAME catalog and price function the runtime uses: `loadCatalog()` + `estimateCostUsd` (cache reads and writes at their own rates, a missing cache rate at the input rate, the 1-hour cache-write subset at 2× input). Lookup: the exact key, the provider's upstream id or alias, the twin provider (`codex-oauth`/Codex → `openai`, Claude Code → `anthropic`), and for Anthropic ids a dated id without its date and `4-5` as `4.5`. Every cost for Codex, Claude Code or a subscription row is a **list-price estimate** (the UI marks it "est."): a subscription is not billed per token. `cache_savings_usd` = the same reads priced as plain input minus as cache reads.
+
+## The external ingest — on demand, never in the background
+
+- Runs only when a Usage surface asks (`usage.summary` / `usage.series`): single-flight, throttled to one pass per 20 s (a flipped tracking switch, or a pass that ran out of budget, skips the throttle); the RPC waits at most 1.5 s for it and answers what is stored. No watcher, no timer: an idle daemon does nothing (`check:idle-wakeups` stays at 0/s).
+- `ingest-files.ts`: only the bytes appended since the stored offset, whole lines only (a partial last line waits); the inode changed (rotated, replaced) or the size below the offset (truncated) → from 0, with dedupe keeping the counts right; a line over 16 MiB is skipped whole; 64 MiB per file and 256 MiB per pass, yielding between files.
+- **Codex** (`usage/codex.ts`): `<CODEX_HOME>/sessions/**/rollout-*.jsonl` and `archived_sessions/`. Only `session_meta` (`id`, `model_provider`, `model`), `turn_context` (`model`) and `event_msg`/`token_count` are parsed. The delta is `info.total_token_usage` against the file's previous total; a file's FIRST count uses `last_token_usage` (a resumed session's file opens with the old cumulative total), a total that went down uses `last_token_usage`, an unchanged total is nothing. OpenAI's `input_tokens` INCLUDES `cached_input_tokens` and `output_tokens` includes `reasoning_output_tokens`: normalized to uncached input + cache read; reasoning kept as its own column, never added. `dedupe` = `codex:<session id>:<cumulative total>` (an archived file re-read counts nothing new).
+- **Claude Code** (`usage/claude-code.ts`): `<claude config dir>/projects/**/*.jsonl` (subagent transcripts included). Only `type: "assistant"` records with `message.usage`: `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` (+ `cache_creation.ephemeral_1h_input_tokens`), `message.model` (`<synthetic>` skipped), `message.id`, `requestId`, `sessionId`, `timestamp`. A streamed message repeats per content block and across files: `dedupe` = `cc:<message id>:<request id>`, first copy wins.
+- **PRIVACY (hard rule)**: from another app's files only numbers, a model, a time and an opaque session id are kept — never content, a cwd, a path (offsets are keyed by its hash) or a project name, and nothing of them is logged or sent. `test/usage/ingest.test.ts` greps the raw DB and WAL bytes and every RPC answer for fixture sentinels.
+
+## Plans — source ladders (`UsageService.codexPlan` / `claudeCodePlan`)
+
+A plan read waits at most 2 s (`planWaitMs`) for a spawn still running — a client's request times out at 5 s — and answers from the next rung meanwhile; the spawn finishes in the background (single-flight) and the next ask gets it. `usage.summary` runs the ingest and both ladders side by side. A reading says its `source`, its `at` and, per window, `usedPercent` (0…100), `resetsAt` (ms), `stale` + `staleReason`. **Stale**: measured longer ago than its own window (`older_than_window`), or its reset has passed (`reset_passed`) — `plan.ts`'s `staleness`.
+
+**Codex** (`codex.ts`):
+1. **Codex's app-server** — the user's `codex app-server` (stdio JSON-RPC, Codex's own protocol, no `jsonrpc` field; shapes from `codex app-server generate-ts`): `initialize` → `initialized` → `account/rateLimits/read {excludeResetCreditDetails: true}` → shut down. `rateLimitsByLimitId.codex ?? rateLimits`: `primary`/`secondary` `{usedPercent, windowDurationMins, resetsAt (s)}`, `planType`, `credits`, `rateLimitReachedType`. Codex asks with ITS OWN login. On demand only, at most once per 60 s (answer or failure cached), 8 s hard timeout, its own process group killed on timeout; never resident.
+2. **The newest rollout's `rate_limits`** — the newest 5 rollouts by mtime, each read BACKWARDS from its end to the last record with `rate_limits` (`primary`/`secondary` `{used_percent, window_minutes, resets_at | resets_in_seconds}`); passive, offline, possibly stale.
+3. **Winter's own codex-oauth report** — the island's `rate_limit_event` windows from sessions on `codex-oauth` (status only, no percentage), labelled "From Winter's ChatGPT sign-in".
+- NEVER `~/.codex/auth.json` or any credential: nothing opens a file outside `sessions/` and `archived_sessions/`.
+
+**Claude Code** (`claude-code.ts`; the seam is `ClaudeCodePlanUsageSource`):
+1. **Claude Code's own `/usage`** — EXACTLY `claude -p "/usage" --output-format stream-json --verbose --no-session-persistence --setting-sources "" --strict-mcp-config` (`CLAUDE_USAGE_ARGS`), stdin from /dev/null, in a neutral empty cwd (`<home>/usage/neutral`): no hooks, no MCP servers, no session file. NOT `--bare` (it refuses OAuth, so no plan report). The `assistant` message carries `usage_report.rate_limits.limits[]` (`kind` `session` | `weekly_all` | `weekly_scoped`, `group`, `percent`, `resets_at` ISO, `scope` (`{model}`), `severity`, `is_active`). **Guard**: accepted only when the `result` has `local_command: "usage"`, cost 0 and `num_turns: 0` — anything else means `/usage` reached the model loop: the rung is switched off until the daemon restarts (one warning, no content). On demand, at most once per 5 min, 15 s hard timeout with a process-group kill. The report exists only for a claude.ai login with a known plan; absent → next rung. Source: https://code.claude.com/docs/en/agent-sdk/typescript (`/usage` → `usage_report`).
+2. **`~/.claude.json`'s `cachedUsageUtilization`** (`$CLAUDE_CONFIG_DIR/.claude.json` when set) — `fetchedAtMs`, `utilization.{five_hour, seven_day, seven_day_<model>}.{utilization (percent), resets_at}`; undocumented, refreshed only while Claude Code runs. The file holds unrelated config (possibly MCP env secrets): parsed in memory, ONLY that key read, nothing else kept, logged or sent.
+- NOT used: the statusline route (it would edit the user's `~/.claude/settings.json`), stream-json's `rate_limit_event` (needs inference), OpenTelemetry. Winter NEVER reads, copies or uses Claude Code's Keychain item or token — https://code.claude.com/docs/en/legal-and-compliance.
+
+## Where the other apps live (`usage/wiring.ts`)
+
+Codex: `$WINTER_USAGE_CODEX_HOME` → `$CODEX_HOME` → `~/.codex`. Claude Code: `$WINTER_USAGE_CLAUDE_HOME` → `$CLAUDE_CONFIG_DIR` → `~/.claude`; its `.claude.json`: `$WINTER_USAGE_CLAUDE_JSON` → `$CLAUDE_CONFIG_DIR/.claude.json` → `~/.claude.json`. Executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` (authoritative: a missing path or `off` = none, never a fall-through) → `$PATH` → the usual install places (Homebrew, `~/.local/bin`, the Codex app bundle). `startDaemon({ usage })` injects all of them. **Both test preloads point every `WINTER_USAGE_*` at nothing**: no test reads the real `~/.codex`/`~/.claude*` or spawns the real `codex`/`claude`; tests use fixture trees and FAKE executables (`test/usage/fixtures.ts`). Never run the real binaries from an agent: they use the user's own credentials and quota.
+
+## Settings
+
+`settings.usage = { codex?: { enabled? }, claudeCode?: { enabled? } }`, default both on; the ONE reader is `usageTrackingFrom`. Off: nothing of that app is read and nothing is spawned, from the next ask (live: `settings.json` → the watcher → the live holder; no restart). `usage.setTracking` writes it.
+
+## RPCs (harness only — refused for `remote` and `plugin`, none remote-allowlisted; `test/usage/rpc.test.ts`)
+
+- `usage.summary {range: "1h"|"24h"|"7d"|"30d"|"all", sources?, plans?}` → `{range, from, to, bucketMs, totals, bySource, topModels (5), spark, sparkTokens, plans: {codex, claudeCode}, tracking, ingest}`.
+- `usage.series {range, sources?}` → `{range, from, to, bucketMs, buckets: [{start, costUsd, tokens, bySource, models}], models (every source × provider × model with `costBasis` list/estimate/mixed/unknown), totals, bySource}`. Buckets: 1 h → 5 min, 24 h → 1 h, 7 d → 6 h, 30 d → 1 local day, all → whole days, ≤ ~60 buckets.
+- `usage.subscriptions.list | set {subscription} | remove {id}` → the list with `nextRenewal`, `cycleStart`, `monthlyCost`, `usageThisCycleUsd` (list + estimate cost of the `covers` sources since the cycle began: `codex`, `claude-code`, `winter`, `winter:<provider>`). Monthly or yearly; a renewal day past the month's end renews on its last day.
+- `usage.setTracking {codex?, claudeCode?}`.
+- Swift: `WinterKit/WinterClient+Usage.swift` (`UsageClientTests`).
+
+## The app (`apple/Winter/Sources/Usage/`)
+
+- **The island's Usage tab, compact** (`IslandUsageCompact` in `IslandUsage.swift`): the Codex and Claude Code slots (rings — 5-hour, weekly, weekly per model — or why there are none; source and age; stale rings grey), the selected range's cost (1H · 24H · 7D · 30D · All) with a sparkline and tokens/cached, the top 3 models, and **Open usage**. Below it, unchanged: other providers' runtime windows, This session, Background jobs, Notes.
+- **The Usage window** (`UsageWindow.swift`, `UsageWindowController`): pill-chrome (`PillChromeWindow`, traffic lights, drag band, resize grips, black), opened from **Open usage** and the menu bar's **Usage…** (`MenuBarController.onOpenUsage`). The range, the plans, tiles (cost, tokens, cached, cache savings), source toggles (never all off) and Cost/Tokens, a stacked bar chart by model (Swift Charts; the top 6 models + Other, system semantic colours), the per-model table (input, output, cache read, cache write, cost with its basis), the subscriptions editor, and the two tracking switches. It refreshes only while open (15 s).
+- `UsagePresentation` is the pure shaping both draw from; `UsageWindowTests` covers it, the two models and the renders (`UsageGallery`, `TEST_RUNNER_WINTER_USAGE_RENDER_DIR`).

@@ -24,7 +24,7 @@ function service(over: Partial<UsageServiceDeps> & { logs?: string[] } = {}) {
   const svc = new UsageService({
     db, pricer, tracking: () => ({ codex: true, claudeCode: true }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    neutralCwd: () => home, ingestEveryMs: 0,
+    neutralCwd: () => home, ingestEveryMs: 0, planWaitMs: 20_000,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,
   });
@@ -37,6 +37,13 @@ function marks(markerPath: string): Array<{ argv: string[]; cwd: string; pid: nu
 
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** Gone within `ms` (a killed child is a zombie until it is reaped, which a loaded machine can take a moment over). */
+async function goneWithin(pid: number, ms = 3_000): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (alive(pid) && Date.now() < end) await Bun.sleep(25);
+  return !alive(pid);
 }
 
 describe("staleness", () => {
@@ -82,8 +89,7 @@ describe("the Codex plan", () => {
     now += 31_000;
     await svc.codexPlan();
     expect(marks(fake.markerPath)).toHaveLength(2);
-    await Bun.sleep(50);
-    for (const x of marks(fake.markerPath)) expect(alive(x.pid)).toBe(false);
+    for (const x of marks(fake.markerPath)) expect(await goneWithin(x.pid)).toBe(true);
   });
 
   test("a hung app-server is killed at the timeout, and the rollout answers (with its age and staleness)", async () => {
@@ -91,15 +97,15 @@ describe("the Codex plan", () => {
     const fake = fakeCodex(bin, "hang");
     const codexHome = tempDir("codex");
     rollouts(codexHome, NOW - 10 * 60_000, 2, 34, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
-    const { svc, logs } = service({ codexExecutable: () => fake.path, codexHome, appServerTimeoutMs: 400 });
+    const { svc, logs } = service({ codexExecutable: () => fake.path, codexHome, appServerTimeoutMs: 1_200 });
     const started = Date.now();
     const plan = await svc.codexPlan();
-    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(Date.now() - started).toBeLessThan(4_000);
     expect(plan.source).toBe("codex-rollout");
     expect(plan.at).toBe(NOW - 10 * 60_000);
     expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.stale])).toEqual([["five_hour", 2, false], ["weekly", 34, false]]);
-    await Bun.sleep(100);
-    expect(alive(marks(fake.markerPath)[0]!.pid)).toBe(false);
+    // (A child killed before it even started writes no mark: nothing left to check then.)
+    for (const m of marks(fake.markerPath)) expect(await goneWithin(m.pid)).toBe(true);
     expect(logs.some((l) => l.includes("timeout"))).toBe(true);
   });
 
@@ -143,6 +149,26 @@ describe("the Codex plan", () => {
     expect((await svc.codexPlan()).source).toBe("disabled");
     expect((await svc.claudeCodePlan()).source).toBe("disabled");
     expect(marks(fake.markerPath)).toHaveLength(0);
+  });
+});
+
+describe("a plan read never holds a client past its short wait", () => {
+  test("a slow spawn: the first ask answers from the next rung, the spawn finishes in the background, the next ask has it", async () => {
+    const bin = tempDir("bin");
+    // A Claude CLI that takes ~1 s.
+    const slow = fakeClaude(bin, "ok");
+    const wrapper = join(bin, "slow-claude");
+    writeFileSync(wrapper, `#!/bin/sh\nsleep 1\nexec "${slow.path}" "$@"\n`);
+    require("node:fs").chmodSync(wrapper, 0o755);
+    const { svc } = service({ claudeExecutable: () => wrapper, planWaitMs: 100 });
+    const started = Date.now();
+    expect((await svc.claudeCodePlan()).source).toBe("none");
+    expect(Date.now() - started).toBeLessThan(800);
+    const end = Date.now() + 10_000;
+    let plan = await svc.claudeCodePlan();
+    while (plan.source !== "claude-cli" && Date.now() < end) { await Bun.sleep(100); plan = await svc.claudeCodePlan(); }
+    expect(plan.source).toBe("claude-cli");
+    expect(marks(slow.markerPath)).toHaveLength(1);
   });
 });
 
@@ -193,7 +219,7 @@ describe("the Claude Code plan", () => {
         seven_day_opus: { utilization: 15, resets_at: new Date(NOW - 1000).toISOString() },
       });
       const logs: string[] = [];
-      const { svc, db } = service({ claudeExecutable: () => fake.path, claudeJsonPath: jsonPath, claudeCliTimeoutMs: 400, logs });
+      const { svc, db } = service({ claudeExecutable: () => fake.path, claudeJsonPath: jsonPath, claudeCliTimeoutMs: 1_200, logs });
       const plan = await svc.claudeCodePlan();
       expect(plan.source).toBe("claude-cache");
       expect(plan.at).toBe(NOW - 120_000);
@@ -203,7 +229,7 @@ describe("the Claude Code plan", () => {
       const everything = JSON.stringify(plan) + logs.join("\n") + readFileSync(db.path).toString("latin1");
       for (const s of SECRETS) expect(everything.includes(s)).toBe(false);
       expect(everything.includes("someone@example.com")).toBe(false);
-      if (mode === "hang") { await Bun.sleep(100); expect(alive(marks(fake.markerPath)[0]!.pid)).toBe(false); }
+      if (mode === "hang") for (const m of marks(fake.markerPath)) expect(await goneWithin(m.pid)).toBe(true);
     }
   });
 

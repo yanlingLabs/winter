@@ -41,6 +41,16 @@ export interface UsageServiceDeps {
   claudeCliEveryMs?: number;
   appServerTimeoutMs?: number;
   claudeCliTimeoutMs?: number;
+  /** How long a plan read waits for a spawn still running before answering with what it has (default 2 s — a client's
+   *  request times out at 5 s; the spawn finishes in the background and the next ask gets it). */
+  planWaitMs?: number;
+}
+
+/** Wait for `p`, at most `ms`. */
+async function within(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([p, new Promise<void>((r) => { timer = setTimeout(r, ms); timer.unref?.(); })]);
+  if (timer !== undefined) clearTimeout(timer);
 }
 
 export interface WinterTurnRow {
@@ -248,7 +258,9 @@ export class UsageService {
     if (!this.deps.tracking().codex) return { provider: "codex", source: "disabled", windows: [] };
     const now = this.now();
     const every = this.deps.codexAppServerEveryMs ?? 60_000;
-    if (this.codexCache === undefined || now - this.codexCache.at >= every) {
+    if (this.codexRun !== undefined) {
+      await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
+    } else if (this.codexCache === undefined || now - this.codexCache.at >= every) {
       this.codexRun ??= (async () => {
         const exe = this.deps.codexExecutable();
         if (exe === undefined) { this.codexCache = { at: this.now(), failure: "not-installed" }; return; }
@@ -259,7 +271,7 @@ export class UsageService {
         this.codexCache = { at: this.now(), ...r };
         if (r.failure !== undefined) this.deps.log?.info?.("[usage] codex app-server gave no plan reading", { reason: r.failure });
       })().finally(() => { this.codexRun = undefined; });
-      await this.codexRun;
+      await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
     }
     if (this.codexCache?.reading !== undefined) return this.codexCache.reading;
     if (this.deps.codexHome !== undefined) {
@@ -276,7 +288,9 @@ export class UsageService {
     if (!this.deps.tracking().claudeCode) return { provider: "claude-code", source: "disabled", windows: [] };
     const now = this.now();
     const every = this.deps.claudeCliEveryMs ?? 300_000;
-    if (!this.claudeCliDisabled && (this.claudeCache === undefined || now - this.claudeCache.at >= every)) {
+    if (this.claudeRun !== undefined) {
+      await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
+    } else if (!this.claudeCliDisabled && (this.claudeCache === undefined || now - this.claudeCache.at >= every)) {
       this.claudeRun ??= (async () => {
         const exe = this.deps.claudeExecutable();
         if (exe === undefined) { this.claudeCache = { at: this.now(), failure: "not-installed" }; return; }
@@ -292,7 +306,7 @@ export class UsageService {
           this.deps.log?.info?.("[usage] claude /usage gave no plan reading", { reason: r.failure });
         }
       })().finally(() => { this.claudeRun = undefined; });
-      await this.claudeRun;
+      await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
     }
     if (this.claudeCache?.reading !== undefined) return this.claudeCache.reading;
     if (this.deps.claudeJsonPath !== undefined) {
@@ -353,9 +367,14 @@ export class UsageService {
   }
 
   async summary(range: UsageRange, sources: readonly UsageSource[] = USAGE_SOURCES, opts: { plans?: boolean; waitMs?: number } = {}) {
-    await this.ingestWithin(opts.waitMs ?? 1_500);
+    // The ingest and both plan ladders run side by side; each answers within its own short wait.
+    const [, codex, claudeCode] = await Promise.all([
+      this.ingestWithin(opts.waitMs ?? 1_500),
+      opts.plans === false ? undefined : this.codexPlan(),
+      opts.plans === false ? undefined : this.claudeCodePlan(),
+    ]);
     const s = this.series(range, sources);
-    const plans = opts.plans === false ? undefined : { codex: await this.codexPlan(), claudeCode: await this.claudeCodePlan() };
+    const plans = codex === undefined || claudeCode === undefined ? undefined : { codex, claudeCode };
     return {
       range: s.range, from: s.from, to: s.to, bucketMs: s.bucketMs, totals: s.totals, bySource: s.bySource,
       topModels: s.models.slice(0, 5),
