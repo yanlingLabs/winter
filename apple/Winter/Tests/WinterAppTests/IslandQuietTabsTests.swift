@@ -9,6 +9,34 @@ import WinterKit
 final class IslandQuietTabsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    // MARK: Watches
+
+    private func watch(armedAt: Int, expiresAt: Int, title: String? = "List the extension") -> IslandWatchItem {
+        IslandWatchItem(sessionId: "s1", wakeId: "w", condition: "clicked", targetLabel: "Chrome — Inbox", elementLabel: "“Send”",
+                        armedAt: armedAt, expiresAt: expiresAt, session: IslandSessionFacts(mode: "code", title: title))
+    }
+
+    func testAWatchsLineFillsAsItsTimeRunsOutAndSaysTheTimeLinesTwoHalvesInside() {
+        let w = watch(armedAt: 0, expiresAt: 60 * 60_000)
+        XCTAssertEqual(IslandWatchesPresentation.elapsed(w, nowMs: 0), 0)
+        XCTAssertEqual(IslandWatchesPresentation.elapsed(w, nowMs: 15 * 60_000), 0.25, accuracy: 0.0001)
+        XCTAssertEqual(IslandWatchesPresentation.elapsed(w, nowMs: 2 * 60 * 60_000), 1)
+        XCTAssertEqual(IslandWatchesPresentation.elapsed(watch(armedAt: 5, expiresAt: 5), nowMs: 9), 1, "no span: full")
+        let words = IslandWatchesPresentation.lineWords(w, nowMs: 4 * 60_000)
+        XCTAssertEqual(words.atFill, "armed 4 min ago")
+        XCTAssertEqual(words.end, "56 min left")
+        // The same words as the time line the row used to show, split in two.
+        XCTAssertEqual("\(words.atFill!) · \(words.end!)", islandWatchTimeLine(w, nowMs: 4 * 60_000))
+        let fresh = IslandWatchesPresentation.lineWords(watch(armedAt: 0, expiresAt: 3 * 60 * 60_000), nowMs: 30_000)
+        XCTAssertEqual("\(fresh.atFill!) · \(fresh.end!)", islandWatchTimeLine(watch(armedAt: 0, expiresAt: 3 * 60 * 60_000), nowMs: 30_000))
+    }
+
+    func testAWatchSaysItsSessionAtRestAndItsTargetUnderThePointer() {
+        let w = watch(armedAt: 0, expiresAt: 1)
+        XCTAssertEqual(IslandWatchesPresentation.sideWords(w, hovered: false), "List the extension")
+        XCTAssertEqual(IslandWatchesPresentation.sideWords(w, hovered: true), "List the extension · Chrome — Inbox")
+    }
+
     // MARK: Devices
 
     func testADevicesLineIsAllOrNothingAndTheHelpersIsItsTwoPermissions() {
