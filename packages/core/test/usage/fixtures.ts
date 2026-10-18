@@ -1,6 +1,7 @@
 // Fixtures for the usage tests (`docs/claude/usage.md`): temp directories shaped like `~/.codex/sessions` and
-// `~/.claude/projects`, and FAKE `codex` / `claude` executables. Nothing here ever touches the real ones.
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+// `~/.claude/projects`, and FAKE `codex` / `claude` / `agy` / `opencode` executables. Nothing here ever touches the
+// real ones.
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -178,6 +179,75 @@ else {
   log(${JSON.stringify(result)});
 }
 `);
+}
+
+/** agy's `/usage` answer as seen live (sanitized; `shapes/agy-usage.json`). */
+export const AGY_USAGE = JSON.parse(readFileSync(join(import.meta.dir, "shapes", "agy-usage.json"), "utf8")) as Record<string, unknown>;
+
+/** A fake `agy -p /usage --output-format json`. Modes as named; the answer is pretty-printed, like agy's. */
+export type FakeAgyMode = "ok" | "banner" | "turns" | "tokens" | "other-command" | "conversation" | "no-command" | "no-json" | "exit-1" | "hang";
+
+export function fakeAgy(dir: string, mode: FakeAgyMode): { path: string; markerPath: string } {
+  const base = JSON.parse(JSON.stringify(AGY_USAGE)) as Record<string, any>;
+  base.response = "SECRET-ANSWER-91bc";
+  if (mode === "turns") base.num_turns = 1;
+  if (mode === "tokens") base.usage.input_tokens = 1200;
+  if (mode === "other-command") base.command.name = "chat";
+  if (mode === "conversation") base.conversation_id = "conv-123";
+  if (mode === "no-command") delete base.command;
+  return fakeExecutable(dir, "agy", `
+const mode = ${JSON.stringify(mode)};
+if (mode === "hang") { setInterval(() => {}, 1000); }
+else if (mode === "no-json") { log("Error: not signed in"); process.exit(1); }
+else {
+  if (mode === "banner") log("Antigravity CLI 1.0 — a banner line that is not JSON");
+  log(JSON.stringify(${JSON.stringify(base)}, null, 1));
+  if (mode === "exit-1") process.exit(1);
+}
+`);
+}
+
+/** One model's numbers on one local day, as a fake `opencode` keeps them. */
+export interface OpencodeDayModel { id: string; providerID: string; variant?: string; input: number; output: number; reasoning?: number; read?: number; write?: number; cost?: number }
+/** A fake OpenCode's history: `daily[k]` = the models' numbers k local days ago (0 = today); `activity` = what `--all`
+ *  lists; `fail` = answer garbage and exit 1. */
+export interface OpencodeHistory { daily: Record<number, OpencodeDayModel[]>; activity?: string[]; fail?: boolean }
+
+/**
+ * A fake `opencode stats --standalone …`, answering BY ARGV from a data file it re-reads every run (`write` changes
+ * it): `--days N` = the sum of `daily[0…N−1]` (`--days 0` = `--days 1`, as OpenCode does), `--all` = everything plus
+ * the active dates. Decoy session, prompt and tool fields ride along and must never be kept.
+ */
+export function fakeOpencode(dir: string, history: OpencodeHistory): { path: string; markerPath: string; write(h: OpencodeHistory): void } {
+  const dataPath = join(dir, "opencode-history.json");
+  const write = (h: OpencodeHistory): void => writeFileSync(dataPath, JSON.stringify(h));
+  write(history);
+  const fake = fakeExecutable(dir, "opencode", `
+const data = JSON.parse(fs.readFileSync(${JSON.stringify(dataPath)}, "utf8"));
+const argv = process.argv.slice(2);
+if (data.fail) { log("Error: SECRET-PROMPT-7f3a"); process.exit(1); }
+const all = argv.includes("--all");
+const n = all ? Infinity : Math.max(1, Number(argv[argv.indexOf("--days") + 1]));
+const models = new Map();
+for (const [k, list] of Object.entries(data.daily)) {
+  if (Number(k) >= n) continue;
+  for (const m of list) {
+    const key = m.providerID + "/" + m.id + "|" + (m.variant ?? "default");
+    const t = models.get(key) ?? { model: { id: m.id, providerID: m.providerID, variant: m.variant ?? "default" }, steps: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 };
+    t.steps += 1; t.tokens.input += m.input; t.tokens.output += m.output; t.tokens.reasoning += m.reasoning ?? 0;
+    t.tokens.cache.read += m.read ?? 0; t.tokens.cache.write += m.write ?? 0; t.cost += m.cost ?? 0;
+    models.set(key, t);
+  }
+}
+log(JSON.stringify({
+  range: { from: 0, to: Date.now() }, sessions: 3, prompts: 9, steps: 12,
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0,
+  tools: { mode: "detail", usage: [{ name: "SECRET-INSTRUCTIONS-c0de", calls: 1 }] },
+  activity: (data.activity ?? []).map((date) => ({ date, steps: 1 })),
+  models: [...models.values()],
+}, null, 1));
+`);
+  return { ...fake, write };
 }
 
 /** A `.claude.json` with the plan cache AND decoy secret-looking keys that must never escape. */

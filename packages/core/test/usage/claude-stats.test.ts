@@ -7,7 +7,7 @@ import { existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { UsageDb } from "../../src/usage/db";
 import { UsagePricer } from "../../src/usage/pricing";
-import { UsageService } from "../../src/usage/service";
+import { UsageService, type UsageTracking } from "../../src/usage/service";
 import { CLAUDE_STATS_FILE, parseClaudeStats, splitByRatios } from "../../src/usage/claude-stats";
 import { SECRETS, claudeAssistant, claudeTranscriptPath, claudeUser, lines, probeRootIn, tempDir } from "./fixtures";
 
@@ -43,13 +43,13 @@ function statsCache(days: Record<string, Record<string, number>>, opts: { modelU
   });
 }
 
-function setup(opts: { tracking?: { codex: boolean; claudeCode: boolean }; claudeStatsMaxBytes?: number; fileBudgetBytes?: number } = {}) {
+function setup(opts: { tracking?: UsageTracking; claudeStatsMaxBytes?: number; fileBudgetBytes?: number } = {}) {
   const home = tempDir("home");
   const claudeHome = tempDir("claude");
   const db = new UsageDb(join(home, "usage", "usage.db"));
   const logs: string[] = [];
   const log = (msg: string, meta?: Record<string, unknown>) => { logs.push(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`); };
-  const tracking = opts.tracking ?? { codex: false, claudeCode: true };
+  const tracking = opts.tracking ?? { codex: false, claudeCode: true, antigravity: true, opencode: true };
   const clock = { now: NOW };
   const svc = new UsageService({
     db, pricer, tracking: () => tracking, claudeHome,
@@ -365,10 +365,11 @@ describe("schema 3", () => {
     db.db.run("DROP INDEX usage_records_source_synthetic_at");
     db.db.run("ALTER TABLE usage_records DROP COLUMN synthetic");
     db.db.run("ALTER TABLE usage_hourly DROP COLUMN synthetic_records");
+    db.db.run("ALTER TABLE usage_hourly DROP COLUMN reported_records");
     db.db.run("PRAGMA user_version = 2");
     db.close();
     db = new UsageDb(path);
-    expect(db.schemaVersion()).toBe(3);
+    expect(db.schemaVersion()).toBe(4);
     expect(db.db.query("SELECT dedupe, synthetic FROM usage_records").all()).toEqual([{ dedupe: "cc:m1:r1", synthetic: 0 }]);
     expect(db.earliestReal("claude-code")).toBe(NOW);
     expect(db.hourly(0, NOW + 1, ["claude-code"])[0]).toMatchObject({ records: 1, syntheticRecords: 0 });

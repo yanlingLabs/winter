@@ -24,7 +24,7 @@ function service(over: Partial<UsageServiceDeps> & { logs?: string[] } = {}) {
   const db = new UsageDb(join(home, "usage", "usage.db"));
   const logs = over.logs ?? [];
   const svc = new UsageService({
-    db, pricer, tracking: () => ({ codex: true, claudeCode: true }),
+    db, pricer, tracking: () => ({ codex: true, claudeCode: true, antigravity: true, opencode: true }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
     probeRoot: () => probeRootIn(home), ingestEveryMs: 0, planWaitMs: 20_000, fallbackEveryMs: 0,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
@@ -181,7 +181,7 @@ describe("the Codex plan", () => {
 
   test("tracking off: nothing is spawned or read", async () => {
     const fake = fakeCodex(tempDir("bin"), "ok");
-    const { svc } = service({ codexExecutable: () => fake.path, tracking: () => ({ codex: false, claudeCode: false }) });
+    const { svc } = service({ codexExecutable: () => fake.path, tracking: () => ({ codex: false, claudeCode: false, antigravity: false, opencode: false }) });
     expect((await svc.codexPlan()).source).toBe("disabled");
     expect((await svc.claudeCodePlan()).source).toBe("disabled");
     expect(marks(fake.markerPath)).toHaveLength(0);

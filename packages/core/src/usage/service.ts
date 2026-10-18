@@ -1,22 +1,27 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
+import { antigravityPlanFromCli } from "./antigravity";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
 import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
+import {
+  OPENCODE_ALL_ARGS, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs, opencodeDifference,
+  runOpencodeStats, type OpencodeStats,
+} from "./opencode";
 import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
 
 // The usage service (`docs/claude/usage.md`): records Winter's own turns as they end, ingests the user's Codex and
 // Claude Code usage ON DEMAND (when a Usage surface asks — no watcher, no timer: an idle daemon does nothing), reads
-// the two plans through their source ladders, and answers the `usage.*` RPCs.
+// the plans (Codex, Claude Code, Antigravity) through their source ladders, and answers the `usage.*` RPCs.
 
 export type UsageRange = "1h" | "24h" | "7d" | "30d" | "all";
 export const USAGE_RANGES: readonly UsageRange[] = ["1h", "24h", "7d", "30d", "all"];
 
-export interface UsageTracking { codex: boolean; claudeCode: boolean }
+export interface UsageTracking { codex: boolean; claudeCode: boolean; antigravity: boolean; opencode: boolean }
 
 export interface UsageServiceDeps {
   db: UsageDb;
@@ -31,6 +36,10 @@ export interface UsageServiceDeps {
   claudeJsonPath?: string;
   codexExecutable: () => string | undefined;
   claudeExecutable: () => string | undefined;
+  /** The user's Antigravity CLI (`agy`); absent = not on this Mac. */
+  agyExecutable?: () => string | undefined;
+  /** The user's OpenCode (`opencode`); absent = not on this Mac. */
+  opencodeExecutable?: () => string | undefined;
   /** Winter's own codex-oauth `rate_limit_event` windows (status only) — the Codex plan's last rung. */
   winterCodexWindows: () => PlanStatusWindow[];
   /** The directory each probe's own fresh, empty cwd is made in (`<home>/usage`): a probe runs where no project config
@@ -45,6 +54,13 @@ export interface UsageServiceDeps {
   claudeCliEveryMs?: number;
   appServerTimeoutMs?: number;
   claudeCliTimeoutMs?: number;
+  agyCliEveryMs?: number;
+  agyCliTimeoutMs?: number;
+  /** OpenCode's stats runs: at most one batch per `opencodeEveryMs` (default 10 min), at most `opencodeSpawnBudget`
+   *  runs per pass (default 40; a backfill that needs more continues next pass), each killed at `opencodeTimeoutMs`. */
+  opencodeEveryMs?: number;
+  opencodeSpawnBudget?: number;
+  opencodeTimeoutMs?: number;
   /** How long a plan read waits for a spawn still running before answering with what it has (default 2 s — a client's
    *  request times out at 5 s; the spawn finishes in the background and the next ask gets it). */
   planWaitMs?: number;
@@ -132,8 +148,9 @@ export interface UsageModelRow extends UsageTotals {
   source: UsageSource;
   provider: string;
   model: string;
-  /** `list` (the runtime's own price), `estimate` (Winter's list-price estimate), `mixed`, or `unknown`. */
-  costBasis: "list" | "estimate" | "mixed" | "unknown";
+  /** `list` (the runtime's own price), `estimate` (Winter's list-price estimate), `reported` (the other app's own
+   *  figure — OpenCode), `mixed`, or `unknown`. */
+  costBasis: "list" | "estimate" | "reported" | "mixed" | "unknown";
 }
 
 export interface UsageBucket { start: number; costUsd: number; tokens: number; bySource: Partial<Record<UsageSource, number>>; models: Array<{ source: UsageSource; model: string; costUsd: number; tokens: number }> }
@@ -206,6 +223,11 @@ export class UsageService {
   private codexRun: Promise<void> | undefined;
   private claudeCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
   private claudeRun: Promise<void> | undefined;
+  private agyCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
+  private agyRun: Promise<void> | undefined;
+  /** OpenCode's last stats batch (its throttle), and whether its backfill ran out of budget (then the throttle waits). */
+  private opencodeAt = 0;
+  private opencodeMore = false;
   /** Claude Code's plan name (`auth status`'s `subscriptionType`), per binary, re-asked hourly. */
   private claudePlanName: { at: number; key: string; value?: string } | undefined;
   /** Set when `/usage` came back as something other than the local command: this rung is off until restart. */
@@ -259,7 +281,7 @@ export class UsageService {
     const every = this.deps.ingestEveryMs ?? 20_000;
     // A tracking switch flipped since the last pass is news: never held back by the throttle.
     const tracking = this.deps.tracking();
-    const switched = this.lastTracking === undefined || this.lastTracking.codex !== tracking.codex || this.lastTracking.claudeCode !== tracking.claudeCode;
+    const switched = this.lastTracking === undefined || JSON.stringify(this.lastTracking) !== JSON.stringify(tracking);
     if (!force && !switched && !this.ingestMore && this.now() - this.lastIngestAt < every) return Promise.resolve();
     this.lastTracking = tracking;
     this.ingestRun = this.ingestPass().finally(() => { this.ingestRun = undefined; this.lastIngestAt = this.now(); });
@@ -302,6 +324,8 @@ export class UsageService {
         this.dropCoveredSynthetic();
         if (!ccMore) await this.importClaudeStats(this.deps.claudeHome);
       }
+      const opencode = this.deps.opencodeExecutable?.();
+      if (tracking.opencode && opencode !== undefined) more = (await this.ingestOpencode(opencode)) || more;
     } catch (err) {
       this.deps.log?.warn?.("[usage] ingest failed", { error: err instanceof Error ? err.name : "error" });
     }
@@ -382,6 +406,93 @@ export class UsageService {
     const cutoffDay = this.cutoffDay();
     const before = cutoffDay !== undefined ? utcNoon(cutoffDay) : utcNoon(utcDay(span.last + 86_400_000));
     return { claudeCodeStats: { from: span.first, before } };
+  }
+
+  /**
+   * OpenCode's usage, from its own `opencode stats` (`usage/opencode.ts`) — at most one batch per `opencodeEveryMs`
+   * (10 min) unless its backfill ran out of budget. Each batch, in order:
+   *  1. TODAY = `--days 1`, written as one row per model per variant for today's local date, REPLACING the day's rows;
+   *  2. every day to FINALIZE, newest first, as `--days k+1` − `--days k` (a run is shared by two neighbouring days):
+   *     yesterday once after midnight, the last day written as "today" (the daemon may have slept through midnights),
+   *     and the one-time backfill — every active date `--all` lists, kept as a `pending` list until done, so an
+   *     interrupted backfill resumes. A finalized day is never asked again (`done`, the last two weeks kept).
+   * At most `opencodeSpawnBudget` runs per batch: out of budget = `more` (the next pass skips both throttles); a failed
+   * run ends the batch (an ordinary failure, retried after the throttle — never `more`, so a broken binary never loops
+   * the catch-up). A local midnight crossed mid-batch discards it. Returns `more`.
+   */
+  private async ingestOpencode(exe: string): Promise<boolean> {
+    const now = this.now();
+    if (!this.opencodeMore && this.opencodeAt > 0 && now - this.opencodeAt < (this.deps.opencodeEveryMs ?? 600_000)) return false;
+    this.opencodeAt = now;
+    this.opencodeMore = false;
+    const today = localDay(now);
+    const key = "opencode:progress";
+    const saved = this.deps.db.sourceState(key) ?? {};
+    const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+    const done = new Set(strings(saved.done));
+    let pending = strings(saved.pending);
+    let listed = saved.listed === true;
+    const lastToday = typeof saved.lastToday === "string" ? saved.lastToday : undefined;
+    let budget = this.deps.opencodeSpawnBudget ?? 40;
+    const runs = new Map<string, OpencodeStats>();
+    let failed = false;
+    const run = async (args: string[]): Promise<OpencodeStats | undefined> => {
+      const id = args.join(" ");
+      const hit = runs.get(id);
+      if (hit !== undefined) return hit;
+      budget -= 1;
+      const r = await this.inProbeDir((cwd) => runOpencodeStats(exe, args, {
+        cwd, ...(this.deps.opencodeTimeoutMs === undefined ? {} : { timeoutMs: this.deps.opencodeTimeoutMs }),
+      })).catch(() => ({ failure: "spawn-failed" as const, stats: undefined }));
+      if (r.stats === undefined) {
+        failed = true;
+        this.deps.log?.info?.("[usage] opencode stats gave no reading", { reason: r.failure ?? "no-json" });
+        return undefined;
+      }
+      runs.set(id, r.stats);
+      return r.stats;
+    };
+    const days = (k: number): Promise<OpencodeStats | undefined> => run(opencodeDaysArgs(k));
+    const writes: Array<{ day: string; rows: UsageRecordInput[] }> = [];
+    const todayStats = await days(1);
+    if (todayStats === undefined) return false;
+    writes.push({ day: today, rows: opencodeDayRecords(todayStats, today, Math.min(localNoon(today), now), this.deps.pricer) });
+    if (!listed) {
+      const all = await run([...OPENCODE_ALL_ARGS]);
+      if (all !== undefined) { pending = all.activity.filter((d) => d < today && !done.has(d)); listed = true; }
+    }
+    const due = new Set(pending);
+    due.add(dayMinus(today, 1));
+    if (lastToday !== undefined) due.add(lastToday);
+    const order = [...due].filter((d) => d < today && !done.has(d)).sort().reverse();
+    for (const day of order) {
+      if (failed) break;
+      const k = daysBefore(day, today);
+      const needed = [k + 1, k].filter((n) => !runs.has(opencodeDaysArgs(n).join(" "))).length;
+      if (needed > budget) { this.opencodeMore = true; break; }
+      const wide = await days(k + 1);
+      const narrow = wide === undefined ? undefined : await days(k);
+      if (wide === undefined || narrow === undefined) break;
+      writes.push({ day, rows: opencodeDayRecords(opencodeDifference(wide, narrow), day, localNoon(day), this.deps.pricer) });
+      done.add(day);
+    }
+    // Every `--days` run counts from the local midnight of its moment: across a midnight the differences are wrong.
+    if (localDay(this.now()) !== today) { this.opencodeAt = 0; this.opencodeMore = false; return false; }
+    for (const w of writes) this.replaceOpencodeDay(w.day, w.rows);
+    const keepFrom = dayMinus(today, 14);
+    this.deps.db.setSourceState(key, "opencode", {
+      done: [...done].filter((d) => d >= keepFrom).sort(), pending: pending.filter((d) => !done.has(d)), listed, lastToday: today,
+    }, this.now());
+    return this.opencodeMore;
+  }
+
+  /** Replace one local day of OpenCode rows — written only when something differs (a re-read of an unchanged day writes nothing). */
+  private replaceOpencodeDay(day: string, rows: readonly UsageRecordInput[]): void {
+    const from = localDayStart(day);
+    const to = localDayEnd(day);
+    const stored = new Map(this.deps.db.storedRows("opencode", false, from, to).map((r) => [r.dedupe, r]));
+    if (stored.size === rows.length && rows.every((r) => { const s = stored.get(r.dedupe); return s !== undefined && !differs(s, r); })) return;
+    this.deps.db.replaceDay("opencode", from, to, rows);
   }
 
   /** Read every file's new bytes. Returns true when a budget left bytes for the next pass. */
@@ -496,6 +607,40 @@ export class UsageService {
     return { provider: "claude-code", source: "none", windows: [] };
   }
 
+  /** The Antigravity plan: `agy`'s own `/usage` (no other rung — nothing else of agy's is read). */
+  async antigravityPlan(): Promise<PlanReading> {
+    if (!this.deps.tracking().antigravity) return { provider: "antigravity", source: "disabled", windows: [] };
+    if (this.deps.agyExecutable?.() === undefined) return { provider: "antigravity", source: "not-installed", windows: [] };
+    const now = this.now();
+    const every = this.deps.agyCliEveryMs ?? 300_000;
+    if (this.agyRun !== undefined) {
+      await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
+    } else if (this.agyCache === undefined || now - this.agyCache.at >= every) {
+      this.agyRun ??= (async () => {
+        const exe = this.deps.agyExecutable?.();
+        if (exe === undefined) { this.agyCache = { at: this.now(), failure: "not-installed" }; return; }
+        // The latch, as for Claude Code: a binary whose `/usage` once reached the model loop is not asked again until it changes.
+        const key = binaryKey("agy", exe);
+        if (key === undefined || this.deps.db.latch(key) !== undefined) { this.agyCache = { at: this.now(), failure: "latched" }; return; }
+        const r = await this.inProbeDir((cwd) => antigravityPlanFromCli(exe, {
+          cwd, now: this.now,
+          ...(this.deps.agyCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.agyCliTimeoutMs }),
+        })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
+        this.agyCache = { at: this.now(), ...r };
+        if (r.failure === "guard") {
+          try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
+          this.deps.log?.warn?.("[usage] agy /usage did not come back as the read-only command; not asked again until Antigravity changes");
+        } else if (r.failure !== undefined) {
+          this.deps.log?.info?.("[usage] agy /usage gave no plan reading", { reason: r.failure });
+        }
+      })().finally(() => { this.agyRun = undefined; });
+      await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
+    }
+    const cached = this.agyCache?.reading;
+    if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+    return { provider: "antigravity", source: "none", windows: [] };
+  }
+
   /** `~/.claude.json`'s plan cache: re-parsed only when the file's mtime or size changed; never read over the cap
    *  (checked on the stat AND on the bytes actually read); the over-cap line is logged once per process. */
   private async claudeJsonReading(path: string): Promise<PlanReading | undefined> {
@@ -576,7 +721,8 @@ export class UsageService {
       if (row === undefined) { row = { source: r.source, provider: r.provider, model: r.model, costBasis: "unknown", ...EMPTY() }; models.set(key, row); }
       add(row, r);
       const prevBasis = row.costBasis;
-      const basis = r.listRecords > 0 && r.estimateRecords === 0 ? "list" : r.estimateRecords > 0 && r.listRecords === 0 ? "estimate" : r.listRecords + r.estimateRecords > 0 ? "mixed" : "unknown";
+      const kinds = ([["list", r.listRecords], ["estimate", r.estimateRecords], ["reported", r.reportedRecords]] as const).filter(([, c]) => c > 0);
+      const basis = kinds.length === 1 ? kinds[0]![0] : kinds.length > 1 ? "mixed" : "unknown";
       row.costBasis = prevBasis === "unknown" ? basis : basis === "unknown" || basis === prevBasis ? prevBasis : "mixed";
       let s = bySource.get(r.source);
       if (s === undefined) { s = EMPTY(); bySource.set(r.source, s); }
@@ -591,20 +737,23 @@ export class UsageService {
   }
 
   async summary(range: UsageRange, sources: readonly UsageSource[] = USAGE_SOURCES, opts: { plans?: boolean; waitMs?: number } = {}) {
-    // The ingest and both plan ladders run side by side; each answers within its own short wait.
-    const [, codex, claudeCode] = await Promise.all([
+    // The ingest and the plan ladders run side by side; each answers within its own short wait.
+    const [, codex, claudeCode, antigravity] = await Promise.all([
       this.ingestWithin(opts.waitMs ?? 1_500),
       opts.plans === false ? undefined : this.codexPlan(),
       opts.plans === false ? undefined : this.claudeCodePlan(),
+      opts.plans === false ? undefined : this.antigravityPlan(),
     ]);
     const s = this.series(range, sources);
-    const plans = codex === undefined || claudeCode === undefined ? undefined : { codex, claudeCode };
+    const plans = codex === undefined || claudeCode === undefined || antigravity === undefined ? undefined : { codex, claudeCode, antigravity };
     return {
       range: s.range, from: s.from, to: s.to, bucketMs: s.bucketMs, totals: s.totals, bySource: s.bySource,
       topModels: s.models.slice(0, 5),
       spark: s.buckets.map((b) => b.costUsd), sparkTokens: s.buckets.map((b) => b.tokens),
       ...(plans === undefined ? {} : { plans }),
       tracking: this.deps.tracking(), ingest: this.ingestState(), history: s.history,
+      // A source with no plan slot to say "not installed": OpenCode's toggle shows only when it is on this Mac.
+      installed: { opencode: this.deps.opencodeExecutable?.() !== undefined },
     };
   }
 
