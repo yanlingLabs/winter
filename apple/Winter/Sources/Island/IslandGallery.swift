@@ -179,12 +179,42 @@ enum IslandGallery {
         let models = sampleTabModels(now: now, files: files)
         let store = sampleStore()
 
+        store.activity.apply(sampleWatches(nowMs: Int(now.timeIntervalSince1970 * 1000)))
         for (tab, name) in [(IslandTabRegistry.sessions, "sessions"), (IslandTabRegistry.shelf, "shelf"),
                             (IslandTabRegistry.usage, "usage"), (IslandTabRegistry.devices, "devices"),
-                            (IslandTabRegistry.servers, "servers")] {
+                            (IslandTabRegistry.watches, "watches"), (IslandTabRegistry.servers, "servers")] {
             store.tabs.select(tab.id)
             out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id), directory,
                                  "island-tab-\(name)@2x.png"))
+        }
+        // The same tabs with one unit under the pointer (the island's visual language: the hover is forced through
+        // `hoverLiftPreview`, the one-shot renderer having no pointer).
+        for (tab, name, ids) in hoveredSamples(models) {
+            store.tabs.select(tab.id)
+            out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id, preview: ids), directory,
+                                 "island-tab-\(name)-hovered@2x.png"))
+        }
+        // Usage and Devices cut taller (they scroll live), at rest and hovered: the cost block; the helper and a browser
+        // that is not connected (its reason on the grey track).
+        for (tab, name, hovered) in [(IslandTabRegistry.usage, "usage", ["cost"]),
+                                     (IslandTabRegistry.devices, "devices", ["device:cu", "device:browser-chrome"])] {
+            store.tabs.select(tab.id)
+            for (suffix, ids) in [("", Set<String>()), ("-hovered", Set(hovered))] {
+                out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id, preview: ids, height: 440),
+                                     directory, "island-tab-\(name)-tall\(suffix)@2x.png"))
+            }
+        }
+        // A server's Stop waiting for its second click, and offering (then asking) a force quit beside its link — set
+        // through the seam, never clicked (nothing is signalled): Stop stays on screen with the pointer elsewhere, in the
+        // row's flow, so its wider capsule never covers the link.
+        store.tabs.select(IslandTabRegistry.servers.id)
+        for (name, phase) in [("confirm", IslandServerStopPhase.confirming(at: now)), ("forcequit", .confirmingForce(at: now))] {
+            let servers = sampleServers(now: now, withLink: true)
+            if let row = servers.bundles.first(where: { !servers.drills($0) })?.rows.first {
+                servers.setStopsForTesting([row.id: phase])
+            }
+            out.append(try write(openScene(store: store, models: IslandTabModels(shelf: models.shelf, servers: servers), shape: shape,
+                                           tab: IslandTabRegistry.servers.id), directory, "island-tab-servers-\(name)@2x.png"))
         }
         // The empty Shelf, and the Shelf while a drag hovers it.
         let emptyModels = IslandTabModels(shelf: IslandShelfStore(persistence: IslandShelfPersistence(
@@ -214,12 +244,28 @@ enum IslandGallery {
         return out
     }
 
+    /// The units drawn hovered in the tabs' hovered pictures, by tab: one row (or tile) each.
+    static func hoveredSamples(_ models: IslandTabModels) -> [(IslandTab, String, Set<String>)] {
+        let single = models.servers.bundles.first { !models.servers.drills($0) }?.rows.first.map { "server:\($0.id)" }
+        let bundle = models.servers.bundles.first { models.servers.drills($0) }.map { "server:\($0.key)" }
+        return [
+            (IslandTabRegistry.sessions, "sessions", ["session:s2"]),
+            (IslandTabRegistry.shelf, "shelf", Set(models.shelf.items.dropFirst().first.map { ["shelf:\($0.id)"] } ?? [])),
+            (IslandTabRegistry.devices, "devices", ["device:phone-p1"]),
+            (IslandTabRegistry.watches, "watches", ["watch:wk_1"]),
+            (IslandTabRegistry.servers, "servers", Set([single].compactMap { $0 })),
+            (IslandTabRegistry.servers, "servers-bundle", Set([bundle].compactMap { $0 })),
+        ]
+    }
+
     private static func openScene(store: IslandStore, models: IslandTabModels, shape: IslandScreenShape, tab: String,
-                                  light: Bool = false) -> some View {
-        // The island's one size, whatever the tab.
+                                  light: Bool = false, preview: Set<String> = [], height: CGFloat? = nil) -> some View {
+        // The island's one size, whatever the tab (`height`: a taller cut, to see a long tab whole).
         let island = IslandLayout.island(shape)
-        return scene(shape, width: island.width + 120, height: island.height + 50, light: light) {
-            IslandExpandedView(store: store, shape: shape, size: island.size, scrolls: false, tabModels: models)
+        let size = CGSize(width: island.width, height: height ?? island.height)
+        return scene(shape, width: island.width + 120, height: size.height + 50, light: light) {
+            IslandExpandedView(store: store, shape: shape, size: size, scrolls: false, tabModels: models)
+                .environment(\.hoverLiftPreview, preview)
         }
     }
 
@@ -227,16 +273,20 @@ enum IslandGallery {
     static func sampleTabModels(now: Date, files: URL) -> IslandTabModels {
         let ms = { (d: TimeInterval) in (now.addingTimeInterval(d).timeIntervalSince1970 * 1000) }
         // Sessions.
+        let created = { (ago: TimeInterval) in Int(ms(-ago)) }
         let rows = [
-            SessionSummary(sessionId: "s1", title: "Ship the island", createdAt: 5, scope: "global",
+            SessionSummary(sessionId: "s1", title: "Ship the island", createdAt: created(40 * 60), scope: "global",
+                           cwd: "/Users/sample/Code/winter", model: "anthropic/claude-opus-4.1",
                            signals: SessionSignals(attachedElsewhere: false, working: false)),
-            SessionSummary(sessionId: "s2", title: "Refactor the shelf store", createdAt: 4, scope: "global",
+            SessionSummary(sessionId: "s2", title: "Refactor the shelf store", createdAt: created(3 * 3600), scope: "global",
+                           cwd: "/Users/sample/Code/winter", model: "gpt-5-codex",
                            signals: SessionSignals(attachedElsewhere: true, working: true)),
-            SessionSummary(sessionId: "s3", title: "Weekly planning", createdAt: 3, scope: "global", mode: "chat",
-                           signals: SessionSignals(attachedElsewhere: false, working: false)),
-            SessionSummary(sessionId: "s4", title: "Compare flight prices", createdAt: 2, scope: "global", mode: "code",
+            SessionSummary(sessionId: "s3", title: "Weekly planning", createdAt: created(26 * 3600), scope: "global", mode: "chat",
+                           model: "google/gemini-2.5-pro", signals: SessionSignals(attachedElsewhere: false, working: false)),
+            SessionSummary(sessionId: "s4", title: "Compare flight prices", createdAt: created(30 * 3600), scope: "global", mode: "code",
                            parentSessionId: "d1", signals: SessionSignals(attachedElsewhere: false, working: false)),
-            SessionSummary(sessionId: "s5", title: "Inbox triage", createdAt: 1, scope: "global", activity: "background",
+            SessionSummary(sessionId: "s5", title: "Inbox triage", createdAt: created(4 * 86400), scope: "global",
+                           cwd: "/Users/sample/Mail", model: "anthropic/claude-sonnet-4.5", activity: "background",
                            signals: SessionSignals(attachedElsewhere: true, working: true)),
         ]
         let sessions = IslandSessionsModel()
@@ -295,14 +345,17 @@ enum IslandGallery {
 
     /// Servers: two servers of one npm package (a bundle), a Python module, a Bun app — from a made-up process list (never
     /// a scan, never a probe).
-    static func sampleServers(now: Date) -> IslandServersModel {
+    /// `withLink`: http.server answers HTTP on loopback (a made-up probe — nothing is asked), so its row has a link.
+    static func sampleServers(now: Date, withLink: Bool = false) -> IslandServersModel {
         let start = { (ago: TimeInterval) in UInt64(now.timeIntervalSince1970 - ago) }
         let home = "/Users/sample"
         // Each in a process group of its own; the two waifus servers are one project (one bundle row).
         func process(_ pid: Int32, parent: Int32 = 1, group: Int32, ago: TimeInterval, path: String, args: [String]? = nil,
-                     cwd: String, tcp: [UInt16]) -> ServerProcess {
-            ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
-                          ppid: parent, pgid: group, path: path, cwd: cwd, tcpPorts: tcp, arguments: args)
+                     cwd: String, tcp: [UInt16], loopback: [UInt16: IslandLoopback] = [:]) -> ServerProcess {
+            var p = ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
+                                  ppid: parent, pgid: group, path: path, cwd: cwd, tcpPorts: tcp, arguments: args)
+            p.loopback = loopback
+            return p
         }
         let model = IslandServersModel()
         model.user = 501
@@ -316,10 +369,13 @@ enum IslandGallery {
                     args: ["node", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs", "start"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [61010]),
             process(410, group: 410, ago: 25 * 60, path: "/usr/bin/python3", args: ["python3", "-m", "http.server", "8000"],
-                    cwd: "\(home)/Sites/portfolio", tcp: [8000]),
+                    cwd: "\(home)/Sites/portfolio", tcp: [8000], loopback: withLink ? [8000: .v4] : [:]),
             process(420, group: 420, ago: 2 * 86400, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
                     cwd: "\(home)/Code/dashboard", tcp: [3000, 3001]),
         ])
+        if withLink, let row = model.rows.first(where: { $0.tcpPorts == [8000] }) {
+            model.setProbesForTesting([IslandServers.probeKey(row, 8000): IslandHTTPProbe(isHTTP: true, isHTML: true)])
+        }
         return model
     }
 

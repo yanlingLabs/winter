@@ -476,31 +476,3 @@ enum UsagePresentation {
         }
     }
 }
-
-/// A tiny sparkline (a plain path: drawn by the offscreen renderer too).
-struct UsageSparkline: View {
-    let values: [Double]
-    var color: Color = Theme.accent
-
-    var body: some View {
-        GeometryReader { proxy in
-            let pts = UsagePresentation.sparkPoints(values, in: proxy.size)
-            ZStack {
-                Path { p in
-                    guard let first = pts.first else { return }
-                    p.move(to: CGPoint(x: first.x, y: proxy.size.height))
-                    for pt in pts { p.addLine(to: pt) }
-                    p.addLine(to: CGPoint(x: pts.last!.x, y: proxy.size.height))
-                    p.closeSubpath()
-                }
-                .fill(LinearGradient(colors: [color.opacity(0.28), color.opacity(0.02)], startPoint: .top, endPoint: .bottom))
-                Path { p in
-                    guard let first = pts.first else { return }
-                    p.move(to: first)
-                    for pt in pts.dropFirst() { p.addLine(to: pt) }
-                }
-                .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-            }
-        }
-    }
-}

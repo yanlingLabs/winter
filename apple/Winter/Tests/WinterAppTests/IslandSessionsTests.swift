@@ -184,6 +184,71 @@ final class IslandSessionsTests: XCTestCase {
                                          windows: [TerminalWindowCandidate(title: nil, tabTitles: ["zsh", "zsh"])]))
     }
 
+    // MARK: The quiet row (the island's visual language)
+
+    func testARowCarriesWhatItsHoverRevealsModelFolderAndAge() {
+        var s = row("a", title: "Ship it", created: 1_700_000_000_000, working: true)
+        s.cwd = "/Users/sample/Code/winter"
+        s.model = "anthropic/claude-sonnet-4.5"
+        s.providerId = "anthropic"
+        let rows = IslandSessionsBuilder.rows(directory: [s], hosts: [:], waiting: [], childStatuses: [:], windows: IslandWindowFacts())
+        XCTAssertEqual(rows.first?.model, "anthropic/claude-sonnet-4.5")
+        XCTAssertEqual(rows.first?.providerId, "anthropic")
+        XCTAssertEqual(rows.first?.folder, "winter")
+        XCTAssertEqual(rows.first?.createdAt, 1_700_000_000_000)
+        XCTAssertNil(IslandSessionsBuilder.folderName(nil))
+        XCTAssertNil(IslandSessionsBuilder.folderName("  "))
+        XCTAssertNil(IslandSessionsBuilder.folderName("/"))
+    }
+
+    func testTheRowStillSaysItsModeOnScreen() throws {
+        // The mode ("Code", "Chat", "Dispatch task") is the row's content: it stays in the muted words beside the host,
+        // never only in the VoiceOver label.
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/Island/IslandSessions.swift").standardizedFileURL, encoding: .utf8)
+        let view = try XCTUnwrap(source.range(of: "struct IslandSessionRowView").map { String(source[$0.lowerBound...]) })
+        XCTAssertTrue(view.contains("Text(row.mode)"), "the mode is drawn")
+    }
+
+    func testTheModelFamilyPicksOneSourcesAccentAndWinterBlueOtherwise() {
+        XCTAssertEqual(IslandModelFamily.of(model: "anthropic/claude-sonnet-4.5", provider: nil), .anthropic)
+        XCTAssertEqual(IslandModelFamily.of(model: "claude-opus-4.1", provider: "openrouter"), .anthropic, "the model's words win")
+        XCTAssertEqual(IslandModelFamily.of(model: "gpt-5-codex", provider: nil), .openai)
+        XCTAssertEqual(IslandModelFamily.of(model: "openai/o3", provider: nil), .openai)
+        XCTAssertEqual(IslandModelFamily.of(model: nil, provider: "codex-oauth"), .openai)
+        XCTAssertEqual(IslandModelFamily.of(model: "google/gemini-2.5-pro", provider: nil), .google)
+        XCTAssertEqual(IslandModelFamily.of(model: "example/model-large", provider: "example"), .other,
+                       "an unknown family is never painted as one of the sources")
+        XCTAssertEqual(IslandModelFamily.of(model: nil, provider: nil), .other)
+        XCTAssertEqual(IslandModelFamily.openai.color, UsagePlanColor.codex)
+        XCTAssertEqual(IslandModelFamily.anthropic.color, UsagePlanColor.claudeCode)
+        XCTAssertEqual(IslandModelFamily.google.color, UsagePlanColor.antigravity)
+        XCTAssertEqual(IslandModelFamily.other.color, Theme.accent)
+    }
+
+    func testTheStatusLineIsFullUnlessIdleAndSaysStateModelAgeAndFolderOnlyUnderThePointer() {
+        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.waiting), 1)
+        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.working), 1)
+        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.finished), 1)
+        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.idle), 0, "idle: the grey track alone")
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let r = IslandSessionRow(sessionId: "a", title: "T", mode: "Code", state: .working, host: .winterWindow,
+                                 model: "anthropic/claude-sonnet-4.5", folder: "winter",
+                                 createdAt: Int((now.timeIntervalSince1970 - 3 * 3600) * 1000))
+        let words = IslandSessionsBuilder.lineWords(r, now: now)
+        XCTAssertEqual(words.start, "Working · claude-sonnet-4.5", "the provider prefix dropped")
+        XCTAssertEqual(words.end, "3 h ago · winter")
+        XCTAssertNil(words.atFill)
+        let bare = IslandSessionRow(sessionId: "b", title: "T", mode: "Chat", state: .idle, host: .nowhere)
+        XCTAssertEqual(IslandSessionsBuilder.lineWords(bare, now: now), HoverLineWords(start: "Idle", end: nil))
+        XCTAssertEqual(IslandSessionsBuilder.lineColor(IslandSessionRow(sessionId: "w", title: "T", mode: "Code", state: .waiting,
+                                                                        host: .nowhere, model: "gpt-5")), pillReviewAmber,
+                       "waiting is amber whatever the model")
+        XCTAssertEqual(IslandSessionsBuilder.lineColor(r), UsagePlanColor.claudeCode)
+        XCTAssertEqual(IslandSessionsBuilder.markColor(r), UsagePlanColor.claudeCode, "the mark wears its line's colour")
+        XCTAssertEqual(IslandSessionsBuilder.markColor(bare), Theme.textMuted)
+    }
+
     func testIslandChangedSaysWhetherThePendingSetOrAWorkingStateChanged() {
         XCTAssertEqual(IslandChangeKind(.object([:])), IslandChangeKind(pending: true, working: false), "phase 1's payload")
         XCTAssertEqual(IslandChangeKind(.object(["working": .bool(true)])), IslandChangeKind(pending: false, working: true))

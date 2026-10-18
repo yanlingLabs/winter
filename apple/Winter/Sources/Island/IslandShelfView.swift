@@ -15,6 +15,12 @@ struct IslandShelfTab: View {
 
     static let columns = 4
 
+    /// The selected file's mark: a short line under its name.
+    static let selectionLine = CGSize(width: 22, height: 3)
+
+    /// PURE: whether a tile shows the selection's line — selected and present (a missing file says "Missing" there).
+    static func showsSelectionLine(selected: Bool, missing: Bool) -> Bool { selected && !missing }
+
     var body: some View {
         if shelf.items.isEmpty {
             IslandEmptyTab(symbol: shelf.dropTargeted ? "tray.and.arrow.down.fill" : "tray",
@@ -48,7 +54,7 @@ struct IslandShelfTab: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, IslandQuietRow.inset - 6)
         .padding(.bottom, 14)
         .overlay(dropOutline.padding(.horizontal, 8).padding(.bottom, 8).opacity(shelf.dropTargeted ? 1 : 0))
     }
@@ -62,7 +68,10 @@ struct IslandShelfTile: View {
     var body: some View {
         let url = shelf.url(of: item.id)
         let selected = shelf.selectedId == item.id
-        IslandHoverSurface { hovered in
+        // Quiet (the island's visual language): no card behind a file — its thumbnail and name. Under the pointer the
+        // thumbnail lifts from its bottom edge, the name brightens and the copy and remove buttons appear; the selected
+        // file (what ⌘C copies) is marked by a short white line under its name.
+        HoverLiftReader(id: "shelf:\(item.id)") { hovered in
             VStack(spacing: 6) {
                 ZStack {
                     if let url {
@@ -78,17 +87,26 @@ struct IslandShelfTile: View {
                             .frame(width: 52, height: 52)
                     }
                 }
+                .hoverLiftLabel(hovered, anchor: .bottom)
                 Text(item.name)
                     .font(Typography.caption(.medium))
-                    .foregroundStyle(url == nil ? Theme.textMuted : Color.white)
+                    .foregroundStyle(url == nil ? Theme.textMuted : Color.white.opacity(hovered || selected ? 1 : 0.75))
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .multilineTextAlignment(.center)
                     .frame(height: 28, alignment: .top)
-                // The same height for every tile: the "Missing" line has its slot whether shown or not.
-                Text("Missing").font(Typography.tiny(.semibold)).foregroundStyle(pillReviewAmber)
-                    .opacity(url == nil ? 1 : 0)
-                    .accessibilityHidden(url != nil)
+                // The same height for every tile: the mark's slot is there whether shown or not — "Missing" for a file
+                // that is gone, else the selection's line.
+                ZStack {
+                    Capsule().fill(Color.white.opacity(0.75))
+                        .frame(width: IslandShelfTab.selectionLine.width, height: IslandShelfTab.selectionLine.height)
+                        .opacity(IslandShelfTab.showsSelectionLine(selected: selected, missing: url == nil) ? 1 : 0)
+                        .accessibilityHidden(true)
+                    Text("Missing").font(Typography.tiny(.semibold)).foregroundStyle(pillReviewAmber)
+                        .opacity(url == nil ? 1 : 0)
+                        .accessibilityHidden(url != nil)
+                }
+                .frame(height: 12)
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 6)
@@ -102,10 +120,9 @@ struct IslandShelfTile: View {
                         IslandShelfMiniButton(symbol: "xmark", label: "Remove \(item.name) from the shelf") { shelf.remove(item.id) }
                     }
                     .padding(5)
+                    .transition(.opacity)
                 }
             }
-            .overlay(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous)
-                .strokeBorder(Color.white.opacity(selected ? 0.55 : 0), lineWidth: 1.5))
         }
         .contentShape(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous))
         .gesture(TapGesture(count: 2).onEnded { shelf.open(item.id) }

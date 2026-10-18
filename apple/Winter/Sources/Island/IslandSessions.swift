@@ -79,7 +79,45 @@ struct IslandSessionRow: Identifiable, Equatable {
     let mode: String
     let state: IslandSessionLiveState
     let host: IslandSessionHostKind
+    /// What the row reveals under the pointer: its model (the session's pinned tag), the provider that served it, the
+    /// working folder's last component and when it was created (epoch seconds or ms, as the directory has it).
+    var model: String? = nil
+    var providerId: String? = nil
+    var folder: String? = nil
+    var createdAt: Int = 0
     var id: String { sessionId }
+}
+
+/// A session's model family — the colour its status line wears (`UsagePlanColor`: Codex green for OpenAI's models,
+/// Claude Code clay for Anthropic's, Antigravity blue for Google's; Winter's own accent for any other).
+enum IslandModelFamily: Equatable {
+    case openai, anthropic, google, other
+
+    /// PURE: from the session's model tag ("anthropic/claude-sonnet-4.5", "gpt-5-codex") and the provider that served it
+    /// ("anthropic", "codex-oauth", "openai", "google"…); the model's own words win, an unknown one is `other`.
+    static func of(model: String?, provider: String?) -> IslandModelFamily {
+        for raw in [model, provider] {
+            guard let s = raw?.lowercased(), !s.isEmpty else { continue }
+            if s.contains("claude") || s.contains("anthropic") || s.contains("opus") || s.contains("sonnet") || s.contains("haiku") {
+                return .anthropic
+            }
+            if s.contains("gpt") || s.contains("openai") || s.contains("codex") || s.hasPrefix("o3") || s.hasPrefix("o4")
+                || s.contains("/o3") || s.contains("/o4") {
+                return .openai
+            }
+            if s.contains("gemini") || s.contains("google") || s.contains("antigravity") { return .google }
+        }
+        return .other
+    }
+
+    var color: Color {
+        switch self {
+        case .openai: return UsagePlanColor.codex
+        case .anthropic: return UsagePlanColor.claudeCode
+        case .google: return UsagePlanColor.antigravity
+        case .other: return Theme.accent
+        }
+    }
 }
 
 /// What the app's own windows show.
@@ -178,11 +216,57 @@ enum IslandSessionsBuilder {
                 || childStatuses[row.sessionId] != nil
             guard live else { continue }
             let title = row.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Untitled \(modeLabel(row).lowercased())"
-            out.append((IslandSessionRow(sessionId: row.sessionId, title: title, mode: modeLabel(row), state: state, host: host),
+            out.append((IslandSessionRow(sessionId: row.sessionId, title: title, mode: modeLabel(row), state: state, host: host,
+                                         model: row.model, providerId: row.providerId, folder: folderName(row.cwd),
+                                         createdAt: row.createdAt),
                         row.createdAt))
         }
         out.sort { a, b in a.0.state != b.0.state ? a.0.state < b.0.state : a.1 > b.1 }
         return Array(out.prefix(limit).map(\.0))
+    }
+
+    /// PURE: a working folder as the row names it — its last component ("winter"); nil without one.
+    static func folderName(_ cwd: String?) -> String? {
+        guard let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty else { return nil }
+        let last = URL(fileURLWithPath: cwd).lastPathComponent
+        return last.isEmpty || last == "/" ? nil : last
+    }
+
+    /// PURE: what a hovered row's status line says inside itself — the state and the model at its start ("Working ·
+    /// claude-sonnet-4.5"), how long ago it was created and its folder at its end ("3 h ago · winter").
+    static func lineWords(_ row: IslandSessionRow, now: Date) -> HoverLineWords {
+        var start = [row.state.label]
+        if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+            start.append(UsagePresentation.modelName(model))
+        }
+        var end: [String] = []
+        if row.createdAt > 0 { end.append(islandRelativePast(IslandDevicesPresentation.date(row.createdAt), now: now)) }
+        if let folder = row.folder { end.append(folder) }
+        return HoverLineWords(start: start.joined(separator: " · "), end: end.isEmpty ? nil : end.joined(separator: " · "))
+    }
+
+    /// PURE: the status line's fill — full while it waits, works or has finished (the colour says which); empty (the grey
+    /// track alone) while idle.
+    static func lineFraction(_ state: IslandSessionLiveState) -> Double { state == .idle ? 0 : 1 }
+
+    /// PURE: the status line's colour — amber while it waits for you, its model family's while it works, a quiet white
+    /// once finished.
+    static func lineColor(_ row: IslandSessionRow) -> Color {
+        switch row.state {
+        case .waiting: return pillReviewAmber
+        case .working, .idle: return IslandModelFamily.of(model: row.model, provider: row.providerId).color
+        case .finished: return Color.white.opacity(0.3)
+        }
+    }
+
+    /// PURE: the state's mark beside the title — the line's own colour while it waits or works, muted while idle, a
+    /// quiet white once finished.
+    static func markColor(_ row: IslandSessionRow) -> Color {
+        switch row.state {
+        case .waiting, .working: return lineColor(row)
+        case .idle: return Theme.textMuted
+        case .finished: return Color.white.opacity(0.6)
+        }
     }
 
     /// PURE: the strip's working count — sessions the daemon last said are working (not archived).
@@ -258,71 +342,77 @@ struct IslandSessionsList: View {
     }
 
     private var list: some View {
-        VStack(spacing: IslandLayout.rowGap) {
+        VStack(spacing: IslandSessionRowView.gap) {
             ForEach(model.rows) { row in
                 IslandSessionRowView(row: row) { onOpen(row) }
             }
         }
-        .padding(.horizontal, IslandLayout.listInset)
+        .padding(.horizontal, IslandQuietRow.inset)
+        .padding(.top, 2)
         .padding(.bottom, IslandLayout.listInset)
     }
 }
 
+/// A session as a quiet row (the island's visual language, `docs/claude/island.md`): its state's mark, its title and
+/// where it is (muted), over a thin status line — amber while it waits for you, its model family's colour while it
+/// works, grey while idle, a quiet white once finished. Under the pointer the title lifts, the line thickens and says
+/// the state and model, its age and folder inside itself, and the ↗ shows. A click goes where the session is.
 struct IslandSessionRowView: View {
     let row: IslandSessionRow
+    var now = Date()
     let action: () -> Void
+
+    /// The gap between rows.
+    static let gap: CGFloat = 10
 
     var body: some View {
         Button(action: action) {
-            IslandHoverSurface { hovered in
-                HStack(spacing: 10) {
-                    Image(systemName: row.state.symbol)
-                        .font(Typography.label(.semibold))
-                        .foregroundStyle(islandSessionStateColor(row.state))
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
+            HoverLiftReader(id: "session:\(row.sessionId)") { hovered in
+                HStack(alignment: .center, spacing: 6) {
+                VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
+                    HStack(spacing: 8) {
+                        Image(systemName: row.state.symbol)
+                            .font(Typography.caption(.semibold))
+                            .foregroundStyle(IslandSessionsBuilder.markColor(row))
+                            .frame(width: IslandQuietRow.markWidth)
                         Text(row.title)
                             .font(Typography.composerField())
-                            .foregroundStyle(Color.white)
+                            .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.9))
                             .lineLimit(1)
                             .truncationMode(.tail)
+                            .hoverLiftLabel(hovered)
+                            .padding(.trailing, hovered ? 18 : 0)
+                        Spacer(minLength: 8)
+                        // The mode and where it is, muted — the row's subtitle before, word for word.
                         HStack(spacing: 5) {
                             Text(row.mode)
                             Text("·")
                             Image(systemName: row.host.symbol)
                             Text(row.host.label)
                         }
-                        .font(Typography.caption())
+                        .font(Typography.tiny())
                         .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                     }
-                    Spacer(minLength: 8)
-                    Text(row.state.label)
-                        .font(Typography.caption(.medium))
-                        .foregroundStyle(row.state == .waiting ? Color.black : Color.white)
-                        .padding(.horizontal, 8)
-                        .frame(height: 20)
-                        .background(Capsule().fill(row.state == .waiting ? pillReviewAmber : Color.white.opacity(hovered ? 0.16 : 0.1)))
-                    Image(systemName: "arrow.up.right")
-                        .font(Typography.caption(.semibold))
-                        .foregroundStyle(hovered ? Color.white : Theme.textMuted)
+                    .frame(height: IslandQuietRow.titleHeight)
+                    HoverLine(fraction: IslandSessionsBuilder.lineFraction(row.state), color: IslandSessionsBuilder.lineColor(row),
+                              hovered: hovered, words: IslandSessionsBuilder.lineWords(row, now: now),
+                              inkOnFill: row.state == .waiting ? .black : .white)
+                        .padding(.leading, IslandQuietRow.markWidth + 8)
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 50)
+                // Where a click goes, shown under the pointer; its column is kept at rest (nothing moves).
+                Image(systemName: "arrow.up.right")
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(width: IslandQuietRow.markWidth)
+                    .opacity(hovered ? 1 : 0)
+                }
+                .contentShape(Rectangle())
             }
         }
         .buttonStyle(IslandPressStyle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(row.title), \(row.mode), \(row.state.label), \(row.host.label). Show it.")
-    }
-}
-
-func islandSessionStateColor(_ state: IslandSessionLiveState) -> Color {
-    switch state {
-    case .waiting: return pillReviewAmber
-    case .working: return Theme.accent
-    case .idle: return Theme.textMuted
-    case .finished: return Color.white
     }
 }
 

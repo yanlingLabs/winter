@@ -101,6 +101,42 @@ enum IslandDevicesPresentation {
     static func chip(_ label: String, _ granted: Bool?) -> IslandDeviceChip {
         IslandDeviceChip(label: label, state: granted.map { $0 ? .granted : .denied } ?? .unknown)
     }
+
+    // MARK: The quiet row (the island's visual language)
+
+    /// PURE: a row's line — full in its tone's colour when connected (green) or needing attention (amber), the grey
+    /// track alone when off. Nothing is estimated: no phone or helper reports a level, so the line is all or nothing.
+    static func lineFraction(_ tone: IslandDeviceTone) -> Double { tone == .off ? 0 : 1 }
+
+    /// PURE: a permission as words inside its half of the helper's line — "✓ Accessibility", "✕ Screen Recording",
+    /// "? Accessibility" (unknown while the helper is not running).
+    static func chipWords(_ chip: IslandDeviceChip) -> String {
+        switch chip.state {
+        case .granted: return "✓ \(chip.label)"
+        case .denied: return "✕ \(chip.label)"
+        case .unknown: return "? \(chip.label)"
+        }
+    }
+
+    /// PURE: a permission's half of the line — granted green, not granted amber, unknown grey.
+    static func chipColor(_ state: IslandPermissionState) -> Color {
+        switch state {
+        case .granted: return islandToneColor(.ok)
+        case .denied: return pillReviewAmber
+        case .unknown: return Color.white.opacity(0.16)
+        }
+    }
+
+    /// PURE: a permission as VoiceOver says it — "Accessibility: granted".
+    static func chipAccessibility(_ chip: IslandDeviceChip) -> String {
+        "\(chip.label): \(chip.state == .granted ? "granted" : chip.state == .denied ? "not granted" : "unknown")"
+    }
+
+    /// PURE: a row as VoiceOver says it — its title, its detail and its permissions (what the row showed as text and
+    /// chips, now partly only under the pointer).
+    static func accessibilityLabel(_ row: IslandDeviceRow) -> String {
+        ([row.title, row.detail] + row.chips.map(chipAccessibility)).joined(separator: ", ")
+    }
 }
 
 /// The Devices tab's state.
@@ -143,7 +179,7 @@ struct IslandDevicesTab: View {
         if !model.loaded {
             IslandEmptyTab(symbol: "laptopcomputer.and.iphone", line: "Reading devices…")
         } else {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: IslandDeviceRowView.gap) {
                 section("Phones")
                 if model.phones.isEmpty {
                     IslandDeviceRowView(row: IslandDeviceRow(id: "none", symbol: "iphone.slash", title: "No phone paired",
@@ -154,7 +190,7 @@ struct IslandDevicesTab: View {
                 section("Helpers")
                 ForEach(model.helpers) { IslandDeviceRowView(row: $0) }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, IslandQuietRow.inset)
             .padding(.bottom, 14)
         }
     }
@@ -164,59 +200,69 @@ struct IslandDevicesTab: View {
             .font(Typography.tiny(.semibold))
             .tracking(0.6)
             .foregroundStyle(Theme.textMuted)
-            .padding(.horizontal, 6)
-            .padding(.top, 4)
+            .padding(.top, 2)
     }
 }
 
+/// A phone or a helper as a quiet row (the island's visual language): its symbol and name over a line — green while
+/// connected, amber while it needs something, the grey track alone while off; the Computer Use helper's line is its
+/// two permissions side by side (granted green, not granted amber, unknown grey). Under the pointer the name lifts and
+/// the line says its detail — or each permission — inside itself; the helper's detail shows beside its name.
 struct IslandDeviceRowView: View {
     let row: IslandDeviceRow
 
+    static let gap: CGFloat = 8
+
     var body: some View {
-        IslandHoverSurface { _ in
-            HStack(spacing: 10) {
-                Image(systemName: row.symbol)
-                    .font(Typography.label(.semibold))
-                    .foregroundStyle(Color.white)
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title).font(Typography.label(.medium)).foregroundStyle(Color.white).lineLimit(1)
-                    Text(row.detail).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !row.chips.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(row.chips) { IslandPermissionChip(chip: $0) }
-                        }
-                        .padding(.top, 2)
+        HoverLiftReader(id: "device:\(row.id)") { hovered in
+            VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
+                HStack(spacing: 8) {
+                    Image(systemName: row.symbol)
+                        .font(Typography.caption(.semibold))
+                        .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.7))
+                        .frame(width: IslandQuietRow.markWidth)
+                    Text(row.title)
+                        .font(Typography.composerField())
+                        .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.9))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .hoverLiftLabel(hovered)
+                        .padding(.trailing, hovered ? 18 : 0)
+                        .layoutPriority(1)
+                    Spacer(minLength: 8)
+                    if !row.chips.isEmpty, hovered {
+                        // The helper's line is its permissions: its own words go beside its name, two lines at most
+                        // as before.
+                        Text(row.detail)
+                            .font(Typography.tiny())
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity)
                     }
                 }
-                Spacer(minLength: 6)
-                Circle()
-                    .fill(islandToneColor(row.tone))
-                    .frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
+                .frame(minHeight: IslandQuietRow.titleHeight)
+                Group {
+                    if row.chips.isEmpty {
+                        HoverLine(fraction: IslandDevicesPresentation.lineFraction(row.tone), color: islandToneColor(row.tone),
+                                  hovered: hovered, words: HoverLineWords(start: row.detail, startTruncates: true),
+                                  inkOnFill: row.tone == .warning ? .black : .white)
+                    } else {
+                        HoverSegmentLine(segments: row.chips.map { chip in
+                            HoverSegment(id: chip.id, fraction: 1 / Double(row.chips.count),
+                                         color: IslandDevicesPresentation.chipColor(chip.state),
+                                         label: IslandDevicesPresentation.chipWords(chip),
+                                         ink: chip.state == .denied ? .black : .white)
+                        }, hovered: hovered)
+                    }
+                }
+                .padding(.leading, IslandQuietRow.markWidth + 8)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .contentShape(Rectangle())
         }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-struct IslandPermissionChip: View {
-    let chip: IslandDeviceChip
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: chip.state == .granted ? "checkmark" : chip.state == .denied ? "xmark" : "questionmark")
-                .font(Typography.micro(.bold))
-            Text(chip.label).font(Typography.tiny(.medium))
-        }
-        .foregroundStyle(chip.state == .denied ? Color.black : Color.white)
-        .padding(.horizontal, 7)
-        .frame(height: 18)
-        .background(Capsule().fill(chip.state == .denied ? pillReviewAmber : Color.white.opacity(chip.state == .granted ? 0.16 : 0.08)))
-        .accessibilityLabel("\(chip.label): \(chip.state == .granted ? "granted" : chip.state == .denied ? "not granted" : "unknown")")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(IslandDevicesPresentation.accessibilityLabel(row))
     }
 }
 

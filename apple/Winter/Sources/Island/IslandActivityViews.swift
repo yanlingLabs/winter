@@ -3,8 +3,9 @@ import WinterCUPresentation
 import WinterKit
 
 // The Winter island's activity views (phase 2, `docs/claude/island.md`): the computer-use pill and its mirror, the
-// turn-result card, and the Watches tab. Same look as phase 1: black shells, the house type (`Typography` only —
-// `TypographyTests` sweeps this folder), white ✕ / blue ✓ circles with the pills' hover glow, the island's hover grow
+// turn-result card and a plan alarm's notice (the Watches tab is `IslandWatchesTab.swift`). Same look as phase 1: black
+// shells, the house type (`Typography` only — `TypographyTests` sweeps this folder), white ✕ / blue ✓ circles with the
+// pills' hover glow, the island's hover grow
 // (`IslandHover`).
 
 enum IslandCUColors {
@@ -264,76 +265,5 @@ struct IslandUsageAlarmContent: View {
         .onTapGesture(perform: onOpen)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Usage alarm: \(title)\(detail.map { ", \($0)" } ?? "")")
-    }
-}
-
-// MARK: - The Watches tab
-
-/// Every armed computer-use watch — what the agent waits for, in which session and app, since when — each with Stop.
-struct IslandWatchesList: View {
-    @ObservedObject var activity: IslandActivityStore
-    var scrolls = true
-    /// Epoch ms (the gallery passes a fixed one).
-    var nowMs: () -> Int = { Int(Date().timeIntervalSince1970 * 1000) }
-
-    var body: some View {
-        if activity.watches.isEmpty {
-            IslandEmptyTab(symbol: "eye", line: "Nothing is being watched")
-        } else {
-            IslandTabScroll(scrolls: scrolls) { rows }
-        }
-    }
-
-    private var rows: some View {
-        let now = nowMs()
-        return VStack(alignment: .leading, spacing: IslandLayout.rowGap) {
-            ForEach(activity.watches, id: \.wakeId) { watch in
-                IslandWatchRow(watch: watch, nowMs: now, stopping: activity.disarming.contains(watch.wakeId),
-                               error: activity.disarmErrors[watch.wakeId]) { activity.disarmWatch(watch) }
-            }
-        }
-        .padding(.horizontal, IslandLayout.listInset)
-        .padding(.bottom, IslandLayout.listInset)
-    }
-}
-
-struct IslandWatchRow: View {
-    let watch: IslandWatchItem
-    let nowMs: Int
-    let stopping: Bool
-    let error: String?
-    let onStop: () -> Void
-
-    var body: some View {
-        IslandHoverSurface { _ in row }
-    }
-
-    private var row: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: islandWatchSymbol(watch.condition))
-                .font(Typography.label(.semibold))
-                .foregroundStyle(IslandCUColors.accent)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.white.opacity(0.08)))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(islandWatchConditionLine(watch))
-                    .font(Typography.composerField())
-                    .foregroundStyle(Color.white)
-                    .lineLimit(2)
-                Text("\(islandWatchSessionLine(watch)) · \(watch.targetLabel)")
-                    .font(Typography.caption(.medium))
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(error ?? islandWatchTimeLine(watch, nowMs: nowMs))
-                    .font(Typography.captionDigits())
-                    .foregroundStyle(error == nil ? Theme.textMuted : pillReviewAmber)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            IslandAnswerButton(role: .refuse, symbol: "stop.fill", enabled: !stopping, action: onStop)
-                .accessibilityLabel("Stop waiting")
-        }
-        .padding(12)
     }
 }
