@@ -1,20 +1,26 @@
 import AppKit
 import Darwin
 import Foundation
+import ImageIO
 
 // The island's Servers tab, links and logos (`docs/claude/island.md`): which of a server's TCP ports speak HTTP (a
 // link that opens it in the browser), and the server's icon.
 //
-//   - LOOPBACK ONLY, by construction: the one connect here (`IslandHTTP.get`) takes an `IslandLoopback` — 127.0.0.1 or
-//     ::1 —, never a host name, so nothing leaves the machine; a redirect or an icon link is followed only when
-//     `IslandHTTP.loopbackTarget` maps it to loopback (anywhere else is never fetched). Plain HTTP/1.0, no proxy, no
-//     cookie, 400 ms per request, the status line and headers plus at most 64 KB of a page (1 MB of an icon).
+//   - LOOPBACK ONLY, by construction: the one connect here (`IslandHTTP.fetch`) takes an `IslandLoopback` — 127.0.0.1
+//     or ::1 —, never a host name, so nothing leaves the machine; a redirect or an icon link is followed only when
+//     `IslandHTTP.loopbackTarget` maps it to loopback AND to one of the server's own ports (anything else is never
+//     fetched). Plain HTTP/1.0, no proxy, no cookie, 400 ms per request, the status line and headers plus at most 64 KB
+//     of a page (1 MB of an icon).
 //   - Off the main thread, at most `IslandServerProbes.limit` (8) at a time, on a dispatch queue (blocking sockets never
-//     sit on Swift's cooperative pool), and only from the tab's own refresh while it shows; each (server, port) once.
+//     sit on Swift's cooperative pool), and only from the tab's own refresh while it shows. A DEFINITE answer (HTTP,
+//     refused, closed, not HTTP) is kept for the server's lifetime; a port that took the connection but said nothing in
+//     time (a dev server compiling its first page) is asked again later, backing off (`IslandServers.retryAfter`).
 //   - THE ICON LADDER: (a) the page's `<link rel="icon" | "shortcut icon" | "apple-touch-icon">`, then `/favicon.ico`
-//     — loopback only; (b) image files in the project (its folder, its npm package's folder): `favicon`, `logo`,
-//     `icon` (.png .jpg .jpeg .ico .icns .svg) there or in `public/`, `static/`, `assets/`, `resources/` — no deeper,
-//     regular files ≤ 1 MB, kept only when `NSImage` draws them; (c) the row's symbol.
+//     — loopback, the server's own ports; (b) image files in the project (its folder, its npm package's folder):
+//     `favicon`, `logo`, `icon` (.png .jpg .jpeg .ico .icns) there or in `public/`, `static/`, `assets/`, `resources/`
+//     — no deeper, no link followed (`O_NOFOLLOW` on the folder and the file), ≤ 1 MB read from the opened file;
+//     (c) the row's symbol. Every candidate is decoded OFF the main thread into a small thumbnail by ImageIO (at most
+//     `thumbnailPixels`, none over `maxDimension` a side); svg is not read.
 
 /// Where a listening port answers on loopback: 127.0.0.1 (a listener on 127.0.0.1 or 0.0.0.0), else ::1 (on ::1 or
 /// ::). A port bound only to another address has none.
@@ -58,11 +64,26 @@ struct IslandHTTPResponse: Equatable {
     var isRedirect: Bool { (300..<400).contains(status) }
 }
 
-/// What a port said to `GET /`: whether it speaks HTTP, serves a page, and the page's icons (loopback only).
+/// What a port said to `GET /`: whether it speaks HTTP, serves a page, and the page's icons (loopback, its own ports).
+/// `late`: it took the connection but answered nothing in time — not an answer: asked again later, never kept.
 struct IslandHTTPProbe: Equatable {
     var isHTTP = false
     var isHTML = false
     var iconLinks: [IslandLoopbackTarget] = []
+    var late = false
+}
+
+/// One request's outcome: an HTTP answer; a DEFINITE no (refused, closed, not HTTP); or late (connected, nothing — or
+/// not yet a status line — within the deadline).
+enum IslandHTTPFetch: Equatable {
+    case response(IslandHTTPResponse)
+    case notHTTP
+    case late
+
+    var response: IslandHTTPResponse? {
+        if case .response(let response) = self { return response }
+        return nil
+    }
 }
 
 /// A server's link: one of its HTTP ports, opened at `http://localhost:<port>/`.
@@ -175,11 +196,17 @@ enum IslandHTTP {
     // MARK: Loopback I/O (blocking: call off the main thread)
 
     /// GET `target` — HTTP/1.0, `Connection: close` — and read the status line, the headers and at most `maxBody` of the
-    /// body within `timeout` (connect, send and read together). Nil: no answer, or not HTTP.
+    /// body within `timeout` (connect, send and read together). Nil: no answer (late included), or not HTTP.
     static func get(_ target: IslandLoopbackTarget, maxBody: Int, timeout: TimeInterval = timeout) -> IslandHTTPResponse? {
+        fetch(target, maxBody: maxBody, timeout: timeout).response
+    }
+
+    /// `get`, telling a definite no (refused, closed, not HTTP) from a late one (the connection taken, no status line in
+    /// time).
+    static func fetch(_ target: IslandLoopbackTarget, maxBody: Int, timeout: TimeInterval = timeout) -> IslandHTTPFetch {
         let deadline = Date().addingTimeInterval(timeout)
         let fd = socket(target.host == .v4 ? AF_INET : AF_INET6, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
+        guard fd >= 0 else { return .notHTTP }
         defer { close(fd) }
         var on: Int32 = 1
         // A server that closes early must never SIGPIPE the app.
@@ -207,20 +234,22 @@ enum IslandHTTP {
             }
         }
         if started != 0 {
-            guard errno == EINPROGRESS, wait(fd, Int16(POLLOUT), until: deadline) else { return nil }
+            guard errno == EINPROGRESS else { return .notHTTP }
+            // Not connected in time (a full backlog): late; refused: a definite no.
+            guard wait(fd, Int16(POLLOUT), until: deadline) else { return .late }
             var error: Int32 = 0
             var length = socklen_t(MemoryLayout<Int32>.size)
-            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0, error == 0 else { return nil }
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0, error == 0 else { return .notHTTP }
         }
         let request = "GET \(target.path) HTTP/1.0\r\nHost: \(target.host.linkHost):\(target.port)\r\nUser-Agent: Winter\r\n"
             + "Accept: text/html,*/*;q=0.8\r\nConnection: close\r\n\r\n"
         var pending = Array(request.utf8)[...]
         while !pending.isEmpty {
-            guard wait(fd, Int16(POLLOUT), until: deadline) else { return nil }
+            guard wait(fd, Int16(POLLOUT), until: deadline) else { return .late }
             let sent = pending.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
             if sent < 0 {
                 if errno == EAGAIN || errno == EINTR { continue }
-                return nil
+                return .notHTTP
             }
             pending = pending.dropFirst(sent)
         }
@@ -233,26 +262,42 @@ enum IslandHTTP {
             }
             return data.count - range.upperBound >= maxBody
         }
-        while !enough(), wait(fd, Int16(POLLIN), until: deadline) {
+        var ended = false
+        while !enough() {
+            guard wait(fd, Int16(POLLIN), until: deadline) else { break }
             let read = recv(fd, &buffer, buffer.count, 0)
             if read > 0 {
                 data.append(buffer, count: read)
             } else if read == 0 || (errno != EAGAIN && errno != EINTR) {
+                ended = true
                 break
             }
         }
-        return parse(data, maxBody: maxBody)
+        if let response = parse(data, maxBody: maxBody) { return .response(response) }
+        // Closed, or a whole line that is not a status line: not HTTP. Nothing yet (or half a first line) at the
+        // deadline: late.
+        return ended || data.contains(10) ? .notHTTP : .late
     }
 
-    /// `GET /` on a port: HTTP or not, a page or not, the page's icons — following a redirect only on loopback (twice
-    /// at most); one elsewhere is not fetched (the port still speaks HTTP: it gets its link, no page, no icon).
-    static func probe(_ host: IslandLoopback, port: UInt16) -> IslandHTTPProbe {
+    /// `GET /` on a port: HTTP or not, a page or not, the page's icons — following a redirect (twice at most) and
+    /// keeping an icon link only on loopback and on one of `ports` (the server's own; nil: this port only); anything
+    /// else is not fetched (the port still speaks HTTP: it gets its link, no page, no icon).
+    static func probe(_ host: IslandLoopback, port: UInt16, ports: Set<UInt16>? = nil) -> IslandHTTPProbe {
+        let own = ports ?? [port]
+        func allowed(_ href: String, base: IslandLoopbackTarget) -> IslandLoopbackTarget? {
+            loopbackTarget(href, base: base).flatMap { own.contains($0.port) ? $0 : nil }
+        }
         var target = IslandLoopbackTarget(host: host, port: port, path: "/")
-        guard var response = get(target, maxBody: pageLimit) else { return IslandHTTPProbe() }
+        var response: IslandHTTPResponse
+        switch fetch(target, maxBody: pageLimit) {
+        case .response(let first): response = first
+        case .notHTTP: return IslandHTTPProbe()
+        case .late: return IslandHTTPProbe(late: true)
+        }
         var result = IslandHTTPProbe(isHTTP: true)
         var hops = 0
         while response.isRedirect, hops < maxRedirects {
-            guard let location = response.headers["location"], let next = loopbackTarget(location, base: target),
+            guard let location = response.headers["location"], let next = allowed(location, base: target),
                   let followed = get(next, maxBody: pageLimit) else { return result }
             target = next
             response = followed
@@ -261,7 +306,7 @@ enum IslandHTTP {
         guard !response.isRedirect, response.isHTML else { return result }
         result.isHTML = true
         let html = String(data: response.body, encoding: .utf8) ?? String(decoding: response.body, as: UTF8.self)
-        result.iconLinks = iconLinks(html).compactMap { loopbackTarget($0, base: target) }
+        result.iconLinks = iconLinks(html).compactMap { allowed($0, base: target) }
         return result
     }
 
@@ -281,21 +326,34 @@ enum IslandHTTP {
 
 enum IslandServerIcons {
     static let maxFileSize = 1024 * 1024
-    /// The project's own image files, in order (`favicon`, then `logo`, then `icon`).
+    /// The thumbnail's longest side, in pixels (the row's 30 pt icon at 2× and some).
+    static let thumbnailPixels = 96
+    /// An image any side of which is longer than this is not decoded at all.
+    static let maxDimension = 4096
+    /// The project's own image files, in order (`favicon`, then `logo`, then `icon`). No svg: ImageIO does not read it.
     static let projectNames: [String] = ["favicon", "logo", "icon"].flatMap { base in
-        ["png", "svg", "ico", "icns", "jpg", "jpeg"].map { "\(base).\($0)" }
+        ["png", "ico", "icns", "jpg", "jpeg"].map { "\(base).\($0)" }
     }
     /// Where they are looked for in a folder: itself, then these — no deeper.
     static let projectFolders = ["", "public", "static", "assets", "resources"]
 
-    /// Whether `NSImage` draws it (an svg it cannot read is skipped).
-    static func isImage(_ data: Data) -> Bool {
-        guard let image = NSImage(data: data) else { return false }
-        return !image.representations.isEmpty && image.size.width > 0 && image.size.height > 0
+    /// A small thumbnail of untrusted image bytes — ImageIO, off the main thread (this runs on `IslandServerProbes`'
+    /// queue); nil when it is not an image ImageIO reads, or any side is over `maxDimension`.
+    static func thumbnail(_ data: Data) -> CGImage? {
+        guard !data.isEmpty, let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, width <= maxDimension, height <= maxDimension else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceCreateThumbnailWithTransform: true,
+                                        kCGImageSourceShouldCacheImmediately: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: thumbnailPixels]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     /// (a) the page's icon links, then `/favicon.ico` — on loopback, `pages` the server's HTTP ports (a page first).
-    static func fromHTTP(_ pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)]) -> Data? {
+    static func fromHTTP(_ pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)]) -> CGImage? {
         var targets: [IslandLoopbackTarget] = []
         for page in pages {
             targets += page.probe.iconLinks.prefix(4)
@@ -304,43 +362,74 @@ enum IslandServerIcons {
         var seen: Set<IslandLoopbackTarget> = []
         for target in targets where seen.insert(target).inserted {
             guard let response = IslandHTTP.get(target, maxBody: IslandHTTP.iconLimit), response.status == 200,
-                  response.body.count < IslandHTTP.iconLimit, isImage(response.body) else { continue }
-            return response.body
+                  response.body.count < IslandHTTP.iconLimit, let image = thumbnail(response.body) else { continue }
+            return image
         }
         return nil
     }
 
-    /// (b) an image file of the project's own: `projectNames` in each folder and its `projectFolders`, a regular file (no
-    /// link followed) of at most `maxFileSize`.
-    static func fromProject(_ folders: [String]) -> Data? {
+    /// (b) an image file of the project's own: `projectNames` in each folder and its `projectFolders`. Opened without
+    /// following a link — the subfolder (`O_NOFOLLOW | O_DIRECTORY`) and the file (`O_NOFOLLOW`, non-blocking: a fifo
+    /// never hangs) —, checked on the OPEN file (`fstat`: a regular file of at most `maxFileSize`) and read from it, at
+    /// most `maxFileSize + 1` bytes (one more: too big), so nothing is swapped in between.
+    static func fromProject(_ folders: [String]) -> CGImage? {
         var seen: Set<String> = []
         for folder in folders where folder != "/" && !folder.isEmpty && seen.insert(folder).inserted {
+            let top = open(folder, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+            guard top >= 0 else { continue }
+            defer { close(top) }
             for sub in projectFolders {
+                let dir = sub.isEmpty ? dup(top) : openat(top, sub, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard dir >= 0 else { continue }
+                defer { close(dir) }
                 for name in projectNames {
-                    let path = ((folder as NSString).appendingPathComponent(sub) as NSString).appendingPathComponent(name)
-                    guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-                          attributes[.type] as? FileAttributeType == .typeRegular,
-                          let size = attributes[.size] as? NSNumber, size.intValue <= maxFileSize,
-                          let data = FileManager.default.contents(atPath: path), isImage(data) else { continue }
-                    return data
+                    if let data = readSmallFile(dir, name), let image = thumbnail(data) { return image }
                 }
             }
         }
         return nil
+    }
+
+    /// `name` in the open folder `dir`: a regular file, never through a link, at most `maxFileSize` bytes.
+    private static func readSmallFile(_ dir: Int32, _ name: String) -> Data? {
+        let fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, Int(info.st_size) <= maxFileSize else { return nil }
+        var data = Data(count: maxFileSize + 1)
+        var total = 0
+        let capacity = data.count
+        while total < capacity {
+            let read = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress! + total, capacity - total) }
+            if read > 0 {
+                total += read
+            } else if read < 0, errno == EINTR {
+                continue
+            } else {
+                break
+            }
+        }
+        guard total > 0, total <= maxFileSize else { return nil }
+        return data.prefix(total)
     }
 }
 
 /// What the Servers tab asks of the network and the disk — live: `IslandLiveServerProber`; a counting fake in the
 /// tests. Both calls block: they run on `IslandServerProbes`' queue.
 protocol IslandServerProber {
-    func probe(_ host: IslandLoopback, port: UInt16) -> IslandHTTPProbe
-    func icon(pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)], folders: [String]) -> Data?
+    /// `GET /` on `port`, following only to `ports` (the server's own).
+    func probe(_ host: IslandLoopback, port: UInt16, ports: Set<UInt16>) -> IslandHTTPProbe
+    /// The server's icon, as a small thumbnail decoded here (off the main thread).
+    func icon(pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)], folders: [String]) -> CGImage?
 }
 
 struct IslandLiveServerProber: IslandServerProber {
-    func probe(_ host: IslandLoopback, port: UInt16) -> IslandHTTPProbe { IslandHTTP.probe(host, port: port) }
+    func probe(_ host: IslandLoopback, port: UInt16, ports: Set<UInt16>) -> IslandHTTPProbe {
+        IslandHTTP.probe(host, port: port, ports: ports)
+    }
 
-    func icon(pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)], folders: [String]) -> Data? {
+    func icon(pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)], folders: [String]) -> CGImage? {
         IslandServerIcons.fromHTTP(pages) ?? IslandServerIcons.fromProject(folders)
     }
 }
@@ -390,4 +479,10 @@ extension IslandServers {
 
     /// The probe cache's key: the server (its top process's pid and start time) and the port — once per server lifetime.
     static func probeKey(_ row: IslandServerRow, _ port: UInt16) -> String { "\(row.id)#\(port)" }
+
+    /// After the `attempt`-th late answer (1-based), when to ask again: 5 s, 15 s, 60 s, then every 5 min.
+    static func retryAfter(attempt: Int) -> TimeInterval {
+        let steps: [TimeInterval] = [5, 15, 60, 300]
+        return steps[min(max(attempt, 1), steps.count) - 1]
+    }
 }

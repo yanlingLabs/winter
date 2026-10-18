@@ -50,13 +50,35 @@ final class IslandServersLinksTests: XCTestCase {
         XCTAssertEqual(bundles.map(\.name), ["waifus", "api", "vite", "vite", "a", "b", "serve", "serve"])
         XCTAssertEqual(bundles.map(\.rows.count), [2, 2, 1, 1, 1, 1, 1, 1])
         let waifusBundle = bundles[0]
-        XCTAssertEqual(waifusBundle.key, "package:/opt/homebrew/lib/node_modules/@waifucave/discord-waifus")
+        XCTAssertEqual(waifusBundle.key, "package:/opt/homebrew/lib/node_modules/@waifucave/discord-waifus\u{0}/Users/me/Discord Waifus",
+                       "a package from outside the project bundles by its folder AND the cwd")
         XCTAssertEqual(waifusBundle.rows.map(\.name), ["waifus remote", "waifus start"])
         XCTAssertEqual(waifusBundle.tcpPorts, [3888, 61010], "the bundle's ports are its servers' together")
         XCTAssertEqual(IslandServers.portsLine(waifusBundle.tcpPorts), ":3888 :61010")
         XCTAssertEqual(IslandServers.serversWord(2), "2 servers")
         XCTAssertEqual(IslandServers.packageRoot(list[0]), "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus")
         XCTAssertNil(IslandServers.packageRoot(list[4]), "a .bin link names no package folder")
+    }
+
+    /// The review's case: a global or npx package (`http-server`, `serve`) run in two projects is two projects — one
+    /// Stop all must never reach the other.
+    func testASharedPackageRunInTwoProjectsIsTwoBundles() {
+        let global = "/opt/homebrew/lib/node_modules/http-server/bin/http-server"
+        let npx = "/Users/me/.npm/_npx/9c1e/node_modules/serve/build/main.js"
+        let list = [
+            process(101, ["node", global, "-p", "8080"], cwd: "/Users/me/site-a", tcp: [8080], started: epoch + 5),
+            process(102, ["node", global, "-p", "8081"], cwd: "/Users/me/site-b", tcp: [8081], started: epoch + 4),
+            process(103, ["node", npx], cwd: "/Users/me/site-a", tcp: [3000], started: epoch + 3),
+            process(104, ["node", npx], cwd: "/Users/me/site-b", tcp: [3001], started: epoch + 2),
+            // The same global package twice in ONE project: one bundle.
+            process(105, ["node", global, "-p", "9090"], cwd: "/Users/me/docs", tcp: [9090], started: epoch + 1),
+            process(106, ["node", global, "-p", "9091"], cwd: "/Users/me/docs", tcp: [9091], started: epoch),
+        ]
+        let bundles = IslandServers.bundles(rows(list))
+        XCTAssertEqual(bundles.map(\.rows.count), [1, 1, 1, 1, 2])
+        XCTAssertEqual(bundles.last?.rows.map(\.tcpPorts), [[9090], [9091]])
+        XCTAssertEqual(IslandServers.bundleKey(name: "vite", packageRoot: "/Users/me/site/node_modules/vite", cwd: "/Users/me/site"),
+                       "package:/Users/me/site/node_modules/vite", "the project's own package: by its folder alone")
     }
 
     // MARK: The page and Stop all
@@ -77,24 +99,26 @@ final class IslandServersLinksTests: XCTestCase {
         }
     }
 
-    /// Counts what it is asked; answers from `http` (by port) and `icon`.
+    /// Counts what it is asked; answers from `http` (by port), late for `late`, and `icon`.
     private final class FakeProber: IslandServerProber {
         var http: [UInt16: IslandHTTPProbe] = [:]
-        var icon: Data?
+        var late: Set<UInt16> = []
+        var icon: CGImage?
         private let lock = NSLock()
         private var _probed: [UInt16] = []
         private var _iconLookups: [[String]] = []
         var probed: [UInt16] { lock.lock(); defer { lock.unlock() }; return _probed }
         var iconLookups: [[String]] { lock.lock(); defer { lock.unlock() }; return _iconLookups }
 
-        func probe(_ host: IslandLoopback, port: UInt16) -> IslandHTTPProbe {
+        func probe(_ host: IslandLoopback, port: UInt16, ports: Set<UInt16>) -> IslandHTTPProbe {
             lock.lock()
             _probed.append(port)
+            let isLate = late.contains(port)
             lock.unlock()
-            return http[port] ?? IslandHTTPProbe()
+            return isLate ? IslandHTTPProbe(late: true) : http[port] ?? IslandHTTPProbe()
         }
 
-        func icon(pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)], folders: [String]) -> Data? {
+        func icon(pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)], folders: [String]) -> CGImage? {
             lock.lock()
             _iconLookups.append(folders)
             lock.unlock()
@@ -196,7 +220,7 @@ final class IslandServersLinksTests: XCTestCase {
     func testEachServersPortIsProbedOnceAndEachProjectsIconLookedForOnce() async {
         let prober = FakeProber()
         prober.http = [3888: IslandHTTPProbe(isHTTP: true, isHTML: true)]
-        prober.icon = Self.png()
+        prober.icon = IslandServerIcons.thumbnail(Self.png())
         var list = project
         // A port bound only to another address is never probed.
         list.append(process(104, ["node", "lan.js"], cwd: "/Users/me/lan", tcp: [9100], loopback: [:], started: epoch - 1))
@@ -205,7 +229,7 @@ final class IslandServersLinksTests: XCTestCase {
         XCTAssertEqual(Set(prober.probed), [3888, 61010, 8000])
         XCTAssertEqual(prober.probed.count, 3)
         XCTAssertEqual(prober.iconLookups.count, 3, "one per project")
-        XCTAssertNotNil(model.icons["package:/opt/homebrew/lib/node_modules/@waifucave/discord-waifus"])
+        XCTAssertNotNil(model.icons[try! XCTUnwrap(model.bundles.first).key])
         XCTAssertTrue(prober.iconLookups.contains(["/Users/me/Discord Waifus", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus"]),
                       "the project's folder, then its package's")
 
@@ -219,6 +243,37 @@ final class IslandServersLinksTests: XCTestCase {
         await model.refresh()
         XCTAssertEqual(prober.probed.count, 4)
         XCTAssertEqual(prober.probed.last, 8000)
+    }
+
+    /// A port that took the connection but said nothing in time (a dev server compiling) is not an answer: never kept,
+    /// asked again after 5 s, 15 s, 60 s, then every 5 min — until it answers.
+    func testALateAnswerIsAskedAgainWithABackoff() async {
+        let prober = FakeProber()
+        prober.late = [3000]
+        prober.http = [3000: IslandHTTPProbe(isHTTP: true, isHTML: true)]
+        let (model, _, _) = model([process(101, ["node", "server.js"], tcp: [3000])], prober: prober)
+        await model.refresh()
+        XCTAssertEqual(prober.probed, [3000])
+        XCTAssertTrue(model.http.isEmpty, "not kept")
+        clock.addTimeInterval(4)
+        await model.refresh()
+        XCTAssertEqual(prober.probed.count, 1, "not before 5 s")
+        clock.addTimeInterval(1)
+        await model.refresh()
+        XCTAssertEqual(prober.probed.count, 2)
+        clock.addTimeInterval(14)
+        await model.refresh()
+        XCTAssertEqual(prober.probed.count, 2, "then not before 15 s")
+        prober.late = []
+        clock.addTimeInterval(1)
+        await model.refresh()
+        XCTAssertEqual(prober.probed.count, 3)
+        let row = try! XCTUnwrap(model.rows.first)
+        XCTAssertEqual(model.links(row).map(\.port), [3000], "it answered: its link")
+        clock.addTimeInterval(600)
+        await model.refresh()
+        XCTAssertEqual(prober.probed.count, 3, "a definite answer is kept")
+        XCTAssertEqual([1, 2, 3, 4, 9].map { IslandServers.retryAfter(attempt: $0) }, [5, 15, 60, 300, 300])
     }
 
     func testTheProbeRunnerKeepsAtMostEightInFlight() async {
@@ -320,6 +375,13 @@ final class IslandServersLinksTests: XCTestCase {
         XCTAssertEqual(IslandHTTP.probe(.v4, port: home.port).isHTML, true, "a redirect on loopback is followed")
         XCTAssertEqual(home.paths, ["/", "/home"])
 
+        // Took the connection, answered after the deadline: late (asked again later), not "no HTTP".
+        let slow = LoopbackTestServer(delay: 0.7) { _ in LoopbackTestServer.http("200 OK", type: "text/html", body: Data("<html>".utf8)) }
+        defer { slow.stop() }
+        XCTAssertEqual(IslandHTTP.probe(.v4, port: slow.port), IslandHTTPProbe(late: true))
+        XCTAssertEqual(IslandHTTP.fetch(IslandLoopbackTarget(host: .v4, port: garbage.port, path: "/"), maxBody: 10), .notHTTP,
+                       "garbage then a close: a definite no")
+
         // A closed port: no answer, within the deadline.
         let closed = LoopbackTestServer { _ in Data() }
         let closedPort = closed.port
@@ -337,6 +399,28 @@ final class IslandServersLinksTests: XCTestCase {
         let links = IslandServers.links(row, http: http)
         XCTAssertEqual(links.map(\.port), [page.port, plain.port])
         XCTAssertEqual(links.first?.url, URL(string: "http://localhost:\(page.port)/"))
+    }
+
+    /// An icon link or a redirect is followed only to the server's own ports — never another loopback service.
+    func testOnlyTheServersOwnPortsAreFollowed() {
+        let png = Self.png()
+        let other = LoopbackTestServer { path in
+            path == "/i.png" ? LoopbackTestServer.http("200 OK", type: "image/png", body: png)
+                : LoopbackTestServer.http("200 OK", type: "text/html", body: Data("<html></html>".utf8))
+        }
+        let page = LoopbackTestServer { _ in
+            LoopbackTestServer.http("200 OK", type: "text/html", body: Data(#"<link rel="icon" href="http://127.0.0.1:\#(other.port)/i.png">"#.utf8))
+        }
+        let jump = LoopbackTestServer { _ in LoopbackTestServer.http("302 Found", headers: ["Location: http://localhost:\(other.port)/"]) }
+        defer { [other, page, jump].forEach { $0.stop() } }
+
+        XCTAssertEqual(IslandHTTP.probe(.v4, port: page.port), IslandHTTPProbe(isHTTP: true, isHTML: true), "another port's icon: dropped")
+        XCTAssertEqual(IslandHTTP.probe(.v4, port: page.port, ports: [page.port, other.port]).iconLinks,
+                       [IslandLoopbackTarget(host: .v4, port: other.port, path: "/i.png")], "the server's own other port: kept")
+        XCTAssertEqual(IslandHTTP.probe(.v4, port: jump.port), IslandHTTPProbe(isHTTP: true))
+        XCTAssertEqual(other.paths, [], "a redirect to another server's port is never followed")
+        XCTAssertEqual(IslandHTTP.probe(.v4, port: jump.port, ports: [jump.port, other.port]).isHTML, true)
+        XCTAssertEqual(other.paths, ["/"])
     }
 
     // MARK: Logos
@@ -362,8 +446,8 @@ final class IslandServersLinksTests: XCTestCase {
         defer { [page, bare, broken].forEach { $0.stop() } }
 
         // (a) the page's link, else /favicon.ico; nothing that does not draw.
-        XCTAssertEqual(IslandServerIcons.fromHTTP([(IslandHTTP.probe(.v4, port: page.port), .v4, page.port)]), png)
-        XCTAssertEqual(IslandServerIcons.fromHTTP([(IslandHTTP.probe(.v4, port: bare.port), .v4, bare.port)]), other)
+        XCTAssertEqual(IslandServerIcons.fromHTTP([(IslandHTTP.probe(.v4, port: page.port), .v4, page.port)])?.width, 4)
+        XCTAssertEqual(IslandServerIcons.fromHTTP([(IslandHTTP.probe(.v4, port: bare.port), .v4, bare.port)])?.width, 8)
         XCTAssertNil(IslandServerIcons.fromHTTP([(IslandHTTP.probe(.v4, port: broken.port), .v4, broken.port)]))
 
         // (b) the project's own: oversized, not an image, a link — all skipped; `public/favicon.png` found.
@@ -376,14 +460,29 @@ final class IslandServersLinksTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("favicon.png"),
                                                    withDestinationURL: folder.appendingPathComponent("elsewhere.png"))
         try png.write(to: folder.appendingPathComponent("public/favicon.png"))
-        XCTAssertEqual(IslandServerIcons.fromProject([folder.path]), png)
+        XCTAssertEqual(IslandServerIcons.fromProject([folder.path])?.width, 4, "public/favicon.png")
         XCTAssertNil(IslandServerIcons.fromProject(["/", ""]))
         XCTAssertNil(IslandServerIcons.fromProject([folder.appendingPathComponent("none").path]))
 
+        // A symlinked `public/` is never entered; an svg is not read; a huge image is not decoded.
+        let linked = FileManager.default.temporaryDirectory.appendingPathComponent("servers-icons-linked-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: linked) }
+        try FileManager.default.createSymbolicLink(at: linked.appendingPathComponent("public"),
+                                                   withDestinationURL: folder.appendingPathComponent("public"))
+        try Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#.utf8).write(to: linked.appendingPathComponent("favicon.svg"))
+        XCTAssertNil(IslandServerIcons.fromProject([linked.path]))
+        try Self.png(width: IslandServerIcons.maxDimension + 1, height: 1).write(to: linked.appendingPathComponent("logo.png"))
+        XCTAssertNil(IslandServerIcons.fromProject([linked.path]), "wider than maxDimension")
+        XCTAssertNil(IslandServerIcons.thumbnail(Self.png(width: IslandServerIcons.maxDimension + 1, height: 1)))
+        let thumbnail = try XCTUnwrap(IslandServerIcons.thumbnail(Self.png(width: 400, height: 200)))
+        XCTAssertEqual(thumbnail.width, IslandServerIcons.thumbnailPixels, "downsampled")
+        XCTAssertEqual(thumbnail.height, IslandServerIcons.thumbnailPixels / 2)
+
         // The live prober's ladder: the page first, the project only without one.
         let prober = IslandLiveServerProber()
-        XCTAssertEqual(prober.icon(pages: [(IslandHTTP.probe(.v4, port: bare.port), .v4, bare.port)], folders: [folder.path]), other)
-        XCTAssertEqual(prober.icon(pages: [], folders: [folder.path]), png)
+        XCTAssertEqual(prober.icon(pages: [(IslandHTTP.probe(.v4, port: bare.port), .v4, bare.port)], folders: [folder.path])?.width, 8)
+        XCTAssertEqual(prober.icon(pages: [], folders: [folder.path])?.width, 4)
     }
 
     /// The live scan records where this process's own listener answers on loopback.
@@ -395,8 +494,10 @@ final class IslandServersLinksTests: XCTestCase {
     }
 
     /// A tiny PNG of `size` × `size`.
-    static func png(_ size: Int = 4) -> Data {
-        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size, bitsPerSample: 8, samplesPerPixel: 4,
+    static func png(_ size: Int = 4) -> Data { png(width: size, height: size) }
+
+    static func png(width: Int, height: Int) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
                                    hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         return rep.representation(using: .png, properties: [:])!
     }
@@ -416,7 +517,8 @@ final class LoopbackTestServer {
         return asked
     }
 
-    init(_ respond: @escaping (String) -> Data) {
+    /// `delay`: how long it waits before answering each request.
+    init(delay: TimeInterval = 0, _ respond: @escaping (String) -> Data) {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
@@ -446,6 +548,7 @@ final class LoopbackTestServer {
                 let request = String(decoding: buffer.prefix(max(0, read)), as: UTF8.self)
                 let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
                 self?.record(path)
+                if delay > 0 { Thread.sleep(forTimeInterval: delay) }
                 let reply = respond(path)
                 reply.withUnsafeBytes { _ = Darwin.send(client, $0.baseAddress, $0.count, 0) }
                 Darwin.close(client)

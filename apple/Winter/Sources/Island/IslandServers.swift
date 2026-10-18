@@ -548,10 +548,15 @@ enum IslandServers {
     // MARK: Bundles
 
     /// The project a server belongs to (user 2026-10-18: one project's servers are one row): the npm package it runs
-    /// from — by its folder on disk, so the same package installed in two projects (two `vite`s) stays two —, else its
-    /// folder and command (the first word of its name: `waifus remote` and `waifus start` in one folder).
+    /// from — by its folder on disk when that is the project's own (inside its cwd: two projects' `vite`s stay two);
+    /// a package from elsewhere (a global `http-server`, an npx one in `~/.npm/_npx`) is shared by every project that
+    /// runs it, so it bundles only with the same cwd —, else its folder and command (the first word of its name:
+    /// `waifus remote` and `waifus start` in one folder).
     static func bundleKey(name: String, packageRoot: String?, cwd: String?) -> String {
-        if let packageRoot { return "package:\(packageRoot)" }
+        if let packageRoot {
+            if let cwd, packageRoot.hasPrefix(cwd.hasSuffix("/") ? cwd : cwd + "/") { return "package:\(packageRoot)" }
+            return "package:\(packageRoot)\u{0}\(cwd ?? "")"
+        }
         let command = name.split(separator: " ").first.map(String.init) ?? name
         guard let cwd else { return "name:\(command)" }
         return "folder:\(cwd)\u{0}\(command)"
@@ -916,6 +921,8 @@ final class IslandServersModel: ObservableObject {
     private var targets: [String: [ServerProcessIdentity]] = [:]
     /// Which HTTP ports each project's icon was last looked for with: a new one (a page that came up) looks again.
     private var iconTried: [String: String] = [:]
+    /// Ports that took the connection but answered late: how often, and when to ask again (`IslandServers.retryAfter`).
+    private var retries: [String: (attempts: Int, next: Date)] = [:]
     /// A probe pass in flight (a refresh while one runs does not start another).
     private var probing = false
 
@@ -943,28 +950,41 @@ final class IslandServersModel: ObservableObject {
         targets = targets.filter { ids.contains($0.key) }
         let ports = Set(rows.flatMap { row in row.tcpPorts.map { IslandServers.probeKey(row, $0) } })
         http = http.filter { ports.contains($0.key) }
+        retries = retries.filter { ports.contains($0.key) }
         if let open = openBundle, bundle(open) == nil { openBundle = nil }
         loaded = true
     }
 
     // MARK: Links and icons
 
-    /// Probes each server's loopback ports not probed yet (at most `IslandServerProbes.limit` at once), then looks for
-    /// the icon of each project whose HTTP ports changed. Off the main thread; only from `refresh`.
+    /// Probes each server's loopback ports with no answer yet (at most `IslandServerProbes.limit` at once; a late one
+    /// again only once its backoff is over), then looks for the icon of each project whose HTTP ports changed. Off the
+    /// main thread; only from `refresh`.
     func probe() async {
         guard !probing else { return }
         probing = true
         defer { probing = false }
-        let pending: [(key: String, host: IslandLoopback, port: UInt16)] = rows.flatMap { row in
+        let time = now()
+        let pending: [(key: String, host: IslandLoopback, port: UInt16, ports: Set<UInt16>)] = rows.flatMap { row in
             row.tcpPorts.compactMap { port in
                 let key = IslandServers.probeKey(row, port)
                 guard let host = row.loopback[port], http[key] == nil else { return nil }
-                return (key, host, port)
+                if let retry = retries[key], retry.next > time { return nil }
+                return (key, host, port, Set(row.tcpPorts))
             }
         }
         let prober = prober
-        let results = await IslandServerProbes.run(pending.map { job in { prober.probe(job.host, port: job.port) } })
-        for (job, result) in zip(pending, results) { http[job.key] = result }
+        let results = await IslandServerProbes.run(pending.map { job in { prober.probe(job.host, port: job.port, ports: job.ports) } })
+        for (job, result) in zip(pending, results) {
+            if result.late {
+                // Not an answer (a dev server still compiling its first page): asked again later.
+                let attempts = (retries[job.key]?.attempts ?? 0) + 1
+                retries[job.key] = (attempts, now().addingTimeInterval(IslandServers.retryAfter(attempt: attempts)))
+            } else {
+                http[job.key] = result
+                retries[job.key] = nil
+            }
+        }
 
         var lookups: [(key: String, signature: String, pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)],
                        folders: [String])] = []
@@ -985,9 +1005,10 @@ final class IslandServersModel: ObservableObject {
             lookups.append((bundle.key, signature, pages, folders))
         }
         let found = await IslandServerProbes.run(lookups.map { job in { prober.icon(pages: job.pages, folders: job.folders) } })
-        for (job, data) in zip(lookups, found) {
+        for (job, image) in zip(lookups, found) {
             iconTried[job.key] = job.signature
-            if let data, let image = NSImage(data: data) { icons[job.key] = image }
+            // Already a small thumbnail, decoded off the main thread: only wrapped here.
+            if let image { icons[job.key] = NSImage(cgImage: image, size: .zero) }
         }
     }
 
