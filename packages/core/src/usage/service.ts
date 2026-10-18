@@ -87,7 +87,8 @@ export function removeProbeDir(root: string, dir: string): boolean {
 function differs(s: SyntheticRow, r: UsageRecordInput): boolean {
   const cost = r.costBasis === "unknown" || r.costUsd === undefined ? null : r.costUsd;
   return s.input !== r.input || s.output !== r.output || s.cacheRead !== r.cacheRead || s.cacheWrite !== r.cacheWrite || s.costBasis !== r.costBasis
-    || (cost === null) !== (s.costUsd === null) || (cost !== null && s.costUsd !== null && Math.abs(cost - s.costUsd) > 1e-9);
+    || (cost === null) !== (s.costUsd === null) || (cost !== null && s.costUsd !== null && Math.abs(cost - s.costUsd) > 1e-9)
+    || Math.abs((s.cacheSavingsUsd ?? 0) - (r.cacheSavingsUsd ?? 0)) > 1e-9;
 }
 
 /** Wait for `p`, at most `ms`. */
@@ -295,7 +296,10 @@ export class UsageService {
         const files = await claudeCodeTranscripts(this.deps.claudeHome);
         const ccMore = await this.ingestFiles("claude-code", files, (line, _state, file) => claudeCodeRecordOf(line, this.deps.pricer, file.mtimeMs));
         more = ccMore || more;
-        // The `/stats` history only once the transcripts are all in: its boundary is the first transcript day.
+        // Transcripts win, EVERY pass (a chunked import, a missing or corrupt stats file included): a synthetic row on a
+        // day the transcripts now cover goes. New history is planned only once the transcripts are all in — its boundary
+        // is the first transcript day.
+        this.dropCoveredSynthetic();
         if (!ccMore) await this.importClaudeStats(this.deps.claudeHome);
       }
     } catch (err) {
@@ -310,12 +314,29 @@ export class UsageService {
     this.deps.log?.warn?.(msg);
   }
 
+  /** The UTC day of the earliest TRANSCRIPT-derived Claude Code record (synthetic rows never move it). */
+  private cutoffDay(): string | undefined {
+    const earliest = this.deps.db.earliestReal("claude-code");
+    return earliest === undefined ? undefined : utcDay(earliest);
+  }
+
+  /** Remove every synthetic Claude Code row on or after the first transcript day — an indexed seek; a write only when
+   *  there is something to remove. Independent of the stats file: it may be missing, corrupt or unchanged. */
+  private dropCoveredSynthetic(): void {
+    const cutoffDay = this.cutoffDay();
+    if (cutoffDay === undefined) return;
+    const covered = this.deps.db.syntheticDedupesFrom("claude-code", Date.parse(`${cutoffDay}T00:00:00Z`));
+    if (covered.length === 0) return;
+    const { removed } = this.deps.db.reconcileSynthetic("claude-code", covered, []);
+    if (removed > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added: 0, removed });
+  }
+
   /**
    * Backfill Claude Code's history from its own `/stats` cache (`usage/claude-stats.ts`) for the days its transcripts no
-   * longer cover. The file is parsed only when its mtime or size changed; the rows are re-planned only when the file,
-   * the first transcript day or today changed, and written only where they differ. Synthetic rows are derived state:
-   * a day the transcripts now cover loses its synthetic rows; a day the cache no longer lists keeps them (history).
-   * A missing, corrupt or over-cap file changes nothing.
+   * longer cover. The file is parsed only when its mtime or size changed; the rows are re-planned (and re-calibrated)
+   * only when the file or the transcript coverage (the first transcript day) changed — never merely because a day
+   * passed — and written only where they differ. A day the cache no longer lists keeps its rows (history). A missing,
+   * corrupt or over-cap file plans nothing; `dropCoveredSynthetic` runs before this regardless.
    */
   private async importClaudeStats(claudeHome: string): Promise<void> {
     const path = join(claudeHome, CLAUDE_STATS_FILE);
@@ -338,18 +359,16 @@ export class UsageService {
     if (stats === undefined) return;
     const now = this.now();
     const today = utcDay(now);
-    const earliest = this.deps.db.earliestReal("claude-code");
-    const cutoffDay = earliest === undefined ? undefined : utcDay(earliest);
-    const signature = `${stamp}|${cutoffDay ?? ""}|${today}`;
+    const cutoffDay = this.cutoffDay();
+    const signature = `${stamp}|${cutoffDay ?? ""}`;
     if (signature === this.statsSignature) return;
     const from = overlapFrom(now);
     const real = cutoffDay === undefined ? [] : this.deps.db.dailyRealTotals("claude-code", Date.parse(`${from}T00:00:00Z`));
     const wanted = claudeStatsRecords({ stats, ...(cutoffDay === undefined ? {} : { cutoffDay }), today, real, overlapFromDay: from, pricer: this.deps.pricer });
     const stored = new Map(this.deps.db.syntheticRows("claude-code").map((r) => [r.dedupe, r]));
-    // The transcripts win: a synthetic row on a day they now cover goes.
-    const remove = cutoffDay === undefined ? [] : [...stored.values()].filter((r) => utcDay(r.at) >= cutoffDay).map((r) => r.dedupe);
+    // Covered days were removed by `dropCoveredSynthetic` this very pass; the plan never reaches them.
     const upsert = wanted.filter((r) => { const s = stored.get(r.dedupe); return s === undefined || differs(s, r); });
-    const { removed, added } = this.deps.db.reconcileSynthetic("claude-code", remove, upsert);
+    const { removed, added } = this.deps.db.reconcileSynthetic("claude-code", [], upsert);
     this.statsSignature = signature;
     if (removed + added > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added, removed });
   }
@@ -358,8 +377,10 @@ export class UsageService {
   history(): UsageHistory {
     const span = this.deps.db.syntheticSpan("claude-code");
     if (span === undefined) return {};
-    const earliest = this.deps.db.earliestReal("claude-code");
-    const before = earliest !== undefined && earliest > span.last ? utcNoon(utcDay(earliest)) : span.last + 86_400_000;
+    // The first transcript day when there is one (every synthetic row lies before it); with no transcripts at all, the
+    // day after the last imported day.
+    const cutoffDay = this.cutoffDay();
+    const before = cutoffDay !== undefined ? utcNoon(cutoffDay) : utcNoon(utcDay(span.last + 86_400_000));
     return { claudeCodeStats: { from: span.first, before } };
   }
 

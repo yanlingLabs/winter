@@ -82,6 +82,7 @@ export interface SyntheticRow {
   cacheWrite: number;
   costUsd: number | null;
   costBasis: CostBasis;
+  cacheSavingsUsd: number | null;
 }
 
 export interface IngestFileState {
@@ -284,12 +285,19 @@ export class UsageDb {
   }
 
   syntheticRows(source: UsageSource): SyntheticRow[] {
-    const rows = this.db.query("SELECT dedupe, at, input, output, cache_read, cache_write, cost_usd, cost_basis FROM usage_records WHERE source = ? AND synthetic = 1")
+    const rows = this.db.query("SELECT dedupe, at, input, output, cache_read, cache_write, cost_usd, cost_basis, cache_savings_usd FROM usage_records WHERE source = ? AND synthetic = 1")
       .all(source) as Array<Record<string, unknown>>;
     return rows.map((r) => ({
       dedupe: String(r.dedupe), at: n(r.at), input: n(r.input), output: n(r.output), cacheRead: n(r.cache_read), cacheWrite: n(r.cache_write),
       costUsd: typeof r.cost_usd === "number" ? r.cost_usd : null, costBasis: r.cost_basis === "list" || r.cost_basis === "estimate" ? r.cost_basis : "unknown",
+      cacheSavingsUsd: typeof r.cache_savings_usd === "number" ? r.cache_savings_usd : null,
     }));
+  }
+
+  /** The synthetic rows of `source` at or after `fromMs` (an index seek). */
+  syntheticDedupesFrom(source: UsageSource, fromMs: number): string[] {
+    return (this.db.query("SELECT dedupe FROM usage_records WHERE source = ? AND synthetic = 1 AND at >= ?").all(source, fromMs) as Array<{ dedupe: string }>)
+      .map((r) => r.dedupe);
   }
 
   /**

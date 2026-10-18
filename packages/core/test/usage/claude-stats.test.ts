@@ -3,7 +3,7 @@
 // calibration, the ratio split and cost math, the size cap, a missing or corrupt file, the tracking switch, and the
 // privacy rule (the cache's session id and counters never reach the DB, its WAL, a log line or an RPC answer).
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { UsageDb } from "../../src/usage/db";
 import { UsagePricer } from "../../src/usage/pricing";
@@ -17,8 +17,9 @@ const at = (day: string, hour = 10): number => Date.parse(`${day}T${String(hour)
 const noon = (day: string): number => Date.parse(`${day}T12:00:00Z`);
 
 const A = "claude-sonnet-4-5-20250929";
-const B = "claude-opus-4-1-20250805";
+const B = "claude-opus-4-5-20251101";
 const C = "glm-4.6"; // a non-Anthropic model run through Claude Code: no Anthropic price
+const D = "kimi-k2-thinking"; // unpriced too, but Claude Code kept a cost for it
 
 const DECOYS = ["DECOY-SESSION-5a5a-longest", "DECOY-OTHER-KEY-77", "2026-01-02T03:04:05.678Z"];
 
@@ -33,6 +34,7 @@ function statsCache(days: Record<string, Record<string, number>>, opts: { modelU
       [A]: { inputTokens: 1000, outputTokens: 3000, cacheReadInputTokens: 5000, cacheCreationInputTokens: 1000, costUSD: 0, contextWindow: 0, maxOutputTokens: 0, webSearchRequests: 0 },
       [B]: { inputTokens: 100_000, outputTokens: 100_000, cacheReadInputTokens: 700_000, cacheCreationInputTokens: 100_000, costUSD: 5, contextWindow: 0, maxOutputTokens: 0, webSearchRequests: 0 },
       [C]: { inputTokens: 500, outputTokens: 500, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, contextWindow: 0, maxOutputTokens: 0, webSearchRequests: 0 },
+      [D]: { inputTokens: 500_000, outputTokens: 500_000, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 2, contextWindow: 0, maxOutputTokens: 0, webSearchRequests: 0 },
     },
     totalSessions: 42, totalMessages: 4242,
     longestSession: { sessionId: DECOYS[0], duration: 123456, messageCount: 99, timestamp: DECOYS[2] },
@@ -48,15 +50,16 @@ function setup(opts: { tracking?: { codex: boolean; claudeCode: boolean }; claud
   const logs: string[] = [];
   const log = (msg: string, meta?: Record<string, unknown>) => { logs.push(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`); };
   const tracking = opts.tracking ?? { codex: false, claudeCode: true };
+  const clock = { now: NOW };
   const svc = new UsageService({
     db, pricer, tracking: () => tracking, claudeHome,
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    probeRoot: () => probeRootIn(home), ingestEveryMs: 0, now: () => NOW, log: { warn: log, info: log },
+    probeRoot: () => probeRootIn(home), ingestEveryMs: 0, now: () => clock.now, log: { warn: log, info: log },
     ...(opts.claudeStatsMaxBytes === undefined ? {} : { claudeStatsMaxBytes: opts.claudeStatsMaxBytes }),
     ...(opts.fileBudgetBytes === undefined ? {} : { fileBudgetBytes: opts.fileBudgetBytes }),
   });
   const statsPath = join(claudeHome, CLAUDE_STATS_FILE);
-  return { home, claudeHome, db, svc, logs, tracking, statsPath };
+  return { home, claudeHome, db, svc, logs, tracking, statsPath, clock };
 }
 
 type Row = { dedupe: string; at: number; model: string; input: number; output: number; cache_read: number; cache_write: number; cost_usd: number | null; cost_basis: string; synthetic: number; session_id: string | null };
@@ -88,22 +91,28 @@ describe("the backfill boundary and the row shape", () => {
     transcripts(claudeHome, ["2026-10-01", "2026-10-05"]);
     writeFileSync(statsPath, statsCache({
       "2026-09-20": { [A]: 20_000 },
-      "2026-09-25": { [A]: 10_000, [B]: 100_000, [C]: 3_000 },
+      "2026-09-25": { [A]: 10_000, [B]: 100_000, [C]: 3_000, [D]: 100_000 },
       "2026-10-01": { [A]: 10_000 },           // the first transcript day: the transcripts have it
       "2026-10-03": { [B]: 50_000 },           // B has no transcripts, but the day is after the boundary: never imported
       "2026-10-18": { [A]: 1 },                // today: never
     }));
     await svc.ingest(true);
     const rows = byKey(db);
-    expect([...rows.keys()].sort()).toEqual([`ccstats:${A}:2026-09-20`, `ccstats:${A}:2026-09-25`, `ccstats:${B}:2026-09-25`, `ccstats:${C}:2026-09-25`].sort());
+    expect([...rows.keys()].sort()).toEqual([`ccstats:${A}:2026-09-20`, `ccstats:${A}:2026-09-25`, `ccstats:${B}:2026-09-25`, `ccstats:${C}:2026-09-25`, `ccstats:${D}:2026-09-25`].sort());
     const a = rows.get(`ccstats:${A}:2026-09-20`)!;
     expect(a).toMatchObject({ at: noon("2026-09-20"), model: A, input: 2000, output: 6000, cache_read: 10_000, cache_write: 2000, cost_basis: "estimate", session_id: null, synthetic: 1 });
     // costUSD is 0 in Claude Code's cache: the split is priced by the same catalog as the transcripts.
     expect(a.cost_usd!).toBeCloseTo(pricer.price("anthropic", A, { input: 2000, output: 6000, cacheRead: 10_000, cacheWrite: 2000 })!.costUsd, 12);
-    // A positive costUSD is shared out by tokens: 5 USD × 100k / 1M.
+    // One pricing basis: the catalog, even where Claude Code kept a costUSD (B's would have been 0.5 USD).
     const b = rows.get(`ccstats:${B}:2026-09-25`)!;
     expect(b).toMatchObject({ input: 10_000, output: 10_000, cache_read: 70_000, cache_write: 10_000, cost_basis: "estimate" });
-    expect(b.cost_usd!).toBeCloseTo(0.5, 12);
+    expect(b.cost_usd!).toBeCloseTo(pricer.price("anthropic", B, { input: 10_000, output: 10_000, cacheRead: 70_000, cacheWrite: 10_000 })!.costUsd, 12);
+    expect(b.cost_usd!).not.toBeCloseTo(0.5, 6);
+    // costUSD only as the fallback for a model the catalog cannot price: 2 USD × 100k / 1M.
+    expect(pricer.price("anthropic", D, { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 })).toBeUndefined();
+    const d = rows.get(`ccstats:${D}:2026-09-25`)!;
+    expect(d).toMatchObject({ input: 50_000, output: 50_000, cost_basis: "estimate" });
+    expect(d.cost_usd!).toBeCloseTo(0.2, 12);
     // A model nothing prices keeps its tokens, unpriced.
     expect(rows.get(`ccstats:${C}:2026-09-25`)).toMatchObject({ input: 1500, output: 1500, cost_usd: null, cost_basis: "unknown" });
     // The transcript rows are untouched; the rollup matches the records.
@@ -364,5 +373,68 @@ describe("schema 3", () => {
     expect(db.earliestReal("claude-code")).toBe(NOW);
     expect(db.hourly(0, NOW + 1, ["claude-code"])[0]).toMatchObject({ records: 1, syntheticRecords: 0 });
     db.close();
+  });
+});
+
+describe("review fixes: transcripts win whatever the stats file's state; stable across days", () => {
+  for (const damage of ["deleted", "corrupt", "over the cap"] as const) {
+    test(`stats file ${damage} after an import, then an older transcript appears: that day counted once`, async () => {
+      const env = setup({ claudeStatsMaxBytes: damage === "over the cap" ? 64 * 1024 : undefined });
+      transcripts(env.claudeHome, ["2026-10-01"]);
+      writeFileSync(env.statsPath, statsCache({ "2026-09-20": { [A]: 20_000 }, "2026-09-25": { [A]: 10_000 } }));
+      await env.svc.ingest(true);
+      expect(synthetic(env.db)).toHaveLength(2);
+      if (damage === "deleted") rmSync(env.statsPath);
+      else if (damage === "corrupt") writeFileSync(env.statsPath, "{ not json");
+      else writeFileSync(env.statsPath, "x".repeat(64 * 1024 + 1));
+      transcripts(env.claudeHome, ["2026-09-25"], 10_000, A, "cc-session-old");
+      await env.svc.ingest(true);
+      expect(synthetic(env.db).map((r) => r.dedupe)).toEqual([`ccstats:${A}:2026-09-20`]);
+      expectRollupConsistent(env.db);
+      const day = env.db.db.query("SELECT SUM(input + output + cache_read + cache_write) t FROM usage_records WHERE at >= ? AND at < ?")
+        .get(Date.parse("2026-09-25T00:00:00Z"), Date.parse("2026-09-26T00:00:00Z")) as { t: number };
+      expect(day.t).toBe(10_000);
+      // The footnote's date is the first transcript day.
+      expect(env.svc.history().claudeCodeStats?.before).toBe(noon("2026-09-25"));
+    });
+  }
+
+  test("a chunked transcript import still removes the synthetic rows of days it has already reached", async () => {
+    const env = setup({ fileBudgetBytes: 1000 });
+    transcripts(env.claudeHome, ["2026-10-01"]);
+    writeFileSync(env.statsPath, statsCache({ "2026-09-20": { [A]: 20_000 }, "2026-09-25": { [A]: 10_000 } }));
+    await env.svc.catchUp();
+    expect(synthetic(env.db)).toHaveLength(2);
+    // An older session's file: its first line (09-25) is read on the first pass; the rest waits for later passes.
+    transcripts(env.claudeHome, ["2026-09-25", "2026-09-26", "2026-09-27", "2026-09-28"], 10_000, A, "cc-session-old");
+    await env.svc.ingest(true);
+    // Still chunked: not every record of the older file is in yet.
+    expect((env.db.db.query("SELECT COUNT(*) n FROM usage_records WHERE synthetic = 0").get() as { n: number }).n).toBeLessThan(5);
+    expect(synthetic(env.db).map((r) => r.dedupe)).toEqual([`ccstats:${A}:2026-09-20`]);
+  });
+
+  test("a new day alone neither re-parses nor re-plans (rows stay put)", async () => {
+    const env = setup();
+    transcripts(env.claudeHome, ["2026-10-01", "2026-10-02"]);
+    writeFileSync(env.statsPath, statsCache({ "2026-09-20": { [A]: 20_000 }, "2026-10-02": { [A]: 20_000 } }));
+    await env.svc.ingest(true);
+    const before = synthetic(env.db);
+    const logsBefore = env.logs.length;
+    for (let d = 1; d <= 40; d++) { env.clock.now = NOW + d * 86_400_000; await env.svc.ingest(true); }
+    expect(env.svc.claudeStatsParses).toBe(1);
+    expect(synthetic(env.db)).toEqual(before);
+    expect(env.logs.length).toBe(logsBefore);
+  });
+
+  test("calibration compares the SAME (model, day) pairs: a stats day the transcripts lack does not dilute it", async () => {
+    const env = setup();
+    transcripts(env.claudeHome, ["2026-10-01", "2026-10-02"]);
+    writeFileSync(env.statsPath, statsCache({
+      "2026-09-20": { [A]: 30_000 },
+      "2026-10-02": { [A]: 30_000 },                // shared: ours 10k vs theirs 30k → ⅓
+      "2026-10-03": { [A]: 30_000 }, "2026-10-04": { [A]: 30_000, [B]: 50_000 }, // no transcripts: not compared
+    }));
+    await env.svc.ingest(true);
+    expect(byKey(env.db).get(`ccstats:${A}:2026-09-20`)).toMatchObject({ input: 1000, output: 3000, cache_read: 5000, cache_write: 1000 });
   });
 });

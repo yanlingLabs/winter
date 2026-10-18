@@ -13,13 +13,15 @@ import type { UsagePricer } from "./pricing";
 //    input + output only (cache excluded) and keyed by the session's first message: such a file is scaled up to all four
 //    kinds with the model's all-time ratios. A v5 rebuild recomputes the days from the transcripts still on disk, so
 //    the file's coverage starts at its last rebuild, not at `firstSessionDate`.
-//  - `modelUsage[model]` = all-time sums of the four kinds; `costUSD` is not accrued by that code (it stays 0), so a
-//    zero cost is priced by Winter's catalog instead (a positive one is shared out by tokens, as the brief asks).
+//  - `modelUsage[model]` = all-time sums of the four kinds; `costUSD` is not accrued by that code (it stays 0). Every
+//    synthetic row is priced by Winter's catalog (one basis with the transcript rows); a positive `costUSD` is used only
+//    for a model the catalog cannot price, shared out by tokens.
 //  - Claude Code counts a streamed message once per transcript line (no message-id dedupe), so its totals run HIGHER
 //    than Winter's deduped transcript rows. Each import calibrates against the days both cover (see `calibration`).
 //
 // PRIVACY: the file also holds session counts, hour histograms and `longestSession` (a session id). Only
-// `dailyModelTokens`, `modelUsage` and `lastComputedDate` are read; everything else is dropped with the parse.
+// `dailyModelTokens`, `modelUsage`, `lastComputedDate` and `dailyModelTokensVersion` are read; everything else is
+// dropped with the parse.
 
 export const CLAUDE_STATS_FILE = "stats-cache.json";
 /** Over this, `stats-cache.json` is not read at all (a real one is a few tens of KiB). */
@@ -114,10 +116,11 @@ export function splitByRatios(total: number, m: ClaudeStatsModel | undefined): {
 export interface RealDayTotal { model: string; day: string; all: number; io: number }
 
 /**
- * PURE: the calibration — Winter's deduped transcript totals ÷ Claude Code's own totals over the days both cover
- * reliably (after the first transcript day, within the last `CLAUDE_STATS_OVERLAP_DAYS`, before today, computed by
- * Claude Code). Per model; a model with no overlap takes the factor of all models together; none at all → 1. Clamped
- * to at most 1: it only ever corrects Claude Code's per-line over-count, never inflates.
+ * PURE: the calibration — Winter's deduped transcript totals ÷ Claude Code's own totals over the SAME (model, day)
+ * pairs: those both have tokens for, inside the reliable window (after the first transcript day, within the last
+ * `CLAUDE_STATS_OVERLAP_DAYS`, before today, computed by Claude Code). Per model; a model with no shared pair takes the
+ * factor of all shared pairs together; none at all → 1. Clamped to at most 1: it only ever corrects Claude Code's
+ * per-line over-count, never inflates.
  */
 export function calibration(stats: ClaudeStats, real: readonly RealDayTotal[], cutoffDay: string | undefined, today: string, overlapFromDay: string):
   { byModel: Map<string, number>; global: number } {
@@ -128,15 +131,15 @@ export function calibration(stats: ClaudeStats, real: readonly RealDayTotal[], c
   const t = new Map<string, number>();
   let S = 0;
   let T = 0;
-  for (const [day, models] of stats.days) {
-    if (!inOverlap(day)) continue;
-    for (const [model, tokens] of models) { s.set(model, (s.get(model) ?? 0) + tokens); S += tokens; }
-  }
   for (const r of real) {
-    if (!inOverlap(r.day) || !stats.days.has(r.day)) continue;
-    const v = stats.countsCache ? r.all : r.io;
-    t.set(r.model, (t.get(r.model) ?? 0) + v);
-    T += v;
+    if (!inOverlap(r.day)) continue;
+    const theirs = stats.days.get(r.day)?.get(r.model) ?? 0;
+    const ours = stats.countsCache ? r.all : r.io;
+    if (theirs <= 0 || ours <= 0) continue; // only pairs BOTH have
+    s.set(r.model, (s.get(r.model) ?? 0) + theirs);
+    t.set(r.model, (t.get(r.model) ?? 0) + ours);
+    S += theirs;
+    T += ours;
   }
   const global = S > 0 && T > 0 ? Math.min(1, T / S) : 1;
   for (const [model, sm] of s) {
@@ -161,7 +164,8 @@ export interface StatsBackfillInput {
  * PURE: the synthetic rows Claude Code's `/stats` cache yields — one per model per day, for days BEFORE the first day
  * Winter's transcript ingest has (so a day is never counted twice), before today and no later than the cache's
  * `lastComputedDate`. A day's tokens are calibrated, then split by the model's all-time ratios; the cost is the
- * model's `costUSD` share when Claude Code kept one, else the catalog's list price of the split, else unknown.
+ * catalog's list price of the split (the same basis as every transcript row), else — for a model the catalog cannot
+ * price — the model's `costUSD` share if Claude Code kept one, else unknown.
  */
 export function claudeStatsRecords(input: StatsBackfillInput): UsageRecordInput[] {
   const { stats, cutoffDay, today, pricer } = input;
@@ -187,9 +191,8 @@ export function claudeStatsRecords(input: StatsBackfillInput): UsageRecordInput[
         out.push({ ...base, input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, costBasis: "unknown" });
         continue;
       }
-      const priced = mu !== undefined && mu.costUsd > 0
-        ? { costUsd: (mu.costUsd * tokens) / allOf(mu), cacheSavingsUsd: pricer.savingsFor("anthropic", model, split.cacheRead) }
-        : pricer.price("anthropic", model, split);
+      const priced = pricer.price("anthropic", model, split)
+        ?? (mu !== undefined && mu.costUsd > 0 ? { costUsd: (mu.costUsd * tokens) / allOf(mu), cacheSavingsUsd: 0 } : undefined);
       out.push(priced === undefined
         ? { ...base, ...split, costBasis: "unknown" }
         : { ...base, ...split, costUsd: priced.costUsd, costBasis: "estimate", cacheSavingsUsd: priced.cacheSavingsUsd });
