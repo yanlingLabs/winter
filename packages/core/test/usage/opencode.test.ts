@@ -177,6 +177,20 @@ describe("OpenCode in the usage DB", () => {
     expect(runs(fake.markerPath).slice(count)).toEqual([opencodeDaysArgs(1).join(" ")]);
   });
 
+  test("asleep for days: the active days between the last batch and yesterday are asked for once (`--all` again)", async () => {
+    const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [m("a", 1)] }, activity: [TODAY] });
+    const clock = { now: AFTERNOON };
+    const { db, svc } = service({ opencodeExecutable: () => fake.path, clock });
+    await svc.ingest(true);
+    // Four days on; OpenCode was used two days after the last batch (two days ago, by then).
+    const later = dayMinus(TODAY, -4);
+    fake.write({ daily: { 0: [m("a", 4)], 2: [m("a", 22)], 4: [m("a", 1)] }, activity: [TODAY, dayMinus(later, 2), later] });
+    clock.now = localNoon(later) + 3_600_000;
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 1], [dayMinus(later, 2), 22], [later, 4]]);
+    expect(runs(fake.markerPath).filter((a) => a.includes("--all"))).toHaveLength(2);
+  });
+
   test("the backfill resumes after a restart from the saved list (never asking --all again)", async () => {
     const daily: Record<number, OpencodeDayModel[]> = { 0: [m("a", 1)], 3: [m("a", 3)], 9: [m("a", 9)] };
     const fake = fakeOpencode(tempDir("bin"), { daily, activity: [9, 3, 0].map((k) => dayMinus(TODAY, k)) });

@@ -413,8 +413,8 @@ export class UsageService {
    * (10 min) unless its backfill ran out of budget. Each batch, in order:
    *  1. TODAY = `--days 1`, written as one row per model per variant for today's local date, REPLACING the day's rows;
    *  2. every day to FINALIZE, newest first, as `--days k+1` − `--days k` (a run is shared by two neighbouring days):
-   *     yesterday once after midnight, the last day written as "today" (the daemon may have slept through midnights),
-   *     and the one-time backfill — every active date `--all` lists, kept as a `pending` list until done, so an
+   *     yesterday once after midnight, the last day written as "today" (the daemon may have slept through midnights —
+   *     then `--all` is asked once more for the active days in between), and the one-time backfill — every active date `--all` lists, kept as a `pending` list until done, so an
    *     interrupted backfill resumes. A finalized day is never asked again (`done`, the last two weeks kept).
    * At most `opencodeSpawnBudget` runs per batch: out of budget = `more` (the next pass skips both throttles); a failed
    * run ends the batch (an ordinary failure, retried after the throttle — never `more`, so a broken binary never loops
@@ -462,8 +462,14 @@ export class UsageService {
       if (all !== undefined) { pending = all.activity.filter((d) => d < today && !done.has(d)); listed = true; }
     }
     const due = new Set(pending);
-    due.add(dayMinus(today, 1));
+    const yesterday = dayMinus(today, 1);
+    due.add(yesterday);
     if (lastToday !== undefined) due.add(lastToday);
+    // Asleep for days (no batch since before yesterday): the active days in between are asked for once, via `--all`.
+    if (lastToday !== undefined && lastToday < yesterday) {
+      const all = await run([...OPENCODE_ALL_ARGS]);
+      for (const d of all?.activity ?? []) if (d > lastToday && d < today && !done.has(d)) due.add(d);
+    }
     const order = [...due].filter((d) => d < today && !done.has(d)).sort().reverse();
     for (const day of order) {
       if (failed) break;
