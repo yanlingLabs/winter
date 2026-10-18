@@ -10,7 +10,7 @@ import type { CoworkNativeEnvironment } from "./native-wiring";
  * `daemon.ts` asks this one function for the environment the native wiring builds its host from. Today it answers `undefined`, so the wiring is inert:
  * nothing in the daemon constructs, injects or reads the production environment, and a Cowork start refuses before it gets anywhere near it. The flip is the
  * single constant below, `COWORK_NATIVE_ENVIRONMENT_ACTIVATED`, and it changes on the owner's word only (the DOOR lane's `coworkSessions` switch is the other half).
- * Pinned by test/cowork/native-activation.test.ts: the seam answers `undefined`, only this file imports the builder, and the daemon calls this function lazily.
+ * Pinned by the anti-wiring test ("the production environment is built only through the activation seam, and the seam is off"): the seam answers `undefined`, only this file imports the builder, and the daemon calls this function lazily.
  *
  * It takes a thunk so that even the inputs (the environment, the real home directory) are not read while the seam is off.
  */
