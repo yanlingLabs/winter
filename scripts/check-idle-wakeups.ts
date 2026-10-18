@@ -50,8 +50,9 @@ async function main(): Promise<void> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "WINTER_PROFILE") env[k] = v;
   Object.assign(env, { WINTER_HOME: home, WINTER_KEYCHAIN_SERVICE: `com.winter.core.test-idle-${crypto.randomUUID().slice(0, 8)}`, WINTER_LOGIN_SHELL_PATH: "off",
-    // Usage tracking (docs/claude/usage.md) reads nothing until a Usage surface asks; pointed at nothing anyway, so
-    // the measurement never touches the developer's own Codex / Claude Code / Antigravity / OpenCode files or binaries.
+    // Usage tracking (docs/claude/usage.md): its background plan beat stays ON (it is part of what is measured), every
+    // root and executable pointed at nothing, so the measurement never touches the developer's own Codex / Claude Code /
+    // Antigravity / OpenCode files or binaries.
     WINTER_USAGE_CODEX_HOME: `${home}/no-codex`, WINTER_USAGE_CLAUDE_HOME: `${home}/no-claude`, WINTER_USAGE_CLAUDE_JSON: `${home}/no-claude.json`,
     WINTER_USAGE_CODEX_EXECUTABLE: "off", WINTER_USAGE_CLAUDE_EXECUTABLE: "off", WINTER_USAGE_AGY_EXECUTABLE: "off",
     WINTER_USAGE_OPENCODE_EXECUTABLE: "off" });
