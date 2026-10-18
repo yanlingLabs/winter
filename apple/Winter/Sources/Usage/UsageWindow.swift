@@ -500,27 +500,48 @@ struct UsagePlanSlotCard: View {
                 Text(empty).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                let width = titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact)
-                ForEach(slot.rings) { ring in
-                    UsagePlanLine(ring: ring, color: UsagePlanColor.of(provider: slot.id), compact: compact, titleWidth: width)
-                }
+                UsagePlanLineGroup(rings: slot.rings, color: UsagePlanColor.of(provider: slot.id), compact: compact,
+                                   titleWidth: titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// One window as a line: its name, the bar (what is LEFT, from the left), "66% left", and when it resets.
-struct UsagePlanLine: View {
-    let ring: UsagePlanRing
+/// One plan's lines, hovered together (user 2026-10-18): the pointer over any of them opens them all.
+struct UsagePlanLineGroup: View {
+    let rings: [UsagePlanRing]
     let color: Color
     var compact = false
     /// The title column; nil = the floor (52 pt compact, 72 in the window).
     var titleWidth: CGFloat? = nil
     @State private var localHover = false
 
+    var body: some View {
+        // The island's own pointer (its panels are never key), or the window's hover.
+        IslandPointerReader { islandHovered in
+            VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+                ForEach(rings) { ring in
+                    UsagePlanLine(ring: ring, color: color, compact: compact, hovered: islandHovered || localHover, titleWidth: titleWidth)
+                }
+            }
+        }
+        .onHover { localHover = $0 }
+    }
+}
+
+/// One window as a line: its name and the bar (what is USED, from the left); under the pointer, the used and left shares.
+struct UsagePlanLine: View {
+    let ring: UsagePlanRing
+    let color: Color
+    var compact = false
+    /// Its plan's group is under the pointer (`UsagePlanLineGroup`).
+    var hovered = false
+    /// The title column (`UsagePresentation.titleColumnWidth`); nil = the floor (52 pt compact, 72 in the window).
+    var titleWidth: CGFloat? = nil
+
     /// The line at rest and under the pointer (user 2026-10-18: just the line; on hover it thickens, lengthens a little
-    /// and says how much is used).
+    /// and shows the used share inside the fill and what is left at the track's end).
     static func thickness(compact: Bool, hovered: Bool) -> CGFloat {
         hovered ? (compact ? 14 : 16) : (compact ? 5 : 7)
     }
@@ -528,17 +549,15 @@ struct UsagePlanLine: View {
     /// How much longer the line is under the pointer, half on each end: every panel's hover grow (9.48 pt).
     static func lengthGrowth(hovered: Bool) -> CGFloat { hovered ? HoverGrowth.points : 0 }
 
-    var body: some View {
-        // The island's own pointer (its panels are never key), or the window's hover.
-        IslandPointerReader { islandHovered in
-            lineBody(hovered: islandHovered || localHover)
-        }
-        .onHover { localHover = $0 }
+    /// PURE: the two hover figures — used (inside the fill) and left (at the track's end) — always summing to 100.
+    static func percents(_ fraction: Double) -> (used: Int, left: Int) {
+        let used = Int((min(1, max(0, fraction)) * 100).rounded())
+        return (used, 100 - used)
     }
 
-    private func lineBody(hovered: Bool) -> some View {
+    var body: some View {
         let used = min(1, max(0, ring.fraction))
-        let pct = Int((used * 100).rounded())
+        let pct = Self.percents(ring.fraction)
         let height = Self.thickness(compact: compact, hovered: hovered)
         return HStack(spacing: compact ? 8 : 12) {
             Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.85)).lineLimit(1)
@@ -549,12 +568,17 @@ struct UsagePlanLine: View {
                     Capsule().fill(ring.stale ? Color(nsColor: .systemGray) : color)
                         .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
                     if hovered {
-                        Text("\(pct)% used")
-                            .font(Typography.tiny(.semibold))
-                            .foregroundStyle(Color.white)
-                            .padding(.horizontal, 6)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .transition(.opacity)
+                        // A lighter weight than the titles: the figures sit in the line, they do not shout.
+                        HStack(spacing: 4) {
+                            Text("\(pct.used)%").foregroundStyle(Color.white)
+                            Spacer(minLength: 4)
+                            Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
+                        }
+                        .font(Typography.tiny(.regular))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .transition(.opacity)
                     }
                 }
             }
@@ -566,7 +590,7 @@ struct UsagePlanLine: View {
         .contentShape(Rectangle())
         .animation(HoverGrowth.animation, value: hovered)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(ring.title): \(pct)% used\(ring.resets.map { ", \($0)" } ?? "")")
+        .accessibilityLabel("\(ring.title): \(pct.used)% used, \(pct.left)% left\(ring.resets.map { ", \($0)" } ?? "")")
     }
 }
 

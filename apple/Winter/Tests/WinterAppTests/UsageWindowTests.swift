@@ -139,6 +139,14 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 9.48, accuracy: 0.01)
     }
 
+    func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
+        XCTAssertEqual(UsagePlanLine.percents(0.344).used, 34)
+        XCTAssertEqual(UsagePlanLine.percents(0.344).left, 66)
+        XCTAssertEqual(UsagePlanLine.percents(0.995).used + UsagePlanLine.percents(0.995).left, 100)
+        XCTAssertEqual(UsagePlanLine.percents(-0.2).used, 0)
+        XCTAssertEqual(UsagePlanLine.percents(1.4).left, 0)
+    }
+
     func testResetWordsCountDownAShortWindowAndDateALongOne() {
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(identifier: "UTC")!
