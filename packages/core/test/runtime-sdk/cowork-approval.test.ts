@@ -260,6 +260,15 @@ test("a card is the existing approval_requested: it names the workspace, source 
   expect((again.events[0] as { summary: string }).summary).toContain("agent main"); again.approvals.resolve(SESSION, "tu1", false, "mac"); await p;
 });
 
+test("a Bash card offers Allow and Deny only - Code's rule-bearing options would write a saved rule that is never host authority in Cowork", async () => {
+  const h = build(state("ask"), { turnOrigin: () => "mac" });
+  const pending = h.canUse("Bash", { command: "git push origin main" }, ctx()); await tick();
+  const requested = h.events.find(e => e.type === "approval_requested") as { options?: unknown; summary: string };
+  expect(requested.options).toBeUndefined(); expect(requested.summary).toContain("bash git push origin main");
+  h.approvals.resolve(SESSION, "tu1", true, "mac", "allow_global_0");
+  expect(await pending).toMatchObject({ behavior: "allow", decisionClassification: "user_temporary" });
+});
+
 test("a human denial of a Cowork card interrupts like Code's; nobody answering is a machine outcome", async () => {
   const h = build(state("ask"));
   const pending = h.canUse(...WRITE, ctx()); await tick();
