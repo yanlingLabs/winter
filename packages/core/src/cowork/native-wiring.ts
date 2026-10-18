@@ -6,7 +6,7 @@ import type { RuntimeStateDb } from "../runtime-state/db";
 import { CoworkVolumes } from "./volumes";
 import type { CoworkVolumeBackup } from "./volume-backup";
 import { CoworkNativeAuthority } from "./native/authority";
-import { CoworkNativeHost, type CoworkLauncherPort, type CoworkNativeHostDeps, type CoworkNativeImagePins } from "./native/host";
+import { CoworkNativeHost, type CoworkLauncherPort, type CoworkNativeHostDeps, type CoworkNativeImagePins, type CoworkNativeRunning, type CoworkNativeStartRequest } from "./native/host";
 import { CoworkNativePower } from "./native/power";
 import { COWORK_NATIVE_LIMITS, coworkNativeHostStopWaitMs } from "./native/protocol";
 import { CoworkNativeReceiptKeyStore, type CoworkNativeReceiptKey, type CoworkNativeSecretSlot } from "./native/receipt-mac";
@@ -46,7 +46,14 @@ export interface CoworkNativeEnvironment {
   /** The launcher's retained receipts, the owner-recover input and its guards, and the durable launch journal. Absent means refuse: recovery then keeps ownership. */
   readonly receipts?: CoworkNativeDurableReceiptPort;
   readonly ownerRecover?: CoworkNativeOwnerRecoverPort;
-  readonly guards?: CoworkNativeRecoverGuards;
+  /** The two guard probes, or a factory that receives the volumes object the wiring builds (the process probe needs to know whether any volume still names an owner). */
+  readonly guards?: CoworkNativeRecoverGuards | ((context: { readonly volumes: Pick<CoworkVolumes, "records"> }) => CoworkNativeRecoverGuards);
+  /** Called once, right after the host is built, so an environment can reach the host (the pressure guard halts writers by stopping guests). */
+  readonly bindHost?: (host: { activeWorkspaces(): string[]; stop(workspaceId: string, reason: "shutdown"): Promise<{ readonly released: boolean }> }) => void;
+  /** Awaited before every start (a fresh disk-pressure sample, timers started). Failing refuses the start. */
+  readonly prepareStart?: () => Promise<void>;
+  /** Called at shutdown, after the guests were drained: timers stopped, the ledger closed. */
+  readonly close?: () => void;
   readonly journal?: CoworkNativeLaunchJournalPort;
   /** Timers, clocks, checkpoints and the conversation source: everything of the host's own that is not one of the structural ports above. */
   readonly hostOptions?: Partial<Omit<CoworkNativeHostDeps, "records" | "volumes" | "admission" | "authority" | "power" | "recovery" | "registry" | "hostBoot" | "launcher" | "images" | "journal" | "daemon">>;
@@ -61,6 +68,9 @@ export interface CoworkNativeWiringOptions {
    * and read (never created) at boot. Absent: no key exists, so a start refuses (`no_receipt_key`) and every retained receipt is Class B. Never touched until a start or a boot scan that
    * has something to settle asks for it, and never without an environment. */
   readonly secrets?: CoworkNativeSecretSlot;
+  /** How long a Keychain read for the receipt key may take before it counts as "no key" (boot) or refuses the start. A JS timer cannot interrupt a call that blocks the
+   * main thread; it bounds a promise that never settles (a prompt waiting for a person, a locked Keychain) and nothing else. Default 5000. */
+  readonly keyReadTimeoutMs?: number;
   /** Test seam that can only SHORTEN the shutdown bound below the contract's host wait; it can never lengthen it. */
   readonly shutdownBoundMs?: number;
 }
@@ -101,6 +111,7 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
   private readonly starting = new Set<Promise<unknown>>();
   private drainBudgetMs: number = COWORK_NATIVE_LIMITS.drainBudgetMs;
   private receiptKey: CoworkNativeReceiptKey | null = null;
+  private environmentInstance: CoworkNativeEnvironment | undefined;
   private readonly keys: CoworkNativeReceiptKeyStore | undefined;
   constructor(private readonly options: CoworkNativeWiringOptions) { this.keys = options.secrets ? new CoworkNativeReceiptKeyStore(options.secrets) : undefined; }
 
@@ -114,30 +125,41 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
     if (!make) throw new CoworkNativeUnavailableError("native_unavailable");
     let environment: CoworkNativeEnvironment;
     try { environment = make(); } catch { throw new CoworkNativeUnavailableError("native_unavailable"); }
+    this.environmentInstance = environment;
     const { db, records, home } = this.options;
     const registry = new CoworkNativeStopRegistry();
     const authority = new CoworkNativeAuthority({ records, hostBoot: environment.hostBoot, registry });
     const volumes = new CoworkVolumes(db, home, authority.volumes, environment.backup, undefined, authority.filesystem);
     const power = new CoworkNativePower(db);
     const recovery = new CoworkNativeRecovery({ records, volumes, admission: environment.admission, power, registry, hostBoot: environment.hostBoot, receiptKey: () => this.receiptKey,
-      receipts: environment.receipts, ownerRecover: environment.ownerRecover, guards: environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
+      receipts: environment.receipts, ownerRecover: environment.ownerRecover, guards: typeof environment.guards === "function" ? environment.guards({ volumes }) : environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
     const images = bindCoworkImagePins(this.options.imagePins ?? readOnlyImagePins(db));
     this.drainBudgetMs = environment.hostOptions?.timeouts?.drainBudgetMs ?? COWORK_NATIVE_LIMITS.drainBudgetMs;
     this.hostInstance = new CoworkNativeHost({ ...environment.hostOptions, records, volumes, admission: environment.admission, authority, power, recovery, registry, hostBoot: environment.hostBoot,
       launcher: environment.launcher, images, receiptKey: () => this.receiptKey, journal: environment.journal, daemon: environment.daemon });
+    try { environment.bindHost?.({ activeWorkspaces: () => this.hostInstance!.activeWorkspaces(), stop: (workspaceId, reason) => this.hostInstance!.stop(workspaceId, reason) }); } catch { /* an environment that cannot bind has no pressure halt; the guard then reports unconfirmed */ }
     return this.hostInstance;
   }
 
+  /** The Keychain bound: the promise's own value, or `expired` after the bound. A late settlement is dropped by the caller never reading it, and the timer is always cleared. */
+  private async withinSecretBound<T>(work: Promise<T>, expired: T | Error): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<T | Error>(resolve => { timer = setTimeout(() => resolve(expired), this.options.keyReadTimeoutMs ?? 5_000); timer.unref?.(); });
+    try { const value = await Promise.race([work, bound]); if (value instanceof Error && value === expired) throw value; return value as T; }
+    finally { if (timer) clearTimeout(timer); }
+  }
+
   /** The service's door. Refused once shutdown began. */
-  async start(workspaceId: string): Promise<unknown> {
+  async start(workspaceId: string, request?: CoworkNativeStartRequest): Promise<CoworkNativeRunning> {
     if (this.closing) throw new CoworkNativeUnavailableError("native_closing");
     const host = this.host();
+    try { await this.environmentInstance?.prepareStart?.(); } catch { throw new CoworkNativeUnavailableError("native_unavailable"); }
     if (this.keys && this.receiptKey === null) {
-      // Created on first need. A Keychain that cannot be read or written refuses the start; nothing has moved yet.
-      try { this.receiptKey = await this.keys.ensure(); } catch { throw new CoworkNativeUnavailableError("receipt_key_unavailable"); }
+      // Created on first need. A Keychain that cannot be read or written, or does not answer in time, refuses the start; nothing has moved yet.
+      try { this.receiptKey = await this.withinSecretBound(this.keys.ensure(), new Error("keychain_timeout")); } catch { throw new CoworkNativeUnavailableError("receipt_key_unavailable"); }
     }
     if (this.closing) throw new CoworkNativeUnavailableError("native_closing");
-    const started = host.start(workspaceId);
+    const started = host.start(workspaceId, request);
     this.starting.add(started);
     try { return await started; } finally { this.starting.delete(started); }
   }
@@ -165,7 +187,8 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
     try {
       const host = this.host();
       // Read only: boot never creates the key. No key (missing, unreadable, malformed) leaves every retained receipt Class B.
-      if (this.keys && this.receiptKey === null) this.receiptKey = await this.keys.read();
+      // Bounded: an expiry means "no key", exactly like a missing one, so a locked Keychain or an access prompt cannot stall the daemon's start.
+      if (this.keys && this.receiptKey === null) this.receiptKey = await this.withinSecretBound(this.keys.read(), null);
       return { source: "host", reports: host.bootReconcile() };
     }
     catch (error) {
@@ -181,7 +204,7 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
   beginShutdown(): Promise<void> | undefined {
     this.closing = true;
     const host = this.hostInstance;
-    if (!host || (host.activeWorkspaces().length === 0 && this.starting.size === 0)) return undefined;
+    if (!host || (host.activeWorkspaces().length === 0 && this.starting.size === 0)) { this.closeEnvironment(); return undefined; }
     const bound = Math.min(coworkNativeHostStopWaitMs(this.drainBudgetMs), this.options.shutdownBoundMs ?? Number.POSITIVE_INFINITY);
     const work = (async () => {
       await Promise.allSettled([...this.starting]);
@@ -189,8 +212,9 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
     })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<void>(resolve => { timer = setTimeout(resolve, bound); timer.unref?.(); });
-    return Promise.race([work, expired]).then(() => undefined, () => undefined).finally(() => { if (timer) clearTimeout(timer); });
+    return Promise.race([work, expired]).then(() => undefined, () => undefined).finally(() => { if (timer) clearTimeout(timer); this.closeEnvironment(); });
   }
+  private closeEnvironment(): void { try { this.environmentInstance?.close?.(); } catch { /* closing is best effort */ } }
   /** Diagnostics and tests. */
   activeWorkspaces(): string[] { return this.hostInstance?.activeWorkspaces() ?? []; }
 }

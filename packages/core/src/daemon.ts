@@ -1,5 +1,6 @@
 import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents } from "./cowork/workspace-events";
 import { createMacCoworkHost } from "./cowork/mac-host";
+import { coworkNativeProductionEnvironment } from "./cowork/native-activation";
 import { createCoworkNativeWiring, type CoworkNativeWiring, type CoworkNativeWiringOptions } from "./cowork/native-wiring";
 import { CoworkRepository } from "./cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
@@ -3025,9 +3026,11 @@ export async function startDaemon(opts: {
   // N2 S7: the native worker host's wiring. INERT: building it builds no host, process, socket, timer or file (the host appears on the
   // first start a caller asks for, from an injected environment that production never has). The Cowork service gets it as its
   // `native` port only when a caller injected an environment, so the production service refuses exactly as before.
+  // The production environment comes ONLY through the activation seam (cowork/native-activation.ts), which answers undefined until the owner flips it.
+  const nativeEnvironment = opts.coworkNative?.environment ?? (runtime ? coworkNativeProductionEnvironment(() => ({ home: winterHome, db: runtime.db, records: coworkRecords!, env: process.env })) : undefined);
   const coworkNative: CoworkNativeWiring | undefined = runtime
-    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative }) : undefined;
-  const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;
+    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative, ...(nativeEnvironment ? { environment: nativeEnvironment } : {}) }) : undefined;
+  const coworkNativePort = nativeEnvironment ? coworkNative : undefined;
   const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
   const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
   coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;

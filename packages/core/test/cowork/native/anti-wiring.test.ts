@@ -19,6 +19,11 @@ const everyNativeSource = sourceFiles(nativeDirectory);
 const nativeSources = everyNativeSource.filter(file => !OTHER_SLICES.includes(basename(file, ".ts")));
 // N2 S7: the ONE module outside cowork/native/ that may import it. It is lazy and inert; the daemon is its only importer. Both facts are pinned below.
 const WIRING = join(packages, "core", "src", "cowork", "native-wiring.ts");
+// N2 S7B part 1: the production environment builder (src/cowork/host-env/*) is the second module family that may import cowork/native. It is built only through
+// the activation seam (src/cowork/native-activation.ts), which the daemon calls lazily and which answers `undefined` until the owner flips it; both are pinned below.
+const HOST_ENV_DIRECTORY = join(packages, "core", "src", "cowork", "host-env") + sep;
+const ACTIVATION = join(packages, "core", "src", "cowork", "native-activation.ts");
+const isHostEnv = (file: string): boolean => file.startsWith(HOST_ENV_DIRECTORY);
 const scriptSources = existsSync(join(repositoryRoot, "scripts")) ? sourceFiles(join(repositoryRoot, "scripts")) : [];
 
 /** Every module specifier a source text names: static imports and re-exports (any form, multi-line included), bare `import "x"`, `import("x")`,
@@ -67,15 +72,16 @@ test("the module set is exactly the reviewed one and has no barrel", () => {
 test("no source file outside cowork/native imports, names or constructs anything from it", () => {
   const needles = ["cowork/native", "CoworkNativeHost", "CoworkNativeAuthority", "CoworkNativeRecovery", "CoworkNativePower", "CoworkNativeStopRegistry", "CoworkLauncherPort", "CoworkLauncherSession", "CoworkNativeImagePins",
     "CoworkNativeDurableReceiptPort", "CoworkNativeOwnerRecoverPort", "parseCoworkNativeLauncherLine", "parseCoworkNativeEnvelope", "parseCoworkNativeMuxFrame", "FdLineChannel", "FdReceiver", "spawnWithChannel", "COWORK_LIBKRUN_"];
-  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING)) {
-    const text = readFileSync(file, "utf8").split("cowork/native-wiring").join("");
+  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING && !isHostEnv(candidate))) {
+    const text = readFileSync(file, "utf8").split("cowork/native-wiring").join("").split("cowork/native-activation").join("");
     for (const needle of needles) expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
   }
 });
 
 test("none of the ports they declare is implemented anywhere in src/", () => {
   const ports = ["CoworkLauncherPort", "CoworkLauncherSession", "CoworkNativeImagePins", "CoworkNativeDurableReceiptPort", "CoworkNativeOwnerRecoverPort", "CoworkNativeRecoverGuards", "CoworkNativeHostBoot", "CoworkNativeLink"];
-  for (const file of allSources) {
+  // The production environment (host-env/) is where the launcher port, the receipt store and the journal are implemented; the wiring binds the image pins. Both are exempt for their own ports only.
+  for (const file of allSources.filter(candidate => !isHostEnv(candidate) && candidate !== WIRING)) {
     const text = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
     for (const port of ports) {
       expect(`${basename(file)}:${port}:${new RegExp(`implements[^{]*\\b${port}\\b|:\\s*${port}\\s*=\\s*\\{|class\\s+\\w+[^{]*\\b${port}\\b|as\\s+${port}\\b`).test(text)}`).toBe(`${basename(file)}:${port}:false`);
@@ -121,7 +127,7 @@ test("no module under cowork/native reads anything at import time", () => {
 
 test("no file anywhere (every package's src, and scripts/) imports from cowork/native, however the specifier is written", () => {
   const offenders: string[] = [];
-  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING))
+  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING && !isHostEnv(candidate)))
     for (const specifier of specifiersOf(readFileSync(file, "utf8"))) if (reachesNative(file, specifier)) offenders.push(`${relative(repositoryRoot, file)} -> ${specifier}`);
   expect(offenders).toEqual([]);
   expect(scriptSources.length).toBeGreaterThan(5);
@@ -155,8 +161,13 @@ export function namesTheWiring(source: string): boolean {
 test("N2 S7: the wiring is the only importer of cowork/native, the daemon is the only importer of the wiring, and the wiring is lazy and reaches no process, socket, setting or environment", () => {
   const wiringText = readFileSync(WIRING, "utf8"), code = wiringText.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
   expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/host", "./native/power", "./native/protocol", "./native/receipt-mac", "./native/recovery", "./native/stop-proof"]);
-  const importers = [...allSources, ...scriptSources].filter(file => file !== WIRING && namesTheWiring(readFileSync(file, "utf8"))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
-  expect(importers).toEqual(["packages/core/src/daemon.ts"]);
+  const importers = [...allSources, ...scriptSources].filter(file => file !== WIRING && namesTheWiring(readFileSync(file, "utf8"))).map(file => relative(repositoryRoot, file).split(sep).join("/")).sort();
+  // the daemon imports the wiring; the host-env environment and the activation seam import only its TYPES
+  expect(importers).toEqual(["packages/core/src/cowork/host-env/environment.ts", "packages/core/src/cowork/native-activation.ts", "packages/core/src/daemon.ts"]);
+  for (const file of [join(HOST_ENV_DIRECTORY, "environment.ts"), ACTIVATION]) {
+    const typeOnlyImports = ts.createSourceFile("x.ts", readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true).statements.filter((statement): statement is ts.ImportDeclaration => ts.isImportDeclaration(statement) && /native-wiring/.test((statement.moduleSpecifier as ts.StringLiteral).text));
+    expect(typeOnlyImports.length > 0 && typeOnlyImports.every(statement => statement.importClause?.isTypeOnly === true)).toBe(true);
+  }
   for (const forbidden of ["Bun.spawn", "child_process", "Bun.connect(", "Bun.listen(", "node:net", "process.env", "Bun.secrets", "Keychain", "readFileSync", "writeFileSync", "mkdirSync", "setInterval", "dlopen(", "krun_", "Hypervisor", "sandbox_init", "pmset"])
     expect(`${forbidden}:${code.includes(forbidden)}`).toBe(`${forbidden}:false`);
   // Nothing is built or scheduled at import time or at construction: the host appears only inside the private `host()` builder.
@@ -247,4 +258,26 @@ test("the importer scanner folds concatenations and templates, and keeps a colla
   expect(namesTheWiring('const p = "native-" + prefix + "wir" + "ing"; import(p);')).toBe(false); // the documented limit: a run-time part defeats both nets
   expect(namesTheWiring("const q = `${a}native-wiring`;")).toBe(true);
   expect(namesTheWiring('import x from "./native-adapter";')).toBe(false);
+});
+
+test("N2 S7B part 1: the production environment is built only through the activation seam, and the seam is off", async () => {
+  // 1. only the seam imports the environment builder; only the daemon imports the seam
+  const hostEnvImporters = [...allSources, ...scriptSources].filter(file => !isHostEnv(file) && specifiersOf(readFileSync(file, "utf8")).some(specifier => /(^|\/)host-env(\/|$)/.test(specifier))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
+  expect(hostEnvImporters).toEqual(["packages/core/src/cowork/native-activation.ts"]);
+  const activationImporters = [...allSources, ...scriptSources].filter(file => file !== ACTIVATION && specifiersOf(readFileSync(file, "utf8")).some(specifier => /(^|\/)native-activation(\.ts|\.js)?$/.test(specifier))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
+  expect(activationImporters).toEqual(["packages/core/src/daemon.ts"]);
+  // 2. the daemon calls the seam lazily (a thunk), so nothing about the environment is read while it is off
+  expect(readFileSync(join(packages, "core", "src", "daemon.ts"), "utf8")).toContain("coworkNativeProductionEnvironment(() => ({");
+  // 3. the seam answers undefined, with the thunk never called
+  const { coworkNativeProductionEnvironment } = await import("../../../src/cowork/native-activation");
+  let called = 0;
+  expect(coworkNativeProductionEnvironment(() => { called += 1; throw new Error("must not be read"); })).toBeUndefined();
+  expect(called).toBe(0);
+  expect(readFileSync(ACTIVATION, "utf8")).toContain("const COWORK_NATIVE_ENVIRONMENT_ACTIVATED: boolean = false;");
+  // 4. the builder reads no environment variable and no real home directory by itself, and reaches no network, secret store, VM or sandbox
+  for (const file of sourceFiles(HOST_ENV_DIRECTORY.slice(0, -1))) {
+    const code = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    for (const forbidden of ["process.env", "homedir", "Bun.connect(", "Bun.listen(", "node:net", "node:http", "fetch(", "Bun.secrets", "Keychain", "child_process", "Bun.spawn(", "krun_", "Hypervisor", "sandbox_init", "pmset", "codesign"])
+      expect(`${basename(file)}:${forbidden}:${code.includes(forbidden)}`).toBe(`${basename(file)}:${forbidden}:false`);
+  }
 });
