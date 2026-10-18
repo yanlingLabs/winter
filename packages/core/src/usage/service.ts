@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { AGY_TIMEOUT_BACKOFF_MS, antigravityPlanFromCli } from "./antigravity";
-import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
+import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudeCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
 import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type AlarmProvider, type Subscription, type SyntheticRow, type UsageAlarm, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
@@ -273,7 +273,7 @@ export class UsageService {
   /** Set when `/usage` came back as something other than the local command: this rung is off until restart. */
   /** The passive rungs' last readings (rollout tails, `~/.claude.json`), re-read at most every `fallbackEveryMs`. */
   private rolloutCache: { at: number; reading?: PlanReading } | undefined;
-  private claudeFileCache: { stamp: string; reading?: PlanReading } | undefined;
+  private claudeFileCache: { stamp: string; reading?: PlanReading; multiple?: string } | undefined;
   /** Test seam: how many times `~/.claude.json` was parsed. */
   claudeFileParses = 0;
   private claudeFileOverCapLogged = false;
@@ -698,13 +698,14 @@ export class UsageService {
       })().finally(() => { this.claudeRun = undefined; });
       await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
     }
-    const plan = this.claudePlanName?.value;
+    // The plan's name from `auth status` ("max"), its size from `~/.claude.json` ("20x" → "max_20x", shown "Max 20x").
+    const file = this.deps.claudeJsonPath === undefined ? undefined : await this.claudeJsonFile(this.deps.claudeJsonPath);
+    const name = this.claudePlanName?.value;
+    const plan = name === undefined ? undefined : file?.multiple === undefined ? name : `${name}_${file.multiple}`;
     const named = (r: PlanReading): PlanReading => (plan === undefined || r.planType !== undefined ? r : { ...r, planType: plan });
     if (this.claudeCache?.reading !== undefined) return named(this.claudeCache.reading);
-    if (this.deps.claudeJsonPath !== undefined) {
-      const cached = await this.claudeJsonReading(this.deps.claudeJsonPath);
-      if (cached !== undefined) return named({ ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) });
-    }
+    const cached = file?.reading;
+    if (cached !== undefined) return named({ ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) });
     return { provider: "claude-code", source: "none", windows: [] };
   }
 
@@ -889,15 +890,16 @@ export class UsageService {
     }
   }
 
-  /** `~/.claude.json`'s plan cache: re-parsed only when the file's mtime or size changed; never read over the cap
-   *  (checked on the stat AND on the bytes actually read); the over-cap line is logged once per process. */
-  private async claudeJsonReading(path: string): Promise<PlanReading | undefined> {
+  /** `~/.claude.json`'s plan cache and the plan's size ("20x"): re-parsed only when the file's mtime or size changed;
+   *  never read over the cap (checked on the stat AND on the bytes actually read); the over-cap line is logged once per
+   *  process. */
+  private async claudeJsonFile(path: string): Promise<{ reading?: PlanReading; multiple?: string } | undefined> {
     let st: { mtimeMs: number; size: number };
     try { st = statSync(path); } catch { this.claudeFileCache = undefined; return undefined; }
     const stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
-    if (this.claudeFileCache?.stamp === stamp) return this.claudeFileCache.reading;
+    if (this.claudeFileCache?.stamp === stamp) return this.claudeFileCache;
     const cap = this.deps.claudeJsonMaxBytes ?? CLAUDE_JSON_MAX_BYTES;
-    const result = st.size > cap ? "over-cap" : await claudePlanFromCacheFile(path, this.now(), cap);
+    const result = st.size > cap ? "over-cap" : await claudeCacheFile(path, this.now(), cap);
     if (result === "over-cap") {
       this.claudeFileCache = { stamp };
       if (!this.claudeFileOverCapLogged) {
@@ -906,9 +908,9 @@ export class UsageService {
       }
       return undefined;
     }
-    this.claudeFileCache = { stamp, reading: result };
+    this.claudeFileCache = { stamp, ...(result ?? {}) };
     this.claudeFileParses++;
-    return result;
+    return this.claudeFileCache;
   }
 
   /**

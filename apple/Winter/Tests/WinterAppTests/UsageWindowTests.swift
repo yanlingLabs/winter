@@ -196,6 +196,21 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.2, compact: true).reset, .none)
     }
 
+    func testAPlanBadgeSpellsCodexsNamesAndAClaudePlansSize() {
+        XCTAssertEqual(UsagePresentation.planBadge("max_20x"), "Max 20x")
+        XCTAssertEqual(UsagePresentation.planBadge("max_5x"), "Max 5x")
+        XCTAssertEqual(UsagePresentation.planBadge("max"), "Max")
+        XCTAssertEqual(UsagePresentation.planBadge("prolite"), "Pro Lite")
+        XCTAssertEqual(UsagePresentation.planBadge("promax"), "Pro Max")
+        XCTAssertEqual(UsagePresentation.planBadge("pro"), "Pro")
+        XCTAssertEqual(UsagePresentation.planBadge("self_serve_business"), "Self Serve Business")
+    }
+
+    func testTheHeaderGrowsWithTheLines() {
+        XCTAssertEqual(UsagePlanSlotCard.headerScale(hovered: true), UsagePlanLine.titleScale(hovered: true))
+        XCTAssertEqual(UsagePlanSlotCard.headerScale(hovered: false), 1)
+    }
+
     func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
         XCTAssertEqual(UsagePlanLine.percents(0.344).used, 34)
         XCTAssertEqual(UsagePlanLine.percents(0.344).left, 66)

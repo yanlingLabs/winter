@@ -266,6 +266,18 @@ enum UsagePresentation {
         return "Resets \(f.string(from: reset)) at \(clock)"
     }
 
+    /// PURE: a plan's badge (user 2026-10-18) — Codex's own names spelled out ("prolite" → "Pro Lite", "promax" → "Pro
+    /// Max"), a plan with its size ("max_20x" → "Max 20x"), else its words capitalised ("plus" → "Plus").
+    static func planBadge(_ raw: String) -> String {
+        let spelled: [String: String] = ["prolite": "Pro Lite", "promax": "Pro Max"]
+        if let name = spelled[raw.lowercased()] { return name }
+        if let m = raw.range(of: #"_(\d{1,3})x$"#, options: .regularExpression) {
+            let name = String(raw[..<m.lowerBound])
+            return "\(planBadge(name)) \(raw[raw.index(after: m.lowerBound)...])"
+        }
+        return raw.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
     /// PURE: whether a plan gets a slot at all — not when its app is not on this Mac (user 2026-10-18). Before the
     /// first answer it shows ("Reading…").
     static func showsSlot(_ reading: UsagePlanReading?) -> Bool { reading?.source != "not-installed" }
@@ -314,7 +326,7 @@ enum UsagePresentation {
         var parts = [planSourceWords(reading.source)]
         if let at = reading.at { parts.append(islandRelativePast(Date(timeIntervalSince1970: at / 1000), now: now)) }
         if rings.contains(where: \.stale) { parts.append("stale") }
-        let planType = reading.planType.map { $0.replacingOccurrences(of: "_", with: " ").capitalized }
+        let planType = reading.planType.map(planBadge)
         if !rings.isEmpty {
             return UsagePlanSlot(id: provider, title: title, rings: rings, sourceLine: parts.joined(separator: " · "), emptyLine: nil, planType: planType)
         }
