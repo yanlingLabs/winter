@@ -288,6 +288,13 @@ extension WinterClient {
         return Self.decodeUsageAlarms(try await request("usage.alarms.set", params: .object(p))["alarms"])
     }
 
+    /// Acknowledges a fired alarm's notice (dismissed, opened, or shown its full time): the daemon forgets it. True when
+    /// this call removed it.
+    @discardableResult
+    public func usageAckAlarm(id: String) async throws -> Bool {
+        try await request("usage.alarms.ack", params: .object(["id": .string(id)]))["acked"]?.boolValue ?? false
+    }
+
     /// Removes an alarm; answers the whole list.
     public func usageRemoveAlarm(id: String) async throws -> [UsageAlarm] {
         Self.decodeUsageAlarms(try await request("usage.alarms.remove", params: .object(["id": .string(id)]))["alarms"])

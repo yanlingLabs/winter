@@ -12,10 +12,6 @@ import WinterKit
 //   - while the session's host is in front (its Winter window key/main, its exact terminal): dropped — the user sees it;
 //   - one first seen long after the turn ended (`maxAgeAtBirth`: the app just connected, a stale list): dropped.
 // The daemon publishes only turns that ended IDLE (a 1.5 s settle, no automated-loop turns, no card still waiting).
-//
-// A fired plan alarm's notification (`docs/claude/usage.md`) rides the same queue and slot: no session behind it, so it
-// is always on top (never hidden behind a host), born only when fresh, shown `alarmShowFor`; a click opens the island's
-// Usage tab.
 
 struct IslandResultQueue: Equatable {
     /// How long an unhovered result shows.
@@ -26,8 +22,6 @@ struct IslandResultQueue: Equatable {
     static let maxAgeAtBirth: TimeInterval = 60
     /// A result held while a card needing an answer owns the top is born when the top frees — within this long, else dropped.
     static let holdAtMost: TimeInterval = 30
-    /// A fired plan alarm's notification shows longer: it is news the user asked for, with nothing to open elsewhere.
-    static let alarmShowFor: TimeInterval = 12
 
     struct Entry: Equatable {
         let id: String
@@ -35,8 +29,6 @@ struct IslandResultQueue: Equatable {
         var dismissAt: TimeInterval?
         /// When it arrived (a held one is dropped `holdAtMost` after).
         let arrivedAt: TimeInterval
-        /// How long it shows unhovered once born.
-        var showFor: TimeInterval = IslandResultQueue.showFor
     }
 
     /// The result on top.
@@ -63,13 +55,13 @@ struct IslandResultQueue: Equatable {
     /// A result arrives. `busy`: a card needing an answer owns the top — it is held until that clears. A newer result
     /// replaces an older one (which never comes back). Returns false for one seen before.
     @discardableResult
-    mutating func arrive(_ id: String, busy: Bool, now: TimeInterval, showFor: TimeInterval = IslandResultQueue.showFor) -> Bool {
+    mutating func arrive(_ id: String, busy: Bool, now: TimeInterval) -> Bool {
         guard seen.insert(id).inserted else { return false }
         if busy {
-            held = Entry(id: id, dismissAt: nil, arrivedAt: now, showFor: showFor)
+            held = Entry(id: id, dismissAt: nil, arrivedAt: now)
             return true
         }
-        current = Entry(id: id, dismissAt: now + showFor, arrivedAt: now, showFor: showFor)
+        current = Entry(id: id, dismissAt: now + Self.showFor, arrivedAt: now)
         hovered = false
         return true
     }
@@ -78,13 +70,13 @@ struct IslandResultQueue: Equatable {
     /// the top (it goes back up); free bears the held one.
     mutating func setBusy(_ busy: Bool, now: TimeInterval) {
         if busy {
-            if let cur = current { held = Entry(id: cur.id, dismissAt: nil, arrivedAt: now, showFor: cur.showFor) }
+            if let cur = current { held = Entry(id: cur.id, dismissAt: nil, arrivedAt: now) }
             current = nil
             hovered = false
         } else if current == nil, let h = held {
             held = nil
             if now - h.arrivedAt <= Self.holdAtMost {
-                current = Entry(id: h.id, dismissAt: now + h.showFor, arrivedAt: h.arrivedAt, showFor: h.showFor)
+                current = Entry(id: h.id, dismissAt: now + Self.showFor, arrivedAt: h.arrivedAt)
             }
         }
     }
@@ -119,7 +111,6 @@ struct IslandResultQueue: Equatable {
 /// What the island's activity panel draws under the housing.
 enum IslandActivitySlot: Equatable {
     case none
-    /// A turn result, or a fired plan alarm's notification (one queue, `IslandResultQueue`).
     case result(String)
     /// The computer-use pill (`expanded`: as its mirror).
     case computerUse(sessionId: String, expanded: Bool)
