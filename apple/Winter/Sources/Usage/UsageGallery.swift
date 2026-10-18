@@ -22,7 +22,7 @@ enum UsageGallery {
     }
 
     static let sampleModels: [(UsageSource, String, String, Double, UsageTotals)] = [
-        (.claudeCode, "anthropic", "claude-opus-5-5", 0, UsageTotals(costUsd: 41.20, input: 82_000, output: 610_000, cacheRead: 38_000_000, cacheWrite: 1_900_000, cacheSavingsUsd: 68.4, records: 900)),
+        (.claudeCode, "anthropic", "claude-opus-5-5", 0, UsageTotals(costUsd: 41.20, input: 82_000, output: 610_000, cacheRead: 38_000_000, cacheWrite: 1_900_000, cacheSavingsUsd: 68.4, records: 900, syntheticRecords: 40)),
         (.codex, "openai", "gpt-6-sol", 0, UsageTotals(costUsd: 18.75, input: 2_400_000, output: 320_000, cacheRead: 9_100_000, reasoning: 120_000, cacheSavingsUsd: 16.4, records: 210)),
         (.winter, "codex-oauth", "codex-oauth/gpt-6-sol", 0, UsageTotals(costUsd: 6.10, input: 900_000, output: 80_000, cacheRead: 2_600_000, cacheSavingsUsd: 4.7, records: 64)),
         (.winter, "anthropic", "anthropic/claude-sonnet-5-5", 0, UsageTotals(costUsd: 3.42, input: 120_000, output: 40_000, cacheRead: 1_100_000, cacheWrite: 90_000, cacheSavingsUsd: 1.98, records: 31)),
@@ -61,7 +61,8 @@ enum UsageGallery {
         let plans = samplePlans(now: now)
         return UsageSummary(range: range.rawValue, from: series.from, to: series.to, bucketMs: series.bucketMs, totals: series.totals,
                             bySource: series.bySource, topModels: Array(series.models.prefix(5)), spark: series.buckets.map(\.costUsd),
-                            sparkTokens: series.buckets.map(\.tokens), codexPlan: plans.codex, claudeCodePlan: plans.claude)
+                            sparkTokens: series.buckets.map(\.tokens), codexPlan: plans.codex, claudeCodePlan: plans.claude,
+                            claudeCodeStatsBefore: (now.timeIntervalSince1970 - 30 * 86400) * 1000)
     }
 
     static func sampleSubscriptions(now: Date) -> [UsageSubscription] {

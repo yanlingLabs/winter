@@ -24,6 +24,14 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.basisMark("list"), "")
         XCTAssertEqual(UsagePresentation.basisMark("estimate"), "est.")
         XCTAssertEqual(UsagePresentation.basisMark("unknown"), "unpriced")
+        let fromStats = UsageModelRow(source: .claudeCode, provider: "anthropic", model: "m", costBasis: "estimate", totals: UsageTotals(records: 3, syntheticRecords: 2))
+        XCTAssertEqual(UsagePresentation.basisMark(fromStats), "est.*")
+        XCTAssertEqual(UsagePresentation.basisMark(UsageModelRow(source: .claudeCode, provider: "anthropic", model: "m", costBasis: "estimate", totals: UsageTotals(records: 3))), "est.")
+        // Noon UTC of 2026-10-01.
+        XCTAssertEqual(UsagePresentation.statsHistoryLine(before: 1_790_856_000_000)?.hasPrefix("History before "), true)
+        XCTAssertEqual(UsagePresentation.statsHistoryLine(before: 1_790_856_000_000)?.contains("2026"), true)
+        XCTAssertEqual(UsagePresentation.statsHistoryLine(before: 1_790_856_000_000)?.hasSuffix("from Claude Code’s /stats"), true)
+        XCTAssertNil(UsagePresentation.statsHistoryLine(before: nil))
     }
 
     // MARK: plans

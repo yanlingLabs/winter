@@ -213,9 +213,9 @@ export const CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024;
  * Claude Code runs). The file holds unrelated config (possibly MCP env secrets): it is parsed in memory and ONLY that
  * one key is read; nothing else of it is kept, logged or sent.
  */
-export async function claudePlanFromCacheFile(path: string, now: number, maxBytes = CLAUDE_JSON_MAX_BYTES): Promise<PlanReading | "over-cap" | undefined> {
-  // The cap is enforced on the bytes actually READ (at most cap + 1), whatever a stat said a moment before.
-  let text: string;
+/** A whole small file as text — the cap enforced on the bytes actually READ (at most cap + 1), whatever a stat said a
+ *  moment before. `undefined` = missing or unreadable. */
+export async function readCapped(path: string, maxBytes: number): Promise<string | "over-cap" | undefined> {
   try {
     const fh = await open(path, "r");
     try {
@@ -227,11 +227,17 @@ export async function claudePlanFromCacheFile(path: string, now: number, maxByte
         read += bytesRead;
       }
       if (read > maxBytes) return "over-cap";
-      text = buf.subarray(0, read).toString("utf8");
+      return buf.subarray(0, read).toString("utf8");
     } finally {
       await fh.close().catch(() => undefined);
     }
   } catch { return undefined; }
+}
+
+export async function claudePlanFromCacheFile(path: string, now: number, maxBytes = CLAUDE_JSON_MAX_BYTES): Promise<PlanReading | "over-cap" | undefined> {
+  const read = await readCapped(path, maxBytes);
+  if (read === undefined || read === "over-cap") return read;
+  let text = read;
   let cached: unknown;
   try { cached = (JSON.parse(text) as Record<string, unknown>).cachedUsageUtilization; } catch { return undefined; }
   text = "";
