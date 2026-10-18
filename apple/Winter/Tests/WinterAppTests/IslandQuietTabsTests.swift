@@ -9,6 +9,49 @@ import WinterKit
 final class IslandQuietTabsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    // MARK: Servers
+
+    func testAServersLineFillsOverItsFirstDayAndSaysItsUptimeAndPortsInside() {
+        XCTAssertEqual(IslandServers.uptimeFraction(since: now, now: now), 0)
+        XCTAssertEqual(IslandServers.uptimeFraction(since: now.addingTimeInterval(-6 * 3600), now: now), 0.25, accuracy: 0.0001)
+        XCTAssertEqual(IslandServers.uptimeFraction(since: now.addingTimeInterval(-3 * 86400), now: now), 1, "full from a day on")
+        XCTAssertEqual(IslandServers.uptimeFraction(since: now.addingTimeInterval(60), now: now), 0, "a clock skew is never negative")
+        XCTAssertEqual(IslandServers.lineWords(status: "up 3 h", ports: ":3000 :3001"),
+                       HoverLineWords(start: nil, atFill: "up 3 h", end: ":3000 :3001"))
+        XCTAssertNil(IslandServers.lineWords(status: "up 3 h", ports: "").end)
+    }
+
+    func testAServersLineWearsStopsPhaseAndItsWordsReadOnAmber() {
+        let t = now
+        XCTAssertEqual(IslandServers.lineColor(nil), islandToneColor(.ok))
+        XCTAssertEqual(IslandServers.lineColor(.confirming(at: t)), pillReviewAmber)
+        XCTAssertEqual(IslandServers.lineColor(.stopping(sentAt: t)), Color.white.opacity(0.3))
+        XCTAssertEqual(IslandServers.lineColor(.killing(sentAt: t)), Color.white.opacity(0.3))
+        XCTAssertEqual(IslandServers.lineColor(.forceOffered), Color(nsColor: .systemRed))
+        XCTAssertEqual(IslandServers.lineColor(.confirmingForce(at: t)), Color(nsColor: .systemRed))
+        XCTAssertEqual(IslandServers.inkOnFill(.confirming(at: t)), .black)
+        XCTAssertEqual(IslandServers.inkOnFill(nil), .white)
+    }
+
+    func testStopShowsUnderThePointerAndNeverHidesMidPhase() {
+        let t = now
+        for phase: IslandServerStopPhase in [.confirming(at: t), .stopping(sentAt: t), .forceOffered, .confirmingForce(at: t),
+                                             .killing(sentAt: t)] {
+            XCTAssertTrue(IslandQuietRow.showsActions(hovered: false, busy: true), "\(phase) stays on screen")
+        }
+        XCTAssertFalse(IslandQuietRow.showsActions(hovered: false, busy: false), "at rest: hidden")
+    }
+
+    func testABundleRowSaysItsCountAndFolderAtRestAndTheWholeFolderUnderThePointer() throws {
+        let model = IslandGallery.sampleServers(now: now)
+        let bundle = try XCTUnwrap(model.bundles.first { $0.isBundle })
+        XCTAssertEqual(IslandServers.bundleWords(bundle, hovered: false), "2 servers · Discord Waifus · @waifucave/discord-waifus")
+        XCTAssertEqual(IslandServers.bundleWords(bundle, hovered: true),
+                       "2 servers · ~/Code/Discord Waifus · @waifucave/discord-waifus")
+        let single = try XCTUnwrap(model.bundles.first { !$0.isBundle && $0.rows.first?.name == "http.server" })
+        XCTAssertEqual(IslandServers.bundleWords(single, hovered: false), "portfolio")
+    }
+
     // MARK: Watches
 
     private func watch(armedAt: Int, expiresAt: Int, title: String? = "List the extension") -> IslandWatchItem {
