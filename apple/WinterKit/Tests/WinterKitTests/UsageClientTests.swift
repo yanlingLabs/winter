@@ -35,6 +35,32 @@ final class UsageClientTests: XCTestCase {
         XCTAssertFalse(s.trackClaudeCode)
     }
 
+    func testTheAntigravityPlanOpenCodeAndTheirSwitchesDecode() throws {
+        let s = WinterClient.decodeUsageSummary(try json(#"""
+        {"range":"24h","totals":{},
+         "bySource":[{"source":"opencode","costUsd":0.37,"records":2}],
+         "topModels":[{"source":"opencode","provider":"nvidia","model":"nvidia/deepseek-ai/deepseek-v4-pro","costBasis":"reported","costUsd":0.37,"records":1}],
+         "plans":{"antigravity":{"provider":"antigravity","source":"agy-cli","at":1000,
+                                 "windows":[{"id":"gemini-5h","kind":"five_hour","windowMinutes":300,"usedPercent":27,"resetsAt":5000,"scope":"Gemini","stale":false}]}},
+         "tracking":{"codex":true,"claudeCode":true,"antigravity":false,"opencode":false},"installed":{"opencode":false}}
+        """#))
+        XCTAssertEqual(s.antigravityPlan?.source, "agy-cli")
+        XCTAssertEqual(s.antigravityPlan?.windows.first?.scope, "Gemini")
+        XCTAssertEqual(s.antigravityPlan?.windows.first?.usedPercent, 27)
+        XCTAssertEqual(s.trackAntigravity, false)
+        XCTAssertEqual(s.trackOpencode, false)
+        XCTAssertEqual(s.opencodeInstalled, false)
+        XCTAssertEqual(s.bySource[.opencode]?.costUsd, 0.37)
+        XCTAssertEqual(s.topModels.first?.source, .opencode)
+        XCTAssertEqual(s.topModels.first?.costBasis, "reported")
+        // An older daemon sends none of them: no switches, no plan, and no OpenCode source at all (nil, not "installed").
+        let old = WinterClient.decodeUsageSummary(try json(#"{"range":"24h","tracking":{"codex":true,"claudeCode":true}}"#))
+        XCTAssertNil(old.antigravityPlan)
+        XCTAssertNil(old.trackAntigravity, "an older daemon has no such switch")
+        XCTAssertNil(old.trackOpencode)
+        XCTAssertNil(old.opencodeInstalled)
+    }
+
     func testClaudeCodeStatsHistoryDecodes() throws {
         let s = WinterClient.decodeUsageSummary(try json(#"""
         {"range":"all","totals":{"records":3,"syntheticRecords":2},"history":{"claudeCodeStats":{"from":100,"before":200}},

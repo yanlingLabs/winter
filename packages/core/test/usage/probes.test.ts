@@ -22,7 +22,7 @@ function service(over: Partial<UsageServiceDeps> & { db?: UsageDb; home?: string
   const db = over.db ?? new UsageDb(join(home, "usage", "usage.db"));
   const logs: string[] = [];
   const svc = new UsageService({
-    db, pricer, tracking: () => ({ codex: true, claudeCode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
+    db, pricer, tracking: () => ({ codex: true, claudeCode: true, antigravity: true, opencode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
     winterCodexWindows: () => [], probeRoot: () => probeRootIn(home), ingestEveryMs: 0, planWaitMs: 20_000,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,

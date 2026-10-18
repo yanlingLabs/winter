@@ -3532,6 +3532,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               ...settings.usage,
               ...(p.codex === undefined ? {} : { codex: { ...settings.usage?.codex, enabled: p.codex } }),
               ...(p.claudeCode === undefined ? {} : { claudeCode: { ...settings.usage?.claudeCode, enabled: p.claudeCode } }),
+              ...(p.antigravity === undefined ? {} : { antigravity: { ...settings.usage?.antigravity, enabled: p.antigravity } }),
+              ...(p.opencode === undefined ? {} : { opencode: { ...settings.usage?.opencode, enabled: p.opencode } }),
             },
           };
           saveSettings(settingsPath, next);

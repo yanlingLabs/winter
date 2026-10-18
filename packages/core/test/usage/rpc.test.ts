@@ -70,7 +70,7 @@ describe("usage.* over the socket", () => {
     const tokens = await authority.ensureTokens();
     const db = new UsageDb(join(home, "usage", "usage.db"));
     const usage = new UsageService({
-      db, pricer: new UsagePricer(), tracking: () => ({ codex: true, claudeCode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
+      db, pricer: new UsagePricer(), tracking: () => ({ codex: true, claudeCode: true, antigravity: true, opencode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
       winterCodexWindows: () => [], probeRoot: () => probeRootIn(home),
     });
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub, usage, winterHome: home });
@@ -122,10 +122,10 @@ describe("usage.* over the socket", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({ legacy: { readLegacyProjectFiles: false } }));
     const app = await TestClient.connect(socketPath);
     await app.hello(tokens.harness, "orb");
-    const r = (await app.request(METHODS.usageSetTracking, { claudeCode: false })).result;
-    expect(r.tracking).toEqual({ codex: true, claudeCode: false });
+    const r = (await app.request(METHODS.usageSetTracking, { claudeCode: false, antigravity: false, opencode: false })).result;
+    expect(r.tracking).toEqual({ codex: true, claudeCode: false, antigravity: false, opencode: false });
     const saved = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
-    expect(saved.usage).toEqual({ claudeCode: { enabled: false } });
+    expect(saved.usage).toEqual({ claudeCode: { enabled: false }, antigravity: { enabled: false }, opencode: { enabled: false } });
     expect(saved.legacy).toEqual({ readLegacyProjectFiles: false });
     app.close();
   });

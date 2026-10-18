@@ -600,19 +600,20 @@ export const IslandUsageWindowSchema = z.object({
 });
 /** Usage and cost tracking (`docs/claude/usage.md`) — HARNESS role only, local clients; never remote, never plugins.
  *  `range`: last hour, 24 h, 7 days, 30 days, all time. `sources`: Winter's own sessions, the user's Codex CLI/app,
- *  the user's Claude Code (default all three). Costs are USD; `costBasis` says whether a figure is the runtime's own
- *  list price, Winter's list-price estimate (a subscription's tokens, another app's usage) or unknown. */
+ *  the user's Claude Code and OpenCode (default all four). Costs are USD; `costBasis` says whether a figure is the
+ *  runtime's own list price, Winter's list-price estimate (a subscription's tokens, another app's usage), the other
+ *  app's own figure (`reported`, OpenCode) or unknown. */
 export const UsageRangeSchema = z.enum(["1h", "24h", "7d", "30d", "all"]);
-export const UsageSourceSchema = z.enum(["winter", "codex", "claude-code"]);
+export const UsageSourceSchema = z.enum(["winter", "codex", "claude-code", "opencode"]);
 export const UsageSummaryParams = z.object({
   range: UsageRangeSchema.default("24h"),
-  sources: z.array(UsageSourceSchema).max(3).optional(),
+  sources: z.array(UsageSourceSchema).max(4).optional(),
   /** Read the plans too (default true). */
   plans: z.boolean().optional(),
 });
 export const UsageSeriesParams = z.object({
   range: UsageRangeSchema.default("7d"),
-  sources: z.array(UsageSourceSchema).max(3).optional(),
+  sources: z.array(UsageSourceSchema).max(4).optional(),
 });
 export const UsageSubscriptionInput = z.object({
   id: z.string().min(1).max(64).optional(),
@@ -623,11 +624,13 @@ export const UsageSubscriptionInput = z.object({
   cadence: z.enum(["monthly", "yearly"]),
   renewalDay: z.number().int().min(1).max(31),
   renewalMonth: z.number().int().min(1).max(12).optional(),
-  covers: z.array(z.string().regex(/^(codex|claude-code|winter|winter:[a-z0-9-]{1,40})$/)).max(8).default([]),
+  covers: z.array(z.string().regex(/^(codex|claude-code|opencode|winter|winter:[a-z0-9-]{1,40})$/)).max(8).default([]),
 });
 export const UsageSubscriptionsSetParams = z.object({ subscription: UsageSubscriptionInput });
 /** Writes `settings.usage.<app>.enabled` (live: the next ask honours it, no restart). */
-export const UsageSetTrackingParams = z.object({ codex: z.boolean().optional(), claudeCode: z.boolean().optional() });
+export const UsageSetTrackingParams = z.object({
+  codex: z.boolean().optional(), claudeCode: z.boolean().optional(), antigravity: z.boolean().optional(), opencode: z.boolean().optional(),
+});
 export const UsageSubscriptionsRemoveParams = z.object({ id: z.string().min(1).max(64) });
 
 /** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the

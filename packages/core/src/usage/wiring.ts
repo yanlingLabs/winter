@@ -12,8 +12,9 @@ import { resolveExecutable } from "./spawn-lines";
 //  - Codex: `$WINTER_USAGE_CODEX_HOME` (tests) → `$CODEX_HOME` → `~/.codex`;
 //  - Claude Code: `$WINTER_USAGE_CLAUDE_HOME` (tests) → `$CLAUDE_CONFIG_DIR` → `~/.claude`, and its `.claude.json`
 //    (`$WINTER_USAGE_CLAUDE_JSON` → `$CLAUDE_CONFIG_DIR/.claude.json` → `~/.claude.json`);
-//  - the executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` (authoritative: a missing
-//    path or "off" means none) → `$PATH` → the usual install places.
+//  - the executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` /
+//    `$WINTER_USAGE_AGY_EXECUTABLE` / `$WINTER_USAGE_OPENCODE_EXECUTABLE` (authoritative: a missing path or "off" means none) → the usual install places
+//    → `$PATH`.
 // Both test preloads point every `WINTER_USAGE_*` at nothing, so no test daemon ever reads or spawns the real ones.
 
 export interface UsageInjection {
@@ -22,6 +23,8 @@ export interface UsageInjection {
   claudeJsonPath?: string | null;
   codexExecutable?: string | null;
   claudeExecutable?: string | null;
+  agyExecutable?: string | null;
+  opencodeExecutable?: string | null;
   now?: () => number;
   /** The background catch-up: false = off (tests); its timings. */
   catchUp?: boolean;
@@ -37,6 +40,15 @@ export const CODEX_INSTALLS = [
 export const CLAUDE_INSTALLS = [
   "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(homedir(), ".local/bin/claude"), join(homedir(), ".claude/local/claude"),
   join(homedir(), ".npm-global/bin/claude"),
+];
+/** Antigravity's CLI (Homebrew installs it as `agy`). */
+export const AGY_INSTALLS = [
+  "/opt/homebrew/bin/agy", "/usr/local/bin/agy", join(homedir(), ".local/bin/agy"), join(homedir(), ".npm-global/bin/agy"),
+];
+/** OpenCode (Homebrew, its own install script's `~/.opencode/bin`, npm). */
+export const OPENCODE_INSTALLS = [
+  "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode", join(homedir(), ".opencode/bin/opencode"), join(homedir(), ".local/bin/opencode"),
+  join(homedir(), ".npm-global/bin/opencode"),
 ];
 
 /** The JS package managers' global bins (bun, volta, pnpm, every nvm node): a CLI installed through one of them is
@@ -88,6 +100,8 @@ export function createUsageService(opts: {
     ...(claudeJsonPath === undefined ? {} : { claudeJsonPath }),
     codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...CODEX_INSTALLS, ...packageManagerBins("codex")]),
     claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...CLAUDE_INSTALLS, ...packageManagerBins("claude")]),
+    agyExecutable: () => resolveExecutable("agy", explicit(inj.agyExecutable, env.WINTER_USAGE_AGY_EXECUTABLE), [...AGY_INSTALLS, ...packageManagerBins("agy")]),
+    opencodeExecutable: () => resolveExecutable("opencode", explicit(inj.opencodeExecutable, env.WINTER_USAGE_OPENCODE_EXECUTABLE), [...OPENCODE_INSTALLS, ...packageManagerBins("opencode")]),
     winterCodexWindows: () => (opts.islandUsage?.windowsFor("codex-oauth") ?? []).map((w) => ({
       ...(w.rateLimitType === undefined ? {} : { rateLimitType: w.rateLimitType }), status: w.status,
       ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: w.at,
