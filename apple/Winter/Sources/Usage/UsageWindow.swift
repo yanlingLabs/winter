@@ -490,6 +490,9 @@ struct UsagePlanSlotCard: View {
     var alarms: [UsageAlarm] = []
     var alarmActions: UsageAlarmActions? = nil
     @State private var localHover = false
+    /// What the card shows: the pointer's state, set INSIDE an animation transaction so the card's growth moves the
+    /// cards below it smoothly too (user 2026-10-18: the push down and back up glides, it never jumps).
+    @State private var shown = false
 
     /// The header's grow under the pointer — the lines' title grow (user 2026-10-18: the app's name and its plan grow
     /// too, keeping their distance from the lines: it grows from its bottom edge and the card takes the height).
@@ -499,7 +502,10 @@ struct UsagePlanSlotCard: View {
         // The pointer over ANY part of a plan — its header or a line — opens all of it: the island's own pointer (its
         // panels are never key), or the window's hover.
         IslandPointerReader { islandHovered in
-            card(hovered: islandHovered || localHover)
+            card(hovered: shown)
+                .onChange(of: islandHovered || localHover) { _, hovered in
+                    withAnimation(HoverGrowth.animation) { shown = hovered }
+                }
         }
         .onHover { localHover = $0 }
     }

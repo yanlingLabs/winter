@@ -293,11 +293,12 @@ enum IslandGallery {
                                servers: sampleServers(now: now))
     }
 
-    /// Servers: a node bot with a worker, a Python module, a Bun app — from a made-up process list (never a scan).
+    /// Servers: two servers of one npm package (a bundle), a Python module, a Bun app — from a made-up process list (never
+    /// a scan, never a probe).
     static func sampleServers(now: Date) -> IslandServersModel {
         let start = { (ago: TimeInterval) in UInt64(now.timeIntervalSince1970 - ago) }
         let home = "/Users/sample"
-        // The bot and its worker share a process group (one row); the others each have their own.
+        // Each in a process group of its own; the two waifus servers are one project (one bundle row).
         func process(_ pid: Int32, parent: Int32 = 1, group: Int32, ago: TimeInterval, path: String, args: [String]? = nil,
                      cwd: String, tcp: [UInt16]) -> ServerProcess {
             ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
@@ -308,9 +309,11 @@ enum IslandGallery {
         model.ownPid = 0
         model.home = home
         model.apply([
-            process(400, group: 400, ago: 3 * 3600 + 12 * 60, path: "/opt/homebrew/bin/node", args: ["node", "bot.js", "remote"],
+            process(400, group: 400, ago: 3 * 3600 + 12 * 60, path: "/opt/homebrew/bin/node",
+                    args: ["node", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs", "remote"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [3888]),
-            process(401, parent: 400, group: 400, ago: 3 * 3600, path: "/opt/homebrew/bin/node", args: ["node", "worker.js"],
+            process(401, group: 401, ago: 3 * 3600, path: "/opt/homebrew/bin/node",
+                    args: ["node", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs", "start"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [61010]),
             process(410, group: 410, ago: 25 * 60, path: "/usr/bin/python3", args: ["python3", "-m", "http.server", "8000"],
                     cwd: "\(home)/Sites/portfolio", tcp: [8000]),
