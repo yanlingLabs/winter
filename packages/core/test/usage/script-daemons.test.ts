@@ -6,7 +6,10 @@
 //     `background: false` and every root and executable to null / "off" (`usage: undefined` does not pass);
 //   - a spawn that boots a daemon (`daemon run`, the cu-live daemon binary, a compiled probe route that boots one, a
 //     `bun` probe file) passes an `env` that carries `USAGE_INERT_ENV` — in the call, or in the definition of the
-//     variable or function it names (and any `Object.assign` onto it before the call).
+//     variable or function it names (and any `Object.assign` onto it before the call);
+//   - STRUCTURALLY, whatever the spawn's shape: every file under `scripts/` whose code names the daemon (`winter-core`,
+//     `startDaemon`, `daemon run`) carries `USAGE_INERT_ENV` / `USAGE_INERT` / a `background: false` injection, or is
+//     listed in `NO_DAEMON_OF_ITS_OWN` with its reason (no stale entries).
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -29,7 +32,47 @@ const NOT_A_DAEMON = [
   /["']__(?:helper-call|helper-freshness|peer-hello)["']/,
   /^\(\s*\[?\s*["'](?:grep|codesign|strings|otool|nm|file|pgrep)["']/,
 ];
-const SPAWN_CALL =/\b(?:Bun\.spawnSync|Bun\.spawn|spawnSync|spawn|execFileSync|execFile|runChild)\(/g;
+const SPAWN_CALL = /\b(?:Bun\.spawnSync|Bun\.spawn|spawnSync|spawn|execFileSync|execFile|runChild)\(/g;
+
+/** The structural rule's subject: a script that names the daemon binary (`winter-core`, `winter-core-live`, a
+ *  `dist/dev/winter-core`, never the `@yanlinglabs/winter-core` package), `startDaemon` or `daemon run`… */
+const NAMES_A_DAEMON = /(?<!@yanlinglabs\/)\bwinter-core\b|\bstartDaemon\b|\bdaemon run\b|["']daemon["']\s*,\s*["']run["']/;
+/** …carries the usage-inert switch somewhere in its code (not a comment)… */
+const CARRIES_INERT = /\bUSAGE_INERT_ENV\b|\bUSAGE_INERT\b|\busage\s*:\s*\{[^}]*\bbackground\s*:\s*false\b/;
+/** …or is one of these, each for its reason. A NEW script naming the daemon fails until it is one or the other, so a
+ *  spawn shape the call scan below does not know is still caught. */
+const NO_DAEMON_OF_ITS_OWN: Record<string, string> = {
+  "scripts/dev-daemon.ts": "the developer's own dev daemon — real, on purpose",
+  "scripts/dev-daemon-lib.ts": "the dev daemon's helpers (paths, signing, the transition)",
+  "scripts/dev-daemon.test.ts": "tests the dev daemon's helpers; boots none",
+  "scripts/computer-helper-lib.ts": "names the daemon's code-signing identities for the helper's allowlist",
+  "scripts/cu-live/build.ts": "compiles and signs winter-core-live; runs it never",
+  "scripts/verify-automation-worker-compiled.ts": "runs only the `__automation-worker` route (a worker, no daemon)",
+  "scripts/verify-workflow-compiled.ts": "runs only the `__workflow-worker` route (a worker, no daemon)",
+  "scripts/verify-runtimes-compiled.ts": "runs only `__runtimes-probe` (resolves the bundled runtimes, no daemon)",
+  "scripts/release.ts": "builds, signs and notarizes winter-core; runs only `__keychain-ffi-probe` (an ffi check, no daemon)",
+  "scripts/release.test.ts": "tests the release's helpers; boots none",
+  "scripts/release-lib.test.ts": "tests the release's helpers; boots none",
+  "scripts/rename/codemod.test.ts": "the rename codemod's fixtures (strings)",
+};
+
+/** Every script file (any language this repo writes them in), tests included. */
+function scriptFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    if (name === "node_modules" || name === "dist" || name.startsWith(".")) continue;
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) out.push(...scriptFiles(path));
+    else if (/\.(?:[cm]?[jt]s|sh|zsh|py)$/.test(name)) out.push(path);
+  }
+  return out;
+}
+
+/** Comments out: the lexer for JS/TS, `#` lines for the shells and Python (a shebang is a comment too). */
+function codeOf(path: string): string {
+  const src = readFileSync(path, "utf8");
+  return /\.(?:sh|zsh|py)$/.test(path) ? src.replace(/^\s*#.*$/gm, "") : stripComments(src);
+}
 
 function sources(dir: string): string[] {
   const out: string[] = [];
@@ -223,6 +266,28 @@ describe("script and probe daemons are usage-inert", () => {
     expect(inertSpawn(other, "(x, [\"daemon\", \"run\"], { env: e2 })", other.indexOf("spawn("))).toBe(false);
     const passed = "const env: Record<string, string> = {};\nObject.assign(env, { ...USAGE_INERT_ENV });\nspawn(x, [\"daemon\", \"run\"], { env, detached: true });";
     expect(inertSpawn(passed, "(x, [\"daemon\", \"run\"], { env, detached: true })", passed.indexOf("spawn("))).toBe(true);
+  });
+
+  test("structurally: every script naming the daemon carries the usage-inert switch, or is listed with its reason", () => {
+    const unexplained: string[] = [];
+    const named = new Set<string>();
+    for (const file of scriptFiles(join(REPO, "scripts"))) {
+      const rel = relative(REPO, file);
+      const code = codeOf(file);
+      if (!NAMES_A_DAEMON.test(code)) continue;
+      named.add(rel);
+      if (!CARRIES_INERT.test(code) && NO_DAEMON_OF_ITS_OWN[rel] === undefined) unexplained.push(rel);
+    }
+    expect(unexplained).toEqual([]);
+    // No stale entry: each listed script still names the daemon and still lacks the switch (one that gained it, or
+    // stopped naming the daemon, leaves the list).
+    const stale = Object.keys(NO_DAEMON_OF_ITS_OWN).filter((rel) => !named.has(rel) || CARRIES_INERT.test(codeOf(join(REPO, rel))));
+    expect(stale).toEqual([]);
+    // The daemons the switch is for are among the subjects.
+    for (const rel of ["scripts/check-idle-wakeups.ts", "scripts/cu-live/run.ts", "scripts/cu-live/daemon-entry.ts", "scripts/office-agent-gate.ts",
+      "scripts/verify-embedded-compiled.ts", "scripts/verify-runtime-state-compiled.ts", "scripts/browser-e2e/extension/run.ts"]) {
+      expect(named.has(rel)).toBe(true);
+    }
   });
 
   test("every in-process startDaemon and every daemon spawn outside the tests is usage-inert", () => {
