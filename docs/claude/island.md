@@ -113,4 +113,4 @@ The tabs' state lives OUTSIDE `IslandStore` (which stays the cards'): `IslandTab
 
 ## Not yet
 
-Plan cards (`plan_presented`) on the island. The live look, the terminal raise, the screenshot drag and the computer-use pill and mirror are checked with the user on a real screen.
+Plan cards (`plan_presented`) on the island. The live look, the terminal raise, the screenshot drag, the computer-use pill and mirror, and the Servers tab (its rows against real servers, its two-click Stop) are checked with the user on a real screen.
