@@ -153,7 +153,8 @@ export class UsageDb {
       this.db.transaction(() => {
         this.db.run("ALTER TABLE usage_records ADD COLUMN synthetic INTEGER NOT NULL DEFAULT 0");
         this.db.run("ALTER TABLE usage_hourly ADD COLUMN synthetic_records INTEGER NOT NULL DEFAULT 0");
-        this.db.run("CREATE INDEX IF NOT EXISTS usage_records_synthetic ON usage_records(source, at) WHERE synthetic = 1");
+        // `earliestReal` / `syntheticSpan` are a seek, not a walk of the `at` index past other sources' older rows.
+        this.db.run("CREATE INDEX IF NOT EXISTS usage_records_source_synthetic_at ON usage_records(source, synthetic, at)");
         this.db.run("PRAGMA user_version = 3");
       })();
     }

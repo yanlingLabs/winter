@@ -11,7 +11,7 @@ Tokens and cost for every model — cache reads and writes kept apart, because t
 - `usage_hourly`: the same numbers per hour × source × provider × model, written in the record's transaction only when the record was new. Ranges ≤ 24 h read records; 7 d / 30 d / all read the rollup.
 - `ingest_files`: per-file read state — keyed by a SHA-256 of the path (the plaintext path names the user's project), with the inode, byte offset and the per-file carry (Codex's last cumulative totals, model, session id).
 - `subscriptions`: the plans the user entered.
-- `synthetic` (schema 3): `usage_records.synthetic` = 1 marks a row DERIVED from Claude Code's `/stats` cache (below); `usage_hourly.synthetic_records` counts them, and every row/total answer carries `syntheticRecords`. They are the only rows ever replaced or removed (`UsageDb.reconcileSynthetic`, which takes a removed row's numbers back off its hour).
+- `synthetic` (schema 3): `usage_records.synthetic` = 1 marks a row DERIVED from Claude Code's `/stats` cache (below); `usage_hourly.synthetic_records` counts them, and every row/total answer carries `syntheticRecords`. They are the only rows ever replaced or removed (`UsageDb.reconcileSynthetic`, which takes a removed row's numbers back off its hour). Index `(source, synthetic, at)`: the first-transcript-day lookup is a seek.
 - `probe_latches` (schema 2): a plan probe switched off for one exact binary — `claude:<sha256 of the realpath>:<mtime>:<size>` (hashed: the path names the user) — because its `/usage` reached the model loop. It survives restarts; an updated Claude Code is a new key and is tried again.
 
 ## Winter's own turns

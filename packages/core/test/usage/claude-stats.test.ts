@@ -353,7 +353,7 @@ describe("schema 3", () => {
     let db = new UsageDb(path);
     db.insert([{ dedupe: "cc:m1:r1", source: "claude-code", at: NOW, provider: "anthropic", model: A, input: 1, output: 2, cacheRead: 3, cacheWrite: 4, costBasis: "unknown" }]);
     // Back to what schema 2 had.
-    db.db.run("DROP INDEX usage_records_synthetic");
+    db.db.run("DROP INDEX usage_records_source_synthetic_at");
     db.db.run("ALTER TABLE usage_records DROP COLUMN synthetic");
     db.db.run("ALTER TABLE usage_hourly DROP COLUMN synthetic_records");
     db.db.run("PRAGMA user_version = 2");
