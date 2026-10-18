@@ -486,16 +486,38 @@ struct UsagePlanSlotCard: View {
     var compact = false
     /// The lines' title column (`UsagePresentation.titleColumnWidth`, shared by every slot of a block); nil = this slot's own.
     var titleWidth: CGFloat? = nil
+    @State private var localHover = false
+
+    /// The header's grow under the pointer — the lines' title grow (user 2026-10-18: the app's name and its plan grow
+    /// too, keeping their distance from the lines: it grows from its bottom edge and the card takes the height).
+    static func headerScale(hovered: Bool) -> CGFloat { UsagePlanLine.titleScale(hovered: hovered) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+        // The pointer over ANY part of a plan — its header or a line — opens all of it: the island's own pointer (its
+        // panels are never key), or the window's hover.
+        IslandPointerReader { islandHovered in
+            card(hovered: islandHovered || localHover)
+        }
+        .onHover { localHover = $0 }
+    }
+
+    private func card(hovered: Bool) -> some View {
+        let titleFont = compact ? Typography.caption(.semibold) : Typography.label(.semibold)
+        let grow = Self.headerScale(hovered: hovered)
+        return VStack(alignment: .leading, spacing: compact ? 5 : 8) {
             HStack(spacing: 6) {
-                Text(slot.title).font(compact ? Typography.caption(.semibold) : Typography.label(.semibold)).foregroundStyle(Color.white)
-                if let plan = slot.planType {
-                    Text(plan).font(Typography.tiny(.semibold)).foregroundStyle(Theme.textMuted)
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Capsule().fill(Color.white.opacity(0.08)))
+                HStack(spacing: 6) {
+                    Text(slot.title).font(titleFont).foregroundStyle(Color.white)
+                    if let plan = slot.planType {
+                        Text(plan).font(Typography.tiny(.semibold)).foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                    }
                 }
+                .scaleEffect(grow, anchor: .bottomLeading)
+                // The grown header's room: above it (the card grows, the lines stay where they are under it) and after it.
+                .padding(.top, hovered ? (compact ? 2 : 3) : 0)
+                .padding(.trailing, hovered ? 16 : 0)
                 Spacer(minLength: 8)
                 if !slot.sourceLine.isEmpty {
                     Text(slot.sourceLine).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
@@ -506,32 +528,32 @@ struct UsagePlanSlotCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 UsagePlanLineGroup(rings: slot.rings, color: UsagePlanColor.of(provider: slot.id), compact: compact,
-                                   titleWidth: titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact))
+                                   titleWidth: titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact),
+                                   hovered: hovered)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .animation(HoverGrowth.animation, value: hovered)
     }
 }
 
-/// One plan's lines, hovered together (user 2026-10-18): the pointer over any of them opens them all.
+/// One plan's lines, hovered together (user 2026-10-18): the pointer anywhere on its card opens them all.
 struct UsagePlanLineGroup: View {
     let rings: [UsagePlanRing]
     let color: Color
     var compact = false
     /// The title column; nil = the floor (52 pt compact, 72 in the window).
     var titleWidth: CGFloat? = nil
-    @State private var localHover = false
+    /// Its card is under the pointer (`UsagePlanSlotCard`).
+    var hovered = false
 
     var body: some View {
-        // The island's own pointer (its panels are never key), or the window's hover.
-        IslandPointerReader { islandHovered in
-            VStack(alignment: .leading, spacing: compact ? 5 : 8) {
-                ForEach(rings) { ring in
-                    UsagePlanLine(ring: ring, color: color, compact: compact, hovered: islandHovered || localHover, titleWidth: titleWidth)
-                }
+        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+            ForEach(rings) { ring in
+                UsagePlanLine(ring: ring, color: color, compact: compact, hovered: hovered, titleWidth: titleWidth)
             }
         }
-        .onHover { localHover = $0 }
     }
 }
 

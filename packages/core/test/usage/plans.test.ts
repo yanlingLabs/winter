@@ -277,6 +277,20 @@ describe("the Claude Code plan", () => {
     }
   });
 
+  test("the plan's size from ~/.claude.json's account tier only: max + default_claude_max_20x → max_20x", async () => {
+    const fake = fakeClaude(tempDir("bin"), "ok");
+    const jsonPath = join(tempDir("claude-json"), ".claude.json");
+    claudeJson(jsonPath, NOW - 60_000, {}, "default_claude_max_20x");
+    const { svc } = service({ claudeExecutable: () => fake.path, claudeJsonPath: jsonPath });
+    const plan = await svc.claudeCodePlan();
+    expect(plan.planType).toBe("max_20x");
+    // Nothing else of the account crosses.
+    expect(JSON.stringify(plan)).not.toContain("someone@example.com");
+    expect(JSON.stringify(plan)).not.toContain("sk-decoy");
+    const { claudeTierMultiple } = await import("../../src/usage/claude-code");
+    expect([claudeTierMultiple("default_claude_max_5x"), claudeTierMultiple("default_claude_ai"), claudeTierMultiple(7)]).toEqual(["5x", undefined, undefined]);
+  });
+
   test("not installed: no slot, whatever the cache holds; installed with no report and no cache: none", async () => {
     const { svc } = service({ claudeJsonPath: join(tempDir("x"), "absent.json") });
     expect((await svc.claudeCodePlan()).source).toBe("not-installed");
