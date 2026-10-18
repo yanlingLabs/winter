@@ -86,11 +86,16 @@ enum IslandUsagePresentation {
         }
     }
 
+    /// PURE: a runtime window's gauge id — its provider AND kind (two providers' five-hour windows are two gauges).
+    static func windowId(_ w: IslandUsageWindow) -> String {
+        "window-\(w.provider ?? "unknown")-\(w.rateLimitType ?? "plan")"
+    }
+
     /// PURE: every plan window, the most constrained first; the background jobs' subscription snapshot is added
     /// only when no runtime window of the same kind is there.
     static func gauges(_ snapshot: IslandUsageSnapshot, now: Date) -> [IslandUsageGauge] {
         var out: [IslandUsageGauge] = snapshot.windows.map { w in
-            gauge(id: "window-\(w.rateLimitType ?? "plan")", kind: w.rateLimitType, status: w.status,
+            gauge(id: Self.windowId(w), kind: w.rateLimitType, status: w.status,
                   utilization: w.utilization, resetsAt: w.resetsAt, at: w.at, now: now)
         }
         if let s = snapshot.subscription, !snapshot.windows.contains(where: { $0.rateLimitType == s.rateLimitType }) {
@@ -238,7 +243,8 @@ struct IslandUsageTab: View {
             // Usage and cost (`docs/claude/usage.md`), compact: the plans, the range's cost, the top models, the window.
             IslandUsageCompact(model: model, now: now)
             // Other providers' runtime-reported windows (the Codex ones are in the Codex slot above).
-            let others = gauges.filter { g in !(snapshot.windows.contains { $0.provider == "codex-oauth" && "window-\($0.rateLimitType ?? "plan")" == g.id }) }
+            let codexIds = Set(snapshot.windows.filter { $0.provider == "codex-oauth" }.map(IslandUsagePresentation.windowId))
+            let others = gauges.filter { !codexIds.contains($0.id) }
             if !others.isEmpty {
                 section("Other plan windows")
                 VStack(spacing: 8) {

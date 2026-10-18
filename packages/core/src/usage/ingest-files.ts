@@ -48,6 +48,9 @@ export interface ReadResult {
   reset: boolean;
   /** True when the byte budget stopped the read before the end. */
   more: boolean;
+  /** True when the read stopped INSIDE an over-long line being skipped: `offset` is past what was read of it, and the
+   *  next read (handed this back) goes on skipping to its newline — so the offset always advances. */
+  skipping: boolean;
 }
 
 const CHUNK = 1 << 20;
@@ -58,22 +61,22 @@ const NL = 0x0a;
  * Lines longer than `maxLine` bytes are skipped whole (still consumed). At most `budget` bytes are read per call.
  */
 export async function readNewLines(
-  file: FoundFile, prev: { inode: number; offset: number } | undefined, onLine: (line: string) => void,
+  file: FoundFile, prev: { inode: number; offset: number; skipping?: boolean } | undefined, onLine: (line: string) => void,
   opts: { budget?: number; maxLine?: number } = {},
 ): Promise<ReadResult> {
   const reset = prev !== undefined && (prev.inode !== file.inode || file.size < prev.offset);
   let offset = prev === undefined || reset ? 0 : prev.offset;
-  if (offset >= file.size) return { offset, reset, more: false };
+  if (offset >= file.size) return { offset, reset, more: false, skipping: !reset && prev?.skipping === true };
   const budget = opts.budget ?? 64 * CHUNK;
   const maxLine = opts.maxLine ?? 16 * CHUNK;
   const decoder = new TextDecoder();
   let fh: import("node:fs/promises").FileHandle;
-  try { fh = await open(file.path, "r"); } catch { return { offset: prev?.offset ?? 0, reset: false, more: false }; }
+  try { fh = await open(file.path, "r"); } catch { return { offset: prev?.offset ?? 0, reset: false, more: false, skipping: prev?.skipping === true }; }
   try {
     let pos = offset;
     let carry: Buffer[] = [];
     let carryLen = 0;
-    let skipping = false;
+    let skipping = !reset && prev?.skipping === true;
     const end = Math.min(file.size, offset + budget);
     while (pos < end) {
       const want = Math.min(CHUNK, end - pos);
@@ -104,8 +107,9 @@ export async function readNewLines(
       }
       pos += bytesRead;
     }
-    // A line still being skipped at the end of the budget is consumed only once its newline is seen.
-    return { offset, reset, more: end < file.size };
+    // Inside an over-long line at the end: everything read of it is consumed (never re-read), and the skip goes on.
+    if (skipping) offset = pos;
+    return { offset, reset, more: end < file.size, skipping };
   } finally {
     await fh.close().catch(() => undefined);
   }

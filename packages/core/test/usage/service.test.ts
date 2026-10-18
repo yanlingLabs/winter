@@ -7,7 +7,7 @@ import { UsageDb } from "../../src/usage/db";
 import { UsagePricer } from "../../src/usage/pricing";
 import { UsageService, rangeWindow, subscriptionCycle } from "../../src/usage/service";
 import { turnModelUsageOf, type LedgerSnapshot } from "../../src/projector/terminal";
-import { tempDir } from "./fixtures";
+import { neutralIn, tempDir } from "./fixtures";
 import { accept, assistantText, init, makeProjector, modelUsage, result } from "../projector/harness";
 
 const pricer = new UsagePricer();
@@ -17,7 +17,7 @@ function service(now: () => number) {
   const db = new UsageDb(join(home, "usage", "usage.db"));
   const svc = new UsageService({
     db, pricer, tracking: () => ({ codex: false, claudeCode: false }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
-    winterCodexWindows: () => [], neutralCwd: () => home, now,
+    winterCodexWindows: () => [], neutralCwd: () => neutralIn(home), now,
   });
   return { db, svc };
 }

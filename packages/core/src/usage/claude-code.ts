@@ -4,7 +4,7 @@ import type { UsageRecordInput } from "./db";
 import { findFiles, timeOf, tokenCount, type FoundFile } from "./ingest-files";
 import { percentOf, resetMs, shortStr, staleness, type PlanReading, type PlanWindow, type PlanWindowKind } from "./plan";
 import type { UsagePricer } from "./pricing";
-import { runLines } from "./spawn-lines";
+import { probeEnv, runLines } from "./spawn-lines";
 
 // The user's own Claude Code (`docs/claude/usage.md`) — READ ONLY, and only what is needed:
 //
@@ -107,31 +107,55 @@ export function windowsFromUsageReport(report: unknown, at: number, now: number)
 }
 
 export const CLAUDE_USAGE_TIMEOUT_MS = 15_000;
-/** EXACTLY the invocation verified on a real install: no hooks, no MCP servers, no session file, stdin closed. */
-export const CLAUDE_USAGE_ARGS = ["-p", "/usage", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config"] as const;
+/**
+ * The invocation verified on a real install (no hooks, no MCP servers, no session file, stdin closed) plus two HARD
+ * bounds in case `/usage` ever reaches the model loop: `--max-turns 1` and `--tools ""` (every built-in tool off; with
+ * `--strict-mcp-config` and no `--mcp-config` there are no MCP tools either). Both are documented CLI flags
+ * (https://code.claude.com/docs/en/cli-reference); a local command runs no turn and uses no tool, so neither applies to it.
+ */
+export const CLAUDE_USAGE_ARGS = [
+  "-p", "/usage", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+  "--max-turns", "1", "--tools", "",
+] as const;
+
+/** Why a `/usage` run was refused. `guard` (and `guard-model-turn`) mean `/usage` reached the model loop: the caller
+ *  switches the rung off for this exact binary. Everything else is an ordinary failure, retried after the throttle. */
+export type ClaudeCliFailure = "guard" | "guard-model-turn" | "error" | "no-report" | "no-result" | "timeout" | "spawn-failed" | "too-large";
+
+/** PURE: does a stream frame show a MODEL turn (an assistant message that used tokens, or any tool use)? */
+export function isModelTurnSignal(msg: Record<string, unknown>): boolean {
+  if (msg.type !== "assistant") return false;
+  const m = msg.message as Record<string, unknown> | undefined;
+  if (typeof m !== "object" || m === null) return false;
+  const u = m.usage as Record<string, unknown> | undefined;
+  if (typeof u === "object" && u !== null && (tokenCount(u.input_tokens) > 0 || tokenCount(u.output_tokens) > 0)) return true;
+  return Array.isArray(m.content) && m.content.some((b) => typeof b === "object" && b !== null && (b as { type?: unknown }).type === "tool_use");
+}
 
 /**
  * Run the user's `claude` for its `/usage` report. Accepted ONLY when the turn's `result` says it was the local
- * `/usage` command (`local_command: "usage"`), cost nothing and ran no model turn (`num_turns: 0`) — anything else
- * means `/usage` reached the model loop, which is a `guard` failure (the caller stops using this rung).
+ * `/usage` command (`local_command: "usage"`), cost nothing and ran no model turn (`num_turns: 0`) — anything else is a
+ * `guard` failure (the caller latches the rung off). A `result` with `is_error` but the local command (logged out,
+ * offline) is an ordinary `error`. A run that ends without a result (a timeout, an exit) after a model-turn signal is
+ * `guard-model-turn`.
  */
-export async function claudePlanFromCli(executable: string, opts: { cwd: string; timeoutMs?: number; now: () => number }):
-  Promise<{ reading?: PlanReading; failure?: string }> {
+export async function claudePlanFromCli(executable: string, opts: { cwd: string; timeoutMs?: number; now: () => number; env?: Record<string, string> }):
+  Promise<{ reading?: PlanReading; failure?: ClaudeCliFailure }> {
   let report: unknown;
+  let sawModelTurn = false;
   const outcome = await runLines(executable, {
     args: [...CLAUDE_USAGE_ARGS], cwd: opts.cwd, stdin: "ignore", timeoutMs: opts.timeoutMs ?? CLAUDE_USAGE_TIMEOUT_MS,
-    // A daemon started from inside a Claude Code session inherits its nested-session markers; the CLI must run as a
-    // fresh top-level invocation.
-    dropEnv: (k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_"),
+    env: opts.env ?? probeEnv(["CLAUDE_CONFIG_DIR"]),
     onLine: (line) => {
       let msg: Record<string, unknown>;
       try { msg = JSON.parse(line) as Record<string, unknown>; } catch { return undefined; }
+      if (isModelTurnSignal(msg)) sawModelTurn = true;
       if (msg.type === "assistant" && msg.usage_report !== undefined) { report = msg.usage_report; return undefined; }
       if (msg.type !== "result") return undefined;
-      const cost = msg.total_cost_usd;
-      const guardOk = msg.local_command === "usage" && (cost === undefined || cost === 0) && (msg.num_turns === undefined || msg.num_turns === 0)
-        && msg.is_error !== true;
-      if (!guardOk) return { failure: "guard" };
+      const cost = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : 0;
+      const turns = typeof msg.num_turns === "number" ? msg.num_turns : 0;
+      if (msg.local_command !== "usage" || cost > 0 || turns > 0) return { failure: "guard" };
+      if (msg.is_error === true) return { failure: "error" };
       if (report === undefined) return { failure: "no-report" };
       const at = opts.now();
       const windows = windowsFromUsageReport(report, at, at);
@@ -139,9 +163,13 @@ export async function claudePlanFromCli(executable: string, opts: { cwd: string;
       return { reading: { provider: "claude-code", source: "claude-cli", at, windows } satisfies PlanReading };
     },
   });
-  if (outcome.kind === "done") return outcome.value as { reading?: PlanReading; failure?: string };
+  if (outcome.kind === "done") return outcome.value as { reading?: PlanReading; failure?: ClaudeCliFailure };
+  if (sawModelTurn) return { failure: "guard-model-turn" };
   return { failure: outcome.kind === "exited" ? "no-result" : outcome.kind };
 }
+
+/** Over this, `~/.claude.json` is not read at all. */
+export const CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * The fallback: `cachedUsageUtilization` from Claude Code's `~/.claude.json` (undocumented; refreshed only while

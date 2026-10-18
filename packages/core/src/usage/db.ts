@@ -13,8 +13,10 @@ import { dirname } from "node:path";
 //  - `ingest_files`: per-file read state for the external sources — keyed by a HASH of the path (the plaintext
 //    path names the user's project), with the inode and byte offset, and the per-file state a delta needs.
 //  - `subscriptions`: the plans the user entered (Settings-like data the user owns, edited over RPC).
+//  - `probe_latches` (v2): a plan probe switched off for one exact binary (its realpath, mtime and size) — Claude Code's
+//    `/usage` that reached the model loop. Survives restarts; an updated binary is a new key, so it is tried again.
 
-export const USAGE_DB_SCHEMA_VERSION = 1;
+export const USAGE_DB_SCHEMA_VERSION = 2;
 
 export type UsageSource = "winter" | "codex" | "claude-code";
 export const USAGE_SOURCES: readonly UsageSource[] = ["winter", "codex", "claude-code"];
@@ -98,10 +100,15 @@ export class UsageDb {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     try { chmodSync(path, 0o600); } catch { /* best effort */ }
-    this.db.run("PRAGMA journal_mode = WAL");
-    this.db.run("PRAGMA busy_timeout = 2000");
-    this.db.run("PRAGMA synchronous = NORMAL");
-    this.migrate();
+    try {
+      this.db.run("PRAGMA journal_mode = WAL");
+      this.db.run("PRAGMA busy_timeout = 2000");
+      this.db.run("PRAGMA synchronous = NORMAL");
+      this.migrate();
+    } catch (err) {
+      try { this.db.close(); } catch { /* already closed */ }
+      throw err;
+    }
   }
 
   schemaVersion(): number {
@@ -112,6 +119,20 @@ export class UsageDb {
     const v = this.schemaVersion();
     if (v > USAGE_DB_SCHEMA_VERSION) throw new Error(`usage.db is schema ${v}, newer than this Winter (${USAGE_DB_SCHEMA_VERSION})`);
     if (v === USAGE_DB_SCHEMA_VERSION) return;
+    if (v < 1) this.migrateTo1();
+    if (v < 2) {
+      this.db.transaction(() => {
+        this.db.run(`CREATE TABLE IF NOT EXISTS probe_latches (
+          key TEXT PRIMARY KEY,
+          reason TEXT NOT NULL,
+          at INTEGER NOT NULL
+        )`);
+        this.db.run("PRAGMA user_version = 2");
+      })();
+    }
+  }
+
+  private migrateTo1(): void {
     this.db.transaction(() => {
       this.db.run(`CREATE TABLE IF NOT EXISTS usage_records (
         id INTEGER PRIMARY KEY,
@@ -171,7 +192,7 @@ export class UsageDb {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )`);
-      this.db.run(`PRAGMA user_version = ${USAGE_DB_SCHEMA_VERSION}`);
+      this.db.run("PRAGMA user_version = 1");
     })();
   }
 
@@ -289,6 +310,18 @@ export class UsageDb {
         .run(file.key, file.source, file.inode, file.offset, JSON.stringify(file.state), now);
     })();
     return added;
+  }
+
+  // ── probe latches ───────────────────────────────────────────────────────────────────────────────
+
+  latch(key: string): { reason: string; at: number } | undefined {
+    const r = this.db.query("SELECT reason, at FROM probe_latches WHERE key = ?").get(key) as { reason: string; at: number } | null;
+    return r ?? undefined;
+  }
+
+  setLatch(key: string, reason: string, at: number): void {
+    this.db.query("INSERT INTO probe_latches (key, reason, at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET reason = excluded.reason, at = excluded.at")
+      .run(key, reason, at);
   }
 
   // ── subscriptions ───────────────────────────────────────────────────────────────────────────────

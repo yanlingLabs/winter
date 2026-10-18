@@ -68,6 +68,16 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.slot(provider: "codex", reading: nil, now: now).emptyLine, "Reading…")
     }
 
+    func testARingsLabelFitsItAndAGaugeIdNamesItsProvider() {
+        XCTAssertEqual(IslandRing.label(1, size: 32), "100", "no percent sign in a compact ring")
+        XCTAssertEqual(IslandRing.label(0.384, size: 52), "38%")
+        let a = IslandUsageWindow(rateLimitType: "five_hour", status: "allowed", at: 0, sessionId: "s", provider: "codex-oauth")
+        let b = IslandUsageWindow(rateLimitType: "five_hour", status: "allowed", at: 0, sessionId: "t", provider: "anthropic")
+        XCTAssertNotEqual(IslandUsagePresentation.windowId(a), IslandUsagePresentation.windowId(b))
+        let gauges = IslandUsagePresentation.gauges(IslandUsageSnapshot(windows: [a, b], background: .init(limited: false, inputTokens: 0, outputTokens: 0)), now: now)
+        XCTAssertEqual(Set(gauges.map(\.id)).count, 2, "two providers' five-hour windows are two gauges")
+    }
+
     // MARK: chart shaping
 
     func testChartPointsStackTheTopModelsAndFoldTheRestIntoOther() {

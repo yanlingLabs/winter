@@ -3,7 +3,7 @@ import type { UsageRecordInput } from "./db";
 import { findFiles, scanLinesBackward, timeOf, tokenCount, type FoundFile } from "./ingest-files";
 import { kindOfMinutes, percentOf, resetMs, shortStr, staleness, type PlanReading, type PlanWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
-import { runLines } from "./spawn-lines";
+import { probeEnv, runLines } from "./spawn-lines";
 
 // The user's own Codex install (`docs/claude/usage.md`) — READ ONLY, and only what is needed:
 //
@@ -219,10 +219,11 @@ export const CODEX_APP_SERVER_TIMEOUT_MS = 8_000;
  * reads no Codex credential. `undefined` on any failure (timeout — the process group is killed —, an error reply,
  * a malformed reply, no binary).
  */
-export async function codexPlanFromAppServer(executable: string, opts: { timeoutMs?: number; cwd?: string; version?: string; now: () => number }):
+export async function codexPlanFromAppServer(executable: string, opts: { timeoutMs?: number; cwd?: string; version?: string; now: () => number; env?: Record<string, string> }):
   Promise<{ reading?: PlanReading; failure?: string }> {
   const outcome = await runLines(executable, {
     args: ["app-server"], timeoutMs: opts.timeoutMs ?? CODEX_APP_SERVER_TIMEOUT_MS, ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
+    env: opts.env ?? probeEnv(["CODEX_HOME"]),
     onStart: (io) => io.send({ id: 1, method: "initialize", params: { clientInfo: { name: "winter", title: "Winter", version: opts.version ?? "0" }, capabilities: null } }),
     onLine: (line, io) => {
       let msg: Record<string, unknown>;

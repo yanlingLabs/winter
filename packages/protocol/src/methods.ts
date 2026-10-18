@@ -598,12 +598,6 @@ export const IslandUsageWindowSchema = z.object({
   sessionId: z.string(),
   provider: z.string().optional(),
 });
-/** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the
- *  latest report per window kind since the daemon started; `subscription` — Winter's background jobs' subscription
- *  quota snapshot (the codex-oauth ledger); `background` — those jobs' backoff and token counts since start (the same
- *  numbers as `quota.state`); `session` — one session's token counts summed from its `turn_completed` events since
- *  the daemon started, its last measured context size, and its model's context window when the catalog knows it.
- *  HARNESS role only. */
 /** Usage and cost tracking (`docs/claude/usage.md`) — HARNESS role only, local clients; never remote, never plugins.
  *  `range`: last hour, 24 h, 7 days, 30 days, all time. `sources`: Winter's own sessions, the user's Codex CLI/app,
  *  the user's Claude Code (default all three). Costs are USD; `costBasis` says whether a figure is the runtime's own
@@ -636,6 +630,12 @@ export const UsageSubscriptionsSetParams = z.object({ subscription: UsageSubscri
 export const UsageSetTrackingParams = z.object({ codex: z.boolean().optional(), claudeCode: z.boolean().optional() });
 export const UsageSubscriptionsRemoveParams = z.object({ id: z.string().min(1).max(64) });
 
+/** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the
+ *  latest report per provider and window kind (each tagged with its `provider`) since the daemon started; `subscription` — Winter's background jobs' subscription
+ *  quota snapshot (the codex-oauth ledger); `background` — those jobs' backoff and token counts since start (the same
+ *  numbers as `quota.state`); `session` — one session's token counts summed from its `turn_completed` events since
+ *  the daemon started, its last measured context size, and its model's context window when the catalog knows it.
+ *  HARNESS role only. */
 export const IslandUsageParams = z.object({ sessionId: z.string().min(1).optional() });
 export const IslandUsageResult = z.object({
   windows: z.array(IslandUsageWindowSchema),

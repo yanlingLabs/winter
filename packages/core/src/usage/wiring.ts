@@ -25,8 +25,15 @@ export interface UsageInjection {
   now?: () => number;
 }
 
-const CODEX_INSTALLS = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", join(homedir(), ".local/bin/codex"), "/Applications/Codex.app/Contents/Resources/codex"];
-const CLAUDE_INSTALLS = [join(homedir(), ".local/bin/claude"), join(homedir(), ".claude/local/claude"), "/opt/homebrew/bin/claude", "/usr/local/bin/claude"];
+/** The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle). */
+export const CODEX_INSTALLS = [
+  "/opt/homebrew/bin/codex", "/usr/local/bin/codex", join(homedir(), ".local/bin/codex"), join(homedir(), ".npm-global/bin/codex"),
+  "/Applications/Codex.app/Contents/Resources/codex",
+];
+export const CLAUDE_INSTALLS = [
+  "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(homedir(), ".local/bin/claude"), join(homedir(), ".claude/local/claude"),
+  join(homedir(), ".npm-global/bin/claude"),
+];
 
 function pick(injected: string | null | undefined, env: string | undefined, fallback: () => string | undefined): string | undefined {
   if (injected !== undefined) return injected ?? undefined;

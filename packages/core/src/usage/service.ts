@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli } from "./claude-code";
+import { readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli } from "./claude-code";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type Subscription, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
@@ -44,8 +46,22 @@ export interface UsageServiceDeps {
   /** How long a plan read waits for a spawn still running before answering with what it has (default 2 s — a client's
    *  request times out at 5 s; the spawn finishes in the background and the next ask gets it). */
   planWaitMs?: number;
-  /** How often the passive plan rungs are re-read (default 60 s; tests shorten it). */
+  /** How often the Codex rollout rung is re-read (default 60 s; tests shorten it). */
   fallbackEveryMs?: number;
+  /** Bytes read per file per pass (default 64 MiB) and the longest line parsed (default 16 MiB); tests shorten both. */
+  fileBudgetBytes?: number;
+  maxLineBytes?: number;
+  /** `~/.claude.json` over this is not read (default 32 MiB). */
+  claudeJsonMaxBytes?: number;
+}
+
+/** A binary's identity for a probe latch: its realpath, mtime and size (an update is a new binary). */
+export function binaryKey(tool: string, exe: string): string | undefined {
+  try {
+    const real = realpathSync(exe);
+    const st = statSync(real);
+    return `${tool}:${real}:${Math.round(st.mtimeMs)}:${st.size}`;
+  } catch { return undefined; }
 }
 
 /** Wait for `p`, at most `ms`. */
@@ -157,10 +173,11 @@ export class UsageService {
   private claudeCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
   private claudeRun: Promise<void> | undefined;
   /** Set when `/usage` came back as something other than the local command: this rung is off until restart. */
-  private claudeCliDisabled = false;
   /** The passive rungs' last readings (rollout tails, `~/.claude.json`), re-read at most every `fallbackEveryMs`. */
   private rolloutCache: { at: number; reading?: PlanReading } | undefined;
-  private claudeFileCache: { at: number; reading?: PlanReading } | undefined;
+  private claudeFileCache: { stamp: string; reading?: PlanReading } | undefined;
+  /** Test seam: how many times `~/.claude.json` was parsed. */
+  claudeFileParses = 0;
 
   constructor(private readonly deps: UsageServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -243,13 +260,15 @@ export class UsageService {
       const reset = prev !== undefined && (prev.inode !== file.inode || file.size < prev.offset);
       const state = source === "codex" ? (codexStateOf(reset || prev === undefined ? {} : prev.state) as Record<string, unknown>) : {};
       const records: UsageRecordInput[] = [];
-      const read = await readNewLines(file, prev, (line) => {
+      const skipping = !reset && prev?.state.__skipping === true;
+      const read = await readNewLines(file, prev === undefined ? undefined : { inode: prev.inode, offset: prev.offset, skipping }, (line) => {
         const r = recordOf(line, state, file);
         if (r !== undefined) records.push(r);
-      }, { budget: Math.min(budget, 64 * 1024 * 1024) });
+      }, { budget: this.deps.fileBudgetBytes ?? 64 * 1024 * 1024, ...(this.deps.maxLineBytes === undefined ? {} : { maxLine: this.deps.maxLineBytes }) }); // a whole budget per file: a long line always progresses
       budget -= read.offset - (reset || prev === undefined ? 0 : prev.offset);
       if (read.more) more = true;
-      this.deps.db.commitFile({ key, source, inode: file.inode, offset: read.offset, state }, records, this.now());
+      const saved = read.skipping ? { ...state, __skipping: true } : (({ __skipping: _, ...rest }) => rest)(state as Record<string, unknown>);
+      this.deps.db.commitFile({ key, source, inode: file.inode, offset: read.offset, state: saved }, records, this.now());
       // Yield between files: a first import of a large history never holds the event loop for long.
       await new Promise<void>((r) => setImmediate(r));
     }
@@ -273,6 +292,7 @@ export class UsageService {
           now: this.now, cwd: this.deps.neutralCwd(), ...(this.deps.version === undefined ? {} : { version: this.deps.version }),
           ...(this.deps.appServerTimeoutMs === undefined ? {} : { timeoutMs: this.deps.appServerTimeoutMs }),
         });
+        this.cleanNeutralCwd();
         this.codexCache = { at: this.now(), ...r };
         if (r.failure !== undefined) this.deps.log?.info?.("[usage] codex app-server gave no plan reading", { reason: r.failure });
       })().finally(() => { this.codexRun = undefined; });
@@ -299,18 +319,22 @@ export class UsageService {
     const every = this.deps.claudeCliEveryMs ?? 300_000;
     if (this.claudeRun !== undefined) {
       await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
-    } else if (!this.claudeCliDisabled && (this.claudeCache === undefined || now - this.claudeCache.at >= every)) {
+    } else if (this.claudeCache === undefined || now - this.claudeCache.at >= every) {
       this.claudeRun ??= (async () => {
         const exe = this.deps.claudeExecutable();
         if (exe === undefined) { this.claudeCache = { at: this.now(), failure: "not-installed" }; return; }
+        // The latch: a binary whose `/usage` once reached the model loop is never asked again — until it changes.
+        const key = binaryKey("claude", exe);
+        if (key === undefined || this.deps.db.latch(key) !== undefined) { this.claudeCache = { at: this.now(), failure: "latched" }; return; }
         const r = await claudePlanFromCli(exe, {
           cwd: this.deps.neutralCwd(), now: this.now,
           ...(this.deps.claudeCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.claudeCliTimeoutMs }),
         });
+        this.cleanNeutralCwd();
         this.claudeCache = { at: this.now(), ...r };
-        if (r.failure === "guard") {
-          this.claudeCliDisabled = true;
-          this.deps.log?.warn?.("[usage] claude /usage did not come back as the local command; not asked again until restart");
+        if (r.failure === "guard" || r.failure === "guard-model-turn") {
+          try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
+          this.deps.log?.warn?.("[usage] claude /usage did not come back as the local command; not asked again until Claude Code changes");
         } else if (r.failure !== undefined) {
           this.deps.log?.info?.("[usage] claude /usage gave no plan reading", { reason: r.failure });
         }
@@ -319,13 +343,35 @@ export class UsageService {
     }
     if (this.claudeCache?.reading !== undefined) return this.claudeCache.reading;
     if (this.deps.claudeJsonPath !== undefined) {
-      if (this.claudeFileCache === undefined || this.now() - this.claudeFileCache.at >= (this.deps.fallbackEveryMs ?? 60_000)) {
-        this.claudeFileCache = { at: this.now(), reading: await claudePlanFromCacheFile(this.deps.claudeJsonPath, this.now()) };
-      }
-      const cached = this.claudeFileCache.reading;
+      const cached = await this.claudeJsonReading(this.deps.claudeJsonPath);
       if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
     }
     return { provider: "claude-code", source: "none", windows: [] };
+  }
+
+  /** `~/.claude.json`'s plan cache: re-parsed only when the file's mtime or size changed; never read over the cap. */
+  private async claudeJsonReading(path: string): Promise<PlanReading | undefined> {
+    let st: { mtimeMs: number; size: number };
+    try { st = statSync(path); } catch { this.claudeFileCache = undefined; return undefined; }
+    const stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
+    if (this.claudeFileCache?.stamp === stamp) return this.claudeFileCache.reading;
+    if (st.size > (this.deps.claudeJsonMaxBytes ?? CLAUDE_JSON_MAX_BYTES)) {
+      this.claudeFileCache = { stamp };
+      this.deps.log?.warn?.("[usage] Claude Code's config file is over the size cap; its plan cache is not read");
+      return undefined;
+    }
+    this.claudeFileCache = { stamp, reading: await claudePlanFromCacheFile(path, this.now()) };
+    this.claudeFileParses++;
+    return this.claudeFileCache.reading;
+  }
+
+  /** The neutral cwd is kept empty: anything a probe left there is removed after each run. */
+  private cleanNeutralCwd(): void {
+    try {
+      const dir = this.deps.neutralCwd();
+      if (!dir.endsWith("/neutral")) return; // only ever the dedicated empty directory
+      for (const name of readdirSync(dir)) rmSync(join(dir, name), { recursive: true, force: true });
+    } catch { /* nothing to clean */ }
   }
 
   // ── queries ─────────────────────────────────────────────────────────────────────────────────────

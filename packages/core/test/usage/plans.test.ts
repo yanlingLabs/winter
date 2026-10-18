@@ -10,7 +10,7 @@ import { UsageService, type UsageServiceDeps } from "../../src/usage/service";
 import { staleness } from "../../src/usage/plan";
 import { CLAUDE_USAGE_ARGS } from "../../src/usage/claude-code";
 import {
-  SECRETS, claudeJson, codexMeta, codexRateLimits, codexRolloutPath, codexTokenCount, codexTurnContext, fakeClaude, fakeCodex, lines, tempDir,
+  SECRETS, claudeJson, codexMeta, codexRateLimits, codexRolloutPath, codexTokenCount, codexTurnContext, fakeClaude, fakeCodex, lines, neutralIn, tempDir,
 } from "./fixtures";
 
 const pricer = new UsagePricer();
@@ -24,11 +24,20 @@ function service(over: Partial<UsageServiceDeps> & { logs?: string[] } = {}) {
   const svc = new UsageService({
     db, pricer, tracking: () => ({ codex: true, claudeCode: true }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    neutralCwd: () => home, ingestEveryMs: 0, planWaitMs: 20_000, fallbackEveryMs: 0,
+    neutralCwd: () => neutralIn(home), ingestEveryMs: 0, planWaitMs: 20_000, fallbackEveryMs: 0,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,
   });
   return { home, db, svc, logs };
+}
+
+/** Run `fn` with `vars` set in process.env, always restoring what was there. */
+async function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try { return await fn(); } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 }
 
 function marks(markerPath: string): Array<{ argv: string[]; cwd: string; pid: number }> {
@@ -81,7 +90,8 @@ describe("the Codex plan", () => {
     const m = marks(fake.markerPath);
     expect(m).toHaveLength(1);
     expect(m[0]!.argv).toEqual(["app-server"]);
-    expect(m[0]!.cwd.endsWith(home.split("/").pop()!)).toBe(true);
+    expect(m[0]!.cwd.endsWith("/neutral")).toBe(true);
+    void home;
     // Cached within the window; asked again after it.
     now += 30_000;
     await svc.codexPlan();
@@ -197,12 +207,8 @@ describe("the Claude Code plan", () => {
     const fake = fakeClaude(tempDir("bin"), "ok");
     let now = NOW;
     // A daemon started from inside a Claude Code session: its nested-session markers never reach the CLI.
-    process.env.CLAUDECODE = "1";
-    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
     const { svc, home } = service({ claudeExecutable: () => fake.path, now: () => now });
-    const plan = await svc.claudeCodePlan();
-    delete process.env.CLAUDECODE;
-    delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    const plan = await withEnv({ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" }, () => svc.claudeCodePlan());
     expect(plan.source).toBe("claude-cli");
     expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.scope, w.stale])).toEqual([
       ["five_hour", 23, undefined, false], ["weekly", 61, undefined, false], ["weekly_scoped", 80, "opus", false],
@@ -210,8 +216,9 @@ describe("the Claude Code plan", () => {
     expect(JSON.stringify(plan).includes("SECRET")).toBe(false);
     const m = marks(fake.markerPath);
     expect(m[0]!.argv).toEqual([...CLAUDE_USAGE_ARGS]);
-    expect((m[0] as unknown as { nested: string[] }).nested).toEqual([]);
-    expect(m[0]!.cwd.includes(home.split("/").pop()!)).toBe(true);
+    expect((m[0] as unknown as { env: string[] }).env.filter((k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_"))).toEqual([]);
+    expect(m[0]!.cwd.endsWith("/neutral")).toBe(true);
+    void home;
     // Throttled to once per five minutes.
     now += 4 * 60_000;
     await svc.claudeCodePlan();
@@ -227,7 +234,7 @@ describe("the Claude Code plan", () => {
       let now = NOW;
       const { svc, logs } = service({ claudeExecutable: () => fake.path, now: () => now });
       expect((await svc.claudeCodePlan()).source).toBe("none");
-      expect(logs.some((l) => l.includes("not asked again until restart"))).toBe(true);
+      expect(logs.some((l) => l.includes("not asked again until Claude Code changes"))).toBe(true);
       expect(logs.join("\n").includes("SECRET")).toBe(false);
       now += 3_600_000;
       await svc.claudeCodePlan();

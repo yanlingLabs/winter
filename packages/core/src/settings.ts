@@ -917,13 +917,13 @@ export function pinsFor(settings: Settings | null | undefined): {
   };
 }
 
-/** Phase 9c (P9c-4): the ONE reader of `legacy.readLegacyProjectFiles` — absent block or absent key
- *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
 /** The ONE reader of `settings.usage`: which of the user's other apps Winter may read usage from (default both). */
 export function usageTrackingFrom(settings: Settings | null | undefined): { codex: boolean; claudeCode: boolean } {
   return { codex: settings?.usage?.codex?.enabled ?? true, claudeCode: settings?.usage?.claudeCode?.enabled ?? true };
 }
 
+/** Phase 9c (P9c-4): the ONE reader of `legacy.readLegacyProjectFiles` — absent block or absent key
+ *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
 export function legacyProjectFilesReadEnabled(settings: Settings | null | undefined): boolean {
   return settings?.legacy?.readLegacyProjectFiles ?? true;
 }

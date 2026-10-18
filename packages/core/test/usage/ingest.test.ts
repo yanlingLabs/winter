@@ -12,12 +12,12 @@ import { readNewLines } from "../../src/usage/ingest-files";
 import { stat } from "node:fs/promises";
 import {
   SECRETS, claudeAssistant, claudeTranscriptPath, claudeUser, codexMessage, codexMeta, codexRolloutPath, codexTokenCount,
-  codexTurnContext, lines, tempDir,
+  codexTurnContext, lines, neutralIn, tempDir,
 } from "./fixtures";
 
 const pricer = new UsagePricer();
 
-function service(opts: { codexHome?: string; claudeHome?: string; tracking?: { codex: boolean; claudeCode: boolean }; now?: () => number } = {}) {
+function service(opts: { codexHome?: string; claudeHome?: string; tracking?: { codex: boolean; claudeCode: boolean }; now?: () => number; fileBudgetBytes?: number; maxLineBytes?: number } = {}) {
   const home = tempDir("home");
   const db = new UsageDb(join(home, "usage", "usage.db"));
   const svc = new UsageService({
@@ -25,7 +25,9 @@ function service(opts: { codexHome?: string; claudeHome?: string; tracking?: { c
     ...(opts.codexHome === undefined ? {} : { codexHome: opts.codexHome }),
     ...(opts.claudeHome === undefined ? {} : { claudeHome: opts.claudeHome }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    neutralCwd: () => home, ingestEveryMs: 0, ...(opts.now === undefined ? {} : { now: opts.now }),
+    neutralCwd: () => neutralIn(home), ingestEveryMs: 0, ...(opts.now === undefined ? {} : { now: opts.now }),
+    ...(opts.fileBudgetBytes === undefined ? {} : { fileBudgetBytes: opts.fileBudgetBytes }),
+    ...(opts.maxLineBytes === undefined ? {} : { maxLineBytes: opts.maxLineBytes }),
   });
   return { home, db, svc };
 }
@@ -179,6 +181,23 @@ describe("privacy", () => {
       expect(bytes.includes(secret)).toBe(false);
       expect(answer.includes(secret)).toBe(false);
     }
+  });
+});
+
+describe("a line longer than the whole per-pass budget", () => {
+  test("never stalls the ingest: the offset advances every pass, the line is skipped whole, what follows is read", async () => {
+    const claudeHome = tempDir("claude");
+    const path = claudeTranscriptPath(claudeHome);
+    writeFileSync(path, `${"x".repeat(10_000)}\n${claudeAssistant(T0, { msgId: "after", requestId: "r" })}\n`);
+    const { db, svc } = service({ claudeHome, fileBudgetBytes: 2_048, maxLineBytes: 1_024 });
+    const offsets: number[] = [];
+    for (let i = 0; i < 20 && rows(db).length === 0; i++) {
+      await svc.ingest(true);
+      offsets.push((db.db.query("SELECT offset FROM ingest_files").get() as { offset: number }).offset);
+    }
+    expect(rows(db).map((r) => r.model)).toEqual(["claude-sonnet-4-5-20250929"]);
+    for (let i = 1; i < offsets.length; i++) expect(offsets[i]!).toBeGreaterThan(offsets[i - 1]!);
+    expect(offsets.at(-1)).toBe((await stat(path)).size);
   });
 });
 

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 
 // Spawning the user's own `codex` / `claude` for a plan reading (`docs/claude/usage.md`): one short-lived child in
 // its OWN process group (so a timeout kills the whole tree), stdout read as lines, a hard deadline. Nothing it prints
@@ -16,9 +16,8 @@ export interface LineChild {
 export interface RunOptions {
   args: string[];
   cwd?: string;
-  env?: Record<string, string | undefined>;
-  /** Inherited variables to leave out of the child's environment. */
-  dropEnv?: (key: string) => boolean;
+  /** The child's WHOLE environment (`probeEnv` builds it from an allowlist); nothing else is inherited. */
+  env: Record<string, string>;
   timeoutMs: number;
   /** Each stdout line; return a value to finish (the child is then shut down) or undefined to keep reading. */
   onLine: (line: string, child: LineChild) => unknown;
@@ -47,8 +46,7 @@ export function runLines(executable: string, opts: RunOptions): Promise<RunOutco
     try {
       child = spawn(executable, opts.args, {
         cwd: opts.cwd,
-        env: Object.fromEntries(Object.entries({ ...process.env, ...opts.env })
-          .filter(([k, v]) => v !== undefined && !(opts.dropEnv?.(k) ?? false))) as NodeJS.ProcessEnv,
+        env: opts.env as NodeJS.ProcessEnv,
         stdio: [opts.stdin ?? "pipe", "pipe", "ignore"], detached: true,
       });
     } catch {
@@ -112,6 +110,22 @@ export function runLines(executable: string, opts: RunOptions): Promise<RunOutco
   });
 }
 
+/** The variables a plan probe inherits — an ALLOWLIST: the user's identity, locale, shell, temp dir and PATH, plus
+ *  the tool's own config-dir variable (`extra`: `CODEX_HOME` / `CLAUDE_CONFIG_DIR`, so it finds its own sign-in where
+ *  the user put it). Nothing else crosses: no API key or base URL (`ANTHROPIC_*`, `OPENAI_*`) that would switch the
+ *  tool off the user's plan login, no nested-session marker (`CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_*` sandbox flags),
+ *  no `WINTER_*`. */
+export const PROBE_ENV_ALLOW = ["HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL"] as const;
+
+export function probeEnv(extra: readonly string[] = [], from: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of [...PROBE_ENV_ALLOW, ...extra]) {
+    const v = from[k];
+    if (typeof v === "string" && v.length > 0) out[k] = v;
+  }
+  return out;
+}
+
 function isExecutable(p: string): boolean {
   try {
     if (!statSync(p).isFile()) return false;
@@ -122,18 +136,19 @@ function isExecutable(p: string): boolean {
 
 /**
  * The user's own `name` executable: an explicit override (authoritative — missing or "off" means none, never a
- * fall-through), else `$PATH`, else the usual install places.
+ * fall-through), else the usual ABSOLUTE install places first (`installs`), else `$PATH`'s ABSOLUTE entries — a
+ * relative entry (`.`, `bin`) would resolve against the daemon's cwd and is never searched.
  */
-export function resolveExecutable(name: string, explicit: string | undefined, extra: readonly string[], pathEnv = process.env.PATH ?? ""): string | undefined {
+export function resolveExecutable(name: string, explicit: string | undefined, installs: readonly string[], pathEnv = process.env.PATH ?? ""): string | undefined {
   if (explicit !== undefined) {
-    if (explicit === "" || explicit === "off") return undefined;
+    if (explicit === "" || explicit === "off" || !isAbsolute(explicit)) return undefined;
     return isExecutable(explicit) ? explicit : undefined;
   }
+  for (const p of installs) if (isAbsolute(p) && existsSync(p) && isExecutable(p)) return p;
   for (const dir of pathEnv.split(delimiter)) {
-    if (dir.length === 0) continue;
+    if (dir.length === 0 || !isAbsolute(dir)) continue;
     const p = join(dir, name);
     if (isExecutable(p)) return p;
   }
-  for (const p of extra) if (existsSync(p) && isExecutable(p)) return p;
   return undefined;
 }

@@ -11,6 +11,13 @@ export function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `winter-usage-${prefix}-`));
 }
 
+/** The service's neutral cwd under a test home (`<home>/neutral`, created). */
+export function neutralIn(home: string): string {
+  const dir = join(home, "neutral");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 export const iso = (ms: number): string => new Date(ms).toISOString();
 
 export interface CodexTotals { input: number; cached: number; output: number; reasoning: number }
@@ -84,7 +91,7 @@ export function fakeExecutable(dir: string, name: string, body: string): { path:
 const fs = require("node:fs");
 const log = (o) => process.stdout.write((typeof o === "string" ? o : JSON.stringify(o)) + "\\n");
 const mark = (s) => fs.appendFileSync(${JSON.stringify(markerPath)}, s + "\\n");
-mark(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid, nested: Object.keys(process.env).filter((k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) }));
+mark(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid, env: Object.keys(process.env).sort() }));
 ${body}
 `);
   chmodSync(path, 0o755);
@@ -123,7 +130,10 @@ else {
 }
 
 /** A fake `claude -p /usage`. Modes as named. */
-export function fakeClaude(dir: string, mode: "ok" | "no-local-command" | "wrong-command" | "cost" | "turns" | "no-report" | "hang" | "malformed"): { path: string; markerPath: string } {
+export type FakeClaudeMode = "ok" | "no-local-command" | "wrong-command" | "cost" | "turns" | "no-report" | "hang" | "malformed"
+  | "is-error" | "model-turn-hang" | "tool-use-exit";
+
+export function fakeClaude(dir: string, mode: FakeClaudeMode): { path: string; markerPath: string } {
   const resetsAt = new Date(Date.now() + 2 * 3600_000).toISOString();
   const report = {
     rate_limits: {
@@ -136,7 +146,7 @@ export function fakeClaude(dir: string, mode: "ok" | "no-local-command" | "wrong
     session: { note: "SECRET-ANSWER-91bc" },
   };
   const result = {
-    type: "result", subtype: "success", is_error: false, num_turns: mode === "turns" ? 1 : 0, total_cost_usd: mode === "cost" ? 0.01 : 0,
+    type: "result", subtype: mode === "is-error" ? "error_during_execution" : "success", is_error: mode === "is-error", num_turns: mode === "turns" ? 1 : 0, total_cost_usd: mode === "cost" ? 0.01 : 0,
     usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {}, result: "",
     ...(mode === "no-local-command" ? {} : { local_command: mode === "wrong-command" ? "cost" : "usage" }),
   };
@@ -144,9 +154,16 @@ export function fakeClaude(dir: string, mode: "ok" | "no-local-command" | "wrong
 const mode = ${JSON.stringify(mode)};
 if (mode === "hang") { setInterval(() => {}, 1000); }
 else if (mode === "malformed") { log("{not json"); log("still not"); }
+else if (mode === "model-turn-hang") {
+  log({ type: "assistant", message: { content: [{ type: "text", text: "SECRET-ANSWER-91bc" }], usage: { input_tokens: 1200, output_tokens: 30 } } });
+  setInterval(() => {}, 1000);
+}
+else if (mode === "tool-use-exit") {
+  log({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }], usage: { input_tokens: 0, output_tokens: 0 } } });
+}
 else {
   log({ type: "system", subtype: "init", session_id: "s", tools: [], mcp_servers: [] });
-  ${mode === "no-report" ? "" : `log({ type: "assistant", message: { content: [{ type: "text", text: "SECRET-ANSWER-91bc" }] }, usage_report: ${JSON.stringify(report)}, local_command_run: "usage", local_command_source: "builtin" });`}
+  ${mode === "no-report" || mode === "is-error" ? "" : `log({ type: "assistant", message: { content: [{ type: "text", text: "SECRET-ANSWER-91bc" }] }, usage_report: ${JSON.stringify(report)}, local_command_run: "usage", local_command_source: "builtin" });`}
   log(${JSON.stringify(result)});
 }
 `);
