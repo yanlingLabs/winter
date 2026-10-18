@@ -338,7 +338,7 @@ class Package(unittest.TestCase):
             self.assertNotIn(needle, build, needle)
         self.assertIn('sys.executable, "-I"', build, "child Python runs isolated")
 
-    # The vector files that ARE the worker's layers (L2 envelopes, the L3/L4 mux, the guest-stop verdict inputs, the image digest, the host bootstrap order).
+    # The vector files that ARE the worker's layers (L2 envelopes, the L3/L4 mux, the guest-stop verdict inputs, the image digest). `bootstrap-order.json` is the HOST's sequencing, not a worker layer (the worker is blind to bootstrap payloads), so it is only pinned, not frozen.
     # Text version 2 (the receipt MAC, 2026-10-18) and the empty-OUT/ERR rule changed none of them: these hashes are frozen from the 6c1f04e8 copies, so a
     # change to any of them is a change to the worker's contract and must be a decision, not a refresh.
     WORKER_LAYER_VECTORS = {
@@ -346,7 +346,6 @@ class Package(unittest.TestCase):
         "mux-frames.json": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
         "guest-stop.json": "beba7550e5b6dfdaee71345f723a4b17329f39d89533e9860baddb4fc3628a72",
         "runtime-image.json": "2929af10fe5593a748b4f9d8c1506f2a1393c62b6e4fe4ffc0dba429f4496858",
-        "bootstrap-order.json": "36be531467c3ceb9d91f0f2cefb02ec40fba324878a021fe5247317a3c389ca4",
     }
 
     def test_the_worker_layer_vectors_did_not_move_with_text_version_2(self):
