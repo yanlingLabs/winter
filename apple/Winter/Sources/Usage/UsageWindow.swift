@@ -160,14 +160,15 @@ struct UsageWindowContent: View {
     // MARK: plans
 
     private func plans(now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if UsagePresentation.showsSlot(model.summary?.codexPlan) {
-                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: model.summary?.codexPlan, now: now))
-            }
-            if UsagePresentation.showsSlot(model.summary?.claudeCodePlan) {
+        // Codex, Claude Code, Antigravity — only the apps on this Mac; one title column for every line.
+        let slots = UsagePresentation.plans(model.summary).filter { UsagePresentation.showsSlot($0.reading) }
+            .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
+        let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) }, compact: false)
+        return VStack(alignment: .leading, spacing: 18) {
+            ForEach(slots) { slot in
                 VStack(alignment: .leading, spacing: 6) {
-                    UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
-                    if let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
+                    UsagePlanSlotCard(slot: slot, titleWidth: titleWidth)
+                    if slot.id == "claude-code", let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
                         Text(line).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
                     }
                 }
@@ -195,7 +196,7 @@ struct UsageWindowContent: View {
 
     private var sourcesRow: some View {
         HStack(spacing: 8) {
-            ForEach(UsageSource.allCases, id: \.self) { s in
+            ForEach(UsageSource.allCases.filter { UsagePresentation.showsToggle($0, summary: model.summary) }, id: \.self) { s in
                 let on = model.sources.contains(s)
                 let cost = model.series?.bySource[s]?.costUsd ?? 0
                 Button { model.toggle(s) } label: {
@@ -322,6 +323,10 @@ struct UsageWindowContent: View {
                 }
                 Text("“est.” — a list-price estimate: what the same tokens would cost on the API (a subscription isn’t billed per token).")
                     .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                if rows.contains(where: { $0.costBasis == "reported" }) {
+                    Text("“reported” — the cost OpenCode itself recorded for those tokens.")
+                        .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                }
                 if rows.contains(where: { $0.totals.syntheticRecords > 0 }) {
                     Text("* includes days from Claude Code’s /stats, kept after its transcripts were deleted: daily totals split by each model’s overall mix, so the cache split and cost are estimates.")
                         .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
@@ -391,7 +396,13 @@ struct UsageWindowContent: View {
             UsageSwitchRow(on: model.summary?.trackClaudeCode ?? true, text: "Claude Code — its transcripts and its own /usage report") { v in
                 Task { await model.setTrack(claudeCode: v) }
             }
-            Text("Only numbers, model names and times are kept — never what was said, never a path or a project name. Winter never reads either app’s sign-in.")
+            UsageSwitchRow(on: model.summary?.trackAntigravity ?? true, text: "Antigravity — its own /usage report") { v in
+                Task { await model.setTrack(antigravity: v) }
+            }
+            UsageSwitchRow(on: model.summary?.trackOpencode ?? true, text: "OpenCode — its own stats: tokens and cost per model") { v in
+                Task { await model.setTrack(opencode: v) }
+            }
+            Text("Only numbers, model names and times are kept — never what was said, never a path or a project name. Winter never reads any of these apps’ sign-in.")
                 .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
         }
     }
@@ -447,12 +458,19 @@ struct UsageTile: View {
     }
 }
 
-/// The plan lines' colours (user 2026-10-18): Codex green, Claude Code Claude's own clay.
+/// The plan lines' colours (user 2026-10-18): Codex green, Claude Code Claude's own clay, Antigravity Google blue.
 enum UsagePlanColor {
     static let codex = Color(red: 0.063, green: 0.639, blue: 0.498)
     static let claudeCode = Color(red: 0.851, green: 0.467, blue: 0.341)
+    static let antigravity = Color(red: 0.259, green: 0.522, blue: 0.957)
 
-    static func of(provider: String) -> Color { provider == "codex" ? codex : claudeCode }
+    static func of(provider: String) -> Color {
+        switch provider {
+        case "codex": return codex
+        case "antigravity": return antigravity
+        default: return claudeCode
+        }
+    }
 }
 
 /// A plan's slot (user 2026-10-18): the plan's name, then one LINE per window filling left to right with what is LEFT
@@ -461,6 +479,8 @@ enum UsagePlanColor {
 struct UsagePlanSlotCard: View {
     let slot: UsagePlanSlot
     var compact = false
+    /// The lines' title column (`UsagePresentation.titleColumnWidth`, shared by every slot of a block); nil = this slot's own.
+    var titleWidth: CGFloat? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 5 : 8) {
@@ -480,8 +500,9 @@ struct UsagePlanSlotCard: View {
                 Text(empty).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
+                let width = titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact)
                 ForEach(slot.rings) { ring in
-                    UsagePlanLine(ring: ring, color: UsagePlanColor.of(provider: slot.id), compact: compact)
+                    UsagePlanLine(ring: ring, color: UsagePlanColor.of(provider: slot.id), compact: compact, titleWidth: width)
                 }
             }
         }
@@ -494,6 +515,8 @@ struct UsagePlanLine: View {
     let ring: UsagePlanRing
     let color: Color
     var compact = false
+    /// The title column; nil = the floor (52 pt compact, 72 in the window).
+    var titleWidth: CGFloat? = nil
     @State private var localHover = false
 
     /// The line at rest and under the pointer (user 2026-10-18: just the line; on hover it thickens, lengthens a little
@@ -519,7 +542,7 @@ struct UsagePlanLine: View {
         let height = Self.thickness(compact: compact, hovered: hovered)
         return HStack(spacing: compact ? 8 : 12) {
             Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.85)).lineLimit(1)
-                .frame(width: compact ? 52 : 72, alignment: .leading)
+                .frame(width: titleWidth ?? (compact ? 52 : 72), alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.08))

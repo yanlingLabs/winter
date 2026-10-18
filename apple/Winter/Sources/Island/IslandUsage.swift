@@ -374,8 +374,8 @@ struct IslandUsageContextRow: View {
     }
 }
 
-/// The Usage tab's compact top (`docs/claude/usage.md`): Codex's and Claude Code's plan rings, the selected range's
-/// cost with a tiny sparkline, the top models, and "Open usage" for the full window.
+/// The Usage tab's compact top (`docs/claude/usage.md`): Codex's, Claude Code's and Antigravity's plan lines, the
+/// selected range's cost with a tiny sparkline, the top models, and "Open usage" for the full window.
 struct IslandUsageCompact: View {
     @ObservedObject var model: IslandUsageModel
     let now: Date
@@ -383,14 +383,14 @@ struct IslandUsageCompact: View {
     var body: some View {
         let summary = model.summary
         VStack(alignment: .leading, spacing: 8) {
-            // Codex and its lines, then Claude Code and its lines (user 2026-10-18).
+            // Codex and its lines, then Claude Code's, then Antigravity's (user 2026-10-18) — only the apps on this Mac,
+            // one title column for every line (wider than 52 pt only when a title needs it).
+            let slots = UsagePresentation.plans(summary).filter { UsagePresentation.showsSlot($0.reading) }
+                .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
+            let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) }, compact: true)
             VStack(alignment: .leading, spacing: 10) {
-                // Only the apps on this Mac (user 2026-10-18).
-                if UsagePresentation.showsSlot(summary?.codexPlan) {
-                    UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: summary?.codexPlan, now: now), compact: true)
-                }
-                if UsagePresentation.showsSlot(summary?.claudeCodePlan) {
-                    UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: summary?.claudeCodePlan, now: now), compact: true)
+                ForEach(slots) { slot in
+                    UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth)
                 }
             }
             .padding(.horizontal, 6)

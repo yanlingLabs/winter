@@ -79,7 +79,14 @@ enum UsagePresentation {
         case .winter: return "Winter"
         case .codex: return "Codex"
         case .claudeCode: return "Claude Code"
+        case .opencode: return "OpenCode"
         }
+    }
+
+    /// PURE: whether a source gets its toggle — OpenCode has no plan slot to say "not on this Mac", so its toggle shows
+    /// only when it is installed (its stored rows still count in the history either way).
+    static func showsToggle(_ source: UsageSource, summary: UsageSummary?) -> Bool {
+        source != .opencode || (summary?.opencodeInstalled ?? true)
     }
 
     /// PURE: USD as words — "$0", "<$0.01", "$3.42", "$1,284".
@@ -108,6 +115,7 @@ enum UsagePresentation {
         switch basis {
         case "list": return ""
         case "estimate": return "est."
+        case "reported": return "reported"
         case "mixed": return "part est."
         default: return "unpriced"
         }
@@ -137,6 +145,7 @@ enum UsagePresentation {
         case "winter-codex-oauth": return "From Winter’s ChatGPT sign-in"
         case "claude-cli": return "From Claude Code"
         case "claude-cache": return "From Claude Code’s cache"
+        case "agy-cli": return "From Antigravity"
         case "disabled": return "Tracking off"
         default: return "Not found"
         }
@@ -145,8 +154,14 @@ enum UsagePresentation {
     // MARK: plans
 
     static func windowTitle(_ w: UsagePlanWindow) -> String {
-        // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
-        if let scope = w.scope, !scope.isEmpty { return scopeName(scope) }
+        if let scope = w.scope, !scope.isEmpty {
+            // A model GROUP's own windows (Antigravity: "Gemini", "Claude & GPT") say the group and the window, the group
+            // as agy names it ("Gemini 5h", "Claude & GPT week").
+            if w.kind == "five_hour" { return "\(scope) 5h" }
+            if w.kind == "weekly" { return "\(scope) week" }
+            // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
+            return scopeName(scope)
+        }
         switch w.kind {
         case "five_hour": return "5-hour"
         case "weekly", "weekly_scoped": return "Weekly"
@@ -164,12 +179,18 @@ enum UsagePresentation {
         return scope.prefix(1).uppercased() + scope.dropFirst()
     }
 
-    /// PURE: a reading's rings, the 5-hour first, then weekly, then per-model weekly.
+    /// PURE: a reading's rings, the 5-hour first, then weekly, then per-model weekly — a model group's windows
+    /// (Antigravity's) together, the groups in the order the source gave them.
     static func rings(_ reading: UsagePlanReading?, now: Date) -> [UsagePlanRing] {
         guard let reading else { return [] }
         let order: [String: Int] = ["five_hour": 0, "weekly": 1, "weekly_scoped": 2]
+        var groups: [String] = []
+        for w in reading.windows where w.kind != "weekly_scoped" {
+            if let scope = w.scope, !groups.contains(scope) { groups.append(scope) }
+        }
+        let group = { (w: UsagePlanWindow) -> Int in w.kind == "weekly_scoped" ? 0 : w.scope.flatMap { groups.firstIndex(of: $0) } ?? 0 }
         return reading.windows
-            .sorted { (order[$0.kind] ?? 3, $0.id) < (order[$1.kind] ?? 3, $1.id) }
+            .sorted { (group($0), order[$0.kind] ?? 3, $0.id) < (group($1), order[$1.kind] ?? 3, $1.id) }
             .map { w in
                 let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? $0 : nil }
                 let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
@@ -190,13 +211,35 @@ enum UsagePresentation {
         return f.string(from: reset)
     }
 
-    /// PURE: a plan's slot. `provider` is "codex" or "claude-code" (its reading may be nil before the first answer).
     /// PURE: whether a plan gets a slot at all — not when its app is not on this Mac (user 2026-10-18). Before the
     /// first answer it shows ("Reading…").
     static func showsSlot(_ reading: UsagePlanReading?) -> Bool { reading?.source != "not-installed" }
 
+    /// The plans in the order both surfaces show them: Codex, Claude Code, Antigravity.
+    static func plans(_ summary: UsageSummary?) -> [(provider: String, reading: UsagePlanReading?)] {
+        [("codex", summary?.codexPlan), ("claude-code", summary?.claudeCodePlan), ("antigravity", summary?.antigravityPlan)]
+    }
+
+    static func planTitle(provider: String) -> String {
+        switch provider {
+        case "codex": return "Codex"
+        case "antigravity": return "Antigravity"
+        default: return "Claude Code"
+        }
+    }
+
+    /// PURE: the plan lines' title column — the floor (52 pt in the island, 72 in the window), wider only when a title
+    /// needs it ("Claude & GPT week"), so no title truncates and every line of a block starts at one x.
+    static func titleColumnWidth(_ titles: [String], compact: Bool) -> CGFloat {
+        let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
+        let widest = titles.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        return max(compact ? 52 : 72, (widest + 1).rounded(.up))
+    }
+
+    /// PURE: a plan's slot. `provider` is "codex", "claude-code" or "antigravity" (its reading may be nil before the
+    /// first answer).
     static func slot(provider: String, reading: UsagePlanReading?, now: Date) -> UsagePlanSlot {
-        let title = provider == "codex" ? "Codex" : "Claude Code"
+        let title = planTitle(provider: provider)
         guard let reading else {
             return UsagePlanSlot(id: provider, title: title, rings: [], sourceLine: "", emptyLine: "Reading…", planType: nil)
         }
@@ -218,7 +261,7 @@ enum UsagePresentation {
         case "disabled":
             empty = "Tracking is off"
         default:
-            empty = provider == "codex" ? "Codex not found on this Mac" : "No plan report from Claude Code"
+            empty = provider == "codex" ? "Codex not found on this Mac" : "No plan report from \(title)"
         }
         return UsagePlanSlot(id: provider, title: title, rings: [], sourceLine: parts.joined(separator: " · "), emptyLine: empty, planType: planType)
     }
@@ -334,7 +377,8 @@ enum UsagePresentation {
 
     /// What a plan can cover, with words.
     static let coverOptions: [(id: String, title: String)] = [
-        ("codex", "Codex"), ("claude-code", "Claude Code"), ("winter:codex-oauth", "Winter on ChatGPT"), ("winter", "All of Winter"),
+        ("codex", "Codex"), ("claude-code", "Claude Code"), ("opencode", "OpenCode"), ("winter:codex-oauth", "Winter on ChatGPT"),
+        ("winter", "All of Winter"),
     ]
 
     /// PURE: a provider's default covers ("openai" → Codex + Winter on ChatGPT).

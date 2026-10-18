@@ -6,7 +6,7 @@ import WinterKit
 /// (`docs/claude/usage.md`; `UsageWindowTests` with `TEST_RUNNER_WINTER_USAGE_RENDER_DIR=<dir>`).
 @MainActor
 enum UsageGallery {
-    static func samplePlans(now: Date) -> (codex: UsagePlanReading, claude: UsagePlanReading) {
+    static func samplePlans(now: Date) -> (codex: UsagePlanReading, claude: UsagePlanReading, antigravity: UsagePlanReading) {
         let ms = { (s: Double) in (now.timeIntervalSince1970 + s) * 1000 }
         let codex = UsagePlanReading(provider: "codex", source: "codex-app-server", at: ms(-40), windows: [
             UsagePlanWindow(id: "primary", kind: "five_hour", windowMinutes: 300, usedPercent: 38, resetsAt: ms(2 * 3600 + 14 * 60)),
@@ -18,7 +18,13 @@ enum UsageGallery {
             UsagePlanWindow(id: "weekly_scoped:opus:2", kind: "weekly_scoped", windowMinutes: 10_080, usedPercent: 92, resetsAt: ms(4 * 86400),
                             scope: "opus"),
         ])
-        return (codex, claude)
+        let antigravity = UsagePlanReading(provider: "antigravity", source: "agy-cli", at: ms(-60), windows: [
+            UsagePlanWindow(id: "gemini-weekly", kind: "weekly", windowMinutes: 10_080, usedPercent: 27, resetsAt: ms(6 * 86400), scope: "Gemini"),
+            UsagePlanWindow(id: "gemini-5h", kind: "five_hour", windowMinutes: 300, usedPercent: 8, resetsAt: ms(4 * 3600), scope: "Gemini"),
+            UsagePlanWindow(id: "3p-weekly", kind: "weekly", windowMinutes: 10_080, usedPercent: 27, resetsAt: ms(6 * 86400), scope: "Claude & GPT"),
+            UsagePlanWindow(id: "3p-5h", kind: "five_hour", windowMinutes: 300, usedPercent: 0, resetsAt: ms(4 * 3600), scope: "Claude & GPT"),
+        ])
+        return (codex, claude, antigravity)
     }
 
     static let sampleModels: [(UsageSource, String, String, Double, UsageTotals)] = [
@@ -27,13 +33,17 @@ enum UsageGallery {
         (.winter, "codex-oauth", "codex-oauth/gpt-6-sol", 0, UsageTotals(costUsd: 6.10, input: 900_000, output: 80_000, cacheRead: 2_600_000, cacheSavingsUsd: 4.7, records: 64)),
         (.winter, "anthropic", "anthropic/claude-sonnet-5-5", 0, UsageTotals(costUsd: 3.42, input: 120_000, output: 40_000, cacheRead: 1_100_000, cacheWrite: 90_000, cacheSavingsUsd: 1.98, records: 31)),
         (.claudeCode, "anthropic", "claude-haiku-4-5-20251001", 0, UsageTotals(costUsd: 0.38, input: 210_000, output: 30_000, cacheRead: 400_000, cacheSavingsUsd: 0.36, records: 44)),
+        (.opencode, "nvidia", "nvidia/deepseek-ai/deepseek-v4-pro", 0, UsageTotals(costUsd: 0.37, input: 2_000, output: 400, cacheRead: 10_000, records: 1)),
     ]
 
     static func sampleSeries(now: Date, range: UsageRange = .week) -> UsageSeries {
         let bucket: Double = range == .week ? 6 * 3600 : 3600
         let count = range == .week ? 28 : 24
         let from = now.timeIntervalSince1970 * 1000 - Double(count) * bucket * 1000
-        let rows = sampleModels.map { UsageModelRow(source: $0.0, provider: $0.1, model: $0.2, costBasis: $0.0 == .winter && $0.1 == "anthropic" ? "list" : "estimate", totals: $0.4) }
+        let rows = sampleModels.map {
+            UsageModelRow(source: $0.0, provider: $0.1, model: $0.2,
+                          costBasis: $0.0 == .opencode ? "reported" : $0.0 == .winter && $0.1 == "anthropic" ? "list" : "estimate", totals: $0.4)
+        }
         let buckets: [UsageBucket] = (0..<count).map { i in
             // A day/night rhythm, deterministic.
             let wave = max(0, sin(Double(i) / Double(count) * .pi * 8 - 1)) + 0.15
@@ -61,7 +71,7 @@ enum UsageGallery {
         let plans = samplePlans(now: now)
         return UsageSummary(range: range.rawValue, from: series.from, to: series.to, bucketMs: series.bucketMs, totals: series.totals,
                             bySource: series.bySource, topModels: Array(series.models.prefix(5)), spark: series.buckets.map(\.costUsd),
-                            sparkTokens: series.buckets.map(\.tokens), codexPlan: plans.codex, claudeCodePlan: plans.claude,
+                            sparkTokens: series.buckets.map(\.tokens), codexPlan: plans.codex, claudeCodePlan: plans.claude, antigravityPlan: plans.antigravity,
                             claudeCodeStatsBefore: (now.timeIntervalSince1970 - 30 * 86400) * 1000)
     }
 
@@ -81,7 +91,7 @@ enum UsageGallery {
         model.now = { now }
         model.setForTesting(series: sampleSeries(now: now), summary: sampleSummary(now: now, range: .week), subscriptions: sampleSubscriptions(now: now))
         let view = UsageWindowRootView(model: model, onClose: {}, onMinimize: {}, onZoom: {}, scrolls: false)
-            .frame(width: 920, height: 1560)
+            .frame(width: 920, height: 1740)
         return try write(view, directory, "usage-window@2x.png")
     }
 
