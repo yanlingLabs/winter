@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
-import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli } from "./claude-code";
+import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType } from "./claude-code";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type Subscription, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
@@ -188,6 +188,8 @@ export class UsageService {
   private codexRun: Promise<void> | undefined;
   private claudeCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
   private claudeRun: Promise<void> | undefined;
+  /** Claude Code's plan name (`auth status`'s `subscriptionType`), per binary, re-asked hourly. */
+  private claudePlanName: { at: number; key: string; value?: string } | undefined;
   /** Set when `/usage` came back as something other than the local command: this rung is off until restart. */
   /** The passive rungs' last readings (rollout tails, `~/.claude.json`), re-read at most every `fallbackEveryMs`. */
   private rolloutCache: { at: number; reading?: PlanReading } | undefined;
@@ -342,6 +344,11 @@ export class UsageService {
         // The latch: a binary whose `/usage` once reached the model loop is never asked again — until it changes.
         const key = binaryKey("claude", exe);
         if (key === undefined || this.deps.db.latch(key) !== undefined) { this.claudeCache = { at: this.now(), failure: "latched" }; return; }
+        // The plan's name (Max, Pro…), from Claude Code's own offline `auth status` — hourly, per binary.
+        if (this.claudePlanName === undefined || this.claudePlanName.key !== key || this.now() - this.claudePlanName.at >= 3_600_000) {
+          const value = await this.inProbeDir((cwd) => claudeSubscriptionType(exe, { cwd })).catch(() => undefined);
+          this.claudePlanName = { at: this.now(), key, ...(value === undefined ? {} : { value }) };
+        }
         const r = await this.inProbeDir((cwd) => claudePlanFromCli(exe, {
           cwd, now: this.now,
           ...(this.deps.claudeCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.claudeCliTimeoutMs }),
@@ -356,10 +363,12 @@ export class UsageService {
       })().finally(() => { this.claudeRun = undefined; });
       await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
     }
-    if (this.claudeCache?.reading !== undefined) return this.claudeCache.reading;
+    const plan = this.claudePlanName?.value;
+    const named = (r: PlanReading): PlanReading => (plan === undefined || r.planType !== undefined ? r : { ...r, planType: plan });
+    if (this.claudeCache?.reading !== undefined) return named(this.claudeCache.reading);
     if (this.deps.claudeJsonPath !== undefined) {
       const cached = await this.claudeJsonReading(this.deps.claudeJsonPath);
-      if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+      if (cached !== undefined) return named({ ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) });
     }
     return { provider: "claude-code", source: "none", windows: [] };
   }

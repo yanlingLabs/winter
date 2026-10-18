@@ -29,7 +29,9 @@ function service(over: Partial<UsageServiceDeps> & { db?: UsageDb; home?: string
 }
 
 function marks(markerPath: string): Array<{ argv: string[]; cwd: string; env: string[] }> {
-  return existsSync(markerPath) ? readFileSync(markerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+  // Claude Code's hourly `auth status` (the plan's name) is not a `/usage` run: not counted here.
+  return existsSync(markerPath) ? readFileSync(markerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    .filter((m: { argv: string[] }) => m.argv[0] !== "auth") : [];
 }
 
 async function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {

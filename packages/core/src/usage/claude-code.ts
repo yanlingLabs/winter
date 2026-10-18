@@ -181,6 +181,30 @@ export async function claudePlanFromCli(executable: string, opts: { cwd: string;
   return { failure: outcome.kind === "exited" ? "no-result" : outcome.kind };
 }
 
+/** `claude auth status --json`: Claude Code reporting its OWN sign-in, offline (user 2026-10-18: show the plan beside
+ *  "Claude Code", like Codex's). Seen live: `{loggedIn, authMethod, …, subscriptionType: "max"}`. */
+export const CLAUDE_AUTH_STATUS_ARGS = ["auth", "status", "--json"] as const;
+
+/**
+ * The user's Claude plan name ("max", "pro", …) from Claude Code's own `auth status`. ONLY `subscriptionType` is read;
+ * the rest of the answer (email, organisation, ids) is parsed in memory and dropped — never kept, logged or sent.
+ * Undefined when not signed in with claude.ai, or on any failure.
+ */
+export async function claudeSubscriptionType(executable: string, opts: { cwd: string; timeoutMs?: number; env?: Record<string, string> }): Promise<string | undefined> {
+  const lines: string[] = [];
+  const outcome = await runLines(executable, {
+    args: [...CLAUDE_AUTH_STATUS_ARGS], cwd: opts.cwd, stdin: "ignore", timeoutMs: opts.timeoutMs ?? 8_000, maxBytes: 64 * 1024,
+    env: opts.env ?? probeEnv(["CLAUDE_CONFIG_DIR"]),
+    onLine: (line) => { lines.push(line); return undefined; },
+  });
+  if (outcome.kind !== "exited" && outcome.kind !== "done") return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(lines.join("\n")); } catch { return undefined; }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const t = (parsed as Record<string, unknown>).subscriptionType;
+  return typeof t === "string" && /^[A-Za-z0-9 _-]{1,24}$/.test(t) ? t : undefined;
+}
+
 /** Over this, `~/.claude.json` is not read at all. */
 export const CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024;
 

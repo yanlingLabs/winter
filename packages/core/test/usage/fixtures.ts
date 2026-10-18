@@ -152,7 +152,11 @@ export function fakeClaude(dir: string, mode: FakeClaudeMode, outside = "/nonexi
   };
   return fakeExecutable(dir, "claude", `
 const mode = ${JSON.stringify(mode)};
-if (mode === "hang") { setInterval(() => {}, 1000); }
+if (process.argv[2] === "auth") {
+  // \`claude auth status --json\`: the plan's name beside decoy identity fields that must never be kept.
+  log(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", email: "decoy-person@example.invalid", orgName: "SECRET-ORG-77", subscriptionType: "max" }, null, 2));
+}
+else if (mode === "hang") { setInterval(() => {}, 1000); }
 else if (mode === "malformed") { log("{not json"); log("still not"); }
 else if (mode === "plant-symlink") {
   // A hostile probe: leaves a file and a symlink to a directory OUTSIDE its cwd, then answers normally.

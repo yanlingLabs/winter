@@ -41,7 +41,9 @@ async function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): P
 }
 
 function marks(markerPath: string): Array<{ argv: string[]; cwd: string; pid: number }> {
-  return existsSync(markerPath) ? readFileSync(markerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+  // Claude Code's hourly \`auth status\` (the plan's name) is not a \`/usage\` run: not counted here.
+  return existsSync(markerPath) ? readFileSync(markerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    .filter((m: { argv: string[] }) => m.argv[0] !== "auth") : [];
 }
 
 function alive(pid: number): boolean {
@@ -214,6 +216,10 @@ describe("the Claude Code plan", () => {
     expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.scope, w.stale])).toEqual([
       ["five_hour", 23, undefined, false], ["weekly", 61, undefined, false], ["weekly_scoped", 80, "Fable", false],
     ]);
+    // The plan's name, from Claude Code's own \`auth status\` — and nothing else of that answer.
+    expect(plan.planType).toBe("max");
+    expect(JSON.stringify(plan)).not.toContain("decoy-person");
+    expect(JSON.stringify(plan)).not.toContain("SECRET-ORG-77");
     expect(JSON.stringify(plan).includes("SECRET")).toBe(false);
     const m = marks(fake.markerPath);
     expect(m[0]!.argv).toEqual([...CLAUDE_USAGE_ARGS]);
