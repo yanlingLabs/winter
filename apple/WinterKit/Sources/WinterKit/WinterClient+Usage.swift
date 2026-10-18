@@ -140,8 +140,9 @@ public struct UsageSummary: Sendable, Equatable {
     public let trackClaudeCode: Bool
     public let trackAntigravity: Bool
     public let trackOpencode: Bool
-    /// OpenCode is on this Mac (it has no plan slot to say so): its source toggle shows only then.
-    public let opencodeInstalled: Bool
+    /// OpenCode is on this Mac (it has no plan slot to say so): its source toggle shows only then. Nil = a daemon that
+    /// knows no OpenCode source at all — never send it `opencode` in `sources` (it would refuse the whole request).
+    public let opencodeInstalled: Bool?
     /// Epoch ms (noon UTC of that day): Claude Code days before it come from its own `/stats` cache. Nil = none imported.
     public let claudeCodeStatsBefore: Double?
 
@@ -149,7 +150,7 @@ public struct UsageSummary: Sendable, Equatable {
                 bySource: [UsageSource: UsageTotals] = [:], topModels: [UsageModelRow] = [], spark: [Double] = [],
                 sparkTokens: [Double] = [], codexPlan: UsagePlanReading? = nil, claudeCodePlan: UsagePlanReading? = nil,
                 antigravityPlan: UsagePlanReading? = nil, trackCodex: Bool = true, trackClaudeCode: Bool = true,
-                trackAntigravity: Bool = true, trackOpencode: Bool = true, opencodeInstalled: Bool = true,
+                trackAntigravity: Bool = true, trackOpencode: Bool = true, opencodeInstalled: Bool? = nil,
                 claudeCodeStatsBefore: Double? = nil) {
         self.range = range; self.from = from; self.to = to; self.bucketMs = bucketMs; self.totals = totals; self.bySource = bySource
         self.topModels = topModels; self.spark = spark; self.sparkTokens = sparkTokens; self.codexPlan = codexPlan
@@ -300,7 +301,7 @@ extension WinterClient {
                      trackCodex: r["tracking"]?["codex"]?.boolValue ?? true, trackClaudeCode: r["tracking"]?["claudeCode"]?.boolValue ?? true,
                      trackAntigravity: r["tracking"]?["antigravity"]?.boolValue ?? true,
                      trackOpencode: r["tracking"]?["opencode"]?.boolValue ?? true,
-                     opencodeInstalled: r["installed"]?["opencode"]?.boolValue ?? true,
+                     opencodeInstalled: r["installed"]?["opencode"]?.boolValue,
                      claudeCodeStatsBefore: num(r["history"]?["claudeCodeStats"]?["before"]))
     }
 

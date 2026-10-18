@@ -40,10 +40,16 @@ final class UsageWindowModel: ObservableObject {
     }
 
     func refresh() async {
+        await refresh(again: true)
+    }
+
+    private func refresh(again: Bool) async {
         let range = range, sources = sources
+        // Never a source the daemon has not said it knows (`UsagePresentation.requestSources`).
+        let asked = UsagePresentation.requestSources(sources, summary: summary)
         do {
-            async let s = fetchSeries(range, sources)
-            async let m = fetchSummary(range, sources)
+            async let s = fetchSeries(range, asked)
+            async let m = fetchSummary(range, asked)
             let (series, summary) = try await (s, m)
             // A newer choice while these were in flight: theirs wins.
             guard range == self.range, sources == self.sources else { return }
@@ -52,6 +58,11 @@ final class UsageWindowModel: ObservableObject {
             failed = false
         } catch {
             failed = series == nil
+        }
+        // The first answer said OpenCode is known: ask once more with it, so its stored rows show at once.
+        if again, UsagePresentation.requestSources(sources, summary: summary) != asked {
+            await refresh(again: false)
+            return
         }
         if let subs = try? await fetchSubscriptions() { subscriptions = subs }
     }

@@ -72,7 +72,7 @@ enum UsageGallery {
         return UsageSummary(range: range.rawValue, from: series.from, to: series.to, bucketMs: series.bucketMs, totals: series.totals,
                             bySource: series.bySource, topModels: Array(series.models.prefix(5)), spark: series.buckets.map(\.costUsd),
                             sparkTokens: series.buckets.map(\.tokens), codexPlan: plans.codex, claudeCodePlan: plans.claude, antigravityPlan: plans.antigravity,
-                            claudeCodeStatsBefore: (now.timeIntervalSince1970 - 30 * 86400) * 1000)
+                            opencodeInstalled: true, claudeCodeStatsBefore: (now.timeIntervalSince1970 - 30 * 86400) * 1000)
     }
 
     static func sampleSubscriptions(now: Date) -> [UsageSubscription] {

@@ -106,11 +106,31 @@ final class UsageWindowTests: XCTestCase {
     func testOpenCodeIsASourceWithItsOwnCostMarkAndAToggleOnlyWhenInstalled() {
         XCTAssertEqual(UsagePresentation.sourceTitle(.opencode), "OpenCode")
         XCTAssertEqual(UsagePresentation.basisMark("reported"), "reported")
-        XCTAssertTrue(UsagePresentation.showsToggle(.opencode, summary: nil))
-        XCTAssertTrue(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h")))
+        XCTAssertFalse(UsagePresentation.showsToggle(.opencode, summary: nil))
+        XCTAssertFalse(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h")))
+        XCTAssertTrue(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h", opencodeInstalled: true)))
         XCTAssertFalse(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h", opencodeInstalled: false)))
         XCTAssertTrue(UsagePresentation.showsToggle(.codex, summary: UsageSummary(range: "24h", opencodeInstalled: false)))
         XCTAssertTrue(UsagePresentation.coverOptions.contains { $0.id == "opencode" })
+    }
+
+    func testAnOlderDaemonIsNeverAskedForOpenCodeANewerOneAlwaysIs() async {
+        let all = Set(UsageSource.allCases)
+        XCTAssertEqual(UsagePresentation.requestSources(all, summary: nil), [.winter, .codex, .claudeCode])
+        XCTAssertEqual(UsagePresentation.requestSources(all, summary: UsageSummary(range: "24h")), [.winter, .codex, .claudeCode])
+        // Not installed, but known: its stored rows still show.
+        XCTAssertEqual(UsagePresentation.requestSources(all, summary: UsageSummary(range: "24h", opencodeInstalled: false)), all)
+        let model = UsageWindowModel()
+        var seen: [Set<UsageSource>] = []
+        struct Refused: Error {}
+        // An older daemon: refuses `opencode`, and never says it knows it.
+        model.fetchSeries = { r, s in seen.append(s); if s.contains(.opencode) { throw Refused() }; return UsageSeries(range: r.rawValue) }
+        model.fetchSummary = { r, s in if s.contains(.opencode) { throw Refused() }; return UsageSummary(range: r.rawValue) }
+        await model.refresh()
+        await model.refresh()
+        XCTAssertFalse(model.failed)
+        XCTAssertNotNil(model.summary)
+        XCTAssertTrue(seen.allSatisfy { !$0.contains(.opencode) })
     }
 
     func testTheWindowModelSendsEachTrackingSwitch() async {
@@ -273,9 +293,11 @@ final class UsageWindowTests: XCTestCase {
         let model = UsageWindowModel()
         var seen: [Set<UsageSource>] = []
         model.fetchSeries = { r, s in seen.append(s); return UsageSeries(range: r.rawValue, totals: UsageTotals(costUsd: Double(s.count))) }
-        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue) }
+        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue, opencodeInstalled: true) }
         model.fetchSubscriptions = { [UsageSubscription(id: "x", name: "P", provider: "openai", price: 1)] }
         await model.refresh()
+        // The first ask names no OpenCode (nothing said it exists yet); the daemon's answer does, so it is asked again.
+        XCTAssertEqual(seen.first, [.winter, .codex, .claudeCode])
         XCTAssertEqual(model.series?.totals.costUsd, 4)
         XCTAssertEqual(model.subscriptions.map(\.id), ["x"])
         model.toggle(.codex)

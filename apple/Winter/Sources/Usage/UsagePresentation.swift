@@ -84,9 +84,15 @@ enum UsagePresentation {
     }
 
     /// PURE: whether a source gets its toggle — OpenCode has no plan slot to say "not on this Mac", so its toggle shows
-    /// only when it is installed (its stored rows still count in the history either way).
+    /// only when the daemon says it is installed (its stored rows still count in the history either way).
     static func showsToggle(_ source: UsageSource, summary: UsageSummary?) -> Bool {
-        source != .opencode || (summary?.opencodeInstalled ?? true)
+        source != .opencode || summary?.opencodeInstalled == true
+    }
+
+    /// PURE: the sources a request may name — `opencode` only once the daemon has said it knows that source (an older
+    /// daemon refuses an unknown source, and with it the whole summary).
+    static func requestSources(_ sources: Set<UsageSource>, summary: UsageSummary?) -> Set<UsageSource> {
+        summary?.opencodeInstalled == nil ? sources.subtracting([.opencode]) : sources
     }
 
     /// PURE: USD as words — "$0", "<$0.01", "$3.42", "$1,284".

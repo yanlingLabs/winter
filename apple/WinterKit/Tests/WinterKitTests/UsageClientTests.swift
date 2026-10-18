@@ -49,14 +49,15 @@ final class UsageClientTests: XCTestCase {
         XCTAssertEqual(s.antigravityPlan?.windows.first?.usedPercent, 27)
         XCTAssertFalse(s.trackAntigravity)
         XCTAssertFalse(s.trackOpencode)
-        XCTAssertFalse(s.opencodeInstalled)
+        XCTAssertEqual(s.opencodeInstalled, false)
         XCTAssertEqual(s.bySource[.opencode]?.costUsd, 0.37)
         XCTAssertEqual(s.topModels.first?.source, .opencode)
         XCTAssertEqual(s.topModels.first?.costBasis, "reported")
-        // An older daemon sends none of them: on, installed, no plan.
+        // An older daemon sends none of them: on, no plan, and no OpenCode source at all (nil, not "installed").
         let old = WinterClient.decodeUsageSummary(try json(#"{"range":"24h","tracking":{"codex":true,"claudeCode":true}}"#))
         XCTAssertNil(old.antigravityPlan)
-        XCTAssertTrue(old.trackAntigravity && old.trackOpencode && old.opencodeInstalled)
+        XCTAssertTrue(old.trackAntigravity && old.trackOpencode)
+        XCTAssertNil(old.opencodeInstalled)
     }
 
     func testClaudeCodeStatsHistoryDecodes() throws {
