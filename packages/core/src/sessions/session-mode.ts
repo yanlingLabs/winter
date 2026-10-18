@@ -36,6 +36,17 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B 
  *  Code. */
 export const SESSION_MODES_CLASSIFIED: Equal<WireSessionMode, RunnableSessionMode | UnrunnableSessionMode> = true;
 
+/** Session door spine (D1). The modes a session DRIVER may hold: the runnable ones plus `cowork`, whose agent loop runs in
+ *  a Linux guest the host only drives (docs/research/2026-10-18-cowork-session-door-design.md section 3). TYPE ONLY, and
+ *  deliberately narrow: it is admitted where a session is DRIVEN (the Cowork driver table and, from D3, `WinterSessionDeps.mode`
+ *  and the projector's `mode`), NEVER where host `Options`, a prompt, a tool list, a run home or a hook is built — those
+ *  keep `RunnableSessionMode`, so `cowork` still cannot reach any of them. No runtime list exists for it on purpose: a
+ *  table keyed by every drivable mode would be exactly the place a Cowork entry could fall through to Code. */
+export type DrivableSessionMode = RunnableSessionMode | "cowork";
+/** COMPILE-TIME PIN: the drivable modes are exactly the runnable ones plus `cowork` — not a superset of the wire list (a
+ *  new protocol mode is classified above first) and never `RunnableSessionMode` itself (`cowork` stays out of it). */
+export const DRIVABLE_SESSION_MODES_CLASSIFIED: Equal<DrivableSessionMode, RunnableSessionMode | "cowork"> & Equal<Exclude<DrivableSessionMode, RunnableSessionMode>, "cowork"> = true;
+
 /** A mode the protocol names and this daemon cannot run (today only `"cowork"`) — derived from
  *  `UNRUNNABLE_SESSION_MODES`, so a second such mode is one list entry, not another literal comparison. Absent
  *  (`undefined`/`null`) is Code by the store-wide convention and is NOT unrunnable. */

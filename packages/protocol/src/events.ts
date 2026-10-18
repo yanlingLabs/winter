@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CoworkSessionCreatedFacts } from "./cowork";
 
 const Base = z.object({
   seq: z.number().int().nonnegative(),
@@ -58,6 +59,11 @@ export const SessionCreatedEvent = Base.extend({
   runtimeKind: z.enum(["claude-agent", "winter-agent"]).optional(),
   providerId: z.string().min(1).optional(),
   modelRef: z.string().min(1).optional(),
+  // Cowork session door (D1 spine): the binding a Cowork conversation was created with — workspace, Project (null
+  // for a standalone workspace), location kind, source (null for the outputs location) and the policy revision.
+  // Durable on seq 1, so an index rebuild and a resume can tell a Cowork log from a Code one without host records.
+  // Additive/optional; no producer yet (nothing can create a Cowork session), and still outside HISTORY_EVENT_TYPES.
+  cowork: CoworkSessionCreatedFacts.optional(),
 });
 
 export const HarnessAttachedEvent = Base.extend({

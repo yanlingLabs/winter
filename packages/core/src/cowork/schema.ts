@@ -277,3 +277,38 @@ export function migrateCoworkPeerInboxSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS cowork_peer_inbox_sender ON cowork_peer_inbox(sender_session_id);
   `);
 }
+
+/** v18, session door spine (D1; docs/research/2026-10-18-cowork-session-door-design.md, gaps G1 and G9). Rebuilds
+ * `cowork_conversations` (SQLite's generalized ALTER TABLE: the registration sets `rebuildsParentTable`, so foreign keys are
+ * off around the transaction and `foreign_key_check` must be no worse at the end) to add two facts:
+ *  - `location_kind`: where the conversation works. `source` (every existing row) binds a workspace source; `outputs` binds
+ *    the conversation's own outputs location, the first-session working root (owner decision O1, 2026-10-18), and has NO
+ *    source and the location's own root as its cwd. The CHECK makes any other combination unrepresentable.
+ *  - `backend_session_id`: the guest runtime's durable backend identity (G9), minted at bind by a later slice; NULL for
+ *    every existing row. Unique when present. A Cowork conversation never gets a host `runtime_sessions` record.
+ * Records only: nothing reads either column yet, and no row can be created through any door. Idempotent: a store whose
+ * table already has `location_kind` is left alone (fixtures that rewind only `user_version` replay this). */
+export function migrateCoworkSessionBindingSchema(db: Database): void {
+  const columns = db.query<{ name: string }, []>("PRAGMA table_info(cowork_conversations)").all().map(column => column.name);
+  if (columns.includes("location_kind")) return;
+  db.exec(`
+    DROP TABLE IF EXISTS cowork_conversations_v18;
+    CREATE TABLE cowork_conversations_v18 (
+      session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+      project_id TEXT REFERENCES cowork_projects(project_id),
+      location_kind TEXT NOT NULL DEFAULT 'source' CHECK(location_kind IN ('source','outputs')),
+      source_id TEXT,
+      relative_cwd TEXT NOT NULL, policy TEXT NOT NULL CHECK(policy IN ('plan','dont-ask','ask','accept-edits','auto','bypass')),
+      restrictions_json TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0),
+      state TEXT NOT NULL CHECK(state IN ('active','archived','deleted')), created_at TEXT NOT NULL,
+      backend_session_id TEXT UNIQUE CHECK(backend_session_id IS NULL OR length(backend_session_id) BETWEEN 1 AND 128),
+      CHECK((location_kind='source' AND source_id IS NOT NULL) OR (location_kind='outputs' AND source_id IS NULL AND relative_cwd='.')),
+      FOREIGN KEY(workspace_id,source_id) REFERENCES cowork_sources(workspace_id,source_id)
+    );
+    INSERT INTO cowork_conversations_v18(session_id,workspace_id,project_id,location_kind,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at,backend_session_id)
+      SELECT session_id,workspace_id,project_id,'source',source_id,relative_cwd,policy,restrictions_json,revision,state,created_at,NULL FROM cowork_conversations;
+    DROP TABLE cowork_conversations;
+    ALTER TABLE cowork_conversations_v18 RENAME TO cowork_conversations;
+    CREATE INDEX IF NOT EXISTS cowork_conversations_workspace ON cowork_conversations(workspace_id);
+  `);
+}

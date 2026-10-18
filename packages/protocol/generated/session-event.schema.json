@@ -482,6 +482,57 @@
         "modelRef": {
           "type": "string",
           "minLength": 1
+        },
+        "cowork": {
+          "type": "object",
+          "properties": {
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+            },
+            "projectId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "location": {
+              "type": "string",
+              "enum": [
+                "source",
+                "outputs"
+              ]
+            },
+            "sourceId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "policyRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "workspaceId",
+            "projectId",
+            "location",
+            "sourceId",
+            "policyRevision"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
