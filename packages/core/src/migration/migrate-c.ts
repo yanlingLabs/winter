@@ -906,6 +906,7 @@ function rawRuntimeState(home: string, fn: (db: Database) => void): void {
   const db = new Database(path);
   try {
     db.run("PRAGMA busy_timeout = 5000");
+    db.run("PRAGMA secure_delete = FAST"); // every writable runtime-state handle zeroes freed pages (peer-message bodies)
     db.transaction(() => fn(db))();
   } finally { db.close(); }
 }
