@@ -22,6 +22,10 @@ export interface UsageInjection {
   codexExecutable?: string | null;
   claudeExecutable?: string | null;
   now?: () => number;
+  /** The background catch-up: false = off (tests); its timings. */
+  catchUp?: boolean;
+  catchUpFirstMs?: number;
+  catchUpEveryMs?: number;
 }
 
 /** The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle). */
@@ -85,5 +89,27 @@ export function createUsageService(opts: {
       info: (msg, meta) => console.error(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`),
     },
   });
-  return { service, close: () => db.close() };
+  // The background catch-up (`UsageService.catchUp`): once a few minutes after boot, then every few hours — so Claude
+  // Code's transcripts are read before its own cleanup deletes them, Usage screen open or not. Unref'd timers (never
+  // hold the daemon), a handful of wakeups a day; off with the env switch (tests, the idle-wakeups gate).
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  if (inj.catchUp !== false && env.WINTER_USAGE_CATCH_UP !== "off") {
+    const run = (): void => { void service.catchUp().catch(() => { /* logged per pass; the next catch-up retries */ }); };
+    const first = setTimeout(run, inj.catchUpFirstMs ?? USAGE_CATCH_UP_FIRST_MS);
+    const every = setInterval(run, inj.catchUpEveryMs ?? USAGE_CATCH_UP_EVERY_MS);
+    first.unref?.();
+    every.unref?.();
+    timers.push(first, every);
+  }
+  return {
+    service,
+    close: () => {
+      for (const t of timers) clearTimeout(t);
+      db.close();
+    },
+  };
 }
+
+/** The background catch-up's first run after boot, and its period. */
+export const USAGE_CATCH_UP_FIRST_MS = 3 * 60_000;
+export const USAGE_CATCH_UP_EVERY_MS = 6 * 3_600_000;

@@ -241,6 +241,19 @@ export class UsageService {
     return this.ingestRun;
   }
 
+  /**
+   * The background catch-up (user 2026-10-18: keep Claude Code's usage past its own 30-day transcript cleanup). Rows are
+   * never deleted here, but they exist only once ingested — so a few minutes after boot and every few hours, ingest
+   * EVERYTHING new (a chunked first import runs to its end), whether or not a Usage screen is open. Each switch still
+   * applies: a source turned off is not read. Bounded: at most `maxPasses` passes per catch-up.
+   */
+  async catchUp(maxPasses = 200): Promise<void> {
+    for (let i = 0; i < maxPasses; i++) {
+      await this.ingest(true);
+      if (!this.ingestMore) return;
+    }
+  }
+
   ingestState(): { running: boolean; lastAt?: number } {
     return { running: this.ingestRun !== undefined, ...(this.lastIngestAt > 0 ? { lastAt: this.lastIngestAt } : {}) };
   }
