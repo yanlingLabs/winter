@@ -269,9 +269,10 @@ log(JSON.stringify({
 }
 
 /** A `.claude.json` with the plan cache AND decoy secret-looking keys that must never escape. */
-export function claudeJson(path: string, fetchedAtMs: number, util: Record<string, { utilization: number; resets_at: string }>): void {
+export function claudeJson(path: string, fetchedAtMs: number, util: Record<string, { utilization: number; resets_at: string }>, tier?: string): void {
   writeFileSync(path, JSON.stringify({
-    numStartups: 3, userID: "DECOY_TOKEN_VALUE", oauthAccount: { emailAddress: "someone@example.com", accessToken: "sk-decoy-6e1d" },
+    numStartups: 3, userID: "DECOY_TOKEN_VALUE",
+    oauthAccount: { emailAddress: "someone@example.com", accessToken: "sk-decoy-6e1d", ...(tier === undefined ? {} : { organizationRateLimitTier: tier }) },
     mcpServers: { thing: { env: { API_KEY: "sk-decoy-6e1d" } } },
     projects: { "/Users/someone/SecretProjectName": { history: [{ display: "SECRET-PROMPT-7f3a" }] } },
     cachedUsageUtilization: { fetchedAtMs, utilization: util, limits: [] },
