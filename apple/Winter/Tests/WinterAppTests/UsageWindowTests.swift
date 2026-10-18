@@ -178,6 +178,24 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertFalse(UsagePlanLine.figureLayout(width: 300, fraction: 0.97, compact: true).showsLeft)
     }
 
+    func testTheResetInsideAHoveredLineSaysTheTimeTodayAndTheDateOtherwise() {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let en = Locale(identifier: "en_US")
+        // now = Fri 2027-01-15 08:00 UTC.
+        XCTAssertEqual(UsagePresentation.hoverResetWords(now.addingTimeInterval(15 * 3600 + 600), now: now, calendar: utc, locale: en), "Resets 11:10pm")
+        XCTAssertEqual(UsagePresentation.hoverResetWords(now.addingTimeInterval(4 * 3600), now: now, calendar: utc, locale: en), "Resets 12pm")
+        XCTAssertEqual(UsagePresentation.hoverResetWords(now.addingTimeInterval(30 * 3600), now: now, calendar: utc, locale: en), "Resets Jan 16 at 2pm")
+    }
+
+    func testTheResetWordsGoInTheGreyElseTheFillElseNowhere() {
+        let words = UsagePlanLine.resetWidth("Resets Oct 19 at 2pm")
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.2, compact: true, resetWidth: words).reset, .grey)
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.9, compact: true, resetWidth: words).reset, .fill)
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 120, fraction: 0.5, compact: true, resetWidth: words).reset, .none)
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.2, compact: true).reset, .none)
+    }
+
     func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
         XCTAssertEqual(UsagePlanLine.percents(0.344).used, 34)
         XCTAssertEqual(UsagePlanLine.percents(0.344).left, 66)

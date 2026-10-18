@@ -21,6 +21,8 @@ struct UsagePlanRing: Identifiable, Equatable {
     /// The same, short enough for the island's compact ring: "2 h 14 min", "Thu 9:00".
     var resetsShort: String? = nil
     let stale: Bool
+    /// Inside the line under the pointer (user 2026-10-18): "Resets Oct 19 at 2pm", or "Resets 11:10pm" the same day.
+    var resetsHover: String? = nil
 }
 
 /// A plan's slot: Codex now, Claude Code beside it — its rings, where the numbers came from and how old they are, or
@@ -201,7 +203,8 @@ enum UsagePresentation {
                 let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? $0 : nil }
                 let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
                 return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: min(1, max(0, w.usedPercent / 100)),
-                                     resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale)
+                                     resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale,
+                                     resetsHover: reset.map { hoverResetWords($0, now: now) })
             }
     }
 
@@ -215,6 +218,21 @@ enum UsagePresentation {
         f.locale = locale
         f.setLocalizedDateFormatFromTemplate(reset.timeIntervalSince(now) < 6.5 * 86_400 ? "EEEjmm" : "MMMd")
         return f.string(from: reset)
+    }
+
+    /// PURE: the reset inside a hovered line (user 2026-10-18) — "Resets 11:10pm" when it falls today, else
+    /// "Resets Oct 19 at 2pm"; the minutes only when they are not :00.
+    static func hoverResetWords(_ reset: Date, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        let parts = calendar.dateComponents([.hour, .minute], from: reset)
+        let hour = parts.hour ?? 0, minute = parts.minute ?? 0
+        let clock = "\(hour % 12 == 0 ? 12 : hour % 12)\(minute == 0 ? "" : String(format: ":%02d", minute))\(hour < 12 ? "am" : "pm")"
+        if calendar.isDate(reset, inSameDayAs: now) { return "Resets \(clock)" }
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.locale = locale
+        f.dateFormat = "MMM d"
+        return "Resets \(f.string(from: reset)) at \(clock)"
     }
 
     /// PURE: whether a plan gets a slot at all — not when its app is not on this Mac (user 2026-10-18). Before the

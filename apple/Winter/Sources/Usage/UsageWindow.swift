@@ -565,13 +565,28 @@ struct UsagePlanLine: View {
     /// (it then runs past a short fill), and the left one is dropped when the grey left over is shorter.
     static func figureSlot(compact: Bool) -> CGFloat { compact ? 30 : 34 }
 
+    /// Where the reset words go inside a hovered line: the grey after the fill (before the left figure), else the fill
+    /// (before the used figure), else nowhere (they stay in the VoiceOver label).
+    enum ResetPlacement: Equatable { case grey, fill, none }
+
+    /// About how wide the reset words are in the tiny face (≈ 5.4 pt a character at 10 pt) plus their gap.
+    static func resetWidth(_ words: String?) -> CGFloat { words.map { CGFloat($0.count) * 5.4 + 10 } ?? 0 }
+
     /// PURE: where the figures go on a track `width` wide — the used one glued to the fill's END, inside it (its slot
-    /// never narrower than `figureSlot`); the left one at the track's end, only when the grey left over fits it.
-    static func figureLayout(width: CGFloat, fraction: Double, compact: Bool) -> (usedSlot: CGFloat, showsLeft: Bool) {
+    /// never narrower than `figureSlot`); the left one at the track's end, only when the grey left over fits it; the
+    /// reset words where they fit whole (`ResetPlacement`).
+    static func figureLayout(width: CGFloat, fraction: Double, compact: Bool, resetWidth: CGFloat = 0)
+        -> (usedSlot: CGFloat, showsLeft: Bool, reset: ResetPlacement) {
         let fill = width * CGFloat(min(1, max(0, fraction)))
         let slot = figureSlot(compact: compact)
         let usedSlot = min(width, max(fill, slot))
-        return (usedSlot, width - usedSlot >= slot)
+        let showsLeft = width - usedSlot >= slot
+        let reset: ResetPlacement
+        if resetWidth <= 0 { reset = .none }
+        else if showsLeft && width - usedSlot - slot >= resetWidth { reset = .grey }
+        else if usedSlot - slot >= resetWidth { reset = .fill }
+        else { reset = .none }
+        return (usedSlot, showsLeft, reset)
     }
 
     /// PURE: the two hover figures — used (inside the fill) and left (at the track's end) — always summing to 100.
@@ -595,15 +610,26 @@ struct UsagePlanLine: View {
                         .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
                     if hovered {
                         // A lighter weight than the titles: the figures sit in the line, they do not shout.
-                        let layout = Self.figureLayout(width: proxy.size.width, fraction: used, compact: compact)
+                        let layout = Self.figureLayout(width: proxy.size.width, fraction: used, compact: compact,
+                                                       resetWidth: Self.resetWidth(ring.resetsHover))
                         ZStack(alignment: .leading) {
-                            Text("\(pct.used)%").foregroundStyle(Color.white)
-                                .padding(.trailing, 6)
-                                .frame(width: layout.usedSlot, alignment: .trailing)
+                            HStack(spacing: 0) {
+                                if layout.reset == .fill, let words = ring.resetsHover {
+                                    Text(words).foregroundStyle(Color.white.opacity(0.85)).padding(.leading, 6)
+                                }
+                                Spacer(minLength: 4)
+                                Text("\(pct.used)%").foregroundStyle(Color.white).padding(.trailing, 6)
+                            }
+                            .frame(width: layout.usedSlot)
                             if layout.showsLeft {
-                                Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
-                                    .padding(.trailing, 6)
-                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                                HStack(spacing: 8) {
+                                    if layout.reset == .grey, let words = ring.resetsHover {
+                                        Text(words).foregroundStyle(Color.white.opacity(0.6))
+                                    }
+                                    Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
+                                }
+                                .padding(.trailing, 6)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
                             }
                         }
                         .font(Typography.tinyDigits(.regular))
