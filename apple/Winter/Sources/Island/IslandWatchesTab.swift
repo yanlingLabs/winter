@@ -32,6 +32,12 @@ enum IslandWatchesPresentation {
         return HoverLineWords(atFill: armed, end: "\(span(w.expiresAt - nowMs)) left")
     }
 
+    /// PURE: a watch row as VoiceOver says it — the condition, session and target, and its time line (or why its Stop
+    /// failed): what the row showed as text at rest before, now partly only inside its line under the pointer.
+    static func accessibilityLabel(_ w: IslandWatchItem, nowMs: Int, error: String?) -> String {
+        "\(islandWatchConditionLine(w)), \(islandWatchSessionLine(w)) · \(w.targetLabel), \(error ?? islandWatchTimeLine(w, nowMs: nowMs))"
+    }
+
     /// PURE: the muted words beside the condition — its session at rest; its session and target under the pointer.
     static func sideWords(_ w: IslandWatchItem, hovered: Bool) -> String {
         hovered ? "\(islandWatchSessionLine(w)) · \(w.targetLabel)" : islandWatchSessionLine(w)
@@ -115,5 +121,6 @@ struct IslandQuietWatchRow: View {
             .contentShape(Rectangle())
         }
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(IslandWatchesPresentation.accessibilityLabel(watch, nowMs: nowMs, error: error))
     }
 }

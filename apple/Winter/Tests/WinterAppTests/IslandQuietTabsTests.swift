@@ -52,6 +52,15 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertEqual(IslandServers.bundleWords(single, hovered: false), "portfolio")
     }
 
+    func testVoiceOverHearsAServersPortsStateAndFolderAtRest() throws {
+        let model = IslandGallery.sampleServers(now: now)
+        let row = try XCTUnwrap(model.rows.first { $0.name == "http.server" })
+        XCTAssertEqual(IslandServers.accessibilityLabel(row, phase: nil, now: now), "http.server, :8000 · up 25 min, ~/Sites/portfolio")
+        XCTAssertEqual(IslandServers.accessibilityLabel(row, phase: .stopping(sentAt: now), now: now),
+                       "http.server, :8000 · Stopping…, ~/Sites/portfolio")
+        XCTAssertEqual(IslandServers.statusWords(row, phase: .forceOffered, now: now), "Still running")
+    }
+
     // MARK: Watches
 
     private func watch(armedAt: Int, expiresAt: Int, title: String? = "List the extension") -> IslandWatchItem {
@@ -78,6 +87,12 @@ final class IslandQuietTabsTests: XCTestCase {
         let w = watch(armedAt: 0, expiresAt: 1)
         XCTAssertEqual(IslandWatchesPresentation.sideWords(w, hovered: false), "List the extension")
         XCTAssertEqual(IslandWatchesPresentation.sideWords(w, hovered: true), "List the extension · Chrome — Inbox")
+        let timed = watch(armedAt: 0, expiresAt: 60 * 60_000)
+        XCTAssertEqual(IslandWatchesPresentation.accessibilityLabel(timed, nowMs: 4 * 60_000, error: nil),
+                       "You click “Send”, List the extension · Chrome — Inbox, armed 4 min ago · 56 min left",
+                       "VoiceOver hears the time line at rest")
+        XCTAssertEqual(IslandWatchesPresentation.accessibilityLabel(timed, nowMs: 0, error: "Couldn't stop it"),
+                       "You click “Send”, List the extension · Chrome — Inbox, Couldn't stop it")
     }
 
     // MARK: Devices
@@ -181,6 +196,9 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertEqual(IslandCostPresentation.detail(UsageSummary(range: "day", totals: UsageTotals(input: 1_000, output: 200, cacheRead: 5_000)),
                                                      range: .day), "1.2k tokens · \(UsagePresentation.tokens(5_000)) cached")
         XCTAssertEqual(IslandCostPresentation.detail(nil, range: .week), "last 7 days")
+        XCTAssertEqual(IslandCostPresentation.headerAccessibility(UsageSummary(range: "day", totals: UsageTotals(costUsd: 3.5, input: 1_000, output: 200)),
+                                                                  range: .day), "Cost $3.50, 1.2k tokens",
+                       "VoiceOver hears the tokens at rest")
     }
 
     func testTheCostBlocksLinesShareThePlanLinesTitleColumn() {

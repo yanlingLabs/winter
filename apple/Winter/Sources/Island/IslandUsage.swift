@@ -490,6 +490,11 @@ enum IslandCostPresentation {
         }
     }
 
+    /// PURE: the header as VoiceOver says it, at rest too — "Cost $70.22, 4.8M tokens · 51M cached".
+    static func headerAccessibility(_ summary: UsageSummary?, range: UsageRange) -> String {
+        "Cost \(UsagePresentation.cost(summary?.totals.costUsd ?? 0)), \(detail(summary, range: range))"
+    }
+
     /// PURE: the line as VoiceOver says it — "Cost by model: gpt-5-codex $3.42, claude-sonnet-4.5 $1.10".
     static func accessibilityLine(_ segments: [IslandCostSegment]) -> String {
         segments.isEmpty ? "No usage in this range" : "Cost by model: " + segments.map { "\($0.name) \($0.label)" }.joined(separator: ", ")
@@ -528,6 +533,8 @@ struct IslandCostBlock: View {
                     // The grown header's room (the block grows, its lines stay put under it).
                     .padding(.top, hovered ? 2 : 0)
                     .padding(.trailing, hovered ? 10 : 0)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(IslandCostPresentation.headerAccessibility(summary, range: model.range))
                     if hovered {
                         Text(IslandCostPresentation.detail(summary, range: model.range))
                             .font(Typography.tinyDigits())

@@ -475,6 +475,23 @@ enum IslandServers {
         }
     }
 
+    /// PURE: a server's state as words — its uptime, or Stop's ("Stopping…", "Still running").
+    static func statusWords(_ row: IslandServerRow, phase: IslandServerStopPhase?, now: Date) -> String {
+        switch phase {
+        case .stopping?, .killing?: return "Stopping…"
+        case .forceOffered?, .confirmingForce?: return "Still running"
+        default: return uptime(since: row.startedAt, now: now)
+        }
+    }
+
+    /// PURE: a server row as VoiceOver says it — its name, ports and state, and its whole folder: what the row showed as
+    /// text at rest before, now partly only inside its line under the pointer.
+    static func accessibilityLabel(_ row: IslandServerRow, phase: IslandServerStopPhase?, now: Date) -> String {
+        var parts = [row.name, "\(row.portsLine) · \(statusWords(row, phase: phase, now: now))"]
+        if let detail = detailLine(row, hovered: true) { parts.append(detail) }
+        return parts.joined(separator: ", ")
+    }
+
     /// PURE: the words' colour inside the line — black on the light amber of a Stop waiting for its second click.
     static func inkOnFill(_ phase: IslandServerStopPhase?) -> Color {
         if case .confirming? = phase { return .black }
@@ -1333,15 +1350,10 @@ struct IslandServerRowView: View {
             .contentShape(Rectangle())
         }
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(IslandServers.accessibilityLabel(row, phase: phase, now: now))
     }
 
-    private var statusLine: String {
-        switch phase {
-        case .stopping?, .killing?: return "Stopping…"
-        case .forceOffered?, .confirmingForce?: return "Still running"
-        default: return IslandServers.uptime(since: row.startedAt, now: now)
-        }
-    }
+    private var statusLine: String { IslandServers.statusWords(row, phase: phase, now: now) }
 }
 
 /// A server's name, lifting under the pointer.
