@@ -573,8 +573,7 @@ struct UsagePlanLine: View {
                                     .frame(maxWidth: .infinity, alignment: .trailing)
                             }
                         }
-                        .font(Typography.tiny(.regular))
-                        .monospacedDigit()
+                        .font(Typography.tinyDigits(.regular))
                         .lineLimit(1)
                         .transition(.opacity)
                     }
