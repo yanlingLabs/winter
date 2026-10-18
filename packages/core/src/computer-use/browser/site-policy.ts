@@ -7,8 +7,10 @@
 //   ask / accept-edits / plan              a daemon-raised card ("Allow Winter to use <host> in <browser>? It is on
 //                                          the dangerous-domains list.", once / this session); a standing
 //                                          `WebFetch(domain:…)` allow rule counts as the approval
-//   auto / bypass / dont-ask, Dispatch     hard block (`NotAllowed`)
-//   a Dispatch child                       its own policy's row (a card is relayed to Dispatch, bounded)
+//   auto / bypass / dont-ask, chat         hard block (`NotAllowed`)
+//   Dispatch, a Dispatch child             its own policy's row, like code (user ruling 2026-10-17: Dispatch respects
+//                                          its approval mode) — a child's card relayed to Dispatch; either bounded
+//                                          when nobody typed the turn (`approval-bridge.ts`'s `dispatchCardTimeoutMs`)
 //
 // After a committed navigation onto a listed host that is not approved, only BLOCKED_TAB_PRIMITIVES work on that tab
 // until it navigates away (leaving it, reading where it is, answering a page dialog, handing it to the user).
@@ -20,7 +22,7 @@ import type { TabRunScope } from "./tab-scope";
 
 /** What a listed host meets in this session: a card, or a hard block. */
 export function siteRow(facts: Pick<SessionFacts, "policy" | "mode">): "card" | "block" {
-  if (facts.mode === "dispatch" || facts.mode === "chat") return "block";
+  if (facts.mode === "chat") return "block";
   switch (facts.policy) {
     case "ask":
     case "accept-edits":
@@ -96,7 +98,7 @@ export async function ensureSiteAllowed(scope: TabRunScope, approvals: SiteAppro
   if (approvals.approved(scope.sessionId, scope.runId, host)) return;
   const facts = scope.sessionFacts();
   if (siteRow(facts) === "block") {
-    const why = facts.mode === "dispatch" ? "Dispatch never asks" : facts.mode === "chat" ? "chat never asks" : `this session's ${facts.policy} policy does not ask`;
+    const why = facts.mode === "chat" ? "chat never asks" : `this session's ${facts.policy} policy does not ask`;
     throw new AutomationFailure("NotAllowed", `${host} is on the dangerous-domains list (${match.matchedEntry}), and ${why} — don't retry it; ask the user if they need it`);
   }
   let rules: readonly string[] = [];

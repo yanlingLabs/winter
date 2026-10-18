@@ -137,8 +137,9 @@ let sessionPolicyModes: [String] = ["plan", "dont-ask", "ask", "accept-edits", "
 /// The policies a **dispatch** session may actually be set to: every one above except `plan`.
 ///
 /// A fact about the daemon, not about any surface — `session.setPolicy` refuses exactly that one
-/// value for a dispatch target ("plan policy is not available for dispatch sessions — dispatch never
-/// asks permissions", `packages/core/src/ipc/server.ts:1527-1528`) and settles the other five.
+/// value for a dispatch target ("plan policy is not available for dispatch sessions — Dispatch cannot
+/// present a plan (exit_plan_mode is code-only)", `packages/core/src/ipc/server.ts`) and settles the
+/// other five, each honoured as in code (user ruling 2026-10-17).
 /// DERIVED from `sessionPolicyModes` rather than spelled out, so a seventh policy reaches dispatch
 /// by default and only a deliberate second refusal can keep it away.
 ///

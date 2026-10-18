@@ -163,11 +163,11 @@ describe("elicitationHandlerFor", () => {
     await pending;
   });
 
-  test("a dispatch child keeps its never-prompt rule and declines; a dispatch or chat session cards", async () => {
+  test("a dispatch child declines (its link requests are not relayed to Dispatch); a dispatch or chat session cards", async () => {
     const child = harness({ origin: "dispatch-child" });
     expect(await child.ask(urlRequest())).toEqual({ action: "decline" });
     expect(child.events).toEqual([]);
-    expect(child.logs[0]).toContain("dispatch child never prompts");
+    expect(child.logs[0]).toContain("a dispatch child's link requests are not relayed to Dispatch");
     for (const mode of ["dispatch", "chat"] as const) {
       const h = harness({ mode });
       const pending = h.ask(urlRequest());

@@ -3,8 +3,9 @@ import WinterCUPresentation
 import WinterProtocol
 
 // The Winter island's views (`docs/claude/island.md`). Always dark (the panels are `darkAqua`): black shells over
-// arbitrary desktop content, the Dispatch pill's type (`Typography.body(.light)` — its composer's 14 pt), the white ✕ and
-// the blue ✓ with the pills' hover glow. Fonts come from `Typography` only (`TypographyTests` sweeps this folder).
+// arbitrary desktop content, the Dispatch pill's typed text (`Typography.composerField()` — its composer's 14 pt, light on
+// the dark shells), the white ✕ and the blue ✓ with the pills' hover glow. Fonts come from `Typography` only
+// (`TypographyTests` sweeps this folder).
 
 /// The coordinate space the island's panels draw in (the pointer monitors report into it).
 enum IslandSpace {
@@ -13,13 +14,16 @@ enum IslandSpace {
 
 // MARK: - The slim strip
 
-/// The permanent strip extending the housing: the "waiting for you" icon on its left wing, the count on its right.
-/// Static: no animation, no timeline — it redraws only when the count changes.
+/// The permanent strip extending the housing: "waiting for you" (the amber icon and its count) on its left wing, the
+/// working sessions (a bolt and their count) on its right. Static: no animation, no timeline — it redraws only when a
+/// count changes. Idle (nothing waits, nothing works) it is the housing alone.
 struct IslandStripView: View {
     let model: IslandStripModel
     let size: CGSize
     /// The housing's width, nil without one (the icon and the count then sit side by side).
     let housingWidth: CGFloat?
+    /// The pointer is over it: it glows dark, softly — the Dispatch pill buttons' glow, in black (user 2026-10-17).
+    var hovered = false
 
     var body: some View {
         let shape = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: IslandLayout.stripCorner,
@@ -27,19 +31,22 @@ struct IslandStripView: View {
                                            style: .continuous)
         ZStack {
             shape.fill(Color.black)
-            if model.waitingCount == 0 {
+                .shadow(color: Color.black.opacity(hovered ? PillHoverGlowMetrics.near : 0), radius: PillHoverGlowMetrics.nearRadius)
+                .shadow(color: Color.black.opacity(hovered ? PillHoverGlowMetrics.far : 0), radius: PillHoverGlowMetrics.farRadius)
+                .animation(.easeOut(duration: 0.15), value: hovered)
+            if !model.showsWings {
                 // Idle: exactly the housing, black on black — nothing drawn beside it.
                 EmptyView()
             } else if let housingWidth {
                 HStack(spacing: 0) {
-                    icon.frame(width: IslandLayout.stripWing)
+                    waitingGroup.frame(width: IslandLayout.stripWing)
                     Spacer(minLength: housingWidth)
-                    count.frame(width: IslandLayout.stripWing)
+                    workingGroup.frame(width: IslandLayout.stripWing)
                 }
             } else {
-                HStack(spacing: 6) {
-                    icon
-                    count
+                HStack(spacing: 8) {
+                    waitingGroup
+                    workingGroup
                 }
             }
         }
@@ -50,17 +57,39 @@ struct IslandStripView: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    private var icon: some View {
-        Image(systemName: IslandTabRegistry.needsYou.symbol)
-            .font(Typography.label(.semibold))
-            .foregroundStyle(model.waitingCount > 0 ? pillReviewAmber : Theme.textMuted)
+    /// Both wings' symbols and counts share one size, centred on the housing's height (the menu bar's own centre line).
+    static let glyph = Typography.label(.semibold)
+    static let count = Typography.label(.semibold)
+
+    /// The amber "waiting for you" icon and its count (nothing while nothing waits).
+    @ViewBuilder private var waitingGroup: some View {
+        if let label = model.countLabel {
+            HStack(spacing: 4) {
+                Image(systemName: IslandTabRegistry.needsYou.symbol)
+                    .font(Self.glyph)
+                    .foregroundStyle(pillReviewAmber)
+                Text(label)
+                    .font(Self.count)
+                    .foregroundStyle(Color.white)
+            }
+            .frame(height: size.height)
+        } else {
+            Color.clear.frame(width: 1, height: 1)
+        }
     }
 
-    @ViewBuilder private var count: some View {
-        if let label = model.countLabel {
-            Text(label)
-                .font(Typography.label(.semibold))
-                .foregroundStyle(Color.white)
+    /// The working sessions: a bolt and their count (nothing while nothing works).
+    @ViewBuilder private var workingGroup: some View {
+        if let label = model.workingLabel {
+            HStack(spacing: 4) {
+                Image(systemName: "bolt.fill")
+                    .font(Self.glyph)
+                    .foregroundStyle(Theme.accent)
+                Text(label)
+                    .font(Self.count)
+                    .foregroundStyle(Color.white)
+            }
+            .frame(height: size.height)
         } else {
             Color.clear.frame(width: 1, height: 1)
         }
@@ -147,7 +176,7 @@ func islandHeaderLine(_ card: IslandCard) -> String {
     switch card.payload {
     case .approval(let tool, _, _, _): return "\(card.sessionLabel) · \(tool)"
     case .question: return "\(card.sessionLabel) asks"
-    case .elicitation(let server, _, let host, _): return "\(server) · \(host)"
+    case .elicitation(let server, _, _, _): return "\(card.sessionLabel) · \(server)"
     case .viewRequest(let app, _, _): return "\(card.sessionLabel) · \(app)"
     }
 }
@@ -191,34 +220,64 @@ struct IslandRectContent: View {
                 IslandQuestionBody(card: card, questions: questions, store: store)
             default:
                 IslandCardHeader(card: card)
-                Text(islandBodyText(card))
-                    .font(Typography.body(.light))
-                    .foregroundStyle(Color.white)
-                    .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                answerRow
+                IslandAnswerLine(card: card, store: store, lineLimit: 4)
             }
         }
         .padding(IslandLayout.cardPadding)
         .frame(width: IslandLayout.cardWidth, alignment: .topLeading)
     }
+}
 
-    private var answerRow: some View {
-        HStack(spacing: 8) {
-            if let error = store.errors[card.id] {
-                Text(error).font(Typography.caption()).foregroundStyle(pillReviewAmber).lineLimit(1)
+/// An approval's, a link request's or a view request's words with their ✕ and ✓ (↗ for a link) at the trailing end,
+/// bottom-aligned with the last line — the one answer layout of every island card (the desktop-switch pill's row, the
+/// turn result's), on top and in Needs you. A failed answer's line goes under the words.
+struct IslandAnswerLine: View {
+    let card: IslandCard
+    @ObservedObject var store: IslandStore
+    var lineLimit = 4
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(islandBodyText(card))
+                    .font(Typography.composerField())
+                    .foregroundStyle(Color.white)
+                    .lineLimit(lineLimit)
+                    .fixedSize(horizontal: false, vertical: true)
+                if case .elicitation(_, _, let host, _) = card.payload {
+                    // Where ↗ goes, said once, beside the button that opens it.
+                    HStack(spacing: 5) {
+                        Image(systemName: "lock.fill").font(Typography.caption(.semibold))
+                        Text(host).font(Typography.labelMono()).lineLimit(1).truncationMode(.middle)
+                    }
+                    .foregroundStyle(Theme.textMuted)
+                }
+                if let error = store.errors[card.id] {
+                    Text(error).font(Typography.caption()).foregroundStyle(pillReviewAmber).lineLimit(1)
+                }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, minHeight: IslandCircleButtonStyle.size, alignment: .leading)
             let enabled = !store.inFlight.contains(card.id)
-            IslandAnswerButton(role: .refuse, enabled: enabled) {
-                if card.kind == .elicitation { store.answerElicitation(card, accept: false) } else { store.answerApproval(card, approved: false) }
-            }
-            .accessibilityLabel(card.kind == .elicitation ? "Decline" : "Deny")
+            IslandAnswerButton(role: .refuse, enabled: enabled) { answer(false) }
+                .accessibilityLabel(islandAnswerLabels(card).refuse)
             IslandAnswerButton(role: .accept, symbol: card.kind == .elicitation ? "arrow.up.right" : nil, enabled: enabled) {
-                if card.kind == .elicitation { store.answerElicitation(card, accept: true) } else { store.answerApproval(card, approved: true) }
+                answer(true)
             }
-            .accessibilityLabel(card.kind == .elicitation ? "Open link" : "Allow once")
+            .accessibilityLabel(islandAnswerLabels(card).accept)
         }
+    }
+
+    private func answer(_ yes: Bool) {
+        if card.kind == .elicitation { store.answerElicitation(card, accept: yes) } else { store.answerApproval(card, approved: yes) }
+    }
+}
+
+/// PURE: the ✕ and ✓ words VoiceOver reads for a card.
+func islandAnswerLabels(_ card: IslandCard) -> (refuse: String, accept: String) {
+    switch card.payload {
+    case .elicitation(let server, _, let host, _): return ("Decline \(server)'s link", "Open \(host)")
+    case .viewRequest: return ("Don't switch", "Switch now")
+    default: return ("Deny", "Allow once")
     }
 }
 
@@ -235,7 +294,7 @@ struct IslandQuestionBody: View {
             IslandCardHeader(card: card, trailing: questions.count > 1 ? "\(index + 1) of \(questions.count)" : nil)
             if let question {
                 Text(question.question)
-                    .font(Typography.body(.light))
+                    .font(Typography.composerField())
                     .foregroundStyle(Color.white)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -249,7 +308,7 @@ struct IslandQuestionBody: View {
                         get: { draft.wrappedValue.otherTexts[index] ?? "" },
                         set: { draft.wrappedValue.otherTexts[index] = $0 }))
                         .textFieldStyle(.plain)
-                        .font(Typography.body(.light))
+                        .font(Typography.composerField())
                         .foregroundStyle(Color.white)
                         .padding(.horizontal, 12)
                         .frame(height: 30)
@@ -277,17 +336,20 @@ struct IslandQuestionBody: View {
 
     private func optionRow(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack {
-                Text(label)
-                    .font(Typography.body(.light))
-                    .foregroundStyle(selected ? Color.black : Color.white)
-                    .lineLimit(2)
-                Spacer(minLength: 0)
+            IslandPointerReader { hovered in
+                HStack {
+                    Text(label)
+                        .font(Typography.composerField())
+                        .foregroundStyle(selected ? Color.black : Color.white)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .frame(minHeight: 30)
+                .background(Capsule().fill(selected ? Color.white : Color.white.opacity(hovered ? 0.18 : 0.12)))
+                .animation(.easeOut(duration: 0.15), value: hovered)
+                .contentShape(Capsule())
             }
-            .padding(.horizontal, 12)
-            .frame(minHeight: 30)
-            .background(Capsule().fill(selected ? Color.white : Color.white.opacity(0.12)))
-            .contentShape(Capsule())
         }
         .buttonStyle(IslandPressStyle())
     }
@@ -334,25 +396,29 @@ struct IslandRectShell: View {
     let geometry: DesktopIslandGeometry
     @ObservedObject var state: DesktopIslandState
     @ObservedObject var store: IslandStore
+    /// Hovered, as the controller judged it (the grown shape while hovered): its grow.
+    var hovered = false
+    /// The pointer in the card's own unscaled space, for its buttons' glow and options' highlight.
+    var pointer: DispatchPillPointer?
     var reduceMotion = false
 
     var body: some View {
-        Group {
-            if state.still || state.bornAt == nil {
-                frameView(at: Date())
-            } else {
-                TimelineView(.animation) { context in frameView(at: context.date) }
-            }
+        // ONE timeline, paused at rest: the card's contents (a question's typed "Other") keep their identity when the
+        // birth settles.
+        let paused = state.still || state.bornAt == nil
+        TimelineView(.animation(minimumInterval: nil, paused: paused)) { context in
+            frameView(at: paused ? Date() : context.date)
         }
         .frame(width: geometry.panelSize.width, height: geometry.panelSize.height, alignment: .topLeading)
     }
 
     private func frameView(at date: Date) -> some View {
         let frame = reduceMotion ? restFrame(date) : DesktopIslandFluid(geometry: geometry).frame(at: state.seconds(at: date))
-        let hovered = state.pointer.map { geometry.pill.contains($0) } ?? false
         return CUIslandLiquidFrame(frame: frame, geometry: geometry, hovered: hovered && frame.content > 0.9 && state.returningAt == nil,
                                    interactive: frame.content > 0.9 && state.returningAt == nil) {
             IslandRectContent(card: card, store: store)
+                .islandPanelSpace()
+                .environment(\.dispatchPillPointer, pointer)
         }
     }
 
@@ -366,11 +432,14 @@ struct IslandRectShell: View {
     }
 }
 
-// MARK: - The waiting pill and the badge
+// MARK: - The waiting pill
 
-/// The compact pill waiting under a hovered card: one short line; a click expands it (the current card tucks away).
+/// The compact pill waiting under a hovered card: one short line; a click expands it (the current card tucks away). It
+/// grows under the pointer by the compact Dispatch pill's few points, like every floating island panel.
 struct IslandWaitingPill: View {
     let card: IslandCard
+    /// Hovered, as the controller judged it (the grown shape while hovered).
+    var hovered = false
     let action: () -> Void
 
     var body: some View {
@@ -393,144 +462,162 @@ struct IslandWaitingPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(IslandPressStyle())
+        .islandHoverGrow(hovered, size: CGSize(width: IslandLayout.waitingWidth, height: IslandLayout.waitingHeight))
         .accessibilityLabel("Waiting: \(islandWaitingLine(card)). Show it.")
-    }
-}
-
-/// The badge hanging from the housing: "2 waiting". Hovering it brings the newest back.
-struct IslandBadge: View {
-    let count: Int
-    let width: CGFloat
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: IslandTabRegistry.needsYou.symbol)
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(pillReviewAmber)
-            Text(islandBadgeLabel(count))
-                .font(Typography.label(.medium))
-                .foregroundStyle(Color.white)
-        }
-        .frame(width: width, height: IslandLayout.badgeHeight)
-        .background(UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: IslandLayout.badgeHeight / 2,
-                                                              bottomTrailing: IslandLayout.badgeHeight / 2),
-                                           style: .continuous).fill(Color.black))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(islandBadgeLabel(count))
-    }
-
-    /// Wide enough for its words.
-    static func width(for count: Int) -> CGFloat {
-        let text = (islandBadgeLabel(count) as NSString).size(withAttributes: [.font: Typography.sansNS(ofSize: Typography.labelSize, .medium)]).width
-        return ceil(text) + 50
     }
 }
 
 // MARK: - The open island
 
-/// The open island: grows out of the housing, its tab dots, and the selected tab — Phase 1's one tab, Needs you.
+/// The open island at rest, with its own shell (the offscreen gallery's; live, `IslandOpenFrame` draws the shell as it
+/// morphs out of the strip): the header, its tab dots, and the selected tab.
 struct IslandExpandedView: View {
     @ObservedObject var store: IslandStore
     let shape: IslandScreenShape
     let size: CGSize
-    /// The list scrolls (always, live); the offscreen gallery lays it out flat (`ImageRenderer` cannot draw a scroll view).
+    /// The list scrolls (always, live); the offscreen gallery lays it out flat, cut at the island's edge (`ImageRenderer`
+    /// cannot draw a scroll view).
     var scrolls = true
+    /// The phase-2 tabs' models (nil: only Needs you has a body).
+    var tabModels: IslandTabModels?
 
     var body: some View {
-        let outline = UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: IslandLayout.islandCorner,
-                                                                bottomTrailing: IslandLayout.islandCorner),
-                                             style: .continuous)
+        let target = CGRect(origin: .zero, size: size)
+        IslandOpenFrame(frame: .resting(target), target: target, shape: shape) {
+            IslandExpandedContent(store: store, shape: shape, size: size, scrolls: scrolls, tabModels: tabModels)
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+}
+
+/// The open island's contents (no shell): the housing's band, the header (pinned), the selected tab — which scrolls
+/// inside the island's fixed size (`IslandTabScroll`).
+struct IslandExpandedContent: View {
+    @ObservedObject var store: IslandStore
+    let shape: IslandScreenShape
+    let size: CGSize
+    var scrolls = true
+    var tabModels: IslandTabModels?
+
+    var body: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: shape.topInset)
-            HStack(spacing: 8) {
-                Text(store.tabs.selected?.title ?? "")
-                    .font(Typography.body(.semibold))
-                    .foregroundStyle(Color.white)
-                if store.tabs.selected?.id == IslandTabRegistry.needsYou.id, !store.cards.isEmpty {
-                    Text("\(store.cards.count)")
-                        .font(Typography.captionDigits(.semibold))
-                        .foregroundStyle(Color.black)
-                        .padding(.horizontal, 6)
-                        .frame(height: 16)
-                        .background(Capsule().fill(pillReviewAmber))
-                }
-                Spacer()
-                if store.tabs.showsDots { IslandTabDots(state: store.tabs) { store.tabs.select($0) } }
+            if shape.hasHousing {
+                // The header sits IN the housing's band, inline with it: the title left of the housing, the dots right.
+                IslandOpenHeader(store: store, height: shape.topInset, housingWidth: shape.housing?.width)
+            } else {
+                Color.clear.frame(height: shape.topInset)
+                IslandOpenHeader(store: store)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
             tabBody
         }
         .frame(width: size.width, height: size.height, alignment: .top)
-        .background(outline.fill(Color.black))
-        .overlay(outline.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
-        .clipShape(outline)
-        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
     }
 
     @ViewBuilder private var tabBody: some View {
         switch store.tabs.selected?.id {
         case IslandTabRegistry.needsYou.id?: IslandNeedsYouList(store: store, scrolls: scrolls)
+        case IslandTabRegistry.watches.id?: IslandWatchesList(activity: store.activity, scrolls: scrolls)
+        case let id?:
+            if let tabModels { IslandTabBody(id: id, models: tabModels, scrolls: scrolls) } else { Spacer() }
         default: Spacer()
         }
     }
 }
 
+/// The open island's header: the selected tab's title (with Needs you's count), and the dots on the same centre line.
+struct IslandOpenHeader: View {
+    @ObservedObject var store: IslandStore
+    /// The row's height: `Self.height` below the band without a housing, the housing's height beside it.
+    var height: CGFloat = Self.height
+    /// The housing's width when the header sits beside it: the title keeps left of it, the dots right of it.
+    var housingWidth: CGFloat? = nil
+
+    /// The header's height without a housing (the open island's content measure adds it).
+    static let height: CGFloat = 46
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(store.tabs.selected?.title ?? "")
+                    .font(Typography.body(.semibold))
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if store.tabs.selected?.id == IslandTabRegistry.needsYou.id, !store.cards.isEmpty {
+                    Text("\(store.cards.count)")
+                        .font(Typography.captionDigits(.semibold))
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 6)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(Capsule().fill(pillReviewAmber))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let housingWidth { Color.clear.frame(width: housingWidth) }
+            HStack {
+                if store.tabs.showsDots { IslandTabDots(state: store.tabs) { store.tabs.select($0) } }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, IslandLayout.headerInset)
+        .frame(height: height)
+    }
+}
+
+/// Where you are among the tabs: the selected one a short white bar, the others small dots (the page indicator's
+/// shape), sliding on the same spring as a tab change. Each takes a click.
 struct IslandTabDots: View {
     let state: IslandTabState
     let select: (String) -> Void
 
+    static let dot: CGFloat = 6
+    static let selectedWidth: CGFloat = 16
+
     var body: some View {
         HStack(spacing: 5) {
             ForEach(Array(state.tabs.enumerated()), id: \.element.id) { i, tab in
-                Circle()
-                    .fill(i == state.selectedIndex ? Color.white : Color.white.opacity(0.3))
-                    .frame(width: 6, height: 6)
-                    .contentShape(Rectangle().inset(by: -4))
+                let selected = i == state.selectedIndex
+                Capsule()
+                    .fill(selected ? Color.white : Color.white.opacity(0.3))
+                    .frame(width: selected ? Self.selectedWidth : Self.dot, height: Self.dot)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
                     .onTapGesture { select(tab.id) }
                     .help(tab.title)
                     .accessibilityLabel(tab.title)
+                    .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
             }
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.selectedIndex)
     }
 }
 
-/// Needs you: every pending card, newest first, each answerable here — approvals, questions and links with the
-/// transcript's own card (rule options and notes included), view requests with ✕ / ✓.
+/// Needs you: every pending card, newest first, each answerable here — approvals and questions with the transcript's own
+/// card (rule options and notes included), link and view requests with the island's answer line, all on the transcript
+/// card's surface.
 struct IslandNeedsYouList: View {
     @ObservedObject var store: IslandStore
     var scrolls = true
 
+    /// Between two cards (each a header and its card).
+    static let gap: CGFloat = 12
+
     var body: some View {
         if store.cards.isEmpty {
-            VStack(spacing: 6) {
-                Image(systemName: "checkmark.circle")
-                    .font(Typography.heading(.light))
-                    .foregroundStyle(Theme.textMuted)
-                Text("Nothing needs you")
-                    .font(Typography.label())
-                    .foregroundStyle(Theme.textMuted)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 18)
-        } else if scrolls {
-            ScrollView(.vertical) { rows }
-                .scrollIndicators(.never)
+            IslandEmptyTab(symbol: "checkmark.circle", line: "Nothing needs you")
         } else {
-            rows
-            Spacer(minLength: 0)
+            IslandTabScroll(scrolls: scrolls) { rows }
         }
     }
 
     private var rows: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Self.gap) {
             ForEach(store.cards.reversed()) { card in
                 IslandNeedsYouRow(card: card, store: store)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 14)
+        .padding(.horizontal, IslandLayout.listInset)
+        .padding(.bottom, IslandLayout.listInset)
     }
 }
 
@@ -541,57 +628,16 @@ struct IslandNeedsYouRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             IslandCardHeader(card: card)
-                .padding(.horizontal, 6)
-            if case .elicitation(let server, _, let host, _) = card.payload {
-                // A link request: its words, then ✕ (decline) and ↗ (open link) together at the trailing edge, like
-                // every other island card.
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(islandBodyText(card))
-                        .font(Typography.body(.light))
-                        .foregroundStyle(Color.white)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 8) {
-                        Image(systemName: "lock.fill")
-                            .font(Typography.caption(.semibold))
-                            .foregroundStyle(Theme.textMuted)
-                        Text(host)
-                            .font(Typography.labelMono())
-                            .foregroundStyle(Theme.textMuted)
-                            .lineLimit(1)
-                        if let error = store.errors[card.id] {
-                            Text(error).font(Typography.caption()).foregroundStyle(pillReviewAmber).lineLimit(1)
-                        }
-                        Spacer(minLength: 8)
-                        let enabled = !store.inFlight.contains(card.id)
-                        IslandAnswerButton(role: .refuse, enabled: enabled) { store.answerElicitation(card, accept: false) }
-                            .accessibilityLabel("Decline \(server)'s link")
-                        IslandAnswerButton(role: .accept, symbol: "arrow.up.right", enabled: enabled) {
-                            store.answerElicitation(card, accept: true)
-                        }
-                        .accessibilityLabel("Open \(host)")
-                    }
-                }
-                .padding(14)
-                .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.08)))
-            } else if let record = islandInteractionRecord(card) {
-                TranscriptInteractionCard(record: record, wiring: wiring)
-            } else {
-                // A view request: the pill's own line and buttons.
-                HStack(spacing: 8) {
-                    Text(islandBodyText(card))
-                        .font(Typography.body(.light))
-                        .foregroundStyle(Color.white)
-                        .lineLimit(2)
-                    Spacer(minLength: 8)
-                    let enabled = !store.inFlight.contains(card.id)
-                    IslandAnswerButton(role: .refuse, enabled: enabled) { store.answerApproval(card, approved: false) }
-                        .accessibilityLabel("Don't switch")
-                    IslandAnswerButton(role: .accept, enabled: enabled) { store.answerApproval(card, approved: true) }
-                        .accessibilityLabel("Switch now")
-                }
-                .padding(.horizontal, 14)
-                .frame(height: DesktopIslandGeometry.pillHeight)
-                .background(Capsule(style: .continuous).fill(Color.white.opacity(0.08)))
+                .padding(.horizontal, IslandLayout.headerInset - IslandLayout.listInset)
+            switch card.payload {
+            case .elicitation, .viewRequest:
+                // A link or a view request: the island's own answer line (✕ and ↗ / ✓ beside the words, as on top), on
+                // the transcript card's surface.
+                IslandAnswerLine(card: card, store: store, lineLimit: card.kind == .viewRequest ? 2 : 6)
+                    .padding(IslandLayout.cardPadding)
+                    .islandInnerCard()
+            default:
+                if let record = islandInteractionRecord(card) { TranscriptInteractionCard(record: record, wiring: wiring) }
             }
         }
     }
@@ -633,3 +679,53 @@ func islandInteractionRecord(_ card: IslandCard) -> InteractionRecord? {
 /// A link request with no deadline on record (never from a live daemon, which always sends one): an hour from now,
 /// so the card's own expiry check never reads it as expired.
 func islandUnknownExpiry(now: Date = Date()) -> Int { Int(now.timeIntervalSince1970 * 1000) + 3_600_000 }
+
+// MARK: - Surfaces
+
+extension View {
+    /// The transcript interaction card's surface (`CardSurface`, a `HairlineElevated` rim, its 28 pt corner) — what a
+    /// link or view request sits on in Needs you, beside the transcript's own cards.
+    func islandInnerCard() -> some View {
+        modifier(IslandInnerCardChrome())
+    }
+}
+
+private struct IslandInnerCardChrome: ViewModifier {
+    @Environment(\.displayScale) private var displayScale
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: IslandLayout.innerCardCorner, style: .continuous)
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.cardSurface, in: shape)
+            .overlay(shape.strokeBorder(Theme.hairlineElevated, lineWidth: 1 / displayScale))
+    }
+}
+
+/// Reads whether the island's pointer (`dispatchPillPointer`) is over this view — a row's or an option's hover state,
+/// with no monitor of its own (no pointer, as in the offscreen gallery: never hovered).
+struct IslandPointerReader<Content: View>: View {
+    @ViewBuilder let content: (Bool) -> Content
+    @Environment(\.dispatchPillPointer) private var pointer
+
+    var body: some View {
+        if let pointer {
+            IslandPointerTracking(pointer: pointer, content: content)
+        } else {
+            content(false)
+        }
+    }
+}
+
+private struct IslandPointerTracking<Content: View>: View {
+    @ObservedObject var pointer: DispatchPillPointer
+    let content: (Bool) -> Content
+    @State private var frame: CGRect = .zero
+
+    var body: some View {
+        content(pointer.location.map { frame.contains($0) } ?? false)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(DispatchPillView.canvasSpace))
+            } action: { frame = $0 }
+    }
+}

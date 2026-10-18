@@ -97,7 +97,8 @@ describe("the local network (refused; this Mac allowed)", () => {
     const r = h.run();
     const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "headless" }) as TabHandle;
     h.headless.failNextNavigate = "net::ERR_ABORTED";
-    refusedAt = Date.now() + 1;
+    // Stamped after the navigation started. `Date.now() + 1` lost to a slow runner, whose start stamp came later.
+    refusedAt = Date.now() + 60_000;
     const e = await failure(h.engine.primitive(r.scope, tab.targetId, "goto", { url: "https://redirects.example/" }));
     expect((e as AutomationFailure).kind).toBe("NotAllowed");
     expect(e.message).toBe(`${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);

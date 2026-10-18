@@ -308,8 +308,9 @@ struct CodeComposerChrome: ComposerChrome {
 /// `WindowContentView`, the same card the sidebar's sessions get.
 ///
 /// **A permissions row too, minus one row:** `session.setPolicy` refuses exactly `"plan"` for a
-/// dispatch target — *"dispatch never asks permissions"*
-/// (`packages/core/src/ipc/server.ts:1527-1528`) — while the other five are settable, so this row
+/// dispatch target — *"Dispatch cannot present a plan (exit_plan_mode is code-only)"*
+/// (`packages/core/src/ipc/server.ts`) — while the other five are settable, and each is honoured
+/// as in code (user ruling 2026-10-17: under `ask` Dispatch raises a real approval card), so this row
 /// offers `dispatchSettablePolicyModes`. That is the opposite shape from model/effort, which
 /// dispatch pins entirely (`ipc/server.ts:1567`/`:1610`); Task 7 keeps the header's existing
 /// shown-but-refused behaviour there rather than regressing it.

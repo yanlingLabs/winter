@@ -16,8 +16,10 @@
 //
 // The rule now: a private target NEVER resolves silently. Code mode raises a real card — under every
 // policy, `plan` and `bypass` included, because the runtime's own ask is mandatory under both and a
-// session policy is not consent for it. Every context that cannot prompt (chat, dispatch, a dispatch
-// child, `dont-ask`) gets one fixed typed deny. Public hosts stay free at the gate, unchanged.
+// session policy is not consent for it. Dispatch and a dispatch child card it like code (user ruling
+// 2026-10-17: the dispatch family respects its approval mode; a child's card is relayed to its coordinator,
+// and either is bounded when nobody typed the turn). Every context that cannot prompt (chat, `dont-ask`)
+// gets one fixed typed deny. Public hosts stay free at the gate, unchanged.
 import { test, expect, describe } from "bun:test";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
@@ -170,13 +172,11 @@ describe("the bridge: a private WebFetch target never resolves silently", () => 
     expect(h.events).toEqual([]);
   });
 
-  // The never-prompting contexts. On the Winter leg the SDK's own `privateAddressPolicy: "deny"`
-  // refuses these one layer down; on the OFFICIAL leg this is the only floor, because that leg is
+  // The never-prompting context. On the Winter leg the SDK's own `privateAddressPolicy: "deny"`
+  // refuses it one layer down; on the OFFICIAL leg this is the only floor, because that leg is
   // sent no `Options.web` at all.
   for (const ctxCase of [
     { label: "chat", mode: "chat" as Mode, policy: "chat" as SessionApprovalPolicy, origin: undefined, word: "chat" },
-    { label: "dispatch", mode: "dispatch" as Mode, policy: "auto" as SessionApprovalPolicy, origin: undefined, word: "dispatch" },
-    { label: "dispatch child", mode: "code" as Mode, policy: "auto" as SessionApprovalPolicy, origin: "dispatch-child", word: "dispatch" },
   ]) {
     test(`${ctxCase.label}: a typed deny naming the host, no event, never a card`, async () => {
       const h = harness({ mode: ctxCase.mode, policy: ctxCase.policy, origin: ctxCase.origin });
@@ -185,6 +185,31 @@ describe("the bridge: a private WebFetch target never resolves silently", () => 
       expect((res as { message: string }).message).toContain("127.0.0.1");
       expect((res as { message: string }).message).toContain("private or loopback");
       expect((res as { message: string }).message).toContain(`this ${ctxCase.word} session never prompts`);
+      expect(h.events).toEqual([]);
+    });
+  }
+
+  // The dispatch family respects its policy (user ruling 2026-10-17): a real card — the coordinator's on its
+  // own log, a child's relayed — offering no rule, bounded (no known turn origin here: the daemon's own).
+  for (const ctxCase of [
+    { label: "dispatch", mode: "dispatch" as Mode, origin: undefined },
+    { label: "dispatch child", mode: "code" as Mode, origin: "dispatch-child" },
+  ]) {
+    test(`${ctxCase.label}: a CARD under every policy but dont-ask, bounded at 10 minutes, no rule offered`, async () => {
+      for (const policy of ["ask", "accept-edits", "auto", "bypass"] as SessionApprovalPolicy[]) {
+        const h = harness({ mode: ctxCase.mode, policy, origin: ctxCase.origin });
+        const p = h.canUse("WebFetch", { url: "http://127.0.0.1:3000/", prompt: "what" }, ctx());
+        expect({ policy, events: h.events.map((e) => e.type) }).toEqual({ policy, events: ["approval_requested"] });
+        const card = h.events[0] as { callId: string; options?: unknown[]; issuedAt: number; expiresAt: number };
+        expect(card.options).toBeUndefined();
+        expect(card.expiresAt - card.issuedAt).toBe(10 * 60_000);
+        h.approvals.resolve("s1", card.callId, true, "user");
+        expect((await p)!.behavior).toBe("allow");
+      }
+      const h = harness({ mode: ctxCase.mode, policy: "dont-ask", origin: ctxCase.origin });
+      const res = (await h.canUse("WebFetch", { url: "http://127.0.0.1:3000/", prompt: "what" }, ctx()))!;
+      expect(res.behavior).toBe("deny");
+      expect((res as { message: string }).message).toContain("policy dont-ask declines every approval");
       expect(h.events).toEqual([]);
     });
   }

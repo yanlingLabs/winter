@@ -792,6 +792,13 @@ class ProjectorImpl implements Projector {
     const task = this.acceptTaskFrame(msg);
     if (task !== undefined) return task;
 
+    // The island's Usage tab: a plan window's report goes to the daemon's usage registry (still never persisted).
+    if (kindOf(msg) === "rate_limit_event") {
+      const info = (msg as { rate_limit_info?: unknown }).rate_limit_info;
+      if (info !== null && typeof info === "object") {
+        try { this.deps.onRateLimit?.(info as Record<string, unknown>); } catch { /* the registry's failure is its own */ }
+      }
+    }
     this.logSkipped(msg);
     return EMPTY_BATCH();
   }

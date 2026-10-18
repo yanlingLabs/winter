@@ -1188,8 +1188,10 @@ private struct PendingApprovalBody: View {
             // ComputerV2's desktop switch: what silence does, counting down — redrawn once a second only until the
             // deadline (an explicit schedule, never a timer left running on a frozen card).
             if let defaultAllowAt, !isInFlight {
-                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { context in
-                    Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: context.date))
+                // The schedule only REDRAWS; the clock is read here (an explicit timeline's first context date is its
+                // next, future entry — a second early).
+                TimelineView(.explicit(defaultAllowRedraws(defaultAllowAt))) { _ in
+                    Text(defaultAllowCountdownText(defaultAllowAt: defaultAllowAt, now: Date()))
                         .font(Typography.captionDigits(.medium))
                         .foregroundStyle(.secondary)
                 }
@@ -1292,8 +1294,10 @@ struct PendingElicitationBody: View {
                     .foregroundStyle(.secondary)
             } else {
                 // One scheduled redraw at the deadline — not a repeating timer or animation.
-                TimelineView(.explicit([expiry])) { context in
-                    let expired = elicitationIsExpired(expiresAt: expiresAt, now: context.date)
+                // The schedule only REDRAWS at the deadline; the clock is read here — an explicit timeline's first
+                // context date is its (future) entry, which read as expired from the start.
+                TimelineView(.explicit([expiry])) { _ in
+                    let expired = elicitationIsExpired(expiresAt: expiresAt, now: Date())
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 8) {
                             Button("Open link") { onElicitation(elicitationId, true, host, expiresAt) }

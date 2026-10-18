@@ -51,6 +51,8 @@ final class RemoteMirrorHub {
 
     /// How many phones watch `sessionId` (tests).
     func watcherCount(sessionId: String) -> Int { watchers[sessionId]?.count ?? 0 }
+    /// The sessions a phone watches now (the Winter island's Devices tab).
+    var watchedSessionIds: [String] { watchers.filter { !$0.value.isEmpty }.map(\.key).sorted() }
 
     // MARK: - From the Mac's mirror (the tee sink)
 

@@ -210,8 +210,16 @@ describe("browsers.read: a page's text over plain HTTP", () => {
       expect(blocked.cards).toEqual([]);
       expect(blocked.sent.some((s) => s.host === "evil.example")).toBe(false);
     }
-    const dispatch = setup({ names, pages }, { policy: "ask", facts: { mode: "dispatch" }, dangerousAdded: ["evil.example"] });
-    expect(kind(await failure(dispatch.read("https://evil.example/x")))).toBe("NotAllowed");
+    // Dispatch respects its policy like code (user ruling 2026-10-17): a card under ask, a block under auto; chat blocks.
+    const dispatch = setup({ names, pages }, { policy: "ask", facts: { mode: "dispatch" }, dangerousAdded: ["evil.example"], answer: () => "once" });
+    expect((await dispatch.read("https://evil.example/x")).text).toBe("evil");
+    expect(dispatch.cards).toHaveLength(1);
+    const dispatchAuto = setup({ names, pages }, { policy: "auto", facts: { mode: "dispatch" }, dangerousAdded: ["evil.example"] });
+    expect(kind(await failure(dispatchAuto.read("https://evil.example/x")))).toBe("NotAllowed");
+    expect(dispatchAuto.cards).toEqual([]);
+    const chat = setup({ names, pages }, { policy: "ask", facts: { mode: "chat" }, dangerousAdded: ["evil.example"] });
+    expect(kind(await failure(chat.read("https://evil.example/x")))).toBe("NotAllowed");
+    expect(chat.cards).toEqual([]);
     // plan: an observe primitive — the read runs, a listed host still asks.
     const plan = setup({ names, pages: { "ok.example/": () => html("<p>fine</p>") } }, { policy: "plan" });
     expect((await plan.read("https://ok.example/")).text).toBe("fine");

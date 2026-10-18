@@ -52,7 +52,8 @@ import { moveTranscriptFiles, transcriptEntriesOf, type TranscriptMoveResult } f
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { mainTurnOpenInLog, runningTurnOrigin } from "../sessions/turn-origins";
+import { mainTurnOpenInLog } from "../sessions/turn-origins";
+import { turnOriginIndexFor } from "../sessions/turn-origin-index";
 import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, permittedProviders, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
@@ -391,6 +392,8 @@ export interface WinterLegDeps {
    * child before the call resolves) is swallowed at the call site, never surfaced here.
    */
   onSupportedAgents?: (sessionId: string, agents: import("@yanlinglabs/winter-agent-sdk").AgentInfo[]) => void;
+  /** The island's Usage tab: a session's `rate_limit_event` report (the projector's `onRateLimit`). */
+  onRateLimit?: (sessionId: string, info: Record<string, unknown>) => void;
   /**
    * Fix wave (review row 4): Winter's `SessionTitler` — P8b-10 keeps it on Winter's OWN provider
    * layer (never `sdk.query()`). Fired fire-and-forget after every MAIN-thread `turn_completed`
@@ -896,9 +899,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     let liveCapabilityKeys: ReadonlySet<string> = new Set<string>();
     const canUseTool = canUseToolFor({
       sessionId, mode, origin: meta.origin, home, cwd,
-      // Who started the running turn — read per card, and only for a dispatch child: a card from a turn the
-      // USER typed into the child is not bounded by the relay's 10 minutes (`dispatchChildCardTimeoutMs`).
-      turnOrigin: () => runningTurnOrigin(deps.store.read(sessionId)),
+      // Who started the running turn — read per card, and only for a dispatch session or a dispatch child: a
+      // card from a turn the USER typed is not bounded by the dispatch family's 10 minutes (`dispatchCardTimeoutMs`).
+      // From memory (`turn-origin-index.ts`), never a whole-log read: Dispatch's log lives for months.
+      turnOrigin: () => turnOriginIndexFor(deps.hub, deps.store).origin(sessionId),
       capabilityKeys: () => liveCapabilityKeys,
       // WS-21: "in this project" is offered only for a trusted project (live — trusting it reaches the next card).
       ...(deps.isTrusted === undefined ? {} : { projectTrusted: bridgeProjectTrustedFor(deps.isTrusted, cwd) }),
@@ -1345,6 +1349,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // C2 (lane C, 2026-09-22): a card the child abandoned (an interrupt's `[interrupted]` result)
         // is withdrawn before that result lands — this SDK never cancels the pending `canUseTool`.
         onToolResults: (callIds) => { for (const callId of callIds) canUseTool.withdrawPending(callId); },
+        ...(deps.onRateLimit === undefined ? {} : { onRateLimit: (info: Record<string, unknown>) => deps.onRateLimit!(sessionId, info) }),
         checkpoint: checkpoints,
         now: () => new Date().toISOString(),
         log: {

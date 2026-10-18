@@ -17,7 +17,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 //    Coerce, don't reject: the field is meaningless for chat.
 //  - session.setPolicy: a chat session's policy can never be changed (ANY value is rejected — the
 //    policy is fixed, not just "plan"-immune); a dispatch session's policy remains settable EXCEPT
-//    "plan" (same incoherence as chat: exit_plan_mode is code-only, dispatch never asks either).
+//    "plan" (exit_plan_mode is code-only, so a dispatch session could never present its plan).
 //  - "chat" is core-internal only: it can never even be EXPRESSED on the wire (the protocol's
 //    ApprovalPolicy zod enum stays exactly six-valued) — a caller that tries gets a parse error,
 //    not a policy decision.
@@ -261,13 +261,15 @@ describe("plan-immunity: session.setPolicy — chat's fixed policy + dispatch's 
     },
   );
 
-  test("session.setPolicy(dispatch session, 'plan') is rejected — same incoherence as chat: exit_plan_mode is code-only, dispatch never asks either", async () => {
+  test("session.setPolicy(dispatch session, 'plan') is rejected — exit_plan_mode is code-only, so Dispatch could never present a plan", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const dispatch = store.createSession("global", { mode: "dispatch", approvalPolicy: "auto" });
     const c = await harnessClient(socketPath, harnessToken);
     const res = await c.request(METHODS.sessionSetPolicy, { sessionId: dispatch, policy: "plan" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("exit_plan_mode is code-only");
+    expect(res.error.message).not.toContain("never asks"); // Dispatch respects its policy (user ruling 2026-10-17)
     expect(store.meta(dispatch).approvalPolicy).toBe("auto"); // unchanged
     c.close();
   });

@@ -125,7 +125,7 @@ describe("the headless pool's engine", () => {
     expect(r.commands().some((c) => c.op === "cdp.send" && c.params.method === "Browser.close")).toBe(false);
     expect(await r.pool.send<unknown>(t.tabKey, "Runtime.evaluate", { expression: "1+1", contextId: 3 })).toEqual({ result: { type: "number", value: 2 } });
     expect(((await failure(r.pool.subscribe(t.tabKey, ["Not.anEvent"]))) as TransportError).code).toBe("not_allowed");
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("an engine other than Winter's own is refused", async () => {
     const r = rig();
@@ -233,7 +233,7 @@ describe("the budget (8 per session, 24 in all, 3 GB of memory)", () => {
     expect((JSON.parse(readFileSync(headlessPidPath(r.home), "utf8")) as { pid: number }).pid).toBe(r.pool.pid!);
     // The old helper got its pipe's EOF (it exits as the real one does).
     expect(r.commands().filter((c) => c.op === "eof").length).toBe(1);
-  });
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the memory restart): the test's own timeout must sit above all three
 });
 
 describe("the checks before anything is sent", () => {
@@ -286,7 +286,7 @@ describe("the helper's life", () => {
     expect(((await failure(r.pool.send(a.tabKey, "Page.enable"))) as TransportError).code).toBe("tab_gone");
     await r.pool.createTab({ sessionId: "s1", url: "https://again.example/" });
     expect(r.spawned).toBe(2);
-  });
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the fresh one after the crash): the test's own timeout must sit above all three
 
   test("a renderer crash loses only its tab", async () => {
     const r = rig();
@@ -298,7 +298,7 @@ describe("the helper's life", () => {
     expect(gone).toEqual([[lost.tabKey, "crashed"]]);
     expect(r.pool.running).toBe(true);
     expect((await r.pool.listTabs({ sessionId: "s1" })).map((t) => t.tabKey)).toEqual([keep.tabKey]);
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("with no tab for the idle time the helper exits on its pipe's EOF — still offered, started again on demand", async () => {
     const r = rig({ idleExitMs: 100 });
@@ -313,7 +313,7 @@ describe("the helper's life", () => {
     expect(r.pool.connected).toBe(true);
     await r.pool.createTab({ sessionId: "s1", url: "https://b.example/" });
     expect(r.spawned).toBe(2);
-  });
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the one started again on demand): the test's own timeout must sit above all three
 
   test("only the browser's components outlive a run: the next run starts with them, never with the last run's own data", async () => {
     const r = rig({ idleExitMs: 100 });
@@ -329,7 +329,7 @@ describe("the helper's life", () => {
     const second = r.commands().filter((c) => c.op === "started")[1]!.params as { cacheRoot: string; entries: string[] };
     expect(second.entries).toEqual(["PKIMetadata"]); // no Default/ (the run's cookies), no Local State
     expect(readFileSync(join(second.cacheRoot, "PKIMetadata", "1798", "manifest.json"), "utf8")).toContain("pkiMetadata");
-  });
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first run's helper, then the next run's): the test's own timeout must sit above all three
 
   test("turned off in Settings while running: the helper stops and its tabs read closed", async () => {
     const r = rig({ enabledPollMs: 50 });
@@ -340,7 +340,7 @@ describe("the helper's life", () => {
     await until("the stop", () => !r.pool.running);
     expect(gone).toEqual([[t.tabKey, "closed"]]);
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "disabled" });
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("a session's runtime ending disposes its context and forgets only its tabs", async () => {
     const r = rig();
@@ -353,7 +353,7 @@ describe("the helper's life", () => {
     await until("context.dispose", () => r.commands().some((c) => c.op === "context.dispose"));
     expect(r.commands().find((c) => c.op === "context.dispose")!.params).toEqual({ sessionId: "s1" });
     expect((await r.pool.listTabs()).map((t) => t.tabKey)).toEqual([theirs.tabKey]);
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("the daemon's stop kills it at once and removes what this run made — again once it has really exited", async () => {
     const r = rig();
@@ -368,7 +368,7 @@ describe("the helper's life", () => {
     await until("the second removal", () => !existsSync(runDir));
     expect(r.pool.connected).toBe(false);
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "stop" });
-  });
+  }, 20_000); // its 2 waits are bounded at 5 s each by until: the test's own timeout must sit above them
 
   test(`${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row that time out, and the helper still answers a check of itself: only that page's tab is lost — the helper and every other tab stay`, async () => {
     const r = rig({ sendTimeoutMs: 100 });
@@ -399,7 +399,7 @@ describe("the helper's life", () => {
     expect(r.logs.some((l) => l.includes(`a page in Winter's headless browser stopped answering (${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row timed out) — its tab closed (1); the browser itself still answers`))).toBe(true);
     expect(r.logs.some((l) => l.includes("restarting it"))).toBe(false);
     expect(r.metrics.some((m) => m.primitive === "headless.exit")).toBe(false);
-  });
+  }, 20_000); // its 2 waits are bounded at 5 s each by until: the test's own timeout must sit above them
 
   test(`${HEADLESS_WEDGED_AFTER_TIMEOUTS} commands in a row that time out, and the helper does not answer a check of itself either: it is killed as wedged, every tab lost, and the next open starts a fresh one`, async () => {
     const r = rig({ sendTimeoutMs: 100 });
@@ -417,7 +417,7 @@ describe("the helper's life", () => {
     expect(r.metrics.find((m) => m.primitive === "headless.exit")).toMatchObject({ exitReason: "crash" });
     await r.pool.createTab({ sessionId: "s1", url: "https://again.example/" });
     expect(r.spawned).toBe(2);
-  });
+  }, 25_000); // its 5 s until plus the pool's own 5 s hello bound for each of its 2 helper launches (the first helper, then the fresh one after the kill): the test's own timeout must sit above all three
 
   test("turned off in Settings: the next command stops the helper at once, not at the next poll", async () => {
     const r = rig();
@@ -440,7 +440,7 @@ describe("the helper's life", () => {
       "computer-use: a page in Winter's headless browser tried to reach the local network — refused before anything was sent",
     ]);
     expect(r.pool.localNetworkRefusedAt("w-unknown")).toBeUndefined();
-  });
+  }, 15_000); // its wait is bounded at 5 s by until: the test's own timeout must sit above it
 
   test("muting is a no-op: every headless tab is silent already", async () => {
     const r = rig();

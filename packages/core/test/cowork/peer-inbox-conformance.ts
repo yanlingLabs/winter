@@ -13,13 +13,17 @@ import type { PeerAppendResult, PeerInboxCaps, PeerInboxEntry, PeerInboxRecord, 
  * `failAppendAtStep` is REQUIRED: it arms the most recently opened instance so that its NEXT append throws at
  * its n-th internal write (a store with fewer writes simply succeeds). A SQLite store supplies it by throwing
  * inside its transaction body after the n-th statement. It proves failure atomicity (no torn record, no orphan
- * body, no sequence gap). A hard crash mid-append is the store's own transaction property and needs its own
+ * body, no sequence gap). `makeBodyUnreadable` makes ONE body fail to read, so `readBody` is shown to THROW for it
+ * and to return `undefined` only for a handle that names no body. A hard crash mid-append is the store's own transaction property and needs its own
  * kill test; the durability class itself ("returns means committed", fsync-backed) is stated on
  * `PeerInboxStore` and cannot be shown by a unit case.
  */
 export interface PeerInboxStoreHarness {
   open(): PeerInboxStore;
   failAppendAtStep(step: number): void;
+  /** Makes the body behind `handle` unreadable to EVERY instance of this harness: the body store now raises an I/O or
+   * permission error for that handle (as opposed to a handle that names no body). */
+  makeBodyUnreadable(handle: string): void;
 }
 export interface PeerInboxConformanceCase { name: string; run(harness: PeerInboxStoreHarness): void }
 
@@ -249,6 +253,16 @@ export function peerInboxStoreConformanceCases(): PeerInboxConformanceCase[] {
         expect(after.audit()).toEqual(CLEAN);
       }
       throw new Error("append never succeeded within 64 writes");
+    } },
+    { name: "readBody throws for a body that cannot be read and returns undefined only for a handle that names no body", run: ({ open, makeBodyUnreadable }) => {
+      const store = open();
+      const bad = created(put(store, 1, "unreadable")), good = created(put(store, 2, "readable"));
+      makeBodyUnreadable(bad.bodyHandle!);
+      for (const view of [store, open()]) {
+        expect(() => view.readBody(bad.bodyHandle!)).toThrow();
+        expect(view.readBody(good.bodyHandle!)).toBe("readable");
+        expect(view.readBody("no-such-handle")).toBeUndefined();
+      }
     } },
     { name: "audit is clean across a whole lifecycle, and finds nothing torn after a failed append", run: ({ open }) => {
       const store = open();
