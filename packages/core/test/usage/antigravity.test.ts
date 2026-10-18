@@ -1,7 +1,7 @@
 // The Antigravity plan (`docs/claude/usage.md`): agy's own `/usage` (FAKE executables only), the parser against the
 // live-seen shape, the guard and its latch, not installed, tracking off, the throttle.
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { AGY_USAGE_ARGS, agyGroupScope, judgeAgyUsage, windowsFromAgyUsage } from "../../src/usage/antigravity";
 import { UsageDb } from "../../src/usage/db";
@@ -145,7 +145,50 @@ describe("the Antigravity plan", () => {
     now += 5 * 3_600_000 + 60_000;
     await svc.antigravityPlan();
     expect(ran()).toBe(first + 1);
-  });
+  }, 30_000);
+
+  test("the timeout back-off survives a restart (persisted with its time, per exact binary)", async () => {
+    const fake = fakeAgy(tempDir("bin"), "hang");
+    const home = tempDir("home");
+    let now = NOW;
+    const first = service({ home, agyExecutable: () => fake.path, agyCliTimeoutMs: 2_000, now: () => now });
+    await first.svc.antigravityPlan();
+    expect(first.db.latch(binaryKey("agy-timeout", fake.path)!)?.reason).toBe("timeout");
+    expect(first.db.latch(binaryKey("agy", fake.path)!)).toBeUndefined();
+    first.db.close();
+    const ran = () => marks(fake.markerPath).length;
+    const before = ran();
+    // Restarted an hour later: still backing off.
+    now += 3_600_000;
+    const second = service({ home, db: new UsageDb(join(home, "usage", "usage.db")), agyExecutable: () => fake.path, agyCliTimeoutMs: 2_000, now: () => now });
+    expect((await second.svc.antigravityPlan()).source).toBe("none");
+    expect(ran()).toBe(before);
+    second.db.close();
+    // Restarted past the six hours: asked again.
+    now += 5 * 3_600_000 + 60_000;
+    const third = service({ home, db: new UsageDb(join(home, "usage", "usage.db")), agyExecutable: () => fake.path, agyCliTimeoutMs: 2_000, now: () => now });
+    await third.svc.antigravityPlan();
+    expect(ran()).toBe(before + 1);
+  }, 30_000);
+
+  test("an updated agy (its size and mtime change) is a new binary: the latch no longer holds it back", async () => {
+    const fake = fakeAgy(tempDir("bin"), "turns");
+    let now = NOW;
+    const { svc, db } = service({ agyExecutable: () => fake.path, now: () => now });
+    await svc.antigravityPlan();
+    const oldKey = binaryKey("agy", fake.path)!;
+    expect(db.latch(oldKey)?.reason).toBe("guard");
+    now += 3_600_000;
+    await svc.antigravityPlan();
+    expect(marks(fake.markerPath)).toHaveLength(1);
+    // Updated in place: same path, new contents.
+    appendFileSync(fake.path, "\n// updated\n");
+    utimesSync(fake.path, new Date(NOW + 7_200_000), new Date(NOW + 7_200_000));
+    expect(binaryKey("agy", fake.path)).not.toBe(oldKey);
+    now += 3_600_000;
+    await svc.antigravityPlan();
+    expect(marks(fake.markerPath)).toHaveLength(2);
+  }, 30_000);
 
   test("not on this Mac: no slot; tracking off: nothing spawned", async () => {
     expect((await service().svc.antigravityPlan()).source).toBe("not-installed");
