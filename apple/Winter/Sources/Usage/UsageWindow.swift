@@ -396,11 +396,16 @@ struct UsageWindowContent: View {
             UsageSwitchRow(on: model.summary?.trackClaudeCode ?? true, text: "Claude Code — its transcripts and its own /usage report") { v in
                 Task { await model.setTrack(claudeCode: v) }
             }
-            UsageSwitchRow(on: model.summary?.trackAntigravity ?? true, text: "Antigravity — its own /usage report") { v in
-                Task { await model.setTrack(antigravity: v) }
+            // Only when the daemon reports the switch (an older one has neither: the switch would do nothing).
+            if let on = model.summary?.trackAntigravity {
+                UsageSwitchRow(on: on, text: "Antigravity — its own /usage report") { v in
+                    Task { await model.setTrack(antigravity: v) }
+                }
             }
-            UsageSwitchRow(on: model.summary?.trackOpencode ?? true, text: "OpenCode — its own stats: tokens and cost per model") { v in
-                Task { await model.setTrack(opencode: v) }
+            if let on = model.summary?.trackOpencode {
+                UsageSwitchRow(on: on, text: "OpenCode — its own stats: tokens and cost per model") { v in
+                    Task { await model.setTrack(opencode: v) }
+                }
             }
             Text("Only numbers, model names and times are kept — never what was said, never a path or a project name. Winter never reads any of these apps’ sign-in.")
                 .font(Typography.tiny()).foregroundStyle(Theme.textMuted)

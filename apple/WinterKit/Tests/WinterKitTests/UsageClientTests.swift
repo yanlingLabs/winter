@@ -47,16 +47,17 @@ final class UsageClientTests: XCTestCase {
         XCTAssertEqual(s.antigravityPlan?.source, "agy-cli")
         XCTAssertEqual(s.antigravityPlan?.windows.first?.scope, "Gemini")
         XCTAssertEqual(s.antigravityPlan?.windows.first?.usedPercent, 27)
-        XCTAssertFalse(s.trackAntigravity)
-        XCTAssertFalse(s.trackOpencode)
+        XCTAssertEqual(s.trackAntigravity, false)
+        XCTAssertEqual(s.trackOpencode, false)
         XCTAssertEqual(s.opencodeInstalled, false)
         XCTAssertEqual(s.bySource[.opencode]?.costUsd, 0.37)
         XCTAssertEqual(s.topModels.first?.source, .opencode)
         XCTAssertEqual(s.topModels.first?.costBasis, "reported")
-        // An older daemon sends none of them: on, no plan, and no OpenCode source at all (nil, not "installed").
+        // An older daemon sends none of them: no switches, no plan, and no OpenCode source at all (nil, not "installed").
         let old = WinterClient.decodeUsageSummary(try json(#"{"range":"24h","tracking":{"codex":true,"claudeCode":true}}"#))
         XCTAssertNil(old.antigravityPlan)
-        XCTAssertTrue(old.trackAntigravity && old.trackOpencode)
+        XCTAssertNil(old.trackAntigravity, "an older daemon has no such switch")
+        XCTAssertNil(old.trackOpencode)
         XCTAssertNil(old.opencodeInstalled)
     }
 
