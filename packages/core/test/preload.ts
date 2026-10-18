@@ -52,6 +52,8 @@ process.env.WINTER_LOGIN_SHELL_PATH = "off";
   process.env.WINTER_USAGE_CLAUDE_EXECUTABLE = "off";
   process.env.WINTER_USAGE_AGY_EXECUTABLE = "off";
   process.env.WINTER_USAGE_OPENCODE_EXECUTABLE = "off";
+  // No background plan checks either (the 30-min beat, the alarms' fast beats): a test that wants them starts them.
+  process.env.WINTER_USAGE_BACKGROUND = "off";
 }
 // WS-21 (L3.5): saving an "in this project" answer appends to the user's GLOBAL git excludes, resolved
 // through `git config --global core.excludesfile` (claude parity, `agent/git-exclude.ts`). No test may

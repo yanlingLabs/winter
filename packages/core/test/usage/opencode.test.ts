@@ -81,7 +81,7 @@ describe("schema 4", () => {
     db.db.run("PRAGMA user_version = 3");
     db.close();
     db = new UsageDb(path);
-    expect(db.schemaVersion()).toBe(4);
+    expect(db.schemaVersion()).toBe(5);
     expect(db.hourly(0, at + 1, ["codex"])[0]).toMatchObject({ records: 1, estimateRecords: 1, reportedRecords: 0 });
     db.close();
   });
