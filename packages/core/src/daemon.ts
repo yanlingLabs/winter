@@ -1,5 +1,6 @@
 import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents } from "./cowork/workspace-events";
 import { createMacCoworkHost } from "./cowork/mac-host";
+import { createCoworkNativeWiring, type CoworkNativeWiring, type CoworkNativeWiringOptions } from "./cowork/native-wiring";
 import { CoworkRepository } from "./cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
 import { join } from "node:path";
@@ -192,6 +193,8 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
+  /** N2 S7: the inert native worker host wiring (`undefined` without the runtime spine). Nothing reaches it from an RPC. */
+  coworkNative?: CoworkNativeWiring;
   /**
    * P8b Task 5: THE ONE Winter runtime handle — the router `createRuntimeSdk` built, the spawn
    * hook every Winter session's `Options` takes its executable from, and the tracked-query registry
@@ -375,6 +378,9 @@ export async function startDaemon(opts: {
   coworkHost?: CoworkHostPorts;
   /** Isolated clock for host schedule metadata tests. */
   coworkScheduleNow?: () => number;
+  /** Host-only injection of the native worker host's environment (N2 S7). Production passes none: the host is then never built and the
+   * Cowork service keeps its refusing default. Never read from a setting, an RPC or an environment variable. */
+  coworkNative?: Pick<CoworkNativeWiringOptions, "environment" | "imagePins">;
   home?: string;
   secrets?: SecretStore;
   server?: Partial<Pick<IpcServerOptions, "helloTimeoutMs" | "maxConnections" | "preAuthMaxLine">>;
@@ -2997,9 +3003,24 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
-  coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
+  // N2 S7: the native worker host's wiring. INERT: building it builds no host, process, socket, timer or file (the host appears on the
+  // first start a caller asks for, from an injected environment that production never has). The Cowork service gets it as its
+  // `native` port only when a caller injected an environment, so the production service refuses exactly as before.
+  const coworkNative: CoworkNativeWiring | undefined = runtime
+    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, ...opts.coworkNative }) : undefined;
+  const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;
+  const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
+  const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
+  coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
   coworkService?.schedules.recover();
   coworkService?.schedules.tick();
+  // Boot-time reconcile (D1): record-and-refuse. Without an environment this only reads the records; with one it runs the host's own
+  // recovery, which releases nothing on weaker evidence than an orderly receipt, a changed host boot or an owner recover.
+  if (coworkNative) {
+    const boot = coworkNative.reconcileAtBoot();
+    const held = boot.reports.filter(report => report.ownerRetained).length;
+    if (held > 0) console.error(`cowork: ${held} native workspace(s) keep their disk owner after boot (${boot.source}); nothing was released without proof`);
+  }
   const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;
   coworkEvents?.start();
   const server: IpcServer = startIpcServer({
@@ -3204,6 +3225,7 @@ export async function startDaemon(opts: {
     tokens,
     registry: sharedRegistry,
     runtimeState,
+    coworkNative,
     runtimeSdk,
     embedded: embeddedSessions,
     sessions: store,
@@ -3226,6 +3248,9 @@ export async function startDaemon(opts: {
       // Before anything else: no session is created, resumed or (re)opened from here on, and an open
       // already under way refuses just before its spawn — no runtime child can outlive this daemon.
       coworkService?.beginShutdown(); // close durable schedule claims before draining anything
+      // N2 S7: stop every live native guest. `undefined` (no await, no timer) when none was ever started, so the no-guest stop is unchanged;
+      // otherwise bounded by the contract's host wait, and settled below BEFORE the store and the runtime close.
+      const guestsDrained = coworkNative?.beginShutdown();
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
@@ -3284,7 +3309,8 @@ export async function startDaemon(opts: {
       };
       // Synchronous when there is no Winter handle — `stop()`'s existing contract for every pre-8b
       // caller is unchanged (everything but the runtime drain has already happened on return).
-      return winterDone === undefined ? closeRest() : winterDone.then(closeRest);
+      const settled = winterDone === undefined ? guestsDrained : guestsDrained === undefined ? winterDone : Promise.all([winterDone, guestsDrained]).then(() => undefined);
+      return settled === undefined ? closeRest() : settled.then(closeRest);
     },
   };
 }

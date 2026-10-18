@@ -339,7 +339,13 @@ Release policy (decision D1, conservative default). Ownership of the two disks i
 1. a Class A receipt that parses, satisfies its invariants and binds to the exact owner, volumes, nonce and live (or retained) launcher;
 2. a changed host boot id that the host probe confirms really ended the previous boot;
 3. an explicit owner `recover` input behind a port (`CoworkNativeOwnerRecoverPort`, unwired), plus two agreeing guard probes
-   (process absent by pid, start token and boot id; images unlocked). The guards are never load-bearing on their own.
+   (process absent by pid, start token and boot id; images unlocked). The guards are never load-bearing on their own for an owner recover.
+
+The launcher's retained-receipt store is same-user writable and authenticates nothing, so the same two guard probes also gate item 1 when the
+receipt is a RETAINED one (read back from that store rather than received live): it releases only if the old worker process is absent AND the
+images are unlocked at that moment, and the probes are part of the proof's source so no code path mints a retained proof without them. With no
+guard port, a retained Class A receipt is treated like a Class B one. Whether retained receipts also need a MAC is an open owner ruling. The
+daemon deletes a retained receipt file only after the disk is settled by real proof; a file for a disk that stays held is left in place.
 
 A PID that vanished, a socket EOF, a closed descriptor, a launcher that exited, a worker that exited with any status and a Class B
 receipt NEVER release. All of the above live in one table in `stop-proof.ts`, so a different D1 ruling is a small change.
