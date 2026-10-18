@@ -1,6 +1,7 @@
 import AppKit
 import Charts
 import SwiftUI
+import WinterCUPresentation
 import WinterKit
 
 /// The Usage window (`docs/claude/usage.md`): drawn entirely by Winter in the pill material, like a detached session
@@ -491,11 +492,14 @@ struct UsagePlanLine: View {
     var compact = false
     @State private var localHover = false
 
-    /// The line at rest and under the pointer (user 2026-10-18: just the line; on hover it thickens and says how much
-    /// is used).
+    /// The line at rest and under the pointer (user 2026-10-18: just the line; on hover it thickens, lengthens a little
+    /// and says how much is used).
     static func thickness(compact: Bool, hovered: Bool) -> CGFloat {
         hovered ? (compact ? 14 : 16) : (compact ? 5 : 7)
     }
+
+    /// How much longer the line is under the pointer, half on each end: every panel's hover grow (9.48 pt).
+    static func lengthGrowth(hovered: Bool) -> CGFloat { hovered ? HoverGrowth.points : 0 }
 
     var body: some View {
         // The island's own pointer (its panels are never key), or the window's hover.
@@ -528,11 +532,12 @@ struct UsagePlanLine: View {
                 }
             }
             .frame(height: height)
+            .padding(.horizontal, -Self.lengthGrowth(hovered: hovered) / 2)
             .opacity(ring.stale ? 0.6 : 1)
         }
         .frame(height: Self.thickness(compact: compact, hovered: true))
         .contentShape(Rectangle())
-        .animation(.easeOut(duration: 0.15), value: hovered)
+        .animation(HoverGrowth.animation, value: hovered)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(ring.title): \(pct)% used\(ring.resets.map { ", \($0)" } ?? "")")
     }

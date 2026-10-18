@@ -62,6 +62,8 @@ final class UsageWindowTests: XCTestCase {
     func testAPlanLineThickensUnderThePointer() {
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: true, hovered: true), UsagePlanLine.thickness(compact: true, hovered: false))
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: false, hovered: true), UsagePlanLine.thickness(compact: false, hovered: false))
+        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: false), 0)
+        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 9.48, accuracy: 0.01)
     }
 
     func testResetWordsCountDownAShortWindowAndDateALongOne() {
