@@ -1237,6 +1237,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activity.disarm = { sid, wakeId in (try? await client.cancelWake(sessionId: sid, wakeId: wakeId)) ?? false }
         // A fired plan alarm's notification opens the island on its Usage tab.
         activity.openUsageTab = { [weak island] in island?.open(tab: IslandTabRegistry.usage.id) }
+        // …and is acknowledged only once dismissed, opened or shown its whole time (until then the daemon keeps it).
+        activity.ackAlarm = { id in Task { try? await client.usageAckAlarm(id: id) } }
         let coordinator = mirrorCoordinator
         activity.onCursorSessionsChange = { [weak coordinator] ids in coordinator?.setIslandCursorSessions(ids) }
         coordinator?.onIslandCursor = { [weak activity] sid, kind, text, app in

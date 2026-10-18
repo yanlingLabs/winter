@@ -63,10 +63,12 @@ enum UsageAlarmRules {
 
     /// PURE: what a click at `x` on the track does: on a tick, remove that alarm; else, at or below the used share,
     /// nothing ("Already past"); else set an alarm at that whole percent (one already there is the daemon's to keep once).
-    static func tap(x: CGFloat, width: CGFloat, usedPercent: Double, alarms: [UsageAlarm]) -> TapOutcome {
+    /// A STALE line's share is no longer what is used (its window reset, or it is older than its window): no "Already
+    /// past" there — the alarm is set, and the next fresh reading judges it.
+    static func tap(x: CGFloat, width: CGFloat, usedPercent: Double, stale: Bool = false, alarms: [UsageAlarm]) -> TapOutcome {
         if let hit = tickHit(x: x, width: width, alarms: alarms) { return .remove(hit.id) }
         let pct = percent(x: x, width: width)
-        return isAlreadyPast(thresholdPercent: pct, usedPercent: usedPercent) ? .alreadyPast : .set(pct)
+        return !stale && isAlreadyPast(thresholdPercent: pct, usedPercent: usedPercent) ? .alreadyPast : .set(pct)
     }
 
     /// Where the marker's label goes and which of the line's own words it hides.

@@ -83,9 +83,11 @@ final class IslandActivityController {
         let cards = island.store
         let cardOnTop = cards.currentCard != nil || cards.waitingCard != nil
         store.setCardOnTop(cardOnTop)
+        store.setIslandOpen(island.isOpen)
         let cu = store.cuPresentation
+        // An alarm's notice before a turn result: it waited its turn, and it is acknowledged only once seen.
         decision = IslandActivityArbiter.decide(cardOnTop: cardOnTop, islandOpen: island.isOpen,
-                                                result: store.currentResult?.id ?? store.currentAlarm?.id, computerUse: cu?.sessionId,
+                                                result: store.currentAlarm?.id ?? store.currentResult?.id, computerUse: cu?.sessionId,
                                                 mirrorOpen: store.mirrorOpen, realMouse: store.usingRealMouse)
         // The in-island mirror's pictures flow only while it is on screen.
         if case .computerUse(let sid, true) = decision.slot { mirrors?.setIslandMirror(sid) } else { mirrors?.setIslandMirror(nil) }
@@ -130,12 +132,12 @@ final class IslandActivityController {
         var result: IslandResultItem?
         var alarm: IslandUsageAlarmItem?
         switch decision.slot {
-        case .result:
-            if let item = store.currentResult {
-                result = item
-                geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
-            } else if let item = store.currentAlarm {
+        case .result(let id):
+            if let item = store.currentAlarm, item.id == id {
                 alarm = item
+                geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+            } else if let item = store.currentResult {
+                result = item
                 geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
             } else {
                 return nil

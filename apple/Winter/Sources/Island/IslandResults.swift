@@ -106,11 +106,102 @@ struct IslandResultQueue: Equatable {
     }
 }
 
+// MARK: - Fired plan alarms' notices
+
+/// The notices of fired plan alarms (`docs/claude/usage.md`) — NEVER lost (review 2026-10-18): the daemon keeps each one
+/// (in usage.db, across restarts) until it is acknowledged, and this queue acknowledges one only when the user dismissed
+/// it (✕), opened it (↗, a click), or it was on screen its WHOLE `showFor`. So, unlike a turn result:
+///   - no age limit: one that fired while the app was away or asleep is shown when it comes back;
+///   - they queue in the order they fired: a second never replaces the first, and a turn result never takes their place;
+///   - while the top is not theirs (`blocked` — a card needing an answer, the open island, the agent's real mouse) they
+///     wait, however long; one cut short goes back to the head of the line and is shown again whole.
+/// Pure, with the clock passed in (`IslandResultsTests`).
+struct IslandAlarmQueue: Equatable {
+    /// How long an unhovered notice shows (longer than a result: news the user asked for).
+    static let showFor: TimeInterval = 12
+    /// After the pointer leaves a notice whose time is up, it stays this long more.
+    static let hoverLeaveGrace: TimeInterval = IslandQueue.hoverLeaveGrace
+
+    struct Shown: Equatable {
+        let id: String
+        var dismissAt: TimeInterval
+    }
+
+    /// Waiting to be shown, oldest fired first.
+    private(set) var waiting: [String] = []
+    /// The notice on screen.
+    private(set) var current: Shown?
+    private(set) var hovered = false
+    /// The top is not the notices' now.
+    private(set) var blocked = false
+    /// Acknowledged here (never shown again, whatever a list still says before the daemon catches up).
+    private(set) var done: Set<String> = []
+
+    /// When the current notice has had its full time, nil when nothing is due.
+    var nextDeadline: TimeInterval? {
+        guard let current, !hovered else { return nil }
+        return current.dismissAt
+    }
+
+    /// The daemon's list (fired order): new ones join the line, ones it no longer lists (acknowledged elsewhere) go.
+    mutating func sync(_ ids: [String], now: TimeInterval) {
+        let listed = Set(ids)
+        waiting.removeAll { !listed.contains($0) }
+        if let cur = current, !listed.contains(cur.id) { current = nil; hovered = false }
+        for id in ids where !done.contains(id) && current?.id != id && !waiting.contains(id) { waiting.append(id) }
+        advance(now: now)
+    }
+
+    /// The top became the notices' or stopped being. A notice cut short waits at the head of the line, shown whole later.
+    mutating func setBlocked(_ on: Bool, now: TimeInterval) {
+        guard on != blocked else { return }
+        blocked = on
+        if on, let cur = current {
+            waiting.insert(cur.id, at: 0)
+            current = nil
+            hovered = false
+        }
+        advance(now: now)
+    }
+
+    mutating func hover(_ on: Bool, now: TimeInterval) {
+        guard current != nil, on != hovered else { return }
+        hovered = on
+        if !on, var cur = current, cur.dismissAt < now + Self.hoverLeaveGrace {
+            cur.dismissAt = now + Self.hoverLeaveGrace
+            current = cur
+        }
+    }
+
+    /// The clock moved: a notice shown its whole time is done — returns its id (to acknowledge), and the next one shows.
+    mutating func tick(now: TimeInterval) -> String? {
+        guard let cur = current, !hovered, now >= cur.dismissAt else { return nil }
+        current = nil
+        done.insert(cur.id)
+        advance(now: now)
+        return cur.id
+    }
+
+    /// ✕ or ↗ (or a click on it): done.
+    mutating func finish(_ id: String, now: TimeInterval) {
+        done.insert(id)
+        waiting.removeAll { $0 == id }
+        if current?.id == id { current = nil; hovered = false }
+        advance(now: now)
+    }
+
+    private mutating func advance(now: TimeInterval) {
+        guard current == nil, !blocked, !waiting.isEmpty else { return }
+        current = Shown(id: waiting.removeFirst(), dismissAt: now + Self.showFor)
+    }
+}
+
 // MARK: - Who owns the top
 
 /// What the island's activity panel draws under the housing.
 enum IslandActivitySlot: Equatable {
     case none
+    /// A turn result, or a fired plan alarm's notice (`IslandAlarmQueue`; the notice first).
     case result(String)
     /// The computer-use pill (`expanded`: as its mirror).
     case computerUse(sessionId: String, expanded: Bool)

@@ -262,6 +262,8 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsageAlarmRules.tap(x: 92, width: 200, usedPercent: 45.4, alarms: []), .set(46))
         XCTAssertEqual(UsageAlarmRules.tap(x: 200, width: 200, usedPercent: 99.6, alarms: []), .set(100))
         XCTAssertEqual(UsageAlarmRules.tap(x: 200, width: 200, usedPercent: 100, alarms: []), .alreadyPast)
+        // A stale line's share is not what is used now: no "Already past" there.
+        XCTAssertEqual(UsageAlarmRules.tap(x: 90, width: 200, usedPercent: 45.4, stale: true, alarms: []), .set(45))
     }
 
     func testTheMarkersLabelSitsRightUnlessItRunsOffAndTheWordsUnderItStepAside() {
@@ -291,6 +293,10 @@ final class UsageWindowTests: XCTestCase {
         // An older daemon sends no key: the same rule, in the app.
         XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "g", kind: "weekly", usedPercent: 1, scope: "Claude & GPT")), "weekly:claude & gpt")
         XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "o", kind: "other", windowMinutes: 1440, usedPercent: 1)), "other@1440")
+        // A per-model limit by its model family, whichever of Claude Code's sources named it (the daemon's rule).
+        XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "x", kind: "weekly_scoped", usedPercent: 1, scope: "Claude Opus 4.5")),
+                       "weekly_scoped:opus")
+        XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "y", kind: "weekly_scoped", usedPercent: 1, scope: "opus")), "weekly_scoped:opus")
     }
 
     func testTheAlarmsNotificationNamesThePlanTheWindowAndTheThresholdAndWhenItResets() {

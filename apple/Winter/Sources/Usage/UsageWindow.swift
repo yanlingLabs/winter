@@ -751,7 +751,7 @@ struct UsagePlanLine: View {
     /// A click on the line: on a tick, that alarm goes; at or below what is used, "Already past"; else an alarm there.
     private func tapped(rowX: CGFloat) {
         guard let onSetAlarm, let point = UsageAlarmRules.trackPoint(rowX: rowX, slot: slot, hovered: hovered) else { return }
-        switch UsageAlarmRules.tap(x: point.x, width: point.width, usedPercent: ring.fraction * 100, alarms: alarms) {
+        switch UsageAlarmRules.tap(x: point.x, width: point.width, usedPercent: ring.fraction * 100, stale: ring.stale, alarms: alarms) {
         case .remove(let id):
             onRemoveAlarm?(id)
         case .set(let pct):

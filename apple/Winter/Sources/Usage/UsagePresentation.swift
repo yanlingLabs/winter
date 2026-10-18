@@ -217,8 +217,15 @@ enum UsagePresentation {
     static func windowKey(_ w: UsagePlanWindow) -> String {
         if let key = w.windowKey, !key.isEmpty { return key }
         let base = w.kind == "other" ? w.windowMinutes.map { "other@\(Int($0.rounded()))" } ?? "other" : w.kind
-        let scope = w.scope?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+        let scope = w.scope.map(scopeKey) ?? ""
         return scope.isEmpty ? base : "\(base):\(scope)"
+    }
+
+    /// PURE: a scope's key — the daemon's `planScopeKey`: the model family it names ("Claude Opus 4.5" → "opus"), else
+    /// the scope trimmed and lower-cased ("Gemini" → "gemini").
+    static func scopeKey(_ scope: String) -> String {
+        let lower = scope.trimmingCharacters(in: .whitespaces).lowercased()
+        return ["fable", "opus", "sonnet", "haiku"].first { lower.contains($0) } ?? lower
     }
 
     // MARK: alarms
