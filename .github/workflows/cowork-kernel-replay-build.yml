@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Build exact native artifacts without executing them
@@ -25,7 +25,7 @@ jobs:
         run: |
           sha256sum out/kernel-replay-linux-review/build.json
           file out/kernel-replay-linux-review/kernel-journal-replay out/kernel-replay-linux-review/fixture-loop-replay
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kernel-replay-linux-review
           path: out/kernel-replay-linux-review/
