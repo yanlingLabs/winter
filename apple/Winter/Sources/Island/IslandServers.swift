@@ -467,8 +467,8 @@ enum IslandServers {
         }
         // Winter's and the coding agents' own infrastructure: a Winter process (or this app) or an agent (`isAgent`: a
         // CLI, Claude's or another agent's app) up the tree with NO user's shell in between — an MCP server the daemon
-        // or an agent started, through `npx` and its `sh -c` too. A server one ran through its shell is the user's. A server a session ran through its shell (`winter → bash -c … → bun dev`) is the
-        // user's, started on their behalf: listed.
+        // or an agent started, through `npx` and its `sh -c` too. A server one ran through its
+        // shell (`winter → bash -c … → bun dev`, `claude → zsh -c → vite`) is the user's, started on their behalf: listed.
         let underInfrastructure = { (p: ServerProcess) -> Bool in
             var seen: Set<Int32> = [p.pid]
             var parent = p.ppid
