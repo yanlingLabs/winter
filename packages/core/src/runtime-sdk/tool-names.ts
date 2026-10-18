@@ -13,8 +13,8 @@ import { WINTER_DEFAULT_TOOL_DEFINITIONS } from "@yanlinglabs/winter-agent-sdk/t
  *    NETWORK, deny everything else") would DENY chat's only search tool — chat's Search dies with
  *    every unit test green.
  *  - `"Bash"` is not in `MUTATING`, so it falls to the unclassified fail-closed `"ask"` branch —
- *    which under `auto` is a card where today there is silence, and under dispatch/chat a typed
- *    deny (P8b-7/P8b-26) where today the command runs.
+ *    which under `auto` is a card where today there is silence, and in chat a typed deny (P8b-7)
+ *    where today the command runs.
  *  - `approvalCardSummary` / `approvalOptionsFor` (`agent/approvals.ts`) both switch on the literal
  *    `"bash"`, so a card for `"Bash"` would lose its command text AND its "always allow
  *    `Bash(git push:*)`" options — the rules-store "remember this" path would have nothing to
@@ -57,7 +57,7 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
   // both retired with the web-tools ruling — but these mappings are how the runtime's own `WebFetch`/
   // `WebSearch` reach `gate.ts`'s `NETWORK` class and `approvals.ts`'s card text. Delete either and its
   // tool falls to the unclassified fail-closed `"ask"` branch: a card under `auto` where there is silence
-  // today, and a typed deny in chat and dispatch. The host NAMES they map onto are now classification
+  // today (dispatch included), and a typed deny in chat. The host NAMES they map onto are now classification
   // data (and the name old session JSONLs carry), not tools.
   ["WebFetch", "web_fetch"],
   ["WebSearch", "web_search"],
@@ -122,7 +122,7 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
  * — so the gate would allow them anyway. `ReadNotifications` and `advisor` have NO host
  * counterpart at all (there is no tool to map them to, and inventing one would be a lie), so
  * without this set they would fall to the unclassified fail-closed `"ask"` branch: a card under
- * `auto` in code, and a typed deny in dispatch/chat. Membership here is what makes P8b-28 true for
+ * `auto` in code and dispatch, and a typed deny in chat. Membership here is what makes P8b-28 true for
  * all four rather than for the two that happen to be classified.
  */
 export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(

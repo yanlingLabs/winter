@@ -266,6 +266,15 @@ export class WakeRegistry {
     }));
   }
 
+  /** Every armed trigger, every session's, oldest first (the Mac island's Watches tab, `island.activity`). Labels only:
+   *  never the model's note. */
+  listAll(): { sessionId: string; wakeId: string; condition: string; targetLabel: string; elementLabel?: string; armedAt: number; expiresAt: number }[] {
+    return [...this.triggers.values()].map((t) => ({
+      sessionId: t.sessionId, wakeId: t.wakeId, condition: t.condition.kind, targetLabel: t.targetLabel,
+      ...(t.elementLabel === undefined ? {} : { elementLabel: t.elementLabel }), armedAt: t.armedAt, expiresAt: t.expiresAt,
+    }));
+  }
+
   /** How many triggers the session has armed (the session list's "waiting for you" mark). */
   countFor(sessionId: string): number {
     let n = 0;

@@ -23,8 +23,9 @@
 // with a `cu_<hex>` call id, `toolName: "ComputerV2"`, a summary that names the BUNDLE ID (a look-alike app
 // cannot borrow a trusted name), options with no `rule` (so `approval.respond` persists nothing — `always` is
 // this module's own `computerUse.apps.<id>.grant` write). A dispatch child's card rides the existing mirror to
-// its coordinator, bounded like every relayed card (`dispatchChildCardTimeoutMs`). A Dispatch COORDINATOR raises
-// these cards too — an exception to "Dispatch never prompts", like a connector's card.
+// its coordinator, bounded like every relayed card. A Dispatch COORDINATOR raises these cards too, on its own log —
+// Dispatch respects its approval mode like code (user ruling 2026-10-17) — and both are bounded when nobody typed
+// the turn (`dispatchCardTimeoutMs`).
 //
 // RUNG 4 (the foreground: the user's real pointer) needs its own card under `ask`/`accept-edits`/`auto` —
 // "Winter needs to bring <App> to the front and use your mouse for a moment" — and a session nobody is watching
@@ -47,7 +48,7 @@ import { randomBytes } from "node:crypto";
 import type { ApprovalOption, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { ApprovalBroker } from "../agent/approvals";
-import { dispatchChildCardTimeoutMs } from "../runtime-sdk/approval-bridge";
+import { dispatchCardTimeoutMs } from "../runtime-sdk/approval-bridge";
 import { NO_PARK_TIMEOUT_MS } from "../runtime-sdk/bridge-common";
 import type { SessionMode } from "../runtime-sdk/create";
 import { computerUseAllowAllAppsFrom, computerUseAppsFrom, type ComputerUseAccess, type ComputerUseAppSetting, type Settings } from "../settings";
@@ -581,9 +582,9 @@ export class ComputerPolicy {
     if (signal?.aborted) return { approved: false, human: false };
     const facts = this.deps.session(sessionId);
     const callId = `cu_${randomBytes(6).toString("hex")}`;
-    // A relayed dispatch child's card is bounded (its coordinator's prompt promises the user an auto-deny),
-    // unless the user started the turn in the child; every other card waits for its human (P8b-19).
-    const bounded = dispatchChildCardTimeoutMs({
+    // A dispatch-family card (a relayed child's, or the coordinator's own) is bounded — Dispatch's prompt promises
+    // the user an auto-deny — unless a person started the turn; every other card waits for its human (P8b-19).
+    const bounded = dispatchCardTimeoutMs({
       mode: facts.mode, ...(facts.origin === undefined ? {} : { origin: facts.origin }),
       turnOrigin: () => this.deps.turnOrigin?.(sessionId),
     }) ?? NO_PARK_TIMEOUT_MS;

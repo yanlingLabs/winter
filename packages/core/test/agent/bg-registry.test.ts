@@ -74,7 +74,7 @@ d("BackgroundTaskRegistry", () => {
     expect(done.chunk).toBe(""); // everything was already delivered
     expect(events.some((e) => e.type === "bg_task_exited" && e.taskId === id && e.exitCode === 0)).toBe(true);
     expect(firstLen).toBeGreaterThan(0);
-  });
+  }, 100_000); // its 3 waits are bounded at 30 s each by until: the test's own timeout must sit above them
 
   test("kill reaps the whole process group (no orphan)", async () => {
     const cwd = realDir();
@@ -92,7 +92,7 @@ d("BackgroundTaskRegistry", () => {
     // the backgrounded `sleep 30` must be gone (group kill): SIGTERM at once, SIGKILL after the grace
     await until("the grandchild to be reaped", () => { try { process.kill(grandchild, 0); return false; } catch { return true; } });
     expect(["killed", "exited"]).toContain(reg.read("s1", id).status);
-  });
+  }, 70_000); // its 2 waits are bounded at 30 s each by until: the test's own timeout must sit above them
 
   test("background command cannot write outside the session roots (fence reused)", async () => {
     const cwd = realDir();
@@ -101,7 +101,7 @@ d("BackgroundTaskRegistry", () => {
     const id = reg.start("s1", `echo pwned > ${outside}/leak.txt 2>&1 || true`);
     await until("the task to finish", () => reg.read("s1", id).status !== "running"); // it RAN, then the file is checked
     expect(existsSync(join(outside, "leak.txt"))).toBe(false); // denied by the same Seatbelt fence
-  });
+  }, 40_000); // its wait is bounded at 30 s by until: the test's own timeout must sit above it
 
   test("read/kill on a foreign session's task throws", async () => {
     const cwd = realDir();
@@ -120,7 +120,7 @@ d("BackgroundTaskRegistry", () => {
     reg.killAllForSession("s1");
     await until("both tasks to be over", () => hasEnded(reg, "s1", a) && hasEnded(reg, "s1", b));
     for (const t of reg.list("s1")) expect(["killed", "exited"]).toContain(t.status);
-  });
+  }, 40_000); // its wait is bounded at 30 s by until: the test's own timeout must sit above it
 
   test("ring overflow: read() never redelivers already-seen output (cursor stays correct)", async () => {
     const cwd = realDir();
@@ -163,7 +163,7 @@ d("BackgroundTaskRegistry", () => {
     expect(onDisk).toContain("one");
     expect(onDisk).toContain("two");
     expect(onDisk).toContain("three");
-  });
+  }, 40_000); // its wait is bounded at 30 s by until: the test's own timeout must sit above it
 
   test("outputFile() throws for a foreign session or unknown task, same as read()/kill()", () => {
     const cwd = realDir();
@@ -200,7 +200,7 @@ d("BackgroundTaskRegistry", () => {
     const { chunk, status } = reg.read("s1", id);
     expect(chunk).toContain("ZZZZ"); // ring/bash_output keep working past the file cap
     expect(status).toBe("exited");
-  });
+  }, 70_000); // its 2 waits are bounded at 30 s each by until: the test's own timeout must sit above them
 
   test("zero-output task: the output file exists (empty) as soon as the task starts", async () => {
     const cwd = realDir();
@@ -210,7 +210,7 @@ d("BackgroundTaskRegistry", () => {
     expect(existsSync(file)).toBe(true); // pre-created — the spawn result's path is always readable
     await until("the task to exit", () => hasEnded(reg, "s1", id));
     expect(readFileSync(file, "utf8")).toBe("");
-  });
+  }, 40_000); // its wait is bounded at 30 s by until: the test's own timeout must sit above it
 
   // SP-approvals Task 11 (spec §8): the engine gates BEFORE a bg task ever starts (permission-
   // gate-order.test.ts covers that wiring with a stub, no real sandbox) — this registry just needs
@@ -224,7 +224,7 @@ d("BackgroundTaskRegistry", () => {
     await until("the task to exit", () => hasEnded(reg, "s1", id)); // it RAN, then the file is checked
     expect(existsSync(join(outside, "leak-network.txt"))).toBe(false);
     expect(reg.read("s1", id).status).toBeDefined();
-  });
+  }, 40_000); // its wait is bounded at 30 s by until: the test's own timeout must sit above it
 
   test("dangerouslyDisableSandbox: true escapes the fence entirely — a background write outside the roots now SUCCEEDS", async () => {
     const cwd = realDir();
@@ -237,5 +237,5 @@ d("BackgroundTaskRegistry", () => {
     const { status, exitCode } = reg.read("s1", id);
     expect(status).toBe("exited");
     expect(exitCode).toBe(0);
-  });
+  }, 40_000); // its wait is bounded at 30 s by until: the test's own timeout must sit above it
 });

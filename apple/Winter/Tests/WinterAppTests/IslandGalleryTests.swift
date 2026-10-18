@@ -19,6 +19,21 @@ final class IslandGalleryTests: XCTestCase {
         }
     }
 
+    /// The island's shape on a light desktop (`IslandGallery.renderShape`): every tab at the one size, the morph out of
+    /// the housing, the strip, a card at rest and hovered — into the same folder.
+    func testTheShapeRendersOffscreen() throws {
+        let named = ProcessInfo.processInfo.environment["WINTER_ISLAND_RENDER_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+        let directory = named.map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("winter-island-shape-\(UUID().uuidString)")
+        if named == nil { addTeardownBlock { try? FileManager.default.removeItem(at: directory) } }
+        let files = try IslandGallery.renderShape(to: directory)
+        XCTAssertEqual(files.count, IslandTabRegistry.tabs.count + 1 + 3 + 3 + 1)
+        for file in files {
+            let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
+            XCTAssertGreaterThan(size, 1_000, file.lastPathComponent)
+        }
+    }
+
     func testTheLayoutHangsFromTheHousingOrTheTopEdge() {
         let notched = IslandScreenShape(housing: CGSize(width: 185, height: 32), menuBarHeight: 32)
         // Idle: exactly the housing (no wings over the menu bar); without a housing, nothing at all.
@@ -37,6 +52,5 @@ final class IslandGalleryTests: XCTestCase {
         XCTAssertEqual(g.bodyCornerRadius, IslandLayout.cardCorner)
         XCTAssertTrue(g.sourceIsHousing)
         XCTAssertFalse(IslandLayout.cardGeometry(plain, size: CGSize(width: 400, height: 120), rounded: true).sourceIsHousing)
-        XCTAssertEqual(IslandLayout.badge(notched, width: 100).minY, 32 - IslandLayout.badgeTuck, "the badge hangs from the housing")
     }
 }

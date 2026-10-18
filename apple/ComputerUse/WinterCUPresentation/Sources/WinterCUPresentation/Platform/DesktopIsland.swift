@@ -49,8 +49,6 @@ public struct DesktopIslandGeometry: Equatable {
     /// While the shape still moves, the content blurs by how far it has to go (the Dispatch pill's morph blur).
     public static let maxMorphBlur: CGFloat = 8
     public static let morphBlurFalloff: CGFloat = 12
-    /// Under the pointer the pill grows by this much — the Dispatch pill's own hover (`DispatchPillMetrics.hoverScale`).
-    public static let hoverScale: CGFloat = 1.03
 
     /// The pill's width for its line: the text, then the two buttons, within `widthRange`.
     @MainActor public static func pillWidth(for headline: String) -> CGFloat {
@@ -196,8 +194,7 @@ struct IslandFrameView: View {
         return over(check) ? .switchNow : over(cross) ? .refuse : nil
     }
 
-    /// The pointer is over the resting pill: it grows a little (`DesktopIslandGeometry.hoverScale`), like the Dispatch
-    /// pill.
+    /// The pointer is over the resting pill: it grows by the Dispatch pill's few points (`HoverGrowth`).
     private var pillHovered: Bool {
         guard let p = state.pointer, frame.content > 0.9, state.returningAt == nil else { return false }
         return geometry.pill.contains(p)
@@ -292,11 +289,9 @@ public struct CUIslandLiquidFrame<Content: View>: View {
                 .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
                 .compositingGroup()
                 .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
-                // A slight grow under the pointer, from the pill's top edge (away from the housing); the animation is
-                // scoped to the scale alone.
-                .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
-                    view.scaleEffect(hovered ? DesktopIslandGeometry.hoverScale : 1, anchor: .top)
-                }
+                // A slight grow under the pointer — the same few points as the compact Dispatch pill's, whatever the
+                // card's size (`HoverGrowth`) — from its top edge (the housing's side).
+                .hoverGrowth(hovered, size: geometry.pill.size, anchor: .top)
                 .opacity(frame.crisp)
                 .offset(x: pill.minX, y: pill.minY)
                 .allowsHitTesting(interactive)

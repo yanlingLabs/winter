@@ -129,11 +129,11 @@ describe("the child's Options carry the saved rules — after Winter's fixed one
     expect(o.permissions?.deny).toContain("Write(//h/settings.json)");
   });
 
-  test("Winter leg: chat and dispatch get no saved rules (chat's policy is fixed; dispatch never cards)", () => {
-    for (const mode of ["chat", "dispatch"] as const) {
-      const o = buildWinterOptions(winterInput({ mode, policy: mode === "chat" ? "chat" : "auto", persistedAllow: ["Bash(gh repo:*)"] }));
-      expect(o.permissions?.allow).toBeUndefined();
-    }
+  test("Winter leg: chat and dispatch get no saved rules (chat's policy is fixed; a dispatch card offers no rule to remember)", () => {
+    expect(buildWinterOptions(winterInput({ mode: "chat", policy: "chat", persistedAllow: ["Bash(gh repo:*)"] })).permissions?.allow).toBeUndefined();
+    // Dispatch: only Winter's fixed read/web rules (its dont-ask keeps them, as code's does) — never a saved one.
+    const d = buildWinterOptions(winterInput({ mode: "dispatch", policy: "auto", persistedAllow: ["Bash(gh repo:*)"] }));
+    expect(d.permissions?.allow).toEqual(["Read", ...WEB_BUILTIN_ALLOW_RULES]);
   });
 });
 
