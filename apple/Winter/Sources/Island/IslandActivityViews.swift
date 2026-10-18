@@ -216,6 +216,57 @@ struct IslandResultContent: View {
     }
 }
 
+// MARK: - A plan alarm's notification
+
+/// A plan alarm fired (`docs/claude/usage.md`): the plan, the window and the threshold ("Claude Code · Weekly at 80%"),
+/// when it resets, ✕ and ↗ — a click anywhere on it opens the island's Usage tab.
+struct IslandUsageAlarmContent: View {
+    let item: IslandUsageAlarmItem
+    let now: Date
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        let title = UsagePresentation.alarmNoticeTitle(item)
+        let detail = UsagePresentation.alarmNoticeDetail(item, now: now)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "bell.fill")
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(UsagePlanColor.of(provider: item.provider))
+                Text("Usage alarm")
+                    .font(Typography.caption(.medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(Typography.composerField())
+                        .foregroundStyle(Color.white)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail {
+                        Text(detail).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                IslandAnswerButton(role: .refuse, action: onDismiss)
+                    .accessibilityLabel("Dismiss")
+                IslandAnswerButton(role: .accept, symbol: "arrow.up.right", action: onOpen)
+                    .accessibilityLabel("Open usage")
+            }
+        }
+        .padding(IslandLayout.cardPadding)
+        .frame(width: IslandLayout.cardWidth, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Usage alarm: \(title)\(detail.map { ", \($0)" } ?? "")")
+    }
+}
+
 // MARK: - The Watches tab
 
 /// Every armed computer-use watch — what the agent waits for, in which session and app, since when — each with Stop.

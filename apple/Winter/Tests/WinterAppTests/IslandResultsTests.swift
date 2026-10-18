@@ -122,6 +122,187 @@ final class IslandResultsTests: XCTestCase {
         XCTAssertEqual(asked.first?.isDispatch, false)
     }
 
+    // MARK: Fired plan alarms — never lost
+
+    private func alarm(_ id: String, firedSecondsAgo: Double = 2) -> IslandUsageAlarmItem {
+        IslandUsageAlarmItem(id: id, provider: "claude-code", windowKey: "weekly", kind: "weekly", windowMinutes: 10_080,
+                             thresholdPercent: 80, usedPercent: 81, resetsAt: (wall + 86_400) * 1000, at: Int((wall - firedSecondsAgo) * 1000))
+    }
+
+    private func alarmStore() -> (IslandActivityStore, acked: () -> [String], opened: () -> Int) {
+        let store = makeStore()
+        var acked: [String] = []
+        var opened = 0
+        store.ackAlarm = { acked.append($0) }
+        store.openUsageTab = { opened += 1 }
+        return (store, { acked }, { opened })
+    }
+
+    func testANoticeShowsBeforeAResultForItsWholeTimeThenIsAcknowledged() {
+        let (store, acked, _) = alarmStore()
+        store.apply(IslandActivitySnapshot(results: [result("r1")], usageAlarms: [alarm("al-1")]))
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        XCTAssertEqual(IslandActivityArbiter.decide(cardOnTop: false, islandOpen: false, result: store.currentAlarm?.id ?? store.currentResult?.id,
+                                                   computerUse: nil, mirrorOpen: false).slot, .result("al-1"))
+        XCTAssertEqual(store.alarms.current?.dismissAt, now + IslandAlarmQueue.showFor)
+        // The hover holds it past its time; leaving gives it the grace, then it is done — acknowledged then, not before.
+        now += IslandAlarmQueue.showFor - 1
+        store.hoverResult(true)
+        now += 5
+        store.tick()
+        XCTAssertEqual(acked(), [])
+        store.hoverResult(false)
+        now += IslandAlarmQueue.hoverLeaveGrace
+        store.tick()
+        XCTAssertEqual(acked(), ["al-1"])
+        XCTAssertNil(store.currentAlarm)
+        // The daemon still lists it until the ack lands: it is not shown again.
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1")]))
+        XCTAssertNil(store.currentAlarm)
+    }
+
+    func testANoticeThatFiredLongAgoOrWhileTheAppWasAwayIsStillShown() {
+        let (store, _, _) = alarmStore()
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-old", firedSecondsAgo: 6 * 3600)]))
+        XCTAssertEqual(store.currentAlarm?.id, "al-old", "no age limit, unlike a turn result")
+    }
+
+    func testNoticesQueueInTheOrderTheyFiredAndNeverReplaceOneAnother() {
+        let (store, acked, _) = alarmStore()
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-2", firedSecondsAgo: 1), alarm("al-1", firedSecondsAgo: 5)]))
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        // A turn result arriving does not take its place.
+        store.apply(IslandActivitySnapshot(results: [result("r1")], usageAlarms: [alarm("al-2", firedSecondsAgo: 1), alarm("al-1", firedSecondsAgo: 5)]))
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        store.dismissResult("al-1")
+        XCTAssertEqual(acked(), ["al-1"])
+        XCTAssertEqual(store.currentAlarm?.id, "al-2", "the next one in line")
+    }
+
+    func testANoticeWaitsWhileTheIslandIsOpenOrACardHoldsTheTopHoweverLongAndIsShownWholeAfter() {
+        let (store, acked, _) = alarmStore()
+        store.setIslandOpen(true)
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1")]))
+        XCTAssertNil(store.currentAlarm, "the open island shows it all: the notice waits")
+        now += 600
+        store.tick()
+        XCTAssertEqual(acked(), [], "its time never runs while it is not shown")
+        store.setIslandOpen(false)
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        // Cut short by a card needing an answer — longer than a result is ever held (30 s): back in line, shown whole.
+        now += 8
+        store.setCardOnTop(true)
+        XCTAssertNil(store.currentAlarm)
+        now += 120
+        store.tick()
+        XCTAssertEqual(acked(), [])
+        store.setCardOnTop(false)
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        XCTAssertEqual(store.alarms.current?.dismissAt, now + IslandAlarmQueue.showFor, "a full time again")
+    }
+
+    func testOpenGoesToTheUsageTabAndAnAlarmAcknowledgedElsewhereGoes() {
+        let (store, acked, opened) = alarmStore()
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1"), alarm("al-2", firedSecondsAgo: 1)]))
+        store.openResult("al-1")
+        XCTAssertEqual(opened(), 1)
+        XCTAssertEqual(acked(), ["al-1"])
+        XCTAssertEqual(store.currentAlarm?.id, "al-2")
+        // Another client acknowledged it: the daemon no longer lists it, and it goes without an ack of ours.
+        store.apply(IslandActivitySnapshot(usageAlarms: []))
+        XCTAssertNil(store.currentAlarm)
+        XCTAssertEqual(acked(), ["al-1"])
+    }
+
+    func testANoticeCountsItsTimeOnlyWhileSomeoneCanSeeTheScreen() {
+        let (store, acked, _) = alarmStore()
+        // Fired while the screen was locked: it waits, however long, and is never acknowledged unseen.
+        store.screenSignal(.locked)
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1")]))
+        XCTAssertNil(store.currentAlarm)
+        now += 3_600
+        store.tick()
+        XCTAssertEqual(acked(), [])
+        store.screenSignal(.unlocked)
+        XCTAssertEqual(store.currentAlarm?.id, "al-1")
+        // The displays sleep mid-way: cut short, it is shown whole again once they wake.
+        now += 8
+        store.screenSignal(.displaysSlept)
+        XCTAssertNil(store.currentAlarm)
+        now += 600
+        store.tick()
+        XCTAssertEqual(acked(), [])
+        store.screenSignal(.displaysWoke)
+        XCTAssertEqual(store.alarms.current?.dismissAt, now + IslandAlarmQueue.showFor)
+        // Another user's session in front (fast user switching): the same.
+        store.screenSignal(.sessionResigned)
+        XCTAssertNil(store.currentAlarm)
+        store.screenSignal(.sessionActivated)
+        now += IslandAlarmQueue.showFor
+        store.tick()
+        XCTAssertEqual(acked(), ["al-1"], "acknowledged only after its whole time on a screen someone could see")
+    }
+
+    func testAnAppStartedBehindALockedScreenHoldsItsNotices() {
+        // Sparkle relaunched the app while the screen was locked: no `screenIsLocked` comes, only the reading at start.
+        for away in [IslandScreenPresence(locked: true), IslandScreenPresence(displaysAsleep: true), IslandScreenPresence(sessionInactive: true)] {
+            let (store, acked, _) = alarmStore()
+            store.readScreen = { away }
+            store.screenAtStart()
+            store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-1")]))
+            XCTAssertNil(store.currentAlarm)
+            now += 3_600
+            store.tick()
+            XCTAssertEqual(acked(), [], "never acknowledged unseen")
+            store.screenSignal(.unlocked)
+            store.screenSignal(.displaysWoke)
+            store.screenSignal(.sessionActivated)
+            XCTAssertEqual(store.alarms.current?.dismissAt, now + IslandAlarmQueue.showFor)
+            now += IslandAlarmQueue.showFor
+            store.tick()
+            XCTAssertEqual(acked(), ["al-1"])
+        }
+        // Started with someone in front: shown at once.
+        let (store, _, _) = alarmStore()
+        store.readScreen = { IslandScreenPresence() }
+        store.screenAtStart()
+        store.apply(IslandActivitySnapshot(usageAlarms: [alarm("al-2")]))
+        XCTAssertEqual(store.currentAlarm?.id, "al-2")
+    }
+
+    func testScreenPresenceNeedsEverySignalBack() {
+        var screen = IslandScreenPresence()
+        XCTAssertFalse(screen.away)
+        screen.note(.locked)
+        screen.note(.displaysSlept)
+        XCTAssertTrue(screen.away)
+        screen.note(.displaysWoke)
+        XCTAssertTrue(screen.away, "still locked")
+        screen.note(.unlocked)
+        XCTAssertFalse(screen.away)
+        screen.note(.sessionResigned)
+        XCTAssertTrue(screen.away)
+        screen.note(.sessionActivated)
+        XCTAssertFalse(screen.away)
+    }
+
+    func testTheAlarmQueueAlone() {
+        var q = IslandAlarmQueue()
+        q.sync(["a", "b"], now: 0)
+        XCTAssertEqual(q.current?.id, "a")
+        XCTAssertEqual(q.waiting, ["b"])
+        q.setBlocked(true, now: 3)
+        XCTAssertNil(q.current)
+        XCTAssertEqual(q.waiting, ["a", "b"])
+        XCTAssertNil(q.tick(now: 1_000))
+        q.setBlocked(false, now: 1_000)
+        XCTAssertEqual(q.current, .init(id: "a", dismissAt: 1_000 + IslandAlarmQueue.showFor))
+        XCTAssertEqual(q.tick(now: 1_000 + IslandAlarmQueue.showFor), "a")
+        XCTAssertEqual(q.current?.id, "b")
+        q.sync(["a", "b"], now: 1_013)
+        XCTAssertEqual(q.waiting, [], "a done one is never shown again")
+    }
+
     func testOpenGoesExactlyWhereASessionsRowsClickGoes() {
         let sessions = IslandSessionsModel()
         var targets: [IslandSessionTarget] = []

@@ -1310,9 +1310,12 @@ export async function startDaemon(opts: {
   hub.addObserver((event) => islandUsage.observe(event));
   // Usage and cost tracking (`usage.*`, `docs/claude/usage.md`): Winter's own turns as they end, the user's Codex and
   // Claude Code usage ingested ON DEMAND. Its own SQLite file (`<home>/usage/usage.db`), never runtime-state.db.
+  // A fired plan alarm is the island's notification pill — late-bound: the island's activity is built further down.
+  let usageAlarmNotices: (() => void) | undefined;
   const usage = createUsageService({
     home: winterHome, settings: () => settings, islandUsage, version: CORE_VERSION,
     ...(opts.usage === undefined ? {} : { injection: opts.usage }),
+    onAlarmNotices: () => usageAlarmNotices?.(),
   });
 
   const computerUseRuntime = createComputerUseRuntime({
@@ -1359,8 +1362,15 @@ export async function startDaemon(opts: {
     hosts: islandHosts,
     watches: () => computerUseRuntime.control.wakesList?.() ?? [],
     hasPendingCard: (sid) => islandRegistry.list().some((i) => i.answerSessionId === sid || i.sessionId === sid),
+    // The fired plan alarms not acknowledged yet, from the usage DB (they survive a restart).
+    usageAlarms: () => (usage?.service.firedAlarms() ?? []).map((a) => ({
+      id: a.id, provider: a.provider, windowKey: a.windowKey, kind: a.kind, ...(a.scope === undefined ? {} : { scope: a.scope }),
+      ...(a.windowMinutes === undefined ? {} : { windowMinutes: a.windowMinutes }), thresholdPercent: a.thresholdPercent,
+      usedPercent: a.usedPercent, ...(a.resetsAt === undefined ? {} : { resetsAt: a.resetsAt }), at: a.firedAt,
+    })),
   });
   hub.addObserver((event) => islandActivity.observe(event));
+  usageAlarmNotices = () => islandActivity.usageAlarmsChanged();
 
   // ComputerV2 Phase 2 — Winter for Chrome's door into this daemon: `<home>/run/browser.sock`, where
   // `winter-browser-host` (inside the Winter Computer Use bundle) connects for each browser profile running the extension.
