@@ -113,9 +113,12 @@ public struct IslandUsageWindow: Sendable, Equatable {
     public let resetsAt: Double?
     public let at: Double
     public let sessionId: String
+    /// The provider the reporting session's model names (`codex-oauth`, …), when known.
+    public let provider: String?
 
     public init(rateLimitType: String?, status: String, utilization: Double? = nil, resetsAt: Double? = nil, at: Double,
-                sessionId: String) {
+                sessionId: String, provider: String? = nil) {
+        self.provider = provider
         self.rateLimitType = rateLimitType
         self.status = status
         self.utilization = utilization
@@ -224,7 +227,8 @@ extension WinterClient {
             guard let status = w["status"]?.stringValue else { return nil }
             return IslandUsageWindow(rateLimitType: w["rateLimitType"]?.stringValue, status: status,
                                      utilization: number(w["utilization"]), resetsAt: number(w["resetsAt"]),
-                                     at: number(w["at"]) ?? 0, sessionId: w["sessionId"]?.stringValue ?? "")
+                                     at: number(w["at"]) ?? 0, sessionId: w["sessionId"]?.stringValue ?? "",
+                                     provider: w["provider"]?.stringValue)
         }
         let subscription = r["subscription"].flatMap { s -> IslandUsageSnapshot.Subscription? in
             guard case .object = s else { return nil }

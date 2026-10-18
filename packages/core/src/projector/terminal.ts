@@ -240,6 +240,86 @@ export function turnUsageOf(result: ResultFrame): { input: number; output: numbe
   };
 }
 
+/**
+ * ── PER-MODEL TURN USAGE, FOR THE USAGE DB (`docs/claude/usage.md`) ────────────────────────────────
+ *
+ * `turn_completed` keeps only the summed input/output pair. The usage DB wants every model's share of
+ * the turn with its cache split and the runtime's own price, so this reads the SAME cumulative ledger
+ * row by row and differences each row against the previous result's copy of it. The runtime's row
+ * fields: `inputTokens` (uncached), `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`,
+ * `costUSD` (cumulative, priced generations only), `costBasis` (`"list"` only on a row something
+ * priced), `canonicalModel`, `provider`. A row whose fields went DOWN is a fresh ledger (a new child
+ * incarnation starts at zero) and counts whole. A turn with no ledger but a claude-shaped per-turn
+ * `usage` block is its own figure (no delta), keyed on the session's model.
+ */
+export interface LedgerSnapshot { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number }
+
+export interface TurnModelUsageRow {
+  /** The ledger's row key (the qualified `provider/model` catalog key on the Winter runtime). */
+  model: string;
+  canonicalModel?: string;
+  provider?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** This turn's share of the runtime's own price — only for a row the runtime priced (`costBasis: "list"`). */
+  costUsd?: number;
+  costBasis?: "list";
+}
+
+const costOf = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+
+/** PURE: this turn's per-model figures and the ledger snapshot the next turn differences against. */
+export function turnModelUsageOf(
+  result: ResultFrame, previous: ReadonlyMap<string, LedgerSnapshot>, main?: MainModelKey,
+): { rows: TurnModelUsageRow[]; snapshot: Map<string, LedgerSnapshot> } {
+  const usage = (result as { modelUsage?: unknown }).modelUsage;
+  if (typeof usage === "object" && usage !== null) {
+    const snapshot = new Map<string, LedgerSnapshot>();
+    const rows: TurnModelUsageRow[] = [];
+    for (const [key, raw] of Object.entries(usage as Record<string, unknown>)) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const r = raw as Record<string, unknown>;
+      const now: LedgerSnapshot = {
+        input: num(r.inputTokens), output: num(r.outputTokens), cacheRead: num(r.cacheReadInputTokens),
+        cacheWrite: num(r.cacheCreationInputTokens), costUsd: costOf(r.costUSD),
+      };
+      snapshot.set(key, now);
+      const before = previous.get(key);
+      const reset = before !== undefined && (now.input < before.input || now.output < before.output
+        || now.cacheRead < before.cacheRead || now.cacheWrite < before.cacheWrite || now.costUsd < before.costUsd);
+      const base = before === undefined || reset ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 } : before;
+      const row = {
+        inputTokens: now.input - base.input, outputTokens: now.output - base.output,
+        cacheReadTokens: now.cacheRead - base.cacheRead, cacheWriteTokens: now.cacheWrite - base.cacheWrite,
+      };
+      if (row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens === 0) continue;
+      const priced = r.costBasis === "list";
+      const canonicalModel = typeof r.canonicalModel === "string" && r.canonicalModel.length > 0 ? r.canonicalModel.slice(0, 200) : undefined;
+      const provider = typeof r.provider === "string" && r.provider.length > 0 ? r.provider.slice(0, 64) : undefined;
+      rows.push({
+        model: key.slice(0, 200), ...(canonicalModel === undefined ? {} : { canonicalModel }), ...(provider === undefined ? {} : { provider }),
+        ...row, ...(priced ? { costUsd: Math.max(0, now.costUsd - base.costUsd), costBasis: "list" as const } : {}),
+      });
+    }
+    return { rows, snapshot };
+  }
+  const u = (result as { usage?: unknown }).usage;
+  const model = main?.key ?? main?.modelId;
+  if (typeof u === "object" && u !== null && model !== undefined) {
+    const f = u as Record<string, unknown>;
+    const row = {
+      inputTokens: num(f.input_tokens), outputTokens: num(f.output_tokens),
+      cacheReadTokens: num(f.cache_read_input_tokens), cacheWriteTokens: num(f.cache_creation_input_tokens),
+    };
+    if (row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens > 0) {
+      return { rows: [{ model: model.slice(0, 200), ...row }], snapshot: new Map(previous) };
+    }
+  }
+  return { rows: [], snapshot: new Map(previous) };
+}
+
 export interface TerminalInput {
   result: ResultFrame;
   sessionId: string;

@@ -108,6 +108,9 @@ final class MenuBarController {
     /// `LSUIElement`, so there is no main menu bar to hang one from), which is why this lands beside
     /// "Dashboard…" rather than under a "Debug" submenu the app does not have.
     var onOpenEditorHarness: (() -> Void)?
+    /// "Usage…" — the Usage window (`docs/claude/usage.md`). Wired before `install()`; nil = not mounted.
+    var onOpenUsage: (() -> Void)?
+    let usageItem = NSMenuItem(title: "Usage…", action: #selector(didOpenUsage), keyEquivalent: "")
     let editorHarnessItem = NSMenuItem(title: "Editor Bridge Harness…",
                                        action: #selector(didOpenEditorHarness), keyEquivalent: "")
 
@@ -304,6 +307,10 @@ final class MenuBarController {
         menu.addItem(chatItem)
         dashboardItem.target = self
         menu.addItem(dashboardItem)
+        if onOpenUsage != nil {
+            usageItem.target = self
+            menu.addItem(usageItem)
+        }
         pluginManagerItem.target = self
         menu.addItem(pluginManagerItem)
         #if DEBUG
@@ -502,6 +509,7 @@ final class MenuBarController {
     @objc private func didOpenOfficeHarness() { onOpenOfficeHarness?() }
     #endif
     @objc private func didOpenDashboard() { openDashboard() }
+    @objc private func didOpenUsage() { onOpenUsage?() }
     @objc private func didOpenPluginManager() { openPluginManager() }
     @objc private func didOpenPairDevice() { openPairDevice() }
     @objc private func didOpenPairedDevices() { openPairedDevices() }
