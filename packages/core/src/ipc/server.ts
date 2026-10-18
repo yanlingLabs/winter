@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, UsageSummaryParams, UsageSeriesParams, UsageSubscriptionsSetParams, UsageSubscriptionsRemoveParams, UsageSetTrackingParams, UsageAlarmsListParams, UsageAlarmsSetParams, UsageAlarmsRemoveParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, UsageSummaryParams, UsageSeriesParams, UsageSubscriptionsSetParams, UsageSubscriptionsRemoveParams, UsageSetTrackingParams, UsageAlarmsListParams, UsageAlarmsSetParams, UsageAlarmsRemoveParams, UsageAlarmsAckParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -3520,7 +3520,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.usageSetTracking:
       case METHODS.usageAlarmsList:
       case METHODS.usageAlarmsSet:
-      case METHODS.usageAlarmsRemove: {
+      case METHODS.usageAlarmsRemove:
+      case METHODS.usageAlarmsAck: {
         // Usage and cost tracking (`docs/claude/usage.md`): the user's own usage across Winter, Codex and Claude Code,
         // and their plan alarms. LOCAL harness clients only — never a phone, never a plugin.
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to local clients only`);
@@ -3565,6 +3566,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (method === METHODS.usageAlarmsRemove) {
           const p = parseParams(UsageAlarmsRemoveParams, params);
           return { removed: usage.removeAlarm(p.id), alarms: usage.alarms() };
+        }
+        if (method === METHODS.usageAlarmsAck) {
+          const p = parseParams(UsageAlarmsAckParams, params);
+          return { acked: usage.ackAlarm(p.id) };
         }
         if (method === METHODS.usageSubscriptionsList) return { subscriptions: usage.subscriptions() };
         if (method === METHODS.usageSubscriptionsSet) {

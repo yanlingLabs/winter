@@ -5,13 +5,13 @@ import { AGY_TIMEOUT_BACKOFF_MS, antigravityPlanFromCli } from "./antigravity";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudeCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
 import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
-import { USAGE_SOURCES, type AlarmProvider, type Subscription, type SyntheticRow, type UsageAlarm, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
+import { USAGE_SOURCES, type AlarmProvider, type FiredUsageAlarm, type Subscription, type SyntheticRow, type UsageAlarm, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import {
   OPENCODE_ALL_ARGS, OPENCODE_SETTLE_AFTER_DAY_MS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
   opencodeDifference, opencodeFingerprint, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
-import { planWindowKey, staleness, type PlanReading, type PlanStatusWindow, type PlanWindowKind } from "./plan";
+import { planWindowKey, staleness, type PlanReading, type PlanStatusWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
 
 // The usage service (`docs/claude/usage.md`): records Winter's own turns as they end, ingests the user's Codex and
@@ -76,8 +76,9 @@ export interface UsageServiceDeps {
   claudeJsonMaxBytes?: number;
   /** Claude Code's `stats-cache.json` over this is not read (default 8 MiB). */
   claudeStatsMaxBytes?: number;
-  /** A plan alarm fired — it is already deleted (the island's notification, `IslandActivity.usageAlarmFired`). */
-  onAlarmFired?: (fired: UsageAlarmFired) => void;
+  /** The fired alarms waiting for an acknowledgement changed — one fired, or one was acknowledged (the island's
+   *  notifications, `IslandActivity.usageAlarmsChanged`, which reads them back from `firedAlarms`). */
+  onAlarmNotices?: () => void;
   /** The background plan checks (`startBackground`): every installed and tracked plan every `backgroundEveryMs`
    *  (default 30 min), and a plan with an alarm on its own beat (`alarmBeatMs`; default its throttle — Codex 60 s, Claude
    *  Code and Antigravity 5 min). Tests shorten them. */
@@ -87,27 +88,17 @@ export interface UsageServiceDeps {
   setInterval?: (fn: () => void, ms: number) => () => void;
 }
 
-/** A plan alarm that fired: the alarm (deleted), the window it watched in words a client can name, and the reading. */
-export interface UsageAlarmFired {
-  id: string;
-  provider: AlarmProvider;
-  windowKey: string;
-  kind: PlanWindowKind;
-  scope?: string;
-  windowMinutes?: number;
-  thresholdPercent: number;
-  /** The reading's used share (0…100) that met it. */
-  usedPercent: number;
-  /** Epoch ms. */
-  resetsAt?: number;
-  /** When it fired, epoch ms. */
-  at: number;
-}
-
 /** The plans in their slots' order (what the background beat reads). */
 export const PLAN_PROVIDERS: readonly AlarmProvider[] = ["codex", "claude-code", "antigravity"];
 /** The background beat's period (user 2026-10-18: every installed and tracked plan, alarm or not). */
 export const USAGE_BACKGROUND_EVERY_MS = 30 * 60_000;
+/** A fast beat's spawn floor sits this far under its period. */
+export const FAST_BEAT_SLACK_MS = 5_000;
+
+/** PURE: a fast beat's spawn floor — the period less `FAST_BEAT_SLACK_MS`, never under half the period. */
+export function fastBeatFloor(periodMs: number): number {
+  return Math.max(periodMs / 2, periodMs - FAST_BEAT_SLACK_MS);
+}
 
 const defaultInterval = (fn: () => void, ms: number): (() => void) => {
   const t = setInterval(fn, ms);
@@ -770,9 +761,26 @@ export class UsageService {
     return keyed;
   }
 
-  /** Every alarm, oldest first. */
+  /** Every ARMED alarm, oldest first (a fired one waiting for its acknowledgement is not a tick any more). */
   alarms(): UsageAlarm[] {
     return this.deps.db.alarms();
+  }
+
+  /** Every fired alarm whose notice no client has acknowledged yet, in the order they fired — from the DB, so a
+   *  restart, an app away for hours or a busy island never loses one. */
+  firedAlarms(): FiredUsageAlarm[] {
+    try { return this.deps.db.firedAlarms(); } catch { return []; }
+  }
+
+  /** A client acknowledged a fired alarm's notice (dismissed it, opened it, or showed it its full time): the row goes. */
+  ackAlarm(id: string): boolean {
+    const acked = this.deps.db.ackAlarm(id);
+    if (acked) this.noticesChanged();
+    return acked;
+  }
+
+  private noticesChanged(): void {
+    try { this.deps.onAlarmNotices?.(); } catch { /* the island's failure is its own */ }
   }
 
   /** Set an alarm (whole percent); one already set for the same window and threshold is answered instead. The plan's
@@ -797,9 +805,10 @@ export class UsageService {
   /**
    * Fire the alarms a reading meets — ONCE each: a window that is not stale, in a reading measured no earlier than the
    * alarm was set (an older one is no news about it), whose used share is at the threshold or above. The alarm is
-   * deleted first and fires only when THIS call deleted it (`UsageDb.removeAlarm`), so two reads of the same reading —
-   * a spawn landing while a client's read answers the cache, concurrent asks — fire it once. Not installed or tracking
-   * off: the reading has no windows, nothing fires, the alarms stay.
+   * MARKED fired with its notice (`UsageDb.fireAlarm`: `fired_at` set only where it was null) and counts only when THIS
+   * call marked it, so two reads of the same reading — a spawn landing while a client's read answers the cache,
+   * concurrent asks — fire it once. The row then waits, persisted, for a client to acknowledge its notice. Not installed
+   * or tracking off: the reading has no windows, nothing fires, the alarms stay armed.
    */
   private judgeAlarms(reading: PlanReading | undefined): void {
     if (reading === undefined || reading.at === undefined || reading.windows.length === 0) return;
@@ -810,18 +819,18 @@ export class UsageService {
       if (reading.at < a.createdAt) continue;
       const w = reading.windows.find((x) => !x.stale && planWindowKey(x) === a.windowKey && x.usedPercent >= a.thresholdPercent);
       if (w === undefined) continue;
-      try { if (!this.deps.db.removeAlarm(a.id)) continue; } catch { continue; }
+      const notice = {
+        kind: w.kind, ...(w.scope === undefined ? {} : { scope: w.scope }), ...(w.windowMinutes === undefined ? {} : { windowMinutes: w.windowMinutes }),
+        usedPercent: w.usedPercent, ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }),
+      };
+      try { if (!this.deps.db.fireAlarm(a.id, this.now(), notice)) continue; } catch { continue; }
       fired = true;
       this.deps.log?.info?.("[usage] plan alarm fired", { provider: a.provider, window: a.windowKey, threshold: a.thresholdPercent });
-      try {
-        this.deps.onAlarmFired?.({
-          id: a.id, provider: a.provider, windowKey: a.windowKey, kind: w.kind, ...(w.scope === undefined ? {} : { scope: w.scope }),
-          ...(w.windowMinutes === undefined ? {} : { windowMinutes: w.windowMinutes }), thresholdPercent: a.thresholdPercent,
-          usedPercent: w.usedPercent, ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: this.now(),
-        });
-      } catch { /* the notification's failure is its own; the alarm is spent */ }
     }
-    if (fired) this.rescheduleBeats();
+    if (fired) {
+      this.rescheduleBeats();
+      this.noticesChanged();
+    }
   }
 
   // ── the background plan checks ──────────────────────────────────────────────────────────────────
@@ -857,10 +866,12 @@ export class UsageService {
   }
 
   /** Read these plans now (each answer judges their alarms) — the beats' entry; a failure is the next beat's to retry.
-   *  `fast`: a fast beat ticks just as its cache comes of age, so half its period is the floor and each tick reads. */
+   *  `fast`: a fast beat ticks just as its cache comes of age (a spawn's own run time ends its age early), so its floor
+   *  is the period less `FAST_BEAT_SLACK_MS` (5 s; at most half the period) — each tick reads, and a client's read in
+   *  between rarely adds a second spawn to a period. */
   async checkPlans(providers: readonly AlarmProvider[], fast = false): Promise<void> {
     await Promise.all(providers.map((p) => {
-      const floor = fast ? this.beatMs(p) / 2 : undefined;
+      const floor = fast ? fastBeatFloor(this.beatMs(p)) : undefined;
       const read = p === "codex" ? this.codexPlan(floor) : p === "claude-code" ? this.claudeCodePlan(floor) : this.antigravityPlan(floor);
       return read.catch(() => undefined);
     }));

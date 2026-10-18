@@ -24,7 +24,8 @@ import { dirname } from "node:path";
 //    grows (`replaceDay`); its progress lives in `ingest_files` under a key of its own (`sourceState`).
 //  - `usage_alarms` (v5): the user's one-shot plan alarms — a plan, one of its windows by a STABLE key (its kind and
 //    scope, the same window across readings and rungs), a whole-percent threshold and when it was set. A fired alarm is
-//    DELETED (`removeAlarm` answers whether this call removed it: the single-flight).
+//    MARKED (`fired_at` and its notice, `fireAlarm` — true only for the call that marked it: the single-flight) and kept,
+//    surviving restarts, until a client acknowledges its notice (`ackAlarm` deletes it).
 
 export const USAGE_DB_SCHEMA_VERSION = 5;
 
@@ -106,7 +107,8 @@ export interface IngestFileState {
 /** The plans an alarm can watch (the plan slots, not the usage sources). */
 export type AlarmProvider = "codex" | "claude-code" | "antigravity";
 
-/** A one-shot plan alarm: fires once when a window's used share reaches `thresholdPercent`, and is then deleted. */
+/** A one-shot plan alarm: fires once when a window's used share reaches `thresholdPercent`; its notice is then kept
+ *  until a client acknowledges it, and the row goes. */
 export interface UsageAlarm {
   id: string;
   provider: AlarmProvider;
@@ -115,6 +117,23 @@ export interface UsageAlarm {
   /** 1…100, whole. */
   thresholdPercent: number;
   createdAt: number;
+}
+
+/** What a fired alarm's notice says about the window that met it (kept with the row until it is acknowledged). */
+export interface UsageAlarmNotice {
+  kind: string;
+  scope?: string;
+  windowMinutes?: number;
+  /** The used share (0…100) that met it. */
+  usedPercent: number;
+  /** Epoch ms. */
+  resetsAt?: number;
+}
+
+/** A fired alarm, waiting for a client's acknowledgement. */
+export interface FiredUsageAlarm extends UsageAlarm, UsageAlarmNotice {
+  /** Epoch ms. */
+  firedAt: number;
 }
 
 export interface Subscription {
@@ -190,15 +209,19 @@ export class UsageDb {
     }
     if (v < 5) {
       this.db.transaction(() => {
-        // One alarm per plan, window and threshold: a double click sets one, and a tick's removal removes it whole.
+        // `fired_at` / `notice`: set once when it fires; the row stays until its notice is acknowledged.
         this.db.run(`CREATE TABLE IF NOT EXISTS usage_alarms (
           id TEXT PRIMARY KEY,
           provider TEXT NOT NULL,
           window_key TEXT NOT NULL,
           threshold INTEGER NOT NULL,
           created_at INTEGER NOT NULL,
-          UNIQUE (provider, window_key, threshold)
+          fired_at INTEGER,
+          notice TEXT
         )`);
+        // One ARMED alarm per plan, window and threshold: a double click sets one, and a tick's removal removes it whole;
+        // a fired one waiting for its acknowledgement never blocks setting the same alarm again.
+        this.db.run("CREATE UNIQUE INDEX IF NOT EXISTS usage_alarms_armed ON usage_alarms(provider, window_key, threshold) WHERE fired_at IS NULL");
         this.db.run("PRAGMA user_version = 5");
       })();
     }
@@ -509,26 +532,59 @@ export class UsageDb {
 
   // ── plan alarms ─────────────────────────────────────────────────────────────────────────────────
 
-  /** Every alarm, oldest first. */
+  private static alarmOf(r: Record<string, unknown>): UsageAlarm | undefined {
+    const provider = r.provider === "codex" || r.provider === "claude-code" || r.provider === "antigravity" ? r.provider : undefined;
+    if (provider === undefined) return undefined;
+    return { id: String(r.id), provider, windowKey: String(r.window_key), thresholdPercent: n(r.threshold), createdAt: n(r.created_at) };
+  }
+
+  /** Every ARMED alarm (not fired yet), oldest first — the lines' ticks, the beats, the judging. */
   alarms(): UsageAlarm[] {
-    const rows = this.db.query("SELECT * FROM usage_alarms ORDER BY created_at, id").all() as Array<Record<string, unknown>>;
+    const rows = this.db.query("SELECT * FROM usage_alarms WHERE fired_at IS NULL ORDER BY created_at, id").all() as Array<Record<string, unknown>>;
+    return rows.flatMap((r) => { const a = UsageDb.alarmOf(r); return a === undefined ? [] : [a]; });
+  }
+
+  /** Every FIRED alarm still waiting for its notice's acknowledgement, in the order they fired. */
+  firedAlarms(): FiredUsageAlarm[] {
+    const rows = this.db.query("SELECT * FROM usage_alarms WHERE fired_at IS NOT NULL ORDER BY fired_at, id").all() as Array<Record<string, unknown>>;
     return rows.flatMap((r) => {
-      const provider = r.provider === "codex" || r.provider === "claude-code" || r.provider === "antigravity" ? r.provider : undefined;
-      if (provider === undefined) return [];
-      return [{ id: String(r.id), provider, windowKey: String(r.window_key), thresholdPercent: n(r.threshold), createdAt: n(r.created_at) }];
+      const a = UsageDb.alarmOf(r);
+      if (a === undefined) return [];
+      let notice: Record<string, unknown> = {};
+      try { const p = JSON.parse(String(r.notice ?? "{}")); if (typeof p === "object" && p !== null) notice = p; } catch { notice = {}; }
+      const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+      const scope = typeof notice.scope === "string" ? notice.scope : undefined;
+      const windowMinutes = num(notice.windowMinutes);
+      const resetsAt = num(notice.resetsAt);
+      return [{
+        ...a, firedAt: n(r.fired_at), kind: typeof notice.kind === "string" ? notice.kind : "other", usedPercent: num(notice.usedPercent) ?? a.thresholdPercent,
+        ...(scope === undefined ? {} : { scope }), ...(windowMinutes === undefined ? {} : { windowMinutes }), ...(resetsAt === undefined ? {} : { resetsAt }),
+      }];
     });
   }
 
-  /** Store an alarm; one already set for the same plan, window and threshold is kept (and answered) instead. */
+  /** Store an armed alarm; one already armed for the same plan, window and threshold is kept (and answered) instead. */
   addAlarm(a: UsageAlarm): UsageAlarm {
     this.db.query("INSERT OR IGNORE INTO usage_alarms (id, provider, window_key, threshold, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(a.id, a.provider, a.windowKey, a.thresholdPercent, a.createdAt);
     return this.alarms().find((x) => x.provider === a.provider && x.windowKey === a.windowKey && x.thresholdPercent === a.thresholdPercent) ?? a;
   }
 
-  /** Delete an alarm. True only for the call that removed it — a fire happens once, whoever else read the same reading. */
+  /** Mark an armed alarm fired, with its notice. True only for the call that marked it — a fire happens once, whoever
+   *  else read the same reading. */
+  fireAlarm(id: string, at: number, notice: UsageAlarmNotice): boolean {
+    return this.db.query("UPDATE usage_alarms SET fired_at = ?, notice = ? WHERE id = ? AND fired_at IS NULL")
+      .run(at, JSON.stringify(notice), id).changes > 0;
+  }
+
+  /** Delete an ARMED alarm (a tick's removal). */
   removeAlarm(id: string): boolean {
-    return this.db.query("DELETE FROM usage_alarms WHERE id = ?").run(id).changes > 0;
+    return this.db.query("DELETE FROM usage_alarms WHERE id = ? AND fired_at IS NULL").run(id).changes > 0;
+  }
+
+  /** Delete a FIRED alarm: its notice was acknowledged (dismissed, opened, or shown its full time). */
+  ackAlarm(id: string): boolean {
+    return this.db.query("DELETE FROM usage_alarms WHERE id = ? AND fired_at IS NOT NULL").run(id).changes > 0;
   }
 
   // ── subscriptions ───────────────────────────────────────────────────────────────────────────────

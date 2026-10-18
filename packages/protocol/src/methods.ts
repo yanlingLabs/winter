@@ -662,6 +662,9 @@ export const UsageAlarmsSetParams = z.object({
   thresholdPercent: z.number().int().min(1).max(100),
 });
 export const UsageAlarmsRemoveParams = z.object({ id: z.string().min(1).max(64) });
+/** A fired alarm's notice was acknowledged — dismissed, opened, or shown its full time: the daemon forgets it (until
+ *  then `island.activity` lists it, across restarts). */
+export const UsageAlarmsAckParams = z.object({ id: z.string().min(1).max(64) });
 export const UsageAlarmSchema = z.object({
   id: z.string(),
   provider: UsageAlarmProviderSchema,
@@ -3572,6 +3575,7 @@ export const METHODS = {
   usageAlarmsList: "usage.alarms.list",
   usageAlarmsSet: "usage.alarms.set",
   usageAlarmsRemove: "usage.alarms.remove",
+  usageAlarmsAck: "usage.alarms.ack",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",

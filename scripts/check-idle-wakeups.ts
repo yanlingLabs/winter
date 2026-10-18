@@ -13,6 +13,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { USAGE_INERT_ENV } from "../packages/core/src/usage/wiring";
 
 const LIMIT_PER_SECOND = 50;
 const SETTLE_MS = 20_000;
@@ -43,19 +44,19 @@ async function main(): Promise<void> {
   writeFileSync(probe, [
     `const { startDaemon } = await import(${JSON.stringify(join(CORE, "daemon.ts"))});`,
     `const { FileSecretStore } = await import(${JSON.stringify(join(CORE, "auth", "secret-store.ts"))});`,
-    `const d = await startDaemon({ home: ${JSON.stringify(home)}, secrets: new FileSecretStore(${JSON.stringify(join(home, "test-secrets"))}) });`,
+    `const { USAGE_INERT } = await import(${JSON.stringify(join(CORE, "usage", "wiring.ts"))});`,
+    `const d = await startDaemon({ home: ${JSON.stringify(home)}, secrets: new FileSecretStore(${JSON.stringify(join(home, "test-secrets"))}), usage: USAGE_INERT });`,
     `console.log("READY");`,
     `process.on("SIGTERM", async () => { try { await d.stop(); } finally { process.exit(0); } });`,
   ].join("\n"));
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "WINTER_PROFILE") env[k] = v;
   Object.assign(env, { WINTER_HOME: home, WINTER_KEYCHAIN_SERVICE: `com.winter.core.test-idle-${crypto.randomUUID().slice(0, 8)}`, WINTER_LOGIN_SHELL_PATH: "off",
-    // Usage tracking (docs/claude/usage.md): its background plan beat stays ON (it is part of what is measured), every
-    // root and executable pointed at nothing, so the measurement never touches the developer's own Codex / Claude Code /
-    // Antigravity / OpenCode files or binaries.
-    WINTER_USAGE_CODEX_HOME: `${home}/no-codex`, WINTER_USAGE_CLAUDE_HOME: `${home}/no-claude`, WINTER_USAGE_CLAUDE_JSON: `${home}/no-claude.json`,
-    WINTER_USAGE_CODEX_EXECUTABLE: "off", WINTER_USAGE_CLAUDE_EXECUTABLE: "off", WINTER_USAGE_AGY_EXECUTABLE: "off",
-    WINTER_USAGE_OPENCODE_EXECUTABLE: "off" });
+    // Usage tracking (docs/claude/usage.md): inert — every root and executable none, the background plan beat and the
+    // catch-up off (`USAGE_INERT` above, and the same in the environment), so the measurement never touches the
+    // developer's own Codex / Claude Code / Antigravity / OpenCode files or binaries. The gate does NOT cover the beat
+    // (its 30-min and fast timers would not tick inside these 50 s anyway).
+    ...USAGE_INERT_ENV });
   const daemon = Bun.spawn(["bun", probe], { env, stdout: "pipe", stderr: "inherit" });
   try {
     const reader = daemon.stdout.getReader();

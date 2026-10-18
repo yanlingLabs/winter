@@ -301,24 +301,24 @@ describe("IslandActivity — plan alarms", () => {
     resetsAt: 2_000_000, at,
   });
 
-  test("a fired alarm is listed (the island's notification) and the clients are told; held its TTL, at most 32", async () => {
-    const { activity, told } = harness();
-    activity.usageAlarmFired(fired("a1"));
+  test("every fired, unacknowledged alarm is listed from the usage DB at each list — however old — and a change tells the clients", async () => {
+    let stored = [fired("a1", 1)];
+    const { activity, told } = harness({ usageAlarms: () => stored, now: () => 1_000_000 + 24 * 3_600_000 });
+    expect(activity.list().usageAlarms).toEqual([fired("a1", 1)]);
+    expect(IslandActivityResult.parse({ computerUse: [], results: [], watches: [], usageAlarms: activity.list().usageAlarms }).usageAlarms).toHaveLength(1);
+    stored = [fired("a1", 1), fired("a2")];
+    activity.usageAlarmsChanged();
     await flush();
     expect(told()).toBe(1);
-    expect(activity.list().usageAlarms).toEqual([fired("a1")]);
-    expect(IslandActivityResult.parse({ computerUse: [], results: [], watches: [], usageAlarms: activity.list().usageAlarms }).usageAlarms).toHaveLength(1);
-    for (let i = 0; i < 40; i++) activity.usageAlarmFired(fired(`b${i}`));
-    expect(activity.list().usageAlarms.map((a) => a.id)).toEqual(Array.from({ length: 32 }, (_, i) => `b${i + 8}`));
-    const later = harness({ now: () => 1_000_000 + 10 * 60_000 + 1 });
-    later.activity.usageAlarmFired(fired("old"));
-    expect(later.activity.list().usageAlarms).toEqual([]);
+    expect(activity.list().usageAlarms.map((a) => a.id)).toEqual(["a1", "a2"]);
+    stored = [];
+    expect(activity.list().usageAlarms).toEqual([]);
   });
 
-  test("held with no island client connected (the alarm is spent either way)", () => {
-    const activity = new IslandActivity({ facts: () => ({}), hosts: () => [], now: () => 1_000_000 });
-    activity.usageAlarmFired(fired("a1"));
-    expect(activity.list().usageAlarms.map((a) => a.id)).toEqual(["a1"]);
+  test("no usage tracking, or its read failing: none listed, the rest of the activity still answers", () => {
+    expect(new IslandActivity({ facts: () => ({}), hosts: () => [] }).list().usageAlarms).toEqual([]);
+    const failing = new IslandActivity({ facts: () => ({}), hosts: () => [], usageAlarms: () => { throw new Error("db closed"); } });
+    expect(failing.list()).toMatchObject({ usageAlarms: [], results: [], computerUse: [] });
   });
 });
 

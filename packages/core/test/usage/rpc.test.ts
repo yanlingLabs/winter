@@ -56,7 +56,7 @@ class TestClient {
 }
 
 const USAGE_METHODS = [METHODS.usageSummary, METHODS.usageSeries, METHODS.usageSubscriptionsList, METHODS.usageSubscriptionsSet, METHODS.usageSubscriptionsRemove, METHODS.usageSetTracking,
-  METHODS.usageAlarmsList, METHODS.usageAlarmsSet, METHODS.usageAlarmsRemove];
+  METHODS.usageAlarmsList, METHODS.usageAlarmsSet, METHODS.usageAlarmsRemove, METHODS.usageAlarmsAck];
 
 describe("usage.* over the socket", () => {
   let stop: (() => void) | undefined;
