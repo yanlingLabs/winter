@@ -18,7 +18,7 @@ Status: DESIGN ONLY, 2026-10-18, DOOR lane, Phase 0. Nothing in this document is
 12. The off-test runs a production-shaped daemon against a fixture workspace with a ready source and checks every role and every side effect. It is paired with a positive control through an injected door.
 13. The spine (section 7) is the protocol fields, the new error codes, `cowork/session-ports.ts` (types only), the runtime-link seam on the native host, and the provisioning, approval and provider ports.
 14. The slices are D1 spine, D2 tool surface, D3 driver and stand-in selection, D4 provisioning and CLI create, D5 end-to-end with fakes, and D6 the flip. D1 and D2 can run in parallel, and so can D3 and D4.
-15. Eleven spec gaps are listed with recommendations (section 9). Blockers A and B, prompt delivery (G3) and the host/guest SDK version pairing (G8) gate a real VM session. None of them gates D1 to D5.
+15. Eleven spec gaps are listed with recommendations (section 9). Blockers A and B and the host/guest SDK version pairing (G8) gate a real VM session. Prompt delivery (G3) gates the flip. None of them gates D1 to D5.
 
 ## 1. Creation path
 
@@ -152,7 +152,7 @@ A test asserts that the two agree on session ids, cwd, policy and permission mod
 
 ### 2.4 Resume, stop and end
 
-- **Within one incarnation.** `ensure` returns the live driver, and a reattach replays the host log as today. N2 starts the runtime once per incarnation and the set cannot be re-sent, so the driver must not end the guest runtime while the conversation may continue. For Cowork the driver therefore passes `idleTimeoutMs: () => Infinity` (the setting-driven `idleTimeoutSec`, which normally ends an idle child), until cold resume exists.
+- **Within one incarnation.** `ensure` returns the live driver, and a reattach replays the host log as today. N2 starts the runtime once per incarnation and the set cannot be re-sent. The supervisor's `launch_runtime` refuses `runtime_fresh_only` unless the runtime is still `configured` (agent SDK `linux-supervisor.py`). So the driver must not end the guest runtime while the conversation may continue. For Cowork the driver therefore never arms the idle end. It passes `idleTimeoutMs: () => Infinity`, which `WinterSession.armIdleTimer` treats as "arm nothing" (`!Number.isFinite(ms) || ms <= 0` returns before `timers.set`; a test pins that guard). Normally the setting-driven `idleTimeoutSec` ends an idle child. This stays until cold resume exists.
 - **Interrupt.** `session.interrupt` goes to `WinterSession.interrupt`, which sends the SDK `interrupt` control request down IN. TaskStop is not offered (section 4).
 - **End.** Archive, delete, `evict` or daemon stop runs `endInput` and waits for the runtime's stream ends. Then it calls `native.stop(workspaceId, reason)`, because the guest serves only this conversation. Only a valid orderly receipt releases the disks (existing D1 policy in `native/recovery.ts`). The channel's `termination` resolves `confirmed-stopped` with `storeOwnerReleased: true` only from that release; anything else leaves `uncertain`.
 - **After a stop: no cold resume in N2** (D10; `docs/research/2026-10-17-cowork-n2-guest-boot.md` section 10). The next `session.send` refuses `cold_resume_unavailable`, visibly. It never starts a fresh conversation silently and never resumes without the guidance load the spec requires on resume. When cold resume lands, `identity().resume` becomes true for a conversation whose host log has a completed turn, and the next incarnation passes `resume: backendSessionId`.
@@ -305,7 +305,7 @@ A stored `cowork` row is routed to the door's driver table, or refused when ther
    - `incarnation_id` still null and power still `stopped`;
    - the daemon's `coworkNative.built === false`;
    - `workspace.capabilities.get` reporting `execution: false`.
-2. **Positive control.** The same request against a daemon started with an injected fake door succeeds: a row exists, the binding is `active`, and a fake launcher is called only at the first send. Without this, case 1 could pass on a schema refusal.
+2. **Positive control.** The same request succeeds with an injected stub door: a row exists, the binding is `active`, and a fake launcher is called only at the first send. Without this, case 1 could pass on a schema refusal. D1 runs it through `startIpcServer` directly. It moves onto `startDaemon` once S7B's pass-through (section 10 item 4) exists.
 3. **Source pins.**
    - `packages/cli/src` never names `coworkSessions`.
    - In `daemon.ts`, `coworkSessions` appears only as the pass-through of `opts.coworkSessions`.
@@ -457,7 +457,9 @@ export const CoworkSessionLocation = z.discriminatedUnion("kind", [
 ]);
 export const CoworkSessionCreate = z.object({ workspaceId: CoworkId, location: CoworkSessionLocation, requestId: CoworkRequestId }).strict();
 // SessionCreateParams gains:  cowork: CoworkSessionCreate.optional()
-//   superRefine: present iff mode === "cowork"; with it, cwd/approvalPolicy/model/effort/origin must be absent (host-derived).
+//   superRefine: present iff mode === "cowork"; with it, cwd/model/effort/origin must be absent (host-derived).
+//   approvalPolicy carries .default("ask"), so it is never absent on the parsed value: the handler checks the RAW params
+//   for it, as the remote-role check in ipc/server.ts already does, and ignores the parsed default.
 // SessionRow (session.list) gains:  cowork?: { workspaceId: string; projectId: string | null }
 
 // events.ts — session_created gains (durable; still outside HISTORY_EVENT_TYPES, as today):
@@ -636,7 +638,7 @@ Their existing ports are listed verbatim in the block above. The session door ad
 
 | Slice | Size | Files | Lands | Parallel with |
 | --- | --- | --- | --- | --- |
-| **D1 spine** | M | `packages/protocol/src/{methods,events}.ts` (+ generated schema/fixtures), Swift mirrors (`apple/WinterProtocol`, `apple/WinterKit` call sites; `WinterClient` switches unchanged because no variant is added), `cowork/types.ts` (three codes), new `cowork/session-ports.ts`, `sessions/session-mode.ts` (`DrivableSessionMode` type and pin, no behavior), `ipc/server.ts` (parse the `cowork` param, still refuse), tests: protocol round trip, `session-door-off.test.ts` cases 1 and 3, anti-wiring pins | first | D2; other lanes start against it |
+| **D1 spine** | M | `packages/protocol/src/{methods,events}.ts` (+ generated schema/fixtures), Swift mirrors (`apple/WinterProtocol`, `apple/WinterKit` call sites; `WinterClient` switches unchanged because no variant is added), `cowork/types.ts` (three codes), new `cowork/session-ports.ts`, `sessions/session-mode.ts` (`DrivableSessionMode` type and pin, no behavior), `ipc/server.ts` (parse the `cowork` param; refuse without a door; take `opts.coworkSessions`), tests: protocol round trip, anti-wiring pins, and `session-door-off.test.ts` cases 1 and 3, plus case 2's positive control with a stub door through `startIpcServer` directly. Moving case 2 onto `startDaemon` waits for section 10 item 4. | first | D2; other lanes start against it |
 | **D2 tool surface** | M | `cowork/session-profile.ts` (`COWORK_GUEST_PROFILE_TOOLS`), `runtime-sdk/mode-options.ts` (`coworkToolsFor`, `COWORK_CAPABILITY_SERVERS`), `cowork/guest-runtime.ts` (`confinedToolVisibility` from the offered list), generated doc blocks (`COWORK_PROFILE_DOC_UPDATE=1`), tests across every class, policy and readiness combination | with D1 | D1 |
 | **D3 driver and stand-in selection** | L | new `cowork/session-driver.ts`, new `cowork/conversation-set.ts` (one builder for the native entry and the launch), new `cowork/runtime-channel.ts` (`GuestRuntimeChannel` over `CoworkGuestRuntimeLink`), new `cowork/standin-provider.ts` (route, public metadata only), `cowork/guest-query.ts` (callbacks unchanged), `runtime-sdk/winter-session.ts` and `projector/types.ts` (`DrivableSessionMode`), tests over the existing fake launcher (`test/cowork/native/fake-launcher.ts`) and a scripted guest double | after D1 and D2; needs section 10 item 1 (or a fake link) | D4 |
 | **D4 provisioning and CLI create** | M–L | `cowork/service.ts` (`provisioning` port, truthful capabilities), `cowork/repository.ts` (`s_` reservation minter, binding identity column, location kind if O1 picks it), `cowork/schema.ts` (migration body), `sessions/store.ts` (`reservedSessionId`), `ipc/server.ts` (route `cowork` rows to the door; create via the door), `packages/cli/src/cowork-cli.ts` (`session create|list`), tests | after D1; needs section 10 item 3 for the migration | D3 |
