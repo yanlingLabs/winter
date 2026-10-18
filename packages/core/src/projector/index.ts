@@ -742,7 +742,7 @@ class ProjectorImpl implements Projector {
         const perModel = turnModelUsageOf(resultFrame, this.ledgerRows, this.mainModel);
         this.ledgerRows = perModel.snapshot;
         if (perModel.rows.length > 0) {
-          try { this.deps.onTurnUsage?.({ sourceId, rows: perModel.rows }); } catch { /* the usage store's failure is its own */ }
+          try { this.deps.onTurnUsage?.({ sourceId: `g${this.generation}:${sourceId}`, rows: perModel.rows }); } catch { /* the usage store's failure is its own */ }
         }
         return [...closed, ...out.events];
       });

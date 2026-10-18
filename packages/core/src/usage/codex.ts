@@ -226,7 +226,8 @@ export async function codexPlanFromAppServer(executable: string, opts: { timeout
     onStart: (io) => io.send({ id: 1, method: "initialize", params: { clientInfo: { name: "winter", title: "Winter", version: opts.version ?? "0" }, capabilities: null } }),
     onLine: (line, io) => {
       let msg: Record<string, unknown>;
-      try { msg = JSON.parse(line) as Record<string, unknown>; } catch { return { failure: "malformed" }; }
+      // A line that is not JSON (a banner, a warning) is not the answer: only the replies to our ids are judged.
+      try { msg = JSON.parse(line) as Record<string, unknown>; } catch { return undefined; }
       if (msg.id === 1) {
         if (msg.error !== undefined) return { failure: "initialize-refused" };
         io.send({ method: "initialized" });

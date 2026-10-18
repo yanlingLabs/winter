@@ -153,7 +153,8 @@ export interface ProjectorDeps {
   /**
    * The usage DB (`docs/claude/usage.md`): each model's share of a turn that just ended (`terminal.ts`'s
    * `turnModelUsageOf` — tokens with the cache split and the runtime's own price), called once per PROJECTED terminal
-   * (inside its claim, so a replayed prefix never calls it twice). `sourceId` is the terminal's stable source id. A
+   * (inside its claim, so a replayed prefix never calls it twice). `sourceId` is the terminal's source id prefixed with the
+   * projector's generation (`g<n>:rs:…`): a new incarnation restarts its turn counter, so the bare id would repeat. A
    * throw is swallowed.
    */
   onTurnUsage?: (usage: { sourceId: string; rows: import("./terminal").TurnModelUsageRow[] }) => void;

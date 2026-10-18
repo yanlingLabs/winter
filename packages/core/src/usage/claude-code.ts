@@ -120,6 +120,9 @@ export async function claudePlanFromCli(executable: string, opts: { cwd: string;
   let report: unknown;
   const outcome = await runLines(executable, {
     args: [...CLAUDE_USAGE_ARGS], cwd: opts.cwd, stdin: "ignore", timeoutMs: opts.timeoutMs ?? CLAUDE_USAGE_TIMEOUT_MS,
+    // A daemon started from inside a Claude Code session inherits its nested-session markers; the CLI must run as a
+    // fresh top-level invocation.
+    dropEnv: (k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_"),
     onLine: (line) => {
       let msg: Record<string, unknown>;
       try { msg = JSON.parse(line) as Record<string, unknown>; } catch { return undefined; }

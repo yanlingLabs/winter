@@ -24,7 +24,7 @@ function service(over: Partial<UsageServiceDeps> & { logs?: string[] } = {}) {
   const svc = new UsageService({
     db, pricer, tracking: () => ({ codex: true, claudeCode: true }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    neutralCwd: () => home, ingestEveryMs: 0, planWaitMs: 20_000,
+    neutralCwd: () => home, ingestEveryMs: 0, planWaitMs: 20_000, fallbackEveryMs: 0,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,
   });
@@ -109,12 +109,18 @@ describe("the Codex plan", () => {
     expect(logs.some((l) => l.includes("timeout"))).toBe(true);
   });
 
+  test("a banner line before the replies is ignored (the app-server still answers)", async () => {
+    const fake = fakeCodex(tempDir("bin"), "banner");
+    const { svc } = service({ codexExecutable: () => fake.path });
+    expect((await svc.codexPlan()).source).toBe("codex-app-server");
+  });
+
   test("a malformed or refused reply falls back to the rollout; a missing binary too", async () => {
     for (const mode of ["malformed", "error"] as const) {
       const fake = fakeCodex(tempDir("bin"), mode);
       const codexHome = tempDir("codex");
       rollouts(codexHome, NOW - 60_000, 5, 6, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
-      const { svc } = service({ codexExecutable: () => fake.path, codexHome });
+      const { svc } = service({ codexExecutable: () => fake.path, codexHome, appServerTimeoutMs: 1_500 });
       expect((await svc.codexPlan()).source).toBe("codex-rollout");
     }
     const codexHome = tempDir("codex");
@@ -134,6 +140,20 @@ describe("the Codex plan", () => {
     rollouts(codexHome, NOW - 60_000, 3, 4, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
     plan = await svc.codexPlan();
     expect(plan.windows.map((w) => w.usedPercent)).toEqual([3, 4]);
+  });
+
+  test("the passive rung is cached for its window, staleness judged again at every ask", async () => {
+    const codexHome = tempDir("codex");
+    rollouts(codexHome, NOW - 60_000, 5, 6, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
+    let now = NOW;
+    const { svc } = service({ codexHome, now: () => now, fallbackEveryMs: 60_000 });
+    expect((await svc.codexPlan()).windows.map((w) => w.usedPercent)).toEqual([5, 6]);
+    rollouts(codexHome, NOW, 50, 60, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
+    now = NOW + 30_000; // within the cache window: the newer rollout is not read yet
+    expect((await svc.codexPlan()).windows.map((w) => w.usedPercent)).toEqual([5, 6]);
+    now = NOW + 2 * 3_600_000;
+    const later = await svc.codexPlan();
+    expect(later.windows.map((w) => w.usedPercent)).toEqual([50, 60]);
   });
 
   test("no Codex at all: Winter's own codex-oauth report, status only, labelled; none without it", async () => {
@@ -176,8 +196,13 @@ describe("the Claude Code plan", () => {
   test("claude's own /usage, with EXACTLY the verified invocation, in the neutral cwd: session, weekly, weekly per model", async () => {
     const fake = fakeClaude(tempDir("bin"), "ok");
     let now = NOW;
+    // A daemon started from inside a Claude Code session: its nested-session markers never reach the CLI.
+    process.env.CLAUDECODE = "1";
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
     const { svc, home } = service({ claudeExecutable: () => fake.path, now: () => now });
     const plan = await svc.claudeCodePlan();
+    delete process.env.CLAUDECODE;
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
     expect(plan.source).toBe("claude-cli");
     expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.scope, w.stale])).toEqual([
       ["five_hour", 23, undefined, false], ["weekly", 61, undefined, false], ["weekly_scoped", 80, "opus", false],
@@ -185,6 +210,7 @@ describe("the Claude Code plan", () => {
     expect(JSON.stringify(plan).includes("SECRET")).toBe(false);
     const m = marks(fake.markerPath);
     expect(m[0]!.argv).toEqual([...CLAUDE_USAGE_ARGS]);
+    expect((m[0] as unknown as { nested: string[] }).nested).toEqual([]);
     expect(m[0]!.cwd.includes(home.split("/").pop()!)).toBe(true);
     // Throttled to once per five minutes.
     now += 4 * 60_000;

@@ -84,7 +84,7 @@ export function fakeExecutable(dir: string, name: string, body: string): { path:
 const fs = require("node:fs");
 const log = (o) => process.stdout.write((typeof o === "string" ? o : JSON.stringify(o)) + "\\n");
 const mark = (s) => fs.appendFileSync(${JSON.stringify(markerPath)}, s + "\\n");
-mark(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid }));
+mark(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid, nested: Object.keys(process.env).filter((k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) }));
 ${body}
 `);
   chmodSync(path, 0o755);
@@ -92,7 +92,7 @@ ${body}
 }
 
 /** A fake `codex app-server`. Modes: ok, hang, malformed, error. */
-export function fakeCodex(dir: string, mode: "ok" | "hang" | "malformed" | "error", rate?: { primary: number; secondary: number; resetsAtSec: number }): { path: string; markerPath: string } {
+export function fakeCodex(dir: string, mode: "ok" | "hang" | "malformed" | "error" | "banner", rate?: { primary: number; secondary: number; resetsAtSec: number }): { path: string; markerPath: string } {
   const result = {
     ordinaryUsageAllowed: true, accountId: "acct-should-not-matter", rateLimitUpsell: null, rateLimitResetCredits: null, rateLimitsByLimitId: null,
     rateLimits: {
@@ -106,6 +106,7 @@ export function fakeCodex(dir: string, mode: "ok" | "hang" | "malformed" | "erro
 const mode = ${JSON.stringify(mode)};
 if (mode === "hang") { setInterval(() => {}, 1000); }
 else {
+  if (mode === "banner") log("[experimental] app-server: a banner line that is not JSON");
   const rl = require("node:readline").createInterface({ input: process.stdin });
   rl.on("line", (l) => {
     const m = JSON.parse(l);

@@ -68,6 +68,20 @@ describe("the projector hands each projected turn's per-model usage to onTurnUsa
     accept(throwing, assistantText("hi"));
     expect(() => accept(throwing, result({ modelUsage: modelUsage(1, 1) }))).not.toThrow();
   });
+
+  test("the source id carries the projector's generation: a new incarnation's turn 0 is not the old one's", () => {
+    const ids: string[] = [];
+    for (const generation of [1, 2]) {
+      const { projector } = makeProjector({ generation, onTurnUsage: (u) => { ids.push(u.sourceId); } });
+      accept(projector, init());
+      accept(projector, assistantText("hi"));
+      accept(projector, result({ modelUsage: modelUsage(10, 1) }));
+    }
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toMatch(/^g1:rs:/);
+    expect(ids[1]).toMatch(/^g2:rs:/);
+    expect(ids[0]!.slice(3)).toBe(ids[1]!.slice(3));
+  });
 });
 
 describe("Winter turns in the usage DB", () => {

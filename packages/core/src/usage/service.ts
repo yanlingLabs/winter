@@ -3,7 +3,7 @@ import { claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, cla
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type Subscription, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
-import type { PlanReading, PlanStatusWindow } from "./plan";
+import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
 
 // The usage service (`docs/claude/usage.md`): records Winter's own turns as they end, ingests the user's Codex and
@@ -44,6 +44,8 @@ export interface UsageServiceDeps {
   /** How long a plan read waits for a spawn still running before answering with what it has (default 2 s — a client's
    *  request times out at 5 s; the spawn finishes in the background and the next ask gets it). */
   planWaitMs?: number;
+  /** How often the passive plan rungs are re-read (default 60 s; tests shorten it). */
+  fallbackEveryMs?: number;
 }
 
 /** Wait for `p`, at most `ms`. */
@@ -156,6 +158,9 @@ export class UsageService {
   private claudeRun: Promise<void> | undefined;
   /** Set when `/usage` came back as something other than the local command: this rung is off until restart. */
   private claudeCliDisabled = false;
+  /** The passive rungs' last readings (rollout tails, `~/.claude.json`), re-read at most every `fallbackEveryMs`. */
+  private rolloutCache: { at: number; reading?: PlanReading } | undefined;
+  private claudeFileCache: { at: number; reading?: PlanReading } | undefined;
 
   constructor(private readonly deps: UsageServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -275,8 +280,12 @@ export class UsageService {
     }
     if (this.codexCache?.reading !== undefined) return this.codexCache.reading;
     if (this.deps.codexHome !== undefined) {
-      const fromRollout = await codexPlanFromRollouts(await codexRollouts(this.deps.codexHome), this.now());
-      if (fromRollout !== undefined) return fromRollout;
+      // The passive rung, cached like the spawn (a tree walk + tail reads every 5 s would not be cheap).
+      if (this.rolloutCache === undefined || this.now() - this.rolloutCache.at >= (this.deps.fallbackEveryMs ?? 60_000)) {
+        this.rolloutCache = { at: this.now(), reading: await codexPlanFromRollouts(await codexRollouts(this.deps.codexHome), this.now()) };
+      }
+      const fromRollout = this.rolloutCache.reading;
+      if (fromRollout !== undefined) return { ...fromRollout, windows: fromRollout.windows.map((w) => ({ ...w, ...staleness(fromRollout.at, w.windowMinutes, w.resetsAt, this.now()) })) };
     }
     const winter = this.deps.winterCodexWindows();
     if (winter.length > 0) return { provider: "codex", source: "winter-codex-oauth", windows: [], statusOnly: winter, at: Math.max(...winter.map((w) => w.at)) };
@@ -310,8 +319,11 @@ export class UsageService {
     }
     if (this.claudeCache?.reading !== undefined) return this.claudeCache.reading;
     if (this.deps.claudeJsonPath !== undefined) {
-      const cached = await claudePlanFromCacheFile(this.deps.claudeJsonPath, this.now());
-      if (cached !== undefined) return cached;
+      if (this.claudeFileCache === undefined || this.now() - this.claudeFileCache.at >= (this.deps.fallbackEveryMs ?? 60_000)) {
+        this.claudeFileCache = { at: this.now(), reading: await claudePlanFromCacheFile(this.deps.claudeJsonPath, this.now()) };
+      }
+      const cached = this.claudeFileCache.reading;
+      if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
     }
     return { provider: "claude-code", source: "none", windows: [] };
   }

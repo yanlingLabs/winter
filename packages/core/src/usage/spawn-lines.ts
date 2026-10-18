@@ -17,6 +17,8 @@ export interface RunOptions {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /** Inherited variables to leave out of the child's environment. */
+  dropEnv?: (key: string) => boolean;
   timeoutMs: number;
   /** Each stdout line; return a value to finish (the child is then shut down) or undefined to keep reading. */
   onLine: (line: string, child: LineChild) => unknown;
@@ -44,7 +46,9 @@ export function runLines(executable: string, opts: RunOptions): Promise<RunOutco
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(executable, opts.args, {
-        cwd: opts.cwd, env: { ...process.env, ...opts.env } as NodeJS.ProcessEnv,
+        cwd: opts.cwd,
+        env: Object.fromEntries(Object.entries({ ...process.env, ...opts.env })
+          .filter(([k, v]) => v !== undefined && !(opts.dropEnv?.(k) ?? false))) as NodeJS.ProcessEnv,
         stdio: [opts.stdin ?? "pipe", "pipe", "ignore"], detached: true,
       });
     } catch {
