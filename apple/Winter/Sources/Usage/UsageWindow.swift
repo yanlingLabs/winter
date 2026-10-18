@@ -546,8 +546,28 @@ struct UsagePlanLine: View {
         hovered ? (compact ? 14 : 16) : (compact ? 5 : 7)
     }
 
-    /// How much longer the line is under the pointer, half on each end: every panel's hover grow (9.48 pt).
-    static func lengthGrowth(hovered: Bool) -> CGFloat { hovered ? HoverGrowth.points : 0 }
+    /// How much longer the line is under the pointer, half on each end: twice every panel's hover grow (≈19 pt) —
+    /// with the title's grow, the row reads as lifting toward the viewer (user 2026-10-18: "a 3D hover").
+    static func lengthGrowth(hovered: Bool) -> CGFloat { hovered ? HoverGrowth.points * 2 : 0 }
+
+    /// The title's grow under the pointer, from its leading edge.
+    static func titleScale(hovered: Bool) -> CGFloat { hovered ? 1.12 : 1 }
+
+    /// The gap between the title column and the track.
+    static func titleGap(compact: Bool) -> CGFloat { compact ? 8 : 12 }
+
+    /// The narrowest a figure's slot is ("100%" in the tiny face plus its inset): the used one never squeezes below it
+    /// (it then runs past a short fill), and the left one is dropped when the grey left over is shorter.
+    static func figureSlot(compact: Bool) -> CGFloat { compact ? 30 : 34 }
+
+    /// PURE: where the figures go on a track `width` wide — the used one glued to the fill's END, inside it (its slot
+    /// never narrower than `figureSlot`); the left one at the track's end, only when the grey left over fits it.
+    static func figureLayout(width: CGFloat, fraction: Double, compact: Bool) -> (usedSlot: CGFloat, showsLeft: Bool) {
+        let fill = width * CGFloat(min(1, max(0, fraction)))
+        let slot = figureSlot(compact: compact)
+        let usedSlot = min(width, max(fill, slot))
+        return (usedSlot, width - usedSlot >= slot)
+    }
 
     /// PURE: the two hover figures — used (inside the fill) and left (at the track's end) — always summing to 100.
     static func percents(_ fraction: Double) -> (used: Int, left: Int) {
@@ -559,8 +579,9 @@ struct UsagePlanLine: View {
         let used = min(1, max(0, ring.fraction))
         let pct = Self.percents(ring.fraction)
         let height = Self.thickness(compact: compact, hovered: hovered)
-        return HStack(spacing: compact ? 8 : 12) {
-            Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.85)).lineLimit(1)
+        return HStack(spacing: Self.titleGap(compact: compact)) {
+            Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(hovered ? 1 : 0.85)).lineLimit(1)
+                .scaleEffect(Self.titleScale(hovered: hovered), anchor: .leading)
                 .frame(width: titleWidth ?? (compact ? 52 : 72), alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -569,15 +590,20 @@ struct UsagePlanLine: View {
                         .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
                     if hovered {
                         // A lighter weight than the titles: the figures sit in the line, they do not shout.
-                        HStack(spacing: 4) {
+                        let layout = Self.figureLayout(width: proxy.size.width, fraction: used, compact: compact)
+                        ZStack(alignment: .leading) {
                             Text("\(pct.used)%").foregroundStyle(Color.white)
-                            Spacer(minLength: 4)
-                            Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
+                                .padding(.trailing, 6)
+                                .frame(width: layout.usedSlot, alignment: .trailing)
+                            if layout.showsLeft {
+                                Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
+                                    .padding(.trailing, 6)
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                            }
                         }
                         .font(Typography.tiny(.regular))
                         .monospacedDigit()
                         .lineLimit(1)
-                        .padding(.horizontal, 6)
                         .transition(.opacity)
                     }
                 }

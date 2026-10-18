@@ -235,11 +235,23 @@ enum UsagePresentation {
     }
 
     /// PURE: the plan lines' title column — the floor (52 pt in the island, 72 in the window), wider only when a title
-    /// needs it ("Claude & GPT week"), so no title truncates and every line of a block starts at one x.
+    /// needs it ("Claude & GPT week"), so no title truncates and every line of a block starts at one x. Under the pointer
+    /// the title grows (`UsagePlanLine.titleScale`) while the track reaches left by half its growth
+    /// (`UsagePlanLine.lengthGrowth`): the column leaves room for both, so the widest title never touches the track.
     static func titleColumnWidth(_ titles: [String], compact: Bool) -> CGFloat {
         let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
         let widest = titles.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
-        return max(compact ? 52 : 72, (widest + 1).rounded(.up))
+        return max(compact ? 52 : 72, (max(widest, hoverTitleReach(titles, compact: compact)) + 1).rounded(.up))
+    }
+
+    /// PURE: how far right of the column's start the widest title reaches under the pointer, measured against the
+    /// track's hovered start (the column's width + the gap − the leftward growth): the column is wide enough when this
+    /// is at most its width.
+    static func hoverTitleReach(_ titles: [String], compact: Bool) -> CGFloat {
+        let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
+        let widest = titles.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        return widest * UsagePlanLine.titleScale(hovered: true) + UsagePlanLine.lengthGrowth(hovered: true) / 2
+            - UsagePlanLine.titleGap(compact: compact)
     }
 
     /// PURE: a plan's slot. `provider` is "codex", "claude-code" or "antigravity" (its reading may be nil before the

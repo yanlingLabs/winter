@@ -95,8 +95,15 @@ final class UsageWindowTests: XCTestCase {
         let titles = ["5-hour", "Weekly", "Fable", "Gemini 5h", "Gemini week", "Claude & GPT 5h", "Claude & GPT week"]
         for compact in [true, false] {
             let column = UsagePresentation.titleColumnWidth(titles, compact: compact)
-            for t in titles { XCTAssertLessThanOrEqual(width(t), column, "\(t) truncates (compact: \(compact))") }
-            XCTAssertLessThanOrEqual(column, 110, "a modest widening")
+            for t in titles {
+                XCTAssertLessThanOrEqual(width(t), column, "\(t) truncates (compact: \(compact))")
+                // Under the pointer: the title grown from its leading edge never reaches the track, which starts a gap
+                // after the column and reaches left by half its growth.
+                let grown = width(t) * UsagePlanLine.titleScale(hovered: true)
+                let trackStart = column + UsagePlanLine.titleGap(compact: compact) - UsagePlanLine.lengthGrowth(hovered: true) / 2
+                XCTAssertLessThan(grown, trackStart, "\(t) touches the track on hover (compact: \(compact))")
+            }
+            XCTAssertLessThanOrEqual(column, 120, "a modest widening")
         }
         XCTAssertEqual(UsagePresentation.titleColumnWidth(["5-hour", "Weekly", "Fable", "Opus"], compact: true), 52)
         XCTAssertEqual(UsagePresentation.titleColumnWidth(["5-hour", "Weekly", "Fable", "Opus"], compact: false), 72)
@@ -156,7 +163,19 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: true, hovered: true), UsagePlanLine.thickness(compact: true, hovered: false))
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: false, hovered: true), UsagePlanLine.thickness(compact: false, hovered: false))
         XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: false), 0)
-        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 9.48, accuracy: 0.01)
+        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 18.96, accuracy: 0.01)
+        XCTAssertGreaterThan(UsagePlanLine.titleScale(hovered: true), UsagePlanLine.titleScale(hovered: false))
+    }
+
+    func testTheUsedFigureSitsAtTheFillsEndAndTheLeftOneOnlyWhereItFits() {
+        // Half used on a 300 pt track: the used slot ends where the fill ends; the grey after it holds the left one.
+        let half = UsagePlanLine.figureLayout(width: 300, fraction: 0.5, compact: true)
+        XCTAssertEqual(half.usedSlot, 150)
+        XCTAssertTrue(half.showsLeft)
+        // A sliver of fill: the used slot never squeezes below a figure's width.
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.01, compact: true).usedSlot, UsagePlanLine.figureSlot(compact: true))
+        // Nearly full: no room for the left one.
+        XCTAssertFalse(UsagePlanLine.figureLayout(width: 300, fraction: 0.97, compact: true).showsLeft)
     }
 
     func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
