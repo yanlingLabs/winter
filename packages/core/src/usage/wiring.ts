@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { IslandUsageRegistry } from "../island/usage";
@@ -64,7 +63,7 @@ export function createUsageService(opts: {
   const claudeJsonPath = pick(inj.claudeJsonPath, env.WINTER_USAGE_CLAUDE_JSON, () => claudeConfigDir !== undefined ? join(claudeConfigDir, ".claude.json") : join(homedir(), ".claude.json"));
   const explicit = (injected: string | null | undefined, envValue: string | undefined): string | undefined =>
     injected !== undefined ? (injected ?? "off") : envValue;
-  const neutral = join(opts.home, "usage", "neutral");
+  const probeRoot = join(opts.home, "usage");
   const pricer = new UsagePricer();
   const service = new UsageService({
     db, pricer,
@@ -78,7 +77,7 @@ export function createUsageService(opts: {
       ...(w.rateLimitType === undefined ? {} : { rateLimitType: w.rateLimitType }), status: w.status,
       ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: w.at,
     })),
-    neutralCwd: () => { try { mkdirSync(neutral, { recursive: true, mode: 0o700 }); } catch { /* exists */ } return neutral; },
+    probeRoot: () => probeRoot,
     ...(opts.version === undefined ? {} : { version: opts.version }),
     ...(inj.now === undefined ? {} : { now: inj.now }),
     log: opts.log ?? {

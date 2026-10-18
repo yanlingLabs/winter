@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { readdirSync, realpathSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { join, sep } from "node:path";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli } from "./claude-code";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type Subscription, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
@@ -32,8 +32,9 @@ export interface UsageServiceDeps {
   claudeExecutable: () => string | undefined;
   /** Winter's own codex-oauth `rate_limit_event` windows (status only) — the Codex plan's last rung. */
   winterCodexWindows: () => PlanStatusWindow[];
-  /** A neutral, empty directory to run `claude` in (no project config loads). */
-  neutralCwd: () => string;
+  /** The directory each probe's own fresh, empty cwd is made in (`<home>/usage`): a probe runs where no project config
+   *  loads, and exactly its own directory is removed after it. */
+  probeRoot: () => string;
   version?: string;
   now?: () => number;
   log?: { warn?: (msg: string, meta?: Record<string, unknown>) => void; info?: (msg: string, meta?: Record<string, unknown>) => void };
@@ -60,8 +61,23 @@ export function binaryKey(tool: string, exe: string): string | undefined {
   try {
     const real = realpathSync(exe);
     const st = statSync(real);
-    return `${tool}:${real}:${Math.round(st.mtimeMs)}:${st.size}`;
+    // The path is hashed: in plaintext it names the user's home (their username).
+    return `${tool}:${createHash("sha256").update(real).digest("hex").slice(0, 32)}:${Math.round(st.mtimeMs)}:${st.size}`;
   } catch { return undefined; }
+}
+
+/** Remove a probe's own directory — only a real (non-link) directory whose realpath is inside `root`'s. */
+export function removeProbeDir(root: string, dir: string): boolean {
+  try {
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return false;
+    const realRoot = realpathSync(root);
+    const real = realpathSync(dir);
+    if (!real.startsWith(realRoot + sep) || real === realRoot) return false;
+    try { rmdirSync(dir); return true; } catch { /* not empty: the probe left something behind */ }
+    rmSync(dir, { recursive: true, force: true });
+    return true;
+  } catch { return false; }
 }
 
 /** Wait for `p`, at most `ms`. */
@@ -178,6 +194,7 @@ export class UsageService {
   private claudeFileCache: { stamp: string; reading?: PlanReading } | undefined;
   /** Test seam: how many times `~/.claude.json` was parsed. */
   claudeFileParses = 0;
+  private claudeFileOverCapLogged = false;
 
   constructor(private readonly deps: UsageServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -288,11 +305,10 @@ export class UsageService {
       this.codexRun ??= (async () => {
         const exe = this.deps.codexExecutable();
         if (exe === undefined) { this.codexCache = { at: this.now(), failure: "not-installed" }; return; }
-        const r = await codexPlanFromAppServer(exe, {
-          now: this.now, cwd: this.deps.neutralCwd(), ...(this.deps.version === undefined ? {} : { version: this.deps.version }),
+        const r = await this.inProbeDir((cwd) => codexPlanFromAppServer(exe, {
+          now: this.now, cwd, ...(this.deps.version === undefined ? {} : { version: this.deps.version }),
           ...(this.deps.appServerTimeoutMs === undefined ? {} : { timeoutMs: this.deps.appServerTimeoutMs }),
-        });
-        this.cleanNeutralCwd();
+        })).catch(() => ({ failure: "spawn-failed" as string, reading: undefined }));
         this.codexCache = { at: this.now(), ...r };
         if (r.failure !== undefined) this.deps.log?.info?.("[usage] codex app-server gave no plan reading", { reason: r.failure });
       })().finally(() => { this.codexRun = undefined; });
@@ -326,11 +342,10 @@ export class UsageService {
         // The latch: a binary whose `/usage` once reached the model loop is never asked again — until it changes.
         const key = binaryKey("claude", exe);
         if (key === undefined || this.deps.db.latch(key) !== undefined) { this.claudeCache = { at: this.now(), failure: "latched" }; return; }
-        const r = await claudePlanFromCli(exe, {
-          cwd: this.deps.neutralCwd(), now: this.now,
+        const r = await this.inProbeDir((cwd) => claudePlanFromCli(exe, {
+          cwd, now: this.now,
           ...(this.deps.claudeCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.claudeCliTimeoutMs }),
-        });
-        this.cleanNeutralCwd();
+        })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
         this.claudeCache = { at: this.now(), ...r };
         if (r.failure === "guard" || r.failure === "guard-model-turn") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
@@ -349,30 +364,49 @@ export class UsageService {
     return { provider: "claude-code", source: "none", windows: [] };
   }
 
-  /** `~/.claude.json`'s plan cache: re-parsed only when the file's mtime or size changed; never read over the cap. */
+  /** `~/.claude.json`'s plan cache: re-parsed only when the file's mtime or size changed; never read over the cap
+   *  (checked on the stat AND on the bytes actually read); the over-cap line is logged once per process. */
   private async claudeJsonReading(path: string): Promise<PlanReading | undefined> {
     let st: { mtimeMs: number; size: number };
     try { st = statSync(path); } catch { this.claudeFileCache = undefined; return undefined; }
     const stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
     if (this.claudeFileCache?.stamp === stamp) return this.claudeFileCache.reading;
-    if (st.size > (this.deps.claudeJsonMaxBytes ?? CLAUDE_JSON_MAX_BYTES)) {
+    const cap = this.deps.claudeJsonMaxBytes ?? CLAUDE_JSON_MAX_BYTES;
+    const result = st.size > cap ? "over-cap" : await claudePlanFromCacheFile(path, this.now(), cap);
+    if (result === "over-cap") {
       this.claudeFileCache = { stamp };
-      this.deps.log?.warn?.("[usage] Claude Code's config file is over the size cap; its plan cache is not read");
+      if (!this.claudeFileOverCapLogged) {
+        this.claudeFileOverCapLogged = true;
+        this.deps.log?.warn?.("[usage] Claude Code's config file is over the size cap; its plan cache is not read");
+      }
       return undefined;
     }
-    this.claudeFileCache = { stamp, reading: await claudePlanFromCacheFile(path, this.now()) };
+    this.claudeFileCache = { stamp, reading: result };
     this.claudeFileParses++;
-    return this.claudeFileCache.reading;
+    return result;
   }
 
-  /** The neutral cwd is kept empty: anything a probe left there is removed after each run. */
-  private cleanNeutralCwd(): void {
+  /**
+   * Run a probe in its OWN fresh directory — `mkdtemp` under `probeRoot()`, 0700, verified by lstat to be a real
+   * directory — and remove exactly that directory afterwards. Never a shared or pre-existing path, never through a
+   * symlink: the removal re-checks lstat (a real directory, not a link) and that its realpath lies inside the probe
+   * root's realpath; an empty directory is just `rmdir`ed, and `rmSync` (which unlinks a symlink found inside rather
+   * than following it) runs only on that verified path.
+   */
+  async inProbeDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+    const root = this.deps.probeRoot();
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const dir = mkdtempSync(join(root, "probe-"));
+    chmodSync(dir, 0o700);
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) throw new Error("probe directory is not a real directory");
     try {
-      const dir = this.deps.neutralCwd();
-      if (!dir.endsWith("/neutral")) return; // only ever the dedicated empty directory
-      for (const name of readdirSync(dir)) rmSync(join(dir, name), { recursive: true, force: true });
-    } catch { /* nothing to clean */ }
+      return await fn(dir);
+    } finally {
+      removeProbeDir(root, dir);
+    }
   }
+
 
   // ── queries ─────────────────────────────────────────────────────────────────────────────────────
 

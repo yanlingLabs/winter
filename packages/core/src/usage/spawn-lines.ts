@@ -110,12 +110,18 @@ export function runLines(executable: string, opts: RunOptions): Promise<RunOutco
   });
 }
 
-/** The variables a plan probe inherits — an ALLOWLIST: the user's identity, locale, shell, temp dir and PATH, plus
+/** The variables a plan probe inherits — an ALLOWLIST: the user's identity, locale, shell, temp dir, PATH and proxy /
+ *  CA settings, plus
  *  the tool's own config-dir variable (`extra`: `CODEX_HOME` / `CLAUDE_CONFIG_DIR`, so it finds its own sign-in where
  *  the user put it). Nothing else crosses: no API key or base URL (`ANTHROPIC_*`, `OPENAI_*`) that would switch the
  *  tool off the user's plan login, no nested-session marker (`CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_*` sandbox flags),
  *  no `WINTER_*`. */
-export const PROBE_ENV_ALLOW = ["HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL"] as const;
+export const PROBE_ENV_ALLOW = [
+  "HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL",
+  // A user behind a proxy or a custom CA: the tool's own network call must still reach its service.
+  "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "ALL_PROXY", "all_proxy",
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
+] as const;
 
 export function probeEnv(extra: readonly string[] = [], from: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};

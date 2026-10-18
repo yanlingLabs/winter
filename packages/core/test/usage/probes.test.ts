@@ -7,10 +7,10 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, utimesS
 import { join } from "node:path";
 import { UsageDb } from "../../src/usage/db";
 import { UsagePricer } from "../../src/usage/pricing";
-import { UsageService, binaryKey, type UsageServiceDeps } from "../../src/usage/service";
+import { UsageService, binaryKey, removeProbeDir, type UsageServiceDeps } from "../../src/usage/service";
 import { CLAUDE_USAGE_ARGS } from "../../src/usage/claude-code";
 import { probeEnv, resolveExecutable } from "../../src/usage/spawn-lines";
-import { claudeJson, fakeClaude, fakeCodex, neutralIn, tempDir } from "./fixtures";
+import { claudeJson, fakeClaude, fakeCodex, probeRootIn, tempDir } from "./fixtures";
 
 const pricer = new UsagePricer();
 const NOW = Date.now();
@@ -21,7 +21,7 @@ function service(over: Partial<UsageServiceDeps> & { db?: UsageDb; home?: string
   const logs: string[] = [];
   const svc = new UsageService({
     db, pricer, tracking: () => ({ codex: true, claudeCode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
-    winterCodexWindows: () => [], neutralCwd: () => neutralIn(home), ingestEveryMs: 0, planWaitMs: 20_000,
+    winterCodexWindows: () => [], probeRoot: () => probeRootIn(home), ingestEveryMs: 0, planWaitMs: 20_000,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,
   });
@@ -93,12 +93,71 @@ describe("the /usage latch", () => {
     expect(args).not.toContain("--bare");
   });
 
-  test("the neutral cwd is emptied after each probe", async () => {
+  test("a result naming no command (an early startup error, 0 turns, 0 cost) is ordinary: never latched", async () => {
+    const fake = fakeClaude(tempDir("bin"), "no-local-command");
+    const { svc, db } = service({ claudeExecutable: () => fake.path });
+    expect((await svc.claudeCodePlan()).source).toBe("none");
+    expect(db.latch(binaryKey("claude", fake.path)!)).toBeUndefined();
+  });
+
+  test("the latch key names the binary by a hash, never its plaintext path", () => {
     const fake = fakeClaude(tempDir("bin"), "ok");
+    const key = binaryKey("claude", fake.path)!;
+    expect(key).toMatch(/^claude:[0-9a-f]{32}:\d+:\d+$/);
+    expect(key.includes(fake.path)).toBe(false);
+  });
+});
+
+describe("each probe runs in its own directory, and nothing outside it is ever deleted", () => {
+  function outsideWithFiles(): string {
+    const outside = tempDir("outside");
+    writeFileSync(join(outside, "precious.txt"), "keep me");
+    mkdirSync(join(outside, "sub"));
+    writeFileSync(join(outside, "sub", "also.txt"), "keep me too");
+    return outside;
+  }
+  const intact = (outside: string) => {
+    expect(readFileSync(join(outside, "precious.txt"), "utf8")).toBe("keep me");
+    expect(readFileSync(join(outside, "sub", "also.txt"), "utf8")).toBe("keep me too");
+  };
+
+  test("a probe that plants a symlink to a directory outside: its own dir goes, the link's target stays whole", async () => {
+    const outside = outsideWithFiles();
+    const fake = fakeClaude(tempDir("bin"), "plant-symlink", outside);
     const { svc, home } = service({ claudeExecutable: () => fake.path });
-    writeFileSync(join(neutralIn(home), "left-behind.txt"), "x");
+    expect((await svc.claudeCodePlan()).source).toBe("claude-cli");
+    const cwd = marks(fake.markerPath)[0]!.cwd;
+    expect(existsSync(cwd)).toBe(false);
+    intact(outside);
+    expect(require("node:fs").readdirSync(join(home, "usage")).filter((n: string) => n.startsWith("probe-"))).toEqual([]);
+  });
+
+  test("a pre-existing `neutral` symlink under the usage dir is never used nor followed", async () => {
+    const outside = outsideWithFiles();
+    const home = tempDir("home");
+    mkdirSync(join(home, "usage"), { recursive: true });
+    require("node:fs").symlinkSync(outside, join(home, "usage", "neutral"));
+    const fake = fakeClaude(tempDir("bin"), "ok");
+    const { svc } = service({ home, claudeExecutable: () => fake.path });
     await svc.claudeCodePlan();
-    expect(require("node:fs").readdirSync(join(home, "neutral"))).toEqual([]);
+    expect(marks(fake.markerPath)[0]!.cwd.includes("neutral")).toBe(false);
+    intact(outside);
+  });
+
+  test("removeProbeDir refuses a symlink and anything outside the root", () => {
+    const root = tempDir("root");
+    const outside = outsideWithFiles();
+    const link = join(root, "probe-link");
+    require("node:fs").symlinkSync(outside, link);
+    expect(removeProbeDir(root, link)).toBe(false);
+    expect(removeProbeDir(root, outside)).toBe(false);
+    expect(removeProbeDir(root, root)).toBe(false);
+    intact(outside);
+    const own = join(root, "probe-own");
+    mkdirSync(own);
+    writeFileSync(join(own, "x"), "x");
+    expect(removeProbeDir(root, own)).toBe(true);
+    expect(existsSync(own)).toBe(false);
   });
 });
 
@@ -109,6 +168,7 @@ describe("the probes' environment is an allowlist", () => {
     WINTER_HOME: "/nowhere", WINTER_PROFILE: "dev",
   };
   const allowed = new Set(["HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "ALL_PROXY", "all_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
     // added by the OS/runtime to every process, not inherited
     "__CF_USER_TEXT_ENCODING", "PWD", "SHLVL", "_", "OLDPWD"]);
 
@@ -124,6 +184,16 @@ describe("the probes' environment is an allowlist", () => {
       for (const k of Object.keys(leaky)) expect(m.env).not.toContain(k);
       for (const k of m.env) expect(allowed.has(k) || k.startsWith("BUN_") || k.startsWith("__")).toBe(true);
     }
+  });
+
+  test("proxy and CA settings DO reach the probe", async () => {
+    const claude = fakeClaude(tempDir("bin"), "ok");
+    await withEnv({ HTTPS_PROXY: "http://proxy.invalid:3128", no_proxy: "localhost", NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" }, async () => {
+      const { svc } = service({ claudeExecutable: () => claude.path });
+      await svc.claudeCodePlan();
+    });
+    const env = marks(claude.markerPath)[0]!.env;
+    for (const k of ["HTTPS_PROXY", "no_proxy", "NODE_EXTRA_CA_CERTS"]) expect(env).toContain(k);
   });
 
   test("probeEnv keeps only the allowlist and the tool's own config dir", () => {
@@ -179,6 +249,21 @@ describe("~/.claude.json", () => {
     utimesSync(path, new Date(), new Date(Date.now() + 5_000));
     expect((await svc.claudeCodePlan()).windows[0]!.usedPercent).toBe(77);
     expect(svc.claudeFileParses).toBe(2);
+  });
+
+  test("the cap holds on the bytes actually read, and the warning is logged once per process", async () => {
+    const path = join(tempDir("cj"), ".claude.json");
+    claudeJson(path, NOW - 60_000, util);
+    const { claudePlanFromCacheFile } = await import("../../src/usage/claude-code");
+    expect(await claudePlanFromCacheFile(path, NOW, 64)).toBe("over-cap");
+    expect(typeof (await claudePlanFromCacheFile(path, NOW, 1 << 20))).toBe("object");
+    const { svc, logs } = service({ claudeJsonPath: path, claudeJsonMaxBytes: 64 });
+    await svc.claudeCodePlan();
+    // Changed (still over): no second line.
+    claudeJson(path, NOW - 30_000, { ...util, seven_day: { utilization: 1, resets_at: util.five_hour.resets_at } });
+    utimesSync(path, new Date(), new Date(Date.now() + 5_000));
+    await svc.claudeCodePlan();
+    expect(logs).toHaveLength(1);
   });
 
   test("over the size cap it is not read at all, with one fixed log line", async () => {

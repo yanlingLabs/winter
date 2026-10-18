@@ -10,7 +10,7 @@ import { UsageService, type UsageServiceDeps } from "../../src/usage/service";
 import { staleness } from "../../src/usage/plan";
 import { CLAUDE_USAGE_ARGS } from "../../src/usage/claude-code";
 import {
-  SECRETS, claudeJson, codexMeta, codexRateLimits, codexRolloutPath, codexTokenCount, codexTurnContext, fakeClaude, fakeCodex, lines, neutralIn, tempDir,
+  SECRETS, claudeJson, codexMeta, codexRateLimits, codexRolloutPath, codexTokenCount, codexTurnContext, fakeClaude, fakeCodex, lines, probeRootIn, tempDir,
 } from "./fixtures";
 
 const pricer = new UsagePricer();
@@ -24,7 +24,7 @@ function service(over: Partial<UsageServiceDeps> & { logs?: string[] } = {}) {
   const svc = new UsageService({
     db, pricer, tracking: () => ({ codex: true, claudeCode: true }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    neutralCwd: () => neutralIn(home), ingestEveryMs: 0, planWaitMs: 20_000, fallbackEveryMs: 0,
+    probeRoot: () => probeRootIn(home), ingestEveryMs: 0, planWaitMs: 20_000, fallbackEveryMs: 0,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,
   });
@@ -90,7 +90,8 @@ describe("the Codex plan", () => {
     const m = marks(fake.markerPath);
     expect(m).toHaveLength(1);
     expect(m[0]!.argv).toEqual(["app-server"]);
-    expect(m[0]!.cwd.endsWith("/neutral")).toBe(true);
+    expect(m[0]!.cwd).toMatch(/\/usage\/probe-[^/]+$/);
+    expect(existsSync(m[0]!.cwd)).toBe(false); // its own directory, removed after the run
     void home;
     // Cached within the window; asked again after it.
     now += 30_000;
@@ -217,7 +218,8 @@ describe("the Claude Code plan", () => {
     const m = marks(fake.markerPath);
     expect(m[0]!.argv).toEqual([...CLAUDE_USAGE_ARGS]);
     expect((m[0] as unknown as { env: string[] }).env.filter((k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_"))).toEqual([]);
-    expect(m[0]!.cwd.endsWith("/neutral")).toBe(true);
+    expect(m[0]!.cwd).toMatch(/\/usage\/probe-[^/]+$/);
+    expect(existsSync(m[0]!.cwd)).toBe(false); // its own directory, removed after the run
     void home;
     // Throttled to once per five minutes.
     now += 4 * 60_000;
@@ -228,7 +230,7 @@ describe("the Claude Code plan", () => {
     expect(marks(fake.markerPath)).toHaveLength(2);
   });
 
-  for (const mode of ["no-local-command", "wrong-command", "cost", "turns"] as const) {
+  for (const mode of ["wrong-command", "cost", "turns"] as const) {
     test(`/usage that is not the free local command (${mode}) is REJECTED, and the CLI is not asked again`, async () => {
       const fake = fakeClaude(tempDir("bin"), mode);
       let now = NOW;

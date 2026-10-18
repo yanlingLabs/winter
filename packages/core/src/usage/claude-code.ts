@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 import type { UsageRecordInput } from "./db";
 import { findFiles, timeOf, tokenCount, type FoundFile } from "./ingest-files";
@@ -120,7 +120,7 @@ export const CLAUDE_USAGE_ARGS = [
 
 /** Why a `/usage` run was refused. `guard` (and `guard-model-turn`) mean `/usage` reached the model loop: the caller
  *  switches the rung off for this exact binary. Everything else is an ordinary failure, retried after the throttle. */
-export type ClaudeCliFailure = "guard" | "guard-model-turn" | "error" | "no-report" | "no-result" | "timeout" | "spawn-failed" | "too-large";
+export type ClaudeCliFailure = "guard" | "guard-model-turn" | "no-local-command" | "error" | "no-report" | "no-result" | "timeout" | "spawn-failed" | "too-large";
 
 /** PURE: does a stream frame show a MODEL turn (an assistant message that used tokens, or any tool use)? */
 export function isModelTurnSignal(msg: Record<string, unknown>): boolean {
@@ -134,10 +134,10 @@ export function isModelTurnSignal(msg: Record<string, unknown>): boolean {
 
 /**
  * Run the user's `claude` for its `/usage` report. Accepted ONLY when the turn's `result` says it was the local
- * `/usage` command (`local_command: "usage"`), cost nothing and ran no model turn (`num_turns: 0`) — anything else is a
- * `guard` failure (the caller latches the rung off). A `result` with `is_error` but the local command (logged out,
- * offline) is an ordinary `error`. A run that ends without a result (a timeout, an exit) after a model-turn signal is
- * `guard-model-turn`.
+ * `/usage` command (`local_command: "usage"`), cost nothing and ran no model turn. The `guard` failures (the caller
+ * latches the binary off) need POSITIVE evidence of the model loop: turns or cost above 0, another `local_command`, or
+ * a model-turn signal in the stream (then also when the run ends without a result). A `result` naming no command
+ * (an early startup error) and one with `is_error` but the local command (logged out, offline) are ordinary failures.
  */
 export async function claudePlanFromCli(executable: string, opts: { cwd: string; timeoutMs?: number; now: () => number; env?: Record<string, string> }):
   Promise<{ reading?: PlanReading; failure?: ClaudeCliFailure }> {
@@ -154,7 +154,12 @@ export async function claudePlanFromCli(executable: string, opts: { cwd: string;
       if (msg.type !== "result") return undefined;
       const cost = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : 0;
       const turns = typeof msg.num_turns === "number" ? msg.num_turns : 0;
-      if (msg.local_command !== "usage" || cost > 0 || turns > 0) return { failure: "guard" };
+      // Latch only on POSITIVE evidence of the model loop: a turn, a cost, another local command — or a model-turn
+      // signal earlier in the stream. A result naming no command at all (an early startup error) is ordinary.
+      const other = typeof msg.local_command === "string" && msg.local_command !== "usage";
+      if (other || cost > 0 || turns > 0) return { failure: "guard" };
+      if (sawModelTurn) return { failure: "guard-model-turn" };
+      if (msg.local_command !== "usage") return { failure: "no-local-command" };
       if (msg.is_error === true) return { failure: "error" };
       if (report === undefined) return { failure: "no-report" };
       const at = opts.now();
@@ -176,9 +181,25 @@ export const CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024;
  * Claude Code runs). The file holds unrelated config (possibly MCP env secrets): it is parsed in memory and ONLY that
  * one key is read; nothing else of it is kept, logged or sent.
  */
-export async function claudePlanFromCacheFile(path: string, now: number): Promise<PlanReading | undefined> {
+export async function claudePlanFromCacheFile(path: string, now: number, maxBytes = CLAUDE_JSON_MAX_BYTES): Promise<PlanReading | "over-cap" | undefined> {
+  // The cap is enforced on the bytes actually READ (at most cap + 1), whatever a stat said a moment before.
   let text: string;
-  try { text = await readFile(path, "utf8"); } catch { return undefined; }
+  try {
+    const fh = await open(path, "r");
+    try {
+      const buf = Buffer.allocUnsafe(maxBytes + 1);
+      let read = 0;
+      while (read < buf.length) {
+        const { bytesRead } = await fh.read(buf, read, buf.length - read, read);
+        if (bytesRead <= 0) break;
+        read += bytesRead;
+      }
+      if (read > maxBytes) return "over-cap";
+      text = buf.subarray(0, read).toString("utf8");
+    } finally {
+      await fh.close().catch(() => undefined);
+    }
+  } catch { return undefined; }
   let cached: unknown;
   try { cached = (JSON.parse(text) as Record<string, unknown>).cachedUsageUtilization; } catch { return undefined; }
   text = "";

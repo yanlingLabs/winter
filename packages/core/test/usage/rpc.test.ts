@@ -15,7 +15,7 @@ import { UsagePricer } from "../../src/usage/pricing";
 import { UsageService } from "../../src/usage/service";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FakeProvider } from "../../src/agent/fake-provider";
-import { codexMeta, codexRolloutPath, codexTokenCount, codexTurnContext, fakeCodex, lines, tempDir, neutralIn } from "./fixtures";
+import { codexMeta, codexRolloutPath, codexTokenCount, codexTurnContext, fakeCodex, lines, tempDir, probeRootIn } from "./fixtures";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -71,7 +71,7 @@ describe("usage.* over the socket", () => {
     const db = new UsageDb(join(home, "usage", "usage.db"));
     const usage = new UsageService({
       db, pricer: new UsagePricer(), tracking: () => ({ codex: true, claudeCode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
-      winterCodexWindows: () => [], neutralCwd: () => neutralIn(home),
+      winterCodexWindows: () => [], probeRoot: () => probeRootIn(home),
     });
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub, usage, winterHome: home });
     stop = () => { server.stop(); store.close(); db.close(); };

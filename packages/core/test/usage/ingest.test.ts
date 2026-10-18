@@ -12,7 +12,7 @@ import { readNewLines } from "../../src/usage/ingest-files";
 import { stat } from "node:fs/promises";
 import {
   SECRETS, claudeAssistant, claudeTranscriptPath, claudeUser, codexMessage, codexMeta, codexRolloutPath, codexTokenCount,
-  codexTurnContext, lines, neutralIn, tempDir,
+  codexTurnContext, lines, probeRootIn, tempDir,
 } from "./fixtures";
 
 const pricer = new UsagePricer();
@@ -25,7 +25,7 @@ function service(opts: { codexHome?: string; claudeHome?: string; tracking?: { c
     ...(opts.codexHome === undefined ? {} : { codexHome: opts.codexHome }),
     ...(opts.claudeHome === undefined ? {} : { claudeHome: opts.claudeHome }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
-    neutralCwd: () => neutralIn(home), ingestEveryMs: 0, ...(opts.now === undefined ? {} : { now: opts.now }),
+    probeRoot: () => probeRootIn(home), ingestEveryMs: 0, ...(opts.now === undefined ? {} : { now: opts.now }),
     ...(opts.fileBudgetBytes === undefined ? {} : { fileBudgetBytes: opts.fileBudgetBytes }),
     ...(opts.maxLineBytes === undefined ? {} : { maxLineBytes: opts.maxLineBytes }),
   });

@@ -11,9 +11,9 @@ export function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `winter-usage-${prefix}-`));
 }
 
-/** The service's neutral cwd under a test home (`<home>/neutral`, created). */
-export function neutralIn(home: string): string {
-  const dir = join(home, "neutral");
+/** The service's probe root under a test home (`<home>/usage`, created): each probe makes its own dir in it. */
+export function probeRootIn(home: string): string {
+  const dir = join(home, "usage");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -131,9 +131,9 @@ else {
 
 /** A fake `claude -p /usage`. Modes as named. */
 export type FakeClaudeMode = "ok" | "no-local-command" | "wrong-command" | "cost" | "turns" | "no-report" | "hang" | "malformed"
-  | "is-error" | "model-turn-hang" | "tool-use-exit";
+  | "is-error" | "model-turn-hang" | "tool-use-exit" | "plant-symlink";
 
-export function fakeClaude(dir: string, mode: FakeClaudeMode): { path: string; markerPath: string } {
+export function fakeClaude(dir: string, mode: FakeClaudeMode, outside = "/nonexistent"): { path: string; markerPath: string } {
   const resetsAt = new Date(Date.now() + 2 * 3600_000).toISOString();
   const report = {
     rate_limits: {
@@ -154,6 +154,13 @@ export function fakeClaude(dir: string, mode: FakeClaudeMode): { path: string; m
 const mode = ${JSON.stringify(mode)};
 if (mode === "hang") { setInterval(() => {}, 1000); }
 else if (mode === "malformed") { log("{not json"); log("still not"); }
+else if (mode === "plant-symlink") {
+  // A hostile probe: leaves a file and a symlink to a directory OUTSIDE its cwd, then answers normally.
+  fs.writeFileSync("left-behind.txt", "x");
+  fs.symlinkSync(${JSON.stringify(outside)}, "escape");
+  log({ type: "assistant", message: { content: [] }, usage_report: ${JSON.stringify({ rate_limits: { limits: [{ group: "session", is_active: true, kind: "session", percent: 5, resets_at: null, scope: null, severity: "normal" }] } })}, local_command_run: "usage" });
+  log(${JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 0, total_cost_usd: 0, local_command: "usage" })});
+}
 else if (mode === "model-turn-hang") {
   log({ type: "assistant", message: { content: [{ type: "text", text: "SECRET-ANSWER-91bc" }], usage: { input_tokens: 1200, output_tokens: 30 } } });
   setInterval(() => {}, 1000);
