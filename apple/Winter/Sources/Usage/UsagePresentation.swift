@@ -163,10 +163,12 @@ enum UsagePresentation {
 
     static func windowTitle(_ w: UsagePlanWindow) -> String {
         if let scope = w.scope, !scope.isEmpty {
-            // A model GROUP's own windows (Antigravity: "Gemini", "Claude & GPT") say the group and the window, the group
-            // as agy names it ("Gemini 5h", "Claude & GPT week").
-            if w.kind == "five_hour" { return "\(scope) 5h" }
-            if w.kind == "weekly" { return "\(scope) week" }
+            // A model GROUP's own windows (Antigravity's): its main group, Gemini, reads like every other plan ("5-hour",
+            // "Weekly"); any other group is "Other" — short beside the rest (user 2026-10-18: "Other 5h", "Other W").
+            if w.kind == "five_hour" || w.kind == "weekly" {
+                if scope.caseInsensitiveCompare("Gemini") == .orderedSame { return w.kind == "five_hour" ? "5-hour" : "Weekly" }
+                return w.kind == "five_hour" ? "Other 5h" : "Other W"
+            }
             // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
             return scopeName(scope)
         }

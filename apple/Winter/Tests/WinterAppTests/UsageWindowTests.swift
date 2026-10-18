@@ -76,7 +76,7 @@ final class UsageWindowTests: XCTestCase {
         let slot = UsagePresentation.slot(provider: "antigravity", reading: reading, now: now)
         XCTAssertEqual(slot.title, "Antigravity")
         // Each group's lines together, in agy's order; the 5-hour window first within a group.
-        XCTAssertEqual(slot.rings.map(\.title), ["Gemini 5h", "Gemini week", "Claude & GPT 5h", "Claude & GPT week"])
+        XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly", "Other 5h", "Other W"])
         XCTAssertEqual(slot.rings.first { $0.id == "gemini-weekly" }?.fraction ?? 0, 0.27, accuracy: 1e-9)
         XCTAssertEqual(slot.sourceLine, "From Antigravity · just now")
         XCTAssertNil(slot.planType, "agy names no plan")
@@ -92,7 +92,7 @@ final class UsageWindowTests: XCTestCase {
     func testEveryPlanLineTitleFitsItsColumnAndTheIslandsStaysAt52WithoutAntigravity() {
         let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
         let width = { (s: String) in (s as NSString).size(withAttributes: [.font: font]).width }
-        let titles = ["5-hour", "Weekly", "Fable", "Gemini 5h", "Gemini week", "Claude & GPT 5h", "Claude & GPT week"]
+        let titles = ["5-hour", "Weekly", "Fable", "Other 5h", "Other W"]
         for compact in [true, false] {
             let column = UsagePresentation.titleColumnWidth(titles, compact: compact)
             for t in titles {
