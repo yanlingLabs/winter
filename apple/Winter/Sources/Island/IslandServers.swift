@@ -15,11 +15,11 @@ import WinterCUPresentation
 //     on this tab (the open island's refresh beat) — never in the background.
 //   - EXCLUDED: Apple's and the system's (`/System`, `/usr/libexec`, `/usr/sbin`, `/usr/bin`, `/bin`, `/sbin`,
 //     `/Library/Apple`, `/Library/Developer` — Xcode's tools and the simulators), anything inside a `.app` bundle (a GUI
-//     app's ports are not a server you started), Winter's own infrastructure (`winter-core`, `winter`, its helpers,
-//     this app, and what they start with no shell in between — a server a session ran through its shell IS listed),
-//     the coding-agent CLIs (`agentCLIs`), `launchd`. An interpreter
-//     (node, bun, deno, python, ruby, java, php, perl) under `/usr/bin` or `/Library/Developer`, or in a framework's
-//     `Python.app` (Homebrew's, Xcode's), IS listed.
+//     app's ports are not a server you started), the coding agents (their CLIs, `agentCLIs`, and apps, `agentApps`),
+//     and Winter's and the agents' infrastructure (`winter-core`, `winter`, its helpers, this app, an agent — and what
+//     they start with no user's shell in between, an MCP server; a server one ran through its shell IS listed),
+//     `launchd`. An interpreter (node, bun, deno, python, ruby, java, php, perl) under `/usr/bin` or
+//     `/Library/Developer`, or in a framework's `Python.app` (Homebrew's, Xcode's), IS listed.
 //   - ONE ROW per server: a listener goes under its nearest listening ancestor only when it is that server's own —
 //     the same process group, or the same executable as its direct parent (a forked worker); never across a shell, so
 //     never under tmux, a notebook's terminal or an agent session that merely started it: Stop never reaches an
@@ -170,6 +170,16 @@ enum IslandServers {
         return false
     }
 
+    /// The coding agents' desktop apps (user 2026-10-18): anything inside one of these bundles — Claude's own
+    /// (`disclaimer` included), ChatGPT, Codex, Cursor, Antigravity, Windsurf, Devin — is an agent's.
+    static let agentApps: Set<String> = ["claude.app", "chatgpt.app", "codex.app", "cursor.app", "antigravity.app",
+                                         "windsurf.app", "devin.app"]
+
+    /// A coding agent: one of its CLIs (`isAgentCLI`) or anything inside one of its apps (`agentApps`).
+    static func isAgent(_ p: ServerProcess) -> Bool {
+        isAgentCLI(p) || p.path.split(separator: "/").contains { agentApps.contains($0.lowercased()) }
+    }
+
     /// A package runner: `npx`, `bunx`, `uvx`, `pnpx` (the executable, argv[0] or a node script of that name), `npm
     /// exec`, `pnpm dlx`, `bun x`, `uv tool run`.
     static func isPackageRunner(_ p: ServerProcess) -> Bool {
@@ -269,13 +279,13 @@ enum IslandServers {
         // `bun run x`, `deno run -A x`, `deno serve x`; `bun x vite` / `bunx vite` name the package.
         if kind != .node, let first = positional.first, ["run", "serve", "x"].contains(first) { positional.removeFirst() }
         guard let script = positional.first else { return nil }
-        // A package's own bin (`node_modules/.bin/vite` resolves to `node_modules/vite/bin/vite.js`): the package —
-        // or, for a runner, the script it runs.
-        if let package = nodeModulesPackage(script) {
-            if jsRunners.contains(package), positional.count > 1 { return fileScriptName(positional[1], cwd: cwd) }
-            return package
-        }
-        return fileScriptName(script, cwd: cwd)
+        // A runner's package (`node_modules/.bin/tsx src/bot.ts`): the script it runs.
+        let package = nodeModulesPackage(script)
+        if let package, jsRunners.contains(package), positional.count > 1 { return fileScriptName(positional[1], cwd: cwd) }
+        // A bin script: its command and subcommand (`…/discord-waifus/bin/waifus.mjs remote` → "waifus remote").
+        if let command = binCommand(script, next: positional.dropFirst().first) { return command }
+        // Another script in a package: the package.
+        return package ?? fileScriptName(script, cwd: cwd)
     }
 
     private static func pythonScript(_ args: [String], cwd: String?) -> String? {
@@ -288,7 +298,7 @@ enum IslandServers {
             if a == "-c" { return nil }
             if valued.contains(a) { i += 2; continue }
             if a.hasPrefix("-") { i += 1; continue }
-            return fileScriptName(a, cwd: cwd)
+            return binCommand(a, next: args[(i + 1)...].first { !$0.hasPrefix("-") }) ?? fileScriptName(a, cwd: cwd)
         }
         return nil
     }
@@ -302,9 +312,36 @@ enum IslandServers {
             if a == fileFlag { return i + 1 < args.count ? fileScriptName(args[i + 1], cwd: cwd) : nil }
             if valued.contains(a) { i += 2; continue }
             if a.hasPrefix("-") { i += 1; continue }
-            return fileScriptName(a, cwd: cwd)
+            return binCommand(a, next: args[(i + 1)...].first { !$0.hasPrefix("-") }) ?? fileScriptName(a, cwd: cwd)
         }
         return nil
+    }
+
+    /// A script in a `bin` folder (a package's bin, `node_modules/.bin`, a venv's): "<its name> <subcommand>" — the
+    /// first argument after it that is not a flag, when that is a plain word (`remote`, `server`, `app:app`), never a
+    /// path or a file —, else its name alone. Nil for any other script, or an entry file (`bin/index.js`).
+    static func binCommand(_ script: String, next: String?) -> String? {
+        let folder = ((script as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        guard folder == "bin" || folder == ".bin" else { return nil }
+        let base = ((script as NSString).lastPathComponent as NSString).deletingPathExtension
+        guard !base.isEmpty, !entryNames.contains(base) else { return nil }
+        guard let next, isSubcommand(next) else { return base }
+        return "\(base) \(next)"
+    }
+
+    /// A plain word: a letter, then letters, digits, `-`, `_` or `:` (at most 32).
+    static func isSubcommand(_ word: String) -> Bool {
+        guard let first = word.first, first.isLetter, word.count <= 32 else { return false }
+        return word.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ":" }
+    }
+
+    /// The npm package an interpreter's script is in — the row's secondary words when its name does not already say
+    /// it (`waifus remote` · `@waifucave/discord-waifus`).
+    static func packageName(_ p: ServerProcess) -> String? {
+        guard interpreter(executableName(p)) != nil, let args = p.arguments else { return nil }
+        guard let package = args.dropFirst().lazy.compactMap(nodeModulesPackage).first else { return nil }
+        let name = displayName(p)
+        return name == package || name.hasPrefix(package + " ") ? nil : package
     }
 
     /// `-jar app.jar` → "app"; a main class `com.example.Server` → "Server"; `-m mod/com.x.Main` → "Main".
@@ -374,6 +411,14 @@ enum IslandServers {
         return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
+    /// A row's third line: its folder and the package it runs from ("Discord Waifus · @waifucave/discord-waifus"); under
+    /// the pointer the whole folder.
+    static func detailLine(_ row: IslandServerRow, hovered: Bool) -> String? {
+        let folder = hovered ? (row.folderPath ?? row.folder) : row.folder
+        let words = [folder, row.package].compactMap { $0 }
+        return words.isEmpty ? nil : words.joined(separator: " · ")
+    }
+
     /// ":3000 :8080" — the TCP ports in order, each once.
     static func portsLine(_ ports: [UInt16]) -> String {
         Array(Set(ports)).sorted().map { ":\($0)" }.joined(separator: " ")
@@ -397,8 +442,8 @@ enum IslandServers {
 
     // MARK: Rows
 
-    /// The rows, newest first. Winter's own infrastructure (a listener with Winter up its tree and no shell in
-    /// between — an MCP server) is never one. Each other listener is its own row unless its NEAREST listening ancestor
+    /// The rows, newest first. Winter's and the agents' infrastructure (a listener with Winter or an agent up its tree
+    /// and no user's shell in between — an MCP server) is never one. Each other listener is its own row unless its NEAREST listening ancestor
     /// is the same server — the same process group, or the same executable as its direct parent (a forked worker) —,
     /// in which case it joins that one's row. The walk up goes through parents that listen on nothing (`npm run dev` →
     /// `node server.js`) but never through a shell or a coding agent (hidden, it heads nothing), and stops at launchd
@@ -420,24 +465,25 @@ enum IslandServers {
             }
             return out
         }
-        // Winter's own infrastructure: a Winter process (or this app) up the tree with NO user's shell in between (an
-        // MCP server the daemon started, through `npx` and its `sh -c` too). A server a session ran through its shell (`winter → bash -c … → bun dev`) is the
+        // Winter's and the coding agents' own infrastructure: a Winter process (or this app) or an agent (`isAgent`: a
+        // CLI, Claude's or another agent's app) up the tree with NO user's shell in between — an MCP server the daemon
+        // or an agent started, through `npx` and its `sh -c` too. A server one ran through its shell is the user's. A server a session ran through its shell (`winter → bash -c … → bun dev`) is the
         // user's, started on their behalf: listed.
-        let underWinter = { (p: ServerProcess) -> Bool in
+        let underInfrastructure = { (p: ServerProcess) -> Bool in
             var seen: Set<Int32> = [p.pid]
             var parent = p.ppid
             while parent > 1 {
                 // This app, whether or not the scan listed it.
                 if parent == ownPid { return true }
                 guard let a = byPid[parent], seen.insert(parent).inserted else { return false }
-                if isWinter(path: a.path, command: a.command) { return true }
+                if isWinter(path: a.path, command: a.command) || isAgent(a) { return true }
                 // A user's shell ends it — not the `sh -c` a package runner (npx…) runs its package through.
                 if isShell(a), !(byPid[a.ppid].map(isPackageRunner) ?? false) { return false }
                 parent = a.ppid
             }
             return false
         }
-        let qualifying = Set(mine.filter { qualifies($0, user: user, ownPid: ownPid) && !underWinter($0) }.map(\.pid))
+        let qualifying = Set(mine.filter { qualifies($0, user: user, ownPid: ownPid) && !underInfrastructure($0) }.map(\.pid))
 
         /// The listener this one's row is: its nearest listening ancestor when that is the same server — its DIRECT
         /// parent running the same executable (a forked worker), or one in the same process group with no shell
@@ -445,7 +491,7 @@ enum IslandServers {
         /// `node` as the server around it) or an agent.
         func parentServer(_ p: ServerProcess) -> ServerProcess? {
             for a in ancestors(p) {
-                if isShell(a) || isAgentCLI(a) { return nil }
+                if isShell(a) || isAgent(a) { return nil }
                 guard qualifying.contains(a.pid) else { continue }
                 let forkedWorker = a.pid == p.ppid && !p.path.isEmpty && a.path == p.path
                 return forkedWorker || a.pgid == p.pgid ? a : nil
@@ -476,6 +522,7 @@ enum IslandServers {
                 startedAt: start,
                 folder: top.cwd.flatMap(folderName),
                 folderPath: top.cwd.map { abbreviated($0, home: home) },
+                package: packageName(top),
                 members: ordered.map(\.identity))
         }
         .sorted { $0.startedAt != $1.startedAt ? $0.startedAt > $1.startedAt : $0.id < $1.id }
@@ -514,6 +561,8 @@ struct IslandServerRow: Identifiable, Equatable {
     /// The cwd's last component, and the whole of it (`~` for the home) for the hover.
     let folder: String?
     let folderPath: String?
+    /// The npm package a bin command comes from (`@waifucave/discord-waifus`), when its name does not say it.
+    var package: String? = nil
     /// The top process first, then its listening workers.
     let members: [ServerProcessIdentity]
 
@@ -877,15 +926,15 @@ struct IslandServerRowView: View {
                         .font(Typography.captionDigits(.medium))
                         .foregroundStyle(phase == nil ? Theme.textMuted : pillReviewAmber)
                         .lineLimit(1)
-                    if let folder = row.folder {
-                        // The whole folder under the pointer (the island's panels are never key, so a tooltip may not
-                        // show).
-                        Text(hovered ? (row.folderPath ?? folder) : folder)
+                    if let line = IslandServers.detailLine(row, hovered: hovered) {
+                        // The folder and the package; the whole folder under the pointer (the island's panels are
+                        // never key, so a tooltip may not show).
+                        Text(line)
                             .font(Typography.caption())
                             .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                             .truncationMode(.head)
-                            .help(row.folderPath ?? folder)
+                            .help(IslandServers.detailLine(row, hovered: true) ?? line)
                     }
                 }
                 Spacer(minLength: 8)

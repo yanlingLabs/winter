@@ -151,6 +151,49 @@ final class IslandServersTests: XCTestCase {
         XCTAssertFalse(IslandServers.isShell(process(1, path: "/opt/homebrew/bin/tmux")))
     }
 
+    /// The real machine's chains (user 2026-10-18): an MCP server a coding agent started — through its CLI, through
+    /// Claude's app (its `disclaimer` helper), through `npm exec` — is the agent's, hidden, as Winter's are; a dev server
+    /// an agent ran through its bash tool is the user's, listed.
+    func testAnAgentsMCPServersAreHiddenButAServerItRanThroughItsShellIsListed() {
+        let node = "/opt/homebrew/bin/node"
+        let mcp = ["node", "/Users/me/.npm/_npx/4f2a/node_modules/.bin/video-extract-mcp"]
+        let npmExec = ["npm exec video-extract-mcp@latest"]
+        let list = [
+            // codex ← codex ← video-extract-mcp@latest (npm exec) ← node
+            process(300, path: "/opt/homebrew/Caskroom/codex/0.162.1/bin/codex"),
+            process(301, parent: 300, path: "/opt/homebrew/Caskroom/codex/0.162.1/bin/codex"),
+            process(302, parent: 301, path: node, args: npmExec, command: "video-extract-mcp@latest"),
+            process(303, parent: 302, path: node, args: mcp, tcp: [50001]),
+            // Claude (the desktop app) ← disclaimer ← video-extract-mcp@latest ← node
+            process(310, path: "/Applications/Claude.app/Contents/MacOS/Claude"),
+            process(311, parent: 310, path: "/Applications/Claude.app/Contents/Helpers/disclaimer"),
+            process(312, parent: 311, path: node, args: npmExec, command: "video-extract-mcp@latest"),
+            process(313, parent: 312, path: node, args: mcp, tcp: [50002]),
+            // Terminal ← login ← claude ← video-extract-mcp@latest ← node
+            process(320, path: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
+            process(321, parent: 320, path: "/usr/bin/login"),
+            process(322, parent: 321, path: "/Users/me/.local/share/claude/versions/2.1.299"),
+            process(323, parent: 322, path: node, args: npmExec, command: "video-extract-mcp@latest"),
+            process(324, parent: 323, path: node, args: mcp, tcp: [50003]),
+            // claude's bash tool: claude → zsh -c → bun dev — the user's.
+            process(325, parent: 322, path: "/bin/zsh"),
+            process(326, parent: 325, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"], cwd: "/Users/me/shop",
+                    tcp: [5173]),
+            // Cursor's and Antigravity's helpers start MCP servers too.
+            process(330, path: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)"),
+            process(331, parent: 330, path: node, args: mcp, tcp: [50004]),
+            process(332, path: "/Applications/Antigravity.app/Contents/MacOS/Electron"),
+            process(333, parent: 332, path: node, args: mcp, tcp: [50005]),
+        ]
+        XCTAssertEqual(rows(list).map(\.name), ["shop"])
+        for path in ["/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", "/Applications/Codex.app/Contents/MacOS/Codex",
+                     "/Applications/Windsurf.app/Contents/MacOS/Electron", "/Applications/Devin.app/Contents/MacOS/Devin",
+                     "/Applications/Claude.app/Contents/Helpers/disclaimer"] {
+            XCTAssertTrue(IslandServers.isAgent(process(1, path: path)), path)
+        }
+        XCTAssertFalse(IslandServers.isAgent(process(1, path: "/Applications/Spotify.app/Contents/MacOS/Spotify")))
+    }
+
     /// A user's own server named like an agent is the user's: only an agent's exact executable or script name, its npm
     /// package or its installer's layout hides one.
     func testAServerNamedLikeAnAgentIsStillListed() {
@@ -179,7 +222,7 @@ final class IslandServersTests: XCTestCase {
         XCTAssertEqual(name("/opt/homebrew/bin/deno", ["deno", "run", "-A", "main.ts"], cwd: "/Users/me/edge"), "edge")
         // A package's own bin, and a runner's script.
         XCTAssertEqual(name("/opt/homebrew/bin/node", ["node", "/Users/me/app/node_modules/.bin/vite"]), "vite")
-        XCTAssertEqual(name("/opt/homebrew/bin/node", ["node", "/Users/me/app/node_modules/next/dist/bin/next", "dev"]), "next")
+        XCTAssertEqual(name("/opt/homebrew/bin/node", ["node", "/Users/me/app/node_modules/next/dist/bin/next", "dev"]), "next dev")
         XCTAssertEqual(name("/opt/homebrew/bin/node", ["node", "/Users/me/app/node_modules/@acme/cli/bin.js"]), "@acme/cli")
         XCTAssertEqual(name("/opt/homebrew/bin/node", ["node", "/Users/me/app/node_modules/tsx/dist/cli.mjs", "src/bot.ts"]), "bot")
         // Python: the module after -m, else the script.
@@ -191,7 +234,7 @@ final class IslandServersTests: XCTestCase {
         // Java, Ruby, PHP.
         XCTAssertEqual(name("/usr/bin/java", ["java", "-Xmx1g", "-jar", "build/libs/game-server.jar"]), "game-server")
         XCTAssertEqual(name("/usr/bin/java", ["java", "-cp", "lib/*", "com.example.Server"]), "Server")
-        XCTAssertEqual(name("/usr/bin/ruby", ["ruby", "bin/rails", "server"]), "rails")
+        XCTAssertEqual(name("/usr/bin/ruby", ["ruby", "bin/rails", "server"]), "rails server")
         XCTAssertEqual(name("/opt/homebrew/bin/php", ["php", "-S", "localhost:8000", "-t", "public"]), "php")
         XCTAssertEqual(name("/opt/homebrew/bin/php", ["php", "-S", "localhost:8000", "router.php"]), "router")
         // Not an interpreter, or no arguments read: the executable.
@@ -199,6 +242,42 @@ final class IslandServersTests: XCTestCase {
         XCTAssertEqual(name("/opt/homebrew/bin/node", nil), "node")
         // `go run`: its temporary build is named by the folder it runs in.
         XCTAssertEqual(name("/private/var/folders/x/T/go-build123/b001/exe/main", nil, cwd: "/Users/me/gosrv"), "gosrv")
+    }
+
+    /// A bin script is named by its command and subcommand (user 2026-10-18: two `discord-waifus` rows were one name),
+    /// its package kept as the third line's secondary words.
+    func testABinScriptIsNamedByItsCommandAndSubcommand() {
+        let node = "/opt/homebrew/bin/node"
+        let waifus = "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs"
+        let list = [
+            process(400, path: node, args: ["node", waifus, "remote", "--foreground", "--no-open", "--data-root", "/Users/me/.waifus"],
+                    cwd: "/Users/me/Discord Waifus", tcp: [3888], started: epoch + 1),
+            process(410, path: node, args: ["node", waifus, "start", "--foreground", "--data-root", "/Users/me/.waifus"],
+                    cwd: "/Users/me/Discord Waifus", tcp: [61010], started: epoch),
+            process(420, path: node, args: ["node", "/Users/me/site/node_modules/.bin/vite"], tcp: [5173], started: epoch - 1),
+        ]
+        let result = rows(list)
+        XCTAssertEqual(result.map(\.name), ["waifus remote", "waifus start", "vite"])
+        XCTAssertEqual(result.map(\.package), ["@waifucave/discord-waifus", "@waifucave/discord-waifus", nil],
+                       "a package its name already says is not repeated")
+        XCTAssertEqual(IslandServers.detailLine(result[0], hovered: false), "Discord Waifus · @waifucave/discord-waifus")
+        XCTAssertEqual(IslandServers.detailLine(result[0], hovered: true), "~/Discord Waifus · @waifucave/discord-waifus")
+        XCTAssertEqual(IslandServers.detailLine(result[2], hovered: false), "code")
+
+        // No subcommand, or a first argument that is a path or a file: the command alone.
+        XCTAssertEqual(name(node, ["node", waifus]), "waifus")
+        XCTAssertEqual(name(node, ["node", waifus, "--data-root", "/Users/me/.waifus"]), "waifus")
+        XCTAssertEqual(name(node, ["node", "bin/serve.js", "./public"]), "serve")
+        XCTAssertEqual(name(node, ["node", "/Users/me/api/bin/www"]), "www")
+        XCTAssertEqual(name(node, ["node", "/Users/me/.npm/_npx/4f2a/node_modules/.bin/video-extract-mcp"]), "video-extract-mcp")
+        // A venv's bin, any interpreter.
+        XCTAssertEqual(name("/Users/me/svc/.venv/bin/python3", ["python3", "/Users/me/svc/.venv/bin/uvicorn", "app:app", "--port", "8000"]),
+                       "uvicorn app:app")
+        // An entry file in bin/ is still its package's folder.
+        XCTAssertEqual(name(node, ["node", "/Users/me/api/bin/index.js"]), "api")
+        XCTAssertTrue(IslandServers.isSubcommand("remote"))
+        XCTAssertFalse(IslandServers.isSubcommand("server.js"))
+        XCTAssertFalse(IslandServers.isSubcommand("/tmp/x"))
     }
 
     func testProcArgsAreParsed() {
