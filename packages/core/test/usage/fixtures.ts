@@ -140,7 +140,7 @@ export function fakeClaude(dir: string, mode: FakeClaudeMode, outside = "/nonexi
       limits: [
         { group: "session", is_active: true, kind: "session", percent: 23, resets_at: resetsAt, scope: null, severity: "normal" },
         { group: "weekly", is_active: true, kind: "weekly_all", percent: 61, resets_at: new Date(Date.now() + 3 * 86400_000).toISOString(), scope: null, severity: "normal" },
-        { group: "weekly", is_active: true, kind: "weekly_scoped", percent: 80, resets_at: new Date(Date.now() + 3 * 86400_000).toISOString(), scope: { model: "opus" }, severity: "warning" },
+        { group: "weekly", is_active: true, kind: "weekly_scoped", percent: 80, resets_at: new Date(Date.now() + 3 * 86400_000).toISOString(), scope: { model: { display_name: "Fable" }, surface: null }, severity: "warning" },
       ],
     },
     session: { note: "SECRET-ANSWER-91bc" },

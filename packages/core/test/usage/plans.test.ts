@@ -212,7 +212,7 @@ describe("the Claude Code plan", () => {
     const plan = await withEnv({ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" }, () => svc.claudeCodePlan());
     expect(plan.source).toBe("claude-cli");
     expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.scope, w.stale])).toEqual([
-      ["five_hour", 23, undefined, false], ["weekly", 61, undefined, false], ["weekly_scoped", 80, "opus", false],
+      ["five_hour", 23, undefined, false], ["weekly", 61, undefined, false], ["weekly_scoped", 80, "Fable", false],
     ]);
     expect(JSON.stringify(plan).includes("SECRET")).toBe(false);
     const m = marks(fake.markerPath);

@@ -74,9 +74,17 @@ function claudeKind(kind: string | undefined, group: string | undefined): { kind
   return { kind: "other" };
 }
 
+/** A limit's model scope. Claude Code's `/usage` (2.1.293, seen live 2026-10-18) nests it:
+ *  `scope: {model: {display_name: "Fable"}, surface: null}`; a bare string or `{model: "…"}` is read too. */
 function scopeOf(v: unknown): string | undefined {
   if (typeof v === "string") return shortStr(v, 60);
-  if (typeof v === "object" && v !== null) return shortStr((v as Record<string, unknown>).model, 60);
+  if (typeof v !== "object" || v === null) return undefined;
+  const model = (v as Record<string, unknown>).model;
+  if (typeof model === "string") return shortStr(model, 60);
+  if (typeof model === "object" && model !== null) {
+    const m = model as Record<string, unknown>;
+    return shortStr(m.display_name, 60) ?? shortStr(m.name, 60) ?? shortStr(m.id, 60);
+  }
   return undefined;
 }
 
