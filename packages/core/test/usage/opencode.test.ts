@@ -165,13 +165,47 @@ describe("OpenCode in the usage DB", () => {
     clock.now += 11 * 60_000;
     await svc.ingest(true);
     expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 190], [tomorrow, 3]]);
-    // 00:27: the same again — final. Whatever comes later for that day is never read.
+    // 00:27: the same again, ten minutes on — yet the day ended under 2 h ago: still provisional (a long tool run can
+    // keep that message quiet, then add to it).
     clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    // 00:40: it did — yesterday grows again.
+    fake.write({ daily: { 0: [m("b", 3)], 1: [m("a", 250)] } });
+    clock.now += 13 * 60_000;
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 250], [tomorrow, 3]]);
+    // 02:05: the same pair read twice and the day over two hours since — final. Whatever comes later is never read.
+    clock.now = localDayStart(tomorrow) + 2 * 3_600_000 + 5 * 60_000;
     await svc.ingest(true);
     fake.write({ daily: { 0: [m("b", 3)], 1: [m("a", 999)] } });
     clock.now += 11 * 60_000;
     await svc.ingest(true);
-    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 190], [tomorrow, 3]]);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 250], [tomorrow, 3]]);
+  }, 30_000);
+
+  test("the same pair read twice ten minutes apart at 00:20 stays provisional; at 02:05 it is final", async () => {
+    const tomorrow = dayMinus(TODAY, -1);
+    const fake = fakeOpencode(tempDir("bin"), { daily: { 0: [], 1: [m("a", 40)] } });
+    const clock = { now: localDayStart(tomorrow) + 10 * 60_000 };
+    const { db, svc } = service({ opencodeExecutable: () => fake.path, clock });
+    const twos = () => runs(fake.markerPath).filter((a) => a === opencodeDaysArgs(2).join(" ")).length;
+    await svc.ingest(true);
+    clock.now += 10 * 60_000; // 00:20
+    await svc.ingest(true);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 40]]);
+    // Not final: the next batch reads it again.
+    clock.now += 11 * 60_000;
+    const before = twos();
+    await svc.ingest(true);
+    expect(twos()).toBe(before + 1);
+    // 02:05: read the same again, and the day is over two hours gone — final; never read again.
+    clock.now = localDayStart(tomorrow) + 2 * 3_600_000 + 5 * 60_000;
+    await svc.ingest(true);
+    const final = twos();
+    clock.now += 11 * 60_000;
+    await svc.ingest(true);
+    expect(twos()).toBe(final);
+    expect(rows(db).map((r) => [r.day, r.input])).toEqual([[TODAY, 40]]);
   }, 30_000);
 
   test("the backfill: every active day by differences, newest first, under a spawn budget — resumed next pass until done", async () => {

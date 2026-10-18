@@ -8,7 +8,7 @@ import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRoll
 import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import {
-  OPENCODE_ALL_ARGS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
+  OPENCODE_ALL_ARGS, OPENCODE_SETTLE_AFTER_DAY_MS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
   opencodeDifference, opencodeFingerprint, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
 import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
@@ -424,7 +424,8 @@ export class UsageService {
    *    the wider run and not the narrower, in that day's row AND today's — and the day waits for the next batch; the
    *    other days are judged on their own.
    *  - A day is FINALIZED (written, `done`, never asked again; the last two weeks kept) only when two batches at least
-   *    half a throttle apart read the same pair (`reads`: the day's last fingerprint and when). OpenCode files a message
+   *    half a throttle apart read the same pair (`reads`: the day's last fingerprint and when) AND it ended at least
+   *    `OPENCODE_SETTLE_AFTER_DAY_MS` (2 h) ago — a spanning message may go quiet for a long tool run first. OpenCode files a message
    *    under the day it STARTED: one begun at 23:58 and still running after midnight keeps growing yesterday's pair, which
    *    is never finalized short. Until then each read is written as the day's rows (provisional).
    * At most `opencodeSpawnBudget` runs per batch: out of budget = `more` (the next pass skips both throttles; a day read
@@ -507,7 +508,12 @@ export class UsageService {
       const diff = opencodeDifference(wide, narrow);
       const fp = opencodeFingerprint(diff);
       writes.push({ day, rows: opencodeDayRecords(diff, day, localNoon(day, tz), this.deps.pricer) });
-      if (prior !== undefined && prior.fp === fp) { done.add(day); reads.delete(day); } else reads.set(day, { fp, at: now });
+      // Final only when it read the same twice AND the day ended two hours ago or more (a message begun before midnight
+      // can sit quiet through a long tool run, then add tokens to the day it started).
+      const settled = now >= localDayEnd(day, tz) + OPENCODE_SETTLE_AFTER_DAY_MS;
+      if (prior !== undefined && prior.fp === fp) {
+        if (settled) { done.add(day); reads.delete(day); }
+      } else reads.set(day, { fp, at: now });
     }
     // Every `--days` run counts from the local midnight of its moment: across a midnight the differences are wrong. (Only
     // then is the throttle reset: a failed run keeps it.)

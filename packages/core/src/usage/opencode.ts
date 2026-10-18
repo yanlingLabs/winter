@@ -18,6 +18,9 @@ import { probeEnv, runLines } from "./spawn-lines";
 export const opencodeDaysArgs = (days: number): string[] => ["stats", "--standalone", "--days", String(days), "--models", "--cost", "--json"];
 export const OPENCODE_ALL_ARGS = ["stats", "--standalone", "--all", "--json"] as const;
 export const OPENCODE_STATS_TIMEOUT_MS = 15_000;
+/** A past day is never final before this long after its end (local midnight): a message begun before midnight can go
+ *  quiet through a long tool run and still add tokens to the day it started. */
+export const OPENCODE_SETTLE_AFTER_DAY_MS = 2 * 3_600_000;
 
 export interface OpencodeModelTotals {
   /** `<providerID>/<id>` (qualified: the same model on another provider is another model). */
