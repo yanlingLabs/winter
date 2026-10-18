@@ -4,11 +4,12 @@ import { CoworkError } from "./types";
 /*
  * Cowork session profile: the DRAFT system prompt and the concrete tool allowlist.
  *
- * DATA AND PURE FUNCTIONS ONLY. UNWIRED: nothing under src/ imports this module, it has no barrel export, and
- * Cowork stays refused in production (docs/cowork-status.md). It exists so the owner can read, edit and approve
- * the text and the tool list BEFORE any session creation or runtime mode consumes them. An anti-wiring test pins
- * the absence of importers. Whoever wires it later must also satisfy the contracts below; nothing here enforces
- * them at runtime.
+ * DATA AND PURE FUNCTIONS ONLY. WIRED BEHIND THE REFUSAL (session door D2, 2026-10-18): exactly one src module
+ * imports it, runtime-sdk/mode-options.ts, whose `coworkToolsFor` only the guest runtime supervisor calls, and nothing
+ * in src constructs a supervisor. It has no barrel export, and Cowork stays refused in production
+ * (docs/cowork-status.md): `session.create {mode: "cowork"}` answers `unsupported_topology` while no session door
+ * exists. An anti-wiring test pins all of that. Whoever wires it further must also satisfy the contracts below;
+ * nothing here enforces them at runtime.
  *
  * Source of every row: docs/cowork-spec.md, docs/cowork-execution-contracts.md and docs/cowork-host-protocol.md.
  * Each row cites a heading (`spec#`, `contracts#`, `protocol#`), a code symbol (`code#<path>#<symbol>`) or, for a
@@ -74,7 +75,8 @@ export interface CoworkAllowedTool {
   readonly brokers: readonly CoworkBroker[];
   /** Offered only while the host reports this condition. Absent: always. */
   readonly when?: CoworkToolCondition;
-  /** Every listed class must be in the effective ceiling. Mirrors confinedToolVisibility for the four tools it covers. */
+  /** Every listed class must be in the effective ceiling. For Read, Edit, Write and Bash this IS the guest launch's
+   *  visibility: confinedToolVisibility takes the offered list and derives nothing. */
   readonly classes?: readonly CoworkToolClass[];
   /** Readiness keys that must be declared before the tool is offered. */
   readonly needs?: readonly CoworkReadinessKey[];
@@ -166,7 +168,7 @@ const VISIBILITY = "code#packages/core/src/cowork/guest-runtime.ts#confinedToolV
 const PEER_AUTHORITY = "code#packages/core/src/cowork/messaging-authority.ts#mayContactCoworkPeer";
 
 // SETTLED: D13 — owner decision 2026-10-16. The ceiling vocabulary is live (read, write, execute); `classes` below
-// mirrors confinedToolVisibility for Read, Edit, Write and Bash and extends it to Glob, Grep, LSP (read),
+// gates Read, Edit, Write and Bash (the guest launch takes the offered list as is) and extends it to Glob, Grep, LSP (read),
 // NotebookEdit (read and write, as Edit) and Monitor, Workflow (execute).
 export const COWORK_TOOL_ALLOWLIST = freezeAll<CoworkAllowedTool>([
   // --- Files and shell: the guest tool compartment ------------------------------------------------------------------
@@ -537,6 +539,38 @@ export function coworkOfferedTools(input: CoworkToolInputs): string[] {
   const deferred = mcp || COWORK_TOOL_ALLOWLIST.some((row) => row.deferred === true && offered.has(row.name));
   for (const row of COWORK_TOOL_ALLOWLIST) if (row.when === "tool-search-needed" && admitted(row) && toolSearch && deferred) offered.add(row.name);
   return [...offered].sort();
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The guest runtime profile's cap (session door D2; docs/research/2026-10-18-cowork-session-door-design.md 4.2).
+// ---------------------------------------------------------------------------------------------------------
+
+/**
+ * The most each guest runtime profile can carry, sorted. `host-query-v1` admits `tools` within Read, Write, Edit and
+ * Bash only (Edit only beside both Read and Write), no MCP server, and no host-message, question or task control
+ * subtype: agent SDK `packages/runtime/src/guest/linux-host-query-profile.ts` at main 68e57c646f23, mirrored literally
+ * because the SDK this repository pins predates the profile. So every other allowlisted name, the host brokers
+ * included (SendMessage, ListAgents, TaskStop, AskUserQuestion, the Task tools, TaskOutput), is withheld by profile and
+ * the prompt never names it (gap G4, owner decision 2026-10-18). The host-side brokers stay in the allowlist for a
+ * profile that can carry them.
+ */
+export const COWORK_GUEST_PROFILE_TOOLS = Object.freeze({ "host-query-v1": Object.freeze(["Bash", "Edit", "Read", "Write"] as const) });
+export type CoworkGuestProfile = keyof typeof COWORK_GUEST_PROFILE_TOOLS;
+
+/**
+ * The whole withheld list for an incarnation on `profile`, sorted: the host's own withholdings, every allowlisted name
+ * the profile cannot carry, and Edit whenever Read or Write is withheld (the profile refuses Edit without both).
+ * Folding the cap into `withheldTools` keeps ONE offered-tools function for the prompt and the tool list.
+ * Throws CoworkError("invalid_request") on an unknown profile or withheld name.
+ */
+export function coworkProfileWithheldTools(profile: CoworkGuestProfile, withheld: readonly string[] = []): string[] {
+  if (typeof profile !== "string" || !Object.hasOwn(COWORK_GUEST_PROFILE_TOOLS, profile) || !Array.isArray(withheld)) throw new CoworkError("invalid_request");
+  const carried: ReadonlySet<string> = new Set(COWORK_GUEST_PROFILE_TOOLS[profile]);
+  const out = new Set<string>();
+  for (const name of withheld) { if (typeof name !== "string" || !ALLOWED_NAMES.has(name)) throw new CoworkError("invalid_request"); out.add(name); }
+  for (const row of COWORK_TOOL_ALLOWLIST) if (!carried.has(row.name)) out.add(row.name);
+  if (out.has("Read") || out.has("Write")) out.add("Edit");
+  return [...out].sort();
 }
 
 // ---------------------------------------------------------------------------------------------------------

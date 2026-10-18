@@ -344,11 +344,14 @@ describe("tool exposure", () => {
     expect(offered()).toEqual(expect.arrayContaining(["WebFetch", "Search"]));
   });
 
-  test("the ceiling classes gate the file and shell tools, and agree with the guest launch's own visibility (the real function)", () => {
+  test("the ceiling classes gate the file and shell tools, and the guest launch takes exactly that list (the real function)", () => {
     const covered = ["Bash", "Edit", "Read", "Write"];
     for (let mask = 0; mask < 8; mask++) {
-      const classes = ALL_CLASSES.filter((_name, bit) => mask & (1 << bit));
-      expect(offered({ toolClasses: classes }).filter((name) => covered.includes(name))).toEqual([...confinedToolVisibility(classes)].sort());
+      const classes = ALL_CLASSES.filter((_name, bit) => mask & (1 << bit)), has = (name: string) => classes.includes(name);
+      const files = offered({ toolClasses: classes }).filter((name) => covered.includes(name));
+      expect(files).toEqual([has("execute") && "Bash", has("read") && has("write") && "Edit", has("read") && "Read", has("write") && "Write"].filter((name): name is string => typeof name === "string"));
+      // Session door D2: the launch derives nothing from the ceiling; it takes the offered list in the guest's order.
+      expect([...confinedToolVisibility(files)].sort()).toEqual(files);
     }
     expect(offered({ toolClasses: [] })).not.toContain("Read");
     expect(offered({ toolClasses: ["read"] })).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "LSP"]));
@@ -678,24 +681,37 @@ describe("prompt inputs cannot inject instructions", () => {
   });
 });
 
-// ----------------------------------------------------------------------------------------- unwired
+// --------------------------------------------------------------------------- wired behind the refusal
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map((entry) => join(entry.parentPath, entry.name));
 }
 
-test("anti-wiring: no src file imports the profile, it has no barrel export, and it imports nothing but types and the error class", () => {
+test("anti-wiring, wired behind the refusal: one src importer (mode-options), whose Cowork functions only the unconstructed guest supervisor calls; no barrel export; it imports nothing but types and the error class", () => {
   const packages = root("packages");
   expect(existsSync(MODULE)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap((entry) => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100);
   expect(sources).toContain(MODULE);
+  const MODE_OPTIONS_FILE = root("packages", "core", "src", "runtime-sdk", "mode-options.ts"), GUEST_RUNTIME = root("packages", "core", "src", "cowork", "guest-runtime.ts");
+  expect(sources).toContain(MODE_OPTIONS_FILE);
+  // Session door D2 (2026-10-18): mode-options.ts may name the module and the two functions it composes, nothing else.
+  const allowedIn = (file: string): ReadonlySet<string> => file === MODE_OPTIONS_FILE ? new Set(["session-profile", "coworkOfferedTools", "coworkProfileWithheldTools"]) : new Set();
   for (const file of sources.filter((candidate) => candidate !== MODULE)) {
     const content = readFileSync(file, "utf8");
     for (const needle of ["session-profile", "COWORK_TOOL_ALLOWLIST", "COWORK_TOOL_DENYLIST", "COWORK_UNBUILT_CAPABILITY_SERVERS", "COWORK_HOST_ACCESS_REFUSALS", "COWORK_DYNAMIC_TOOL_FAMILIES",
-      "COWORK_PROMPT_LIMITS", "COWORK_DECISIONS", "COWORK_READINESS", "coworkOfferedTools", "coworkSystemPrompt"])
-      expect(`${basename(file)}:${needle}:${content.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
+      "COWORK_PROMPT_LIMITS", "COWORK_DECISIONS", "COWORK_READINESS", "coworkOfferedTools", "coworkSystemPrompt", "COWORK_GUEST_PROFILE_TOOLS", "coworkProfileWithheldTools"])
+      expect(`${basename(file)}:${needle}:${content.includes(needle)}`).toBe(`${basename(file)}:${needle}:${allowedIn(file).has(needle)}`);
   }
+  const imports = [...MODE_OPTIONS.matchAll(/^import [^;]*session-profile[^;]*;$/gm)].map((match) => match[0]);
+  expect(imports).toEqual(['import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkToolInputs } from "../cowork/session-profile";']);
+  // Who reaches the composition: the guest runtime supervisor alone, and nothing in src constructs a supervisor.
+  // (The profile's own header names `coworkToolsFor` in prose; code, not comments, is judged here.)
+  const code = (file: string) => readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const callers = sources.filter((file) => file !== MODE_OPTIONS_FILE && /\b(coworkToolsFor|coworkGuestToolInputs|COWORK_CAPABILITY_SERVERS)\b/.test(code(file)));
+  expect(callers).toEqual([GUEST_RUNTIME]);
+  expect(code(GUEST_RUNTIME)).not.toMatch(/\b(coworkGuestToolInputs|COWORK_CAPABILITY_SERVERS)\b/);
+  expect(sources.filter((file) => /new\s+CoworkGuestRuntimeSupervisor\b/.test(code(file)))).toEqual([]);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/session-profile|from "\.\/cowork/);
   const own = readFileSync(MODULE, "utf8");
@@ -703,8 +719,8 @@ test("anti-wiring: no src file imports the profile, it has no barrel export, and
   expect(own).not.toMatch(/from "@yanlinglabs\/winter-(agent|runtime)-sdk/);
   expect(own).not.toMatch(/\b(process\.env|Bun\.|readFileSync|writeFileSync|fetch\()/);
   expect(Object.keys(profile).sort()).toEqual([
-    "COWORK_DECISIONS", "COWORK_DYNAMIC_TOOL_FAMILIES", "COWORK_HOST_ACCESS_REFUSALS", "COWORK_PROMPT_LIMITS", "COWORK_READINESS", "COWORK_TOOL_ALLOWLIST", "COWORK_TOOL_DENYLIST",
-    "COWORK_UNBUILT_CAPABILITY_SERVERS", "coworkOfferedTools", "coworkSystemPrompt",
+    "COWORK_DECISIONS", "COWORK_DYNAMIC_TOOL_FAMILIES", "COWORK_GUEST_PROFILE_TOOLS", "COWORK_HOST_ACCESS_REFUSALS", "COWORK_PROMPT_LIMITS", "COWORK_READINESS", "COWORK_TOOL_ALLOWLIST", "COWORK_TOOL_DENYLIST",
+    "COWORK_UNBUILT_CAPABILITY_SERVERS", "coworkOfferedTools", "coworkProfileWithheldTools", "coworkSystemPrompt",
   ]);
 });
 

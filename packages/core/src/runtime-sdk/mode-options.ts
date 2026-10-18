@@ -23,6 +23,8 @@ import { hostStorageReadPatterns, hostStorageWriteRoots, type HostStorageFenceOp
 import { providerFor, testProviderNameFor } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import type { CapabilityServerKey } from "../capabilities/names";
+import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkToolInputs } from "../cowork/session-profile";
 
 /**
  * **The six Winter policies → Winter's `PermissionMode`** (P8b-7, AMENDED by the whole-branch
@@ -1153,6 +1155,38 @@ export function toolSurfaceViolations(initTools: readonly string[], allowed: rea
   if (allowed === undefined) return [];
   const ok = new Set(allowed);
   return initTools.filter((name) => !ok.has(name) && !plainNames.has(name) && !name.startsWith("mcp__"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Cowork (session door D2): the guest's tool surface. WIRED BEHIND THE REFUSAL: only the guest runtime supervisor
+// (cowork/guest-runtime.ts) calls `coworkToolsFor`, nothing in src constructs a supervisor, and
+// `session.create {mode: "cowork"}` still answers `unsupported_topology` in production. Cowork never enters
+// `toolsFor` or CAPABILITY_TOOL_MODES, which stay typed for the three runnable modes.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** No daemon capability server is built for a Cowork incarnation: session-profile lists every key as unbuilt in v1,
+ *  and the host-query guest refuses a non-empty `mcpServers`. */
+export const COWORK_CAPABILITY_SERVERS: readonly CapabilityServerKey[] = Object.freeze([]);
+
+export interface CoworkGuestToolInputs extends CoworkToolInputs {
+  /** The guest runtime profile the pinned image runs. Its cap is folded into `withheldTools`. */
+  readonly profile: CoworkGuestProfile;
+}
+
+/**
+ * **The ONE normalisation the prompt facts and the tool list both start from** (design 4.2): the profile's cap and
+ * its Edit rule folded into `withheldTools`, and no MCP server (strict and empty; `COWORK_CAPABILITY_SERVERS`).
+ * A prompt built from `{...coworkGuestToolInputs(input), ...}` names exactly the tools `coworkToolsFor(input)` offers.
+ */
+export function coworkGuestToolInputs(input: CoworkGuestToolInputs): CoworkToolInputs {
+  const { profile, ...rest } = input;
+  return { ...rest, exposure: { ...rest.exposure, mcpServers: false }, withheldTools: coworkProfileWithheldTools(profile, rest.withheldTools ?? []) };
+}
+
+/** The tools a Cowork guest incarnation is offered, sorted: `coworkOfferedTools` over the normalised inputs, so always
+ *  within the profile's set. Empty until the host declares `guest-compartment`. */
+export function coworkToolsFor(input: CoworkGuestToolInputs): string[] {
+  return coworkOfferedTools(coworkGuestToolInputs(input));
 }
 
 /** The canonical live Code permission fields, shared by runtime launch and trusted host admission. */
