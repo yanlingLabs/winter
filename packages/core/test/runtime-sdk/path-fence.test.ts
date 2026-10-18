@@ -31,12 +31,12 @@ describe("the path fence hook", () => {
   const home = "/Users/x/.winter";
   const root = "/Users/x/code/app";
 
-  test("a protected write: ask in code, deny in dispatch and chat", async () => {
+  test("a protected write: ask in code and dispatch (user ruling 2026-10-17), deny in chat", async () => {
     const input = { file_path: `${root}/.winter/skills/deploy/SKILL.md`, content: "x" };
-    expect(decisionOf(await call(fenceOf({ home, cwd: root, mode: "code", trustedProjectRoot: () => root }), "Write", input))).toBe("ask");
-    for (const mode of ["dispatch", "chat"] as const) {
-      expect(decisionOf(await call(fenceOf({ home, cwd: root, mode, trustedProjectRoot: () => root }), "Write", input))).toBe("deny");
+    for (const mode of ["code", "dispatch"] as const) {
+      expect(decisionOf(await call(fenceOf({ home, cwd: root, mode, trustedProjectRoot: () => root }), "Write", input))).toBe("ask");
     }
+    expect(decisionOf(await call(fenceOf({ home, cwd: root, mode: "chat", trustedProjectRoot: () => root }), "Write", input))).toBe("deny");
     // the sdk tier needs no trusted project
     expect(decisionOf(await call(fenceOf({ home, cwd: root, mode: "code" }), "Edit", { file_path: `${home}/sdk/WINTER.md` }))).toBe("ask");
   });
@@ -320,11 +320,11 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     for (const cmd of [...reads, ...outside]) expect(await run(cmd)).not.toContain("ask");
   });
 
-  test("the bridge never auto-allows one: bypass → card, dont-ask/dispatch → deny; a read runs", async () => {
+  test("the bridge never auto-allows one: bypass/dispatch → card, dont-ask/chat → deny; a read runs", async () => {
     const home = real("winter-fr2-home-");
     const root = real("winter-fr2-root-");
     const ctx = (): Parameters<CanUseTool>[2] => ({ signal: new AbortController().signal, toolUseID: `tu-${Math.random()}`, requestId: "r" } as Parameters<CanUseTool>[2]);
-    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" = "code") => {
+    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" | "chat" = "code") => {
       const approvals = new ApprovalBroker();
       return { approvals, canUse: canUseToolFor({ sessionId: "s_1", mode, policy, approvals, questions: new QuestionBroker(), gate: new PermissionGate(), emit: () => {}, log: silent, home, cwd: root }) };
     };
@@ -335,7 +335,14 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     b.approvals.resolve("s_1", b.approvals.list("s_1")[0]!.callId, false, "test");
     expect((await pending)?.behavior).toBe("deny");
     expect((await mk("dont-ask").canUse("Bash", { command: "cp a.md sub/.winter/commands/" }, ctx()))?.behavior).toBe("deny");
-    expect((await mk("auto", "dispatch").canUse("Bash", { command: "echo x > .winter/rules/r.md" }, ctx()))?.behavior).toBe("deny");
+    // Dispatch respects its policy like code (user ruling 2026-10-17): a card; a stale chat row: the typed deny.
+    const d = mk("auto", "dispatch");
+    const dp = d.canUse("Bash", { command: "echo x > .winter/rules/r.md" }, ctx());
+    await new Promise((r) => setTimeout(r, 10));
+    expect(d.approvals.list("s_1")).toHaveLength(1);
+    d.approvals.resolve("s_1", d.approvals.list("s_1")[0]!.callId, false, "test");
+    expect((await dp)?.behavior).toBe("deny");
+    expect((await mk("auto", "chat").canUse("Bash", { command: "echo x > .winter/rules/r.md" }, ctx()))?.behavior).toBe("deny");
     expect((await mk("bypass").canUse("Bash", { command: "cat .winter/skills/x/SKILL.md" }, ctx()))?.behavior).toBe("allow");
   });
 });
@@ -539,11 +546,11 @@ describe("Bash writes through an existing link to a protected directory", () => 
     expect(bashProtectedWriteHit("sed -i '' s/a/b/ s/x/SKILL.md", { cwd: work })).toBe(".winter/skills");
   });
 
-  test("the bridge (third layer) resolves a relative link from its session cwd: bypass → card, dispatch → deny", async () => {
+  test("the bridge (third layer) resolves a relative link from its session cwd: bypass/dispatch → card, chat → deny", async () => {
     const { work } = project();
     const home = real("winter-link-bridge-home-");
     const ctx = (): Parameters<CanUseTool>[2] => ({ signal: new AbortController().signal, toolUseID: `tu-${Math.random()}`, requestId: "r" } as Parameters<CanUseTool>[2]);
-    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" = "code") => {
+    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" | "chat" = "code") => {
       const approvals = new ApprovalBroker();
       return { approvals, canUse: canUseToolFor({ sessionId: "s_1", mode, policy, approvals, questions: new QuestionBroker(), gate: new PermissionGate(), emit: () => {}, log: silent, home, cwd: work }) };
     };
@@ -553,7 +560,13 @@ describe("Bash writes through an existing link to a protected directory", () => 
     expect(b.approvals.list("s_1")).toHaveLength(1);
     b.approvals.resolve("s_1", b.approvals.list("s_1")[0]!.callId, false, "test");
     expect((await pending)?.behavior).toBe("deny");
-    expect((await mk("auto", "dispatch").canUse("Bash", { command: "echo x > ./s/../rules/r.md" }, ctx()))?.behavior).toBe("deny");
+    const d = mk("auto", "dispatch");
+    const dp = d.canUse("Bash", { command: "echo x > ./s/../rules/r.md" }, ctx());
+    await new Promise((r) => setTimeout(r, 10));
+    expect(d.approvals.list("s_1")).toHaveLength(1);
+    d.approvals.resolve("s_1", d.approvals.list("s_1")[0]!.callId, false, "test");
+    expect((await dp)?.behavior).toBe("deny");
+    expect((await mk("auto", "chat").canUse("Bash", { command: "echo x > ./s/../rules/r.md" }, ctx()))?.behavior).toBe("deny");
     expect((await mk("bypass").canUse("Bash", { command: "echo x > n/todo.md" }, ctx()))?.behavior).toBe("allow");
   });
 

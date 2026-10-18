@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, UsageSummaryParams, UsageSeriesParams, UsageSubscriptionsSetParams, UsageSubscriptionsRemoveParams, UsageSetTrackingParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -86,6 +86,9 @@ import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { IslandClient, IslandRegistry } from "../island/registry";
+import type { IslandActivity } from "../island/activity";
+import type { IslandUsageRegistry } from "../island/usage";
+import type { UsageService } from "../usage/service";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
@@ -133,7 +136,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, computerUseMirrorFrom, type McpServerSettingsEntry } from "../settings";
+import { DEFAULT_PROVIDER, usageTrackingFrom, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, computerUseMirrorFrom, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -526,6 +529,13 @@ export interface IpcServerOptions {
   /** The Winter island (`island/registry.ts`): every pending card across sessions (`island.pending`), and the island
    *  clients — a harness hello advertising `CLIENT_CAPABILITY_ISLAND` — it tells when that set changes. */
   island?: IslandRegistry;
+  /** The Winter island's activity (`island/activity.ts`, phase 2): computer use, turn results and watches across
+   *  sessions (`island.activity`), told to the same island clients (`island.activityChanged`). */
+  islandActivity?: IslandActivity;
+  /** The island's Usage tab (`island/usage.ts`, `island.usage`). */
+  islandUsage?: IslandUsageRegistry;
+  /** Usage and cost tracking (`usage/service.ts`, `usage.*`; `docs/claude/usage.md`). */
+  usage?: UsageService;
   tasks?: TaskStore;         // session task lists; task.list
   plans?: PlanBridge;        // in-flight exit_plan_mode plans; plan.respond
   peripheral?: PeripheralBroker; // lease machinery; peripheral.* verbs (Phase 2f)
@@ -2016,7 +2026,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
-        if (socket.data.islandClient) opts.island?.removeClient(socket.data.islandClient);
+        if (socket.data.islandClient) {
+          opts.island?.removeClient(socket.data.islandClient);
+          opts.islandActivity?.removeClient(socket.data.islandClient);
+        }
         // ComputerV2 Phase 2: the connection that carried Winter.app's browser link is gone — the built-in browser
         // reads "Winter isn't running" until the app attaches again (every command in flight fails `disconnected`).
         opts.browserLink?.connectionClosed(socket.data);
@@ -2137,9 +2150,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       socket.data.tty = p.tty ?? null;
       if (p.role === "harness" && p.capabilities?.includes(CLIENT_CAPABILITY_ISLAND) === true && opts.island) {
         const writer = socket.data.writer;
-        const client: IslandClient = { notify: () => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: {} })); } };
+        const client: IslandClient = {
+          notify: (change = {}) => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_CHANGED_NOTIFICATION, params: change })); },
+          notifyActivity: () => { writer.enqueue(encodeLine({ jsonrpc: "2.0", method: ISLAND_ACTIVITY_CHANGED_NOTIFICATION, params: {} })); },
+        };
         socket.data.islandClient = client;
         opts.island.addClient(client);
+        opts.islandActivity?.addClient(client);
       }
       // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
       // omits the field, and the client then falls back).
@@ -3547,11 +3564,84 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(IslandPendingParams, params);
         return { items: opts.island?.list() ?? [] };
       }
+      case METHODS.islandActivity: {
+        // The Winter island's activity: LOCAL harness clients only, like `island.pending`.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.activity is available to local clients only");
+        parseParams(IslandActivityParams, params);
+        return opts.islandActivity?.list() ?? { computerUse: [], results: [], watches: [] };
+      }
       case METHODS.islandShown: {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.shown is available to local clients only");
         const p = parseParams(IslandShownParams, params);
         opts.island?.markShown(p.ids);
         return { ok: true };
+      }
+      case METHODS.islandHosts: {
+        // The island's Sessions tab: who is attached where (a terminal's tty included). LOCAL harness clients only.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.hosts is available to local clients only");
+        parseParams(IslandHostsParams, params);
+        return {
+          sessions: hub.attachedSessionIds().map((sessionId) => ({
+            sessionId,
+            hosts: hub.attachedHarnesses(sessionId).map((h) => ({
+              clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
+            })),
+          })),
+        };
+      }
+      case METHODS.islandUsage: {
+        // The island's Usage tab: what the daemon already knows about usage and limits. LOCAL harness clients only.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.usage is available to local clients only");
+        const p = parseParams(IslandUsageParams, params);
+        if (opts.islandUsage !== undefined) return opts.islandUsage.snapshot(p.sessionId);
+        const state = opts.quota?.state() ?? { kind: "ok" as const };
+        return { windows: [], background: { ...state, ...(opts.quota?.usage() ?? { inputTokens: 0, outputTokens: 0 }) } };
+      }
+      case METHODS.usageSummary:
+      case METHODS.usageSeries:
+      case METHODS.usageSubscriptionsList:
+      case METHODS.usageSubscriptionsSet:
+      case METHODS.usageSubscriptionsRemove:
+      case METHODS.usageSetTracking: {
+        // Usage and cost tracking (`docs/claude/usage.md`): the user's own usage across Winter, Codex and Claude Code.
+        // LOCAL harness clients only — never a phone, never a plugin.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to local clients only`);
+        if (method === METHODS.usageSetTracking) {
+          const p = parseParams(UsageSetTrackingParams, params);
+          if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "usage.setTracking is not available on this server (no winterHome configured)");
+          const settingsPath = join(opts.winterHome, "settings.json");
+          const settings = loadSettings(settingsPath);
+          const next: Settings = {
+            ...settings,
+            usage: {
+              ...settings.usage,
+              ...(p.codex === undefined ? {} : { codex: { ...settings.usage?.codex, enabled: p.codex } }),
+              ...(p.claudeCode === undefined ? {} : { claudeCode: { ...settings.usage?.claudeCode, enabled: p.claudeCode } }),
+            },
+          };
+          saveSettings(settingsPath, next);
+          return { tracking: usageTrackingFrom(next) };
+        }
+        const usage = opts.usage;
+        if (usage === undefined) throw new RpcFailure(ERR.INTERNAL, "usage tracking is unavailable");
+        if (method === METHODS.usageSummary) {
+          const p = parseParams(UsageSummaryParams, params);
+          return await usage.summary(p.range, p.sources, { ...(p.plans === undefined ? {} : { plans: p.plans }) });
+        }
+        if (method === METHODS.usageSeries) {
+          const p = parseParams(UsageSeriesParams, params);
+          await usage.ingestWithin(1_500);
+          return usage.series(p.range, p.sources);
+        }
+        if (method === METHODS.usageSubscriptionsList) return { subscriptions: usage.subscriptions() };
+        if (method === METHODS.usageSubscriptionsSet) {
+          const p = parseParams(UsageSubscriptionsSetParams, params);
+          const { renewalMonth, id, ...rest } = p.subscription;
+          const saved = usage.setSubscription({ ...rest, ...(id === undefined ? {} : { id }), ...(renewalMonth === undefined ? {} : { renewalMonth }) });
+          return { subscription: saved, subscriptions: usage.subscriptions() };
+        }
+        const p = parseParams(UsageSubscriptionsRemoveParams, params);
+        return { removed: usage.removeSubscription(p.id), subscriptions: usage.subscriptions() };
       }
       case METHODS.elicitationUrl: {
         // WS-27: the full url of a PENDING card, for the local client about to open it — the url is
@@ -3766,7 +3856,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions have a fixed policy and cannot be changed — chat never asks permissions");
         }
         if (targetMode === "dispatch" && p.policy === "plan") {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "plan policy is not available for dispatch sessions — dispatch never asks permissions");
+          throw new RpcFailure(ERR.INVALID_PARAMS, "plan policy is not available for dispatch sessions — Dispatch cannot present a plan (exit_plan_mode is code-only)");
         }
         // The policy this session is on RIGHT NOW, read before the write, because the write may have
         // to be undone below. `meta()` throws for an unknown id exactly as `setApprovalPolicy` does,

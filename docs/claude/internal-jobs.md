@@ -42,5 +42,5 @@ Derived per read, never persisted: `provider-unsupported`, `no-credential` (pin 
 
 ## Gate, policies, memory, subagents
 
-- A call the gate cannot allow: a card in code via `canUseTool` (`runtime-sdk/approval-bridge.ts`), a typed deny in dispatch/chat, except a connector action ([mcp](./mcp.md)). Policies `plan | dont-ask | ask | accept-edits | auto | bypass` (`ApprovalPolicy`, protocol `methods.ts`) + chat's immutable `chat` (`agent/gate.ts`).
+- A call the gate cannot allow: a card in code and dispatch via `canUseTool` (`runtime-sdk/approval-bridge.ts`; dispatch respects its policy since 2026-10-17), a typed deny in chat, except a connector action ([mcp](./mcp.md)). Policies `plan | dont-ask | ask | accept-edits | auto | bypass` (`ApprovalPolicy`, protocol `methods.ts`) + chat's immutable `chat` (`agent/gate.ts`).
 - Memory is a MEMDIR of markdown (`agent/memory-dir.ts`); no memory tool. Subagents: no wall-clock timeout, a resettable progress-stall window (`CHILD_STALL_TIMEOUT_MS` 600 s; `settings.subagents.stallTimeoutMs` hot, `null`/`0` off).

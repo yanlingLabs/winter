@@ -70,6 +70,7 @@ struct IslandCard: Identifiable, Equatable {
         switch facts.mode {
         case "dispatch": return "Dispatch"
         case "chat": return "Chat"
+        case "cowork": return "Workspace"
         default: return facts.origin == "dispatch-child" ? "Dispatch task" : "Session"
         }
     }

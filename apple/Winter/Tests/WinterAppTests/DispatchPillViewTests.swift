@@ -330,14 +330,6 @@ final class DispatchPillViewTests: XCTestCase {
         XCTAssertTrue(pendingInteractionRecords(in: exchanges, inactive: ["e1"]).isEmpty)
     }
 
-    func testTwoCardsFloatAndTheRestWait() {
-        XCTAssertEqual(floatingCardSplit(0).shown, 0)
-        XCTAssertEqual(floatingCardSplit(1).shown, 1)
-        XCTAssertEqual(floatingCardSplit(2).waiting, 0)
-        XCTAssertEqual(floatingCardSplit(5).shown, DispatchPillMetrics.maxFloatingCards)
-        XCTAssertEqual(floatingCardSplit(5).waiting, 3)
-    }
-
     func testAPendingInteractionConvertsToItsRecord() {
         let record = interactionRecord(for: .question(callId: "q1", questions: [], childSessionId: "kid"))
         XCTAssertEqual(record.callId, "q1")

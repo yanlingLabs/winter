@@ -9,8 +9,12 @@
 //   - https only, a bounded url with no embedded credentials; anything else is declined without a card.
 //   - A card, never an automatic open: `accept` means the USER chose to open the link, and the client
 //     opens it (the Mac does). The daemon opens nothing.
-//   - It is a connector prompt (WS-26): it cards in code, chat and dispatch sessions alike, while a
-//     dispatch CHILD keeps its never-prompt rule and declines, as does a `dont-ask` session.
+//   - It is a connector prompt (WS-26): it cards in code, chat and dispatch sessions alike, and a
+//     `dont-ask` session declines it. A dispatch CHILD declines it too: its approvals and questions are
+//     relayed to its coordinator (`agent/dispatch-children.ts`), but a link request is not, so its card
+//     would land only on the child's own log, behind the Dispatch pill that does not show it. (Dispatch
+//     itself respects its policy since the user ruling of 2026-10-17; this decline is about the relay,
+//     not a never-prompt rule.)
 //   - The url may carry a one-time code: it is never PERSISTED (the card carries its host and origin)
 //     and no log line names more than its origin. The broker holds it in memory while the card is
 //     pending, and a local client about to open it asks for it (`elicitation.url`).
@@ -155,7 +159,7 @@ function displayMessage(message: unknown): string {
 export interface UrlElicitationDeps {
   sessionId: string;
   mode: SessionMode;
-  /** `SessionMeta.origin`; `"dispatch-child"` never prompts. */
+  /** `SessionMeta.origin`; a `"dispatch-child"` declines (its link requests are not relayed to Dispatch). */
   origin?: string;
   /** Live: `session.setPolicy` mid-session is seen by the next request. */
   policy: () => SessionApprovalPolicy | undefined;
@@ -216,7 +220,7 @@ export function elicitationHandlerFor(deps: UrlElicitationDeps): OnElicitation {
     if (request.mode !== "url") return declineBecause(`${request.mode === undefined ? "no" : "form"} mode — only URL-mode elicitation is supported`);
     const check = checkElicitationUrl(request.url);
     if (!check.ok) return declineBecause(check.reason);
-    if (deps.origin === "dispatch-child") return declineBecause("a dispatch child never prompts");
+    if (deps.origin === "dispatch-child") return declineBecause("a dispatch child's link requests are not relayed to Dispatch");
     if (deps.policy() === "dont-ask") return declineBecause("policy dont-ask declines every prompt");
     if (signal.aborted) return { action: "cancel" };
 

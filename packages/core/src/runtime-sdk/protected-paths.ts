@@ -5,7 +5,7 @@
 // PROTECTED (§7.2) — instructions the runtimes load into every future session: ANY project's
 // `.winter/{skills,commands,rules,output-styles}/**` at any depth, trusted or not (review C1 — the spec
 // names the trusted project's; a later session loads a subdirectory's, and an untrusted project's once
-// trusted), `sdk/{skills,commands,rules,output-styles}/**` and `sdk/WINTER.md`. A write is a card in code under every policy and a typed deny in chat and dispatch.
+// trusted), `sdk/{skills,commands,rules,output-styles}/**` and `sdk/WINTER.md`. A write is a card in code and dispatch under every policy (but `dont-ask`, which declines it) and a typed deny in chat.
 // Three layers at once: this hook's `ask`, the router's flag-layer `permissions.ask` rules (the same
 // set, `protectedPathRules`), and the bridge, which never auto-allows one.
 //
@@ -98,9 +98,10 @@ export type ProtectedWriteDecision = { decision: "ask" } | { decision: "deny"; r
 
 /**
  * Spec §7.2 for one call: `null` when the call is not a write-class tool naming a protected path;
- * otherwise `ask` in code (under EVERY policy — the hook sees none, which is the point: accept-edits and
- * bypass reach this line exactly like ask does) and a typed deny in chat and dispatch. A dispatch CHILD is
- * a code session: its `ask` reaches the bridge, whose never-prompt rule turns it into the typed deny.
+ * otherwise `ask` in code and dispatch (under EVERY policy — the hook sees none, which is the point:
+ * accept-edits and bypass reach this line exactly like ask does; dispatch respects its policy like code since
+ * the user ruling of 2026-10-17) and a typed deny in chat. A dispatch CHILD is a code session: its `ask`
+ * reaches the bridge, which raises the card and relays it to its coordinator.
  *
  * Matched case-folded on the raw AND the canonical spelling of both the target and each protected path
  * (a write through a link into `.winter/skills`, or a realpath'd home), like the control-plane fence —
@@ -114,7 +115,7 @@ export function protectedWriteDecision(
   if (!WRITE_CLASS_TOOL_NAMES.has(toolName)) return null;
   const hit = protectedHit(input, ctx.cwd ?? "", ctx.protected);
   if (hit === undefined) return null;
-  if (ctx.mode === "code") return { decision: "ask" };
+  if (ctx.mode === "code" || ctx.mode === "dispatch") return { decision: "ask" };
   return { decision: "deny", reason: protectedWriteDeniedMessage(toolName, hit, ctx.mode) };
 }
 

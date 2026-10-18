@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AdmissionRecord, StopReceipt as LedgerStopReceipt } from "../admission";
 import type { CoworkVolumeOwner, CoworkVolumeRecord } from "../volumes";
-import { classAInvariantsHold, parseCoworkNativeStopReceipt, serializeCoworkNativeStopReceipt, type CoworkNativeOrderlyReceipt } from "./protocol";
+import { classAInvariantsHold, parseCoworkNativeStopReceipt, serializeCoworkNativeStopReceipt, verifyCoworkNativeOrderlyReceiptMac, type CoworkNativeOrderlyReceipt } from "./protocol";
+import type { CoworkNativeReceiptKey } from "./receipt-mac";
 
 /*
  * Stop evidence: what may release the two disks of a workspace, and the sealed objects that carry it.
@@ -31,7 +32,7 @@ export const COWORK_NATIVE_RELEASE_POLICY = Object.freeze({
 });
 export const releasesOwnership = (kind: string): boolean => (COWORK_NATIVE_RELEASE_POLICY.releasing as readonly string[]).includes(kind);
 
-export type StopEvidenceFailure = "not_orderly" | "wrong_binding" | "nonce_mismatch" | "replayed" | "boot_unknown" | "boot_not_ended" | "recover_refused" | "invalid";
+export type StopEvidenceFailure = "not_orderly" | "wrong_binding" | "nonce_mismatch" | "replayed" | "boot_unknown" | "boot_not_ended" | "recover_refused" | "guard_failed" | "mac_invalid" | "invalid";
 export class CoworkNativeStopEvidenceError extends Error {
   constructor(readonly code: StopEvidenceFailure) { super(code); this.name = "CoworkNativeStopEvidenceError"; }
 }
@@ -147,7 +148,14 @@ export interface OrderlyEvidenceInput {
   /** `live`: the receipt arrived on the launcher channel this process owns, in answer to a stop it issued: the nonce must be the one it
    * issued, the launcher the one on the channel, and the receipt may not contradict what this process observed. `retained`: it was read
    * back from the launcher's durable store through an attesting port. */
-  readonly source: { readonly kind: "live"; readonly stopNonce: string; readonly launcherInstanceId: string; readonly observed: CoworkNativeObserved } | { readonly kind: "retained" };
+  readonly source: { readonly kind: "live"; readonly stopNonce: string; readonly launcherInstanceId: string; readonly observed: CoworkNativeObserved } | {
+    /** Read back from the launcher's durable store. That store is same-user writable and authenticates nothing, so a retained receipt releases ONLY
+     * if both of D1's guards pass at this moment (the old worker process is absent, the images are unlocked); the probes are part of the source,
+     * so there is no way to mint a retained proof without them. Otherwise the receipt is treated like a Class B one: no release. */
+    readonly kind: "retained"; readonly guards: CoworkNativeRecoverGuards; readonly processes: CoworkNativeLaunchEntry | null;
+    /** The installation's receipt key, or null when it is missing or unreadable (a null key makes every retained receipt Class B). The receipt's MAC is verified under it
+     * BEFORE the guards run: a forged file never gets as far as asking about the old worker. */
+    readonly key: CoworkNativeReceiptKey | null };
   readonly registry: CoworkNativeStopRegistry; readonly now: () => number;
 }
 /** Class A receipt to sealed release proof, or a refusal that says which binding failed. Class B has no function here at all. */
@@ -182,6 +190,17 @@ export function mintOrderlyStopProof(input: OrderlyEvidenceInput): CoworkNativeS
     // either happen cannot accept a receipt that says it did not.
     if (observed.guestFault === true) return refuse("not_orderly");
     if ((observed.volumesAccepted && receipt.volumes.some(v => !v.attached)) || ((observed.vmRunning || observed.guestHello) && receipt.guest.drain === "not-booted")) return refuse("not_orderly");
+  }
+  if (input.source.kind === "retained") {
+    const { guards, processes, key } = input.source;
+    // The launcher's store is a same-user writable file that authenticates nothing: the MAC (under a Keychain key the file cannot hold) is what makes it the launcher's.
+    if (!verifyCoworkNativeOrderlyReceiptMac(receipt, key)) return refuse("mac_invalid");
+    const subject: CoworkNativeRecoverSubject = { workspaceId: receipt.workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, owner, processes };
+    // A launch whose launcher identity was never written leaves a process nobody can name: absence cannot be shown (as for owner recover).
+    if (processes !== null && (processes.launcher === null || processes.workspaceId !== subject.workspaceId || processes.incarnationId !== subject.incarnationId || processes.leaseEpoch !== subject.leaseEpoch)) return refuse("guard_failed");
+    let absent = false, unlocked = false;
+    try { absent = guards.processAbsent(subject) === true; unlocked = guards.imagesUnlocked(volumes) === true; } catch { /* a guard that cannot answer refuses */ }
+    if (!absent || !unlocked) return refuse("guard_failed");
   }
   if (input.registry.wasSpent(receipt.confirmationId, receipt.stopNonce)) return refuse("replayed");
   return seal({ kind: "orderly-receipt", workspaceId: receipt.workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, owner: { ...owner }, confirmationId: receipt.confirmationId, receipt, issuedAtMs: input.now(), consumed: false });

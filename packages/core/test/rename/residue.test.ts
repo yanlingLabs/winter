@@ -154,13 +154,13 @@ describe("rename residue (P9b-22)", () => {
     const unpermitted = hits.filter((h) => h.permittedBy === undefined);
     const report = unpermitted.map((h) => `${h.file}:${h.line}: ${h.context}`).join("\n");
     expect(unpermitted, `unpermitted residue:\n${report}`).toHaveLength(0);
-  });
+  }, 20_000); // a cold whole-repo scan: about 2.5 s locally, 5.2 s on a loaded CI runner (over the 5 s default); a 3x slowdown still fails
 
   test("every allowlist entry matched at least once (no dead entries)", () => {
     const { matchedEntryIds } = scan();
     const dead = RENAME_ALLOWLIST.filter((e) => !matchedEntryIds.has(e.id)).map((e) => e.id);
     expect(dead, `dead allowlist entries (matched nothing): ${dead.join(", ")}`).toHaveLength(0);
-  });
+  }, 20_000);
 
   test("BINARY_EXTENSIONS is non-empty (sanity — a typo here would silently scan every binary)", () => {
     expect(BINARY_EXTENSIONS.size).toBeGreaterThan(0);

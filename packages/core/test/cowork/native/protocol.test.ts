@@ -265,7 +265,7 @@ test("runtimeImageDigest covers exactly the kernel and the initramfs, in that or
 test("begin carries the home id (one source for it), right after the request id, and a scope below the 768 MiB floor is refused", () => {
   const begin = lines.positive.find(entry => entry.name === "begin")!, parsed = parseCoworkNativeLauncherLine(begin.line, "to-launcher") as { homeId: string; memoryMiB: number };
   expect(parsed.homeId).toMatch(/^home_/);
-  expect(begin.line.startsWith(`{"v":1,"t":"begin","id":"req-0001","homeId":"${parsed.homeId}","workspaceId":`)).toBe(true);
+  expect(begin.line.startsWith(`{"v":2,"t":"begin","id":"req-0001","homeId":"${parsed.homeId}","workspaceId":`)).toBe(true);
   for (const memory of [767, 512, 256, 0]) expect(code(() => parseCoworkNativeLauncherLine(begin.line.replace('"memoryMiB":768', `"memoryMiB":${memory}`), "to-launcher"))).toBe("bad_field");
   for (const memory of [768, 1024]) expect(parseCoworkNativeLauncherLine(begin.line.replace('"memoryMiB":768', `"memoryMiB":${memory}`), "to-launcher").t).toBe("begin");
 });

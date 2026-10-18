@@ -105,6 +105,10 @@ describe("arming", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).wakes[0]).toMatchObject({ wakeId: a.wakeId, sessionId: "s_a", kind: "clicked", note: "continue the listing once it's submitted" });
     expect(w.reg.countFor("s_a")).toBe(1);
     expect(w.reg.list("s_a")).toEqual([expect.objectContaining({ id: a.wakeId, target: "Chrome — Developer Dashboard", condition: "clicked", element: "“Submit for review”", note: "continue the listing once it's submitted" })]);
+    // The Mac island's Watches tab: every session's, labels only — never the model's note.
+    const all = w.reg.listAll();
+    expect(all).toEqual([{ sessionId: "s_a", wakeId: a.wakeId, condition: "clicked", targetLabel: "Chrome — Developer Dashboard", elementLabel: "“Submit for review”", armedAt: expect.any(Number), expiresAt: a.expiresAt }]);
+    expect(JSON.stringify(all)).not.toContain("listing");
   });
 
   test("a backend's refusal (a condition already true) arms nothing and says so", async () => {

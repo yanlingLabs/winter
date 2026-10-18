@@ -69,6 +69,7 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
     "",
     "# Relayed prompts",
     "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests and questions expire after 10 minutes (denied / left unanswered) and the child continues without them — except a request to move the user to another desktop for a moment (computer use), which goes ahead after one minute unless the user refuses.",
+    "Your own actions follow your approval policy just as a code session's do: when one needs the user's OK, a permission card appears here and you wait for the answer. A card you raise in a turn the user did not start (a wake, a child's report, a message from another session) is denied after 10 minutes if nobody answers — then tell the user what you could not do instead of retrying it.",
   ].join("\n");
 }
 

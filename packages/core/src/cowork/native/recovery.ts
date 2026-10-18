@@ -1,11 +1,12 @@
 import type { AdmissionRecord, CoworkAdmissionLedger } from "../admission";
 import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumes } from "../volumes";
+import type { CoworkNativeReceiptKey } from "./receipt-mac";
 import { parseCoworkNativeStopReceipt, type CoworkNativeOrderlyReceipt } from "./protocol";
 import { CoworkNativePower, type CoworkPower, type CoworkPowerKey } from "./power";
 import {
   CoworkNativeStopEvidenceError, ledgerStopReceipt, mintVolumesFreeToken, mintNewBootStopProof, mintOrderlyStopProof, mintOwnerRecoverStopProof, mintReleaseToken, sameOwnerTuple, stopProofState,
-  type CoworkNativeAdmissionView, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchJournalPort, type CoworkNativeOwnerRecoverAttestation, type CoworkNativeRecoverGuards, type CoworkNativeStopProof, type CoworkNativeStopRegistry,
+  type CoworkNativeAdmissionView, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeOwnerRecoverAttestation, type CoworkNativeRecoverGuards, type CoworkNativeStopProof, type CoworkNativeStopRegistry,
 } from "./stop-proof";
 
 /*
@@ -66,6 +67,8 @@ export interface CoworkNativeRecoveryReport {
 export interface CoworkNativeRecoveryDeps {
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly power: CoworkNativePower;
   readonly registry: CoworkNativeStopRegistry; readonly hostBoot: CoworkNativeHostBoot;
+  /** The installation's receipt key as already loaded into memory (the Keychain read is asynchronous, recovery is not). Null or absent: every retained receipt is Class B. */
+  readonly receiptKey?: () => CoworkNativeReceiptKey | null;
   readonly receipts?: CoworkNativeDurableReceiptPort; readonly ownerRecover?: CoworkNativeOwnerRecoverPort; readonly guards?: CoworkNativeRecoverGuards;
   /** The durable record of which processes each launch started; consulted by owner recovery and forgotten once an incarnation is released. */
   readonly journal?: CoworkNativeLaunchJournalPort;
@@ -163,7 +166,11 @@ export class CoworkNativeRecovery {
     if (stored?.attested === true) {
       try {
         const receipt = parseCoworkNativeStopReceipt(stored.text);
-        if (receipt.class === "A") return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admission: view(admission), volumes, source: { kind: "retained" }, registry: this.deps.registry, now: this.now }) };
+        if (receipt.class === "A") {
+          const source = this.retainedSource(key);
+          if (source === null) reason = "retained receipt needs the guard probes; treated as uncertain";
+          else return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admission: view(admission), volumes, source, registry: this.deps.registry, now: this.now }) };
+        } else
         reason = `uncertain receipt (${receipt.reason}) never releases`;
       } catch (error) { reason = error instanceof CoworkNativeStopEvidenceError ? `retained receipt refused (${error.code})` : "retained receipt unreadable"; }
     }
@@ -187,10 +194,10 @@ export class CoworkNativeRecovery {
       try {
         const receipt = parseCoworkNativeStopReceipt(stored.text);
         if (receipt.class === "A") {
-          const owner = ownerFromReceipt(receipt);
-          return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admission: view(admission), volumes, volumesReleased: true, source: { kind: "retained" }, registry: this.deps.registry, now: this.now }) };
-        }
-        reason = `uncertain receipt (${receipt.reason}) never releases`;
+          const owner = ownerFromReceipt(receipt), source = this.retainedSource(key);
+          if (source === null) reason = "retained receipt needs the guard probes; treated as uncertain";
+          else return { kind: "proof", proof: mintOrderlyStopProof({ receipt, owner, homeId, admission: view(admission), volumes, volumesReleased: true, source, registry: this.deps.registry, now: this.now }) };
+        } else reason = `uncertain receipt (${receipt.reason}) never releases`;
       } catch (error) { reason = error instanceof CoworkNativeStopEvidenceError ? `retained receipt refused (${error.code})` : "retained receipt unreadable"; }
     }
     if (options.ownerRecover === true) {
@@ -199,6 +206,16 @@ export class CoworkNativeRecovery {
       reason = "owner recovery refused";
     }
     return { kind: "none", reason };
+  }
+  /** The only way a retained receipt becomes a source: with the journal entry and the guards. No guards means the receipt is not evidence. */
+  private retainedSource(scope: CoworkNativeReceiptScope): { kind: "retained"; guards: CoworkNativeRecoverGuards; processes: CoworkNativeLaunchEntry | null; key: CoworkNativeReceiptKey | null } | null {
+    const { guards } = this.deps;
+    if (!guards) return null;
+    let processes: CoworkNativeLaunchEntry | null = null;
+    try { processes = this.deps.journal?.load(scope) ?? null; } catch { return null; }
+    let key: CoworkNativeReceiptKey | null = null;
+    try { key = this.deps.receiptKey?.() ?? null; } catch { key = null; }
+    return { kind: "retained", guards, processes, key };
   }
   private ownerRecoverProof(key: CoworkPowerKey, owner: CoworkVolumeOwner | null, volumes: readonly CoworkVolumeRecord[]): CoworkNativeStopProof | null {
     const { ownerRecover, guards } = this.deps;
@@ -242,6 +259,9 @@ export class CoworkNativeRecovery {
     // A receipt is still needed while a replay debt names its owner: the successor must prove THAT writer stopped. It is retired by `settleDebt`,
     // and the caller must not tell the launcher to forget it either (hence the result).
     const owed = free.some(v => v.filesystemJournal?.replayDebt?.owner.incarnationId === key.incarnationId && v.filesystemJournal.replayDebt.owner.leaseEpoch === key.leaseEpoch);
+    // Retire policy (N2 S7): after an owner-loss exit no launcher remains to retire a retained file over L1, and a Class B file is never retired by one.
+    // The daemon therefore deletes a file ONLY here, directly, after volumes, admission and power are settled by real proof (any proof kind, so a Class B
+    // file of a settled incarnation goes with it). A file of a disk that stays held is left in place, never deleted on read or on refusal.
     if (!owed) this.deps.receipts?.retire({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch });
     this.checkpoint("receipt-retired");
     return { retired: !owed };
@@ -273,7 +293,9 @@ export class CoworkNativeRecovery {
       const receipt = parseCoworkNativeStopReceipt(stored.text);
       if (receipt.class !== "A" || !sameOwnerTuple(ownerFromReceipt(receipt), debt.owner)) return false;
       // The proof is minted only to validate the receipt against the canonical records; it releases nothing here.
-      mintOrderlyStopProof({ receipt, owner: debt.owner, homeId: this.deps.records.recordedHomeIdentity(), admission: null, volumes, volumesReleased: true, source: { kind: "retained" }, registry: this.deps.registry, now: this.now });
+      const source = this.retainedSource({ workspaceId, incarnationId: debt.owner.incarnationId, leaseEpoch: debt.owner.leaseEpoch });
+      if (source === null) return false;
+      mintOrderlyStopProof({ receipt, owner: debt.owner, homeId: this.deps.records.recordedHomeIdentity(), admission: null, volumes, volumesReleased: true, source, registry: this.deps.registry, now: this.now });
       this.deps.registry.noteStopped(debt.owner, "orderly-receipt");
       return true;
     } catch { return false; }

@@ -1,5 +1,6 @@
 import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents } from "./cowork/workspace-events";
 import { createMacCoworkHost } from "./cowork/mac-host";
+import { createCoworkNativeWiring, type CoworkNativeWiring, type CoworkNativeWiringOptions } from "./cowork/native-wiring";
 import { CoworkRepository } from "./cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
 import { join } from "node:path";
@@ -127,7 +128,11 @@ import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
-import { IslandRegistry } from "./island/registry";
+import { IslandRegistry, type IslandHost, type IslandSessionFacts } from "./island/registry";
+import { IslandActivity } from "./island/activity";
+import { IslandUsageRegistry } from "./island/usage";
+import { createUsageService, type UsageInjection } from "./usage/wiring";
+import { rowForTag } from "./runtime-sdk/provider-selection";
 import type { WakeRegistry } from "./computer-use/wakes/registry";
 import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
 import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
@@ -189,6 +194,8 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
+  /** N2 S7: the inert native worker host wiring (`undefined` without the runtime spine). Nothing reaches it from an RPC. */
+  coworkNative?: CoworkNativeWiring;
   /**
    * P8b Task 5: THE ONE Winter runtime handle — the router `createRuntimeSdk` built, the spawn
    * hook every Winter session's `Options` takes its executable from, and the tracked-query registry
@@ -372,6 +379,9 @@ export async function startDaemon(opts: {
   coworkHost?: CoworkHostPorts;
   /** Isolated clock for host schedule metadata tests. */
   coworkScheduleNow?: () => number;
+  /** Host-only injection of the native worker host's environment (N2 S7). Production passes none: the host is then never built and the
+   * Cowork service keeps its refusing default. Never read from a setting, an RPC or an environment variable. */
+  coworkNative?: Pick<CoworkNativeWiringOptions, "environment" | "imagePins">;
   home?: string;
   secrets?: SecretStore;
   server?: Partial<Pick<IpcServerOptions, "helloTimeoutMs" | "maxConnections" | "preAuthMaxLine">>;
@@ -441,6 +451,9 @@ export async function startDaemon(opts: {
    *  engine's backends; the rest replace this profile's extension ids, the host's designated requirement and the
    *  Security.framework check of the host's pid (the opt-in extension e2e runs a test-build host). Production sets none. */
   browserHost?: BrowserHostInjection;
+  /** Usage tracking TEST SEAM (`docs/claude/usage.md`): the Codex / Claude Code roots and executables. Absent: the env
+   *  overrides (`WINTER_USAGE_*`, which both test preloads point at nothing), else the user's real installs. */
+  usage?: UsageInjection;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -1282,29 +1295,54 @@ export async function startDaemon(opts: {
   // closures below do.
   // The Winter island (`docs/claude/island.md`): every card still pending in any session, for Winter.app's surface at
   // the camera housing (`island.pending`). Pending-ness is the brokers'; the payload is the request event, seen here.
+  const islandFacts = (sid: string): IslandSessionFacts | undefined => {
+    try {
+      const meta = store.meta(sid);
+      const title = store.getTitle(sid);
+      return {
+        ...(meta.mode === undefined ? {} : { mode: meta.mode }),
+        ...(meta.origin === undefined ? {} : { origin: meta.origin }),
+        ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }),
+        ...(title === null ? {} : { title }),
+      };
+    } catch { return undefined; }
+  };
+  const islandHosts = (sid: string): IslandHost[] => hub.attachedHarnesses(sid).map((h) => ({
+    clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
+  }));
   const islandRegistry = new IslandRegistry({
     pending: {
       approval: (sid, callId) => approvalBroker.pendingMeta(sid, callId) !== undefined,
       question: (sid, callId) => questions.isPending(sid, callId),
       elicitation: (sid, id) => elicitationBroker.urlFor(sid, id) !== undefined,
     },
-    facts: (sid) => {
-      try {
-        const meta = store.meta(sid);
-        const title = store.getTitle(sid);
-        return {
-          ...(meta.mode === undefined ? {} : { mode: meta.mode }),
-          ...(meta.origin === undefined ? {} : { origin: meta.origin }),
-          ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }),
-          ...(title === null ? {} : { title }),
-        };
-      } catch { return undefined; }
-    },
-    hosts: (sid) => hub.attachedHarnesses(sid).map((h) => ({
-      clientName: h.clientName, ...(typeof h.role === "string" ? { role: h.role } : {}), ...(h.tty === undefined ? {} : { tty: h.tty }),
-    })),
+    facts: islandFacts,
+    hosts: islandHosts,
   });
   hub.addObserver((event) => islandRegistry.observe(event));
+  // The island's Usage tab (`island.usage`): plan windows the runtime reported, per-session token counts since start,
+  // and Winter's background jobs' quota — all read from what the daemon already sees.
+  /** The provider a session's model tag names (the island's plan windows are tagged with it). */
+  const islandProviderOf = (sid: string): string | undefined => {
+    try { const m = store.meta(sid).model; return m === undefined || !m.includes("/") ? undefined : splitTag(m).providerId; } catch { return undefined; }
+  };
+  const islandUsage = new IslandUsageRegistry({
+    background: () => ({ ...quota.state(), ...quota.usage() }),
+    subscription: () => quota.subscriptionQuota(),
+    modelOf: (sid) => {
+      const model = store.meta(sid).model;
+      if (model === undefined) return undefined;
+      const window = rowForTag(model)?.contextWindow?.value;
+      return { model, ...(typeof window === "number" && window > 0 ? { contextWindow: window } : {}) };
+    },
+  });
+  hub.addObserver((event) => islandUsage.observe(event));
+  // Usage and cost tracking (`usage.*`, `docs/claude/usage.md`): Winter's own turns as they end, the user's Codex and
+  // Claude Code usage ingested ON DEMAND. Its own SQLite file (`<home>/usage/usage.db`), never runtime-state.db.
+  const usage = createUsageService({
+    home: winterHome, settings: () => settings, islandUsage, version: CORE_VERSION,
+    ...(opts.usage === undefined ? {} : { injection: opts.usage }),
+  });
 
   const computerUseRuntime = createComputerUseRuntime({
     island: islandRegistry,
@@ -1343,6 +1381,15 @@ export async function startDaemon(opts: {
     log: (line) => console.error(line),
   });
   hub.addObserver((event) => computerUseRuntime.observe(event));
+  // The Winter island's activity (phase 2, `island/activity.ts`): the sessions driving ComputerV2 now, the turns that
+  // just ended idle, and every armed wake trigger — for Winter.app's island (`island.activity`).
+  const islandActivity = new IslandActivity({
+    facts: islandFacts,
+    hosts: islandHosts,
+    watches: () => computerUseRuntime.control.wakesList?.() ?? [],
+    hasPendingCard: (sid) => islandRegistry.list().some((i) => i.answerSessionId === sid || i.sessionId === sid),
+  });
+  hub.addObserver((event) => islandActivity.observe(event));
 
   // ComputerV2 Phase 2 — Winter for Chrome's door into this daemon: `<home>/run/browser.sock`, where
   // `winter-browser-host` (inside the Winter Computer Use bundle) connects for each browser profile running the extension.
@@ -2127,6 +2174,12 @@ export async function startDaemon(opts: {
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); dispatchChildren?.onTurnSettled(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
+    onRateLimit: (sid, info) => islandUsage.noteRateLimit(sid, info, islandProviderOf(sid)),
+    onTurnUsage: (sid, u) => {
+      let mode: string | undefined;
+      try { mode = store.meta(sid).mode; } catch { mode = undefined; }
+      usage?.service.recordWinterTurn(sid, mode, u.sourceId, u.rows);
+    },
     ...(titler === undefined ? {} : { titler }),
     // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
     // `.winter/mcp.json`; the repo-root `.mcp.json` is no longer read) reach the child under the
@@ -2969,9 +3022,24 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
-  coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db), opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
+  // N2 S7: the native worker host's wiring. INERT: building it builds no host, process, socket, timer or file (the host appears on the
+  // first start a caller asks for, from an injected environment that production never has). The Cowork service gets it as its
+  // `native` port only when a caller injected an environment, so the production service refuses exactly as before.
+  const coworkNative: CoworkNativeWiring | undefined = runtime
+    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative }) : undefined;
+  const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;
+  const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
+  const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
+  coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
   coworkService?.schedules.recover();
   coworkService?.schedules.tick();
+  // Boot-time reconcile (D1): record-and-refuse. Without an environment this only reads the records; with one it runs the host's own
+  // recovery, which releases nothing on weaker evidence than an orderly receipt, a changed host boot or an owner recover.
+  if (coworkNative) {
+    const boot = await coworkNative.reconcileAtBoot();
+    const held = boot.reports.filter(report => report.ownerRetained).length;
+    if (held > 0) console.error(`cowork: ${held} native workspace(s) keep their disk owner after boot (${boot.source}); nothing was released without proof`);
+  }
   const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;
   coworkEvents?.start();
   const server: IpcServer = startIpcServer({
@@ -3075,6 +3143,9 @@ export async function startDaemon(opts: {
     hooks: hookRegistry,
     questions: questions ?? undefined,
     island: islandRegistry,
+    islandActivity,
+    islandUsage,
+    ...(usage === undefined ? {} : { usage: usage.service }),
     tasks: undefined,
     // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
     // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`
@@ -3174,6 +3245,7 @@ export async function startDaemon(opts: {
     tokens,
     registry: sharedRegistry,
     runtimeState,
+    coworkNative,
     runtimeSdk,
     embedded: embeddedSessions,
     sessions: store,
@@ -3196,6 +3268,9 @@ export async function startDaemon(opts: {
       // Before anything else: no session is created, resumed or (re)opened from here on, and an open
       // already under way refuses just before its spawn — no runtime child can outlive this daemon.
       coworkService?.beginShutdown(); // close durable schedule claims before draining anything
+      // N2 S7: stop every live native guest. `undefined` (no await, no timer) when none was ever started, so the no-guest stop is unchanged;
+      // otherwise bounded by the contract's host wait, and settled below BEFORE the store and the runtime close.
+      const guestsDrained = coworkNative?.beginShutdown();
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
@@ -3248,13 +3323,15 @@ export async function startDaemon(opts: {
           .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
       const closeRest = (): void | Promise<void> => {
         dispatchChildren?.stop();
+        usage?.close();
         store.close();
         if (!runtime) { lock.release(); return; }
         return runtime.close().then(() => lock.release(), () => lock.release());
       };
       // Synchronous when there is no Winter handle — `stop()`'s existing contract for every pre-8b
       // caller is unchanged (everything but the runtime drain has already happened on return).
-      return winterDone === undefined ? closeRest() : winterDone.then(closeRest);
+      const settled = winterDone === undefined ? guestsDrained : guestsDrained === undefined ? winterDone : Promise.all([winterDone, guestsDrained]).then(() => undefined);
+      return settled === undefined ? closeRest() : settled.then(closeRest);
     },
   };
 }

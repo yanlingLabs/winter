@@ -10,9 +10,10 @@
 // `WINTER_RUNTIME_EXECUTABLE` names (skipped when unset; required under WINTER_RUNTIME_REQUIRE_BINARY=1).
 // Every model is a `winter-test/<double>`; nothing reaches the network.
 //
-//   (a) `session.dispatch` mints the singleton ON THE WINTER LEG by default; the card-free pin
-//       (P8b-7): under `auto` the `tooluse` double's unclassified `test_tool` → a `tool_result`
-//       carrying the never-prompts deny message and NO `approval_requested` anywhere
+//   (a) `session.dispatch` mints the singleton ON THE WINTER LEG by default; dispatch respects its
+//       approval mode (user ruling 2026-10-17, reversing P8b-7 for dispatch): under `auto` the `tooluse`
+//       double's unclassified `test_tool` → an `approval_requested` on the dispatch log, and a Deny over
+//       `approval.respond` is the tool_result; under `ask` an Allow lets the call run
 //   (b) the `subagent` double spawns a child → `thread_started`/`thread_completed`, the child's own
 //       frames on its thread, and a `PersistedWinterChild` row (`runtime_children`) that survives a
 //       simulated RESTART; after the restart the same singleton resumes (no second dispatch session,
@@ -28,7 +29,6 @@ import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type Wr
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { RuntimeStateWiring } from "../../src/runtime-state";
-import { neverPromptsMessage } from "../../src/runtime-sdk/approval-bridge";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
@@ -180,7 +180,7 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("(a) session.dispatch mints the singleton on the Winter leg BY DEFAULT; the card-free pin: an unclassified tool under auto → a never-prompts tool_result, no approval_requested", async () => {
+  test("(a) session.dispatch mints the singleton on the Winter leg BY DEFAULT; dispatch respects its policy: an unclassified tool under auto/ask → a real card, answered over approval.respond", async () => {
     expect(daemon!.winter.legForNewSession("dispatch")).toBe("winter");
     expect(daemon!.winter.legForNewSession("chat")).toBe("winter");   // Task 17 Step 4: every mode
     expect(daemon!.winter.legForNewSession("code")).toBe("winter");
@@ -207,39 +207,49 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
     // (1) under `auto` — the SHIPPED dispatch policy, which is Winter's `default` mode since P8b-7
     // was amended (review F1): the unclassified call reaches THE BRIDGE, whose gate fails closed to
-    // "ask" for an unclassified tool under every policy, and the dispatch session never prompts —
-    // so the tool_result is P8b-7's own deny text and NO card exists on either side. (Before F1
-    // this half passed for the wrong reason: Winter's `auto` mode ran its model-backed classifier
-    // ahead of the bridge and blocked the call itself — "Blocked by classifier".)
+    // "ask" for an unclassified tool under every policy — and a dispatch session now CARDS it, on its
+    // own log, exactly as code does (user ruling 2026-10-17). (Before F1 the classifier blocked it.)
+    // The user's Deny over `approval.respond` is the tool_result.
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "use the tool" });
+    const card = await client.waitFor((e) => e.type === "approval_requested" && e.sessionId === sid) as {
+      callId: string; toolName: string; summary: string; options?: unknown[]; childSessionId?: string;
+    };
+    expect(card.toolName).toBe("test_tool");
+    expect(card.childSessionId).toBeUndefined();   // Dispatch's OWN card, not a relayed child's
+    expect(card.options).toBeUndefined();          // a dispatch card offers no rule to remember
+    expect(daemon!.sessions.read(sid).some((e) => e.type === "tool_result")).toBe(false);
+    await client.call(METHODS.approvalRespond, { sessionId: sid, callId: card.callId, approved: false });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
     await Bun.sleep(100);
     let log = mainLog();
-    expect(kinds(log)).toEqual(["user_message", "turn_started", "tool_call", "tool_result", "assistant_message", "turn_completed"]);
     const call = log.find((e) => e.type === "tool_call") as { name: string; callId: string };
     const res = log.find((e) => e.type === "tool_result") as { callId: string; isError: boolean; output: string };
     expect(call.name).toBe("test_tool");
+    expect(call.callId).toBe(card.callId);
     expect(res.callId).toBe(call.callId);
     expect(res.isError).toBe(true);
-    expect(res.output).toContain(neverPromptsMessage("test_tool", "dispatch", "auto"));
-    expect(res.output).not.toContain("classifier");
-    // (2) under `ask` (Winter's `default` mode, the bridge's door): P8b-7's own deny message — the
-    // dispatch session never prompts — and still no card anywhere. The `tooluse` double scripts ONE
-    // tool round per child process, so the child is reopened (the policy is re-read from the store
-    // on reopen; the live `setPermissionMode` path is the driver unit test's).
+    expect(res.output).toContain("The user denied this test_tool action");
+    expect(res.output).not.toContain("never prompts");
+    expect(log.filter((e) => e.type === "approval_resolved")).toEqual([expect.objectContaining({ callId: card.callId, approved: false })]);
+    // (2) under `ask` (Winter's `default` mode, the bridge's door): a card again, and an Allow lets the
+    // call RUN (the double's tool is unregistered, so the tool_result is the child's own fallback). The
+    // `tooluse` double scripts ONE tool round per child process, so the child is reopened (the policy
+    // is re-read from the store on reopen; the live `setPermissionMode` path is the driver unit test's).
     await daemon!.winter.get(sid)!.end();
     await client.call(METHODS.sessionSetPolicy, { sessionId: sid, policy: "ask" });
     const evCount = client.events.length;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "use the tool again" });
+    const card2 = await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "approval_requested" && e.sessionId === sid) as { callId: string; toolName: string };
+    expect(card2.toolName).toBe("test_tool");
+    await client.call(METHODS.approvalRespond, { sessionId: sid, callId: card2.callId, approved: true });
     await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid);
     await Bun.sleep(100);
     log = mainLog();
-    expect(kinds(log).slice(-6)).toEqual(["user_message", "turn_started", "tool_call", "tool_result", "assistant_message", "turn_completed"]);
-    const res2 = log.filter((e) => e.type === "tool_result").at(-1) as { isError: boolean; output: string };
-    expect(res2.isError).toBe(true);
-    expect(res2.output).toContain(neverPromptsMessage("test_tool", "dispatch", "ask"));
-    expect(daemon!.sessions.read(sid).filter((e) => e.type === "approval_requested")).toEqual([]);
-    expect(client.events.filter((e) => e.type === "approval_requested")).toEqual([]);
+    expect(kinds(log).filter((t) => t !== "approval_requested").slice(-6)).toEqual(["user_message", "turn_started", "tool_call", "tool_result", "assistant_message", "turn_completed"]);
+    const res2 = log.filter((e) => e.type === "tool_result").at(-1) as { callId: string; output: string };
+    expect(res2.callId).toBe(card2.callId);
+    expect(res2.output).not.toContain("never prompts");
+    expect(daemon!.sessions.read(sid).filter((e) => e.type === "approval_requested")).toHaveLength(2);
     const errors = daemon!.sessions.read(sid).filter((e) => e.type === "agent_error") as Array<{ message: string }>;
     expect(errors.map((e) => e.message)).toEqual([]);
     await client.call(METHODS.sessionSetPolicy, { sessionId: sid, policy: "auto" });

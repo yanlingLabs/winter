@@ -53,12 +53,14 @@ final class IslandStore: ObservableObject {
     private(set) var answeredHere: Set<String> = []
 
     /// Cards that have been on top before: when one comes back after being hidden (its host was in front), it goes
-    /// straight to the badge instead of popping out again.
+    /// straight to the compacted set (the strip's waiting count and Needs you) instead of popping out again.
     private var everOnTop: Set<String> = []
     /// What the routing last judged each terminal (tty) to be; refreshed before each apply that needs it.
     private(set) var terminalFrontness: [String: TerminalFrontness] = [:]
     /// Typed answers to question cards in the Needs-you list (`TranscriptInteractionCard`), by card id.
     var drafts: [String: PendingCardDraft] = [:]
+    /// Phase 2's activity — the computer-use pill, turn results, the Watches tab (`IslandActivityStore`).
+    let activity = IslandActivityStore()
 
     // MARK: Seams
 
@@ -84,7 +86,10 @@ final class IslandStore: ObservableObject {
 
     // MARK: Reading
 
-    var strip: IslandStripModel { IslandStripModel(waitingCount: cards.count) }
+    /// Sessions the daemon last said are working (the session directory's `signals.working`) — the strip's second count.
+    @Published var workingSessions = 0
+
+    var strip: IslandStripModel { IslandStripModel(waitingCount: cards.count, workingCount: workingSessions) }
 
     func card(_ id: String) -> IslandCard? { cards.first { $0.id == id } }
 
@@ -185,12 +190,12 @@ final class IslandStore: ObservableObject {
         for id in queue.ids where placed[id] != .top && !(queue.currentTyping && queue.current?.id == id) {
             queue.resolve(id, now: now)
         }
-        // Onto the top: new ones arrive (oldest first, so the newest ends up expanded); ones seen before go to the badge.
+        // Onto the top: new ones arrive (oldest first, so the newest ends up expanded); ones seen before go straight to compacted.
         // (A card answered from here is not brought back by a list fetched before the answer landed.)
         for card in next where placed[card.id] == .top && !queue.ids.contains(card.id)
             && !(answeredHere.contains(card.id) && !inFlight.contains(card.id)) {
             if everOnTop.contains(card.id) {
-                queue.addCompacted(card.id, selfCompacts: card.kind.selfCompacts)
+                queue.addCompacted(card.id, selfCompacts: card.kind.selfCompacts, now: now)
             } else {
                 queue.arrive(card.id, selfCompacts: card.kind.selfCompacts, now: now)
                 everOnTop.insert(card.id)
@@ -201,11 +206,12 @@ final class IslandStore: ObservableObject {
         changed()
     }
 
-    /// The view requests the queue holds on top (expanded, waiting or compacted): what the controller acks to the
-    /// daemon (`island.shown`) once its panel is actually on screen.
+    /// The view requests DRAWN on top (expanded, or waiting under it — never one in line): what the controller acks to
+    /// the daemon (`island.shown`) once they are actually visible. One in line stays unacked, so the helper's own prompt
+    /// shows it.
     var viewRequestsOnTop: [IslandCard] {
-        let held = queue.ids
-        return cards.filter { $0.kind == .viewRequest && held.contains($0.id) }
+        let drawn = Set([queue.current?.id, queue.waiting?.id].compactMap { $0 })
+        return cards.filter { $0.kind == .viewRequest && drawn.contains($0.id) }
     }
 
     // MARK: The queue's inputs
@@ -233,12 +239,6 @@ final class IslandStore: ObservableObject {
 
     func clickWaiting() {
         queue.clickWaiting(now: clock())
-        changed()
-    }
-
-    func hoverBadge() {
-        guard queue.current == nil else { return }
-        queue.expandNewestCompacted(now: clock())
         changed()
     }
 
@@ -314,20 +314,28 @@ final class IslandStore: ObservableObject {
     }
 }
 
-/// The slim strip's state: the "waiting for you" count.
+/// The slim strip's state: the "waiting for you" count, and the working-sessions count beside it.
 struct IslandStripModel: Equatable {
     let waitingCount: Int
+    var workingCount: Int = 0
 
+    /// The wings show (and take clicks) only while they have something to say; idle, the strip is the housing alone.
+    var showsWings: Bool { waitingCount > 0 || workingCount > 0 }
     /// "2" — nothing when nothing waits.
     var countLabel: String? { waitingCount > 0 ? "\(waitingCount)" : nil }
+    /// "3" — nothing when nothing works.
+    var workingLabel: String? { workingCount > 0 ? "\(workingCount)" : nil }
     var accessibilityLabel: String {
+        let waiting: String
         switch waitingCount {
-        case 0: return "Winter island. Nothing needs you."
-        case 1: return "Winter island. 1 thing needs you."
-        default: return "Winter island. \(waitingCount) things need you."
+        case 0: waiting = "Winter island. Nothing needs you."
+        case 1: waiting = "Winter island. 1 thing needs you."
+        default: waiting = "Winter island. \(waitingCount) things need you."
+        }
+        switch workingCount {
+        case 0: return waiting
+        case 1: return waiting + " 1 session working."
+        default: return waiting + " \(workingCount) sessions working."
         }
     }
 }
-
-/// The badge hugging the housing: "2 waiting".
-func islandBadgeLabel(_ count: Int) -> String { "\(count) waiting" }

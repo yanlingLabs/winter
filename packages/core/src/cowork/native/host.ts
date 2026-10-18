@@ -5,6 +5,7 @@ import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumeRequest, Cowork
 import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-filesystem";
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
 import { CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
+import type { CoworkNativeReceiptKey } from "./receipt-mac";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
 import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
 import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeObserved, type CoworkNativeStopRegistry } from "./stop-proof";
@@ -27,7 +28,7 @@ import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFre
 
 export { CoworkNativeSimulatedCrash };
 
-export type CoworkNativeHostFailure = "busy" | "not_stopped" | "not_allocated" | "owner_held" | "bad_image_digest" | "bad_boot" | "launcher_refused" | "protocol" | "timeout" | "guest_fault" | "start_failed" | "not_running" | "closed";
+export type CoworkNativeHostFailure = "busy" | "not_stopped" | "not_allocated" | "owner_held" | "bad_image_digest" | "bad_boot" | "launcher_refused" | "protocol" | "timeout" | "guest_fault" | "start_failed" | "not_running" | "closed" | "no_receipt_key";
 export class CoworkNativeHostError extends Error {
   constructor(readonly code: CoworkNativeHostFailure, readonly detail?: string, options?: { cause?: unknown }) { super(detail ? `${code}: ${detail}` : code, options); this.name = "CoworkNativeHostError"; }
 }
@@ -65,6 +66,8 @@ export interface CoworkNativeHostDeps {
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly authority: CoworkNativeAuthority;
   readonly power: CoworkNativePower; readonly recovery: CoworkNativeRecovery; readonly registry: CoworkNativeStopRegistry; readonly hostBoot: CoworkNativeHostBoot;
   readonly launcher: CoworkLauncherPort; readonly images: CoworkNativeImagePins;
+  /** The installation's receipt key, already in memory (the wiring loads it from the Keychain before a start). It rides only in the L1 `begin` line. Null refuses the start, before anything moves. */
+  readonly receiptKey: () => CoworkNativeReceiptKey | null;
   /** The durable record of which processes each launch started (written before the spawn, then with each identity). */
   readonly journal?: CoworkNativeLaunchJournalPort;
   /** A repeating timer, so the admission heartbeat can be driven by a test clock. The default is an unref'd `setInterval`. */
@@ -93,7 +96,7 @@ export interface CoworkNativeUncertainEvent { readonly workspaceId: string; read
 type RunPhase = "starting" | "running" | "stopping" | "dead";
 interface Run {
   readonly key: CoworkPowerKey; readonly owner: CoworkVolumeOwner; readonly homeId: string;
-  admissionId: string | null; session: CoworkLauncherSession | null; binding: CoworkNativeChannelBinding | null; inbox: SessionInbox | null;
+  readonly receiptKey: CoworkNativeReceiptKey; admissionId: string | null; session: CoworkLauncherSession | null; binding: CoworkNativeChannelBinding | null; inbox: SessionInbox | null;
   phase: RunPhase; unsubscribe: (() => void)[]; downSeq: number; upSeq: CoworkNativeMuxSequence;
   /** What this process saw happen on the channel: a stop receipt cannot say less. */
   observed: { volumesAccepted: boolean; vmRunning: boolean; guestHello: boolean; guestFault: boolean };
@@ -197,6 +200,8 @@ export class CoworkNativeHost {
     if (before.some(v => v.owner !== null)) throw new CoworkNativeHostError("owner_held", "a previous owner still holds the volumes; recover first");
     const runtimeImageDigest = this.deps.images.runtimeImageDigest(workspaceId);
     if (typeof runtimeImageDigest !== "string" || !/^[a-f0-9]{64}$/.test(runtimeImageDigest)) throw new CoworkNativeHostError("bad_image_digest");
+    const receiptKey = this.deps.receiptKey();
+    if (receiptKey === null) throw new CoworkNativeHostError("no_receipt_key", "no receipt key is available; a launch without one could not leave authenticable receipts");
     const bootId = this.deps.hostBoot.bootId(), daemon = this.deps.daemon();
     if (daemon.bootId !== bootId) throw new CoworkNativeHostError("bad_boot", "daemon identity is from another boot");
 
@@ -207,7 +212,7 @@ export class CoworkNativeHost {
     const workerInstanceId = `wrk-${this.uuid()}`;
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
-    const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
+    const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, receiptKey, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
       observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, duplicateSeqAnomaly: false, pendingDuplicates: [] };
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
@@ -264,7 +269,7 @@ export class CoworkNativeHost {
     // 3. begin: the worker is spawned suspended, validated, sandboxed
     const full: CoworkNativeScope = { ...scope, admissionId: reserved.admissionId };
     const begin = `req-${this.uuid()}`.slice(0, 63);
-    session.send({ t: "begin", id: begin, homeId: run.homeId, ...full });
+    session.send({ t: "begin", id: begin, homeId: run.homeId, ...full, receiptKey: run.receiptKey });
     await run.inbox.expect(message => message.t === "begun" && message.id === begin ? message : message.t === "refused" && message.id === begin ? message : undefined, this.timeouts.begunMs, "begun")
       .then(message => {
         if (message.t === "refused") throw new CoworkNativeHostError("launcher_refused", message.code);

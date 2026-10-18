@@ -630,13 +630,20 @@ describe("the dangerous-domain floor", () => {
     expect(h.panel.get("s1")).toBeUndefined();
   });
 
+  test("ask (dispatch): a site card, like code's", async () => {
+    const h = harness({ policy: "ask", facts: { mode: "dispatch" }, dangerousAdded: ["evil.example"], answer: () => "once" });
+    await h.engine.global(h.run().scope, "browsers.open", { url: LISTED });
+    expect(h.cards.map((c) => c.summary)).toEqual(["Allow Winter to use evil.example in Winter's browser? It is on the dangerous-domains list."]);
+  });
+
   test("a standing WebFetch(domain:…) rule counts as approval under ask", async () => {
     const h = harness({ policy: "ask", dangerousAdded: ["evil.example"], savedRules: ["WebFetch(domain:evil.example)"] });
     await h.engine.global(h.run().scope, "browsers.open", { url: LISTED });
     expect(h.cards).toEqual([]);
   });
 
-  for (const [policy, mode] of [["auto", "code"], ["bypass", "code"], ["dont-ask", "code"], ["ask", "dispatch"]] as const) {
+  // Dispatch respects its policy like code (user ruling 2026-10-17): its auto blocks; chat blocks under any policy.
+  for (const [policy, mode] of [["auto", "code"], ["bypass", "code"], ["dont-ask", "code"], ["auto", "dispatch"], ["ask", "chat"]] as const) {
     test(`${policy} (${mode}): a hard block, no card, even with a standing rule`, async () => {
       const h = harness({ policy, facts: { mode }, dangerousAdded: ["evil.example"], savedRules: ["WebFetch(domain:evil.example)"] });
       const e = await failure(h.engine.global(h.run().scope, "browsers.open", { url: LISTED }));

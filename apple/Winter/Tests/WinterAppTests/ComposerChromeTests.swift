@@ -253,8 +253,9 @@ final class ComposerChromeTests: XCTestCase {
     }
 
     /// Dispatch's row is code's **minus `plan`**, and minus nothing else — the daemon refuses
-    /// exactly that one ("plan policy is not available for dispatch sessions — dispatch never asks
-    /// permissions", `ipc/server.ts:1527-1528`) and settles the other five. The opposite shape from
+    /// exactly that one ("plan policy is not available for dispatch sessions — Dispatch cannot
+    /// present a plan (exit_plan_mode is code-only)", `ipc/server.ts`) and settles the other five,
+    /// each of which Dispatch honours like code (user ruling 2026-10-17). The opposite shape from
     /// model/effort, which dispatch pins entirely.
     func testDispatchOffersEveryPolicyExceptPlan() throws {
         let row = try permissions(chrome(.dispatch, policy: wiredPolicy("ask")).makeStrip())

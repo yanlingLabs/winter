@@ -22,7 +22,12 @@ export interface CoworkHostPorts {
   /** Must fail closed until native isolation, storage and active resource-return gates pass. Fixture backend
    * permits isolated tests; this port does not launch a worker or mark any source ready. */
   requireProvisioning(principal: CoworkPrincipal): void;
+  /** Optional, host-injected native worker door (N2 S7). Absent (the production default) refuses `startNative` exactly as provisioning
+   * refuses today. It is never read from a setting, an RPC or an environment variable, and no RPC method reaches it. */
+  native?: CoworkGuestStartPort;
 }
+/** The one thing the service asks of the native host: start a stopped workspace's guest. The daemon owns the stop tail separately. */
+export interface CoworkGuestStartPort { start(workspaceId: string): Promise<unknown> }
 const NO_GRANTS: CoworkGrantResolver = { folder: () => undefined, repository: () => undefined };
 const RESPONSE_BUDGET = 128 * 1024;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -84,6 +89,14 @@ export class CoworkWorkspaceService {
     }), watchOptions);
   }
   beginShutdown(): void { this.schedules.beginShutdown(); }
+  /** Start a workspace's native guest. Refuses with `unsupported_topology` when no native port was injected, which is every production
+   * daemon today, and demands the same local-user authority as other administration. Not reachable from any RPC method. */
+  async startNative(principal: CoworkPrincipal, workspaceId: string): Promise<unknown> {
+    const native = this.host.native;
+    if (!native) throw new CoworkError("unsupported_topology");
+    this.authority.requireWorkspace(principal, workspaceId, "admin");
+    return native.start(workspaceId);
+  }
   private localWatchPrincipal(connection: CoworkConnection) {
     const principal = this.host.principal(connection);
     if (!principal || principal.kind !== "local-user" || !["harness", "admin"].includes(connection.role)) throw new CoworkError("authority_denied");

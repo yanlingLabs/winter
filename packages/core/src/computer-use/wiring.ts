@@ -14,7 +14,8 @@ import { sandboxConfigFor } from "../runtime-sdk/mode-options";
 import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
+import { isHumanTurnOrigin } from "../sessions/turn-origins";
+import { turnOriginIndexFor } from "../sessions/turn-origin-index";
 import { runnableModeOf } from "../sessions/session-mode";
 import { AutomationFailure } from "./errors";
 import {
@@ -141,6 +142,8 @@ export interface ComputerUseControl {
   /** Wake triggers: how many the session has armed (the session list's mark), and the Mac's [Stop waiting]. */
   wakesArmed?(sessionId: string): number;
   wakesCancel?(sessionId: string, wakeId: string): boolean;
+  /** Every armed trigger across sessions (the Mac island's Watches tab). */
+  wakesList?(): { sessionId: string; wakeId: string; condition: string; targetLabel: string; elementLabel?: string; armedAt: number; expiresAt: number }[];
 }
 
 export interface ComputerUseRuntime {
@@ -308,7 +311,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       const mode = computerPolicyModeOf(meta.mode);
       return { policy: meta.approvalPolicy, mode, ...(meta.origin === undefined ? {} : { origin: meta.origin }), ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }) };
     },
-    turnOrigin: (sessionId) => { try { return runningTurnOrigin(deps.store.read(sessionId)); } catch { return undefined; } },
+    turnOrigin: (sessionId) => turnOriginIndexFor(deps.hub, deps.store).origin(sessionId),
     // Someone at the MAC is looking at THIS session (the controller's ruling for rung 4): a Mac window or a terminal
     // attached to the session itself. The phone never counts (its gateway connects as the remote role), and a
     // Dispatch coordinator never does: the Mac's Dispatch pill is attached to it all the time, under the same
@@ -544,6 +547,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     wakesArmed: (sessionId) => wakeRegistry.countFor(sessionId),
     wakesCancel: (sessionId, wakeId) => wakeRegistry.cancel(sessionId, wakeId, "user"),
+    wakesList: () => wakeRegistry.listAll(),
   };
 
   return {

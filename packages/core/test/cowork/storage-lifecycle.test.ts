@@ -63,8 +63,8 @@ const pinned = (f: F) => f.pins.pin(f.workspaceId, digests(), PROOF);
 // the lower layer beneath an old installation overlay."
 test("schema 16 adds the lifecycle tables; they are Cowork authority (a populated pin blocks the rollback), and an empty store still rolls back", () => {
   const f = fixture();
-  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(16);
-  expect(f.db.schemaVersion()).toBe(16);
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(17);
+  expect(f.db.schemaVersion()).toBe(17);
   expect(COWORK_TABLES).toContain("cowork_workspace_images"); expect(COWORK_TABLES).toContain("cowork_exports");
   for (const table of ["cowork_workspace_images", "cowork_exports"]) expect(f.db.db.query("SELECT name FROM sqlite_master WHERE name=?").get(table)).not.toBeNull();
   pinned(f);
@@ -80,21 +80,21 @@ const userVersion = (home: string): number => {
   const raw = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
   try { return raw.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version; } finally { raw.close(); }
 };
-test("an empty v16 store downgrades to v7 and to v6, loses the lifecycle tables, and upgrades again cleanly", () => {
+test("an empty v17 store downgrades to v7 and to v6, loses the lifecycle tables, and upgrades again cleanly", () => {
   const home = mkdtempSync(join(tmpdir(), "winter-lifecycle-schema-")); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
   let db = openRuntimeStateDb(home); db.close();
-  expect(userVersion(home)).toBe(16);
+  expect(userVersion(home)).toBe(17);
   expect(tablesOf(home)).toEqual(expect.arrayContaining(["cowork_workspace_images", "cowork_exports"]));
-  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 16, to: 7 });
+  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 17, to: 7 });
   expect(userVersion(home)).toBe(7);
   expect(tablesOf(home).filter(name => name.startsWith("cowork_"))).toEqual([]);
   db = openRuntimeStateDb(home);
-  expect(db.schemaVersion()).toBe(16); expect(db.integrity().ok).toBe(true);
+  expect(db.schemaVersion()).toBe(17); expect(db.integrity().ok).toBe(true);
   for (const table of ["cowork_workspace_images", "cowork_exports"]) expect(db.db.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
   db.close();
-  expect(downgradeRuntimeStateToV6(home)).toEqual({ from: 16, to: 6 });
+  expect(downgradeRuntimeStateToV6(home)).toEqual({ from: 17, to: 6 });
   expect(userVersion(home)).toBe(6);
-  db = openRuntimeStateDb(home); expect(db.schemaVersion()).toBe(16); expect(db.integrity().ok).toBe(true); db.close();
+  db = openRuntimeStateDb(home); expect(db.schemaVersion()).toBe(17); expect(db.integrity().ok).toBe(true); db.close();
 });
 
 test("each lifecycle table alone is Cowork authority: one recorded row refuses both downgrades and survives them", () => {
@@ -106,7 +106,7 @@ test("each lifecycle table alone is Cowork authority: one recorded row refuses b
     const db = openRuntimeStateDb(home); db.db.run("PRAGMA foreign_keys=OFF"); db.db.run(insert); db.close();
     expect(() => downgradeCoworkRuntimeStateToV7(home)).toThrow("Cowork authority");
     expect(() => downgradeRuntimeStateToV6(home)).toThrow("Cowork authority");
-    expect(userVersion(home)).toBe(16);
+    expect(userVersion(home)).toBe(17);
     const raw = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
     try { expect(raw.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 1 }); } finally { raw.close(); }
   }
@@ -416,4 +416,17 @@ test("the manifest schema is closed and exported for consumers", () => {
   const f = fixture(), e = exported(f);
   expect(CoworkExportManifest.safeParse(JSON.parse(e.json)).success).toBe(true);
   expect(CoworkExportManifest.safeParse({ ...JSON.parse(e.json), extra: 1 }).success).toBe(false);
+});
+
+// ── Peer inbox (schema 17) is outside the export ────────────────────────────────────────────────────
+test("an export manifest and its stored row never carry a peer-inbox body, record or counter", () => {
+  const f = fixture(); pinned(f);
+  const marker = "PEER-BODY-MARKER-export-1c9";
+  f.db.db.run("INSERT INTO cowork_peer_inbox(receipt_id,sender_session_id,sender_incarnation,send_id,recipient_session_id,digest,size,body,sequence,state,attempts,accepted_at,updated_at,version) VALUES('r1','s_a','inc-1','m1','s_r',?,?,?,1,'accepted',0,1,1,1)", [A, marker.length, Buffer.from(marker)]);
+  f.db.db.run("INSERT INTO cowork_peer_inbox_sequences(recipient_session_id,last_sequence) VALUES('s_r',1)");
+  const prepared = f.exports.prepare(f.workspaceId, PROOF);
+  expect(prepared.manifestJson).not.toContain(marker); expect(prepared.manifestJson).not.toContain("s_r"); expect(prepared.manifestJson).not.toContain("peer");
+  const stored = f.db.db.query<{ manifest_json: string }, []>("SELECT manifest_json FROM cowork_exports").all();
+  expect(stored.map(row => row.manifest_json).join("")).not.toContain(marker);
+  expect(Object.keys(prepared.manifest).sort()).toEqual(["formatVersion", "generation", "homeId", "images", "kind", "plaintextImages", "volumes", "workspace"]);
 });

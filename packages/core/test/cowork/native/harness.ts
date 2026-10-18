@@ -5,6 +5,7 @@ import { CoworkAdmissionLedger, type AdmissionOwner, type AdmissionProbes, type 
 import { CoworkRepository } from "../../../src/cowork/repository";
 import { CoworkVolumes, RAW_VOLUME_MIN_BYTES, type CoworkVolumeAuthority } from "../../../src/cowork/volumes";
 import type { CoworkVolumeBackup } from "../../../src/cowork/volume-backup";
+import { CoworkNativeReceiptKey } from "../../../src/cowork/native/receipt-mac";
 import { CoworkNativeAuthority } from "../../../src/cowork/native/authority";
 import { CoworkNativeHost, CoworkNativeSimulatedCrash, type CoworkNativeHostDeps, type CoworkNativeHostTimeouts } from "../../../src/cowork/native/host";
 import { CoworkNativePower } from "../../../src/cowork/native/power";
@@ -15,6 +16,8 @@ import { guidedSet } from "./conversation-fixtures";
 import { FakeLauncher, type FakeBehavior } from "./fake-launcher";
 
 export const IMAGE_DIGEST = "d".repeat(64);
+/** The installation key of every harness: synthetic, and the same across restarts like a Keychain slot. */
+export const RECEIPT_KEY = CoworkNativeReceiptKey.fromBytes(Uint8Array.from({ length: 32 }, (_, i) => 0x10 + i));
 const PHASES = ["incarnation-begun", "admission-reserved", "launcher-spawned", "worker-begun", "claimed", "filesystem-intent", "volumes-opened", "transferred", "bootstrap-sent", "receipt-received", "filesystems-confirmed", "ready-sent", "conversations-sent", "runtime-ready", "power-running"] as const;
 export const START_PHASES: readonly string[] = PHASES;
 /** Volume-layer checkpoints that fire inside CoworkVolumes, in sequence order. */
@@ -139,12 +142,12 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     const ownerRecover: CoworkNativeOwnerRecoverPort = { confirm: () => ownerRecoverAttestation.value as never };
     const recoveryGuards: CoworkNativeRecoverGuards = { processAbsent: subject => { guards.seen.push(subject); return guards.processAbsent; }, imagesUnlocked: () => guards.imagesUnlocked };
     const checkpoint = (phase: string) => { events.push(`host:${phase}`); options.onCheckpoint?.(phase, harness); if (crashAt === phase) throw new CoworkNativeSimulatedCrash(phase); };
-    harness.recovery = new CoworkNativeRecovery({ records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, journal: journalPort, now: () => clock.now, checkpoint });
+    harness.recovery = new CoworkNativeRecovery({ receiptKey: () => RECEIPT_KEY, records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, journal: journalPort, now: () => clock.now, checkpoint });
     harness.launcher = new FakeLauncher({ behavior: boot.behavior ?? {}, homeId, hostBootId: () => hostBoot.current, receipts, events });
     harness.daemon = daemon;
     const deps: CoworkNativeHostDeps = {
       records: harness.records, volumes: harness.volumes, admission: harness.ledger, authority: harness.authority, power: harness.power, recovery: harness.recovery, registry: harness.registry, hostBoot,
-      launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, runtimeReadyMs: 400, stopGraceMs: 150, exitAllowanceMs: 0, drainBudgetMs: 150, ...boot.timeouts },
+      launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, receiptKey: () => RECEIPT_KEY, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, runtimeReadyMs: 400, stopGraceMs: 150, exitAllowanceMs: 0, drainBudgetMs: 150, ...boot.timeouts },
       conversations: "conversations" in options ? options.conversations : guidedSet, unsafeTestTimeouts: true, now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
     };
     harness.deps = deps;
