@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { validFilesystemPlan } from "../volume-filesystem";
+import { CoworkNativeReceiptKey, computeCoworkNativeReceiptMac, isCanonicalBase64Of32Bytes, verifyCoworkNativeReceiptMac } from "./receipt-mac";
 
 /*
  * Wire contract of the production Mac Cowork VM worker (N2 slice S1). The prose is docs/cowork-native-worker.md; this
@@ -27,6 +28,10 @@ import { validFilesystemPlan } from "../volume-filesystem";
  */
 
 export const COWORK_NATIVE_PROTOCOL_VERSION = 1;
+/** The `v` of the two JSON texts that carry the retained-receipt authentication: every L1 line and every stop receipt. 2 = the Class A receipt has a final
+ * `mac` key and the `begin` line a final `receiptKey` key (owner ruling 2026-10-18). The binary headers (L2 envelope, L3/L4 mux) and the bootstrap/runtime
+ * JSON that rides inside mux frames stay at version 1: nothing in them changed. */
+export const COWORK_NATIVE_TEXT_VERSION = 2;
 
 /** Every refusal the parsers raise. `reserved_class` is the provider class; there is no implementation behind it. */
 export const COWORK_NATIVE_PROTOCOL_FAILURES = Object.freeze(["malformed", "oversize", "version", "unknown_type", "bad_field", "bad_direction", "bad_rights", "reserved_class", "bad_sequence"] as const);
@@ -213,13 +218,16 @@ function distinctFiles<T extends readonly [CoworkNativeVolumeIdentity, CoworkNat
  * store BEFORE it sends it, and keeps it until the daemon sends `receipt_retire`. It states facts the launcher itself
  * observed (it is the sole reaper); it is valid only if every invariant in `classAInvariantsHold` holds. */
 export interface CoworkNativeOrderlyReceipt {
-  readonly v: 1; readonly class: "A"; readonly confirmationId: string; readonly stopNonce: string; readonly origin: typeof COWORK_NATIVE_STOP_ORIGINS[number];
+  readonly v: 2; readonly class: "A"; readonly confirmationId: string; readonly stopNonce: string; readonly origin: typeof COWORK_NATIVE_STOP_ORIGINS[number];
   readonly launcherInstanceId: string; readonly admissionId: string; readonly homeId: string; readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number;
   readonly controllerInstanceId: string; readonly workerInstanceId: string; readonly runtimeImageDigest: string; readonly hostBootId: string;
   readonly guest: Readonly<{ drain: "acked" | "not-booted"; halting: "observed" | "not-booted"; powerOff: "observed" | "not-booted" }>;
   readonly worker: Readonly<{ pid: number; startToken: string; exit: "code"; status: 0; reaped: true }>;
   readonly volumes: readonly [OrderlyVolume, OrderlyVolume];
   readonly issuedAtMs: number;
+  /** Base64 (44 characters) of HMAC-SHA256 over the receipt's canonical text without this key (`coworkNativeReceiptMacInput`), under the installation's
+   * receipt key. The last key of the text. A retained receipt counts only if it verifies; see receipt-mac.ts. */
+  readonly mac: string;
 }
 export interface OrderlyVolume {
   readonly purpose: CoworkNativeVolumePurpose; readonly device: string; readonly inode: string; readonly capacityBytes: number;
@@ -229,7 +237,7 @@ export interface OrderlyVolume {
  * capacityBytes 0 (`classAInvariantsHold` demands it). An attached entry carries the real identity, in the capacity range. */
 const orderlyVolumeSpec = (purpose: CoworkNativeVolumePurpose): Spec => [["purpose", literal(purpose)], ["device", decimal64], ["inode", decimal64], ["capacityBytes", value => value === 0 ? 0 : capacity(value)], ["attached", bool],
   ["flushRequested", uint()], ["flushCompleted", uint()], ["finalFlush", oneOf(["completed", "not-attached"] as const)]];
-const ORDERLY_SPEC: Spec = [["v", literal(1)], ["class", literal("A")], ["confirmationId", token], ["stopNonce", nonce], ["origin", oneOf(COWORK_NATIVE_STOP_ORIGINS)], ["launcherInstanceId", label],
+const ORDERLY_UNSIGNED_SPEC: Spec = [["v", literal(COWORK_NATIVE_TEXT_VERSION)], ["class", literal("A")], ["confirmationId", token], ["stopNonce", nonce], ["origin", oneOf(COWORK_NATIVE_STOP_ORIGINS)], ["launcherInstanceId", label],
   ["admissionId", token], ["homeId", token], ["workspaceId", token], ["incarnationId", token], ["leaseEpoch", epochOf], ["controllerInstanceId", token], ["workerInstanceId", token],
   ["runtimeImageDigest", digest], ["hostBootId", label],
   ["guest", recordOf([["drain", oneOf(["acked", "not-booted"] as const)], ["halting", oneOf(["observed", "not-booted"] as const)], ["powerOff", oneOf(["observed", "not-booted"] as const)]])],
@@ -238,17 +246,19 @@ const ORDERLY_SPEC: Spec = [["v", literal(1)], ["class", literal("A")], ["confir
     if (!Array.isArray(value) || value.length !== 2) return fail();
     return Object.freeze(COWORK_NATIVE_VOLUME_PURPOSES.map((purpose, index) => record(value[index], orderlyVolumeSpec(purpose))));
   }], ["issuedAtMs", uint()]];
+const macText: Validator<string> = value => isCanonicalBase64Of32Bytes(value) ? value : fail();
+const ORDERLY_SPEC: Spec = [...ORDERLY_UNSIGNED_SPEC, ["mac", macText]];
 
 /** Class B: uncertain. A crash, a daemon loss, a forced kill, a drain that ran out of budget, a closed channel. It
  * describes what the launcher saw and is exactly that: it has no key that could name a confirmation and the module
  * that mints release proofs (stop-proof.ts) has no code path that accepts one. */
 export interface CoworkNativeUncertainReceipt {
-  readonly v: 1; readonly class: "B"; readonly launcherInstanceId: string; readonly admissionId: string; readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number;
+  readonly v: 2; readonly class: "B"; readonly launcherInstanceId: string; readonly admissionId: string; readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number;
   readonly workerInstanceId: string; readonly reason: typeof COWORK_NATIVE_UNCERTAIN_REASONS[number];
   readonly worker: Readonly<{ pid: number; startToken: string; exit: "code" | "signal" | "unknown"; status: number }>;
   readonly attachedVolumes: boolean; readonly issuedAtMs: number;
 }
-const UNCERTAIN_SPEC: Spec = [["v", literal(1)], ["class", literal("B")], ["launcherInstanceId", label], ["admissionId", token], ["workspaceId", token], ["incarnationId", token], ["leaseEpoch", epochOf],
+const UNCERTAIN_SPEC: Spec = [["v", literal(COWORK_NATIVE_TEXT_VERSION)], ["class", literal("B")], ["launcherInstanceId", label], ["admissionId", token], ["workspaceId", token], ["incarnationId", token], ["leaseEpoch", epochOf],
   ["workerInstanceId", token], ["reason", oneOf(COWORK_NATIVE_UNCERTAIN_REASONS)],
   ["worker", recordOf([["pid", uint(1, 0x7fff_ffff)], ["startToken", label], ["exit", oneOf(["code", "signal", "unknown"] as const)], ["status", uint(0, 255)]])],
   ["attachedVolumes", bool], ["issuedAtMs", uint()]];
@@ -256,6 +266,21 @@ const UNCERTAIN_SPEC: Spec = [["v", literal(1)], ["class", literal("B")], ["laun
 const orderly: Validator<CoworkNativeOrderlyReceipt> = value => record(value, ORDERLY_SPEC) as unknown as CoworkNativeOrderlyReceipt;
 const uncertain: Validator<CoworkNativeUncertainReceipt> = value => record(value, UNCERTAIN_SPEC) as unknown as CoworkNativeUncertainReceipt;
 export type CoworkNativeStopReceipt = CoworkNativeOrderlyReceipt | CoworkNativeUncertainReceipt;
+
+/** The exact bytes the MAC covers: the receipt's canonical JSON text (schema key order, no whitespace, integers only) with the `mac` key left out and no
+ * trailing newline, UTF-8. The text is the receipt line with `,"mac":"<44 characters>"` removed before the closing brace and the newline dropped. */
+export function coworkNativeReceiptMacInput(receipt: Omit<CoworkNativeOrderlyReceipt, "mac"> | CoworkNativeOrderlyReceipt): string {
+  const { mac: _mac, ...unsigned } = receipt as CoworkNativeOrderlyReceipt;
+  return JSON.stringify(record(unsigned, ORDERLY_UNSIGNED_SPEC));
+}
+/** The launcher side, as a reference for the Swift implementation and for the test fakes: sign a receipt that has no `mac` yet. */
+export function signCoworkNativeOrderlyReceipt(unsigned: Omit<CoworkNativeOrderlyReceipt, "mac">, key: CoworkNativeReceiptKey): CoworkNativeOrderlyReceipt {
+  return { ...unsigned, mac: computeCoworkNativeReceiptMac(key, coworkNativeReceiptMacInput(unsigned)) };
+}
+/** True only for a receipt whose `mac` verifies under `key`, in constant time. False for a missing key, a malformed mac and a mismatch. */
+export function verifyCoworkNativeOrderlyReceiptMac(receipt: CoworkNativeOrderlyReceipt, key: CoworkNativeReceiptKey | null): boolean {
+  try { return verifyCoworkNativeReceiptMac(key, coworkNativeReceiptMacInput(receipt), receipt.mac); } catch { return false; }
+}
 
 /** The internal consistency a Class A receipt must have to mean what it says. A launcher that cannot state all of these
  * emits Class B instead. A receipt that parses but fails this is NOT orderly evidence: treat it as a protocol fault. */
@@ -810,7 +835,7 @@ export type CoworkNativeToDaemon =
   | { readonly t: "pong"; readonly id: string }
   | { readonly t: "fault"; readonly code: typeof COWORK_NATIVE_CHANNEL_FAULTS[number] };
 export type CoworkNativeToLauncher =
-  | ({ readonly t: "begin"; readonly id: string; readonly homeId: string } & CoworkNativeScope)
+  | ({ readonly t: "begin"; readonly id: string; readonly homeId: string } & CoworkNativeScope & { readonly receiptKey: CoworkNativeReceiptKey })
   | { readonly t: "volumes"; readonly id: string; readonly scopeDigest: string; readonly volumes: readonly [CoworkNativeVolumeIdentity, CoworkNativeVolumeIdentity] }
   | { readonly t: "mux_down"; readonly frame: CoworkNativeMuxFrame }
   | { readonly t: "stop"; readonly id: string; readonly stopNonce: string; readonly reason: typeof COWORK_NATIVE_STOP_REASONS[number]; readonly budgetMs: number }
@@ -829,7 +854,7 @@ const muxField = (direction: CoworkNativeMuxDirection): Validator<CoworkNativeMu
   if (frame.class === "control" || Buffer.from(serializeCoworkNativeMuxFrame(frame, direction)).toString("base64") !== value) return fail();
   return frame;
 };
-const LINE_BASE: Spec = [["v", literal(1)]];
+const LINE_BASE: Spec = [["v", literal(COWORK_NATIVE_TEXT_VERSION)]];
 const LAUNCHER_SPECS: Record<CoworkNativeLauncherDirection, Record<string, Spec>> = {
   "to-daemon": {
     hello: [["t", literal("hello")], ["launcherInstanceId", label], ["hostBootId", label], ["parentVerified", literal(true)]],
@@ -844,7 +869,7 @@ const LAUNCHER_SPECS: Record<CoworkNativeLauncherDirection, Record<string, Spec>
     fault: [["t", literal("fault")], ["code", oneOf(COWORK_NATIVE_CHANNEL_FAULTS)]],
   },
   "to-launcher": {
-    begin: [["t", literal("begin")], ["id", token], ["homeId", token], ...SCOPE_SPEC],
+    begin: [["t", literal("begin")], ["id", token], ["homeId", token], ...SCOPE_SPEC, ["receiptKey", value => isCanonicalBase64Of32Bytes(value) ? value : fail()]],
     volumes: [["t", literal("volumes")], ["id", token], ["scopeDigest", digest], ["volumes", volumePair]],
     mux_down: [["t", literal("mux_down")], ["frame", muxField("down")]],
     stop: [["t", literal("stop")], ["id", token], ["stopNonce", nonce], ["reason", oneOf(COWORK_NATIVE_STOP_REASONS)], ["budgetMs", uint(0, COWORK_NATIVE_LIMITS.drainBudgetCeilingMs)]],
@@ -867,9 +892,11 @@ export function parseCoworkNativeLauncherLine(raw: unknown, direction: CoworkNat
   if (!spec) return Object.hasOwn(LAUNCHER_SPECS[direction === "to-daemon" ? "to-launcher" : "to-daemon"], type) ? fail("bad_direction") : fail("unknown_type");
   if (Buffer.byteLength(raw as string, "utf8") > (MUX_CARRIERS.has(type) ? COWORK_NATIVE_LIMITS.muxLineBytes : COWORK_NATIVE_LIMITS.controlLineBytes)) return fail("oversize");
   if (rights !== (type === "volumes" ? COWORK_NATIVE_LIMITS.volumeRights : 0)) return fail("bad_rights");
-  if (parsed.v !== COWORK_NATIVE_PROTOCOL_VERSION) return fail("version");
+  if (parsed.v !== COWORK_NATIVE_TEXT_VERSION) return fail("version");
   const typed = record(parsed, [...LINE_BASE, ...spec]);
   delete typed.v;
+  // The key leaves the parser only inside its redacting wrapper (its text form never appears in a typed message).
+  if (type === "begin") typed.receiptKey = CoworkNativeReceiptKey.fromBase64(typed.receiptKey) ?? fail();
   // A mux carrier decodes into a frame object, so the compare goes through the serializer, which re-encodes the frame.
   const message = typed as unknown as CoworkNativeLauncherMessage;
   if (serializeCoworkNativeLauncherLine(message, direction) !== raw) return fail("malformed");
@@ -878,7 +905,9 @@ export function parseCoworkNativeLauncherLine(raw: unknown, direction: CoworkNat
 export function serializeCoworkNativeLauncherLine(message: CoworkNativeLauncherMessage, direction: CoworkNativeLauncherDirection): string {
   const specs = LAUNCHER_SPECS[direction], type = (message as { t: string }).t, spec = specs !== undefined && Object.hasOwn(specs, type) ? specs[type]! : undefined;
   if (!spec) return fail("unknown_type");
-  const wire: Record<string, unknown> = { v: 1, ...message }, carrier = MUX_CARRIERS.has(type);
+  const wire: Record<string, unknown> = { v: COWORK_NATIVE_TEXT_VERSION, ...message }, carrier = MUX_CARRIERS.has(type);
+  // The one place the key's text is read: onto the wire, for the launcher. Anything that is not the wrapper is refused, never stringified.
+  if (type === "begin") { const key = (message as { receiptKey?: unknown }).receiptKey; if (!(key instanceof CoworkNativeReceiptKey)) return fail(); wire.receiptKey = key.reveal(); }
   // The typed object carries a frame; the wire carries its canonical base64, which muxField re-verifies while validating.
   if (carrier) wire.frame = Buffer.from(serializeCoworkNativeMuxFrame((message as { frame: CoworkNativeMuxFrame }).frame, type === "mux_up" ? "up" : "down")).toString("base64");
   const typed = record(wire, [...LINE_BASE, ...spec]);
