@@ -489,30 +489,52 @@ struct UsagePlanLine: View {
     let ring: UsagePlanRing
     let color: Color
     var compact = false
+    @State private var localHover = false
+
+    /// The line at rest and under the pointer (user 2026-10-18: just the line; on hover it thickens and says how much
+    /// is used).
+    static func thickness(compact: Bool, hovered: Bool) -> CGFloat {
+        hovered ? (compact ? 14 : 16) : (compact ? 5 : 7)
+    }
 
     var body: some View {
-        let pct = Int((min(1, max(0, ring.fraction)) * 100).rounded())
-        HStack(spacing: compact ? 8 : 12) {
+        // The island's own pointer (its panels are never key), or the window's hover.
+        IslandPointerReader { islandHovered in
+            lineBody(hovered: islandHovered || localHover)
+        }
+        .onHover { localHover = $0 }
+    }
+
+    private func lineBody(hovered: Bool) -> some View {
+        let used = min(1, max(0, ring.fraction))
+        let pct = Int((used * 100).rounded())
+        let height = Self.thickness(compact: compact, hovered: hovered)
+        return HStack(spacing: compact ? 8 : 12) {
             Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.85)).lineLimit(1)
                 .frame(width: compact ? 52 : 72, alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.08))
                     Capsule().fill(ring.stale ? Color(nsColor: .systemGray) : color)
-                        .frame(width: max(ring.fraction > 0 ? 4 : 0, proxy.size.width * min(1, max(0, ring.fraction))))
+                        .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
+                    if hovered {
+                        Text("\(pct)% used")
+                            .font(Typography.tiny(.semibold))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 6)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .transition(.opacity)
+                    }
                 }
             }
-            .frame(height: compact ? 5 : 7)
+            .frame(height: height)
             .opacity(ring.stale ? 0.6 : 1)
-            Text("\(pct)% left").font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white).lineLimit(1)
-                .frame(width: compact ? 58 : 70, alignment: .trailing)
-            if let r = compact ? ring.resetsShort : ring.resets {
-                Text(r).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                    .frame(width: compact ? 70 : 130, alignment: .leading)
-            }
         }
+        .frame(height: Self.thickness(compact: compact, hovered: true))
+        .contentShape(Rectangle())
+        .animation(.easeOut(duration: 0.15), value: hovered)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(ring.title): \(pct)% left\(ring.resets.map { ", \($0)" } ?? "")")
+        .accessibilityLabel("\(ring.title): \(pct)% used\(ring.resets.map { ", \($0)" } ?? "")")
     }
 }
 

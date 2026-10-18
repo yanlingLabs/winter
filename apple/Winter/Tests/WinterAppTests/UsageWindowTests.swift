@@ -44,9 +44,9 @@ final class UsageWindowTests: XCTestCase {
         let slot = UsagePresentation.slot(provider: "codex", reading: reading, now: now)
         XCTAssertEqual(slot.title, "Codex")
         XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly"])
-        // The rings show what is LEFT (2 % and 34 % used → 98 % and 66 % left); the colour reads what is used.
-        for (ring, (left, used)) in zip(slot.rings, [(0.98, 0.02), (0.66, 0.34)]) {
-            XCTAssertEqual(ring.fraction, left, accuracy: 1e-9)
+        // The lines show what is USED (user 2026-10-18: back to used).
+        for (ring, used) in zip(slot.rings, [0.02, 0.34]) {
+            XCTAssertEqual(ring.fraction, used, accuracy: 1e-9)
             XCTAssertEqual(ring.used, used, accuracy: 1e-9)
         }
         XCTAssertNil(slot.rings[0].resets, "a passed reset says nothing")
@@ -57,6 +57,11 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(slot.sourceLine, "From Codex’s last session · 3 h ago · stale")
         XCTAssertEqual(slot.planType, "Plus")
         XCTAssertNil(slot.emptyLine)
+    }
+
+    func testAPlanLineThickensUnderThePointer() {
+        XCTAssertGreaterThan(UsagePlanLine.thickness(compact: true, hovered: true), UsagePlanLine.thickness(compact: true, hovered: false))
+        XCTAssertGreaterThan(UsagePlanLine.thickness(compact: false, hovered: true), UsagePlanLine.thickness(compact: false, hovered: false))
     }
 
     func testResetWordsCountDownAShortWindowAndDateALongOne() {

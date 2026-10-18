@@ -11,10 +11,10 @@ struct UsagePlanRing: Identifiable, Equatable {
     let id: String
     /// "5-hour", "Weekly", "Fable" (a per-model weekly limit is named by its model alone).
     let title: String
-    /// 0…1: what is LEFT of the window (user 2026-10-18: show the usage left, not used) — the ring and its number.
+    /// 0…1: what is USED of the window — the line's fill, and its number on hover (user 2026-10-18: back to used).
     let fraction: Double
-    /// 0…1: what is used — only the colour reads it (amber, then red, as the window runs out).
-    var used: Double { 1 - fraction }
+    /// The same (kept for readers that name it).
+    var used: Double { fraction }
     /// "resets in 2 h 14 min"; a window a day or longer says WHEN — "resets Thu 9:00" (user 2026-10-18: the weekly reset
     /// date). Nil without a reset, or once it passed.
     let resets: String?
@@ -173,7 +173,7 @@ enum UsagePresentation {
             .map { w in
                 let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? $0 : nil }
                 let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
-                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: 1 - min(1, max(0, w.usedPercent / 100)),
+                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: min(1, max(0, w.usedPercent / 100)),
                                      resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale)
             }
     }
