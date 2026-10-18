@@ -385,8 +385,13 @@ struct IslandUsageCompact: View {
         VStack(alignment: .leading, spacing: 8) {
             // Codex and its lines, then Claude Code and its lines (user 2026-10-18).
             VStack(alignment: .leading, spacing: 10) {
-                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: summary?.codexPlan, now: now), compact: true)
-                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: summary?.claudeCodePlan, now: now), compact: true)
+                // Only the apps on this Mac (user 2026-10-18).
+                if UsagePresentation.showsSlot(summary?.codexPlan) {
+                    UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: summary?.codexPlan, now: now), compact: true)
+                }
+                if UsagePresentation.showsSlot(summary?.claudeCodePlan) {
+                    UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: summary?.claudeCodePlan, now: now), compact: true)
+                }
             }
             .padding(.horizontal, 6)
             IslandHoverSurface { _ in

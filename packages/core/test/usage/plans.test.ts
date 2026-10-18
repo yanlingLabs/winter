@@ -16,6 +16,8 @@ import {
 const pricer = new UsagePricer();
 const NOW = Date.now();
 const sec = (ms: number) => Math.floor(ms / 1000);
+/** An installed app that answers nothing (exits at once): the fallback rungs' tests. */
+const FAILING = "/usr/bin/false";
 
 function service(over: Partial<UsageServiceDeps> & { logs?: string[] } = {}) {
   const home = tempDir("home");
@@ -128,7 +130,7 @@ describe("the Codex plan", () => {
     expect((await svc.codexPlan()).source).toBe("codex-app-server");
   });
 
-  test("a malformed or refused reply falls back to the rollout; a missing binary too", async () => {
+  test("a malformed or refused reply falls back to the rollout; a missing binary is not installed (no slot)", async () => {
     for (const mode of ["malformed", "error"] as const) {
       const fake = fakeCodex(tempDir("bin"), mode);
       const codexHome = tempDir("codex");
@@ -139,14 +141,14 @@ describe("the Codex plan", () => {
     const codexHome = tempDir("codex");
     rollouts(codexHome, NOW - 60_000, 5, 6, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
     const { svc } = service({ codexExecutable: () => undefined, codexHome });
-    expect((await svc.codexPlan()).source).toBe("codex-rollout");
+    expect((await svc.codexPlan()).source).toBe("not-installed");
   });
 
   test("the NEWEST rollout's last rate_limits; stale when older than its window or past its reset", async () => {
     const codexHome = tempDir("codex");
     const old = rollouts(codexHome, NOW - 6 * 3_600_000, 90, 91, { primary: sec(NOW - 3_600_000), secondary: sec(NOW + 86_400_000) });
     utimesSync(old, new Date(NOW - 6 * 3_600_000), new Date(NOW - 6 * 3_600_000));
-    const { svc } = service({ codexHome });
+    const { svc } = service({ codexHome, codexExecutable: () => FAILING });
     let plan = await svc.codexPlan();
     // Six hours old: the 5-hour window is past its reset (and older than its window); the weekly one still holds.
     expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.stale, w.staleReason])).toEqual([["five_hour", 90, true, "reset_passed"], ["weekly", 91, false, undefined]]);
@@ -159,7 +161,7 @@ describe("the Codex plan", () => {
     const codexHome = tempDir("codex");
     rollouts(codexHome, NOW - 60_000, 5, 6, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
     let now = NOW;
-    const { svc } = service({ codexHome, now: () => now, fallbackEveryMs: 60_000 });
+    const { svc } = service({ codexHome, codexExecutable: () => FAILING, now: () => now, fallbackEveryMs: 60_000 });
     expect((await svc.codexPlan()).windows.map((w) => w.usedPercent)).toEqual([5, 6]);
     rollouts(codexHome, NOW, 50, 60, { primary: sec(NOW + 3_600_000), secondary: sec(NOW + 86_400_000) });
     now = NOW + 30_000; // within the cache window: the newer rollout is not read yet
@@ -169,11 +171,12 @@ describe("the Codex plan", () => {
     expect(later.windows.map((w) => w.usedPercent)).toEqual([50, 60]);
   });
 
-  test("no Codex at all: Winter's own codex-oauth report, status only, labelled; none without it", async () => {
-    const { svc } = service({ winterCodexWindows: () => [{ rateLimitType: "five_hour", status: "allowed", at: NOW - 1000, resetsAt: NOW + 1000 }] });
-    const plan = await svc.codexPlan();
+  test("Codex that cannot answer: Winter's own codex-oauth report, status only, labelled; none without it; not installed whatever Winter knows", async () => {
+    const windows = () => [{ rateLimitType: "five_hour", status: "allowed" as const, at: NOW - 1000, resetsAt: NOW + 1000 }];
+    const plan = await service({ codexExecutable: () => FAILING, winterCodexWindows: windows }).svc.codexPlan();
     expect(plan).toMatchObject({ source: "winter-codex-oauth", windows: [], statusOnly: [{ rateLimitType: "five_hour", status: "allowed" }] });
-    expect((await service().svc.codexPlan()).source).toBe("none");
+    expect((await service({ codexExecutable: () => FAILING }).svc.codexPlan()).source).toBe("none");
+    expect((await service({ winterCodexWindows: windows }).svc.codexPlan()).source).toBe("not-installed");
   });
 
   test("tracking off: nothing is spawned or read", async () => {
@@ -274,8 +277,10 @@ describe("the Claude Code plan", () => {
     }
   });
 
-  test("nothing installed and no cache: none", async () => {
+  test("not installed: no slot, whatever the cache holds; installed with no report and no cache: none", async () => {
     const { svc } = service({ claudeJsonPath: join(tempDir("x"), "absent.json") });
-    expect((await svc.claudeCodePlan()).source).toBe("none");
+    expect((await svc.claudeCodePlan()).source).toBe("not-installed");
+    const installed = service({ claudeExecutable: () => FAILING, claudeJsonPath: join(tempDir("x"), "absent.json") });
+    expect((await installed.svc.claudeCodePlan()).source).toBe("none");
   });
 });

@@ -83,7 +83,7 @@ describe("usage.* over the socket", () => {
     const app = await TestClient.connect(socketPath);
     await app.hello(tokens.harness, "orb");
     const summary = (await app.request(METHODS.usageSummary, { range: "24h" })).result;
-    expect(summary).toMatchObject({ range: "24h", totals: { costUsd: 0 }, plans: { codex: { source: "none" }, claudeCode: { source: "none" } } });
+    expect(summary).toMatchObject({ range: "24h", totals: { costUsd: 0 }, plans: { codex: { source: "not-installed" }, claudeCode: { source: "not-installed" } } });
     expect((await app.request(METHODS.usageSeries, { range: "all", sources: ["codex"] })).result.buckets.length).toBeGreaterThan(0);
     expect((await app.request(METHODS.usageSummary, { range: "forever" })).error?.code).toBe(ERR.INVALID_PARAMS);
 

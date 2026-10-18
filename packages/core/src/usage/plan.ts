@@ -31,7 +31,9 @@ export interface PlanStatusWindow {
 export type PlanSource =
   | "codex-app-server" | "codex-rollout" | "winter-codex-oauth"
   | "claude-cli" | "claude-cache"
-  | "none" | "disabled";
+  | "none" | "disabled"
+  /** The app is not on this Mac (no executable found): the surfaces hide its slot. */
+  | "not-installed";
 
 export interface PlanReading {
   provider: "codex" | "claude-code";

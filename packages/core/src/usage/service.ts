@@ -419,6 +419,8 @@ export class UsageService {
   /** The Codex plan: Codex's app-server → the newest rollout's `rate_limits` → Winter's own codex-oauth report. */
   async codexPlan(): Promise<PlanReading> {
     if (!this.deps.tracking().codex) return { provider: "codex", source: "disabled", windows: [] };
+    // Not on this Mac: no slot at all (user 2026-10-18), whatever an old rollout or Winter's own sign-in could say.
+    if (this.deps.codexExecutable() === undefined) return { provider: "codex", source: "not-installed", windows: [] };
     const now = this.now();
     const every = this.deps.codexAppServerEveryMs ?? 60_000;
     if (this.codexRun !== undefined) {
@@ -453,6 +455,7 @@ export class UsageService {
   /** The Claude Code plan (`ClaudeCodePlanUsageSource`): Claude Code's own `/usage` → `~/.claude.json`'s cache. */
   async claudeCodePlan(): Promise<PlanReading> {
     if (!this.deps.tracking().claudeCode) return { provider: "claude-code", source: "disabled", windows: [] };
+    if (this.deps.claudeExecutable() === undefined) return { provider: "claude-code", source: "not-installed", windows: [] };
     const now = this.now();
     const every = this.deps.claudeCliEveryMs ?? 300_000;
     if (this.claudeRun !== undefined) {

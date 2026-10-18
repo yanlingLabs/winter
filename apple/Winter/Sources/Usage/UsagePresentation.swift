@@ -191,6 +191,10 @@ enum UsagePresentation {
     }
 
     /// PURE: a plan's slot. `provider` is "codex" or "claude-code" (its reading may be nil before the first answer).
+    /// PURE: whether a plan gets a slot at all — not when its app is not on this Mac (user 2026-10-18). Before the
+    /// first answer it shows ("Reading…").
+    static func showsSlot(_ reading: UsagePlanReading?) -> Bool { reading?.source != "not-installed" }
+
     static func slot(provider: String, reading: UsagePlanReading?, now: Date) -> UsagePlanSlot {
         let title = provider == "codex" ? "Codex" : "Claude Code"
         guard let reading else {

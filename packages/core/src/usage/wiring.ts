@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { IslandUsageRegistry } from "../island/usage";
@@ -38,6 +39,16 @@ export const CLAUDE_INSTALLS = [
   join(homedir(), ".npm-global/bin/claude"),
 ];
 
+/** The JS package managers' global bins (bun, volta, pnpm, every nvm node): a CLI installed through one of them is
+ *  still "on this Mac" when the app's `$PATH` is the bare launchd one. */
+export function packageManagerBins(name: string, home = homedir()): string[] {
+  const out = [join(home, ".bun/bin", name), join(home, ".volta/bin", name), join(home, "Library/pnpm", name)];
+  try {
+    for (const v of readdirSync(join(home, ".nvm/versions/node"))) out.push(join(home, ".nvm/versions/node", v, "bin", name));
+  } catch { /* no nvm */ }
+  return out;
+}
+
 function pick(injected: string | null | undefined, env: string | undefined, fallback: () => string | undefined): string | undefined {
   if (injected !== undefined) return injected ?? undefined;
   if (env !== undefined && env.length > 0) return env;
@@ -75,8 +86,8 @@ export function createUsageService(opts: {
     ...(codexHome === undefined ? {} : { codexHome }),
     ...(claudeHome === undefined ? {} : { claudeHome }),
     ...(claudeJsonPath === undefined ? {} : { claudeJsonPath }),
-    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), CODEX_INSTALLS),
-    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), CLAUDE_INSTALLS),
+    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...CODEX_INSTALLS, ...packageManagerBins("codex")]),
+    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...CLAUDE_INSTALLS, ...packageManagerBins("claude")]),
     winterCodexWindows: () => (opts.islandUsage?.windowsFor("codex-oauth") ?? []).map((w) => ({
       ...(w.rateLimitType === undefined ? {} : { rateLimitType: w.rateLimitType }), status: w.status,
       ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: w.at,

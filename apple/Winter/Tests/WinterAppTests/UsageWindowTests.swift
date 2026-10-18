@@ -59,6 +59,13 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertNil(slot.emptyLine)
     }
 
+    func testAnAppNotOnThisMacGetsNoSlot() {
+        XCTAssertTrue(UsagePresentation.showsSlot(nil))
+        XCTAssertFalse(UsagePresentation.showsSlot(UsagePlanReading(provider: "codex", source: "not-installed", windows: [])))
+        XCTAssertTrue(UsagePresentation.showsSlot(UsagePlanReading(provider: "codex", source: "none", windows: [])))
+        XCTAssertTrue(UsagePresentation.showsSlot(UsagePlanReading(provider: "claude-code", source: "disabled", windows: [])))
+    }
+
     func testAPlanLineThickensUnderThePointer() {
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: true, hovered: true), UsagePlanLine.thickness(compact: true, hovered: false))
         XCTAssertGreaterThan(UsagePlanLine.thickness(compact: false, hovered: true), UsagePlanLine.thickness(compact: false, hovered: false))

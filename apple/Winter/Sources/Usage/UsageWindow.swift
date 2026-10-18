@@ -161,11 +161,15 @@ struct UsageWindowContent: View {
 
     private func plans(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: model.summary?.codexPlan, now: now))
-            VStack(alignment: .leading, spacing: 6) {
-                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
-                if let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
-                    Text(line).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+            if UsagePresentation.showsSlot(model.summary?.codexPlan) {
+                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: model.summary?.codexPlan, now: now))
+            }
+            if UsagePresentation.showsSlot(model.summary?.claudeCodePlan) {
+                VStack(alignment: .leading, spacing: 6) {
+                    UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
+                    if let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
+                        Text(line).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                    }
                 }
             }
         }

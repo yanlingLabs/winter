@@ -47,6 +47,8 @@ Claude Code deletes transcripts after its retention period (30 days by default);
 
 ## Plans — source ladders (`UsageService.codexPlan` / `claudeCodePlan`)
 
+**Only the apps on this Mac (user 2026-10-18).** Before any rung, a plan whose executable does not resolve answers `source: "not-installed"` — no rollout, no `~/.claude.json`, no Winter codex-oauth status — and the island and the window show no slot for it (`UsagePresentation.showsSlot`). "Installed" is the executable resolution below, which also tries the JS package managers' global bins (`packageManagerBins`: bun, volta, pnpm, every nvm node) so a CLI installed through one is not hidden when the app's `$PATH` is launchd's.
+
 A plan read waits at most 2 s (`planWaitMs`) for a spawn still running — a client's request times out at 5 s — and answers from the next rung meanwhile; the spawn finishes in the background (single-flight) and the next ask gets it. `usage.summary` runs the ingest and both ladders side by side. A reading says its `source`, its `at` and, per window, `usedPercent` (0…100), `resetsAt` (ms), `stale` + `staleReason`. **Stale**: measured longer ago than its own window (`older_than_window`), or its reset has passed (`reset_passed`) — `plan.ts`'s `staleness`.
 
 **Codex** (`codex.ts`):
