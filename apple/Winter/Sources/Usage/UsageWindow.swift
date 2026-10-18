@@ -161,7 +161,12 @@ struct UsageWindowContent: View {
     private func plans(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: model.summary?.codexPlan, now: now))
-            UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
+            VStack(alignment: .leading, spacing: 6) {
+                UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
+                if let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
+                    Text(line).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                }
+            }
         }
     }
 
@@ -301,8 +306,8 @@ struct UsageWindowContent: View {
                             num(r.totals.cacheRead)
                             num(r.totals.cacheWrite)
                             HStack(spacing: 4) {
-                                if !UsagePresentation.basisMark(r.costBasis).isEmpty {
-                                    Text(UsagePresentation.basisMark(r.costBasis)).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                                if !UsagePresentation.basisMark(r).isEmpty {
+                                    Text(UsagePresentation.basisMark(r)).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
                                 }
                                 Text(r.costBasis == "unknown" ? "—" : UsagePresentation.cost(r.totals.costUsd))
                                     .font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white)
@@ -312,6 +317,10 @@ struct UsageWindowContent: View {
                 }
                 Text("“est.” — a list-price estimate: what the same tokens would cost on the API (a subscription isn’t billed per token).")
                     .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                if rows.contains(where: { $0.totals.syntheticRecords > 0 }) {
+                    Text("* includes days from Claude Code’s /stats, kept after its transcripts were deleted: daily totals split by each model’s overall mix, so the cache split and cost are estimates.")
+                        .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                }
             }
         }
         .padding(16)

@@ -35,6 +35,20 @@ final class UsageClientTests: XCTestCase {
         XCTAssertFalse(s.trackClaudeCode)
     }
 
+    func testClaudeCodeStatsHistoryDecodes() throws {
+        let s = WinterClient.decodeUsageSummary(try json(#"""
+        {"range":"all","totals":{"records":3,"syntheticRecords":2},"history":{"claudeCodeStats":{"from":100,"before":200}},
+         "topModels":[{"source":"claude-code","provider":"anthropic","model":"m","costBasis":"estimate","records":3,"syntheticRecords":2}]}
+        """#))
+        XCTAssertEqual(s.claudeCodeStatsBefore, 200)
+        XCTAssertEqual(s.totals.syntheticRecords, 2)
+        XCTAssertEqual(s.topModels.first?.totals.syntheticRecords, 2)
+        // An older daemon sends neither: nothing imported.
+        let old = WinterClient.decodeUsageSummary(try json(#"{"range":"all","totals":{"records":3}}"#))
+        XCTAssertNil(old.claudeCodeStatsBefore)
+        XCTAssertEqual(old.totals.syntheticRecords, 0)
+    }
+
     func testTheSeriesAndTheSubscriptionsDecode() throws {
         let series = WinterClient.decodeUsageSeries(try json(#"""
         {"range":"7d","from":0,"to":10,"bucketMs":5,"buckets":[{"start":0,"costUsd":1,"tokens":10,"bySource":{},"models":[{"source":"winter","model":"m","costUsd":1,"tokens":10}]},{"start":5,"costUsd":0,"tokens":0,"models":[]}],

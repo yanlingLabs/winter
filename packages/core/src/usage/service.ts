@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
-import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType } from "./claude-code";
+import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudePlanFromCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
+import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
-import { USAGE_SOURCES, type Subscription, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
+import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
@@ -54,6 +55,8 @@ export interface UsageServiceDeps {
   maxLineBytes?: number;
   /** `~/.claude.json` over this is not read (default 32 MiB). */
   claudeJsonMaxBytes?: number;
+  /** Claude Code's `stats-cache.json` over this is not read (default 8 MiB). */
+  claudeStatsMaxBytes?: number;
 }
 
 /** A binary's identity for a probe latch: its realpath, mtime and size (an update is a new binary). */
@@ -78,6 +81,13 @@ export function removeProbeDir(root: string, dir: string): boolean {
     rmSync(dir, { recursive: true, force: true });
     return true;
   } catch { return false; }
+}
+
+/** A stored synthetic row against a planned one: any token count, the cost or its basis changed. */
+function differs(s: SyntheticRow, r: UsageRecordInput): boolean {
+  const cost = r.costBasis === "unknown" || r.costUsd === undefined ? null : r.costUsd;
+  return s.input !== r.input || s.output !== r.output || s.cacheRead !== r.cacheRead || s.cacheWrite !== r.cacheWrite || s.costBasis !== r.costBasis
+    || (cost === null) !== (s.costUsd === null) || (cost !== null && s.costUsd !== null && Math.abs(cost - s.costUsd) > 1e-9);
 }
 
 /** Wait for `p`, at most `ms`. */
@@ -109,7 +119,13 @@ export interface UsageTotals {
   unpricedTokens: number;
   cacheSavingsUsd: number;
   records: number;
+  /** Of `records`, how many are Claude Code `/stats` estimates (no transcript left for that day). */
+  syntheticRecords: number;
 }
+
+/** Where the Claude Code history came from: days before `before` (UTC noon of that day, epoch ms) are Claude Code's
+ *  own `/stats` totals; `from` is the first such day. */
+export interface UsageHistory { claudeCodeStats?: { from: number; before: number } }
 
 export interface UsageModelRow extends UsageTotals {
   source: UsageSource;
@@ -121,11 +137,12 @@ export interface UsageModelRow extends UsageTotals {
 
 export interface UsageBucket { start: number; costUsd: number; tokens: number; bySource: Partial<Record<UsageSource, number>>; models: Array<{ source: UsageSource; model: string; costUsd: number; tokens: number }> }
 
-const EMPTY = (): UsageTotals => ({ costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, unpricedTokens: 0, cacheSavingsUsd: 0, records: 0 });
+const EMPTY = (): UsageTotals => ({ costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, unpricedTokens: 0, cacheSavingsUsd: 0, records: 0, syntheticRecords: 0 });
 
 function add(t: UsageTotals, r: UsageRow): void {
   t.costUsd += r.costUsd; t.input += r.input; t.output += r.output; t.cacheRead += r.cacheRead; t.cacheWrite += r.cacheWrite;
   t.reasoning += r.reasoning; t.unpricedTokens += r.unpricedTokens; t.cacheSavingsUsd += r.cacheSavingsUsd; t.records += r.records;
+  t.syntheticRecords += r.syntheticRecords;
 }
 
 const HOUR = 3_600_000;
@@ -197,6 +214,13 @@ export class UsageService {
   /** Test seam: how many times `~/.claude.json` was parsed. */
   claudeFileParses = 0;
   private claudeFileOverCapLogged = false;
+  /** Claude Code's `stats-cache.json`, parsed only when its mtime or size changed. */
+  private statsFile: { stamp: string; stats?: ClaudeStats } | undefined;
+  /** The last applied backfill's inputs (file stamp, transcript cutoff day, today): unchanged → nothing to do. */
+  private statsSignature: string | undefined;
+  private statsLogged = new Set<string>();
+  /** Test seam: how many times `stats-cache.json` was parsed. */
+  claudeStatsParses = 0;
 
   constructor(private readonly deps: UsageServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -269,12 +293,74 @@ export class UsageService {
       }
       if (tracking.claudeCode && this.deps.claudeHome !== undefined) {
         const files = await claudeCodeTranscripts(this.deps.claudeHome);
-        more = (await this.ingestFiles("claude-code", files, (line, _state, file) => claudeCodeRecordOf(line, this.deps.pricer, file.mtimeMs))) || more;
+        const ccMore = await this.ingestFiles("claude-code", files, (line, _state, file) => claudeCodeRecordOf(line, this.deps.pricer, file.mtimeMs));
+        more = ccMore || more;
+        // The `/stats` history only once the transcripts are all in: its boundary is the first transcript day.
+        if (!ccMore) await this.importClaudeStats(this.deps.claudeHome);
       }
     } catch (err) {
       this.deps.log?.warn?.("[usage] ingest failed", { error: err instanceof Error ? err.name : "error" });
     }
     this.ingestMore = more;
+  }
+
+  private statsLog(key: string, msg: string): void {
+    if (this.statsLogged.has(key)) return;
+    this.statsLogged.add(key);
+    this.deps.log?.warn?.(msg);
+  }
+
+  /**
+   * Backfill Claude Code's history from its own `/stats` cache (`usage/claude-stats.ts`) for the days its transcripts no
+   * longer cover. The file is parsed only when its mtime or size changed; the rows are re-planned only when the file,
+   * the first transcript day or today changed, and written only where they differ. Synthetic rows are derived state:
+   * a day the transcripts now cover loses its synthetic rows; a day the cache no longer lists keeps them (history).
+   * A missing, corrupt or over-cap file changes nothing.
+   */
+  private async importClaudeStats(claudeHome: string): Promise<void> {
+    const path = join(claudeHome, CLAUDE_STATS_FILE);
+    let st: { mtimeMs: number; size: number };
+    try { st = statSync(path); } catch { return; }
+    const stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
+    if (this.statsFile?.stamp !== stamp) {
+      const cap = this.deps.claudeStatsMaxBytes ?? CLAUDE_STATS_MAX_BYTES;
+      const text = st.size > cap ? "over-cap" : await readCapped(path, cap);
+      let stats: ClaudeStats | undefined;
+      if (text === "over-cap") this.statsLog("over-cap", "[usage] Claude Code's stats cache is over the size cap; its history is not read");
+      else if (text !== undefined) {
+        stats = parseClaudeStats(text);
+        this.claudeStatsParses++;
+        if (stats === undefined) this.statsLog("corrupt", "[usage] Claude Code's stats cache could not be read; its history is not imported");
+      }
+      this.statsFile = { stamp, ...(stats === undefined ? {} : { stats }) };
+    }
+    const stats = this.statsFile.stats;
+    if (stats === undefined) return;
+    const now = this.now();
+    const today = utcDay(now);
+    const earliest = this.deps.db.earliestReal("claude-code");
+    const cutoffDay = earliest === undefined ? undefined : utcDay(earliest);
+    const signature = `${stamp}|${cutoffDay ?? ""}|${today}`;
+    if (signature === this.statsSignature) return;
+    const from = overlapFrom(now);
+    const real = cutoffDay === undefined ? [] : this.deps.db.dailyRealTotals("claude-code", Date.parse(`${from}T00:00:00Z`));
+    const wanted = claudeStatsRecords({ stats, ...(cutoffDay === undefined ? {} : { cutoffDay }), today, real, overlapFromDay: from, pricer: this.deps.pricer });
+    const stored = new Map(this.deps.db.syntheticRows("claude-code").map((r) => [r.dedupe, r]));
+    // The transcripts win: a synthetic row on a day they now cover goes.
+    const remove = cutoffDay === undefined ? [] : [...stored.values()].filter((r) => utcDay(r.at) >= cutoffDay).map((r) => r.dedupe);
+    const upsert = wanted.filter((r) => { const s = stored.get(r.dedupe); return s === undefined || differs(s, r); });
+    const { removed, added } = this.deps.db.reconcileSynthetic("claude-code", remove, upsert);
+    this.statsSignature = signature;
+    if (removed + added > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added, removed });
+  }
+
+  /** Where the Claude Code history came from (the Usage window's footnote). */
+  history(): UsageHistory {
+    const span = this.deps.db.syntheticSpan("claude-code");
+    if (span === undefined) return {};
+    const earliest = this.deps.db.earliestReal("claude-code");
+    const before = earliest !== undefined && earliest > span.last ? utcNoon(utcDay(earliest)) : span.last + 86_400_000;
+    return { claudeCodeStats: { from: span.first, before } };
   }
 
   /** Read every file's new bytes. Returns true when a budget left bytes for the next pass. */
@@ -443,7 +529,7 @@ export class UsageService {
 
   series(range: UsageRange, sources: readonly UsageSource[] = USAGE_SOURCES): {
     range: UsageRange; from: number; to: number; bucketMs: number; buckets: UsageBucket[]; models: UsageModelRow[];
-    totals: UsageTotals; bySource: Array<{ source: UsageSource } & UsageTotals>;
+    totals: UsageTotals; bySource: Array<{ source: UsageSource } & UsageTotals>; history: UsageHistory;
   } {
     const { from, to, bucketMs, rows } = this.rows(range, sources);
     const count = Math.max(1, Math.ceil((to - from) / bucketMs));
@@ -474,7 +560,7 @@ export class UsageService {
       add(totals, r);
     }
     return {
-      range, from, to, bucketMs, buckets,
+      range, from, to, bucketMs, buckets, history: this.history(),
       models: [...models.values()].sort((a, b) => b.costUsd - a.costUsd || (b.input + b.output + b.cacheRead) - (a.input + a.output + a.cacheRead)),
       totals, bySource: [...bySource.entries()].map(([source, t]) => ({ source, ...t })),
     };
@@ -494,7 +580,7 @@ export class UsageService {
       topModels: s.models.slice(0, 5),
       spark: s.buckets.map((b) => b.costUsd), sparkTokens: s.buckets.map((b) => b.tokens),
       ...(plans === undefined ? {} : { plans }),
-      tracking: this.deps.tracking(), ingest: this.ingestState(),
+      tracking: this.deps.tracking(), ingest: this.ingestState(), history: s.history,
     };
   }
 

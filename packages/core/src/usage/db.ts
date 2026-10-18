@@ -15,8 +15,11 @@ import { dirname } from "node:path";
 //  - `subscriptions`: the plans the user entered (Settings-like data the user owns, edited over RPC).
 //  - `probe_latches` (v2): a plan probe switched off for one exact binary (its realpath, mtime and size) — Claude Code's
 //    `/usage` that reached the model loop. Survives restarts; an updated binary is a new key, so it is tried again.
+//  - `synthetic` (v3): a row DERIVED from Claude Code's own `/stats` cache (`usage/claude-stats.ts`) for a day its
+//    transcripts no longer cover — one per model per day, `dedupe` = `ccstats:<model>:<YYYY-MM-DD>`. They are the
+//    only rows ever replaced or removed (`reconcileSynthetic`), and the hourly rollup counts them (`synthetic_records`).
 
-export const USAGE_DB_SCHEMA_VERSION = 2;
+export const USAGE_DB_SCHEMA_VERSION = 3;
 
 export type UsageSource = "winter" | "codex" | "claude-code";
 export const USAGE_SOURCES: readonly UsageSource[] = ["winter", "codex", "claude-code"];
@@ -43,6 +46,8 @@ export interface UsageRecordInput {
   costBasis: CostBasis;
   /** What the cache reads saved against the same tokens at the full input price (list prices). */
   cacheSavingsUsd?: number;
+  /** A row derived from Claude Code's `/stats` cache, not read from a transcript (shown as "est." with a footnote). */
+  synthetic?: boolean;
 }
 
 export interface UsageRow {
@@ -63,6 +68,20 @@ export interface UsageRow {
   estimateRecords: number;
   cacheSavingsUsd: number;
   records: number;
+  /** Of `records`, how many were derived from Claude Code's `/stats` cache (`synthetic`). */
+  syntheticRecords: number;
+}
+
+/** A stored synthetic row, as `reconcileSynthetic` compares it. */
+export interface SyntheticRow {
+  dedupe: string;
+  at: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number | null;
+  costBasis: CostBasis;
 }
 
 export interface IngestFileState {
@@ -128,6 +147,14 @@ export class UsageDb {
           at INTEGER NOT NULL
         )`);
         this.db.run("PRAGMA user_version = 2");
+      })();
+    }
+    if (v < 3) {
+      this.db.transaction(() => {
+        this.db.run("ALTER TABLE usage_records ADD COLUMN synthetic INTEGER NOT NULL DEFAULT 0");
+        this.db.run("ALTER TABLE usage_hourly ADD COLUMN synthetic_records INTEGER NOT NULL DEFAULT 0");
+        this.db.run("CREATE INDEX IF NOT EXISTS usage_records_synthetic ON usage_records(source, at) WHERE synthetic = 1");
+        this.db.run("PRAGMA user_version = 3");
       })();
     }
   }
@@ -200,35 +227,104 @@ export class UsageDb {
   insert(records: readonly UsageRecordInput[]): number {
     if (records.length === 0) return 0;
     const ins = this.db.prepare(`INSERT OR IGNORE INTO usage_records
-      (dedupe, source, at, session_id, mode, provider, model, input, output, cache_read, cache_write, reasoning, cost_usd, cost_basis, cache_savings_usd)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      (dedupe, source, at, session_id, mode, provider, model, input, output, cache_read, cache_write, reasoning, cost_usd, cost_basis, cache_savings_usd, synthetic)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const roll = this.db.prepare(`INSERT INTO usage_hourly
-      (hour, source, provider, model, input, output, cache_read, cache_write, reasoning, cost_usd, unpriced_tokens, list_records, estimate_records, cache_savings_usd, records)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      (hour, source, provider, model, input, output, cache_read, cache_write, reasoning, cost_usd, unpriced_tokens, list_records, estimate_records, cache_savings_usd, records, synthetic_records)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
       ON CONFLICT (hour, source, provider, model) DO UPDATE SET
         input = input + excluded.input, output = output + excluded.output,
         cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write,
         reasoning = reasoning + excluded.reasoning, cost_usd = cost_usd + excluded.cost_usd,
         unpriced_tokens = unpriced_tokens + excluded.unpriced_tokens,
         list_records = list_records + excluded.list_records, estimate_records = estimate_records + excluded.estimate_records,
-        cache_savings_usd = cache_savings_usd + excluded.cache_savings_usd, records = records + 1`);
+        cache_savings_usd = cache_savings_usd + excluded.cache_savings_usd, records = records + 1,
+        synthetic_records = synthetic_records + excluded.synthetic_records`);
     let added = 0;
     this.db.transaction(() => {
       for (const r of records) {
         const priced = r.costUsd !== undefined && r.costBasis !== "unknown";
         const res = ins.run(r.dedupe, r.source, Math.round(r.at), r.sessionId ?? null, r.mode ?? null, r.provider ?? "", r.model,
           r.input, r.output, r.cacheRead, r.cacheWrite, r.reasoning ?? null, priced ? r.costUsd! : null, priced ? r.costBasis : "unknown",
-          r.cacheSavingsUsd ?? null);
+          r.cacheSavingsUsd ?? null, r.synthetic === true ? 1 : 0);
         if (res.changes === 0) continue;
         added++;
         const hour = Math.floor(r.at / 3_600_000) * 3_600_000;
         const tokens = r.input + r.output + r.cacheRead + r.cacheWrite;
         roll.run(hour, r.source, r.provider ?? "", r.model, r.input, r.output, r.cacheRead, r.cacheWrite, r.reasoning ?? 0,
           priced ? r.costUsd! : 0, priced ? 0 : tokens, priced && r.costBasis === "list" ? 1 : 0, priced && r.costBasis === "estimate" ? 1 : 0,
-          r.cacheSavingsUsd ?? 0);
+          r.cacheSavingsUsd ?? 0, r.synthetic === true ? 1 : 0);
       }
     })();
     return added;
+  }
+
+  // ── synthetic rows (Claude Code's `/stats` history) ─────────────────────────────────────────────
+
+  /** The earliest TRANSCRIPT-derived (non-synthetic) record of `source`, epoch ms — synthetic rows never move it. */
+  earliestReal(source: UsageSource): number | undefined {
+    const r = this.db.query("SELECT MIN(at) AS at FROM usage_records WHERE source = ? AND synthetic = 0").get(source) as { at: number | null } | null;
+    return r?.at ?? undefined;
+  }
+
+  /** The first and last synthetic record of `source`, epoch ms. */
+  syntheticSpan(source: UsageSource): { first: number; last: number } | undefined {
+    const r = this.db.query("SELECT MIN(at) AS first, MAX(at) AS last FROM usage_records WHERE source = ? AND synthetic = 1")
+      .get(source) as { first: number | null; last: number | null } | null;
+    return r?.first === null || r?.first === undefined || r.last === null ? undefined : { first: r.first, last: r.last };
+  }
+
+  /** Non-synthetic token totals of `source` per model per UTC day (`YYYY-MM-DD`) since `fromMs`: `all` = the four
+   *  kinds, `io` = input + output only. */
+  dailyRealTotals(source: UsageSource, fromMs: number): Array<{ model: string; day: string; all: number; io: number }> {
+    const rows = this.db.query(`SELECT model, (at / 86400000) AS d, SUM(input + output + cache_read + cache_write) AS a, SUM(input + output) AS io
+      FROM usage_records WHERE source = ? AND synthetic = 0 AND at >= ? GROUP BY model, d`).all(source, fromMs) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({ model: String(r.model), day: new Date(n(r.d) * 86_400_000).toISOString().slice(0, 10), all: n(r.a), io: n(r.io) }));
+  }
+
+  syntheticRows(source: UsageSource): SyntheticRow[] {
+    const rows = this.db.query("SELECT dedupe, at, input, output, cache_read, cache_write, cost_usd, cost_basis FROM usage_records WHERE source = ? AND synthetic = 1")
+      .all(source) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      dedupe: String(r.dedupe), at: n(r.at), input: n(r.input), output: n(r.output), cacheRead: n(r.cache_read), cacheWrite: n(r.cache_write),
+      costUsd: typeof r.cost_usd === "number" ? r.cost_usd : null, costBasis: r.cost_basis === "list" || r.cost_basis === "estimate" ? r.cost_basis : "unknown",
+    }));
+  }
+
+  /**
+   * Apply a synthetic-row plan in ONE transaction: remove the rows named in `remove` (and any being replaced), then
+   * insert `upsert` — a removed row's numbers come off its hour's rollup (an hour row left with no records goes). Only
+   * synthetic rows are ever touched. Returns how many rows were removed and added.
+   */
+  reconcileSynthetic(source: UsageSource, remove: readonly string[], upsert: readonly UsageRecordInput[]): { removed: number; added: number } {
+    if (remove.length === 0 && upsert.length === 0) return { removed: 0, added: 0 };
+    const get = this.db.prepare("SELECT * FROM usage_records WHERE dedupe = ? AND source = ? AND synthetic = 1");
+    const del = this.db.prepare("DELETE FROM usage_records WHERE id = ?");
+    const sub = this.db.prepare(`UPDATE usage_hourly SET input = input - ?, output = output - ?, cache_read = cache_read - ?,
+        cache_write = cache_write - ?, reasoning = reasoning - ?, cost_usd = cost_usd - ?, unpriced_tokens = unpriced_tokens - ?,
+        list_records = list_records - ?, estimate_records = estimate_records - ?, cache_savings_usd = cache_savings_usd - ?,
+        records = records - 1, synthetic_records = synthetic_records - 1
+      WHERE hour = ? AND source = ? AND provider = ? AND model = ?`);
+    const empty = this.db.prepare("DELETE FROM usage_hourly WHERE hour = ? AND source = ? AND provider = ? AND model = ? AND records <= 0");
+    let removed = 0;
+    let added = 0;
+    this.db.transaction(() => {
+      for (const dedupe of new Set([...remove, ...upsert.map((r) => r.dedupe)])) {
+        const r = get.get(dedupe, source) as Record<string, unknown> | null;
+        if (r === null) continue;
+        const hour = Math.floor(n(r.at) / 3_600_000) * 3_600_000;
+        const priced = r.cost_usd !== null && r.cost_basis !== "unknown";
+        const tokens = n(r.input) + n(r.output) + n(r.cache_read) + n(r.cache_write);
+        sub.run(n(r.input), n(r.output), n(r.cache_read), n(r.cache_write), n(r.reasoning), priced ? n(r.cost_usd) : 0, priced ? 0 : tokens,
+          priced && r.cost_basis === "list" ? 1 : 0, priced && r.cost_basis === "estimate" ? 1 : 0, n(r.cache_savings_usd),
+          hour, String(r.source), String(r.provider ?? ""), String(r.model));
+        empty.run(hour, String(r.source), String(r.provider ?? ""), String(r.model));
+        del.run(n(r.id));
+        removed++;
+      }
+      added = this.insert(upsert.map((r) => ({ ...r, source, synthetic: true })));
+    })();
+    return { removed, added };
   }
 
   private static rowOf(r: Record<string, unknown>): UsageRow {
@@ -236,7 +332,7 @@ export class UsageDb {
       source: r.source as UsageSource, provider: String(r.provider ?? ""), model: String(r.model ?? ""),
       input: n(r.input), output: n(r.output), cacheRead: n(r.cache_read), cacheWrite: n(r.cache_write), reasoning: n(r.reasoning),
       costUsd: n(r.cost_usd), unpricedTokens: n(r.unpriced_tokens), listRecords: n(r.list_records), estimateRecords: n(r.estimate_records),
-      cacheSavingsUsd: n(r.cache_savings_usd), records: n(r.records),
+      cacheSavingsUsd: n(r.cache_savings_usd), records: n(r.records), syntheticRecords: n(r.synthetic_records),
     };
   }
 
@@ -250,7 +346,7 @@ export class UsageDb {
         SUM(CASE WHEN cost_usd IS NULL THEN input + output + cache_read + cache_write ELSE 0 END) AS unpriced_tokens,
         SUM(CASE WHEN cost_basis = 'list' THEN 1 ELSE 0 END) AS list_records,
         SUM(CASE WHEN cost_basis = 'estimate' THEN 1 ELSE 0 END) AS estimate_records,
-        SUM(COALESCE(cache_savings_usd, 0)) AS cache_savings_usd, COUNT(*) AS records
+        SUM(COALESCE(cache_savings_usd, 0)) AS cache_savings_usd, COUNT(*) AS records, SUM(synthetic) AS synthetic_records
       FROM usage_records WHERE at >= ? AND at < ? AND source IN (${marks})
       GROUP BY bucket, source, provider, model`).all(from, from, bucketMs, bucketMs, from, to, ...sources) as Array<Record<string, unknown>>;
     return rows.map((r) => ({ ...UsageDb.rowOf(r), bucket: n(r.bucket) }));

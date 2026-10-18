@@ -113,6 +113,22 @@ enum UsagePresentation {
         }
     }
 
+    /// PURE: a model row's cost mark — "est." with a "*" when some of its days are Claude Code `/stats` estimates.
+    static func basisMark(_ row: UsageModelRow) -> String {
+        let mark = basisMark(row.costBasis)
+        return row.totals.syntheticRecords > 0 ? mark + "*" : mark
+    }
+
+    /// PURE: the Claude Code section's history line ("History before 1 Oct 2026 from Claude Code’s /stats"), or nil.
+    /// `before` is noon UTC of the first transcript day: the same calendar date in every zone the app runs in.
+    static func statsHistoryLine(before: Double?) -> String? {
+        guard let before else { return nil }
+        let utc = TimeZone(identifier: "UTC") ?? .current
+        var style = Date.FormatStyle(date: .abbreviated, time: .omitted)
+        style.timeZone = utc
+        return "History before \(Date(timeIntervalSince1970: before / 1000).formatted(style)) from Claude Code’s /stats"
+    }
+
     /// PURE: a plan source as words.
     static func planSourceWords(_ source: String) -> String {
         switch source {

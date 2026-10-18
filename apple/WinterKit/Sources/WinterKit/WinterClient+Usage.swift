@@ -76,11 +76,14 @@ public struct UsageTotals: Sendable, Equatable {
     public let unpricedTokens: Double
     public let cacheSavingsUsd: Double
     public let records: Double
+    /// Of `records`, how many are Claude Code `/stats` estimates (days with no transcript left).
+    public let syntheticRecords: Double
 
     public init(costUsd: Double = 0, input: Double = 0, output: Double = 0, cacheRead: Double = 0, cacheWrite: Double = 0,
-                reasoning: Double = 0, unpricedTokens: Double = 0, cacheSavingsUsd: Double = 0, records: Double = 0) {
+                reasoning: Double = 0, unpricedTokens: Double = 0, cacheSavingsUsd: Double = 0, records: Double = 0, syntheticRecords: Double = 0) {
         self.costUsd = costUsd; self.input = input; self.output = output; self.cacheRead = cacheRead; self.cacheWrite = cacheWrite
         self.reasoning = reasoning; self.unpricedTokens = unpricedTokens; self.cacheSavingsUsd = cacheSavingsUsd; self.records = records
+        self.syntheticRecords = syntheticRecords
     }
 
     public var tokens: Double { input + output + cacheRead + cacheWrite }
@@ -134,14 +137,17 @@ public struct UsageSummary: Sendable, Equatable {
     public let claudeCodePlan: UsagePlanReading?
     public let trackCodex: Bool
     public let trackClaudeCode: Bool
+    /// Epoch ms (noon UTC of that day): Claude Code days before it come from its own `/stats` cache. Nil = none imported.
+    public let claudeCodeStatsBefore: Double?
 
     public init(range: String, from: Double = 0, to: Double = 0, bucketMs: Double = 0, totals: UsageTotals = .init(),
                 bySource: [UsageSource: UsageTotals] = [:], topModels: [UsageModelRow] = [], spark: [Double] = [],
                 sparkTokens: [Double] = [], codexPlan: UsagePlanReading? = nil, claudeCodePlan: UsagePlanReading? = nil,
-                trackCodex: Bool = true, trackClaudeCode: Bool = true) {
+                trackCodex: Bool = true, trackClaudeCode: Bool = true, claudeCodeStatsBefore: Double? = nil) {
         self.range = range; self.from = from; self.to = to; self.bucketMs = bucketMs; self.totals = totals; self.bySource = bySource
         self.topModels = topModels; self.spark = spark; self.sparkTokens = sparkTokens; self.codexPlan = codexPlan
         self.claudeCodePlan = claudeCodePlan; self.trackCodex = trackCodex; self.trackClaudeCode = trackClaudeCode
+        self.claudeCodeStatsBefore = claudeCodeStatsBefore
     }
 }
 
@@ -239,7 +245,7 @@ extension WinterClient {
         UsageTotals(costUsd: num(v?["costUsd"]) ?? 0, input: num(v?["input"]) ?? 0, output: num(v?["output"]) ?? 0,
                     cacheRead: num(v?["cacheRead"]) ?? 0, cacheWrite: num(v?["cacheWrite"]) ?? 0, reasoning: num(v?["reasoning"]) ?? 0,
                     unpricedTokens: num(v?["unpricedTokens"]) ?? 0, cacheSavingsUsd: num(v?["cacheSavingsUsd"]) ?? 0,
-                    records: num(v?["records"]) ?? 0)
+                    records: num(v?["records"]) ?? 0, syntheticRecords: num(v?["syntheticRecords"]) ?? 0)
     }
 
     static func decodeModelRows(_ v: JSONValue?) -> [UsageModelRow] {
@@ -280,7 +286,8 @@ extension WinterClient {
                      totals: decodeUsageTotals(r["totals"]), bySource: decodeBySource(r["bySource"]), topModels: decodeModelRows(r["topModels"]),
                      spark: (r["spark"]?.arrayValue ?? []).map { num($0) ?? 0 }, sparkTokens: (r["sparkTokens"]?.arrayValue ?? []).map { num($0) ?? 0 },
                      codexPlan: decodePlan(r["plans"]?["codex"]), claudeCodePlan: decodePlan(r["plans"]?["claudeCode"]),
-                     trackCodex: r["tracking"]?["codex"]?.boolValue ?? true, trackClaudeCode: r["tracking"]?["claudeCode"]?.boolValue ?? true)
+                     trackCodex: r["tracking"]?["codex"]?.boolValue ?? true, trackClaudeCode: r["tracking"]?["claudeCode"]?.boolValue ?? true,
+                     claudeCodeStatsBefore: num(r["history"]?["claudeCodeStats"]?["before"]))
     }
 
     public static func decodeUsageSeries(_ r: JSONValue) -> UsageSeries {
