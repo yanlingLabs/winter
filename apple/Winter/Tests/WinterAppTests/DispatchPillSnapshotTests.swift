@@ -47,6 +47,23 @@ final class DispatchPillSnapshotTests: XCTestCase {
 
     /// Renders the pill's view tree at its canvas size, over a desktop-ish backdrop, to `<name>.png`.
     private func render(_ pill: DispatchPillController, _ name: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        let image = try renderImage(pill, settle: true, file: file, line: line)
+        try write(image, name, file: file, line: line)
+    }
+
+    private func write(_ image: NSImage, _ name: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            return XCTFail("could not encode \(name)", file: file, line: line)
+        }
+        try png.write(to: outputDirectory.appendingPathComponent("\(name).png"))
+    }
+
+    /// The pill's view tree drawn over the backdrop. `settle` gives the layout passes time to report the floating
+    /// layers and the card's measured height (which can grow the canvas); a filmstrip frame skips that so the
+    /// animated size it was handed stays put.
+    private func renderImage(_ pill: DispatchPillController, settle: Bool,
+                             file: StaticString = #filePath, line: UInt = #line) throws -> NSImage {
         let host = NSHostingView(rootView: DispatchPillView(controller: pill))
         let window = NSWindow(contentRect: CGRect(origin: .zero, size: pill.canvas.size),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -56,18 +73,16 @@ final class DispatchPillSnapshotTests: XCTestCase {
         window.contentView = host
         // Two passes: the first lays out and reports the floating layers' size, which can grow the
         // canvas; the second renders at the settled canvas.
-        for _ in 0..<3 {
+        for _ in 0..<(settle ? 3 : 1) {
             host.frame = CGRect(origin: .zero, size: pill.canvas.size)
             window.setContentSize(pill.canvas.size)
             host.layoutSubtreeIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            RunLoop.main.run(until: Date().addingTimeInterval(settle ? 0.4 : 0.05))
         }
         let size = pill.canvas.size
-        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
-            return XCTFail("no bitmap for \(name)", file: file, line: line)
-        }
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds), file: file, line: line)
         host.cacheDisplay(in: host.bounds, to: rep)
-        let pixelSize = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+        XCTAssertGreaterThan(rep.pixelsWide, 0, file: file, line: line)
 
         let backdrop = NSImage(size: size)
         backdrop.lockFocus()
@@ -76,13 +91,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
             .draw(in: CGRect(origin: .zero, size: size), angle: 90)
         rep.draw(in: CGRect(origin: .zero, size: size))
         backdrop.unlockFocus()
-
-        guard let tiff = backdrop.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:]) else {
-            return XCTFail("could not encode \(name)", file: file, line: line)
-        }
-        try png.write(to: outputDirectory.appendingPathComponent("\(name).png"))
-        XCTAssertGreaterThan(pixelSize.width, 0, file: file, line: line)
+        return backdrop
     }
 
     func test1CompactIdle() throws {
@@ -129,7 +138,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "5-working")
     }
 
-    func test6ApprovalFloatsAboveThePill() throws {
+    func test6ApprovalMorphsThePill() throws {
         let record = InteractionRecord(callId: "a1",
                                        ask: .approval(toolName: "bash", summary: "git push origin release/0.124"),
                                        childSessionId: "c1")
@@ -355,5 +364,162 @@ final class DispatchPillSnapshotTests: XCTestCase {
             p.setPresentationForTesting(.compact)
             try render(p, "7-child-pills-\(count)")
         }
+    }
+
+    // MARK: - The pill as a card (user, 2026-10-17: the pill MORPHS into the card)
+
+    private func approvalRecord(_ callId: String = "a1") -> InteractionRecord {
+        InteractionRecord(callId: callId,
+                          ask: .approval(toolName: "Bash", summary: "git push origin release/0.124 --follow-tags",
+                                         reviewerReason: "Pushes a tag to the shared remote",
+                                         options: try! JSONDecoder().decode([SessionEvent.ApprovalOption].self, from: Data("""
+                                             [{"id":"allow_once","label":"Allow once"},
+                                              {"id":"allow_project","label":"Always allow `git push origin release/*` and `git push --follow-tags` from the release sessions in this project","rule":"Bash(git push:*)","scope":"project"},
+                                              {"id":"deny","label":"Deny"}]
+                                             """.utf8))),
+                          childSessionId: "c1")
+    }
+
+    private func pillWithCard(_ record: InteractionRecord, waiting: [InteractionRecord] = [],
+                              presentation: DispatchPillPresentation = .compact) -> DispatchPillController {
+        let p = pill { s in
+            s.exchanges = [Exchange(prompt: "ship the release", reply: "",
+                                    activity: ([record] + waiting).map { ActivityItem(kind: .interaction($0)) })]
+            s.children = [ChildItem(sessionId: "c1", title: "release", status: "awaiting_approval"),
+                          ChildItem(sessionId: "c2", title: "docs pass", status: "running")]
+        }
+        p.setPresentationForTesting(presentation)
+        p.refreshCards()
+        return p
+    }
+
+    private func question(_ multi: Bool) -> SessionEvent.Question {
+        SessionEvent.Question(question: multi ? "Which checks should run before the tag goes out?"
+                                              : "Which branch should the release notes come from?",
+                              header: multi ? "Checks" : "Branch",
+                              options: multi
+                                ? [SessionEvent.QuestionOption(label: "Unit tests"),
+                                   SessionEvent.QuestionOption(label: "The built-binary e2e", description: "Needs dist/winter — about 4 minutes"),
+                                   SessionEvent.QuestionOption(label: "Idle wake-ups")]
+                                : [SessionEvent.QuestionOption(label: "main"),
+                                   SessionEvent.QuestionOption(label: "release/0.124", description: "Cut yesterday from main"),
+                                   SessionEvent.QuestionOption(label: "The last tag")],
+                              multiSelect: multi)
+    }
+
+    func test15CardApproval() throws {
+        let p = pillWithCard(approvalRecord(), waiting: [InteractionRecord(callId: "a9", ask: .approval(toolName: "Edit", summary: "README.md"))])
+        try render(p, "15-card-approval")
+    }
+
+    func test16CardSingleSelectQuestion() throws {
+        let record = InteractionRecord(callId: "q1", ask: .question(questions: [question(false)]), childSessionId: "c1")
+        let p = pillWithCard(record)
+        var draft = PendingCardDraft()
+        draft.selectSingle(1, forQuestion: 0)
+        p.adapter.pendingCardDraftBinding(for: "q1").wrappedValue = draft
+        try render(p, "16-card-question-single")
+    }
+
+    func test17CardMultiSelectQuestionWithSubmit() throws {
+        let record = InteractionRecord(callId: "q2", ask: .question(questions: [question(true), question(false)]))
+        let p = pillWithCard(record)
+        var draft = PendingCardDraft()
+        draft.toggleMulti(0, forQuestion: 0)
+        draft.toggleMulti(1, forQuestion: 0)
+        p.adapter.pendingCardDraftBinding(for: "q2").wrappedValue = draft
+        try render(p, "17-card-question-multi-submit")
+    }
+
+    func test18CardOtherField() throws {
+        let record = InteractionRecord(callId: "q3", ask: .question(questions: [question(false)]), childSessionId: "c1")
+        let p = pillWithCard(record)
+        var draft = PendingCardDraft()
+        draft.setOtherText("hotfix/0.124.1", forQuestion: 0)
+        draft.toggleNote(forQuestion: 0)
+        draft.setNote("tag it after the notes land", forQuestion: 0)
+        p.adapter.pendingCardDraftBinding(for: "q3").wrappedValue = draft
+        try render(p, "18-card-question-other")
+    }
+
+    func test19CardElicitation() throws {
+        let record = InteractionRecord(callId: "e1", ask: .urlElicitation(
+            serverName: "GitHub", message: "Sign in to GitHub so the release can open its pull request.",
+            host: "github.com", origin: "https://github.com",
+            expiresAt: Int(Date().addingTimeInterval(600).timeIntervalSince1970 * 1000)))
+        let p = pillWithCard(record)
+        try render(p, "19-card-elicitation")
+    }
+
+    func test20CardFromTheTypingPill() throws {
+        let p = pillWithCard(approvalRecord(), presentation: .expanded)
+        try render(p, "20-card-from-typing-pill")
+    }
+
+    /// The morph itself, 8 frames: the compact pill's shape springing to the card's (a content swap — the card stays
+    /// hidden while the shape grows, then fades and sharpens in over the last stretch), stitched into one strip.
+    /// Drawn with `ImageRenderer`, which draws SwiftUI's blur and the rounded clip exactly (the window snapshot above
+    /// leaves both out); AppKit-backed pieces (the plume layers) are blank there.
+    func test21MorphFilmstrip() throws {
+        let p = pillWithCard(approvalRecord())
+        _ = try renderImage(p, settle: true) // measure the card, settle the canvas
+        let from = CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
+        let to = p.morph.target
+        let canvas = p.canvas.size
+        var frames: [CGImage] = []
+        for i in 0..<8 {
+            let t = CGFloat(i) / 7
+            p.setSwapFrameForTesting(size: CGSize(width: from.width + (to.width - from.width) * t,
+                                                  height: from.height + (to.height - from.height) * t),
+                                     origin: from)
+            let view = ZStack {
+                LinearGradient(colors: [Color(red: 0.62, green: 0.56, blue: 0.50), Color(red: 0.36, green: 0.42, blue: 0.52)],
+                               startPoint: .top, endPoint: .bottom)
+                DispatchPillView(controller: p)
+                    .environment(\.dispatchPillCardFlat, true)
+            }
+            .frame(width: canvas.width, height: canvas.height)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            frames.append(try XCTUnwrap(renderer.cgImage, "frame \(i)"))
+        }
+        let w = frames[0].width, h = frames[0].height
+        let strip = NSImage(size: CGSize(width: w * frames.count, height: h))
+        strip.lockFocus()
+        for (i, frame) in frames.enumerated() {
+            NSGraphicsContext.current?.cgContext.draw(frame, in: CGRect(x: w * i, y: 0, width: w, height: h))
+        }
+        strip.unlockFocus()
+        try write(strip, "21-morph-filmstrip")
+    }
+
+    /// The pill as a card at rest and hovered, side by side on a light desktop: the hovered card grows by the compact
+    /// pill's 9.48 pt (2.15 % of a 440 pt card), not by 3 % of itself (`HoverGrowth`). Drawn with `ImageRenderer`.
+    func test22CardHoverGrowth() throws {
+        let p = pillWithCard(approvalRecord())
+        _ = try renderImage(p, settle: true) // measure the card, settle the canvas
+        let canvas = p.canvas.size
+        var frames: [CGImage] = []
+        for hovered in [false, true] {
+            p.setPointerOverForTesting(hovered)
+            let view = ZStack {
+                LinearGradient(colors: [Color(white: 0.93), Color(white: 0.86)], startPoint: .top, endPoint: .bottom)
+                DispatchPillView(controller: p)
+                    .environment(\.dispatchPillCardFlat, true)
+                    .transaction { $0.disablesAnimations = true }
+            }
+            .frame(width: canvas.width, height: canvas.height)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            frames.append(try XCTUnwrap(renderer.cgImage, hovered ? "hovered" : "at rest"))
+        }
+        let w = frames[0].width, h = frames[0].height
+        let pair = NSImage(size: CGSize(width: w * 2, height: h))
+        pair.lockFocus()
+        for (i, frame) in frames.enumerated() {
+            NSGraphicsContext.current?.cgContext.draw(frame, in: CGRect(x: w * i, y: 0, width: w, height: h))
+        }
+        pair.unlockFocus()
+        try write(pair, "22-card-rest-vs-hovered")
     }
 }

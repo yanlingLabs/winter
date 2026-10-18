@@ -41,7 +41,6 @@ final class IslandStoreTests: XCTestCase {
         XCTAssertEqual(store.placements[approval("b", session: "s_front").id], .hidden)
         XCTAssertEqual(store.placements[approval("c", session: "s_disp").id], .dispatchPill)
         XCTAssertEqual(store.queue.ids, [approval("a").id], "only the card placed on top is born on top")
-        XCTAssertEqual(islandBadgeLabel(2), "2 waiting")
     }
 
     func testANewCardReplacesTheCurrentAndTheOneWakeUpSelfCompactsIt() {
@@ -52,11 +51,12 @@ final class IslandStoreTests: XCTestCase {
         now = 1
         store.apply([approval("a"), approval("b")])
         XCTAssertEqual(store.currentCard?.callId, "b")
-        XCTAssertEqual(store.queue.badgeCount, 1)
+        XCTAssertEqual(store.queue.compacted.count, 1)
         now = 1 + IslandQueue.selfCompactAfter
         store.tick()
         XCTAssertNil(store.currentCard)
-        XCTAssertEqual(store.queue.badgeCount, 2)
+        XCTAssertEqual(store.queue.compacted.count, 2)
+        XCTAssertEqual(store.strip.countLabel, "2", "compacted cards show only as the strip's count")
         XCTAssertEqual(wakes.last ?? 0, nil, "nothing due: the wake-up is cancelled")
         // Both are still in the list until answered.
         XCTAssertEqual(store.cards.count, 2)
@@ -74,7 +74,7 @@ final class IslandStoreTests: XCTestCase {
         XCTAssertNil(store.waitingCard)
     }
 
-    func testACardHiddenBehindItsHostLeavesTheTopAndComesBackToTheBadgeNotAsANewPop() async {
+    func testACardHiddenBehindItsHostLeavesTheTopAndComesBackCompactedNotAsANewPop() async {
         var focus = IslandFocus()
         let store = IslandStore()
         store.clock = { [unowned self] in self.now }

@@ -15,7 +15,7 @@ import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, canUseToolFor, neverPromptsMessage,
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared, takeReviewerCleared } from "../../src/runtime-sdk/bridge-common";
 import {
   buildWinterOptions, permissionModeFor, disallowedToolsFor, toolsFor, deferToolsFor,
-  CAPABILITY_TOOL_MODES, CHAT_BUILTIN_TOOLS, DISPATCH_BUILTIN_TOOLS, GLOBAL_READ_ALLOW_RULES,
+  CAPABILITY_TOOL_MODES, CHAT_BUILTIN_TOOLS, DISPATCH_BUILTIN_TOOLS, DISPATCH_READ_ALLOW_RULES, GLOBAL_READ_ALLOW_RULES,
   WEB_BUILTIN_ALLOW_RULES, KNOWN_RUNTIME_BUILTINS, CAPABILITY_PLAIN_NAMES, LEGACY_TOOL_NAMES, toolSurfaceViolations,
   type ToolExposure, type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
@@ -192,7 +192,7 @@ test("B1: the daemon's skill surface rides Options.plugins + Options.skills verb
 // USER RULING 2026-09-18: reads are globally allowed, stated as an allow rule rather than left to a
 // `canUseTool` round trip. Only where the tools EXIST: chat's and dispatch's toolsets exclude
 // Read/Glob/Grep through `disallowedToolsFor`, and a rule for an absent tool is noise.
-test("code cells carry the global read-allow list AND the two web built-ins; chat and dispatch carry none", () => {
+test("code cells carry the global read-allow list AND the two web built-ins; dispatch its Read + the web pair; chat none", () => {
   // 0.0.17: `WebFetch`/`WebSearch` join the code-mode allow list — see `WEB_BUILTIN_ALLOW_RULES`'
   // own doc. Without them a `dont-ask` session loses both tools, because the runtime denies an
   // unresolved call under that mode without ever calling `canUseTool` (where Winter's gate has always
@@ -201,9 +201,20 @@ test("code cells carry the global read-allow list AND the two web built-ins; cha
     expect(buildWinterOptions(optionsInput({ mode: "code", policy })).permissions?.allow)
       .toEqual([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES]);
     expect(WEB_BUILTIN_ALLOW_RULES).toEqual(["WebFetch", "WebSearch"]);
-    for (const mode of ["chat", "dispatch"] as const) {
-      expect(buildWinterOptions(optionsInput({ mode, policy })).permissions?.allow).toBeUndefined();
-    }
+    expect(buildWinterOptions(optionsInput({ mode: "chat", policy })).permissions?.allow).toBeUndefined();
+    // Dispatch respects its policy like code (user ruling 2026-10-17): under dont-ask it keeps its reads and web reads.
+    expect(buildWinterOptions(optionsInput({ mode: "dispatch", policy })).permissions?.allow)
+      .toEqual([...DISPATCH_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES]);
+  }
+});
+
+// Merge of main's Dispatch allow rules with the Cowork refusals: a stored cowork mode is never a runnable mode, so
+// it must never be handed the Dispatch (or Code) allow rules - it is refused or carries no allow list at all.
+test("a cowork mode gets none of the Dispatch or Code allow rules", () => {
+  for (const policy of ["dont-ask", "ask", "auto"] as const) {
+    let allow: readonly string[] | undefined;
+    try { allow = buildWinterOptions(optionsInput({ mode: "cowork" as never, policy })).permissions?.allow; } catch { continue; }
+    expect(allow).toBeUndefined();
   }
 });
 
@@ -894,7 +905,10 @@ function expectedVerdict(mode: Mode, policy: SessionApprovalPolicy, winterTool: 
   let v = new PermissionGate().evaluate(gateName, policy) as Verdict;
   if (v === "ask" && policy === "dont-ask") v = "deny";
   if (v !== "ask") return { want: v, diverged: false };
-  const neverPrompts = origin === "dispatch-child" || mode !== "code";
+  // Only chat never prompts (P8b-7); dispatch respects its policy like code (user ruling 2026-10-17), and a
+  // dispatch child's card is relayed to its coordinator.
+  void origin;
+  const neverPrompts = mode === "chat";
   return neverPrompts ? { want: "deny", diverged: true } : { want: "ask", diverged: false };
 }
 
@@ -943,12 +957,20 @@ test("a CODE-mode dispatch child's card is RAISED (relayed to its coordinator) a
   expect(plain.events).toHaveLength(1);
   const card = plain.events[0] as { issuedAt: number; expiresAt: number };
   expect(card.expiresAt - card.issuedAt).toBeGreaterThan(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
-  // …and the dispatch session's OWN card is still the never-prompt deny (P8b-7).
+  // …and the dispatch session's OWN card is raised on its own log (user ruling 2026-10-17, reversing P8b-7
+  // for dispatch), bounded the same way when the daemon started the turn (no known origin here).
   const coordinator = harness({ mode: "dispatch", policy: "auto" });
-  const res = (await coordinator.canUse("Workflow", { script: "x" }, ctx()))!;
+  void coordinator.canUse("Workflow", { script: "x" }, ctx());
+  expect(coordinator.events).toHaveLength(1);
+  const own = coordinator.events[0] as { type: string; sessionId: string; issuedAt: number; expiresAt: number };
+  expect(own.type).toBe("approval_requested");
+  expect(own.expiresAt - own.issuedAt).toBe(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+  // Chat still never prompts: a stale chat row's would-be card is the P8b-7 typed deny.
+  const chat = harness({ mode: "chat", policy: "auto" });
+  const res = (await chat.canUse("Workflow", { script: "x" }, ctx()))!;
   expect(res.behavior).toBe("deny");
-  expect((res as { message: string }).message).toBe(neverPromptsMessage("Workflow", "dispatch", "auto"));
-  expect(coordinator.events).toEqual([]);
+  expect((res as { message: string }).message).toBe(neverPromptsMessage("Workflow", "chat", "auto"));
+  expect(chat.events).toEqual([]);
 });
 
 test("a relayed dispatch child's card that nobody answers is denied as a timeout and resolved on the log", async () => {
@@ -1084,8 +1106,8 @@ test("C3 round 3: an escape under auto with NO call id cards — a clearance can
   expect((h.events[0] as { type: string }).type).toBe("approval_requested");
   h.approvals.resolve("s1", (h.events[0] as { callId: string }).callId, false, "user");
   await expect(p).resolves.toMatchObject({ behavior: "deny" });
-  // …and where nobody can answer it, the typed deny
-  const d = harness({ mode: "dispatch", policy: "auto" });
+  // …and where nobody can answer it (a stale chat row), the typed deny
+  const d = harness({ mode: "chat", policy: "auto" });
   expect((await d.canUse("Bash", { command: "gh repo view x", dangerouslyDisableSandbox: true }, c))!.behavior).toBe("deny");
   expect(d.events).toEqual([]);
 });
@@ -1101,11 +1123,10 @@ test("C3 round 3: a clearance is bound to the command the reviewer judged — a 
   expect(takeReviewerCleared("s1", c.toolUseID, "gh repo view x")).toBe(false);
 });
 
-test("C3-1: where nobody can answer a card (dispatch) an uncleared escape is the typed never-prompts deny; a dispatch child's is relayed; a cleared one runs", async () => {
+test("C3-1: an uncleared escape is a CARD in dispatch (user ruling 2026-10-17) and a dispatch child's is relayed; a cleared one runs", async () => {
   const dispatch = harness({ mode: "dispatch", policy: "auto" });
-  const res = (await dispatch.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx()))!;
-  expect(res.behavior).toBe("deny");
-  expect(dispatch.events).toEqual([]);
+  void dispatch.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx());
+  expect(dispatch.events.map((e) => e.type)).toEqual(["approval_requested"]);
   // A dispatch child's uncleared escape is a CARD — relayed to its coordinator — never a silent run.
   const child = harness({ mode: "code", policy: "auto", origin: "dispatch-child" });
   void child.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx());
@@ -1138,12 +1159,16 @@ test("C3: a PLAIN bash call the reviewer could not judge still cards under auto 
   expect(quiet.events).toEqual([]);
 });
 
-test("C3: an escape under ask in dispatch/chat is the never-prompts deny, as any ask is", async () => {
-  for (const h of [harness({ mode: "dispatch", policy: "ask" }), harness({ mode: "chat", policy: "chat" })]) {
-    const res = (await h.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx()))!;
-    expect(res.behavior).toBe("deny");
-    expect(h.events).toEqual([]);
-  }
+test("C3: an escape under ask in chat is the never-prompts deny, as any ask is; in dispatch it cards, as in code", async () => {
+  const chat = harness({ mode: "chat", policy: "chat" });
+  const res = (await chat.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx()))!;
+  expect(res.behavior).toBe("deny");
+  expect(chat.events).toEqual([]);
+  const dispatch = harness({ mode: "dispatch", policy: "ask" });
+  const p = dispatch.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx());
+  expect(dispatch.events.map((e) => e.type)).toEqual(["approval_requested"]);
+  dispatch.approvals.resolve("s1", (dispatch.events[0] as { callId: string }).callId, false, "user");
+  await expect(p).resolves.toMatchObject({ behavior: "deny" });
 });
 
 // -------------------------------------------------------------------------------------------
@@ -1391,17 +1416,19 @@ test("WS-20: a tag names its provider outright regardless of which OTHER provide
 // -------------------------------------------------------------------------------------------
 
 test("every Winter-leg cell carries a `web` block, and its private-address policy is per MODE", () => {
-  // `ask` in code (a card the user can answer), `deny` in chat and dispatch (they never prompt, and a
-  // prompt they cannot answer is a hang or an invisible refusal). WebFetch is the only door a Winter
-  // child has to a local service — its Bash sandbox has no network — so silent reach would ADD power.
+  // `ask` in code and dispatch (a card the user can answer — dispatch respects its policy since the user
+  // ruling of 2026-10-17), `deny` in chat (it never prompts, and a prompt it cannot answer is a hang or an
+  // invisible refusal). WebFetch is the only door a Winter child has to a local service — its Bash sandbox
+  // has no network — so silent reach would ADD power.
   for (const policy of POLICIES) {
-    expect(buildWinterOptions(optionsInput({ mode: "code", policy })).web?.fetch?.privateAddressPolicy).toBe("ask");
-    for (const mode of ["chat", "dispatch"] as const) {
-      expect(buildWinterOptions(optionsInput({ mode, policy })).web?.fetch?.privateAddressPolicy).toBe("deny");
+    for (const mode of ["code", "dispatch"] as const) {
+      expect(buildWinterOptions(optionsInput({ mode, policy })).web?.fetch?.privateAddressPolicy).toBe("ask");
     }
+    expect(buildWinterOptions(optionsInput({ mode: "chat", policy })).web?.fetch?.privateAddressPolicy).toBe("deny");
   }
-  // A dispatch CHILD is a code-mode session that can never answer a card either (P8b-26).
-  expect(buildWinterOptions(optionsInput({ mode: "code", origin: "dispatch-child" })).web?.fetch?.privateAddressPolicy).toBe("deny");
+  // A dispatch CHILD (a code session) asks too: its card is relayed to its coordinator and bounded (P8b-26's
+  // "children prompt nobody" is what the relay answers).
+  expect(buildWinterOptions(optionsInput({ mode: "code", origin: "dispatch-child" })).web?.fetch?.privateAddressPolicy).toBe("ask");
 });
 
 test("the Exa key travels as a keychain LOCATOR, and only when one is stored", () => {

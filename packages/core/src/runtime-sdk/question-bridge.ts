@@ -47,9 +47,9 @@ export interface AskUserQuestionDeps {
   now?: () => number;
   /** How long a question waits for its answer before it resolves unanswered (`by: "timeout"`, a
    *  typed deny). Absent: it waits for its human (P8b-19). A dispatch child's questions, relayed to
-   *  its coordinator, are bounded (`approval-bridge.ts`'s `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS`) — decided
-   *  PER QUESTION through the getter form, since one the user's own turn raises is not
-   *  (`dispatchChildCardTimeoutMs`); the getter answering `undefined` means "no bound". */
+   *  its coordinator, and a dispatch session's own are bounded (`approval-bridge.ts`'s
+   *  `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS`) — decided PER QUESTION through the getter form, since one a
+   *  person's own turn raises is not (`dispatchCardTimeoutMs`); the getter answering `undefined` means "no bound". */
   timeoutMs?: number | (() => number | undefined);
 }
 

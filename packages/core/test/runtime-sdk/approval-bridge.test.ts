@@ -9,8 +9,8 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { PermissionRules } from "../../src/agent/permission-rules";
 import {
-  canUseToolFor, neverPromptsMessage, approvalOptionsFromSuggestions,
-  NO_PARK_TIMEOUT_MS, type ApprovalBridge, type BridgeLogger, type BridgedApprovalRequest, type CanUseToolDeps,
+  canUseToolFor, neverPromptsMessage, approvalOptionsFromSuggestions, dispatchCardTimeoutMs,
+  DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, NO_PARK_TIMEOUT_MS, type ApprovalBridge, type BridgeLogger, type BridgedApprovalRequest, type CanUseToolDeps,
 } from "../../src/runtime-sdk/approval-bridge";
 import { gateToolNameFor } from "../../src/runtime-sdk/tool-names";
 import { planBridgeFor } from "../../src/runtime-sdk/plan-bridge";
@@ -439,11 +439,17 @@ test("a Winter-protected path is a CARD in code, never an unconditional refusal"
   }
 });
 
-test("a Winter-protected path is the P8b-7 typed deny in a session that never prompts", async () => {
-  const h = harness({ mode: "dispatch", policy: "auto", cwd: "/repo" });
+test("a Winter-protected path is a CARD in dispatch too (user ruling 2026-10-17) and the P8b-7 typed deny in a stale chat row", async () => {
+  const d = harness({ mode: "dispatch", policy: "auto", cwd: "/repo" });
+  const p = d.canUse("Edit", { file_path: "/repo/package.json" }, requestCtx({ blockedPath: "/repo/package.json" }));
+  expect(d.events.map((e) => e.type)).toEqual(["approval_requested"]);
+  d.approvals.resolve(SESSION, "tu1", true, "user");
+  await expect(p).resolves.toMatchObject({ behavior: "allow" });
+
+  const h = harness({ mode: "chat", policy: "auto", cwd: "/repo" });
   const res = (await h.canUse("Edit", { file_path: "/repo/package.json" }, requestCtx({ blockedPath: "/repo/package.json" })))!;
   expect(res.behavior).toBe("deny");
-  expect((res as { message: string }).message).toBe(neverPromptsMessage("Edit", "dispatch", "auto"));
+  expect((res as { message: string }).message).toBe(neverPromptsMessage("Edit", "chat", "auto"));
   expect(h.events).toEqual([]);
 });
 
@@ -460,13 +466,17 @@ test("$OUTDIR is BLESSED — the gate's verdict stands, unescalated", async () =
     expect(h.events).toEqual([]);
   }
   // …and ANOTHER session's outputs directory is not blessed for this one (the blessing is keyed by
-  // sessionId, never by the bare `~/.winter/outputs/` prefix).
+  // sessionId, never by the bare `~/.winter/outputs/` prefix): it escalates — a card in dispatch.
   const other = harness({ mode: "dispatch", policy: "auto", home, cwd: "/repo" });
   const foreign = `${home}/outputs/sess-2/report.md`;
-  expect((await other.canUse("Write", { file_path: foreign }, requestCtx({ blockedPath: foreign })))!.behavior).toBe("deny");
-  // With no `home` wired the answer is the conservative one: escalate.
-  const noHome = harness({ mode: "dispatch", policy: "auto", cwd: "/repo" });
+  const fp = other.canUse("Write", { file_path: foreign }, requestCtx({ blockedPath: foreign }));
+  expect(other.events.map((e) => e.type)).toEqual(["approval_requested"]);
+  other.approvals.resolve(SESSION, "tu1", false, "user");
+  expect((await fp)!.behavior).toBe("deny");
+  // With no `home` wired the answer is the conservative one: escalate (a stale chat row: its typed deny).
+  const noHome = harness({ mode: "chat", policy: "auto", cwd: "/repo" });
   expect((await noHome.canUse("Write", { file_path: out }, requestCtx({ blockedPath: out })))!.behavior).toBe("deny");
+  expect(noHome.events).toEqual([]);
 });
 
 test("an escalation NARROWS a verdict and never widens one", async () => {
@@ -488,12 +498,14 @@ test("matchedAskRule is never a blanket allow", async () => {
   asked.approvals.resolve(SESSION, "tu1", true, "user");
   await expect(p).resolves.toMatchObject({ behavior: "allow" });
 
+  // Dispatch respects its policy like code (user ruling 2026-10-17): the ask rule cards there too.
   const dispatch = harness({ mode: "dispatch", policy: "auto" });
-  const dres = (await dispatch.canUse("Bash", { command: "ls" }, requestCtx({
+  const dp = dispatch.canUse("Bash", { command: "ls" }, requestCtx({
     matchedAskRule: { source: "project", toolName: "Bash" },
-  })))!;
-  expect(dres.behavior).toBe("deny");
-  expect(dispatch.events).toEqual([]);
+  }));
+  expect(dispatch.events.map((e) => e.type)).toEqual(["approval_requested"]);
+  dispatch.approvals.resolve(SESSION, "tu1", true, "user");
+  await expect(dp).resolves.toMatchObject({ behavior: "allow" });
 });
 
 test("decisionReason alone changes nothing — it is informational (logged, never acted on)", async () => {
@@ -602,6 +614,182 @@ test("a pending approval survives 10s of fake time with no deny, and is armed at
 });
 
 // -------------------------------------------------------------------------------------------
+// (d') DISPATCH RESPECTS ITS APPROVAL MODE (user ruling 2026-10-17, reversing P8b-7 for dispatch).
+//      Its OWN "ask" is a real card on its own log, answered with `approval.respond` (here: the
+//      broker), exactly as code's — minus any rule option (a saved rule never reaches dispatch) —
+//      and a card from a turn the daemon started is bounded like a relayed child's.
+// -------------------------------------------------------------------------------------------
+
+const ESCAPE = { command: "curl https://example.com -o /tmp/x", dangerouslyDisableSandbox: true };
+
+test("dispatch/ask: Bash outside the sandbox raises a card on the dispatch log — and an Allow runs it, once", async () => {
+  const h = harness({ mode: "dispatch", policy: "ask", turnOrigin: () => "winter-mac" });
+  const pending = h.canUse("Bash", ESCAPE, requestCtx({
+    // The SDK's own suggestion is dropped: a dispatch card offers no rule to remember.
+    suggestions: [{ type: "addRules", behavior: "allow", destination: "userSettings", rules: [{ toolName: "Bash", ruleContent: "curl:*" }] }] as PermissionUpdate[],
+  }));
+  expect(h.events).toHaveLength(1);
+  const card = h.events[0] as { type: string; sessionId: string; toolName: string; summary: string; options?: unknown[]; issuedAt: number; expiresAt: number };
+  expect(card.type).toBe("approval_requested");
+  expect(card.sessionId).toBe(SESSION);
+  expect(card.toolName).toBe("bash");
+  expect(card.summary).toContain("UNSANDBOXED");
+  expect(card.options).toBeUndefined();
+  // A turn the USER typed waits for its human, like any code card (P8b-19).
+  expect(card.expiresAt - card.issuedAt).toBe(NO_PARK_TIMEOUT_MS);
+  expect(h.approvals.pendingMeta(SESSION, "tu1")).toBeDefined();
+  expect(ApprovalRequestedEvent.parse({ ...card, seq: 1, ts: FIXED_NOW })).toBeTruthy();
+
+  h.approvals.resolve(SESSION, "tu1", true, "orb", "allow_global_0");   // an option the card never offered persists nothing
+  const res = (await pending)!;
+  expect(res).toMatchObject({ behavior: "allow", decisionClassification: "user_temporary" });
+  expect(res).not.toHaveProperty("updatedPermissions");
+  expect(h.events.map((e) => e.type)).toEqual(["approval_requested", "approval_resolved"]);
+  expect(h.events[1]).toMatchObject({ approved: true, by: "orb", callId: "tu1" });
+});
+
+test("dispatch/ask: a Deny on the card is the user's refusal — interrupt, user_reject, the engine's text", async () => {
+  const h = harness({ mode: "dispatch", policy: "ask", turnOrigin: () => "winter-mac" });
+  const pending = h.canUse("Bash", ESCAPE, requestCtx());
+  expect(h.events.map((e) => e.type)).toEqual(["approval_requested"]);
+  h.approvals.resolve(SESSION, "tu1", false, "orb");
+  const res = (await pending)! as { behavior: string; interrupt?: boolean; decisionClassification?: string; message: string };
+  expect(res.behavior).toBe("deny");
+  expect(res.interrupt).toBe(true);
+  expect(res.decisionClassification).toBe("user_reject");
+  expect(res.message).toContain("The user denied this bash action");
+  expect(h.events[1]).toMatchObject({ type: "approval_resolved", approved: false, by: "orb" });
+});
+
+test("dispatch: a card from a turn the DAEMON started is bounded at 10 minutes; one the user typed waits", () => {
+  const seenFor = (origin: string | undefined): number => {
+    const approvals = new ApprovalBroker();
+    const seen: number[] = [];
+    const realWait = approvals.wait.bind(approvals);
+    approvals.wait = ((sid: string, cid: string, ms: number, meta?: Parameters<typeof realWait>[3]) => {
+      seen.push(ms);
+      return realWait(sid, cid, ms, meta);
+    }) as typeof approvals.wait;
+    const h = harness({ mode: "dispatch", policy: "ask", approvals, turnOrigin: () => origin });
+    void h.canUse("Bash", ESCAPE, requestCtx());
+    const card = h.events[0] as { issuedAt: number; expiresAt: number };
+    expect(card.expiresAt - card.issuedAt).toBe(seen[0]!);
+    approvals.resolve(SESSION, "tu1", false, "cleanup");
+    return seen[0]!;
+  };
+  // A child's report / wake, a peer's SendMessage, Dispatch's own door, a computer-use wake, an unknown origin.
+  for (const origin of ["dispatch-wake", "dispatch", "messaging", "computer-wake", undefined]) {
+    expect({ origin, ms: seenFor(origin) }).toEqual({ origin, ms: DISPATCH_CHILD_APPROVAL_TIMEOUT_MS });
+  }
+  // The pill, a window, the phone, a steer — a person is there.
+  for (const origin of ["winter-mac", "session", "steer"]) {
+    expect({ origin, ms: seenFor(origin) }).toEqual({ origin, ms: NO_PARK_TIMEOUT_MS });
+  }
+  // The same rule as a relayed child's, and nothing else is bounded.
+  expect(dispatchCardTimeoutMs({ mode: "code", origin: "dispatch-child", turnOrigin: () => "messaging" })).toBe(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+  expect(dispatchCardTimeoutMs({ mode: "code", turnOrigin: () => "messaging" })).toBeUndefined();
+  expect(dispatchCardTimeoutMs({ mode: "chat", turnOrigin: () => "messaging" })).toBeUndefined();
+});
+
+test("dispatch: an unanswered card from a daemon-started turn auto-denies by timeout — not a refusal", async () => {
+  const approvals = new ApprovalBroker();
+  const realWait = approvals.wait.bind(approvals);
+  const seen: number[] = [];
+  // The broker's own timer, shortened: the bridge must hand it the dispatch bound.
+  approvals.wait = ((sid: string, cid: string, ms: number, meta?: Parameters<typeof realWait>[3]) => {
+    seen.push(ms);
+    return realWait(sid, cid, 5, meta);
+  }) as typeof approvals.wait;
+  const h = harness({ mode: "dispatch", policy: "ask", approvals, turnOrigin: () => "dispatch-wake" });
+  const res = (await h.canUse("Bash", ESCAPE, requestCtx()))! as { behavior: string; interrupt?: boolean; decisionClassification?: string; message: string };
+  expect(seen).toEqual([DISPATCH_CHILD_APPROVAL_TIMEOUT_MS]);
+  expect(res.behavior).toBe("deny");
+  expect(res.message).toBe("bash was not run — nobody answered the approval request.");
+  expect(res.interrupt).toBeUndefined();
+  expect(res.decisionClassification).toBeUndefined();
+  expect(h.events.map((e) => e.type)).toEqual(["approval_requested", "approval_resolved"]);
+  expect(h.events[1]).toMatchObject({ approved: false, by: "timeout" });
+});
+
+test("dispatch: the other policies answer exactly as code does, deny texts included", async () => {
+  for (const policy of ["plan", "dont-ask"] as SessionApprovalPolicy[]) {
+    const code = (await harness({ mode: "code", policy }).canUse("Bash", ESCAPE, requestCtx()))! as { behavior: string; message: string };
+    const dispatch = harness({ mode: "dispatch", policy });
+    const res = (await dispatch.canUse("Bash", ESCAPE, requestCtx()))! as { behavior: string; message: string };
+    expect({ policy, res }).toEqual({ policy, res: code });
+    expect(res.behavior).toBe("deny");
+    expect(dispatch.events).toEqual([]);
+  }
+  // bypass: the escape runs without a card, as in code.
+  const bypass = harness({ mode: "dispatch", policy: "bypass" });
+  expect((await bypass.canUse("Bash", ESCAPE, requestCtx()))!.behavior).toBe("allow");
+  expect(bypass.events).toEqual([]);
+  // accept-edits / auto (uncleared by the reviewer): a card, as in code.
+  for (const policy of ["accept-edits", "auto"] as SessionApprovalPolicy[]) {
+    const h = harness({ mode: "dispatch", policy });
+    const p = h.canUse("Bash", ESCAPE, requestCtx());
+    expect({ policy, events: h.events.map((e) => e.type) }).toEqual({ policy, events: ["approval_requested"] });
+    h.approvals.resolve(SESSION, "tu1", false, "cleanup");
+    await p;
+  }
+});
+
+test("chat is unchanged: it never prompts — its own policy denies, and a stale row's would-be card is the P8b-7 typed deny", async () => {
+  const chat = harness({ mode: "chat", policy: "chat" });
+  const res = (await chat.canUse("Bash", ESCAPE, requestCtx()))! as { behavior: string; message: string };
+  expect(res).toMatchObject({ behavior: "deny", message: "Blocked — chat sessions never ask permissions and cannot run this action." });
+  expect(chat.events).toEqual([]);
+  const stale = harness({ mode: "chat", policy: "ask" });
+  const sres = (await stale.canUse("Bash", ESCAPE, requestCtx()))! as { behavior: string; message: string };
+  expect(sres).toMatchObject({ behavior: "deny", message: neverPromptsMessage("Bash", "chat", "ask") });
+  expect(stale.events).toEqual([]);
+});
+
+test("dispatch's OWN AskUserQuestion: bounded at 10 minutes in a daemon-started turn (resolves unanswered by timeout); a person's turn waits", async () => {
+  const QUESTION = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "A" }, { label: "B" }] }] };
+  const run = (origin: string | undefined, shorten: boolean) => {
+    const questions = new QuestionBroker();
+    const seen: number[] = [];
+    const realWait = questions.wait.bind(questions);
+    questions.wait = ((sid: string, cid: string, ms: number) => { seen.push(ms); return realWait(sid, cid, shorten ? 5 : ms); }) as typeof questions.wait;
+    const h = harness({ mode: "dispatch", policy: "ask", questions, turnOrigin: () => origin });
+    return { h, seen, pending: h.canUse("AskUserQuestion", QUESTION, requestCtx()) };
+  };
+  for (const origin of ["dispatch-wake", "messaging", undefined]) {
+    const { h, seen, pending } = run(origin, true);
+    expect({ origin, seen }).toEqual({ origin, seen: [DISPATCH_CHILD_APPROVAL_TIMEOUT_MS] });
+    const res = (await pending)! as { behavior: string; message: string; decisionClassification?: string };
+    expect(res).toMatchObject({ behavior: "deny", message: "AskUserQuestion was not answered — no response was given." });
+    expect(res.decisionClassification).toBeUndefined();
+    expect(h.events.map((e) => e.type)).toEqual(["question_asked", "question_resolved"]);
+    expect(h.events[1]).toMatchObject({ answers: {}, by: "timeout" });
+  }
+  const human = run("winter-mac", false);
+  expect(human.seen).toEqual([NO_PARK_TIMEOUT_MS]);
+  human.h.questions.respond(SESSION, "tu1", { Which: "A" }, "orb");
+  await human.pending;
+  // A plain code session's question is not bounded, whoever started the turn.
+  const codeQ = new QuestionBroker();
+  const codeSeen: number[] = [];
+  const codeWait = codeQ.wait.bind(codeQ);
+  codeQ.wait = ((sid: string, cid: string, ms: number) => { codeSeen.push(ms); return codeWait(sid, cid, 5); }) as typeof codeQ.wait;
+  await harness({ mode: "code", policy: "ask", questions: codeQ, turnOrigin: () => "messaging" }).canUse("AskUserQuestion", QUESTION, requestCtx());
+  expect(codeSeen).toEqual([NO_PARK_TIMEOUT_MS]);
+});
+
+test("a dispatch child's card is unchanged: raised on its own log with its rule options, bounded when Dispatch started the turn", async () => {
+  const h = harness({ mode: "code", policy: "ask", origin: "dispatch-child", turnOrigin: () => "dispatch" });
+  const p = h.canUse("Bash", { command: "rm -rf x" }, requestCtx());
+  const card = h.events[0] as { type: string; sessionId: string; options?: Array<{ id: string }>; issuedAt: number; expiresAt: number };
+  expect(card.type).toBe("approval_requested");
+  expect(card.sessionId).toBe(SESSION);
+  expect(card.options?.map((o) => o.id)).toEqual(["allow_once", "allow_project", "allow_global", "deny"]);
+  expect(card.expiresAt - card.issuedAt).toBe(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+  h.approvals.resolve(SESSION, "tu1", true, "orb");
+  await expect(p).resolves.toMatchObject({ behavior: "allow" });
+});
+
+// -------------------------------------------------------------------------------------------
 // (e) THE SIX POLICIES × THE THREE MODES
 // -------------------------------------------------------------------------------------------
 
@@ -635,14 +823,17 @@ const MATRIX: { mode: "code" | "dispatch" | "chat"; policy: SessionApprovalPolic
   { mode: "code", policy: "ask", tool: "Bash", want: "ask", note: "the default policy cards" },
   { mode: "code", policy: "ask", tool: "Read", want: "allow", note: "reads are free" },
 
-  // DISPATCH — identical everywhere EXCEPT that a would-be card is a typed deny (P8b-7)
-  { mode: "dispatch", policy: "auto", tool: "Bash", want: "allow", note: "unchanged from today" },
-  { mode: "dispatch", policy: "auto", tool: "Workflow", want: "deny", note: "DIVERGENCE: cards today, denies now" },
-  { mode: "dispatch", policy: "auto", tool: "TotallyUnknownTool", want: "deny", note: "DIVERGENCE: cards today, denies now" },
-  { mode: "dispatch", policy: "ask", tool: "Bash", want: "deny", note: "DIVERGENCE: cards today, denies now" },
-  { mode: "dispatch", policy: "plan", tool: "Bash", want: "deny", note: "unchanged from today" },
-  { mode: "dispatch", policy: "dont-ask", tool: "Bash", want: "deny", note: "unchanged from today" },
-  { mode: "dispatch", policy: "bypass", tool: "Bash", want: "allow", note: "unchanged from today" },
+  // DISPATCH — identical to code under every policy (user ruling 2026-10-17, reversing P8b-7 for dispatch)
+  { mode: "dispatch", policy: "auto", tool: "Bash", want: "allow", note: "as code" },
+  { mode: "dispatch", policy: "auto", tool: "Workflow", want: "ask", note: "as code: Workflow never rides auto" },
+  { mode: "dispatch", policy: "auto", tool: "TotallyUnknownTool", want: "ask", note: "as code: unclassified fails closed to a card" },
+  { mode: "dispatch", policy: "ask", tool: "Bash", want: "ask", note: "as code: the ask policy cards" },
+  { mode: "dispatch", policy: "ask", tool: "Read", want: "allow", note: "as code: reads are free" },
+  { mode: "dispatch", policy: "accept-edits", tool: "Edit", want: "allow", note: "as code: EDIT_CLASS is silent" },
+  { mode: "dispatch", policy: "accept-edits", tool: "Bash", want: "ask", note: "as code: non-edit MUTATING still cards" },
+  { mode: "dispatch", policy: "plan", tool: "Bash", want: "deny", note: "as code" },
+  { mode: "dispatch", policy: "dont-ask", tool: "Bash", want: "deny", note: "as code: the dont-ask flip" },
+  { mode: "dispatch", policy: "bypass", tool: "Bash", want: "allow", note: "as code" },
 
   // CHAT — the coerced internal "chat" policy is allow-or-deny and never reaches the divergence
   { mode: "chat", policy: "chat", tool: "mcp__winter__research__Search", want: "allow", note: "capability tool normalizes to NETWORK `Search`" },
@@ -652,8 +843,8 @@ const MATRIX: { mode: "code" | "dispatch" | "chat"; policy: SessionApprovalPolic
   { mode: "chat", policy: "chat", tool: "TotallyUnknownTool", want: "deny", note: "chat denies, never asks" },
   // a session created before the create-time coercion keeps `auto` on its row — the stale-row case
   { mode: "chat", policy: "auto", tool: "Workflow", want: "deny", note: "DIVERGENCE (stale row): never prompts" },
-  // WS-26: a CONNECTOR action (a user-configured MCP server's tool) cards in chat and dispatch — the one
-  // exception to "never prompts"; nothing else moves (the full connector matrix, with the stored
+  // WS-26: a CONNECTOR action (a user-configured MCP server's tool) cards in chat and dispatch — in chat the
+  // one exception to "never prompts"; nothing else moves (the full connector matrix, with the stored
   // permissions and the read-only default, is `agent/mcp/connector-permissions.test.ts`'s).
   { mode: "chat", policy: "chat", tool: "mcp__github__create_issue", want: "ask", note: "WS-26: a connector action cards in chat" },
   { mode: "chat", policy: "chat", tool: "mcp__winter__external__battery", want: "deny", note: "a plugin's extras-tier tool is not a connector" },
@@ -678,7 +869,7 @@ for (const row of MATRIX) {
     // A silent verdict emits NOTHING: no card the user must dismiss, no event the phone must render.
     expect(h.events).toEqual([]);
 
-    if (row.want === "deny" && row.mode !== "code") {
+    if (row.want === "deny" && row.mode === "chat") {
       const msg = (res as { message: string }).message;
       const gateVerdict = new PermissionGate().evaluate(gateToolNameFor(row.tool), row.policy);
       if (gateVerdict === "ask" && row.policy !== "dont-ask") {
@@ -693,8 +884,8 @@ test("only an actual human refusal is classified user_reject", async () => {
   // continues. Claiming `user_reject` risks the runtime ending the turn on plan mode's first Bash.
   const plan = (await harness({ policy: "plan" }).canUse("Bash", {}, requestCtx()))!;
   expect((plan as { decisionClassification?: string }).decisionClassification).toBeUndefined();
-  const dispatch = (await harness({ mode: "dispatch", policy: "ask" }).canUse("Bash", {}, requestCtx()))!;
-  expect((dispatch as { decisionClassification?: string }).decisionClassification).toBeUndefined();
+  const staleChat = (await harness({ mode: "chat", policy: "ask" }).canUse("Bash", {}, requestCtx()))!;
+  expect((staleChat as { decisionClassification?: string }).decisionClassification).toBeUndefined();
 
   // A timeout/abort is "nobody answered", not a refusal…
   const ac = new AbortController();
@@ -713,8 +904,8 @@ test("only an actual human refusal is classified user_reject", async () => {
 });
 
 test("the divergence message is exactly the ruling's wording", () => {
-  expect(neverPromptsMessage("Workflow", "dispatch", "auto"))
-    .toBe("Workflow requires approval and this dispatch session never prompts (policy auto)");
+  expect(neverPromptsMessage("Workflow", "chat", "auto"))
+    .toBe("Workflow requires approval and this chat session never prompts (policy auto)");
   expect(neverPromptsMessage("Bash", "chat", "ask"))
     .toBe("Bash requires approval and this chat session never prompts (policy ask)");
 });

@@ -1,8 +1,10 @@
 import AppKit
 import SwiftUI
+import WinterCUPresentation
 
-/// The pill panel's root: the floating layers (asks waiting on the user, then child sessions)
-/// stacked above the main pill, bottom-aligned in a canvas exactly the panel's size.
+/// The pill panel's root: the floating layers (child sessions, command runs, notices) stacked above
+/// the main pill, bottom-aligned in a canvas exactly the panel's size. An ask waiting on the user is
+/// not one of them: the main pill itself morphs into its card (`DispatchPillComposerBar`).
 ///
 /// Rendered in the dark appearance whatever the system's is: the pill floats over arbitrary desktop
 /// content like the Dynamic Island, and every token below resolves to its dark half (`CardSurface`
@@ -33,8 +35,7 @@ struct DispatchPillView: View {
             || commandMenu != nil
             || controller.commandNotice != nil
             || adapter.compactionStartedAt != nil
-            || !pendingInteractionRecords(in: adapter.transcript, live: adapter.pendingInteractions,
-                                          inactive: adapter.inactiveElicitations).isEmpty
+            || controller.setAsideCardCount > 0
     }
 
     /// The `/` menu for what is typed (`DispatchPillController.currentMenu`).
@@ -47,10 +48,11 @@ struct DispatchPillView: View {
                 DispatchPillAccessories(controller: controller, adapter: adapter, commandRuns: commandRuns, morph: morph,
                                         commandMenu: commandMenu)
                     .fixedSize(horizontal: false, vertical: true)
-                    .onGeometryChange(for: CGRect.self) { proxy in
-                        proxy.frame(in: .named(Self.canvasSpace))
-                    } action: { frame in
-                        controller.accessoryLayoutChanged(frame: frame)
+                    // Their own laid-out SIZE (a frame measured in the canvas would include the hover grow).
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        proxy.size
+                    } action: { size in
+                        controller.accessoryLayoutChanged(size: size)
                     }
                     // Cards and the child row rise out of the main pill, and sink back into it.
                     .transition(.childPill)
@@ -64,12 +66,13 @@ struct DispatchPillView: View {
             }
         }
         // A slight grow under the pointer — the whole stack, anchored at the pill's bottom edge, so the floating
-        // layers above move up and scale with it and stay aligned. Not in full screen.
+        // layers above move up and scale with it and stay aligned. By the compact pill's few POINTS whatever the
+        // shape (`controller.hoverScale`, `HoverGrowth`): a card or the typing pill grows as much as the compact pill,
+        // not 3 % of itself. Not in full screen.
         // The animation is scoped to the scale alone: a container-wide one would also ease the layout the morph
         // spring drives frame by frame.
-        .animation(.spring(response: 0.3, dampingFraction: 0.7)) { view in
-            view.scaleEffect(controller.pointerOver && controller.presentation != .fullScreen
-                             ? DispatchPillMetrics.hoverScale : 1, anchor: .bottom)
+        .animation(HoverGrowth.animation) { view in
+            view.scaleEffect(controller.drawnHoverScale, anchor: .bottom)
         }
         .padding(DispatchPillMetrics.shadowPad)
         .frame(width: canvas.size.width, height: canvas.size.height, alignment: .bottom)
@@ -77,7 +80,7 @@ struct DispatchPillView: View {
         .environment(\.colorScheme, .dark)
         .environment(\.dispatchPillPointer, controller.pointer)
         .onChange(of: accessories, initial: true) { _, present in
-            if !present { controller.accessoryLayoutChanged(frame: .zero) }
+            if !present { controller.accessoryLayoutChanged(size: .zero) }
         }
     }
 }
@@ -105,11 +108,17 @@ struct DispatchPillShell<Content: View>: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: dispatchPillCornerRadius(height: morph.size.height),
                                      style: .continuous)
+        // A content swap (the pill ↔ a card): the old content fades out before the shape moves (`fade`), the new one
+        // stays hidden while it grows and fades and sharpens in near its end (`reveal`). Outside a swap both are 1.
+        let visibility = morph.fade * morph.reveal
         content
             .frame(width: tracksAnimatedWidth ? morph.size.width : morph.target.width,
                    height: morph.target.height)
             .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
-            .blur(radius: dispatchPillMorphBlur(size: morph.size, target: morph.target))
+            .opacity(visibility)
+            .blur(radius: max(dispatchPillMorphBlur(size: morph.size, target: morph.target),
+                              dispatchPillContentBlur(visibility: visibility)))
+            // Clipped to the morphing shape itself at every frame — nothing inside ever draws past its edge.
             .clipShape(shape)
             .background(shape.fill(Color.black))
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
@@ -118,8 +127,9 @@ struct DispatchPillShell<Content: View>: View {
     }
 }
 
-/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, the
-/// commands run from the pill (`CommandPillsView`), a running compaction's clock, a command's notice, and — right above the main pill — the `/` menu while a
+/// What floats above the pill, top to bottom: the child-session row, the
+/// commands run from the pill (`CommandPillsView`), a running compaction's clock, a command's notice, the cards the
+/// user set aside by typing (`DispatchPillSetAsidePill`), and — right above the main pill — the `/` menu while a
 /// command is being typed. Each layer is present only while it has something to show, and the stack
 /// closes up around one that leaves, so the child sessions always stay on top. (`/permissions` floats
 /// nothing: it turns the main pill itself into the picker.)
@@ -136,8 +146,6 @@ private struct DispatchPillAccessories: View {
 
     var body: some View {
         VStack(spacing: DispatchPillMetrics.stackGap) {
-            ApprovalCardOverlay(adapter: adapter,
-                                width: max(rowWidth, DispatchPillMetrics.cardWidth))
             if !adapter.dispatchChildren.isEmpty {
                 ChildSessionPillsView(
                     children: adapter.dispatchChildren,
@@ -162,6 +170,10 @@ private struct DispatchPillAccessories: View {
                 DispatchPillNoticePill(text: notice)
                     .transition(.childPill)
             }
+            if controller.setAsideCardCount > 0 {
+                DispatchPillSetAsidePill(count: controller.setAsideCardCount) { controller.bringBackCards() }
+                    .transition(.childPill)
+            }
             if let commandMenu {
                 DispatchPillMenuView(menu: commandMenu, selected: controller.menuSelection, width: rowWidth,
                                      onPick: { controller.runMenuItem($0) })
@@ -169,6 +181,7 @@ private struct DispatchPillAccessories: View {
             }
         }
         .animation(childRowSpring, value: adapter.compactionStartedAt != nil)
+        .animation(childRowSpring, value: controller.setAsideCardCount > 0)
     }
 }
 
@@ -193,16 +206,20 @@ struct DispatchPillComposerBar: View {
         let expanded = controller.presentation == .expanded
         let running = adapter.turnRunning
         let draft = adapter.composerDraft
-        let working = !expanded && running
-        let preview = expanded ? controller.turnPreview : nil
-        let picker = controller.permissionsPickerOpen
-        let showsAccessories = expanded && preview == nil && !picker
+        // An ask waiting on the user: the pill IS its card (`DispatchPillCardQueue`).
+        let card = controller.cardShowsOnPill ? controller.frontCard : nil
+        let working = !expanded && running && card == nil
+        let preview = expanded && card == nil ? controller.turnPreview : nil
+        let picker = controller.permissionsPickerOpen && card == nil
+        let covered = preview != nil || picker || card != nil
+        let showsAccessories = expanded && !covered
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
         ZStack(alignment: .top) {
             composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
-                        hidesComposer: working || preview != nil || picker, showsAccessories: showsAccessories)
-                .animation(.easeOut(duration: 0.2)) { $0.opacity(preview == nil && !picker ? 1 : 0) }
-                .allowsHitTesting(preview == nil && !picker)
+                        hidesComposer: working || covered || controller.contentFadingOut,
+                        showsAccessories: showsAccessories)
+                .animation(.easeOut(duration: 0.2)) { $0.opacity(covered ? 0 : 1) }
+                .allowsHitTesting(!covered)
             // `/permissions`: the pill IS the picker — the composer stays mounted underneath, hidden, and
             // comes back on × or Esc.
             if picker {
@@ -224,6 +241,27 @@ struct DispatchPillComposerBar: View {
                     .contentShape(Rectangle())
                     .onTapGesture { controller.exitPreview() }
                     .transition(.opacity.animation(.easeOut(duration: 0.2)))
+            }
+            // The card: laid out at its TARGET width (fixed while the shell springs — no re-wrap, no re-measure mid-
+            // morph) and at its own height, which it reports so the shell grows to exactly it. The composer stays
+            // mounted underneath, hidden, so a keystroke still lands in it (and sets the card aside). Its spring, rim,
+            // shadow, clip and its fade in and out are the shell's (`DispatchPillShell`: the content swap) — nothing
+            // here animates.
+            if let card {
+                let records = controller.pendingCardRecords
+                DispatchPillCardView(record: card,
+                                     wiring: dispatchPillCardWiring(adapter: adapter, records: records),
+                                     header: controller.cardHeader(for: card),
+                                     waiting: controller.cardQueue.waiting,
+                                     bodyCap: controller.cardBodyCap)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: controller.cardLayoutWidth)
+                    .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
+                        controller.cardContentHeightChanged(height)
+                    }
+                    .id(card.callId)
+                    // Fading out ahead of a swap (answered, or leaving): no second click lands on it.
+                    .allowsHitTesting(!controller.contentFadingOut)
             }
         }
     }
@@ -290,6 +328,9 @@ struct DispatchPillComposerBar: View {
                         tintOverride: .white,
                         onViewCreated: { controller.registerComposerView($0) },
                         viewAlpha: hidden ? 0 : 1,
+                        // Under a card the composer never holds the keyboard: a Return meant for the card must not
+                        // reach (and send) a draft hidden underneath.
+                        takesFocus: !controller.composerKeyboardBlocked,
                         onFocusKey: { key, _, _ in controller.handleMenuKey(key) },
                         // A shell line the pill will RUN reads in purple, whole; a `/` command typed in full in blue.
                         highlightRanges: { [commandMode] text in

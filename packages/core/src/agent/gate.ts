@@ -100,11 +100,11 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // task_stop already rides free above; `background`/`archive`/`resume` only flip two reversible
 // per-session flags (sessions/set-activity.ts). The reviewed design substitutes LOUDNESS for a
 // confirmation card: every change broadcasts `session_activity` globally (T4) so every attached
-// harness sees it live, rather than a human approving it first — matching dispatch's standing "no
+// harness sees it live, rather than a human approving it first — matching dispatch's then-standing "no
 // permission cards" posture. Left unclassified, both fell through to evaluate()'s final
 // unclassified-tool branch below, which fails closed to "ask" under EVERY policy including `auto`
-// (dispatch's own default — server.ts's session.dispatch) — a card a headless coordinator can never
-// answer, so in practice a silent hang/timeout-deny on every real call. Same fix shape as
+// (dispatch's own default — server.ts's session.dispatch) — a card on every real call (at the time a
+// never-prompts deny in dispatch, which never carded before the user ruling of 2026-10-17). Same fix shape as
 // task_stop's own entry above.
 // office-agent-tools T3: `sheets` (T3: info/read only, READ_ONLY — see the MUTATING set below for
 // T4's reclassification now that it has write verbs too). READ_ONLY's own reasoning for the read
@@ -171,7 +171,7 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // never takes the per-policy answer below: `runtime-sdk/approval-bridge.ts`'s step (4b') allows
 // dispatch's `session_spawn` under every policy but plan, as the engine-era bridge (which ran before
 // this gate) always did — otherwise a dispatch session switched to ask/accept-edits/dont-ask would
-// turn its own delegation into the never-prompt deny.
+// card (or, under dont-ask, deny) its own delegation.
 // office-agent-tools T4: `sheets` moves HERE from READ_ONLY (see that set's own comment for the
 // read-half reasoning it still carries). Task 3 shipped `sheets` with only `info`/`read`; this task
 // adds real write verbs (`set`, `insert_rows`, `insert_cols`, `delete_rows`, `delete_cols`,
@@ -285,7 +285,7 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // fail-closed branch below does to a name it has never heard of, measured through the real engine:
 // "deny" under `chat` (the mode spec §1 makes the browser a DEFAULT tool in — the tool was dead
 // there), "deny" under `plan`, and "ask" under `auto` — i.e. an approval card on EVERY verb,
-// including `tabs`, in a dispatch session that can never answer one. That is the identical trap
+// including `tabs` (in dispatch, at the time, a never-prompts deny). That is the identical trap
 // list_sessions/manage_session's own entry above records, arriving the same way.
 //
 // The verb split (chat gets read verbs only, code/dispatch get the interaction verbs too) is NOT
@@ -301,8 +301,8 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // category (spec §4, the user's decision).
 //
 // `Search` carries a floor of its own in the same never-a-card shape, and for the structural reason
-// chat and dispatch have: they have no approval flow to card through at all (USER DECISION: "chat
-// mode... would never ask permissions"), so a floor-listed CITATION is withheld inside the tool
+// chat has: it has no approval flow to card through at all (USER DECISION: "chat mode... would never
+// ask permissions"; Dispatch, which shares the tool, respects its policy since 2026-10-17), so a floor-listed CITATION is withheld inside the tool
 // (search.ts calls page-core.ts's `checkDangerousDomain` on every cited url) rather than prompted for.
 // None of that changes what THIS gate returns — `Search`'s verdict here is unconditionally "allow";
 // the floor lives one layer below, where this file's classification has no say.
@@ -367,8 +367,7 @@ const EDIT_CLASS = new Set(["write", "edit"]);
  *
  * An unclassified name is not a neutral omission: `evaluate()` fails it CLOSED, which for a
  * genuinely unknown tool is right and for a read-only built-in nobody remembered to list is a tool
- * that is dead under `plan`/`dont-ask` and cards on every call under `auto` — in a dispatch session
- * that can never answer one. Both directions are SILENT: the tool is registered, its own tests pass
+ * that is dead under `plan`/`dont-ask` and cards on every call under `auto`. Both directions are SILENT: the tool is registered, its own tests pass
  * (they call `registry.execute` with a hand-built ToolContext and never cross this gate), and the
  * mode-census sees it in the mode's set because `modes` and this file are different axes.
  *

@@ -356,6 +356,55 @@ final class MirrorCoordinator: ObservableObject {
         static let none = Subscription(frames: false, maxFps: nil, maxWidth: nil)
         static let mac = Subscription(frames: true, maxFps: nil, maxWidth: nil)
         static let phone = Subscription(frames: true, maxFps: MirrorWire.activeFps, maxWidth: MirrorWire.maxLongEdge)
+        /// The Winter island's small mirror (`Island/IslandMirror.swift`): a small picture, a few frames a second.
+        static let island = Subscription(frames: true, maxFps: MirrorCoordinator.islandMaxFps, maxWidth: MirrorCoordinator.islandMaxWidth)
+    }
+
+    // MARK: The Winter island (`docs/claude/island.md`, phase 2)
+
+    /// The island mirror's caps: ≤ 8 frames a second, ≤ 640 px wide.
+    nonisolated static let islandMaxFps = 8
+    nonisolated static let islandMaxWidth = 640
+    /// Sessions whose agent cursor the island's computer-use pill follows: subscribed WITHOUT frames (bound, released and
+    /// cursor only — cheap), for the cursor's own words ("Clicking “Publish”").
+    private(set) var islandCursorSessions: Set<String> = []
+    /// Sessions the island's mirror shows (in the island, or a detached window): subscribed WITH frames at the island's
+    /// caps, ref-counted, only while one is on screen.
+    private var islandFrameHolders: [String: Int] = [:]
+    /// The agent cursor in a session the pill follows: (session, cursor kind, its text, the app it acts in).
+    var onIslandCursor: ((_ sessionId: String, _ kind: String, _ text: String?, _ appName: String?) -> Void)?
+    /// The helper's connection was lost (the island clears what only its cursor stream could end — rung 4).
+    var onIslandConnectionLost: (() -> Void)?
+
+    /// The sessions the computer-use pill follows now.
+    func setIslandCursorSessions(_ sessions: Set<String>) {
+        guard sessions != islandCursorSessions else { return }
+        islandCursorSessions = sessions
+        scheduleSync()
+    }
+
+    /// The island's mirror is on screen for `sessionId` (one call per holder; pair it with `removeIslandFrames`).
+    func addIslandFrames(_ sessionId: String) {
+        islandFrameHolders[sessionId, default: 0] += 1
+        refreshMacPictures()
+        scheduleSync()
+    }
+
+    /// One of the island's mirrors of `sessionId` closed; the frames stop with the last.
+    func removeIslandFrames(_ sessionId: String) {
+        guard let n = islandFrameHolders[sessionId] else { return }
+        if n > 1 { islandFrameHolders[sessionId] = n - 1 } else { islandFrameHolders.removeValue(forKey: sessionId) }
+        refreshMacPictures()
+        scheduleSync()
+    }
+
+    /// Whether the island's mirror holds `sessionId`'s frames now (tests).
+    func islandWantsFrames(_ sessionId: String) -> Bool { islandFrameHolders[sessionId] != nil }
+
+    /// The model the island's mirror draws for `sessionId` — the same one the session's window panel draws.
+    func islandMirrorModel(for sessionId: String) -> CUMirrorModel? {
+        let sink = state(for: sessionId).sink
+        return (sink as? RemoteTeeSink)?.primary as? CUMirrorModel ?? sink as? CUMirrorModel
     }
 
     /// The sessions subscribed on the helper right now, and what each asked. Every change of a session's frames flag is
@@ -488,7 +537,7 @@ final class MirrorCoordinator: ObservableObject {
     /// sees. The panel gets the newest withheld picture the moment a window shows it again.
     private func refreshMacPictures() {
         for (id, state) in states {
-            (state.sink as? RemoteTeeSink)?.setPrimaryPictures(macWantsFrames(id))
+            (state.sink as? RemoteTeeSink)?.setPrimaryPictures(macWantsFrames(id) || islandWantsFrames(id))
         }
     }
 
@@ -498,6 +547,8 @@ final class MirrorCoordinator: ObservableObject {
     var desiredSessions: Set<String> {
         MirrorRules.subscriptions(eligible: windows.values.filter { eligibleWindowIds.contains($0.id) })
             .union(remoteViewers.keys)
+            .union(islandCursorSessions)
+            .union(islandFrameHolders.keys)
     }
 
     /// A session's mirror state, made on first ask so a panel can watch it before anything is subscribed.
@@ -507,7 +558,7 @@ final class MirrorCoordinator: ObservableObject {
         let sink: any MirrorSink
         if let remote {
             let tee = RemoteTeeSink(primary: own, sessionId: sessionId, hub: remote)
-            tee.setPrimaryPictures(macWantsFrames(sessionId))
+            tee.setPrimaryPictures(macWantsFrames(sessionId) || islandWantsFrames(sessionId))
             sink = tee
         } else {
             sink = own
@@ -530,11 +581,17 @@ final class MirrorCoordinator: ObservableObject {
         case .bound(let sessionId, let target): states[sessionId]?.bound(target)
         case .released(let sessionId, let targetId): states[sessionId]?.released(targetId)
         case .frame(let frame): states[frame.sessionId]?.frame(frame)
-        case .cursor(let cursor): states[cursor.sessionId]?.cursor(cursor)
+        case .cursor(let cursor):
+            states[cursor.sessionId]?.cursor(cursor)
+            if islandCursorSessions.contains(cursor.sessionId), let onIslandCursor {
+                let app = states[cursor.sessionId]?.tracker.targets.first { $0.targetId == cursor.targetId }?.appName
+                onIslandCursor(cursor.sessionId, cursor.kind, cursor.text, app)
+            }
         case .connectionLost:
             isConnected = false
             appliedSubscriptions = [:]
             states.values.forEach { $0.reset() }
+            onIslandConnectionLost?()
             if !desiredSessions.isEmpty { log("computer-use helper connection lost; will reconnect") }
             scheduleSync()
         }
@@ -641,7 +698,7 @@ final class MirrorCoordinator: ObservableObject {
     /// kept for every session a window watches, so a change of which one is on show never restarts a capture on
     /// the helper. A window that is minimized, ordered out or covered gets none.
     func wantsFrames(_ sessionId: String) -> Bool {
-        macWantsFrames(sessionId) || remoteViewers[sessionId] != nil
+        macWantsFrames(sessionId) || remoteViewers[sessionId] != nil || islandWantsFrames(sessionId)
     }
 
     /// A visible eligible Winter window shows the session or the work of it.
@@ -656,6 +713,11 @@ final class MirrorCoordinator: ObservableObject {
     /// neither does.
     func subscription(for sessionId: String) -> Subscription {
         if macWantsFrames(sessionId) { return .mac }
+        // The island's mirror and a phone at once: ONE helper subscription per session per connection, so the capture
+        // runs at the larger of the two (the island's 8 fps). The phone still gets ≤ 5 fps: its relay paces what it sends
+        // itself (`RemoteMirrorRelay`, `MirrorWire.activeFps`/`idleFps`), exactly as beside a Mac window (helper default).
+        // A second subscription at the phone's rate would cost a second capture for no gain.
+        if islandWantsFrames(sessionId) { return .island }
         if remoteViewers[sessionId] != nil { return .phone }
         return .none
     }
@@ -676,6 +738,7 @@ final class MirrorCoordinator: ObservableObject {
     /// session it ever opened.
     private func purgeUnusedStates() {
         let shown = Set(windows.values.flatMap(\.allSessionIds)).union(remoteViewers.keys)
+            .union(islandCursorSessions).union(islandFrameHolders.keys)
         for sessionId in states.keys where !shown.contains(sessionId) && !applied.contains(sessionId) {
             states[sessionId]?.reset()
             states.removeValue(forKey: sessionId)

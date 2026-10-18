@@ -60,6 +60,11 @@ struct ComposerTextView: NSViewRepresentable {
     /// composer while keeping it mounted (and first responder): SwiftUI's `.opacity` is not promised
     /// to reach an `NSViewRepresentable`'s view. `1` (the default) leaves every other surface alone.
     var viewAlpha: CGFloat = 1
+    /// Whether the composer may hold the keyboard. `false` while something covers it that the keys belong to — the
+    /// Dispatch pill's card: the text view then refuses first responder, gives it up if it has it, and never
+    /// re-claims it, so a Return meant for the card never reaches (and sends) a draft hidden underneath. `true` (the
+    /// default) leaves every other surface alone.
+    var takesFocus: Bool = true
     /// The typed text's point size. The default is BOUND to the user-message size (ruling
     /// 2026-08-13: the composer types at the size the sent bubble renders, derived from the
     /// same live metrics, so the two can never diverge). NO home overrides it any more: the
@@ -228,7 +233,7 @@ struct ComposerTextView: NSViewRepresentable {
             // Live-gate fix D: yield to whatever text input the user is already in. A composer
             // MOUNTING is not a reason to take the caret out of a field somebody is typing in — the
             // panel opening beside a focused URL bar is exactly that case.
-            if let window = textView.window,
+            if takesFocus, let window = textView.window,
                composerShouldClaimFirstResponder(current: window.firstResponder, composer: textView) {
                 _ = window.makeFirstResponder(textView)
             }
@@ -240,6 +245,10 @@ struct ComposerTextView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? CommandTextView else { return }
         context.coordinator.parent = self
+        textView.focusAllowed = takesFocus
+        if !takesFocus, let window = textView.window, window.firstResponder === textView {
+            _ = window.makeFirstResponder(nil)
+        }
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
         textView.onHorizontalKey = onHorizontalKey
@@ -295,8 +304,9 @@ struct ComposerTextView: NSViewRepresentable {
         // The resting behaviour is deliberately unchanged — with the window, a button or a scroll
         // view as first responder the composer still claims, which is the premise `isTextEditing
         // Focused` (`WinterComposerCard.swift`) is written against and `CardWiringTests` pins.
+        let takesFocus = takesFocus
         DispatchQueue.main.async { [weak textView] in
-            guard let textView, let window = textView.window,
+            guard takesFocus, let textView, let window = textView.window,
                   composerShouldClaimFirstResponder(current: window.firstResponder, composer: textView)
             else { return }
             _ = window.makeFirstResponder(textView)
@@ -391,6 +401,10 @@ func composerShouldClaimFirstResponder(current: NSResponder?, composer: NSView) 
 /// before the character lands (`WinterFieldView`'s wiring sets `adapter.focusedElement = .composer`).
 final class CommandTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    /// `ComposerTextView.takesFocus`: false refuses the keyboard outright (no click, re-claim or `makeFirstResponder`
+    /// can hand it over).
+    var focusAllowed = true
+    override var acceptsFirstResponder: Bool { focusAllowed && super.acceptsFirstResponder }
     var onFocusKey: ((FieldFocusKey, _ caretAtFirstLine: Bool, _ caretAtLastLine: Bool) -> Bool)?
     var onHorizontalKey: ((_ left: Bool) -> Bool)?
     var onTypingRefocus: (() -> Void)?
