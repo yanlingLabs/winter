@@ -61,6 +61,27 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertEqual(IslandServers.statusWords(row, phase: .forceOffered, now: now), "Still running")
     }
 
+    func testVoiceOverStopsAServerWithTheSameTwoClicks() {
+        let t = now
+        XCTAssertEqual(IslandServers.stopActionName(nil, name: "waifus"), "Stop waifus")
+        XCTAssertEqual(IslandServers.stopActionName(.confirming(at: t), name: "waifus"), "Click again to stop waifus")
+        XCTAssertNil(IslandServers.stopActionName(.stopping(sentAt: t), name: "waifus"), "nothing to do while it stops")
+        XCTAssertNil(IslandServers.stopActionName(.killing(sentAt: t), name: "waifus"))
+        XCTAssertEqual(IslandServers.stopActionName(.forceOffered, name: "waifus"), "Force quit waifus")
+        XCTAssertEqual(IslandServers.stopActionName(.confirmingForce(at: t), name: "waifus"), "Click again to force quit waifus")
+    }
+
+    func testTheGallerysForceQuitServerHasALinkBesideItsStop() throws {
+        // The picture `island-tab-servers-forcequit` shows: a plain row with its link and Stop's widest capsule, set
+        // through the seam (nothing clicked, nothing signalled).
+        let model = IslandGallery.sampleServers(now: now, withLink: true)
+        let bundle = try XCTUnwrap(model.bundles.first { !model.drills($0) })
+        let row = try XCTUnwrap(bundle.rows.first)
+        XCTAssertEqual(model.links(row).map(\.port), [8000])
+        model.setStopsForTesting([row.id: .confirmingForce(at: now)])
+        XCTAssertEqual(model.stops[row.id], .confirmingForce(at: now))
+    }
+
     // MARK: Watches
 
     private func watch(armedAt: Int, expiresAt: Int, title: String? = "List the extension") -> IslandWatchItem {
@@ -161,13 +182,33 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertEqual(IslandCostPresentation.segments(UsageSummary(range: "day")), [])
     }
 
-    func testTheLegendNamesTheTopThreeAndASourceOnlyWhenANameRepeats() {
+    func testTheLegendNamesTheTopThreeAndASourceOnlyWhenANameRepeats() throws {
         let summary = UsageSummary(range: "day", totals: UsageTotals(costUsd: 10),
                                    topModels: [modelRow("gpt-5", .codex, cost: 4), modelRow("gpt-5", .winter, cost: 3),
                                                modelRow("anthropic/claude-sonnet-4.5", .claudeCode, cost: 2),
                                                modelRow("m4", .winter, cost: 0.5)])
-        let legend = IslandCostPresentation.legend(IslandCostPresentation.segments(summary))
+        let legend = IslandCostPresentation.legend(summary)
         XCTAssertEqual(legend.map(\.name), ["gpt-5 · Codex", "gpt-5 · Winter", "claude-sonnet-4.5"])
+        XCTAssertEqual(legend.map(\.note), [nil, nil, nil])
+        // Under the pointer a segment says which model it is when that fits — its source when its name is shared.
+        let codex = try XCTUnwrap(IslandCostPresentation.segments(summary).first)
+        XCTAssertEqual(codex.hoverLabels, ["gpt-5 · Codex $4.00", "$4.00"])
+        XCTAssertEqual(HoverSegmentLayout.label(codex.hoverLabels, width: 200), "gpt-5 · Codex $4.00")
+        XCTAssertEqual(HoverSegmentLayout.label(codex.hoverLabels, width: 50), "$4.00", "too narrow for the name: the figure")
+        XCTAssertNil(HoverSegmentLayout.label(codex.hoverLabels, width: 10))
+        let sonnet = try XCTUnwrap(IslandCostPresentation.segments(summary).first { $0.name == "claude-sonnet-4.5" })
+        XCTAssertEqual(sonnet.hoverLabels, ["claude-sonnet-4.5 $2.00", "$2.00"], "a name no other model shares: no source")
+    }
+
+    func testAnUnpricedModelInAPricedRangeStaysInTheLegendWithItsTokens() throws {
+        let summary = UsageSummary(range: "day", totals: UsageTotals(costUsd: 5, input: 9_000),
+                                   topModels: [modelRow("gpt-5", .codex, cost: 5, tokens: 4_000),
+                                               modelRow("local-model", .opencode, cost: 0, tokens: 5_000, basis: "unknown")])
+        XCTAssertEqual(IslandCostPresentation.segments(summary).map(\.name), ["gpt-5"], "no cost: no share of the cost line")
+        let legend = IslandCostPresentation.legend(summary)
+        XCTAssertEqual(legend.map(\.name), ["gpt-5", "local-model"])
+        XCTAssertEqual(legend.map(\.note), [nil, UsagePresentation.tokens(5_000) + " tok"], "it never vanishes")
+        XCTAssertNil(legend[1].segmentId)
     }
 
     func testAnUnpricedRangeIsSplitByTokens() {

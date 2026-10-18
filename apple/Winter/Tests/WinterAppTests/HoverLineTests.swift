@@ -75,7 +75,25 @@ final class HoverLineTests: XCTestCase {
         XCTAssertFalse(l.start)
         XCTAssertFalse(l.atFill)
         XCTAssertEqual(HoverLineLayout.of(width: 200, fraction: 0, words: HoverLineWords()),
-                       HoverLineLayout(fill: 0, fillSlot: 0, start: false, atFill: false, atFillInside: false, end: false))
+                       HoverLineLayout(fill: 0, fillSlot: 0, start: false, atFill: false, atFillInside: false, end: false,
+                                       startRegion: 200))
+    }
+
+    func testStartWordsOnAnEmptyLineHaveTheWholeTrackAndContentTruncatesInsteadOfVanishing() {
+        // A line with no fill (a device that is off) still has the whole track for its words.
+        let off = HoverLineLayout.of(width: 300, fraction: 0, words: HoverLineWords(start: "Not connected"))
+        XCTAssertTrue(off.start)
+        XCTAssertEqual(off.startRegion, 300)
+        // Too long: dropped by default, cut at its tail when it is content (and the end words give up their room).
+        let long = String(repeating: "Winter for Chrome is not connected ", count: 3)
+        XCTAssertFalse(HoverLineLayout.of(width: 300, fraction: 1, words: HoverLineWords(start: long)).start)
+        let cut = HoverLineLayout.of(width: 300, fraction: 1, words: HoverLineWords(start: long, end: "x", startTruncates: true))
+        XCTAssertTrue(cut.start)
+        XCTAssertFalse(cut.end)
+        XCTAssertEqual(cut.startRegion, 300)
+        // Beside end words that fit, the start's room stops where they begin.
+        let both = HoverLineLayout.of(width: 300, fraction: 1, words: HoverLineWords(start: "Connected", end: "paired 9 d ago"))
+        XCTAssertEqual(both.startRegion, 300 - HoverLift.wordsWidth("paired 9 d ago"), accuracy: 0.001)
     }
 
     func testSegmentsTakeTheirShareOfTheTrackLessTheGapsAndDropALabelThatDoesNotFit() {

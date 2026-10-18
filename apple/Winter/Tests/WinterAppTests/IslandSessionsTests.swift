@@ -201,6 +201,15 @@ final class IslandSessionsTests: XCTestCase {
         XCTAssertNil(IslandSessionsBuilder.folderName("/"))
     }
 
+    func testTheRowStillSaysItsModeOnScreen() throws {
+        // The mode ("Code", "Chat", "Dispatch task") is the row's content: it stays in the muted words beside the host,
+        // never only in the VoiceOver label.
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/Island/IslandSessions.swift").standardizedFileURL, encoding: .utf8)
+        let view = try XCTUnwrap(source.range(of: "struct IslandSessionRowView").map { String(source[$0.lowerBound...]) })
+        XCTAssertTrue(view.contains("Text(row.mode)"), "the mode is drawn")
+    }
+
     func testTheModelFamilyPicksOneSourcesAccentAndWinterBlueOtherwise() {
         XCTAssertEqual(IslandModelFamily.of(model: "anthropic/claude-sonnet-4.5", provider: nil), .anthropic)
         XCTAssertEqual(IslandModelFamily.of(model: "claude-opus-4.1", provider: "openrouter"), .anthropic, "the model's words win")

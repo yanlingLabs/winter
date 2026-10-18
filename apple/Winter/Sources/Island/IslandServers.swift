@@ -492,6 +492,19 @@ enum IslandServers {
         return parts.joined(separator: ", ")
     }
 
+    /// PURE: Stop as a VoiceOver action through its phases — the button's own words ("Stop waifus", "Click again to stop
+    /// waifus", "Force quit waifus", "Click again to force quit waifus"); none while it is stopping. The action is the
+    /// button's: the same two clicks, the same guards.
+    static func stopActionName(_ phase: IslandServerStopPhase?, name: String) -> String? {
+        switch phase {
+        case nil: return "Stop \(name)"
+        case .confirming?: return "Click again to stop \(name)"
+        case .stopping?, .killing?: return nil
+        case .forceOffered?: return "Force quit \(name)"
+        case .confirmingForce?: return "Click again to force quit \(name)"
+        }
+    }
+
     /// PURE: the words' colour inside the line — black on the light amber of a Stop waiting for its second click.
     static func inkOnFill(_ phase: IslandServerStopPhase?) -> Color {
         if case .confirming? = phase { return .black }
@@ -1153,6 +1166,9 @@ final class IslandServersModel: ObservableObject {
     }
 
     func setProbesForTesting(_ http: [String: IslandHTTPProbe]) { self.http = http }
+
+    /// Test and gallery seam: Stop's phases as they would be — set directly, never by a click (nothing is signalled).
+    func setStopsForTesting(_ stops: [String: IslandServerStopPhase]) { self.stops = stops }
 }
 
 // MARK: - The view
@@ -1255,7 +1271,7 @@ struct IslandServerBundleRowView: View {
                         }
                         Spacer(minLength: 8)
                         if let link = model.link(bundle) {
-                            IslandServerLinkButton(link: link, compact: true) { model.open(link) }
+                            IslandServerLinkButton(link: link) { model.open(link) }
                                 .opacity(hovered ? 1 : 0)
                         }
                     }
@@ -1273,10 +1289,15 @@ struct IslandServerBundleRowView: View {
             .contentShape(Rectangle())
         }
         .onTapGesture { model.open(bundle) }
-        .accessibilityElement(children: .contain)
+        // One element for VoiceOver, which never hovers: its words, and its link as an action (hidden at rest).
+        .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(bundle.name), \(secondLine)")
+        .accessibilityAction { model.open(bundle) }
         .accessibilityAction(named: "Show its servers") { model.open(bundle) }
+        .accessibilityActions {
+            if let link = model.link(bundle) { Button("Open \(link.label)") { model.open(link) } }
+        }
     }
 
     /// The bundle's oldest start: its line is the project's uptime.
@@ -1328,7 +1349,7 @@ struct IslandServerRowView: View {
                         }
                         Spacer(minLength: 8)
                         ForEach(links) { link in
-                            IslandServerLinkButton(link: link, compact: true) { onLink(link) }
+                            IslandServerLinkButton(link: link) { onLink(link) }
                                 .opacity(actions ? 1 : 0)
                         }
                     }
@@ -1338,19 +1359,23 @@ struct IslandServerRowView: View {
                               words: IslandServers.lineWords(status: statusLine, ports: row.portsLine),
                               inkOnFill: IslandServers.inkOnFill(phase))
                 }
-                // Stop's column is kept at rest (nothing moves when it appears); a phase's wider capsule grows over the
-                // line's end, never pushing the row.
-                Color.clear.frame(width: IslandCircleButtonStyle.size, height: 1)
-            }
-            .overlay(alignment: .trailing) {
+                // Stop in the row's flow after the links: its column is kept at rest (nothing moves when it appears),
+                // and a phase's wider capsule ("Force quit?") narrows the row rather than covering a link.
                 IslandServerStopButton(phase: phase, name: row.name, action: onStop)
                     .opacity(actions ? 1 : 0)
-                    .animation(HoverLift.animation, value: actions)
+                    .frame(minWidth: IslandCircleButtonStyle.size, alignment: .trailing)
             }
+            .animation(HoverLift.animation, value: phase)
             .contentShape(Rectangle())
         }
-        .accessibilityElement(children: .contain)
+        // One element for VoiceOver, which never hovers: its words, and Stop (the same two clicks) and every link as
+        // its actions, whatever their opacity.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(IslandServers.accessibilityLabel(row, phase: phase, now: now))
+        .accessibilityActions {
+            if let stop = IslandServers.stopActionName(phase, name: row.name) { Button(stop, action: onStop) }
+            ForEach(links) { link in Button("Open \(link.label)") { onLink(link) } }
+        }
     }
 
     private var statusLine: String { IslandServers.statusWords(row, phase: phase, now: now) }
@@ -1399,38 +1424,24 @@ struct IslandServerIcon: View {
     }
 }
 
-/// A link to a server's page: "localhost:3888 ↗", opened in the default browser. `compact`: the quiet rows' text link
-/// (no capsule), sized to their main line.
+/// A link to a server's page: "localhost:3888 ↗", opened in the default browser — a small capsule sized to the quiet
+/// rows' main line.
 struct IslandServerLinkButton: View {
     let link: IslandServerLink
-    var compact = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            if compact {
-                HStack(spacing: 3) {
-                    Text(link.label).font(Typography.tinyDigits(.medium))
-                    Image(systemName: "arrow.up.right").font(Typography.micro(.bold))
-                }
-                .foregroundStyle(Color.white.opacity(0.9))
-                .padding(.horizontal, 8)
-                .frame(height: IslandQuietRow.titleHeight)
-                .background(Capsule().fill(Color.white.opacity(0.08)))
-                .contentShape(Capsule())
-                .pillHoverGlow(Color.white)
-            } else {
-                HStack(spacing: 4) {
-                    Text(link.label).font(Typography.captionDigits(.medium))
-                    Image(systemName: "arrow.up.right").font(Typography.tiny(.semibold))
-                }
-                .foregroundStyle(Color.white.opacity(0.9))
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(Capsule().fill(Color.white.opacity(0.1)))
-                .contentShape(Capsule())
-                .pillHoverGlow(Color.white)
+            HStack(spacing: 3) {
+                Text(link.label).font(Typography.tinyDigits(.medium))
+                Image(systemName: "arrow.up.right").font(Typography.micro(.bold))
             }
+            .foregroundStyle(Color.white.opacity(0.9))
+            .padding(.horizontal, 8)
+            .frame(height: IslandQuietRow.titleHeight)
+            .background(Capsule().fill(Color.white.opacity(0.08)))
+            .contentShape(Capsule())
+            .pillHoverGlow(Color.white)
         }
         .buttonStyle(IslandPressStyle())
         .help("Open \(link.url.absoluteString)")

@@ -383,7 +383,10 @@ struct IslandSessionRowView: View {
                             .hoverLiftLabel(hovered)
                             .padding(.trailing, hovered ? 18 : 0)
                         Spacer(minLength: 8)
+                        // The mode and where it is, muted — the row's subtitle before, word for word.
                         HStack(spacing: 5) {
+                            Text(row.mode)
+                            Text("·")
                             Image(systemName: row.host.symbol)
                             Text(row.host.label)
                         }

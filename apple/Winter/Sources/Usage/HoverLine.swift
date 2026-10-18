@@ -101,9 +101,13 @@ struct HoverLineWords: Equatable {
     var atFill: String? = nil
     /// At the track's end, in the grey (the plan lines' left figure: ":3000 :3001", "56 min left").
     var end: String? = nil
+    /// The start words are content that must not vanish (a device's detail): too long for the line, they are cut at
+    /// their tail instead of dropped (and take the end words' room).
+    var startTruncates = false
 }
 
-/// PURE: where a hovered line's words go — each shown only where it fits WHOLE, else dropped.
+/// PURE: where a hovered line's words go — each shown only where it fits WHOLE, else dropped (start words marked
+/// `startTruncates` are cut at their tail instead).
 struct HoverLineLayout: Equatable {
     /// The fill as drawn (never under `minFill`: a started line shows at least a dot).
     var fill: CGFloat
@@ -114,6 +118,8 @@ struct HoverLineLayout: Equatable {
     /// The glued words fit INSIDE the fill (right-aligned at its end, on the colour); else they follow it in the grey.
     var atFillInside: Bool
     var end: Bool
+    /// The room the start words have from the track's start (they are cut to it when they truncate).
+    var startRegion: CGFloat = 0
 
     static func of(width: CGFloat, fraction: Double, words: HoverLineWords, minFill: CGFloat = 0) -> HoverLineLayout {
         let f = CGFloat(min(1, max(0, fraction)))
@@ -127,13 +133,18 @@ struct HoverLineLayout: Equatable {
             let atFill = slot <= width
             let end = endW > 0 && width - (atFill ? slot : fill) >= endW
             // The start words sit in the fill before the glued ones.
-            let start = startW > 0 && inside && fill - glued >= startW
-            return HoverLineLayout(fill: fill, fillSlot: slot, start: start, atFill: atFill, atFillInside: inside, end: end)
+            let region = inside ? fill - glued : 0
+            let start = startW > 0 && inside && (region >= startW || (words.startTruncates && region >= 24))
+            return HoverLineLayout(fill: fill, fillSlot: slot, start: start, atFill: atFill, atFillInside: inside, end: end,
+                                   startRegion: max(0, region))
         }
-        // No glued words: the start first, then the end when both fit whole side by side.
-        let start = startW > 0 && startW <= width
-        let end = endW > 0 && (start ? startW : 0) + endW <= width
-        return HoverLineLayout(fill: fill, fillSlot: fill, start: start, atFill: false, atFillInside: false, end: end)
+        // No glued words: the start first, then the end when both fit whole side by side; start words that truncate
+        // always show, cut to the track (the end words then dropped).
+        let fits = startW > 0 && startW <= width
+        let start = fits || (startW > 0 && words.startTruncates)
+        let end = endW > 0 && (start ? min(startW, width) : 0) + endW <= width
+        return HoverLineLayout(fill: fill, fillSlot: fill, start: start, atFill: false, atFillInside: false, end: end,
+                               startRegion: width - (end ? endW : 0))
     }
 }
 
@@ -159,16 +170,17 @@ struct HoverLine: View {
                 if hovered {
                     let layout = HoverLineLayout.of(width: proxy.size.width, fraction: f, words: words, minFill: height)
                     ZStack(alignment: .leading) {
-                        HStack(spacing: 0) {
-                            if layout.start, let s = words.start {
-                                Text(s).foregroundStyle(inkOnFill.opacity(0.9)).padding(.leading, 6)
-                            }
-                            Spacer(minLength: 0)
-                            if layout.atFill, layout.atFillInside, let a = words.atFill {
-                                Text(a).foregroundStyle(inkOnFill).padding(.trailing, 6)
-                            }
+                        if layout.start, let s = words.start {
+                            // On the fill, or on the grey of a line with none.
+                            Text(s).foregroundStyle(f > 0 ? inkOnFill.opacity(0.9) : Color.white.opacity(0.75))
+                                .truncationMode(.tail)
+                                .padding(.horizontal, 6)
+                                .frame(width: max(0, layout.startRegion), alignment: .leading)
                         }
-                        .frame(width: max(0, layout.fill))
+                        if layout.atFill, layout.atFillInside, let a = words.atFill {
+                            Text(a).foregroundStyle(inkOnFill).padding(.trailing, 6)
+                                .frame(width: max(0, layout.fill), alignment: .trailing)
+                        }
                         if layout.atFill, !layout.atFillInside, let a = words.atFill {
                             // Too long for the fill: right after it, in the grey.
                             Text(a).foregroundStyle(Color.white.opacity(0.85))
@@ -201,10 +213,19 @@ struct HoverSegment: Identifiable, Equatable {
     /// Its share of the whole track, 0…1.
     let fraction: Double
     let color: Color
-    /// What it says inside itself under the pointer (only where it fits whole).
-    let label: String?
+    /// What it says inside itself under the pointer, the most telling first ("gpt-5 · Codex $18.75", "$18.75"): the first
+    /// that fits whole is shown, else none.
+    let labels: [String]
     /// The label's colour (black on a light fill such as amber).
     var ink: Color = .white
+
+    init(id: String, fraction: Double, color: Color, label: String?, ink: Color = .white) {
+        self.init(id: id, fraction: fraction, color: color, labels: label.map { [$0] } ?? [], ink: ink)
+    }
+
+    init(id: String, fraction: Double, color: Color, labels: [String], ink: Color = .white) {
+        self.id = id; self.fraction = fraction; self.color = color; self.labels = labels; self.ink = ink
+    }
 }
 
 /// PURE: segment widths along a track — each its share of `width` less the gaps between them; a segment narrower than
@@ -226,6 +247,11 @@ enum HoverSegmentLayout {
         let w = HoverLift.wordsWidth(label)
         return w > 0 && width >= w
     }
+
+    /// PURE: the first of a segment's labels that fits its width whole; nil when none does.
+    static func label(_ labels: [String], width: CGFloat) -> String? {
+        labels.first { showsLabel($0, width: width) }
+    }
 }
 
 /// A thin line split into segments (each a share of the whole), thickening under the pointer with each segment's label
@@ -246,7 +272,7 @@ struct HoverSegmentLine: View {
                         Rectangle().fill(segment.color)
                             .frame(width: w)
                             .overlay {
-                                if hovered, HoverSegmentLayout.showsLabel(segment.label, width: w), let label = segment.label {
+                                if hovered, let label = HoverSegmentLayout.label(segment.labels, width: w) {
                                     Text(label)
                                         .font(Typography.tinyDigits(.regular))
                                         .foregroundStyle(segment.ink)

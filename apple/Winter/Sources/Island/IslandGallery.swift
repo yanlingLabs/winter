@@ -194,22 +194,28 @@ enum IslandGallery {
             out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id, preview: ids), directory,
                                  "island-tab-\(name)-hovered@2x.png"))
         }
-        // Usage and Devices cut taller (they scroll live), at rest and with the cost block / the helper under the pointer.
-        for (tab, name, hovered) in [(IslandTabRegistry.usage, "usage", "cost"), (IslandTabRegistry.devices, "devices", "device:cu")] {
+        // Usage and Devices cut taller (they scroll live), at rest and hovered: the cost block; the helper and a browser
+        // that is not connected (its reason on the grey track).
+        for (tab, name, hovered) in [(IslandTabRegistry.usage, "usage", ["cost"]),
+                                     (IslandTabRegistry.devices, "devices", ["device:cu", "device:browser-chrome"])] {
             store.tabs.select(tab.id)
-            for (suffix, ids) in [("", Set<String>()), ("-hovered", [hovered])] {
+            for (suffix, ids) in [("", Set<String>()), ("-hovered", Set(hovered))] {
                 out.append(try write(openScene(store: store, models: models, shape: shape, tab: tab.id, preview: ids, height: 440),
                                      directory, "island-tab-\(name)-tall\(suffix)@2x.png"))
             }
         }
-        // A server's Stop waiting for its second click (one click on a fresh sample — nothing is signalled before the
-        // second): it stays on screen, the line amber, with the pointer elsewhere.
-        let confirming = sampleServers(now: now)
-        confirming.schedule = { _, _ in }
-        if let row = confirming.bundles.first(where: { !confirming.drills($0) })?.rows.first { confirming.tap(row) }
+        // A server's Stop waiting for its second click, and offering (then asking) a force quit beside its link — set
+        // through the seam, never clicked (nothing is signalled): Stop stays on screen with the pointer elsewhere, in the
+        // row's flow, so its wider capsule never covers the link.
         store.tabs.select(IslandTabRegistry.servers.id)
-        out.append(try write(openScene(store: store, models: IslandTabModels(shelf: models.shelf, servers: confirming), shape: shape,
-                                       tab: IslandTabRegistry.servers.id), directory, "island-tab-servers-confirm@2x.png"))
+        for (name, phase) in [("confirm", IslandServerStopPhase.confirming(at: now)), ("forcequit", .confirmingForce(at: now))] {
+            let servers = sampleServers(now: now, withLink: true)
+            if let row = servers.bundles.first(where: { !servers.drills($0) })?.rows.first {
+                servers.setStopsForTesting([row.id: phase])
+            }
+            out.append(try write(openScene(store: store, models: IslandTabModels(shelf: models.shelf, servers: servers), shape: shape,
+                                           tab: IslandTabRegistry.servers.id), directory, "island-tab-servers-\(name)@2x.png"))
+        }
         // The empty Shelf, and the Shelf while a drag hovers it.
         let emptyModels = IslandTabModels(shelf: IslandShelfStore(persistence: IslandShelfPersistence(
             fileURL: files.appendingPathComponent("empty-shelf.json"))))
@@ -339,14 +345,17 @@ enum IslandGallery {
 
     /// Servers: two servers of one npm package (a bundle), a Python module, a Bun app — from a made-up process list (never
     /// a scan, never a probe).
-    static func sampleServers(now: Date) -> IslandServersModel {
+    /// `withLink`: http.server answers HTTP on loopback (a made-up probe — nothing is asked), so its row has a link.
+    static func sampleServers(now: Date, withLink: Bool = false) -> IslandServersModel {
         let start = { (ago: TimeInterval) in UInt64(now.timeIntervalSince1970 - ago) }
         let home = "/Users/sample"
         // Each in a process group of its own; the two waifus servers are one project (one bundle row).
         func process(_ pid: Int32, parent: Int32 = 1, group: Int32, ago: TimeInterval, path: String, args: [String]? = nil,
-                     cwd: String, tcp: [UInt16]) -> ServerProcess {
-            ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
-                          ppid: parent, pgid: group, path: path, cwd: cwd, tcpPorts: tcp, arguments: args)
+                     cwd: String, tcp: [UInt16], loopback: [UInt16: IslandLoopback] = [:]) -> ServerProcess {
+            var p = ServerProcess(identity: ServerProcessIdentity(pid: pid, uid: 501, startSeconds: start(ago), startMicros: 0),
+                                  ppid: parent, pgid: group, path: path, cwd: cwd, tcpPorts: tcp, arguments: args)
+            p.loopback = loopback
+            return p
         }
         let model = IslandServersModel()
         model.user = 501
@@ -360,10 +369,13 @@ enum IslandGallery {
                     args: ["node", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs", "start"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [61010]),
             process(410, group: 410, ago: 25 * 60, path: "/usr/bin/python3", args: ["python3", "-m", "http.server", "8000"],
-                    cwd: "\(home)/Sites/portfolio", tcp: [8000]),
+                    cwd: "\(home)/Sites/portfolio", tcp: [8000], loopback: withLink ? [8000: .v4] : [:]),
             process(420, group: 420, ago: 2 * 86400, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
                     cwd: "\(home)/Code/dashboard", tcp: [3000, 3001]),
         ])
+        if withLink, let row = model.rows.first(where: { $0.tcpPorts == [8000] }) {
+            model.setProbesForTesting([IslandServers.probeKey(row, 8000): IslandHTTPProbe(isHTTP: true, isHTML: true)])
+        }
         return model
     }
 

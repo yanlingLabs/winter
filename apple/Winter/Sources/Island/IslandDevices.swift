@@ -231,19 +231,22 @@ struct IslandDeviceRowView: View {
                         .layoutPriority(1)
                     Spacer(minLength: 8)
                     if !row.chips.isEmpty, hovered {
-                        // The helper's line is its permissions: its own words go beside its name.
+                        // The helper's line is its permissions: its own words go beside its name, two lines at most
+                        // as before.
                         Text(row.detail)
                             .font(Typography.tiny())
                             .foregroundStyle(Theme.textMuted)
-                            .lineLimit(1)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: false, vertical: true)
                             .transition(.opacity)
                     }
                 }
-                .frame(height: IslandQuietRow.titleHeight)
+                .frame(minHeight: IslandQuietRow.titleHeight)
                 Group {
                     if row.chips.isEmpty {
                         HoverLine(fraction: IslandDevicesPresentation.lineFraction(row.tone), color: islandToneColor(row.tone),
-                                  hovered: hovered, words: HoverLineWords(start: row.detail),
+                                  hovered: hovered, words: HoverLineWords(start: row.detail, startTruncates: true),
                                   inkOnFill: row.tone == .warning ? .black : .white)
                     } else {
                         HoverSegmentLine(segments: row.chips.map { chip in

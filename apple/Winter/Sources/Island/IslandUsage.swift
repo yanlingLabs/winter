@@ -443,6 +443,23 @@ struct IslandCostSegment: Identifiable, Equatable {
     let label: String
     /// Its rank within its source (0 the largest): a source's later segments are its colour, lighter.
     let rank: Int
+    /// Its name with its source when another shown model shares the name ("gpt-5 · Codex").
+    var qualifiedName: String = ""
+
+    /// Under the pointer, the most telling words that fit inside the segment: its name (and source) with the figure,
+    /// else the figure alone.
+    var hoverLabels: [String] { qualifiedName.isEmpty ? [label] : ["\(qualifiedName) \(label)", label] }
+}
+
+/// One name under the cost line: a top model (as the old list showed them), its colour from its segment — an unpriced
+/// model in a priced range has none, and says its tokens ("1.2k tok") instead.
+struct IslandCostLegendItem: Identifiable, Equatable {
+    let id: String
+    let name: String
+    /// Its segment on the line (nil: no segment — drawn grey).
+    let segmentId: String?
+    /// Words shown beside the name at rest: an unpriced model's tokens.
+    let note: String?
 }
 
 enum IslandCostPresentation {
@@ -462,13 +479,18 @@ enum IslandCostPresentation {
         let whole = max(byCost ? summary.totals.costUsd : summary.totals.tokens, keptSum)
         guard whole > 0 else { return [] }
         var ranks: [UsageSource: Int] = [:]
+        // Every model shown (on the line or under it) once, by id: a name counts twice only when two models share it.
+        var seen = Set<String>()
+        let names = (kept + summary.topModels.prefix(3)).filter { seen.insert($0.id).inserted }
+            .map { UsagePresentation.modelName($0.model) }
         var out = kept.map { r -> IslandCostSegment in
             let rank = ranks[r.source, default: 0]
             ranks[r.source] = rank + 1
             let label = byCost && r.costBasis != "unknown" ? UsagePresentation.cost(r.totals.costUsd)
                 : UsagePresentation.tokens(r.totals.tokens) + " tok"
-            return IslandCostSegment(id: r.id, name: UsagePresentation.modelName(r.model), source: r.source,
-                                     fraction: value(r) / whole, label: label, rank: rank)
+            let name = UsagePresentation.modelName(r.model)
+            return IslandCostSegment(id: r.id, name: name, source: r.source, fraction: value(r) / whole, label: label,
+                                     rank: rank, qualifiedName: qualified(name, source: r.source, among: names))
         }
         let rest = whole - keptSum
         // "Other" only when it is a visible share (rounding never adds a sliver).
@@ -506,15 +528,24 @@ enum IslandCostPresentation {
         return parts.joined(separator: " · ")
     }
 
-    /// PURE: the names under the line (the top 3 models, "Other" left out) — a model's source added only when two of
-    /// them share a name ("gpt-5 · Codex", "gpt-5 · Winter").
-    static func legend(_ segments: [IslandCostSegment]) -> [(id: String, name: String, segment: IslandCostSegment)] {
-        let shown = Array(segments.filter { $0.source != nil }.prefix(3))
-        let names = shown.map(\.name)
-        return shown.map { s in
-            let twice = names.filter { $0 == s.name }.count > 1
-            let name = twice ? "\(s.name) · \(UsagePresentation.sourceTitle(s.source ?? .winter))" : s.name
-            return (s.id, name, s)
+    /// PURE: a model's name with its source when another of `names` is the same ("gpt-5 · Codex"), else the name.
+    static func qualified(_ name: String, source: UsageSource, among names: [String]) -> String {
+        names.filter { $0 == name }.count > 1 ? "\(name) · \(UsagePresentation.sourceTitle(source))" : name
+    }
+
+    /// PURE: the names under the line — the top 3 models in the summary's own order (the ones the old list showed),
+    /// each with its segment's colour; one with no segment (an unpriced model while the range has a cost) says its
+    /// tokens beside its name, so it never vanishes. A source is added to a name another shown model shares.
+    static func legend(_ summary: UsageSummary?) -> [IslandCostLegendItem] {
+        guard let summary else { return [] }
+        let segmentIds = Set(segments(summary).map(\.id))
+        let rows = Array(summary.topModels.filter { $0.totals.costUsd > 0 || $0.totals.tokens > 0 }.prefix(3))
+        let names = rows.map { UsagePresentation.modelName($0.model) }
+        return rows.map { r in
+            let name = qualified(UsagePresentation.modelName(r.model), source: r.source, among: names)
+            let has = segmentIds.contains(r.id)
+            return IslandCostLegendItem(id: r.id, name: name, segmentId: has ? r.id : nil,
+                                        note: has ? nil : UsagePresentation.tokens(r.totals.tokens) + " tok")
         }
     }
 
@@ -575,7 +606,7 @@ struct IslandCostBlock: View {
                 }
                 line(Self.lineTitles[0], hovered: hovered) {
                     HoverSegmentLine(segments: segments.map {
-                        HoverSegment(id: $0.id, fraction: $0.fraction, color: IslandCostPresentation.color($0), label: $0.label)
+                        HoverSegment(id: $0.id, fraction: $0.fraction, color: IslandCostPresentation.color($0), labels: $0.hoverLabels)
                     }, hovered: hovered)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(IslandCostPresentation.accessibilityLine(segments))
@@ -584,14 +615,20 @@ struct IslandCostBlock: View {
                     IslandCostTrend(values: summary?.spark ?? [], hovered: hovered)
                 }
                 HStack(spacing: 12) {
-                    ForEach(IslandCostPresentation.legend(segments), id: \.id) { item in
+                    ForEach(IslandCostPresentation.legend(summary)) { item in
                         HStack(spacing: 5) {
-                            Capsule().fill(IslandCostPresentation.color(item.segment)).frame(width: 8, height: 3)
+                            Capsule()
+                                .fill(segments.first { $0.id == item.segmentId }.map(IslandCostPresentation.color)
+                                      ?? Color.white.opacity(0.22))
+                                .frame(width: 8, height: 3)
                             Text(item.name)
                                 .font(Typography.tiny())
                                 .foregroundStyle(hovered ? Color.white.opacity(0.85) : Theme.textMuted)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
+                            if let note = item.note {
+                                Text(note).font(Typography.tinyDigits()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                            }
                         }
                     }
                     Spacer(minLength: 8)

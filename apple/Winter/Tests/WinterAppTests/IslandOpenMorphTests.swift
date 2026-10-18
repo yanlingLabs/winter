@@ -234,8 +234,9 @@ final class IslandOpenMorphTests: XCTestCase {
         }
     }
 
-    /// No island view writes its own grow: a `scaleEffect` is only a press's shrink (the hover goes through
-    /// `islandHoverGrow`/`HoverGrowth`), and no literal hover factor appears in the island's sources.
+    /// No island view writes its own grow: a `scaleEffect` is only a press's shrink (a panel's hover goes through
+    /// `islandHoverGrow`/`HoverGrowth`; a tab row's label lift — the one allowed exception — through `hoverLiftLabel`,
+    /// `Sources/Usage/HoverLine.swift`, outside this folder), and no literal hover factor appears in the island's sources.
     func testNoIslandSourceHardCodesAHoverScale() throws {
         let folder = sourceFile("")
         let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)

@@ -87,17 +87,18 @@ struct IslandQuietWatchRow: View {
             let actions = IslandQuietRow.showsActions(hovered: hovered, busy: stopping || error != nil)
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
-                    HStack(spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Image(systemName: islandWatchSymbol(watch.condition))
                             .font(Typography.caption(.semibold))
                             .foregroundStyle(IslandCUColors.accent)
                             .frame(width: IslandQuietRow.markWidth)
+                        // Two lines at most, as before: the condition is the row's content.
                         Text(islandWatchConditionLine(watch))
                             .font(Typography.composerField())
                             .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.9))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .hoverLiftLabel(hovered)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .hoverLiftLabel(hovered, anchor: .topLeading)
                             .padding(.trailing, hovered ? 18 : 0)
                             .layoutPriority(1)
                         Spacer(minLength: 8)
@@ -108,7 +109,7 @@ struct IslandQuietWatchRow: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
-                    .frame(height: IslandQuietRow.titleHeight)
+                    .frame(minHeight: IslandQuietRow.titleHeight)
                     HoverLine(fraction: IslandWatchesPresentation.elapsed(watch, nowMs: nowMs), color: IslandCUColors.accent,
                               hovered: hovered, words: IslandWatchesPresentation.lineWords(watch, nowMs: nowMs))
                         .padding(.leading, IslandQuietRow.markWidth + 8)
@@ -120,7 +121,11 @@ struct IslandQuietWatchRow: View {
             }
             .contentShape(Rectangle())
         }
-        .accessibilityElement(children: .contain)
+        // One element for VoiceOver, which never hovers: its words, and Stop as its action whatever its opacity.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(IslandWatchesPresentation.accessibilityLabel(watch, nowMs: nowMs, error: error))
+        .accessibilityActions {
+            if !stopping { Button("Stop waiting", action: onStop) }
+        }
     }
 }
