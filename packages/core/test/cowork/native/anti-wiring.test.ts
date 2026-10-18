@@ -8,7 +8,7 @@ import * as ts from "typescript";
 const packages = join(import.meta.dir, "..", "..", "..", "..");
 const repositoryRoot = join(packages, "..");
 const nativeDirectory = join(packages, "core", "src", "cowork", "native");
-const MODULES = ["authority", "fd-channel", "fd-receiver-worker", "host", "power", "protocol", "recovery", "stop-proof"];
+const MODULES = ["authority", "fd-channel", "fd-receiver-worker", "host", "power", "protocol", "receipt-mac", "recovery", "stop-proof"];
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs|mts|cts)$/.test(entry.name) && !entry.parentPath.split(sep).includes("node_modules")).map(entry => join(entry.parentPath, entry.name));
 }
@@ -154,7 +154,7 @@ export function namesTheWiring(source: string): boolean {
 
 test("N2 S7: the wiring is the only importer of cowork/native, the daemon is the only importer of the wiring, and the wiring is lazy and reaches no process, socket, setting or environment", () => {
   const wiringText = readFileSync(WIRING, "utf8"), code = wiringText.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
-  expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/host", "./native/power", "./native/protocol", "./native/recovery", "./native/stop-proof"]);
+  expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/host", "./native/power", "./native/protocol", "./native/receipt-mac", "./native/recovery", "./native/stop-proof"]);
   const importers = [...allSources, ...scriptSources].filter(file => file !== WIRING && namesTheWiring(readFileSync(file, "utf8"))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
   expect(importers).toEqual(["packages/core/src/daemon.ts"]);
   for (const forbidden of ["Bun.spawn", "child_process", "Bun.connect(", "Bun.listen(", "node:net", "process.env", "Bun.secrets", "Keychain", "readFileSync", "writeFileSync", "mkdirSync", "setInterval", "dlopen(", "krun_", "Hypervisor", "sandbox_init", "pmset"])
@@ -163,7 +163,8 @@ test("N2 S7: the wiring is the only importer of cowork/native, the daemon is the
   expect(code.match(/new CoworkNativeHost\(/g)).toHaveLength(1);
   expect(code.indexOf("new CoworkNativeHost(")).toBeGreaterThan(code.indexOf("private host()"));
   expect(code.indexOf("constructor(private readonly options")).toBeLessThan(code.indexOf("private host()"));
-  expect(/constructor\(private readonly options: CoworkNativeWiringOptions\) \{\}/.test(code)).toBe(true);
+  // the constructor only wraps the secret slot in the key store object (no read, no write, no host)
+  expect(code.includes("constructor(private readonly options: CoworkNativeWiringOptions) { this.keys = options.secrets ? new CoworkNativeReceiptKeyStore(options.secrets) : undefined; }")).toBe(true);
 });
 
 test("the specifier scanner sees every form of import, and resolves it relative to the file that wrote it", () => {

@@ -1,6 +1,7 @@
 import type { AdmissionRecord, CoworkAdmissionLedger } from "../admission";
 import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumes } from "../volumes";
+import type { CoworkNativeReceiptKey } from "./receipt-mac";
 import { parseCoworkNativeStopReceipt, type CoworkNativeOrderlyReceipt } from "./protocol";
 import { CoworkNativePower, type CoworkPower, type CoworkPowerKey } from "./power";
 import {
@@ -66,6 +67,8 @@ export interface CoworkNativeRecoveryReport {
 export interface CoworkNativeRecoveryDeps {
   readonly records: CoworkRepository; readonly volumes: CoworkVolumes; readonly admission: CoworkAdmissionLedger; readonly power: CoworkNativePower;
   readonly registry: CoworkNativeStopRegistry; readonly hostBoot: CoworkNativeHostBoot;
+  /** The installation's receipt key as already loaded into memory (the Keychain read is asynchronous, recovery is not). Null or absent: every retained receipt is Class B. */
+  readonly receiptKey?: () => CoworkNativeReceiptKey | null;
   readonly receipts?: CoworkNativeDurableReceiptPort; readonly ownerRecover?: CoworkNativeOwnerRecoverPort; readonly guards?: CoworkNativeRecoverGuards;
   /** The durable record of which processes each launch started; consulted by owner recovery and forgotten once an incarnation is released. */
   readonly journal?: CoworkNativeLaunchJournalPort;
@@ -205,12 +208,14 @@ export class CoworkNativeRecovery {
     return { kind: "none", reason };
   }
   /** The only way a retained receipt becomes a source: with the journal entry and the guards. No guards means the receipt is not evidence. */
-  private retainedSource(scope: CoworkNativeReceiptScope): { kind: "retained"; guards: CoworkNativeRecoverGuards; processes: CoworkNativeLaunchEntry | null } | null {
+  private retainedSource(scope: CoworkNativeReceiptScope): { kind: "retained"; guards: CoworkNativeRecoverGuards; processes: CoworkNativeLaunchEntry | null; key: CoworkNativeReceiptKey | null } | null {
     const { guards } = this.deps;
     if (!guards) return null;
     let processes: CoworkNativeLaunchEntry | null = null;
     try { processes = this.deps.journal?.load(scope) ?? null; } catch { return null; }
-    return { kind: "retained", guards, processes };
+    let key: CoworkNativeReceiptKey | null = null;
+    try { key = this.deps.receiptKey?.() ?? null; } catch { key = null; }
+    return { kind: "retained", guards, processes, key };
   }
   private ownerRecoverProof(key: CoworkPowerKey, owner: CoworkVolumeOwner | null, volumes: readonly CoworkVolumeRecord[]): CoworkNativeStopProof | null {
     const { ownerRecover, guards } = this.deps;

@@ -110,7 +110,7 @@ test("source pin: the Cowork service receives the native port only when a caller
   const { readFileSync } = await import("node:fs");
   const source = readFileSync(join(import.meta.dir, "..", "..", "src", "daemon.ts"), "utf8");
   expect(source).toContain("const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;");
-  expect(source).toContain("coworkNative.reconcileAtBoot()");
+  expect(source).toContain("await coworkNative.reconcileAtBoot()");
   expect(source).toContain("const guestsDrained = coworkNative?.beginShutdown();");
   // the drain is awaited before the stores close: closeRest (store.close, runtime.close) runs only after it settles
   expect(source).toMatch(/settled\.then\(closeRest\)/);

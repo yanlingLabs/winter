@@ -1,9 +1,10 @@
 import { fstatSync } from "node:fs";
 import { CoworkNativeSimulatedCrash, type CoworkLauncherPort, type CoworkLauncherSession } from "../../../src/cowork/native/host";
 import {
-  CoworkNativeMuxSequence, parseCoworkNativeLauncherLine, serializeCoworkNativeLauncherLine, serializeCoworkNativeStopReceipt, COWORK_NATIVE_VOLUME_PURPOSES,
+  CoworkNativeMuxSequence, parseCoworkNativeLauncherLine, serializeCoworkNativeLauncherLine, serializeCoworkNativeStopReceipt, signCoworkNativeOrderlyReceipt, COWORK_NATIVE_VOLUME_PURPOSES,
   type CoworkNativeMuxFrame, type CoworkNativeOrderlyReceipt, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity,
 } from "../../../src/cowork/native/protocol";
+import { CoworkNativeReceiptKey } from "../../../src/cowork/native/receipt-mac";
 import { COWORK_EXT4_FEATURES } from "../../../src/cowork/volume-filesystem";
 
 /*
@@ -31,6 +32,8 @@ export interface FakeBehavior {
   helloBoot?: string;
 }
 
+/** A fixed fixture key for sessions that never saw a `begin` (staged evidence). */
+export const FIXTURE_KEY = CoworkNativeReceiptKey.fromBytes(Uint8Array.from({ length: 32 }, (_, i) => 0x10 + i));
 interface Received { readonly message: CoworkNativeToLauncher; readonly rights: readonly number[] }
 export class FakeLauncher implements CoworkLauncherPort {
   behavior: FakeBehavior;
@@ -113,8 +116,11 @@ export class FakeSession implements CoworkLauncherSession {
     }
   }
 
+  /** The key the daemon handed over in `begin` (memory only, like the real launcher). */
+  receiptKey: CoworkNativeReceiptKey | null = null;
   private onBegin(message: Extract<CoworkNativeToLauncher, { t: "begin" }>): void {
-    const { t: _t, id, homeId: _home, ...scope } = message; void _t; void _home;
+    this.receiptKey = message.receiptKey;
+    const { t: _t, id, homeId: _home, receiptKey: _key, ...scope } = message; void _t; void _home; void _key;
     this.scope = scope;
     if (this.behavior.begin === "silent") return;
     if (this.behavior.begin === "refuse") return this.deliver({ t: "refused", id, code: "code_identity_mismatch" });
@@ -186,14 +192,18 @@ export class FakeSession implements CoworkLauncherSession {
       const volume = this.volumes[index];
       return { purpose, device: attached ? volume!.device : "0", inode: attached ? volume!.inode : "0", capacityBytes: attached ? volume!.capacityBytes : 0, attached, flushRequested: attached && booted ? 9 : 0, flushCompleted: attached && booted ? 9 : 0, finalFlush: attached ? "completed" as const : "not-attached" as const };
     }) as unknown as CoworkNativeOrderlyReceipt["volumes"];
-    return { v: 1, class: "A", confirmationId: `confirm-fake${this.confirmCounter}`, stopNonce, origin: "host-stop", launcherInstanceId: this.launcherInstanceId, admissionId: scope.admissionId, homeId: this.owner.options.homeId,
+    const unsigned = { v: 2, class: "A", confirmationId: `confirm-fake${this.confirmCounter}`, stopNonce, origin: "host-stop", launcherInstanceId: this.launcherInstanceId, admissionId: scope.admissionId, homeId: this.owner.options.homeId,
       workspaceId: scope.workspaceId, incarnationId: scope.incarnationId, leaseEpoch: scope.leaseEpoch, controllerInstanceId: scope.controllerInstanceId, workerInstanceId: scope.workerInstanceId, runtimeImageDigest: scope.runtimeImageDigest,
       hostBootId: this.hostBootId, guest: attached && booted ? { drain: "acked", halting: "observed", powerOff: "observed" } : { drain: "not-booted", halting: "not-booted", powerOff: "not-booted" },
       worker: { pid: 4242, startToken: "start-4242", exit: "code", status: 0, reaped: true }, volumes, issuedAtMs: 1_760_000_000_000, ...overrides };
+    // The launcher signs with the key it was handed in `begin` (a session that never saw one signs with a fixed fixture key). A test may force any `mac` through the override.
+    const { mac: forced, ...rest } = unsigned as Partial<CoworkNativeOrderlyReceipt> & Omit<CoworkNativeOrderlyReceipt, "mac">;
+    const signed = signCoworkNativeOrderlyReceipt(rest, this.receiptKey ?? FIXTURE_KEY);
+    return forced === undefined ? signed : { ...signed, mac: forced };
   }
   private uncertain(reason: CoworkNativeUncertainReceipt["reason"]): CoworkNativeUncertainReceipt {
     const scope = this.scope!;
-    return { v: 1, class: "B", launcherInstanceId: this.launcherInstanceId, admissionId: scope.admissionId, workspaceId: scope.workspaceId, incarnationId: scope.incarnationId, leaseEpoch: scope.leaseEpoch, workerInstanceId: scope.workerInstanceId, reason,
+    return { v: 2, class: "B", launcherInstanceId: this.launcherInstanceId, admissionId: scope.admissionId, workspaceId: scope.workspaceId, incarnationId: scope.incarnationId, leaseEpoch: scope.leaseEpoch, workerInstanceId: scope.workerInstanceId, reason,
       worker: { pid: 4242, startToken: "start-4242", exit: "signal", status: 9 }, attachedVolumes: this.volumes.length === 2, issuedAtMs: 1_760_000_000_000 };
   }
   /** Build the Class A receipt the way the real launcher would: durable first, then on the wire. */

@@ -9,6 +9,7 @@ import { CoworkNativeAuthority } from "./native/authority";
 import { CoworkNativeHost, type CoworkLauncherPort, type CoworkNativeHostDeps, type CoworkNativeImagePins } from "./native/host";
 import { CoworkNativePower } from "./native/power";
 import { COWORK_NATIVE_LIMITS, coworkNativeHostStopWaitMs } from "./native/protocol";
+import { CoworkNativeReceiptKeyStore, type CoworkNativeReceiptKey, type CoworkNativeSecretSlot } from "./native/receipt-mac";
 import { CoworkNativeRecovery, describeNativeError, type CoworkNativeDurableReceiptPort, type CoworkNativeOwnerRecoverPort, type CoworkNativeRecoveryReport } from "./native/recovery";
 import { CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeLaunchJournalPort, type CoworkNativeRecoverGuards } from "./native/stop-proof";
 
@@ -19,7 +20,8 @@ import { CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeL
  * no timer, no file. The host is built the first time a workspace start asks for it, from an ENVIRONMENT that the daemon's caller
  * injects. Production injects none: every host fact the environment holds (the launcher, the admission ledger's installation id,
  * the home binding, the backup port, the retained-receipt store) is still an undecided owner point or an unmerged slice, so in
- * production `start` refuses with `native_unavailable` and nothing else happens. No setting, environment variable or flag reads
+ * production nothing here runs: the Cowork service has no native port, so a Cowork start refuses with `unsupported_topology` before it gets this far
+ * (`native_unavailable` is only what this wiring throws if it is asked directly), and nothing else happens. No setting, environment variable or flag reads
  * this: the only way in is the `environment` option of `startDaemon`, which only code can pass.
  *
  * D1 is binding here, and this module decides nothing about it. A disk is released only by what the host's recovery accepts as
@@ -28,7 +30,7 @@ import { CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeL
  * and writes NOTHING.
  */
 
-export type CoworkNativeUnavailableCode = "native_unavailable" | "native_closing";
+export type CoworkNativeUnavailableCode = "native_unavailable" | "native_closing" | "receipt_key_unavailable";
 export class CoworkNativeUnavailableError extends Error {
   constructor(readonly code: CoworkNativeUnavailableCode) { super(code); this.name = "CoworkNativeUnavailableError"; }
 }
@@ -55,6 +57,10 @@ export interface CoworkNativeWiringOptions {
   readonly environment?: () => CoworkNativeEnvironment;
   /** Overrides the image-pin source (tests). The default is a read-only view of the stored pins. */
   readonly imagePins?: Pick<CoworkImagePins, "get" | "assertPinned">;
+  /** The daemon's secret store (its Keychain service). The receipt MAC key lives in it, under `cowork-native-receipt-mac-v1`, created on the first start that needs it
+   * and read (never created) at boot. Absent: no key exists, so a start refuses (`no_receipt_key`) and every retained receipt is Class B. Never touched until a start or a boot scan that
+   * has something to settle asks for it, and never without an environment. */
+  readonly secrets?: CoworkNativeSecretSlot;
   /** Test seam that can only SHORTEN the shutdown bound below the contract's host wait; it can never lengthen it. */
   readonly shutdownBoundMs?: number;
 }
@@ -94,7 +100,9 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
   private closing = false;
   private readonly starting = new Set<Promise<unknown>>();
   private drainBudgetMs: number = COWORK_NATIVE_LIMITS.drainBudgetMs;
-  constructor(private readonly options: CoworkNativeWiringOptions) {}
+  private receiptKey: CoworkNativeReceiptKey | null = null;
+  private readonly keys: CoworkNativeReceiptKeyStore | undefined;
+  constructor(private readonly options: CoworkNativeWiringOptions) { this.keys = options.secrets ? new CoworkNativeReceiptKeyStore(options.secrets) : undefined; }
 
   /** True once the host has been built (never at construction). */
   get built(): boolean { return this.hostInstance !== undefined; }
@@ -111,26 +119,32 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
     const authority = new CoworkNativeAuthority({ records, hostBoot: environment.hostBoot, registry });
     const volumes = new CoworkVolumes(db, home, authority.volumes, environment.backup, undefined, authority.filesystem);
     const power = new CoworkNativePower(db);
-    const recovery = new CoworkNativeRecovery({ records, volumes, admission: environment.admission, power, registry, hostBoot: environment.hostBoot,
+    const recovery = new CoworkNativeRecovery({ records, volumes, admission: environment.admission, power, registry, hostBoot: environment.hostBoot, receiptKey: () => this.receiptKey,
       receipts: environment.receipts, ownerRecover: environment.ownerRecover, guards: environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
     const images = bindCoworkImagePins(this.options.imagePins ?? readOnlyImagePins(db));
     this.drainBudgetMs = environment.hostOptions?.timeouts?.drainBudgetMs ?? COWORK_NATIVE_LIMITS.drainBudgetMs;
     this.hostInstance = new CoworkNativeHost({ ...environment.hostOptions, records, volumes, admission: environment.admission, authority, power, recovery, registry, hostBoot: environment.hostBoot,
-      launcher: environment.launcher, images, journal: environment.journal, daemon: environment.daemon });
+      launcher: environment.launcher, images, receiptKey: () => this.receiptKey, journal: environment.journal, daemon: environment.daemon });
     return this.hostInstance;
   }
 
   /** The service's door. Refused once shutdown began. */
   async start(workspaceId: string): Promise<unknown> {
     if (this.closing) throw new CoworkNativeUnavailableError("native_closing");
-    const started = this.host().start(workspaceId);
+    const host = this.host();
+    if (this.keys && this.receiptKey === null) {
+      // Created on first need. A Keychain that cannot be read or written refuses the start; nothing has moved yet.
+      try { this.receiptKey = await this.keys.ensure(); } catch { throw new CoworkNativeUnavailableError("receipt_key_unavailable"); }
+    }
+    if (this.closing) throw new CoworkNativeUnavailableError("native_closing");
+    const started = host.start(workspaceId);
     this.starting.add(started);
     try { return await started; } finally { this.starting.delete(started); }
   }
 
   /** Daemon start. Record-and-refuse: nothing is released here on weaker evidence than the host's recovery accepts, and without an
    * environment nothing is written at all. Never throws. */
-  reconcileAtBoot(): CoworkNativeBootReport {
+  async reconcileAtBoot(): Promise<CoworkNativeBootReport> {
     const { records } = this.options;
     // The cheap, read-only scan first. A retained workspace needs settling when its power is not `stopped` OR any of its volumes still names an
     // owner, whatever its power says (the host's recovery uses the same two facts, plus the admission row). An admission row exists only for a
@@ -148,7 +162,12 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
       }
     } catch (error) { console.error(`cowork: native boot scan failed (${describeNativeError(error)})`); return { source: "records", reports: [] }; }
     if (!this.options.environment || (pending.length === 0 && !launched)) return { source: "records", reports: pending };
-    try { return { source: "host", reports: this.host().bootReconcile() }; }
+    try {
+      const host = this.host();
+      // Read only: boot never creates the key. No key (missing, unreadable, malformed) leaves every retained receipt Class B.
+      if (this.keys && this.receiptKey === null) this.receiptKey = await this.keys.read();
+      return { source: "host", reports: host.bootReconcile() };
+    }
     catch (error) {
       console.error(`cowork: native boot reconcile failed (${describeNativeError(error)}); ownership kept`);
       return { source: "host", reports: pending.map(report => ({ ...report, reason: "boot reconcile could not run; ownership kept" })) };

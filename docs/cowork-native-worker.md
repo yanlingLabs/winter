@@ -1,6 +1,6 @@
 # Cowork native worker: wire contract and host adapter
 
-Status: contract, N2 slice S1, 2026-10-16 (round 3, 2026-10-17: conversation-set delivery, runtime streams, guest faults, `halting`, the layered stop timeline). SOURCE ONLY. Nothing in this document or in `packages/core/src/cowork/native/`
+Status: contract, N2 slice S1, 2026-10-16 (round 3, 2026-10-17: conversation-set delivery, runtime streams, guest faults, `halting`, the layered stop timeline; **text version 2, 2026-10-18: the retained-receipt MAC**, section 7.1). SOURCE ONLY. Nothing in this document or in `packages/core/src/cowork/native/`
 is wired into the daemon, no VM was started to produce it, and every live gate (G0 to G6) still needs a review of the exact
 commit and the owner's approval. The executable twin of this document is
 [`protocol.ts`](../packages/core/src/cowork/native/protocol.ts); the golden vectors in
@@ -45,6 +45,7 @@ Control-class frames terminate at the worker. They never cross L3 or L1: the dae
 ## 3. Common wire rules
 
 * JSON texts are UTF-8, exactly one line, last byte `\n`, no whitespace, integers only, `null` only where a table says so. Control and bootstrap payloads (the mux classes, section 6) are printable ASCII only: a character outside 0x20 to 0x7e makes the payload malformed, and the guest's helper refuses it too.
+* **Text version.** Every L1 line and every stop receipt carries `"v":2` (it was 1 before the receipt MAC). The binary headers (the L2 envelope `WEV1`, the L3/L4 mux `WMX1`, both `version = 1`) and the bootstrap/runtime JSON inside mux frames (`"v":1`) are unchanged: nothing in them changed. A launcher or daemon that sees `"v":1` on an L1 line refuses it (`version`; vector `begin-version-one`).
 * Keys appear in EXACTLY the order of the tables below (`v`, then `t`, then the table order). A parser builds the typed value and
   re-serializes it; the result must equal the input byte for byte. That one comparison refuses duplicate keys, reordered keys,
   alternate escapes, alternate number spellings, and trailing data. Every positive vector exercises the order; the negative
@@ -84,7 +85,7 @@ launcher-bound side is refused as `bad_direction`.
 
 | `t` | Keys after `v`,`t` | Meaning |
 | --- | --- | --- |
-| `begin` | `id`, `homeId`, `workspaceId`, `incarnationId`, `leaseEpoch`, `admissionId`, `controllerInstanceId`, `workerInstanceId`, `runtimeImageDigest`, `vcpus`, `memoryMiB` | the owner scope. `vcpus` is 2, `memoryMiB` 768 to 1024 (D8; 768 is the floor the library admits). `homeId` is the ONE source of the home identity: the launcher stamps it into every receipt, and it has no other input (no spawn argument). It does not travel on L2. |
+| `begin` | `id`, `homeId`, `workspaceId`, `incarnationId`, `leaseEpoch`, `admissionId`, `controllerInstanceId`, `workerInstanceId`, `runtimeImageDigest`, `vcpus`, `memoryMiB`, `receiptKey` | the owner scope, and the installation's receipt MAC key (section 7.1). `receiptKey` is the LAST key: the canonical padded base64 of exactly 32 bytes (44 characters); hex, unpadded, 31 or 33 bytes, `null` or an empty string are refused (`bad_field`) and a key placed anywhere else fails the byte-for-byte compare (`malformed`). It is a secret: the launcher keeps it in memory only and never writes it anywhere. `vcpus` is 2, `memoryMiB` 768 to 1024 (D8; 768 is the floor the library admits). `homeId` is the ONE source of the home identity: the launcher stamps it into every receipt, and it has no other input (no spawn argument). It does not travel on L2. |
 | `volumes` (**two descriptors**) | `id`, `scopeDigest`, `volumes` | `scopeDigest` is the SHA-256 of the 512 byte SCOPE payload (section 5). `volumes` is exactly two records `purpose, device, inode, uid, mode, capacityBytes`, data first then environment; `mode` is 384 (`0600`); the same file may not back both. |
 | `mux_down` | `frame` | one bootstrap or runtime frame |
 | `stop` | `id`, `stopNonce`, `reason`, `budgetMs` | `reason` one of `user shutdown restart update failed-start`; `budgetMs` at most 120000 (the documented budget is 30000) |
@@ -211,7 +212,7 @@ Control and bootstrap payloads are the JSON object WITHOUT a trailing newline, k
 | bootstrap, down | `conversations` | `operationId`, `nonce`, `incarnationId`, `profile`, `conversations` (section 6.1) |
 | bootstrap, up | `runtime_ready` | `operationId`, `nonce`, `conversations` (how many the supervisor now serves, 1 to 16) |
 
-On L1 a mux frame travels as `{"v":1,"t":"mux_down","frame":"<base64>"}` or `mux_up`: the base64 is canonical (re-encoding must
+On L1 a mux frame travels as `{"v":2,"t":"mux_down","frame":"<base64>"}` or `mux_up`: the base64 is canonical (re-encoding must
 reproduce it) and the frame inside must itself be exact. A carrier holds a bootstrap or runtime frame only.
 
 The control-up `fault` terminates at the worker like every control frame: the guest is failing (`unmount_failed` an unmount did not complete clean, `supervisor_lost` the tool
@@ -305,7 +306,7 @@ and `uncertain`).
 **Class A, orderly**: keys `v, class("A"), confirmationId, stopNonce, origin(host-stop | owner-loss-drain), launcherInstanceId, admissionId,
 homeId, workspaceId, incarnationId, leaseEpoch, controllerInstanceId, workerInstanceId, runtimeImageDigest, hostBootId, guest{drain,halting,powerOff},
 worker{pid,startToken,exit("code"),status(0),reaped(true)}, volumes[2]{purpose,device,inode,capacityBytes,attached,flushRequested,flushCompleted,finalFlush},
-issuedAtMs`. The chain it attests: the guest halted through a `drain` frame and a power-off, libkrun exited, the launcher's
+issuedAtMs, mac`. `mac` is the LAST key (section 7.1). The chain it attests: the guest halted through a `drain` frame and a power-off, libkrun exited, the launcher's
 `waitpid` confirmed the exit of the process it owns, and the worker's flush receipt shows every requested flush completed and a
 final flush after power-off. It is valid only when all of these hold (`classAInvariantsHold`): the worker exited by itself with code 0 and
 was reaped (`exit = code`, `status = 0`, `reaped = true`; the libkrun exit hook reported reason `off`, never `reset`, `vcpu-error` or
@@ -329,6 +330,28 @@ none of it.** A daemon that has seen `worker_state guest_fault` refuses an order
 (`origin = owner-loss-drain`). The launcher writes the receipt to its durable store and fsyncs BEFORE sending it, and keeps it until
 the daemon sends `receipt_retire`.
 
+### 7.1 The receipt MAC (text version 2)
+
+Owner ruling 2026-10-18. The key is 32 random bytes in the daemon's Keychain service (the dist, dev or test-throwaway service resolved exactly as for other
+slots), account `cowork-native-receipt-mac-v1`, created on the first start that needs it and read (never created) at boot. It is never written anywhere
+else and never logged. The daemon hands it to the launcher once, in the L1 `begin` line (L1 is the authenticated socketpair, so it never touches disk); the
+launcher keeps it in memory only. There is no rotation API: losing or replacing the key turns every retained receipt into Class B, and the user clicks Recover.
+
+* **MAC input.** The UTF-8 bytes of the receipt's canonical JSON text WITHOUT the `mac` key and without the trailing newline: schema key order, no
+  whitespace, integers only, `"v":2`. Equivalently: the receipt line with `,"mac":"<44 characters>"` removed before the closing `}` and the `\n` dropped.
+* **MAC.** HMAC-SHA256(key, input), the 32 raw bytes, written as canonical padded base64 (44 characters) in the last key `mac`. Verification is a
+  constant-time compare of the 32 bytes; a `mac` that is not the canonical base64 of 32 bytes does not even parse.
+* **What is signed.** Everything in the receipt: the binding fields (workspace, incarnation, epoch, owner tuple, admission, home, boot id, launcher, worker),
+  the guest and volume facts, `issuedAtMs`, the confirmation id and the nonce.
+* **Class B** carries no MAC: nothing in it can release anything.
+* **Where it is verified.** Only on the retained path (`stop-proof.ts`, source `retained`). A receipt received live on L1 in answer to a stop the daemon
+  issued is bound by the channel, the nonce and the launcher instance, as before; the launcher signs it anyway.
+
+Vectors (`stop-receipts.json`, `macVectors`; `launcher-lines.json`): a SYNTHETIC key (`synthetic-receipt-key-0123456789`, shown as UTF-8, hex and base64),
+for each positive receipt the exact MAC input text, the MAC in base64 and in hex, and negatives (wrong MAC with the right shape, a MAC copied from another
+receipt, signed under another key, edited after signing, missing, null, 31 or 33 bytes, hex, unpadded, not last). `begin` carries the same key; negatives
+cover a missing key, `null`, 31 and 33 bytes, hex, unpadded, empty, a misplaced key and `"v":1`.
+
 **Class B, uncertain**: keys `v, class("B"), launcherInstanceId, admissionId, workspaceId, incarnationId, leaseEpoch, workerInstanceId, reason,
 worker{pid,startToken,exit(code|signal|unknown),status}, attachedVolumes, issuedAtMs`, with `reason` one of `daemon-lost drain-timeout
 worker-killed worker-crashed guest-fault flush-uncertain channel-eof launcher-fault`. It has no confirmation id, no nonce and no
@@ -341,11 +364,13 @@ Release policy (decision D1, conservative default). Ownership of the two disks i
 3. an explicit owner `recover` input behind a port (`CoworkNativeOwnerRecoverPort`, unwired), plus two agreeing guard probes
    (process absent by pid, start token and boot id; images unlocked). The guards are never load-bearing on their own for an owner recover.
 
-The launcher's retained-receipt store is same-user writable and authenticates nothing, so the same two guard probes also gate item 1 when the
-receipt is a RETAINED one (read back from that store rather than received live): it releases only if the old worker process is absent AND the
-images are unlocked at that moment, and the probes are part of the proof's source so no code path mints a retained proof without them. With no
-guard port, a retained Class A receipt is treated like a Class B one. Whether retained receipts also need a MAC is an open owner ruling. The
-daemon deletes a retained receipt file only after the disk is settled by real proof; a file for a disk that stays held is left in place.
+The launcher's retained-receipt store is same-user writable, so item 1 differs for a RETAINED receipt (read back from that store rather than
+received live on the authenticated L1 channel). **A retained Class A receipt counts only if its MAC verifies (section 7.1) AND both guard probes
+pass at that moment**, checked in that order: a forged file never reaches the question about the old worker. The MAC and the probes are part of the
+proof's source, so no code path mints a retained proof without them. A missing, unreadable or malformed key, a missing or malformed `mac`, and a MAC
+that does not verify all make the receipt Class B: nothing releases, and the owner's Recover is the way out. With no guard port a retained Class A
+receipt is likewise treated as Class B. Release stays automatic once both hold. The daemon deletes a retained receipt file only after the disk is
+settled by real proof; a file for a disk that stays held is left in place.
 
 A PID that vanished, a socket EOF, a closed descriptor, a launcher that exited, a worker that exited with any status and a Class B
 receipt NEVER release. All of the above live in one table in `stop-proof.ts`, so a different D1 ruling is a small change.

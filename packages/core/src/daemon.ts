@@ -3026,7 +3026,7 @@ export async function startDaemon(opts: {
   // first start a caller asks for, from an injected environment that production never has). The Cowork service gets it as its
   // `native` port only when a caller injected an environment, so the production service refuses exactly as before.
   const coworkNative: CoworkNativeWiring | undefined = runtime
-    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, ...opts.coworkNative }) : undefined;
+    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative }) : undefined;
   const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;
   const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
   const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
@@ -3036,7 +3036,7 @@ export async function startDaemon(opts: {
   // Boot-time reconcile (D1): record-and-refuse. Without an environment this only reads the records; with one it runs the host's own
   // recovery, which releases nothing on weaker evidence than an orderly receipt, a changed host boot or an owner recover.
   if (coworkNative) {
-    const boot = coworkNative.reconcileAtBoot();
+    const boot = await coworkNative.reconcileAtBoot();
     const held = boot.reports.filter(report => report.ownerRetained).length;
     if (held > 0) console.error(`cowork: ${held} native workspace(s) keep their disk owner after boot (${boot.source}); nothing was released without proof`);
   }

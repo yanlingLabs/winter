@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { StopReceipt as LedgerStopReceipt } from "../../../src/cowork/admission";
-import { classAInvariantsHold, type CoworkNativeOrderlyReceipt } from "../../../src/cowork/native/protocol";
+import { classAInvariantsHold, signCoworkNativeOrderlyReceipt, type CoworkNativeOrderlyReceipt } from "../../../src/cowork/native/protocol";
 import {
   COWORK_NATIVE_RELEASE_POLICY, CoworkNativeStopEvidenceError, CoworkNativeStopRegistry, coworkNativeLedgerStopProbe, isStopProof, ledgerStopReceipt, mintControllerInstanceId, mintNewBootStopProof, mintOrderlyStopProof, mintOwnerRecoverStopProof,
   ownerBootId, ownerKey, releasesOwnership, stopProofState, type CoworkNativeStopProof,
 } from "../../../src/cowork/native/stop-proof";
 import type { CoworkVolumeOwner, CoworkVolumeRecord } from "../../../src/cowork/volumes";
-import { cleanupHarnesses, createHarness, type Harness } from "./harness";
+import { cleanupHarnesses, createHarness, RECEIPT_KEY, type Harness } from "./harness";
 
 afterEach(() => { cleanupHarnesses(); });
 const code = (body: () => unknown): string => { try { body(); } catch (error) { expect(error).toBeInstanceOf(CoworkNativeStopEvidenceError); return (error as CoworkNativeStopEvidenceError).code; } return "accepted"; };
 const NONCE = "ab".repeat(16);
 const PASSING = { processAbsent: () => true, imagesUnlocked: () => true };
-const RETAINED = { kind: "retained" as const, guards: PASSING, processes: null };
+const RETAINED = { kind: "retained" as const, guards: PASSING, processes: null, key: RECEIPT_KEY };
 
 async function running(): Promise<{ h: Harness; owner: CoworkVolumeOwner; volumes: CoworkVolumeRecord[]; admissionId: string; receipt: CoworkNativeOrderlyReceipt }> {
   const h = createHarness(), handle = await h.host.start(h.workspaceId);
@@ -21,8 +21,13 @@ async function running(): Promise<{ h: Harness; owner: CoworkVolumeOwner; volume
 const OBSERVED = { volumesAccepted: true, vmRunning: true, guestHello: true };
 const admissionOf = (c: Awaited<ReturnType<typeof running>>) => ({ admissionId: c.admissionId, owner: { bootId: "boot-one" } });
 const liveSource = (c: Awaited<ReturnType<typeof running>>, observed = OBSERVED) => ({ kind: "live" as const, stopNonce: NONCE, launcherInstanceId: c.h.launcher.last.launcherInstanceId, observed });
+/** The launcher signs what it issues: a test that edits a field gets a MAC over the edited text (a `mac` in the override is kept as given), unless the edit makes the text unsignable. */
+const resign = (receipt: CoworkNativeOrderlyReceipt, forced: boolean): CoworkNativeOrderlyReceipt => {
+  if (forced) return receipt;
+  try { const { mac: _mac, ...unsigned } = receipt; return signCoworkNativeOrderlyReceipt(unsigned, RECEIPT_KEY); } catch { return receipt; }
+};
 const mint = (c: Awaited<ReturnType<typeof running>>, over: Partial<CoworkNativeOrderlyReceipt> = {}, extra: Partial<Parameters<typeof mintOrderlyStopProof>[0]> = {}) =>
-  mintOrderlyStopProof({ receipt: { ...c.receipt, ...over } as CoworkNativeOrderlyReceipt, owner: c.owner, homeId: c.h.homeId, admission: admissionOf(c), volumes: c.volumes, source: liveSource(c), registry: c.h.registry, now: () => 7, ...extra });
+  mintOrderlyStopProof({ receipt: resign({ ...c.receipt, ...over } as CoworkNativeOrderlyReceipt, "mac" in over), owner: c.owner, homeId: c.h.homeId, admission: admissionOf(c), volumes: c.volumes, source: liveSource(c), registry: c.h.registry, now: () => 7, ...extra });
 
 describe("D1: the release policy is one table", () => {
   test("exactly three kinds release; everything else is written down as NOT evidence", () => {
@@ -86,7 +91,7 @@ describe("a Class A receipt becomes a release proof only if every binding holds"
   test("a retained receipt releases only while BOTH guards pass: a live old worker or a locked image makes it no evidence", async () => {
     const c = await running();
     const nonce = { stopNonce: "ee".repeat(16), origin: "owner-loss-drain" as const };
-    const withGuards = (guards: { processAbsent(): boolean; imagesUnlocked(): boolean }, processes: null | object = null) => ({ source: { kind: "retained" as const, guards: guards as never, processes: processes as never } });
+    const withGuards = (guards: { processAbsent(): boolean; imagesUnlocked(): boolean }, processes: null | object = null) => ({ source: { kind: "retained" as const, guards: guards as never, processes: processes as never, key: RECEIPT_KEY } });
     expect(code(() => mint(c, nonce, withGuards({ processAbsent: () => false, imagesUnlocked: () => true })))).toBe("guard_failed");
     expect(code(() => mint(c, nonce, withGuards({ processAbsent: () => true, imagesUnlocked: () => false })))).toBe("guard_failed");
     expect(code(() => mint(c, nonce, withGuards({ processAbsent: () => { throw new Error("cannot tell"); }, imagesUnlocked: () => true })))).toBe("guard_failed");
@@ -191,7 +196,7 @@ describe("the mint trusts nothing it did not just validate", () => {
     const forged: [string, object][] = [
       ["extra key", { extra: 1 }], ["id with a space", { confirmationId: "not a token" }], ["uppercase nonce", { stopNonce: "AB".repeat(16) }],
       ["worker killed", { worker: { ...c.receipt.worker, exit: "signal", status: 9 } }], ["worker status 1", { worker: { ...c.receipt.worker, status: 1 } }], ["worker not reaped", { worker: { ...c.receipt.worker, reaped: false } }],
-      ["class B", { class: "B" }], ["version 2", { v: 2 }],
+      ["class B", { class: "B" }], ["version 1", { v: 1 }], ["version 3", { v: 3 }],
     ];
     for (const [name, over] of forged) expect(`${name}:${code(() => mint(c, over as never))}`).toBe(`${name}:not_orderly`);
     expect(code(() => mintOrderlyStopProof({ ...({} as Parameters<typeof mintOrderlyStopProof>[0]), receipt: { ...c.receipt, worker: undefined } as never, owner: c.owner, homeId: c.h.homeId, admission: null, volumes: c.volumes, source: RETAINED, registry: c.h.registry, now: () => 1 }))).toBe("not_orderly");
