@@ -21,8 +21,9 @@ import WinterCUPresentation
 //     (node, bun, deno, python, ruby, java, php, perl) under `/usr/bin` or `/Library/Developer`, or in a framework's
 //     `Python.app` (Homebrew's, Xcode's), IS listed.
 //   - ONE ROW per server: a listener goes under its nearest listening ancestor only when it is that server's own —
-//     the same process group or the same executable (forked workers); never under a shell, tmux or an agent session
-//     that merely started it, so Stop never reaches an unrelated server.
+//     the same process group, or the same executable as its direct parent (a forked worker); never across a shell, so
+//     never under tmux, a notebook's terminal or an agent session that merely started it: Stop never reaches an
+//     unrelated server.
 //   - STOP: two clicks within `confirmWindow` (a double click is one); SIGTERM to the row's processes, each re-checked
 //     (still this user's, the same start time — a reused pid is never hit; never this app, its parent, launchd or a
 //     Winter process) right before; still alive after `forceAfter` → "Force quit" (SIGKILL), two clicks again.
@@ -99,9 +100,16 @@ enum IslandServers {
     static let interpreterPrefixes = ["/usr/bin/", "/Library/Developer/"]
     /// Winter's own executables (its app bundles — `Winter*.app` — are told by their path).
     static let winterNames: Set<String> = ["winter-core", "winter", "WinterHelper", "WinterOfficeHelper", "winter-browser-host"]
-    /// The coding-agent CLIs (user 2026-10-18): never a row, never a server's group — by their executable, their
-    /// npm package (`@anthropic-ai/claude-code` → "claude") or their own installer's `<name>/versions/<v>`.
+    /// The coding-agent CLIs (user 2026-10-18): never a row, never a server's group — by their executable's or
+    /// script's own file name EXACTLY (`claude`, never `claude.py` or a `copilot/index.js`), their npm package, or
+    /// their own installer's `<name>/versions/<v>`.
     static let agentCLIs: Set<String> = ["claude", "codex", "opencode", "agy", "cursor-agent", "devin", "gemini", "copilot"]
+    /// The agents' npm packages (any other package is matched by `agentWord`, the only place a suffix is dropped).
+    static let agentPackages: Set<String> = ["@anthropic-ai/claude-code", "@openai/codex", "opencode-ai", "@google/gemini-cli",
+                                             "@github/copilot", "@cognition-ai/devin", "@cursor/cursor-agent"]
+    /// Package runners (`npx`, `npm exec`, `pnpm dlx`, `bunx`, `uvx`): the shell one runs a package through is not the
+    /// user's shell.
+    static let packageRunners: Set<String> = ["npx", "bunx", "uvx", "pnpx"]
 
     /// The name the kernel or the path gives (the path's last component, else the short command).
     static func executableName(_ p: ServerProcess) -> String {
@@ -140,22 +148,49 @@ enum IslandServers {
         shells.contains(executableName(p)) || shells.contains(p.command)
     }
 
-    /// A coding-agent CLI (`agentCLIs`): its executable or short command, an interpreter's script or package, or a
-    /// path laid out as `<agent>/versions/<version>`.
+    /// A coding-agent CLI (`agentCLIs`): its executable's name or short command, or an interpreter's script's own file
+    /// name, EXACTLY (`/opt/homebrew/bin/claude` under node); the npm package its script is in (`agentPackages`, or a
+    /// package `agentWord` names an agent); or a path laid out as `<agent>/versions/<version>`. A script named after an
+    /// agent's folder or with an extension (`copilot/index.js`, `claude.py`, `claude-cli.js`) is the user's own.
     static func isAgentCLI(_ p: ServerProcess) -> Bool {
-        for word in [executableName(p), p.command, displayName(p)] where agentCLIs.contains(agentWord(word)) { return true }
-        let script = p.arguments?.dropFirst().first { !$0.hasPrefix("-") }
+        if agentCLIs.contains(executableName(p).lowercased()) || agentCLIs.contains(p.command.lowercased()) { return true }
+        var script: String?
+        if interpreter(executableName(p)) != nil { script = p.arguments?.dropFirst().first(where: { !$0.hasPrefix("-") }) }
+        if let script {
+            if agentCLIs.contains((script as NSString).lastPathComponent.lowercased()) { return true }
+            if let package = nodeModulesPackage(script),
+               agentPackages.contains(package.lowercased()) || agentCLIs.contains(agentWord(package)) { return true }
+        }
         for path in [p.path, script ?? ""] {
-            let parts = path.split(separator: "/").map(String.init)
-            for i in parts.indices.dropLast() where parts[i + 1] == "versions" && agentCLIs.contains(agentWord(parts[i])) {
+            let parts = path.split(separator: "/").map { $0.lowercased() }
+            for i in parts.indices.dropLast() where parts[i + 1] == "versions" && agentCLIs.contains(parts[i]) {
                 return true
             }
         }
         return false
     }
 
-    /// A name as an agent's: its last segment, lowercased, without `@version` or a `-code`/`-cli`/`-ai` suffix
-    /// (`@anthropic-ai/claude-code` → "claude", `@google/gemini-cli` → "gemini", `opencode-ai` → "opencode").
+    /// A package runner: `npx`, `bunx`, `uvx`, `pnpx` (the executable, argv[0] or a node script of that name), `npm
+    /// exec`, `pnpm dlx`, `bun x`, `uv tool run`.
+    static func isPackageRunner(_ p: ServerProcess) -> Bool {
+        let name = executableName(p).lowercased()
+        let args = p.arguments ?? []
+        let words = args.dropFirst().filter { !$0.hasPrefix("-") }
+        var names = [name, (args.first.map { ($0 as NSString).lastPathComponent } ?? "").lowercased()]
+        if interpreter(name) != nil, let script = words.first {
+            names.append((((script as NSString).lastPathComponent as NSString).deletingPathExtension).lowercased())
+        }
+        if names.contains(where: { packageRunners.contains($0) || $0 == "npx-cli" }) { return true }
+        let rest = Set(words.map { $0.lowercased() })
+        if names.contains(where: { $0 == "npm" || $0 == "npm-cli" }) && rest.contains("exec") { return true }
+        if names.contains(where: { $0.hasPrefix("pnpm") }) && rest.contains("dlx") { return true }
+        if name == "bun" && words.first == "x" { return true }
+        if name == "uv" && words.prefix(2) == ["tool", "run"] { return true }
+        return false
+    }
+
+    /// An npm package's name as an agent's: its last segment, lowercased, without `@version` or a `-code`/`-cli`/`-ai`
+    /// suffix (`@anthropic-ai/claude-code` → "claude", `@google/gemini-cli` → "gemini", `opencode-ai` → "opencode").
     static func agentWord(_ name: String) -> String {
         var word = (name.split(separator: "/").last.map(String.init) ?? name).lowercased()
         if let at = word.firstIndex(of: "@"), at != word.startIndex { word = String(word[..<at]) }
@@ -364,11 +399,11 @@ enum IslandServers {
 
     /// The rows, newest first. Winter's own infrastructure (a listener with Winter up its tree and no shell in
     /// between — an MCP server) is never one. Each other listener is its own row unless its NEAREST listening ancestor
-    /// is the same server — the same process group or the same executable (forked workers) —, in which case it joins
-    /// that one's row. The walk up goes through parents that listen on nothing (`npm run dev` → `node server.js`) but
-    /// never past a coding agent (hidden, it heads nothing), and stops at launchd or a process that is not the user's:
-    /// a shell, tmux or an agent session that started two servers never makes them one row, so Stop never reaches the
-    /// other.
+    /// is the same server — the same process group, or the same executable as its direct parent (a forked worker) —,
+    /// in which case it joins that one's row. The walk up goes through parents that listen on nothing (`npm run dev` →
+    /// `node server.js`) but never through a shell or a coding agent (hidden, it heads nothing), and stops at launchd
+    /// or a process that is not the user's: a shell, tmux, a notebook's terminal or an agent session that started two
+    /// servers never makes them one row, so Stop never reaches the other.
     static func rows(_ processes: [ServerProcess], user: uid_t, ownPid: Int32, home: String) -> [IslandServerRow] {
         let mine = processes.filter { $0.uid == user }
         var byPid: [Int32: ServerProcess] = [:]
@@ -385,8 +420,8 @@ enum IslandServers {
             }
             return out
         }
-        // Winter's own infrastructure: a Winter process (or this app) up the tree with NO shell in between (an MCP
-        // server the daemon started). A server a session ran through its shell (`winter → bash -c … → bun dev`) is the
+        // Winter's own infrastructure: a Winter process (or this app) up the tree with NO user's shell in between (an
+        // MCP server the daemon started, through `npx` and its `sh -c` too). A server a session ran through its shell (`winter → bash -c … → bun dev`) is the
         // user's, started on their behalf: listed.
         let underWinter = { (p: ServerProcess) -> Bool in
             var seen: Set<Int32> = [p.pid]
@@ -396,20 +431,24 @@ enum IslandServers {
                 if parent == ownPid { return true }
                 guard let a = byPid[parent], seen.insert(parent).inserted else { return false }
                 if isWinter(path: a.path, command: a.command) { return true }
-                if isShell(a) { return false }
+                // A user's shell ends it — not the `sh -c` a package runner (npx…) runs its package through.
+                if isShell(a), !(byPid[a.ppid].map(isPackageRunner) ?? false) { return false }
                 parent = a.ppid
             }
             return false
         }
         let qualifying = Set(mine.filter { qualifies($0, user: user, ownPid: ownPid) && !underWinter($0) }.map(\.pid))
 
-        /// The listener this one's row is: its nearest listening ancestor when that is the same server, else itself.
+        /// The listener this one's row is: its nearest listening ancestor when that is the same server — its DIRECT
+        /// parent running the same executable (a forked worker), or one in the same process group with no shell
+        /// between — else itself. Never across a shell (Jupyter's or code-server's terminal runs the same `python` or
+        /// `node` as the server around it) or an agent.
         func parentServer(_ p: ServerProcess) -> ServerProcess? {
             for a in ancestors(p) {
-                if isAgentCLI(a) { return nil }
+                if isShell(a) || isAgentCLI(a) { return nil }
                 guard qualifying.contains(a.pid) else { continue }
-                let sameBinary = !p.path.isEmpty && a.path == p.path
-                return a.pgid == p.pgid || sameBinary ? a : nil
+                let forkedWorker = a.pid == p.ppid && !p.path.isEmpty && a.path == p.path
+                return forkedWorker || a.pgid == p.pgid ? a : nil
             }
             return nil
         }
@@ -573,16 +612,16 @@ struct LibprocServerProcessSource: ServerProcessSource {
             index[pid] = out.count
             out.append(p)
         }
-        // A listener's ancestors with their path (is one Winter, or a coding agent?) — only theirs, each read once.
+        // A listener's ancestors with their path and argv (Winter? an agent? a package runner?) — only theirs, each read
+        // once.
         for i in out.indices where out[i].listens {
             var parent = out[i].ppid
             var seen: Set<Int32> = []
             while parent > 1, let j = index[parent], seen.insert(parent).inserted {
                 if out[j].path.isEmpty {
                     out[j].path = Self.path(parent)
-                    if IslandServers.interpreter(IslandServers.executableName(out[j])) != nil {
-                        out[j].arguments = Self.arguments(parent)
-                    }
+                    // Its argv too: an agent's script, a package runner's subcommand (`npm exec`).
+                    out[j].arguments = Self.arguments(parent)
                 }
                 parent = out[j].ppid
             }

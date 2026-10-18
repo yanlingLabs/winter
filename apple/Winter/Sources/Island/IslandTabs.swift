@@ -21,7 +21,7 @@ enum IslandTabRegistry {
     static let devices = IslandTab(id: "devices", title: "Devices", symbol: "laptopcomputer.and.iphone")
     /// Every armed computer-use watch (`wakeWhen`), with Stop.
     static let watches = IslandTab(id: "watches", title: "Watches", symbol: "eye")
-    /// The user's own processes listening on a port or a socket — servers they started — with Stop.
+    /// The user's own processes listening on a TCP port — servers they started — with Stop.
     static let servers = IslandTab(id: "servers", title: "Servers", symbol: "server.rack")
 
     /// The tabs this build shows, in swipe order: Needs you first, then Sessions, Shelf, Usage and limits, Devices,

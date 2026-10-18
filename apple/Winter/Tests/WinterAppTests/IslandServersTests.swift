@@ -119,9 +119,51 @@ final class IslandServersTests: XCTestCase {
             process(225, parent: 224, path: "/usr/local/bin/devd", tcp: [4901]),
         ]
         XCTAssertEqual(Set(rows(list).map(\.name)), ["shop", "http.server", "devd"])
+
+        // Through a package runner's own `sh -c` (npx, npm exec, bunx, uvx): still Winter's — hidden.
+        let runners = [
+            process(230, path: "/Users/me/.winter/bin/winter-core"),
+            process(231, parent: 230, path: node, args: ["node", "/opt/homebrew/lib/node_modules/npm/bin/npx-cli.js", "-y", "@acme/mcp"]),
+            process(232, parent: 231, path: "/bin/sh"),
+            process(233, parent: 232, path: node, args: ["node", "/Users/me/.npm/_npx/1/node_modules/@acme/mcp/index.js"], tcp: [4802]),
+            process(234, parent: 230, path: node, args: ["node", "/opt/homebrew/bin/npm", "exec", "--", "@acme/other"]),
+            process(235, parent: 234, path: "/bin/sh"),
+            process(236, parent: 235, path: "/usr/local/bin/other-mcp", tcp: [4803]),
+            process(237, parent: 230, path: "/opt/homebrew/bin/bun", args: ["bunx", "@acme/third"]),
+            process(238, parent: 237, path: "/bin/sh"),
+            process(239, parent: 238, path: "/usr/local/bin/third-mcp", tcp: [4804]),
+            process(240, parent: 230, path: "/Users/me/.local/bin/uvx"),
+            process(241, parent: 240, path: "/bin/sh"),
+            process(242, parent: 241, path: "/usr/local/bin/py-mcp", tcp: [4805]),
+            // The user's own `npx vite` in their terminal: shown.
+            process(250, path: "/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
+            process(251, parent: 250, path: "/bin/zsh"),
+            process(252, parent: 251, path: node, args: ["node", "/opt/homebrew/bin/npx", "vite"]),
+            process(253, parent: 252, path: "/bin/sh"),
+            process(254, parent: 253, path: node, args: ["node", "/Users/me/site/node_modules/.bin/vite"], tcp: [5174]),
+        ]
+        XCTAssertEqual(rows(runners).map(\.name), ["vite"])
+        XCTAssertTrue(IslandServers.isPackageRunner(process(1, path: "/opt/homebrew/bin/pnpm", args: ["pnpm", "dlx", "x"])))
+        XCTAssertTrue(IslandServers.isPackageRunner(process(1, path: "/opt/homebrew/bin/uv", args: ["uv", "tool", "run", "x"])))
+        XCTAssertFalse(IslandServers.isPackageRunner(process(1, path: node, args: ["node", "/opt/homebrew/bin/npm", "run", "dev"])))
         XCTAssertTrue(IslandServers.isShell(process(1, path: "/opt/homebrew/bin/fish")))
         XCTAssertTrue(IslandServers.isShell(process(1, path: "", command: "dash")))
         XCTAssertFalse(IslandServers.isShell(process(1, path: "/opt/homebrew/bin/tmux")))
+    }
+
+    /// A user's own server named like an agent is the user's: only an agent's exact executable or script name, its npm
+    /// package or its installer's layout hides one.
+    func testAServerNamedLikeAnAgentIsStillListed() {
+        let node = "/opt/homebrew/bin/node"
+        let list = [
+            process(10, path: node, args: ["node", "/Users/me/copilot/index.js"], tcp: [3000], started: epoch + 4),
+            process(11, path: "/opt/homebrew/bin/bun", args: ["bun", "/Users/me/gemini-ai/src/index.ts"], tcp: [3001],
+                    started: epoch + 3),
+            process(12, path: node, args: ["node", "claude-cli.js"], tcp: [3002], started: epoch + 2),
+            process(13, path: "/usr/bin/python3", args: ["python3", "claude.py"], tcp: [3003], started: epoch + 1),
+        ]
+        XCTAssertEqual(rows(list).map(\.name), ["copilot", "gemini-ai", "claude-cli", "claude"])
+        XCTAssertTrue(list.allSatisfy { !IslandServers.isAgentCLI($0) })
     }
 
     // MARK: Names
@@ -188,7 +230,7 @@ final class IslandServersTests: XCTestCase {
             // Forked workers: the same group, or the same binary in a group of their own.
             process(101, parent: 100, group: 95, path: node, args: ["node", "worker.js"], tcp: [3001, 3000], started: epoch + 2),
             process(102, parent: 100, group: 102, path: node, args: ["node", "worker.js"], tcp: [3001], started: epoch + 2),
-            // Through a shell that listens on nothing, still the job's group.
+            // Through a shell: its own row, even in the job's group.
             process(103, parent: 100, group: 95, path: "/bin/sh"),
             process(104, parent: 103, group: 95, path: "/opt/homebrew/bin/python3", args: ["python3", "-m", "sidecar"],
                     tcp: [3002], started: epoch + 3),
@@ -199,16 +241,47 @@ final class IslandServersTests: XCTestCase {
             process(301, parent: 300, path: node, args: ["node", "child.js"], tcp: [9001], started: epoch + 30),
         ]
         let result = rows(list)
-        XCTAssertEqual(result.map(\.name), ["child", "redis-server", "server"], "newest first")
-        let server = result[2]
-        XCTAssertEqual(server.members.map(\.pid), [100, 101, 102, 104], "the top first")
-        XCTAssertEqual(server.tcpPorts, [3000, 3001, 3002])
-        XCTAssertEqual(server.portsLine, ":3000 :3001 :3002")
+        XCTAssertEqual(result.map(\.name), ["child", "redis-server", "sidecar", "server"], "newest first")
+        let server = result[3]
+        XCTAssertEqual(server.members.map(\.pid), [100, 101, 102], "the top first")
+        XCTAssertEqual(server.tcpPorts, [3000, 3001])
+        XCTAssertEqual(server.portsLine, ":3000 :3001")
         XCTAssertEqual(server.folder, "code")
         XCTAssertEqual(server.folderPath, "~/code")
         XCTAssertEqual(server.id, "100-\(epoch)-7")
         XCTAssertEqual(server.startedAt, Date(timeIntervalSince1970: TimeInterval(epoch) + 0.000007))
         XCTAssertEqual(result[1].members.map(\.pid), [106])
+        XCTAssertEqual(result[2].members.map(\.pid), [104])
+    }
+
+    /// The re-review's case: a notebook's or an editor's terminal runs the same interpreter as the server around it
+    /// (a venv's python resolves to the base one) — never one row, so Stop on one never reaches the other.
+    func testTheSameBinaryJoinsOnlyADirectParentAndNeverAcrossAShell() {
+        let python = "/opt/homebrew/Cellar/python@3.13/3.13.1/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+        let node = "/opt/homebrew/bin/node"
+        let list = [
+            // Jupyter → its terminal's bash → python -m http.server: the same python, even the same group.
+            process(700, group: 700, path: python, args: ["python3", "-m", "jupyterlab"], tcp: [8888], started: epoch),
+            process(701, parent: 700, group: 700, path: "/bin/bash"),
+            process(702, parent: 701, group: 700, path: python, args: ["python3", "-m", "http.server"], tcp: [8000],
+                    started: epoch + 1),
+            // code-server → bash → node server.js: the same node.
+            process(800, group: 800, path: node, args: ["node", "/usr/local/lib/code-server/out/node/entry.js"], tcp: [8080],
+                    started: epoch + 2),
+            process(801, parent: 800, group: 801, path: "/bin/bash"),
+            process(802, parent: 801, group: 802, path: node, args: ["node", "server.js"], tcp: [3000], started: epoch + 3),
+            // The same node two levels down through a non-shell (its own group): not a forked worker.
+            process(900, group: 900, path: node, args: ["node", "gateway.js"], tcp: [7000], started: epoch + 4),
+            process(901, parent: 900, group: 901, path: node, args: ["node", "spawner.js"]),
+            process(902, parent: 901, group: 902, path: node, args: ["node", "api.js"], tcp: [7001], started: epoch + 5),
+            // A direct child on the same binary in its own group IS a forked worker.
+            process(910, group: 910, path: "/usr/local/bin/gunicorn", tcp: [5000], started: epoch + 6),
+            process(911, parent: 910, group: 911, path: "/usr/local/bin/gunicorn", tcp: [5000], started: epoch + 6),
+        ]
+        let result = rows(list)
+        XCTAssertEqual(result.map(\.name), ["gunicorn", "api", "gateway", "server", "entry", "http.server", "jupyterlab"])
+        XCTAssertEqual(result.first?.members.map(\.pid), [910, 911])
+        XCTAssertTrue(result.dropFirst().allSatisfy { $0.members.count == 1 })
     }
 
     /// The review's case: an agent session (or tmux) that starts two servers never makes them one row — Stop on one
@@ -513,7 +586,8 @@ final class IslandServersTests: XCTestCase {
 
     /// The detection core on real sockets of THIS process (nothing is signalled): a TCP listener on 127.0.0.1 (and on
     /// ::1 with the same port when it is free there — still one port), a Unix-socket listener and a connected TCP
-    /// socket. Only the listener's port is reported, in the right byte order; the Unix listener alone makes no port.
+    /// socket. Against a scan taken before any of them, the process gains exactly the listener's port, in the right
+    /// byte order; without the TCP listeners it gains nothing — the Unix listener and the connections add no port.
     func testTheLiveSourceReportsThisProcesssTCPListenerOnly() throws {
         func bindAndListen<T>(_ fd: Int32, _ address: inout T) -> Bool {
             let bound = withUnsafePointer(to: &address) {
@@ -538,6 +612,9 @@ final class IslandServersTests: XCTestCase {
             return address
         }
 
+        let source = LibprocServerProcessSource()
+        let baseline = Set(try XCTUnwrap(source.processes().first { $0.pid == getpid() }).tcpPorts)
+
         let v4 = socket(AF_INET, SOCK_STREAM, 0)
         XCTAssertGreaterThanOrEqual(v4, 0)
         var any = loopback(0)
@@ -552,6 +629,16 @@ final class IslandServersTests: XCTestCase {
         address6.sin6_port = port.bigEndian
         address6.sin6_addr = in6addr_loopback
         let v6Listening = bindAndListen(v6, &address6)
+        if v6Listening {
+            var bound6 = sockaddr_in6()
+            var length6 = socklen_t(MemoryLayout<sockaddr_in6>.size)
+            _ = withUnsafeMutablePointer(to: &bound6) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(v6, $0, &length6) }
+            }
+            XCTAssertEqual(UInt16(bigEndian: bound6.sin6_port), port, "the ::1 listener shares the port")
+        } else {
+            print("IslandServers socket test: the v6 part is skipped — ::1 port \(port) could not be bound (errno \(errno))")
+        }
 
         let socketPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("srv-\(UUID().uuidString.prefix(8)).sock")
         let unix = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -579,19 +666,21 @@ final class IslandServersTests: XCTestCase {
         }
         let clientPort = localPort(client)
 
-        let source = LibprocServerProcessSource()
+        XCTAssertNotEqual(clientPort, port)
         let mine = try XCTUnwrap(source.processes().first { $0.pid == getpid() })
-        XCTAssertEqual(mine.tcpPorts.filter { $0 == port || $0 == clientPort }, [port],
-                       "the listener's port once (v6 listener too: \(v6Listening)), not the connected sockets'")
+        XCTAssertEqual(mine.tcpPorts.filter { $0 == port }.count, 1, "the port once, v4 and v6 (v6 bound: \(v6Listening))")
+        XCTAssertEqual(Set(mine.tcpPorts), baseline.union([port]),
+                       "exactly the listener's port is new — never the connected sockets' (\(clientPort)) or the Unix listener")
 
-        // Without its TCP listeners, the process's Unix listener makes no port and no row.
+        // Without its TCP listeners (the Unix listener and both connected sockets still open) nothing is new: no row.
         close(v4)
         close(v6)
         let after = try XCTUnwrap(source.processes().first { $0.pid == getpid() })
-        XCTAssertFalse(after.tcpPorts.contains(port))
+        XCTAssertEqual(Set(after.tcpPorts), baseline)
         var asServer = after
         asServer.path = "/usr/local/bin/fixture"
-        let rows = IslandServers.rows([asServer], user: getuid(), ownPid: 0, home: NSHomeDirectory())
-        XCTAssertEqual(rows.isEmpty, after.tcpPorts.isEmpty, "only a TCP port makes a row")
+        asServer.tcpPorts = after.tcpPorts.filter { !baseline.contains($0) }
+        XCTAssertTrue(IslandServers.rows([asServer], user: getuid(), ownPid: 0, home: NSHomeDirectory()).isEmpty,
+                      "a Unix listener alone makes no row")
     }
 }
