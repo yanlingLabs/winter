@@ -186,6 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// it again on either a programmatic `close()` or the user's own red traffic light — the list
     /// never accumulates closed controllers.
     private(set) var detachedWindows: [DetachedWindowController] = []
+    /// The Usage window (`docs/claude/usage.md`), while open.
+    var usageWindow: UsageWindowController?
     /// The session windows opened from the dispatch pill's child pills, standing on the pill.
     let sessionWindowStack = SessionWindowStack()
 
@@ -1289,6 +1291,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let usage = tabs.usage
         usage.fetch = { sid in try await client.islandUsage(sessionId: sid) }
         usage.fetchRoles = { try await client.settingsModelRoles() }
+        usage.fetchSummary = { range in try await client.usageSummary(range: range) }
+        usage.openUsage = { [weak self, weak island] in
+            island?.close()
+            self?.showUsageWindow()
+        }
         usage.currentSession = { [weak self, weak model] in
             guard let self, let model else { return nil }
             let front = self.detachedWindows.first(where: \.isKeyOrMain)?.sessionId
@@ -1926,6 +1933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             OfficeHarness.open(delegate: self)
         }
         #endif
+        mb.onOpenUsage = { [weak self] in self?.showUsageWindow() }
         mb.install()
         menuBar = mb
 

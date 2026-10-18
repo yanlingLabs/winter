@@ -12,7 +12,7 @@ import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
 import { ThinkingBlocks, asReasoningProgressFrame } from "./thinking";
-import { boundContinuityWarningText, boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
+import { boundContinuityWarningText, boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnModelUsageOf, turnUsageOf, type LedgerSnapshot, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { hostInputFoldedCount } from "../runtime-sdk/fold";
 import { ProjectorRefusedError } from "./types";
@@ -174,6 +174,8 @@ class ProjectorImpl implements Projector {
   /** `assistant` frames seen in the current turn — 1 is what makes `contextTokens` exact. */
   private roundsThisTurn = 0;
   private totals: UsageTotals | undefined;
+  /** The previous result's ledger, row by row — what `turnModelUsageOf` differences against (the usage DB). */
+  private ledgerRows: Map<string, LedgerSnapshot> = new Map();
   private pending: PendingMark | undefined;
   private messageIndex = 0;
   private backendSessionId: string | undefined;
@@ -736,6 +738,12 @@ class ProjectorImpl implements Projector {
           ...(this.stopAnnounced ? { stopAlreadyAnnounced: true } : {}),
         });
         this.totals = out.totals ?? this.totals;
+        // The usage DB: each model's share of this turn, once per projected terminal (`docs/claude/usage.md`).
+        const perModel = turnModelUsageOf(resultFrame, this.ledgerRows, this.mainModel);
+        this.ledgerRows = perModel.snapshot;
+        if (perModel.rows.length > 0) {
+          try { this.deps.onTurnUsage?.({ sourceId: `g${this.generation}:${sourceId}`, rows: perModel.rows }); } catch { /* the usage store's failure is its own */ }
+        }
         return [...closed, ...out.events];
       });
       // The turn closes whether or not the result projected (a replayed prefix must still advance

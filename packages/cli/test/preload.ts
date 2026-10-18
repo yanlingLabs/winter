@@ -41,3 +41,15 @@ process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
 // Login-shell PATH: the SAME switch packages/core/test/preload.ts sets — a CLI test that spawns
 // `daemon run` (or boots `startDaemon()` in-process) must never run the developer's real login shell.
 process.env.WINTER_LOGIN_SHELL_PATH = "off";
+// Usage tracking (`src/usage/wiring.ts`, docs/claude/usage.md): no test may read the developer's REAL Codex sessions,
+// Claude Code transcripts or `~/.claude.json`, nor spawn their real `codex` / `claude`. Every root points at an empty
+// throwaway directory and both executables are "off" (authoritative: never a fall-through to $PATH). A test that
+// exercises them injects fixture roots and a fake executable through `startDaemon({ usage })` or the service itself.
+{
+  const none = mkdtempSync(join(tmpdir(), "winter-test-usage-none-"));
+  process.env.WINTER_USAGE_CODEX_HOME = join(none, "codex");
+  process.env.WINTER_USAGE_CLAUDE_HOME = join(none, "claude");
+  process.env.WINTER_USAGE_CLAUDE_JSON = join(none, "claude.json");
+  process.env.WINTER_USAGE_CODEX_EXECUTABLE = "off";
+  process.env.WINTER_USAGE_CLAUDE_EXECUTABLE = "off";
+}
