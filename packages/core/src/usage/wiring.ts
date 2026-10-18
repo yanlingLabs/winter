@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { IslandUsageRegistry } from "../island/usage";
@@ -11,8 +12,9 @@ import { resolveExecutable } from "./spawn-lines";
 //  - Codex: `$WINTER_USAGE_CODEX_HOME` (tests) → `$CODEX_HOME` → `~/.codex`;
 //  - Claude Code: `$WINTER_USAGE_CLAUDE_HOME` (tests) → `$CLAUDE_CONFIG_DIR` → `~/.claude`, and its `.claude.json`
 //    (`$WINTER_USAGE_CLAUDE_JSON` → `$CLAUDE_CONFIG_DIR/.claude.json` → `~/.claude.json`);
-//  - the executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` (authoritative: a missing
-//    path or "off" means none) → `$PATH` → the usual install places.
+//  - the executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` /
+//    `$WINTER_USAGE_AGY_EXECUTABLE` / `$WINTER_USAGE_OPENCODE_EXECUTABLE` (authoritative: a missing path or "off" means none) → the usual install places
+//    → `$PATH`.
 // Both test preloads point every `WINTER_USAGE_*` at nothing, so no test daemon ever reads or spawns the real ones.
 
 export interface UsageInjection {
@@ -21,7 +23,13 @@ export interface UsageInjection {
   claudeJsonPath?: string | null;
   codexExecutable?: string | null;
   claudeExecutable?: string | null;
+  agyExecutable?: string | null;
+  opencodeExecutable?: string | null;
   now?: () => number;
+  /** The background catch-up: false = off (tests); its timings. */
+  catchUp?: boolean;
+  catchUpFirstMs?: number;
+  catchUpEveryMs?: number;
 }
 
 /** The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle). */
@@ -33,6 +41,25 @@ export const CLAUDE_INSTALLS = [
   "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(homedir(), ".local/bin/claude"), join(homedir(), ".claude/local/claude"),
   join(homedir(), ".npm-global/bin/claude"),
 ];
+/** Antigravity's CLI (Homebrew installs it as `agy`). */
+export const AGY_INSTALLS = [
+  "/opt/homebrew/bin/agy", "/usr/local/bin/agy", join(homedir(), ".local/bin/agy"), join(homedir(), ".npm-global/bin/agy"),
+];
+/** OpenCode (Homebrew, its own install script's `~/.opencode/bin`, npm). */
+export const OPENCODE_INSTALLS = [
+  "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode", join(homedir(), ".opencode/bin/opencode"), join(homedir(), ".local/bin/opencode"),
+  join(homedir(), ".npm-global/bin/opencode"),
+];
+
+/** The JS package managers' global bins (bun, volta, pnpm, every nvm node): a CLI installed through one of them is
+ *  still "on this Mac" when the app's `$PATH` is the bare launchd one. */
+export function packageManagerBins(name: string, home = homedir()): string[] {
+  const out = [join(home, ".bun/bin", name), join(home, ".volta/bin", name), join(home, "Library/pnpm", name)];
+  try {
+    for (const v of readdirSync(join(home, ".nvm/versions/node"))) out.push(join(home, ".nvm/versions/node", v, "bin", name));
+  } catch { /* no nvm */ }
+  return out;
+}
 
 function pick(injected: string | null | undefined, env: string | undefined, fallback: () => string | undefined): string | undefined {
   if (injected !== undefined) return injected ?? undefined;
@@ -71,8 +98,10 @@ export function createUsageService(opts: {
     ...(codexHome === undefined ? {} : { codexHome }),
     ...(claudeHome === undefined ? {} : { claudeHome }),
     ...(claudeJsonPath === undefined ? {} : { claudeJsonPath }),
-    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), CODEX_INSTALLS),
-    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), CLAUDE_INSTALLS),
+    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...CODEX_INSTALLS, ...packageManagerBins("codex")]),
+    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...CLAUDE_INSTALLS, ...packageManagerBins("claude")]),
+    agyExecutable: () => resolveExecutable("agy", explicit(inj.agyExecutable, env.WINTER_USAGE_AGY_EXECUTABLE), [...AGY_INSTALLS, ...packageManagerBins("agy")]),
+    opencodeExecutable: () => resolveExecutable("opencode", explicit(inj.opencodeExecutable, env.WINTER_USAGE_OPENCODE_EXECUTABLE), [...OPENCODE_INSTALLS, ...packageManagerBins("opencode")]),
     winterCodexWindows: () => (opts.islandUsage?.windowsFor("codex-oauth") ?? []).map((w) => ({
       ...(w.rateLimitType === undefined ? {} : { rateLimitType: w.rateLimitType }), status: w.status,
       ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: w.at,
@@ -85,5 +114,27 @@ export function createUsageService(opts: {
       info: (msg, meta) => console.error(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`),
     },
   });
-  return { service, close: () => db.close() };
+  // The background catch-up (`UsageService.catchUp`): once a few minutes after boot, then every few hours — so Claude
+  // Code's transcripts are read before its own cleanup deletes them, Usage screen open or not. Unref'd timers (never
+  // hold the daemon), a handful of wakeups a day; off with the env switch (tests, the idle-wakeups gate).
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  if (inj.catchUp !== false && env.WINTER_USAGE_CATCH_UP !== "off") {
+    const run = (): void => { void service.catchUp().catch(() => { /* logged per pass; the next catch-up retries */ }); };
+    const first = setTimeout(run, inj.catchUpFirstMs ?? USAGE_CATCH_UP_FIRST_MS);
+    const every = setInterval(run, inj.catchUpEveryMs ?? USAGE_CATCH_UP_EVERY_MS);
+    first.unref?.();
+    every.unref?.();
+    timers.push(first, every);
+  }
+  return {
+    service,
+    close: () => {
+      for (const t of timers) clearTimeout(t);
+      db.close();
+    },
+  };
 }
+
+/** The background catch-up's first run after boot, and its period. */
+export const USAGE_CATCH_UP_FIRST_MS = 3 * 60_000;
+export const USAGE_CATCH_UP_EVERY_MS = 6 * 3_600_000;

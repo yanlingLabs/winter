@@ -14,13 +14,15 @@ import { claudeJson, fakeClaude, fakeCodex, probeRootIn, tempDir } from "./fixtu
 
 const pricer = new UsagePricer();
 const NOW = Date.now();
+/** An installed Claude Code that answers nothing (exits at once): the cache rung's tests. */
+const FAILING = "/usr/bin/false";
 
 function service(over: Partial<UsageServiceDeps> & { db?: UsageDb; home?: string } = {}) {
   const home = over.home ?? tempDir("home");
   const db = over.db ?? new UsageDb(join(home, "usage", "usage.db"));
   const logs: string[] = [];
   const svc = new UsageService({
-    db, pricer, tracking: () => ({ codex: true, claudeCode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
+    db, pricer, tracking: () => ({ codex: true, claudeCode: true, antigravity: true, opencode: true }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
     winterCodexWindows: () => [], probeRoot: () => probeRootIn(home), ingestEveryMs: 0, planWaitMs: 20_000,
     log: { warn: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`), info: (m, meta) => logs.push(`${m} ${JSON.stringify(meta ?? {})}`) },
     ...over,
@@ -236,7 +238,7 @@ describe("~/.claude.json", () => {
   test("re-parsed only when its mtime or size changes", async () => {
     const path = join(tempDir("cj"), ".claude.json");
     claudeJson(path, NOW - 60_000, util);
-    const { svc } = service({ claudeJsonPath: path });
+    const { svc } = service({ claudeJsonPath: path, claudeExecutable: () => FAILING });
     expect((await svc.claudeCodePlan()).windows[0]!.usedPercent).toBe(42);
     await svc.claudeCodePlan();
     expect(svc.claudeFileParses).toBe(1);
@@ -259,23 +261,23 @@ describe("~/.claude.json", () => {
     const { claudePlanFromCacheFile } = await import("../../src/usage/claude-code");
     expect(await claudePlanFromCacheFile(path, NOW, 64)).toBe("over-cap");
     expect(typeof (await claudePlanFromCacheFile(path, NOW, 1 << 20))).toBe("object");
-    const { svc, logs } = service({ claudeJsonPath: path, claudeJsonMaxBytes: 64 });
+    const { svc, logs } = service({ claudeJsonPath: path, claudeJsonMaxBytes: 64, claudeExecutable: () => FAILING });
     await svc.claudeCodePlan();
     // Changed (still over): no second line.
     claudeJson(path, NOW - 30_000, { ...util, seven_day: { utilization: 1, resets_at: util.five_hour.resets_at } });
     utimesSync(path, new Date(), new Date(Date.now() + 5_000));
     await svc.claudeCodePlan();
-    expect(logs).toHaveLength(1);
+    expect(logs.filter((l) => l.includes("size cap"))).toHaveLength(1);
   });
 
   test("over the size cap it is not read at all, with one fixed log line", async () => {
     const path = join(tempDir("cj"), ".claude.json");
     claudeJson(path, NOW - 60_000, util);
-    const { svc, logs } = service({ claudeJsonPath: path, claudeJsonMaxBytes: 64 });
+    const { svc, logs } = service({ claudeJsonPath: path, claudeJsonMaxBytes: 64, claudeExecutable: () => FAILING });
     expect((await svc.claudeCodePlan()).source).toBe("none");
     expect(svc.claudeFileParses).toBe(0);
-    expect(logs).toEqual(["[usage] Claude Code's config file is over the size cap; its plan cache is not read {}"]);
+    expect(logs.filter((l) => !l.includes("claude /usage gave no plan reading"))).toEqual(["[usage] Claude Code's config file is over the size cap; its plan cache is not read {}"]);
     await svc.claudeCodePlan();
-    expect(logs).toHaveLength(1);
+    expect(logs.filter((l) => l.includes("size cap"))).toHaveLength(1);
   });
 });

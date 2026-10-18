@@ -538,8 +538,9 @@ struct IslandOpenHeader: View {
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             HStack(spacing: 8) {
+                // The Dispatch pill's typed text — its size and weight (user 2026-10-18).
                 Text(store.tabs.selected?.title ?? "")
-                    .font(Typography.body(.semibold))
+                    .font(Typography.composerField())
                     .foregroundStyle(Color.white)
                     .lineLimit(1)
                     .truncationMode(.tail)

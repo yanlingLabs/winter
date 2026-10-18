@@ -6,7 +6,7 @@
 - `<WINTER_HOME>/settings.json` is watched by `settings-watcher.ts` (debounced, single-flight, keep-last-good on a torn file) and swapped atomically by `settings-apply.ts`; read live getters, never a boot snapshot.
 - **No setting or credential change may ever need a daemon restart.** A live child keeps its spawn-time `Options` until its next incarnation; only a credential write evicts children ([providers](./providers-and-credentials.md)).
 - A new setting is an `.optional()` block whose default lives in ONE reader (`settings.ts`: `pinsFor`, `providerBaseUrlFor`, `legacyProjectFilesReadEnabled`, `winterOptionsFromSettings`); an absent block never materializes zod's per-key defaults.
-- `usage` (`usageTrackingFrom`): whether Winter may read the user's own Codex / Claude Code usage — [usage](./usage.md).
+- `usage` (`usageTrackingFrom`): whether Winter may read the user's own Codex / Claude Code / OpenCode usage and Antigravity plan — [usage](./usage.md).
 - Permissions, `outputStyle`, memory, plugins and `mcpServers` live in `<home>/sdk`: [runtime-home](./runtime-home.md). Retired `runtimes.claudeExecutable`/`official.*`/`handoff.crossRuntime` parse, are ignored and logged once per change of the set (`retiredRuntimeSettingKeys`).
 
 ## Migration B (legacy home)
