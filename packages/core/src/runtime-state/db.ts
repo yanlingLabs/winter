@@ -401,7 +401,7 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
     if (!opts.readonly) { db.run("PRAGMA journal_mode = WAL"); db.run("PRAGMA synchronous = NORMAL"); }
     db.run("PRAGMA foreign_keys = ON"); db.run("PRAGMA busy_timeout = 5000");
     // Freed pages (a delivered peer message's body) are zeroed. 2 = FAST is this runtime's default; pinned so a different
-    // SQLite build cannot silently turn it off. The WAL still holds old frames until the next checkpoint.
+    // SQLite build cannot silently turn it off. Set on EVERY open, read-only handles included (a connection setting, no write). The WAL still holds old frames until the next checkpoint.
     db.run("PRAGMA secure_delete = FAST");
     const quick = db.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
     if (quick?.quick_check !== "ok") throw new RuntimeStateUnavailableError(path, "corrupt", quick);

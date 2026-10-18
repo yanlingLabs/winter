@@ -213,8 +213,11 @@ test("code cells carry the global read-allow list AND the two web built-ins; dis
 test("a cowork mode gets none of the Dispatch or Code allow rules", () => {
   for (const policy of ["dont-ask", "ask", "auto"] as const) {
     let allow: readonly string[] | undefined;
-    try { allow = buildWinterOptions(optionsInput({ mode: "cowork" as never, policy })).permissions?.allow; } catch { continue; }
-    expect(allow).toBeUndefined();
+    let threw = false;
+    try { allow = buildWinterOptions(optionsInput({ mode: "cowork" as never, policy })).permissions?.allow; } catch { threw = true; }
+    // Either outcome is a refusal; neither may be skipped, so a future change cannot pass this vacuously.
+    expect(threw || allow === undefined).toBe(true);
+    if (!threw) expect(allow).toBeUndefined();
   }
 });
 

@@ -1,0 +1,356 @@
+import AppKit
+import SwiftUI
+import WinterKit
+
+// Usage and cost tracking, the app half (`docs/claude/usage.md`): the PURE shaping both surfaces draw from — the
+// island's compact Usage tab and the Usage window. Money is USD from the daemon; a figure's basis (the runtime's own
+// list price, Winter's list-price estimate, unknown) is always said, never implied.
+
+/// One plan ring: a window of the user's own Codex or Claude Code plan.
+struct UsagePlanRing: Identifiable, Equatable {
+    let id: String
+    /// "5-hour", "Weekly", "Fable" (a per-model weekly limit is named by its model alone).
+    let title: String
+    /// 0…1: what is LEFT of the window (user 2026-10-18: show the usage left, not used) — the ring and its number.
+    let fraction: Double
+    /// 0…1: what is used — only the colour reads it (amber, then red, as the window runs out).
+    var used: Double { 1 - fraction }
+    /// "resets in 2 h 14 min"; a window a day or longer says WHEN — "resets Thu 9:00" (user 2026-10-18: the weekly reset
+    /// date). Nil without a reset, or once it passed.
+    let resets: String?
+    /// The same, short enough for the island's compact ring: "2 h 14 min", "Thu 9:00".
+    var resetsShort: String? = nil
+    let stale: Bool
+}
+
+/// A plan's slot: Codex now, Claude Code beside it — its rings, where the numbers came from and how old they are, or
+/// why there are none.
+struct UsagePlanSlot: Identifiable, Equatable {
+    let id: String
+    /// "Codex", "Claude Code".
+    let title: String
+    let rings: [UsagePlanRing]
+    /// "From Codex · just now", "From Codex's last session · 3 h ago · stale".
+    let sourceLine: String
+    /// A line in place of rings: "Status only: within limits · resets in 2 h", "Not found on this Mac", "Off".
+    let emptyLine: String?
+    /// "Pro", when the source named the plan.
+    let planType: String?
+}
+
+/// One stacked series point for the window's chart.
+struct UsageChartPoint: Identifiable, Equatable {
+    var id: String { "\(series)|\(slot)" }
+    /// The bucket's index — the chart's x is CATEGORICAL (one bar per bucket, sized by the chart), keyed `slotKey`.
+    let slot: Int
+    var slotKey: String { String(format: "%04d", slot) }
+    let start: Date
+    let series: String
+    let value: Double
+}
+
+enum UsageMetric: String, CaseIterable { case cost, tokens }
+
+enum UsagePresentation {
+    // MARK: words
+
+    static func rangeTitle(_ r: UsageRange) -> String {
+        switch r {
+        case .hour: return "Last hour"
+        case .day: return "Last 24 hours"
+        case .week: return "Last 7 days"
+        case .month: return "Last 30 days"
+        case .all: return "All time"
+        }
+    }
+
+    static func rangeShort(_ r: UsageRange) -> String {
+        switch r {
+        case .hour: return "1H"
+        case .day: return "24H"
+        case .week: return "7D"
+        case .month: return "30D"
+        case .all: return "All"
+        }
+    }
+
+    static func sourceTitle(_ s: UsageSource) -> String {
+        switch s {
+        case .winter: return "Winter"
+        case .codex: return "Codex"
+        case .claudeCode: return "Claude Code"
+        }
+    }
+
+    /// PURE: USD as words — "$0", "<$0.01", "$3.42", "$1,284".
+    static func cost(_ usd: Double) -> String {
+        if usd <= 0 { return "$0" }
+        if usd < 0.01 { return "<$0.01" }
+        if usd < 1_000 { return String(format: "$%.2f", usd) }
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.maximumFractionDigits = 0
+        f.locale = Locale(identifier: "en_US")
+        return "$" + (f.string(from: NSNumber(value: usd.rounded())) ?? String(Int(usd.rounded())))
+    }
+
+    /// PURE: a token count — 1234 → "1.2k".
+    static func tokens(_ n: Double) -> String { islandCompactCount(Int(max(0, n).rounded())) }
+
+    /// PURE: a model's display name — the provider prefix dropped ("anthropic/claude-sonnet-4.5" → "claude-sonnet-4.5").
+    static func modelName(_ model: String) -> String {
+        guard let slash = model.firstIndex(of: "/") else { return model }
+        return String(model[model.index(after: slash)...])
+    }
+
+    /// PURE: how a cost was reached, as a short mark ("" for the runtime's own list price).
+    static func basisMark(_ basis: String) -> String {
+        switch basis {
+        case "list": return ""
+        case "estimate": return "est."
+        case "mixed": return "part est."
+        default: return "unpriced"
+        }
+    }
+
+    /// PURE: a plan source as words.
+    static func planSourceWords(_ source: String) -> String {
+        switch source {
+        case "codex-app-server": return "From Codex"
+        case "codex-rollout": return "From Codex’s last session"
+        case "winter-codex-oauth": return "From Winter’s ChatGPT sign-in"
+        case "claude-cli": return "From Claude Code"
+        case "claude-cache": return "From Claude Code’s cache"
+        case "disabled": return "Tracking off"
+        default: return "Not found"
+        }
+    }
+
+    // MARK: plans
+
+    static func windowTitle(_ w: UsagePlanWindow) -> String {
+        // A per-model weekly limit is named by its model alone ("Fable", not "Weekly · Fable" — user 2026-10-18).
+        if let scope = w.scope, !scope.isEmpty { return scopeName(scope) }
+        switch w.kind {
+        case "five_hour": return "5-hour"
+        case "weekly", "weekly_scoped": return "Weekly"
+        default: return w.windowMinutes.map { $0 >= 1_440 ? "\(Int($0 / 1_440))-day" : "\(Int($0 / 60))-hour" } ?? "Window"
+        }
+    }
+
+    /// PURE: a limit's model scope as a name — the model family when it is one ("claude-fable-5-1", "fable" → "Fable"),
+    /// else the scope capitalised.
+    static func scopeName(_ scope: String) -> String {
+        let lower = scope.lowercased()
+        for family in ["fable", "opus", "sonnet", "haiku"] where lower.contains(family) {
+            return family.prefix(1).uppercased() + family.dropFirst()
+        }
+        return scope.prefix(1).uppercased() + scope.dropFirst()
+    }
+
+    /// PURE: a reading's rings, the 5-hour first, then weekly, then per-model weekly.
+    static func rings(_ reading: UsagePlanReading?, now: Date) -> [UsagePlanRing] {
+        guard let reading else { return [] }
+        let order: [String: Int] = ["five_hour": 0, "weekly": 1, "weekly_scoped": 2]
+        return reading.windows
+            .sorted { (order[$0.kind] ?? 3, $0.id) < (order[$1.kind] ?? 3, $1.id) }
+            .map { w in
+                let reset = w.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? $0 : nil }
+                let short = reset.map { resetWords($0, windowMinutes: w.windowMinutes ?? (w.kind == "five_hour" ? 300 : 10_080), now: now) }
+                return UsagePlanRing(id: w.id, title: windowTitle(w), fraction: 1 - min(1, max(0, w.usedPercent / 100)),
+                                     resets: short.map { "resets \($0)" }, resetsShort: short, stale: w.stale)
+            }
+    }
+
+    /// PURE: when a window resets — a short one as a countdown ("in 2 h 14 min"), a day-long or longer one as its day
+    /// and time ("Thu 9:00", in the user's locale and time zone), or its date once more than a week away ("Oct 30").
+    static func resetWords(_ reset: Date, windowMinutes: Double, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        guard windowMinutes >= 1_440 else { return islandRelativeFuture(reset, now: now) }
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.locale = locale
+        f.setLocalizedDateFormatFromTemplate(reset.timeIntervalSince(now) < 6.5 * 86_400 ? "EEEjmm" : "MMMd")
+        return f.string(from: reset)
+    }
+
+    /// PURE: a plan's slot. `provider` is "codex" or "claude-code" (its reading may be nil before the first answer).
+    static func slot(provider: String, reading: UsagePlanReading?, now: Date) -> UsagePlanSlot {
+        let title = provider == "codex" ? "Codex" : "Claude Code"
+        guard let reading else {
+            return UsagePlanSlot(id: provider, title: title, rings: [], sourceLine: "", emptyLine: "Reading…", planType: nil)
+        }
+        let rings = rings(reading, now: now)
+        var parts = [planSourceWords(reading.source)]
+        if let at = reading.at { parts.append(islandRelativePast(Date(timeIntervalSince1970: at / 1000), now: now)) }
+        if rings.contains(where: \.stale) { parts.append("stale") }
+        let planType = reading.planType.map { $0.replacingOccurrences(of: "_", with: " ").capitalized }
+        if !rings.isEmpty {
+            return UsagePlanSlot(id: provider, title: title, rings: rings, sourceLine: parts.joined(separator: " · "), emptyLine: nil, planType: planType)
+        }
+        let empty: String
+        switch reading.source {
+        case "winter-codex-oauth":
+            let w = reading.statusOnly.first
+            let status = IslandUsagePresentation.statusText(w?.status)
+            let reset = w?.resetsAt.map { Date(timeIntervalSince1970: $0 / 1000) }.flatMap { $0 > now ? " · resets \(islandRelativeFuture($0, now: now))" : nil } ?? ""
+            empty = "Status only: \(status.lowercased())\(reset)"
+        case "disabled":
+            empty = "Tracking is off"
+        default:
+            empty = provider == "codex" ? "Codex not found on this Mac" : "No plan report from Claude Code"
+        }
+        return UsagePlanSlot(id: provider, title: title, rings: [], sourceLine: parts.joined(separator: " · "), emptyLine: empty, planType: planType)
+    }
+
+    // MARK: series
+
+    /// PURE: a sparkline's points in `size`, the lowest value on the bottom edge (an all-zero series is a flat base).
+    static func sparkPoints(_ values: [Double], in size: CGSize) -> [CGPoint] {
+        guard values.count > 1 else { return values.isEmpty ? [] : [CGPoint(x: 0, y: size.height), CGPoint(x: size.width, y: size.height)] }
+        let top = values.max() ?? 0
+        let step = size.width / CGFloat(values.count - 1)
+        return values.enumerated().map { i, v in
+            let y = top > 0 ? size.height - CGFloat(v / top) * size.height : size.height
+            return CGPoint(x: CGFloat(i) * step, y: y)
+        }
+    }
+
+    /// PURE: the chart's stacked points — the `top` models by the metric's total, each its own series, the rest as
+    /// "Other"; one point per bucket per series (zeros included, so stacks line up). Also returns the series order.
+    static func chartPoints(_ series: UsageSeries, metric: UsageMetric, top: Int = 6) -> (points: [UsageChartPoint], order: [String]) {
+        func label(_ source: UsageSource, _ model: String) -> String { "\(modelName(model)) · \(sourceTitle(source))" }
+        var totals: [String: Double] = [:]
+        for b in series.buckets {
+            for m in b.models { totals[label(m.source, m.model), default: 0] += metric == .cost ? m.costUsd : m.tokens }
+        }
+        let ranked = totals.filter { $0.value > 0 }.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+        let kept = Array(ranked.prefix(top))
+        let hasOther = ranked.count > top
+        let order = kept + (hasOther ? ["Other"] : [])
+        var points: [UsageChartPoint] = []
+        for (slot, b) in series.buckets.enumerated() {
+            var values: [String: Double] = [:]
+            for m in b.models {
+                let key = label(m.source, m.model)
+                let v = metric == .cost ? m.costUsd : m.tokens
+                values[kept.contains(key) ? key : "Other", default: 0] += v
+            }
+            let start = Date(timeIntervalSince1970: b.start / 1000)
+            for s in order { points.append(UsageChartPoint(slot: slot, start: start, series: s, value: values[s] ?? 0)) }
+        }
+        return (points, order)
+    }
+
+    /// PURE: which buckets get an x-axis label (about `count`, evenly spaced, the first always) and the label for each —
+    /// a time of day for buckets under a day, a date otherwise.
+    static func axisLabels(_ series: UsageSeries, count: Int = 6) -> [(key: String, text: String)] {
+        let n = series.buckets.count
+        guard n > 0 else { return [] }
+        let stride = max(1, Int((Double(n) / Double(count)).rounded(.up)))
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = series.bucketMs >= 86_400_000 ? "MMM d" : series.bucketMs >= 6 * 3_600_000 ? "EEE HH:mm" : "HH:mm"
+        return Swift.stride(from: 0, to: n, by: stride).map { i in
+            (String(format: "%04d", i), f.string(from: Date(timeIntervalSince1970: series.buckets[i].start / 1000)))
+        }
+    }
+
+    /// The chart's series colours: system semantic colours (never a hex — `docs/brand.md` § 3.1), "Other" grey.
+    static func seriesColors(_ order: [String]) -> [Color] {
+        let palette: [Color] = [Theme.accent, Color(nsColor: .systemPurple), Color(nsColor: .systemOrange), Color(nsColor: .systemGreen),
+                                Color(nsColor: .systemPink), Color(nsColor: .systemTeal), Color(nsColor: .systemYellow), Color(nsColor: .systemIndigo)]
+        var i = 0
+        return order.map { s in
+            if s == "Other" { return Color(nsColor: .systemGray) }
+            defer { i += 1 }
+            return palette[i % palette.count]
+        }
+    }
+
+    // MARK: subscriptions
+
+    /// PURE: "Renews in 5 d · Nov 3".
+    static func renewalLine(_ s: UsageSubscription, now: Date) -> String {
+        guard let next = s.nextRenewal.map({ Date(timeIntervalSince1970: $0 / 1000) }) else { return "" }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d"
+        let days = Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: now), to: next).day ?? 0
+        let when = days <= 0 ? "today" : days == 1 ? "tomorrow" : "in \(days) d"
+        return "Renews \(when) · \(f.string(from: next))"
+    }
+
+    /// PURE: the plan's price as words — "$200/mo", "€240/yr (€20/mo)".
+    static func priceLine(_ s: UsageSubscription) -> String {
+        let sym = currencySymbol(s.currency)
+        func money(_ v: Double) -> String { v.rounded() == v ? "\(sym)\(Int(v))" : String(format: "\(sym)%.2f", v) }
+        if s.cadence == "yearly" { return "\(money(s.price))/yr (\(money(s.monthlyCost ?? s.price / 12))/mo)" }
+        return "\(money(s.price))/mo"
+    }
+
+    /// PURE: the value-for-money line — "Used $412 at list price this cycle · 2.1× the plan" (the ratio only when the
+    /// plan is priced in USD, the usage's currency).
+    static func valueLine(_ s: UsageSubscription) -> String {
+        guard let used = s.usageThisCycleUsd else { return "" }
+        if s.covers.isEmpty { return "Counts no usage — choose what it covers" }
+        var line = "Used \(cost(used)) at list price this cycle"
+        // The cycle is the plan's own (a month, or a year), so its price is the cycle's price.
+        if s.currency.uppercased() == "USD", s.price > 0 {
+            line += String(format: " · %.1f× the plan", used / s.price)
+        }
+        return line
+    }
+
+    static func currencySymbol(_ code: String) -> String {
+        switch code.uppercased() {
+        case "USD": return "$"
+        case "EUR": return "€"
+        case "GBP": return "£"
+        case "JPY": return "¥"
+        default: return code.uppercased() + " "
+        }
+    }
+
+    /// What a plan can cover, with words.
+    static let coverOptions: [(id: String, title: String)] = [
+        ("codex", "Codex"), ("claude-code", "Claude Code"), ("winter:codex-oauth", "Winter on ChatGPT"), ("winter", "All of Winter"),
+    ]
+
+    /// PURE: a provider's default covers ("openai" → Codex + Winter on ChatGPT).
+    static func defaultCovers(provider: String) -> [String] {
+        switch provider {
+        case "openai": return ["codex", "winter:codex-oauth"]
+        case "anthropic": return ["claude-code"]
+        default: return []
+        }
+    }
+}
+
+/// A tiny sparkline (a plain path: drawn by the offscreen renderer too).
+struct UsageSparkline: View {
+    let values: [Double]
+    var color: Color = Theme.accent
+
+    var body: some View {
+        GeometryReader { proxy in
+            let pts = UsagePresentation.sparkPoints(values, in: proxy.size)
+            ZStack {
+                Path { p in
+                    guard let first = pts.first else { return }
+                    p.move(to: CGPoint(x: first.x, y: proxy.size.height))
+                    for pt in pts { p.addLine(to: pt) }
+                    p.addLine(to: CGPoint(x: pts.last!.x, y: proxy.size.height))
+                    p.closeSubpath()
+                }
+                .fill(LinearGradient(colors: [color.opacity(0.28), color.opacity(0.02)], startPoint: .top, endPoint: .bottom))
+                Path { p in
+                    guard let first = pts.first else { return }
+                    p.move(to: first)
+                    for pt in pts.dropFirst() { p.addLine(to: pt) }
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            }
+        }
+    }
+}

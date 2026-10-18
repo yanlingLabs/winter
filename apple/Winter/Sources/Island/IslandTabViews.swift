@@ -94,6 +94,12 @@ struct IslandRing: View {
     var line: CGFloat = 5
     var color: Color = Theme.accent
 
+    /// PURE: the label — the percent sign is dropped in a small ring (under 40 pt), where "100%" would not fit.
+    static func label(_ fraction: Double, size: CGFloat) -> String {
+        let pct = Int((min(1, max(0, fraction)) * 100).rounded())
+        return size < 40 ? "\(pct)" : "\(pct)%"
+    }
+
     var body: some View {
         ZStack {
             Circle().stroke(Color.white.opacity(0.12), lineWidth: line)
@@ -101,9 +107,13 @@ struct IslandRing: View {
                 .trim(from: 0, to: max(0.001, min(1, fraction)))
                 .stroke(color, style: StrokeStyle(lineWidth: line, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Text("\(Int((min(1, max(0, fraction)) * 100).rounded()))%")
+            // Fitted INSIDE the ring: one line, scaled down rather than spilling over the stroke.
+            Text(Self.label(fraction, size: size))
                 .font(Typography.captionDigits(.semibold))
                 .foregroundStyle(Color.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .frame(width: max(8, size - 2 * line - 4))
         }
         .frame(width: size, height: size)
     }

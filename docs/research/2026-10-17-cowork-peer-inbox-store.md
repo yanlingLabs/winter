@@ -78,7 +78,7 @@ nothing else names the store.
 
 ## Open points
 
-1. **Freed pages and the WAL.** `PRAGMA secure_delete=FAST` is pinned on every writable runtime-state handle (`openRuntimeStateDb`, both downgrade functions, Migration C's raw handle) (it is this
+1. **Freed pages and the WAL.** `PRAGMA secure_delete=FAST` is pinned on every runtime-state handle `openRuntimeStateDb` opens (read-only ones too; it is a connection setting), and on the writable raw handles (`openRuntimeStateDb`, both downgrade functions, Migration C's raw handle) (it is this
    runtime's default, SQLite 3.51; the pin stops a different build from silently turning it off). With it, the body
    pages freed at delivery are zeroed in the main file. The WAL keeps the OLD frames (which can hold the body) until
    the next checkpoint; a TRUNCATE checkpoint clears them (tested). This unwired store adds no checkpoint calls.

@@ -9,6 +9,7 @@ import { ApprovalBroker } from "../../src/agent/approvals";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import type { AppResolver } from "../../src/computer-use/app-resolve";
 import { isAppPath, isBundleIdShaped, systemAppResolver } from "../../src/computer-use/app-resolve";
+import { AutomationFailure } from "../../src/computer-use/errors";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { TargetLocks } from "../../src/computer-use/locks";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
@@ -304,6 +305,25 @@ describe("attended (the rung-4 card): a Mac harness on the session itself", () =
       expect(attended(dispatch)).toBe(false); // the pill alone
       hub.attach(client("cli-tui"), code, 0);
       expect(attended(code)).toBe(true);
+    } finally { rt.stop(); store.close(); }
+  });
+});
+
+describe("a stored cowork mode on a Dispatch-origin turn", () => {
+  test("is refused by computer-use policy (NotAllowed), never read as Code or Dispatch", () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-cu-cowork-mode-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const sid = store.createSession("t", { cwd: home, mode: "code" });
+    const rt = createComputerUseRuntime({ home, profile: "dev", settings: () => null, settingsPath: join(home, "settings.json"), approvals: new ApprovalBroker(), hub, store, launchAllowed: false });
+    try {
+      (store as unknown as { db: { run(sql: string, params: unknown[]): void } }).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["cowork", sid]);
+      hub.append(sid, { type: "user_message", sessionId: sid, threadId: "main", text: "do it", clientName: "dispatch" } as unknown as NewSessionEvent);
+      const session = (rt.policy as unknown as { deps: { session(s: string): unknown } }).deps.session;
+      let thrown: unknown;
+      try { session(sid); } catch (e) { thrown = e; }
+      expect(thrown).toBeInstanceOf(AutomationFailure);
+      expect((thrown as AutomationFailure).kind).toBe("NotAllowed");
     } finally { rt.stop(); store.close(); }
   });
 });
