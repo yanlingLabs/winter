@@ -5,8 +5,9 @@ import SwiftUI
 // (a clear white title over muted words, figures in the light tiny digits), one accent per source used sparingly, quiet
 // at rest and LIFTING under the pointer (the title grows 12 % from its leading edge and the details and actions appear,
 // on the Dispatch pill's spring, so what is below glides) — but each kind of data keeps the shape that fits it: a status
-// dot, a glyph, a logo, a small label, a chip. A line only where there is a real amount (a watch's time left; the cost
-// split by model in the Usage tab), never a decorative bar.
+// dot, a glyph, a logo, words. A line only where there is a real amount (a plan window, a session's context, a
+// watch's time left, the cost split by model), never a decorative bar. Actions and links are words, like the usage
+// block's "Open usage ↗" (no filled capsule); a group is titled like a plan (no letter-spaced caps).
 
 enum IslandQuietRow {
     /// From the island's edge to a row: the header's own inset — the usage block's left edge too.
@@ -168,53 +169,91 @@ struct IslandStatusWord: View {
     }
 }
 
-// MARK: - Chips
+// MARK: - Group titles, links, actions
 
-/// A small label in a capsule — the plan block's own chip ("Pro"): a port, a link, a mode.
-struct IslandChip: View {
-    let text: String
-    /// A link's ↗ after the words.
-    var arrow = false
-    /// A link reads brighter than a plain label.
-    var bright = false
+/// A group's title, the plan header's own (user 2026-10-19, the third pass: shared language, own shapes): a clear name
+/// in the plan names' face, and on the far right what it is from or how many, muted — never a letter-spaced caps label.
+struct IslandGroupTitle: View {
+    let title: String
+    var meta: String? = nil
+    /// What the meta says in a colour of its own (a limit reached, amber); nil = muted.
+    var metaColor: Color? = nil
 
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Color.white)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let meta, !meta.isEmpty {
+                Text(meta)
+                    .font(Typography.tiny())
+                    .foregroundStyle(metaColor ?? Theme.textMuted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .frame(minHeight: 18)
+    }
+}
+
+/// The height of a row's small things — its link, its ports, its action — on the title line or the line under it.
+enum IslandRowSmall {
     static let height: CGFloat = 18
+}
+
+/// A link as words, the usage block's "Open usage ↗": brighter than the words around it, an arrow after it.
+struct IslandLinkWords: View {
+    let text: String
 
     var body: some View {
         HStack(spacing: 3) {
             Text(text).font(Typography.tinyDigits(.medium))
-            if arrow { Image(systemName: "arrow.up.right").font(Typography.micro(.bold)) }
+            Image(systemName: "arrow.up.right").font(Typography.micro(.bold))
         }
-        .foregroundStyle(bright ? Color.white.opacity(0.92) : Theme.textMuted)
+        .foregroundStyle(Color.white.opacity(0.92))
         .lineLimit(1)
-        .padding(.horizontal, 6)
-        .frame(height: Self.height)
-        .background(Capsule().fill(Color.white.opacity(bright ? 0.1 : 0.06)))
+        .frame(height: IslandRowSmall.height)
     }
 }
 
-/// A row's small action in the chips' size — Stop and its phases, a watch's Stop: its words on a capsule of its colour.
+/// How a row's action reads: words, never a filled capsule — coloured only while the colour means something (a click
+/// away from stopping: amber; from force quitting: red), muted while it is working.
+enum IslandActionTone: Equatable {
+    case plain, confirm, danger, busy
+
+    /// PURE: the words' ink — a plain action brightens under the pointer.
+    func ink(hovered: Bool) -> Color {
+        switch self {
+        case .plain: return Color.white.opacity(hovered ? 1 : 0.82)
+        case .confirm: return pillReviewAmber
+        case .danger: return Color(nsColor: .systemRed)
+        case .busy: return Theme.textMuted
+        }
+    }
+}
+
+/// A row's action as words — Stop and its phases, a watch's Stop — on the line it ends.
 struct IslandRowActionButton: View {
     let title: String
-    var fill: Color = Color.white
-    var ink: Color = Color.black
+    var tone: IslandActionTone = .plain
     var enabled = true
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(Typography.tiny(.semibold))
-                .foregroundStyle(ink)
-                .lineLimit(1)
-                .padding(.horizontal, 8)
-                .frame(height: IslandChip.height)
-                .background(Capsule().fill(fill))
-                .contentShape(Capsule())
-                .pillHoverGlow(fill)
+            IslandPointerReader { hovered in
+                Text(title)
+                    .font(Typography.tiny(.semibold))
+                    .foregroundStyle(tone.ink(hovered: hovered && enabled))
+                    .lineLimit(1)
+                    .padding(.horizontal, 3)
+                    .frame(height: IslandRowSmall.height)
+                    .contentShape(Rectangle())
+            }
         }
         .buttonStyle(IslandPressStyle())
         .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.6)
     }
 }

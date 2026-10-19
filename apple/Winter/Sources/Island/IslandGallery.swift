@@ -205,6 +205,11 @@ enum IslandGallery {
                                      directory, "island-tab-\(name)-tall\(suffix)@2x.png"))
             }
         }
+        // The Usage tab whole — Winter's own plan, the session's context, the background jobs and the notes under the
+        // cost — as one cut tall enough to end with the tab.
+        store.tabs.select(IslandTabRegistry.usage.id)
+        out.append(try write(openScene(store: store, models: models, shape: shape, tab: IslandTabRegistry.usage.id, preview: [], height: 720),
+                             directory, "island-tab-usage-whole@2x.png"))
         // The reference the tabs are read against: the Usage tab with its plan block under the pointer.
         out.append(try renderUsageReference(to: directory, shape: shape, store: store, models: models))
 

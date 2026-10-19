@@ -209,7 +209,7 @@ struct IslandDevicesTab: View {
             IslandEmptyTab(symbol: "laptopcomputer.and.iphone", line: "Reading devices…")
         } else {
             VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
-                section("Phones")
+                IslandGroupTitle(title: "Phones")
                 if model.phones.isEmpty {
                     IslandDeviceRowView(row: IslandDeviceRow(id: "none", symbol: "iphone.slash", title: "No phone paired",
                                                              detail: "Pair one from Winter's phone panel", tone: .off,
@@ -217,7 +217,8 @@ struct IslandDevicesTab: View {
                 } else {
                     ForEach(model.phones) { IslandDeviceRowView(row: $0) }
                 }
-                section("Helpers")
+                IslandGroupTitle(title: "Helpers")
+                    .padding(.top, 6)
                 ForEach(model.helpers) { IslandDeviceRowView(row: $0) }
             }
             .padding(.horizontal, IslandQuietRow.inset)
@@ -225,14 +226,8 @@ struct IslandDevicesTab: View {
         }
     }
 
-    private func section(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(Typography.tiny(.semibold))
-            .tracking(0.6)
-            .foregroundStyle(Theme.textMuted)
-            .padding(.top, 4)
-    }
 }
+
 
 /// A phone or a helper as a row in the island's language: its glyph and name, and its state as a small dot and a word
 /// ("● Connected", "● Running · 1.4.0") — the Computer Use helper's two permissions as small labelled marks under it

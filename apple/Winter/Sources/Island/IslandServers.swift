@@ -447,7 +447,7 @@ enum IslandServers {
         return restHours == 0 ? "up \(days) d" : "up \(days) d \(restHours) h"
     }
 
-    // MARK: The row (the island's visual language: a logo, a name, a live dot; chips under the pointer)
+    // MARK: The row (the island's visual language: a logo, a name, a live dot; its links and ports in words under the pointer)
 
     /// PURE: a server's live dot through Stop's phases — green while it runs, amber while Stop waits for its second click,
     /// hollow while it is stopping, red while a force quit is offered or asked.
@@ -460,7 +460,7 @@ enum IslandServers {
         }
     }
 
-    /// PURE: the ports a row's chips name as plain labels — every TCP port its shown links do not already carry.
+    /// PURE: the ports a row names under its links — every TCP port its shown links do not already carry.
     static func plainPorts(_ ports: [UInt16], links: [IslandServerLink]) -> [UInt16] {
         let linked = Set(links.map(\.port))
         return Array(Set(ports)).sorted().filter { !linked.contains($0) }
@@ -1209,7 +1209,7 @@ struct IslandServersPage: View {
                     Image(systemName: "chevron.left")
                         .font(Typography.caption(.bold))
                         .foregroundStyle(Color.white)
-                        .frame(width: IslandQuietRow.markWidth, height: IslandChip.height + 4)
+                        .frame(width: IslandQuietRow.markWidth, height: IslandRowSmall.height + 4)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(IslandPressStyle())
@@ -1239,7 +1239,7 @@ struct IslandServersPage: View {
 /// A bundle's row in the list (several servers, or one with several links), in the island's language: its logo stacked
 /// as many times as it has servers (a project's servers share its one logo), its name and "2 servers" (muted), a live
 /// dot and a chevron. Under the pointer the name lifts, its whole folder shows, and its ports, its one link and its
-/// uptime appear under it as chips and words. A click opens its page.
+/// uptime appear under it in words. A click opens its page.
 struct IslandServerBundleRowView: View {
     @ObservedObject var model: IslandServersModel
     let bundle: IslandServerBundle
@@ -1289,9 +1289,9 @@ struct IslandServerBundleRowView: View {
 }
 
 /// A server as a row in the island's language: its logo (else a small glyph), its name and folder (muted) and a small
-/// live dot. Under the pointer the name lifts, the whole folder shows, and under it its links and ports as small chips
+/// live dot. Under the pointer the name lifts, the whole folder shows, and under it its links and ports in words
 /// (a link opens the page), its uptime in words, and Stop — in the row's flow after the links. Once Stop is pressed the
-/// chips and Stop stay on screen through every phase whatever the pointer does. Stop's two clicks, its force quit and
+/// details and Stop stay on screen through every phase whatever the pointer does. Stop's two clicks, its force quit and
 /// every guard are `IslandServerStopMachine`'s and `IslandServersModel`'s, untouched.
 struct IslandServerRowView: View {
     let row: IslandServerRow
@@ -1332,7 +1332,7 @@ struct IslandServerRowView: View {
     }
 }
 
-/// What a server row reveals under its name: its links (a page first) and its other ports as small chips, its uptime
+/// What a server row reveals under its name: its links (a page first) and its other ports in words, its uptime
 /// (or Stop's state) in words, and — at its end, in the row's flow after the links — Stop.
 struct IslandServerDetails<Stop: View>: View {
     let links: [IslandServerLink]
@@ -1344,7 +1344,9 @@ struct IslandServerDetails<Stop: View>: View {
     var body: some View {
         HStack(spacing: 6) {
             ForEach(links) { link in IslandServerLinkButton(link: link) { onLink(link) } }
-            ForEach(ports, id: \.self) { port in IslandChip(text: ":\(port)") }
+            ForEach(ports, id: \.self) { port in
+                Text(":\(port)").font(Typography.tinyDigits(.medium)).foregroundStyle(Theme.textMuted).lineLimit(1)
+            }
             Text(status)
                 .font(Typography.tinyDigits())
                 .foregroundStyle(Theme.textMuted)
@@ -1353,7 +1355,7 @@ struct IslandServerDetails<Stop: View>: View {
             Spacer(minLength: 8)
             stop()
         }
-        .frame(minHeight: IslandChip.height + 4)
+        .frame(minHeight: IslandRowSmall.height + 4)
     }
 }
 
@@ -1405,16 +1407,16 @@ struct IslandServerIconStack: View {
     }
 }
 
-/// A link to a server's page — "localhost:3888 ↗" as a small chip, opened in the default browser.
+/// A link to a server's page — "localhost:3888 ↗" as words, the usage block's "Open usage ↗" — opened in the default
+/// browser.
 struct IslandServerLinkButton: View {
     let link: IslandServerLink
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            IslandChip(text: link.label, arrow: true, bright: true)
-                .contentShape(Capsule())
-                .pillHoverGlow(Color.white)
+            IslandLinkWords(text: link.label)
+                .contentShape(Rectangle())
         }
         .buttonStyle(IslandPressStyle())
         .help("Open \(link.url.absoluteString)")
@@ -1422,8 +1424,8 @@ struct IslandServerLinkButton: View {
     }
 }
 
-/// Stop's button through its phases, in the chips' size: "Stop" (or a bundle's "Stop all"); "Stop?" (amber) waiting
-/// for the second click; "Stopping…" (dimmed); "Force quit", then "Force quit?" (red).
+/// Stop through its phases, as words: "Stop" (or a bundle's "Stop all"); "Stop?" (amber) waiting for the second click;
+/// "Stopping…" (muted); "Force quit", then "Force quit?" (red).
 struct IslandServerStopButton: View {
     let phase: IslandServerStopPhase?
     let name: String
@@ -1437,15 +1439,15 @@ struct IslandServerStopButton: View {
             IslandRowActionButton(title: idleTitle ?? "Stop", action: action)
                 .accessibilityLabel("Stop \(name)")
         case .confirming?:
-            IslandRowActionButton(title: idleTitle.map { "\($0)?" } ?? "Stop?", fill: pillReviewAmber, action: action)
+            IslandRowActionButton(title: idleTitle.map { "\($0)?" } ?? "Stop?", tone: .confirm, action: action)
                 .accessibilityLabel("Click again to stop \(name)")
         case .stopping?, .killing?:
-            IslandRowActionButton(title: "Stopping…", fill: Color.white.opacity(0.1), ink: Color.white, enabled: false, action: action)
+            IslandRowActionButton(title: "Stopping…", tone: .busy, enabled: false, action: action)
         case .forceOffered?:
-            IslandRowActionButton(title: "Force quit", fill: Color.white.opacity(0.1), ink: Color.white, action: action)
+            IslandRowActionButton(title: "Force quit", action: action)
                 .accessibilityLabel("Force quit \(name)")
         case .confirmingForce?:
-            IslandRowActionButton(title: "Force quit?", fill: Color(nsColor: .systemRed), ink: Color.white, action: action)
+            IslandRowActionButton(title: "Force quit?", tone: .danger, action: action)
                 .accessibilityLabel("Click again to force quit \(name)")
         }
     }

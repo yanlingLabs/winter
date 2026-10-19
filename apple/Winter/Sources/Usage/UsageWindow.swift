@@ -473,6 +473,8 @@ enum UsagePlanColor {
         switch provider {
         case "codex": return codex
         case "antigravity": return antigravity
+        // Winter's own plan windows and a session's context: Winter's accent (its cost segments' colour too).
+        case "winter", "winter-context": return Theme.accent
         default: return claudeCode
         }
     }
@@ -516,7 +518,7 @@ struct UsagePlanSlotCard: View {
         return VStack(alignment: .leading, spacing: compact ? 5 : 8) {
             HStack(spacing: 6) {
                 HStack(spacing: 6) {
-                    Text(slot.title).font(titleFont).foregroundStyle(Color.white)
+                    Text(slot.title).font(titleFont).foregroundStyle(Color.white).lineLimit(1)
                     if let plan = slot.planType {
                         Text(plan).font(Typography.tiny(.semibold)).foregroundStyle(Theme.textMuted)
                             .padding(.horizontal, 5).padding(.vertical, 1)
@@ -669,7 +671,8 @@ struct UsagePlanLine: View {
         let pct = Self.percents(ring.fraction)
         let height = Self.thickness(compact: compact, hovered: hovered)
         // The marker: under the pointer, on the hovered track (x along it, from its grown start).
-        let marker = hovered ? pointerX.flatMap { UsageAlarmRules.trackPoint(rowX: $0, slot: slot, hovered: true) } : nil
+        // The marker offers an alarm: only on a line that can take one (Winter's own windows and a session's context cannot).
+        let marker = hovered && onSetAlarm != nil ? pointerX.flatMap { UsageAlarmRules.trackPoint(rowX: $0, slot: slot, hovered: true) } : nil
         let flash = hovered ? pastFlash : nil
         return HStack(spacing: Self.titleGap(compact: compact)) {
             Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(hovered ? 1 : 0.85)).lineLimit(1)
