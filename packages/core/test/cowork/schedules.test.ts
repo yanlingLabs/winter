@@ -502,15 +502,17 @@ function wiringProblems(tree: ts.SourceFile, name: string, portIndex: number): {
  * the constructor: another lane may append or insert parameters without tripping it.
  */
 test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has no implementation and no src construction passes one", () => {
-  const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "schedule-dispatch.ts"), owner = join(packages, "core", "src", "cowork", "schedules.ts"), service = join(packages, "core", "src", "cowork", "service.ts");
+  const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "schedule-dispatch.ts"), doorPort = join(packages, "core", "src", "cowork", "schedule-door-port.ts"), owner = join(packages, "core", "src", "cowork", "schedules.ts"), service = join(packages, "core", "src", "cowork", "service.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module); expect(sources).toContain(owner); expect(sources).toContain(service);
   const relative = (file: string) => file.slice(packages.length);
-  // 1. The bans (the real backstop): nothing but the owner and the types module may even name the boundary.
+  // 1. The bans (the real backstop). Boundary names: only the owner, the types module and the door port (the one implementation, itself imported by
+  //    no src file and constructed by no production code, see schedule-door-port.test.ts) may name them. Driver verbs: only the owner.
   const needles = ["schedule-dispatch", "CoworkScheduleDispatchPort", "CoworkScheduleDispatchInput", "CoworkScheduleDispatchReceipt", "CoworkScheduleDispatchOutcome", "CoworkScheduleStartResult", "CoworkScheduleStartReceipt", "beginDispatch", ".handled(", ".uncertain("];
-  const banned: string[] = [];
-  for (const file of sources.filter(candidate => candidate !== module && candidate !== owner)) { const text = readFileSync(file, "utf8"); for (const needle of needles) if (text.includes(needle)) banned.push(`${relative(file)}:${needle}`); }
+  const driverVerbs = ["beginDispatch", ".handled(", ".uncertain("], banned: string[] = [];
+  expect(sources).toContain(doorPort);
+  for (const file of sources.filter(candidate => candidate !== module && candidate !== owner)) { const text = readFileSync(file, "utf8"); for (const needle of needles) if (text.includes(needle) && !(file === doorPort && !driverVerbs.includes(needle))) banned.push(`${relative(file)}:${needle}`); }
   expect(banned).toEqual([]);
   // 2. The one reference is erased at runtime: schedules.ts imports the port types with `import type`, and the module has no runtime code at all.
   const ownTree = parse(owner), imports = ownTree.statements.filter((statement): statement is ts.ImportDeclaration => ts.isImportDeclaration(statement) && /schedule-dispatch/.test((statement.moduleSpecifier as ts.StringLiteral).text));
@@ -520,6 +522,7 @@ test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has 
   expect(typesTree.statements.filter(ts.isImportDeclaration).every(statement => statement.importClause?.isTypeOnly === true)).toBe(true);
   expect(typesTree.statements.filter(ts.isImportDeclaration).map(statement => (statement.moduleSpecifier as ts.StringLiteral).text).sort()).toEqual(["./types", "@yanlinglabs/winter-protocol"]);
   // 3. No implementation of the port anywhere in src (a class implementing it, or a value annotated with it).
+  // The door port is the single permitted implementation; it is a factory returning an object literal, so it matches neither pattern.
   const implementing = sources.filter(file => /implements\s+CoworkScheduleDispatchPort|:\s*CoworkScheduleDispatchPort\s*=/.test(readFileSync(file, "utf8"))).map(relative);
   expect(implementing).toEqual([]);
   // 4. AST scan: every `new CoworkSchedules(...)` in src (parenthesized or cast included) must leave the port position empty and spread nothing,
