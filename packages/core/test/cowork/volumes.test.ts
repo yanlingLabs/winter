@@ -363,7 +363,6 @@ test("the restore reads through a read-only, identity-pinned descriptor, and onl
   refusal(() => f.store.openForRestoreRead({ workspaceId: f.request.workspaceId, restoreId: "r1", proof }, "data"), "volume_busy"); // no claim yet
   const claim = f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof });
   const opened = f.store.openForRestoreRead(claim, "data");
-  expect(constants.O_ACCMODE & 0).toBe(0);
   expect(() => writeSync(opened.fd, Buffer.from("x"))).toThrow(); // O_RDONLY: the write is refused by the kernel
   expect(opened.volume.purpose).toBe("data");
   opened.close();

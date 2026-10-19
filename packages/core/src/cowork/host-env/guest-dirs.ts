@@ -38,6 +38,8 @@ export function createCoworkOutputsPreparer(home: string): { ensure(workspaceId:
   return {
     ensure(workspaceId, logicalSessionId) {
       if (!SESSION_ID.test(workspaceId)) throw new CoworkGuestDirectoryError("invalid_name");
+      // The shared roots first (idempotent, same checks), so a workspace provisioned before the outputs share existed still gets its root.
+      ensureSharedDirectories(home, workspaceId);
       ensureOwnedDirectory(join(realpathSync(home), "cowork", "workspaces", workspaceId, "shared", "outputs"), logicalSessionId);
     },
   };

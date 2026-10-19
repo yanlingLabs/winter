@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoworkNativeSimulatedCrash, type CoworkNativeConversationContext, type CoworkNativeConversationSet, type CoworkNativeHostShare, type CoworkNativeStartRequest } from "../../../src/cowork/native/host";
@@ -237,8 +237,11 @@ describe("the outputs directory and the plan view", () => {
     const real = join(home, "cowork", "real-workspace", "shared", "outputs"); mkdirSync(real, { recursive: true });
     symlinkSync(join(home, "cowork", "real-workspace"), join(home, "cowork", "workspaces", "ws3")); // a symlinked PARENT of the outputs root
     expect(() => prepare.ensure("ws3", "conv-0001")).toThrow(expect.objectContaining({ code: "root_unusable" }));
+    mkdirSync(join(home, "cowork", "workspaces", "ws4"), { recursive: true });
+    prepare.ensure("ws4", "conv-0001"); // a workspace with no shared roots yet gets them, then the directory
+    expect(lstatSync(join(home, "cowork", "workspaces", "ws4", "shared", "outputs", "conv-0001")).isDirectory()).toBe(true);
     const sibling = join(home, "cowork", "workspaces", "ws2", "shared"); mkdirSync(sibling, { recursive: true }); symlinkSync(outputs, join(sibling, "outputs"));
-    expect(() => prepare.ensure("ws2", "conv-0001")).toThrow(expect.objectContaining({ code: "root_unusable" })); // a symlinked root
+    expect(() => prepare.ensure("ws2", "conv-0001")).toThrow(expect.objectContaining({ code: "not_directory" })); // a symlinked outputs root
   });
   test("the host asks the preparer for each outputs root the set names, before it sends; a failure refuses the start", async () => {
     const asked: string[] = [];
