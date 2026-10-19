@@ -5,7 +5,14 @@ import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../agen
 import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
-import type { Mode as SessionMode } from "../agent/tools/registry";
+import type { Mode as RunnableMode } from "../agent/tools/registry";
+
+/**
+ * The modes the bridge can be constructed for: the runnable ones plus `cowork`, so a Cowork session reaches the bridge as itself and
+ * not through a `mode: "code"` stand-in. (Alias of the session door's `DrivableSessionMode` once that lands; the bridge's own Code,
+ * chat and dispatch logic never sees `cowork` - it routes to `cowork-approval.ts`, and a `cowork` bridge without its ports denies.)
+ */
+export type SessionMode = RunnableMode | "cowork";
 import { projectScopeRootFor } from "./run-home-input";
 import { protectedPathsFor, protectedWriteDecision } from "./protected-paths";
 import { bashProtectedWriteHit } from "./hooks";
@@ -598,8 +605,10 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       return await askQuestion(ctx.toolUseID, input, ctx);
     }
 
-    // (1c) COWORK: the host policy matrix decides, off the gate entirely. See `CanUseToolDeps.cowork`.
+    // (1c) COWORK: the host policy matrix decides, off the gate entirely. See `CanUseToolDeps.cowork`. A `cowork`-mode bridge
+    // built without its ports has no policy to apply and denies everything (fail closed).
     if (deps.cowork !== undefined) return await coworkCanUse(deps.cowork, toolName, input, ctx);
+    if (deps.mode === "cowork") return { behavior: "deny", message: `${toolName} was not run — this Cowork conversation has no approval policy wired, so it fails closed.` };
 
     // (2) THE CONTROL-PLANE FENCE (P8b-27b) — before the gate, under EVERY policy, `bypass`
     // included.

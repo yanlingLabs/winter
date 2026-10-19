@@ -545,6 +545,28 @@ test("the review is bounded: a reviewer that never answers is aborted at the tim
   expect(await run).toMatchObject({ behavior: "deny" }); expect(g.events).toEqual([]);
 });
 
+test('mode "cowork" is accepted by the bridge type, routes to the projection, and without its ports denies everything', async () => {
+  const events: NewSessionEvent[] = [];
+  const machine = new CoworkPolicyTransitionMachine(state("ask"), { closeAdmission: async () => {}, drain: async () => "drained", installView: async () => {} });
+  const ports: CoworkApprovalPorts = { identity: () => ({ workspaceId: "ws-7", sourceRevision: 12 }), snapshot: () => machine.snapshot(), classifyPath, planViewInstalled: () => true };
+  const approvals = new ApprovalBroker();
+  const make = (withPorts: boolean) => canUseToolFor({
+    sessionId: SESSION, mode: "cowork", policy: "auto", approvals, questions: new QuestionBroker(), gate: new PermissionGate(), cwd: "/workspace/repos/app",
+    emit: e => { events.push(e); }, log: silent, now: () => NOW, ...(withPorts ? { cowork: ports } : {}),
+  }) as unknown as Bridge;
+  const routed = make(true);
+  // The Cowork matrix, not the gate, decided: an unknown class is denied with Cowork's own words, and ask raises a Cowork-worded card.
+  expect(await routed("TaskCreate", {}, ctx())).toMatchObject({ behavior: "deny", message: coworkDeniedMessage("TaskCreate", "unknown_tool_class") });
+  const pending = routed("Write", { file_path: "/workspace/repos/app/a.ts", content: "" }, ctx()); await tick();
+  expect((events[0] as { summary: string }).summary).toContain("Cowork workspace ws-7");
+  approvals.resolve(SESSION, "tu1", true, "mac"); expect((await pending)!.behavior).toBe("allow");
+  // A cowork bridge with no ports is closed, whatever the tool or the stored policy.
+  events.length = 0;
+  const closed = make(false);
+  for (const [tool, input] of [READ, WRITE, BASH, ["TaskCreate", {}]] as const) expect(await closed(tool, { ...input }, ctx())).toMatchObject({ behavior: "deny" });
+  expect(events).toEqual([]);
+});
+
 test("an aborted turn is denied with no event and no broker entry", async () => {
   const controller = new AbortController(); controller.abort();
   const h = build(state("ask"));
