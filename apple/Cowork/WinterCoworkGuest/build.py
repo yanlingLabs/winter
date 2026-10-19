@@ -30,8 +30,14 @@ PROGRAMS = {
 }
 HEADERS = [
     "common/ctl.h", "common/ring.h", "common/wmx.h", "init/boot.h", "init/discover.h", "init/ext4sb.h", "init/mounts.h",
-    "init/skeleton.h", "init/trusted_config.h",
+    "init/skeleton.h", "init/standin_hooks.h", "init/trusted_config.h",
 ]
+# The STAND-IN image's PID 1 (docs/research/2026-10-19-n2-standin-image-design.md): the same program plus the stand-in lifecycle, built only with `--profile standin`.
+# It is never part of PROGRAMS, so the production build, the production pins and the production cpio cannot contain it.
+STANDIN_PROGRAMS = {"init-standin": PROGRAMS["init"] + ["init/standin.c", "init/standin_linux.c"]}
+STANDIN_FLAGS = ["-DWG_STANDIN=1"]
+STANDIN_HEADERS = HEADERS + ["init/standin.h", "init/standin_linux.h"]
+STANDIN_SCRIPTS = {"standin_prepare.py": "standin/standin_prepare.py", "profile.json": "standin/profile.json"}
 # The Python half of the guest image: copied byte for byte into the cpio by image.py.
 SCRIPTS = {"guest_bootstrap.py": "bootstrap/guest_bootstrap.py"}
 
@@ -49,17 +55,21 @@ def source_digest(names):
     return digest.hexdigest()
 
 
-def compile_program(zig, name, out_dir, cache):
+def compile_program(zig, name, out_dir, cache, programs=PROGRAMS, extra_flags=()):
     env = {"PATH": "/usr/bin:/bin", "ZIG_GLOBAL_CACHE_DIR": str(cache / "global"), "ZIG_LOCAL_CACHE_DIR": str(cache / "local"), "HOME": str(cache)}
-    sources = [str(HERE / source) for source in PROGRAMS[name]]
-    command = [str(zig), "cc", *COMMON_FLAGS, f"-ffile-prefix-map={HERE}=/winter-guest", *sources, "-o", str(out_dir / name)]
+    sources = [str(HERE / source) for source in programs[name]]
+    command = [str(zig), "cc", *COMMON_FLAGS, *extra_flags, f"-ffile-prefix-map={HERE}=/winter-guest", *sources, "-o", str(out_dir / name)]
     result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=600)
     if result.returncode != 0:
         raise SystemExit(f"{name}: compile failed\n{result.stderr[-4000:]}")
     return out_dir / name
 
 
-def build(zig, out):
+def build(zig, out, profile="production"):
+    if profile not in ("production", "standin"):
+        raise SystemExit("profile must be production or standin")
+    standin = profile == "standin"
+    programs, extra_flags, headers, scripts = (STANDIN_PROGRAMS, STANDIN_FLAGS, STANDIN_HEADERS, STANDIN_SCRIPTS) if standin else (PROGRAMS, [], HEADERS, SCRIPTS)
     zig = Path(zig).resolve()
     version = subprocess.run([str(zig), "version"], capture_output=True, text=True, check=True).stdout.strip()
     if version != ZIG_VERSION:
@@ -67,13 +77,13 @@ def build(zig, out):
     out = Path(out).resolve()
     out.mkdir(parents=True)
     results = {}
-    for name in PROGRAMS:
+    for name in programs:
         first = out / "pass1"
         second = out / "pass2"
         first.mkdir(exist_ok=True)
         second.mkdir(exist_ok=True)
-        compile_program(zig, name, first, out / "cache1")
-        compile_program(zig, name, second, out / "cache2")
+        compile_program(zig, name, first, out / "cache1", programs, extra_flags)
+        compile_program(zig, name, second, out / "cache2", programs, extra_flags)
         a, b = sha256(first / name), sha256(second / name)
         if a != b:
             raise SystemExit(f"{name}: two builds differ ({a} vs {b}); the digest could not be pinned")
@@ -82,10 +92,10 @@ def build(zig, out):
             raise SystemExit(f"{name}: a builder path leaked into the binary")
         (out / name).write_bytes(data)
         os.chmod(out / name, 0o555)
-        results[name] = {"binarySha256": a, "bytes": len(data), "sourceSha256": source_digest(PROGRAMS[name] + HEADERS)}
+        results[name] = {"binarySha256": a, "bytes": len(data), "sourceSha256": source_digest(programs[name] + headers)}
     receipt = {
-        "formatVersion": 1, "target": TARGET, "zig": version, "flags": COMMON_FLAGS, "programs": results,
-        "scripts": {name: {"sha256": sha256(HERE / path)} for name, path in SCRIPTS.items()},
+        "formatVersion": 1, "profile": profile, "target": TARGET, "zig": version, "flags": COMMON_FLAGS + list(extra_flags), "programs": results,
+        "scripts": {name: {"sha256": sha256(HERE / path)} for name, path in scripts.items()},
         "executed": False,
     }
     (out / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
@@ -110,9 +120,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--zig", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--profile", choices=["production", "standin"], default="production", help="standin builds init-standin only, for the separate stand-in test image")
     parser.add_argument("--update-pins", type=Path, help="write the resulting digests into this pins.json (the guest section)")
     args = parser.parse_args()
-    receipt = build(args.zig, args.out)
+    if args.profile == "standin" and args.update_pins:
+        raise SystemExit("the stand-in build never writes the production pins")
+    receipt = build(args.zig, args.out, args.profile)
     if args.update_pins:
         update_pins(receipt, args.update_pins)
     print(json.dumps(receipt, indent=2, sort_keys=True))

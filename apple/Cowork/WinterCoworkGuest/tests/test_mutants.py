@@ -128,6 +128,93 @@ MUTANTS = [
     ("init/boot.c", r'static char runtime_buffer[WG_CONFIG_RUNTIME_MAX + 1];', r'static char runtime_buffer[4096u + 1];', "cboot"),
     ("bootstrap/guest_bootstrap.py", r'                config["guidanceDirectory"] = GUIDANCE_DIRECTORY', r'                pass', "bootstrap"),
     ("bootstrap/guest_bootstrap.py", r'GUIDANCE_DIRECTORY = "/run/winter/shared-instructions"', r'GUIDANCE_DIRECTORY = "/run/winter/shared"', "bootstrap"),
+    # ---- the stand-in lifecycle (init/standin.c), the stand-in effects (init/standin_linux.c) and the metadata composer (standin/standin_prepare.py)
+    ('init/standin.c', '    if (s->state != WG_SI_NONE) return;', '    if (0) return;', 'standin'),
+    ('init/standin.c', '    if (s->items_length == 0) {', '    if (0) {', 'standin'),
+    ('init/standin.c', '    s->items_length = 0;   /* nothing is kept unless every check below passes */\n', '', 'standin'),
+    ('init/standin.c', 's->items, s->items_length) != 0) { fail(s, "standin-prepare-failed"); return; }', 's->items, s->items_length) == 0) { fail(s, "standin-prepare-failed"); return; }', 'standin'),
+    ('init/standin.c', 'if (listener < 3) {', 'if (listener < 0) {', 'standin'),
+    ('init/standin.c', '    s->listener_fd = listener;\n', '', 'standin'),
+    ('init/standin.c', 'now_ms(s->ops->ctx) + WG_STANDIN_LOCATE_MS;', 'now_ms(s->ops->ctx);', 'standin'),
+    ('init/standin.c', 'now_ms(s->ops->ctx) >= s->deadline_ms', 'now_ms(s->ops->ctx) > s->deadline_ms', 'standin'),
+    ('init/standin.c', 'if (pidfd < 0) { fail(s, "standin-runtime-refused"); return; }', 'if (pidfd < 0) { return; }', 'standin'),
+    ('init/standin.c', '    if (s->state != WG_SI_LISTENING) return;\n    int pidfd', '    int pidfd', 'standin'),
+    ('init/standin.c', '    s->ops->close_fd(s->ops->ctx, pidfd);', '    (void)pidfd;', 'standin'),
+    ('init/standin.c', 'if (started != 0) {', 'if (0) {', 'standin'),
+    ('init/standin.c', '    s->ops->close_fd(s->ops->ctx, s->listener_fd); /* the worker holds', '    (void)s; /* the worker holds', 'standin'),
+    ('init/standin.c', '    s->listener_fd = -1;\n    s->worker = worker;', '    s->worker = worker;', 'standin'),
+    ('init/standin.c', 'if (s->state != WG_SI_RUNNING || pid != s->worker) return;', 'if (s->state != WG_SI_RUNNING) return;', 'standin'),
+    ('init/standin.c', '    s->worker = 0;\n    s->state = WG_SI_FAILED;   /* never restarted', '    s->worker = 0;\n    s->state = WG_SI_RUNNING;   /* never restarted', 'standin'),
+    ('init/standin.c', '    if (s->state == WG_SI_RUNNING) s->ops->stop_worker(s->ops->ctx, s->worker);', '    if (0) s->ops->stop_worker(s->ops->ctx, s->worker);', 'standin'),
+    ('init/standin.c', '    if (s->listener_fd >= 3) s->ops->close_fd(s->ops->ctx, s->listener_fd);\n    s->listener_fd = -1;\n    s->worker = 0;\n    s->state = WG_SI_STOPPED;', '    s->listener_fd = -1;\n    s->worker = 0;\n    s->state = WG_SI_STOPPED;', 'standin'),
+    ('init/standin.c', 'set->json_length < 2', 'set->json_length < 1', 'standin'),
+    ('init/standin.c', 'set->json_length > WG_STANDIN_ITEMS_MAX', 'set->json_length >= WG_STANDIN_ITEMS_MAX', 'standin'),
+    ('init/standin.c', '    if (sid_length < 1) return -1;\n', '', 'standin'),
+    ('init/standin.c', 'return s->state == WG_SI_LISTENING ?', 'return s->state != WG_SI_NONE ?', 'standin'),
+    ('init/standin.c', '    s->listener_fd = -1;\n    s->state = WG_SI_FAILED;\n    note(s, code);', '    s->listener_fd = -1;\n    note(s, code);', 'standin'),
+    ('init/standin.c', '    if (s->listener_fd >= 3) s->ops->close_fd(s->ops->ctx, s->listener_fd);\n    s->listener_fd = -1;\n    s->state = WG_SI_FAILED;', '    s->listener_fd = -1;\n    s->state = WG_SI_FAILED;', 'standin'),
+    ('init/standin.c', 'memcpy(s->items, set->json, set->json_length);', 's->items[0] = 0;', 'standin'),
+    ('init/standin.c', '    s->runtime_uid = set->runtime_uid[0];\n', '', 'standin'),
+    ('init/standin.c', 'set->profile != 1 ||', 'set->profile > 2 ||', 'standin'),
+    ('init/standin.c', ' || set->count != 1 ||', ' ||', 'standin'),
+    ('standin/standin_prepare.py', 'WORKER_UID = 65534', 'WORKER_UID = 65533', 'prepare'),
+    ('standin/standin_prepare.py', 'or len(answers) != 2 or', 'or len(answers) > 2 or', 'prepare'),
+    ('standin/standin_prepare.py', '0x20 <= ord(c) <= 0x7E', '0x20 <= ord(c) <= 0x7F', 'prepare'),
+    ('standin/standin_prepare.py', '0x20 <= ord(c) <= 0x7E', '0x1F <= ord(c) <= 0x7E', 'prepare'),
+    ('standin/standin_prepare.py', '1 <= len(text) <= limit', '0 <= len(text) <= limit', 'prepare'),
+    ('standin/standin_prepare.py', '1 <= len(text) <= limit', '1 <= len(text) <= limit + 1', 'prepare'),
+    ('standin/standin_prepare.py', '    if raw != canonical(profile).encode("ascii") + b"\\n":\n        refuse("profile")\n', '', 'prepare'),
+    ('standin/standin_prepare.py', 'profile["workerUid"] != WORKER_UID or type(profile["workerUid"]) is not int', 'type(profile["workerUid"]) is not int', 'prepare'),
+    ('standin/standin_prepare.py', 'profile["workerUid"] != WORKER_UID or type(profile["workerUid"]) is not int', 'profile["workerUid"] != WORKER_UID', 'prepare'),
+    ('standin/standin_prepare.py', 'set(profile) != PROFILE_KEYS or', '', 'prepare'),
+    ('standin/standin_prepare.py', 'selection["providerId"] != "winter-standin" or selection["modelKey"] != "winter-standin/scripted"', 'selection["modelKey"] != "winter-standin/scripted"', 'prepare'),
+    ('standin/standin_prepare.py', 'selection["providerId"] != "winter-standin" or selection["modelKey"] != "winter-standin/scripted"', 'selection["providerId"] != "winter-standin"', 'prepare'),
+    ('standin/standin_prepare.py', 'set(selection) != SELECTION_KEYS or', '', 'prepare'),
+    ('standin/standin_prepare.py', '    if len(found) != 1:', '    if len(found) < 1:', 'prepare'),
+    ('standin/standin_prepare.py', 'not 1000 <= uid <= 65533', 'not 999 <= uid <= 65533', 'prepare'),
+    ('standin/standin_prepare.py', 'not 1000 <= uid <= 65533', 'not 1000 <= uid <= 65534', 'prepare'),
+    ('standin/standin_prepare.py', 'type(uid) is not int or', '', 'prepare'),
+    ('standin/standin_prepare.py', ' or set(item) & {"hostQueryGuidedRuntime"}', '', 'prepare'),
+    ('standin/standin_prepare.py', 'set(provider) != {"scope", "selection"}', '"scope" not in provider', 'prepare'),
+    ('standin/standin_prepare.py', 'provider["selection"] != profile["selection"] or config.get("model") != profile["selection"]["modelKey"]', 'config.get("model") != profile["selection"]["modelKey"]', 'prepare'),
+    ('standin/standin_prepare.py', 'provider["selection"] != profile["selection"] or config.get("model") != profile["selection"]["modelKey"]', 'provider["selection"] != profile["selection"]', 'prepare'),
+    ('standin/standin_prepare.py', 'not isinstance(scope, dict) or set(scope) != set(SCOPE_KEYS)', 'not isinstance(scope, dict)', 'prepare'),
+    ('standin/standin_prepare.py', 'elif type(value) is not int or not 1 <= value <= SAFE_INT:', 'elif not isinstance(value, int) or not 1 <= value <= SAFE_INT:', 'prepare'),
+    ('standin/standin_prepare.py', 'elif type(value) is not int or not 1 <= value <= SAFE_INT:', 'elif type(value) is not int or not 0 <= value <= SAFE_INT:', 'prepare'),
+    ('standin/standin_prepare.py', 'elif type(value) is not int or not 1 <= value <= SAFE_INT:', 'elif type(value) is not int or not 1 <= value:', 'prepare'),
+    ('standin/standin_prepare.py', '            if not printable(value, ID_MAX):', '            if not isinstance(value, str):', 'prepare'),
+    ('standin/standin_prepare.py', 'ID_MAX = 256', 'ID_MAX = 100000', 'prepare'),
+    ('standin/standin_prepare.py', '"selection": profile["selection"],', '"selection": {},', 'prepare'),
+    ('standin/standin_prepare.py', '"system": [], "user": [], "absentSystem": [], "absentUser": []', '"system": ["x"], "user": [], "absentSystem": [], "absentUser": []', 'prepare'),
+    ('standin/standin_prepare.py', 'for answer in profile["answers"]]', 'for answer in profile["answers"][:1] * 2]', 'prepare'),
+    ('standin/standin_prepare.py', 'hashlib.sha256(script_text.encode("ascii")).hexdigest()', 'hashlib.sha256(script_text.encode("ascii") + b" ").hexdigest()', 'prepare'),
+    ('standin/standin_prepare.py', '"version": 1, "runtimeUid": uid,', '"version": 2, "runtimeUid": uid,', 'prepare'),
+    ('standin/standin_prepare.py', 'os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o444)', 'os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o444)', 'prepare'),
+    ('standin/standin_prepare.py', 'os.O_CLOEXEC, 0o444)', 'os.O_CLOEXEC, 0o644)', 'prepare'),
+    ('standin/standin_prepare.py', 'os.makedirs(directory, mode=0o755, exist_ok=True)', 'os.makedirs(directory, mode=0o700, exist_ok=True)', 'prepare'),
+    ('standin/standin_prepare.py', '        if not stat.S_ISREG(os.fstat(descriptor).st_mode):\n            refuse("input")\n', '', 'prepare'),
+    ('standin/standin_prepare.py', '    if len(data) > INPUT_MAX:', '    if len(data) > INPUT_MAX * 4:', 'prepare'),
+    ('standin/standin_prepare.py', 'os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)', 'os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)', 'prepare'),
+    ('standin/standin_prepare.py', 'os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)', 'os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)', 'prepare'),
+    ('standin/standin_prepare.py', '        return 2\n    except OSError:', '        return 0\n    except OSError:', 'prepare'),
+    ('standin/standin_prepare.py', '        print("standin-refused " + error.code)', '        print("standin-refused " + error.code + " " + str(error))', 'prepare'),
+    ('standin/standin_prepare.py', '    except Refused as error:', '    except ZeroDivisionError as error:', 'prepare'),
+    ('standin/standin_prepare.py', '        if os.geteuid() == 0:\n            os.fchown(descriptor, 0, 0)\n', '        os.fchown(descriptor, 0, 0)\n', 'prepare'),
+    ('init/standin_linux.c', 'if (ids[i] != uid) return 0;', 'if (0) return 0;', 'standinlinux'),
+    ('init/standin_linux.c', '    if (found > 1) return -1;\n', '', 'standinlinux'),
+    ('init/standin_linux.c', 'if (*end || value < 2 ||', 'if (*end || value < 1 ||', 'standinlinux'),
+    ('init/standin_linux.c', 'if (!strcmp(target, exe)) return 1;', 'return 1;', 'standinlinux'),
+    ('init/standin_linux.c', 'if (!strcmp(text, comm)) return 1;', 'return 1;', 'standinlinux'),
+    ('init/standin_linux.c', "char marker = 'I';", "char marker = 'J';", 'standinlinux'),
+    ('init/standin_linux.c', '    return wait_child(child, 10000) == 0 ? 0 : -1;', '    return wait_child(child, 10000) == 0 ? 0 : 0;', 'standinlinux'),
+    ('init/standin_linux.c', '        for (int fd = 7; fd < 1024; fd++) close(fd);\n', '', 'standinlinux'),
+    ('init/standin_linux.c', 'static char *const WORKER_ENV[] = { NULL };', 'static char *const WORKER_ENV[] = { "A=1", NULL };', 'standinlinux'),
+    ('init/standin_linux.c', '        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(125);\n', '', 'standinlinux'),
+    ('init/standin_linux.c', 'dup2(null_fd, 0) < 0', 'dup2(out, 0) < 0', 'standinlinux'),
+    ('init/standin_linux.c', '"--listener-fd", "3", "--admission-fd", "4"', '"--admission-fd", "4", "--listener-fd", "3"', 'standinlinux'),
+    ('init/standin_linux.c', '    int sent = wg_standin_send_admission(pair[0], pidfd);', '    int sent = 0;', 'standinlinux'),
+    ('init/standin_linux.c', 'for (int i = 0; i < 4; i++) if (dup2(temporary[i], 3 + i) < 0) _exit(122);', 'for (int i = 0; i < 4; i++) if (dup2(temporary[i], 4 + i) < 0) _exit(122);', 'standinlinux'),
+    ('init/standin_linux.c', '    if (process_matches(p->proc_root, pid, uid, p->runtime_exe, p->runtime_comm) != 1) { close(pidfd); return -1; }\n', '', 'standinlinux'),
 ]
 
 SUITES = {
@@ -139,6 +226,9 @@ SUITES = {
     "hygiene": ("tests", "test_hygiene.py", []),
     "bootstrap": ("bootstrap", "test_guest_bootstrap.py", []),
     "guided": ("tests", "test_guided_config.py", []),
+    "standin": ("tests", "test_standin.py", []),
+    "prepare": ("tests", "test_standin_prepare.py", []),
+    "standinlinux": ("tests", "test_standin_linux.py", []),
 }
 
 
@@ -154,8 +244,11 @@ def run_mutant(mutant):
             return "STALE"
         path.write_text(text.replace(old, new, 1))
         directory, script, arguments = SUITES[suite]
-        result = subprocess.run([sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(copy / directory), "-p", script, *arguments],
-                                capture_output=True, text=True, timeout=900)
+        try:
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(copy / directory), "-p", script, *arguments],
+                                    capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            return "KILLED"   # a mutant that makes the suite hang is caught by the hang
         return "KILLED" if result.returncode != 0 else "SURVIVED"
     finally:
         shutil.rmtree(folder, ignore_errors=True)
@@ -164,7 +257,7 @@ def run_mutant(mutant):
 @unittest.skipUnless(CC, "no C compiler")
 class MutantTests(unittest.TestCase):
     def test_every_mutant_is_caught_by_its_suite(self):
-        runnable = [m for m in MUTANTS if m[3] != "pid1" or LINUX]
+        runnable = [m for m in MUTANTS if m[3] not in ("pid1", "standinlinux") or LINUX]
         with ThreadPoolExecutor(4) as pool:
             outcomes = list(pool.map(run_mutant, runnable))
         for mutant, outcome in zip(runnable, outcomes):

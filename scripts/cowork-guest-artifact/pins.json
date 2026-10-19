@@ -101,11 +101,11 @@
     "programs": {
       "init": {
         "binarySha256": "dede7fd9ddc9eb954c29cb989b689e059f6f3b223618c4f66a392f13aee6f498",
-        "sourceSha256": "231aeafe9276ff5251c5a92efdf522f807805aa3807b28d0f01247c1d597b913"
+        "sourceSha256": "5db72f197eb829d9a5be439ecfdbf081bf6f463468e0ee5bb07710d4e959efee"
       },
       "winter-guest-relay": {
         "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",
-        "sourceSha256": "a48cfea696d832294419dc274c065027c14c928aedc5170e7775ce31d0c8dadb"
+        "sourceSha256": "d5a721f91e6e3ba62b76dba80bc82c16322277116a4401a729d4f93fd6608c4c"
       }
     },
     "scripts": {
