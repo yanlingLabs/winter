@@ -30,7 +30,10 @@ import type { CoworkTransitionSnapshot } from "../cowork/policy-transition";
 /** What the host supplies for ONE Cowork conversation. Every member is read per call (a policy change reaches the next one). */
 export interface CoworkApprovalPorts {
   /** Who the card belongs to: the workspace and the source revision the conversation is bound at. */
-  identity(): { readonly workspaceId: string; readonly sourceRevision: number };
+  identity(): { readonly workspaceId: string; readonly sourceRevision: number; readonly outputsFolder?: string };
+  /** The conversation's CURRENT policy epoch (the machine's `epoch`). `/workspace/plan/<sid>/<epoch>` is the plan scratch of exactly this
+   *  epoch; absent or not a non-negative safe integer, no path is the plan scratch. Never read from a path. */
+  planScratchEpoch?(): number | undefined;
   /** The policy-transition machine's snapshot. `effective` is the policy and ceiling in force; while a narrowing is pending
    *  or failed, `admission` says whether new work may start. */
   snapshot(): CoworkTransitionSnapshot;
@@ -104,10 +107,13 @@ const SAFE_SESSION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
  * `/workspace/.winter/scratch/<its session id>`. Whatever the host classified, a path in ANOTHER conversation's folder, or the
  * `/workspace/outputs` root itself, is `outside` (denied for every tool). The identity is the bridge's own session id, never the guest's.
  */
-function ownFolderOnly(hostClass: string, absolute: string, sessionId: string | undefined): string {
-  if (hostClass !== "outputs" && hostClass !== "scratch") return hostClass;
+function ownFolderOnly(hostClass: string, absolute: string, sessionId: string | undefined, planEpoch?: number): string {
+  if (hostClass !== "outputs" && hostClass !== "scratch" && hostClass !== "planScratch") return hostClass;
   if (sessionId === undefined || !SAFE_SESSION_SEGMENT.test(sessionId)) return "outside";
-  const own = hostClass === "outputs" ? `/workspace/outputs/${sessionId}` : `/workspace/.winter/scratch/${sessionId}`;
+  // The plan scratch is `/workspace/plan/<sid>/<current epoch>`: both parts are the bridge's own, the epoch from the port.
+  if (hostClass === "planScratch" && (planEpoch === undefined || !Number.isSafeInteger(planEpoch) || planEpoch < 0)) return "outside";
+  const own = hostClass === "outputs" ? `/workspace/outputs/${sessionId}`
+    : hostClass === "scratch" ? `/workspace/.winter/scratch/${sessionId}` : `/workspace/plan/${sessionId}/${planEpoch}`;
   return absolute === own || absolute.startsWith(`${own}/`) ? hostClass : "outside";
 }
 
@@ -154,7 +160,9 @@ export function projectCoworkCall(
     const klass = classFor(call.toolName, input, cwd);
     const explicit = ports.explicit?.({ toolName: call.toolName, input });
     // A file tool with no resolvable target, and Bash/Workflow, carry the path class `none` (the matrix denies the former).
-    const classify = (absolute: string): string => ownFolderOnly(ports.classifyPath(absolute), absolute, call.sessionId);
+    let planEpoch: number | undefined;
+    try { planEpoch = ports.planScratchEpoch?.(); } catch { planEpoch = undefined; }
+    const classify = (absolute: string): string => ownFolderOnly(ports.classifyPath(absolute), absolute, call.sessionId, planEpoch);
     const path = klass?.path === undefined ? "none" : classify(klass.path);
     const decide = (pathClass: string) => coworkHostDecision({
       // An unmapped wire name can never spell a known class by accident: it is prefixed.
@@ -194,6 +202,7 @@ export function coworkDeniedMessage(toolName: string, reason: CoworkDenyReason):
     case "read_only_view": return `${head}the shared workspace instructions are read-only to tools; propose a change through the workspace instruction update, which asks the user.`;
     case "path_class_mismatch": return `${head}this operation applies only to the shared workspace instructions.`;
     case "ceiling": return `${head}this conversation's capability ceiling does not grant this kind of action.`;
+    case "plan_scratch_only_in_plan": return `${head}the planning scratch is writable only while this conversation is in plan mode.`;
     case "policy_table": return `${head}the approval policy of this conversation does not permit it.`;
   }
 }
@@ -203,7 +212,9 @@ export function coworkCardPrefix(ports: CoworkApprovalPorts, agentID: string | u
   let who = "Cowork workspace (unknown)";
   try {
     const identity = ports.identity();
-    who = `Cowork workspace ${identity.workspaceId} (source revision ${identity.sourceRevision}, agent ${agentID ?? "main"})`;
+    // A conversation that lives in its outputs folder has no source revision to name (it reads "0"): name the folder instead.
+    const where = typeof identity.outputsFolder === "string" && identity.outputsFolder !== "" ? `outputs folder ${identity.outputsFolder}` : `source revision ${identity.sourceRevision}`;
+    who = `Cowork workspace ${identity.workspaceId} (${where}, agent ${agentID ?? "main"})`;
   } catch { /* the card still raises, with the generic prefix */ }
   return `${who} — `;
 }

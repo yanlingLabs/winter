@@ -82,7 +82,8 @@ export const CoworkPolicyValue = z.discriminatedUnion("detailState", [
   z.object({ detailState: z.literal("summary"), detailReason: z.literal("response_limit"), policySummary: CoworkPolicySummary, detailMethod: z.literal("workspace.policy.get") }).strict(),
 ]);
 export const CoworkPolicyReceipt = receipt(CoworkPolicyValue);
-export const CoworkCapabilities = z.object({ folderPreparation: z.boolean(), repositoryPreparation: z.literal(false), provisioning: z.literal(false), execution: z.literal(false) }).strict();
+/** Session door D4b: `provisioning` and `execution` are the ports the daemon actually has (both false on every production daemon), never a constant. */
+export const CoworkCapabilities = z.object({ folderPreparation: z.boolean(), repositoryPreparation: z.literal(false), provisioning: z.boolean(), execution: z.boolean() }).strict();
 export const CoworkPreparedFolder = z.object({ selectionId: Id, kind: z.literal("folder"), label: Label, access: z.enum(["read-only", "read-write"]), state: z.literal("prepared"), expiresAt: z.string() }).strict();
 export const CoworkScheduleDefinition = z.object({
   target: z.discriminatedUnion("kind", [z.object({ kind: z.literal("conversation"), sessionId: Id }).strict(), z.object({ kind: z.literal("project"), projectId: Id }).strict()]),

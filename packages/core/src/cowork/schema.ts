@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 export const COWORK_BACKUP_EXCLUDED_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox"] as const;
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_binding", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_session_reservations", "cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_binding", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -339,4 +339,22 @@ export function migrateCoworkSessionBindingSchema(db: Database): void {
     ALTER TABLE cowork_conversations_v18 RENAME TO cowork_conversations;
     CREATE INDEX IF NOT EXISTS cowork_conversations_workspace ON cowork_conversations(workspace_id);
   `);
+}
+
+/** v19, session door D4 (docs/research/2026-10-18-cowork-session-door-d4.md): the durable first step of a Cowork
+ * `session.create`. One row per (principal, workspace, requestId) reserves the conversation's session id and the digest of
+ * the request it answers, in one runtime-state transaction, BEFORE the session store row or the binding exist. A retry
+ * finds it and resumes at the missing step (store row, then binding); a different request under the same id is
+ * `request_conflict`. `session_id` is unique, so two requests can never reserve one id, and a standalone workspace's
+ * single conversation (its `owner_id`) is reserved at most once. `state` is `pending` until the binding commits, then
+ * `bound`. It is Cowork authority (COWORK_TABLES), so a populated table refuses both downgrades.
+ * Records only: no production door constructs the module that writes it. Idempotent (`IF NOT EXISTS`). */
+export function migrateCoworkSessionReservationSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_session_reservations (
+    principal_id TEXT NOT NULL, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+    request_id TEXT NOT NULL, request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+    session_id TEXT NOT NULL UNIQUE CHECK(session_id GLOB 's_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]' AND length(session_id)=14),
+    scope TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','bound')), created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,workspace_id,request_id)
+  );`);
 }

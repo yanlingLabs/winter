@@ -107,6 +107,7 @@ import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttac
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
 import { CAPABILITY_PLAIN_NAMES, permissionModeFor, toolSurfaceViolations } from "./mode-options";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import type { DrivableSessionMode } from "../sessions/session-mode";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 import { clearQueuedInput, hostInputFoldedCount, runtimeFolds } from "./fold";
@@ -228,7 +229,9 @@ export interface WinterSessionDeps {
   /** The BACKEND uuid allocated by the creation transaction: `Options.sessionId` on a fresh start,
    *  `Options.resume` afterwards, the messaging address, the name of the child's transcript. */
   backendSessionId: string;
-  mode: SessionMode;
+  /** A Cowork conversation's driver (cowork/session-driver.ts) passes "cowork": the only mode beyond the runnable three,
+   *  admitted here and nowhere in the Options/prompt/tool/run-home builders (sessions/session-mode.ts). */
+  mode: DrivableSessionMode;
   runtime: WinterRuntimeSdk;
   /** `Options` for ONE incarnation. Re-reads the session's LIVE facts (model, effort, policy) and
    *  re-resolves the spawn hook, so a `session.setModel` while resumable is honoured on resume. May
@@ -264,7 +267,10 @@ export interface WinterSessionDeps {
   append: (event: NewSessionEvent) => SessionEvent;
   /** Broadcast one TRANSIENT (the hub's `broadcastTransient`). Never persisted. */
   broadcast: (event: NewSessionEvent) => void;
-  messaging: {
+  /** The router's directory attach. REQUIRED for every runnable mode (the constructor refuses without it); a Cowork
+   *  conversation passes none: its `attach` takes only the router's run modes, and same-Project messaging reaches a Cowork
+   *  conversation through the host peer inbox instead (session door design section 3). */
+  messaging?: {
     /** Task 12's door. */
     attach: typeof attachWinterSession;
     /** Attachment facts beyond the pinned four, read at attach time (title, cwd, selection…). */
@@ -372,7 +378,7 @@ export function unconsumedUserMessages(events: readonly SessionEvent[]): string[
 export interface WinterSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  readonly mode: DrivableSessionMode;
   readonly state: WinterSessionState;
   /** The 8a generation of the current (or last) incarnation; 0 before the first opens. */
   readonly generation: number;
@@ -533,7 +539,7 @@ export function startWinterSession(deps: WinterSessionDeps): WinterSession {
 class WinterSessionImpl implements WinterSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  readonly mode: DrivableSessionMode;
   private stateValue: WinterSessionState = "resumable";
   private inc: Incarnation | undefined;
   private lastDone: Promise<void> = Promise.resolve();
@@ -590,6 +596,7 @@ class WinterSessionImpl implements WinterSession {
   private heldForHandoff = 0;
 
   constructor(private readonly deps: WinterSessionDeps) {
+    if (deps.mode !== "cowork" && deps.messaging === undefined) throw new TypeError(`a ${deps.mode} session needs the router's messaging attach`);
     this.sessionId = deps.sessionId;
     this.backendSessionId = deps.backendSessionId;
     this.mode = deps.mode;
@@ -1489,8 +1496,12 @@ class WinterSessionImpl implements WinterSession {
 
   private attachMessaging(inc: Incarnation): void {
     if (inc.attachment !== undefined) return;
+    // A Cowork conversation never enters the router's directory: same-Project messaging reaches it through the host peer
+    // inbox, and the router's run modes do not include it (session door design section 3).
+    const messaging = this.deps.messaging;
+    if (this.mode === "cowork" || messaging === undefined) return;
     try {
-      inc.attachment = this.deps.messaging.attach(this.deps.runtime, {
+      inc.attachment = messaging.attach(this.deps.runtime, {
         sessionId: this.sessionId,
         backendSessionId: this.backendSessionId,
         query: inc.query,
@@ -1499,7 +1510,7 @@ class WinterSessionImpl implements WinterSession {
         generation: inc.generation,
         status: () => (this.inFlight > 0 ? "running" : "idle"),
         log: (line) => this.log(line),
-        ...(this.deps.messaging.facts?.() ?? {}),
+        ...(messaging.facts?.() ?? {}),
       });
     } catch (err) {
       this.log(`messaging attach failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`);

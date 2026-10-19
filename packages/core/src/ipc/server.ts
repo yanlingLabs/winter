@@ -2,7 +2,7 @@ import type { CoworkWorkspaceEvents } from "../cowork/workspace-events";
 import { COWORK_RPC, COWORK_REMOTE_METHODS, type CoworkMethod } from "@yanlinglabs/winter-protocol";
 import { CoworkWorkspaceService } from "../cowork/service";
 import { CoworkError } from "../cowork/types";
-import type { CoworkSessionDoor } from "../cowork/session-ports";
+import type { CoworkSessionDoor, CoworkSessionDrivers } from "../cowork/session-ports";
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
 import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
@@ -1450,6 +1450,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     return { sessionId, trusted };
   }
 
+  /** Session door D4b: a stored Cowork row's driver table, ONLY when a door was passed (tests only until the flip). Without
+   *  one this is undefined and every Cowork refusal below stays exactly as it was. The stored mode only routes: the
+   *  door's drivers re-read the host binding, which alone is authority (a row with no binding refuses there). */
+  function coworkDriversOf(sessionId: string): CoworkSessionDrivers | undefined {
+    const door = opts.coworkSessions;
+    if (door === undefined) return undefined;
+    let stored: string | undefined;
+    try { stored = opts.store.meta(sessionId).mode; } catch { return undefined; }
+    return stored === "cowork" ? door.drivers : undefined;
+  }
+
   /** P8c-14: `session.send`/`session.interrupt`/`session.compact` gate on this BEFORE resuming —
    *  a leg the driver table can actually run a turn on, never `"engine"` (P8b-22's own refusal)
    *  and never `undefined` (no record at all). Widened from a bare `=== "winter"` string check the
@@ -2354,7 +2365,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const providerId = opts.records?.get(s.sessionId)?.providerId;
           // ComputerV2 wake triggers (2026-10-12): the "waiting for you" mark — how many triggers the session has armed.
           const wakesArmed = opts.computerUse?.wakesArmed?.(s.sessionId) ?? 0;
-          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}) };
+          // Session door D4b: a Cowork row's safe workspace reference, from the host binding (never the log's display fact).
+          // A row whose reference cannot be read lists without it: one bad row never fails the whole list.
+          let cowork: { workspaceId: string; projectId: string | null } | undefined;
+          if (s.mode === "cowork") { try { cowork = opts.cowork?.records.conversationRef(s.sessionId); } catch { cowork = undefined; } }
+          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}), ...(cowork === undefined ? {} : { cowork }) };
           if (!participatesInActivity(s.mode)) return { ...s, signals, ...rowFields };
           const dirs = opts.store.dirs(s.sessionId);
           return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...rowFields };
@@ -2514,6 +2529,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
         // under this client's name exactly as `hub.send` would, then begins the turn (P8b-5).
+        // Session door D4b: a Cowork conversation runs on the door's drivers (only when a door exists). Same attachment
+        // check first; images and files were already refused above (they are Code-only).
+        const coworkSend = coworkDriversOf(p.sessionId);
+        if (coworkSend !== undefined) {
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
+          try {
+            const session = coworkSend.get(p.sessionId) ?? await coworkSend.ensure(p.sessionId);
+            return { seq: (await session.send(p.text, socket.data.clientName)).seq };
+          } catch (err) { rpcFromWinterRefusal(err); }
+        }
         if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           // The attachment check FIRST (the same condition and message `hub.send` throws for), so a
           // client attached elsewhere can never trigger a resume-spawn that is then refused.
@@ -2571,6 +2598,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionSteerParams, params);
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
         const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole, images?.length ?? 0);
+        // A Cowork steer reaches only a LIVE driver: `send` is the one door that may start a guest, so a steer never boots one.
+        const coworkSteer = coworkDriversOf(p.sessionId);
+        if (coworkSteer !== undefined) {
+          const live = coworkSteer.get(p.sessionId);
+          if (live === undefined) return { ok: true, injected: false };
+          try { return { ok: true, injected: (await live.steer(p.text)).injected }; } catch (err) { rpcFromWinterRefusal(err); }
+        }
         {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
@@ -2586,6 +2620,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
+        // Session door D4b: a Cowork conversation's interrupt is its driver's (which refuses typed until the guest carries one);
+        // nothing live means nothing was running, and nothing is started to say so.
+        const coworkInterrupt = coworkDriversOf(p.sessionId);
+        if (coworkInterrupt !== undefined) {
+          const live = coworkInterrupt.get(p.sessionId);
+          if (live === undefined) return { ok: true, wasRunning: false };
+          try { return { ok: true, ...(await live.interrupt()) }; } catch (err) { rpcFromWinterRefusal(err); }
+        }
         // P8b Task 16: only a LIVE driver has anything to interrupt; a resumable Winter session has
         // no child, so the answer is "nothing was running" without spawning one to say so.
         {
@@ -2636,6 +2678,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // text typed into the Mac's composer. The outcome lands in the log as a `continuity_warning`
         // (`compacted` / `compaction_failed`, projector/index.ts). Until 0.0.4's carry this was a typed
         // `not_supported_on_winter_leg`; the runtime has had the built-in all along.
+        // A Cowork conversation cannot compact (the host-query guest refuses slash text): refused typed, with a door too.
+        if (coworkDriversOf(p.sessionId) !== undefined) throw coworkSessionUnsupported("cowork");
         if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           const instructions = p.instructions?.trim() ?? "";
           const text = instructions.length > 0 ? `/compact ${instructions}` : "/compact";
