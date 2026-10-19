@@ -10,7 +10,7 @@ import {
 } from "../../src/cowork/session-profile";
 import { confinedToolVisibility } from "../../src/cowork/guest-runtime";
 import { CoworkError } from "../../src/cowork/types";
-import { KNOWN_RUNTIME_BUILTINS } from "../../src/runtime-sdk/mode-options";
+import { KNOWN_RUNTIME_BUILTINS, type CoworkGuestTool } from "../../src/runtime-sdk/mode-options";
 import { DOC_SAMPLE, docBlockProblems, readBlock, renderDocBlocks, syncDocBlocks } from "./session-profile-doc";
 
 const root = (...parts: string[]) => join(import.meta.dir, "..", "..", "..", "..", ...parts);
@@ -351,7 +351,7 @@ describe("tool exposure", () => {
       const files = offered({ toolClasses: classes }).filter((name) => covered.includes(name));
       expect(files).toEqual([has("execute") && "Bash", has("read") && has("write") && "Edit", has("read") && "Read", has("write") && "Write"].filter((name): name is string => typeof name === "string"));
       // Session door D2: the launch derives nothing from the ceiling; it takes the offered list in the guest's order.
-      expect([...confinedToolVisibility(files)].sort()).toEqual(files);
+      expect([...confinedToolVisibility(files as CoworkGuestTool[])].sort() as string[]).toEqual(files);
     }
     expect(offered({ toolClasses: [] })).not.toContain("Read");
     expect(offered({ toolClasses: ["read"] })).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "LSP"]));
@@ -704,7 +704,7 @@ test("anti-wiring, wired behind the refusal: one src importer (mode-options), wh
       expect(`${basename(file)}:${needle}:${content.includes(needle)}`).toBe(`${basename(file)}:${needle}:${allowedIn(file).has(needle)}`);
   }
   const imports = [...MODE_OPTIONS.matchAll(/^import [^;]*session-profile[^;]*;$/gm)].map((match) => match[0]);
-  expect(imports).toEqual(['import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkToolInputs } from "../cowork/session-profile";']);
+  expect(imports).toEqual(['import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkGuestProfileTool, type CoworkToolInputs } from "../cowork/session-profile";']);
   // Who reaches the composition: the guest runtime supervisor alone, and nothing in src constructs a supervisor.
   // (The profile's own header names `coworkToolsFor` in prose; code, not comments, is judged here.)
   const code = (file: string) => readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");

@@ -24,7 +24,7 @@ import { providerFor, testProviderNameFor } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import type { CapabilityServerKey } from "../capabilities/names";
-import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkToolInputs } from "../cowork/session-profile";
+import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkGuestProfileTool, type CoworkToolInputs } from "../cowork/session-profile";
 
 /**
  * **The six Winter policies → Winter's `PermissionMode`** (P8b-7, AMENDED by the whole-branch
@@ -1185,9 +1185,13 @@ export function coworkGuestToolInputs(input: CoworkGuestToolInputs): CoworkToolI
 
 /** The tools a Cowork guest incarnation is offered, sorted: `coworkOfferedTools` over the normalised inputs, so always
  *  within the profile's set. Empty until the host declares `guest-compartment`. */
-export function coworkToolsFor(input: CoworkGuestToolInputs): string[] {
-  return coworkOfferedTools(coworkGuestToolInputs(input));
+export function coworkToolsFor(input: CoworkGuestToolInputs): CoworkGuestTool[] {
+  // Within the profile's set by construction: the normalisation withholds every tool the profile does not carry.
+  return coworkOfferedTools(coworkGuestToolInputs(input)) as CoworkGuestTool[];
 }
+/** A tool a Cowork guest launch can name (the profile's own set). `confinedToolVisibility` takes only these, so a stale
+ *  caller passing ceiling classes or another tool name fails at compile time, not just at run time. */
+export type CoworkGuestTool = CoworkGuestProfileTool;
 
 /** The canonical live Code permission fields, shared by runtime launch and trusted host admission. */
 export function codePermissionsFor(input: {

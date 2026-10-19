@@ -77,3 +77,7 @@ Two inputs are equivalent today, so no mutant targets them: the supervisor's pol
 - The `system/init` check (`toolSurfaceViolations(init.tools, offered, new Set())`, aborting `tool_surface_unenforced`) needs the driver. It is D3's.
 - "No `winter__<key>` server is built for a Cowork incarnation" cannot be observed before a driver exists. D2 pins what can be pinned: the server list is empty, every key is unbuilt, and the guest query carries `mcpServers: {}` with `strictMcpConfig`.
 - **A trap for D3.** The SDK profile's `configKeys` has no `resume`, but `GuestRuntimeLaunch.runtime` adds `resume` whenever `identity.resume` is true, and the guest would refuse that whole launch. D3's driver must answer `cold_resume_unavailable` (G6) before it ever builds a resume launch.
+
+## Review follow-up (2026-10-19)
+
+The DOOR review found D2 clean. Its one LOW is fixed here. `confinedToolVisibility` now takes only the profile's own tool names (`CoworkGuestTool`, which is `COWORK_GUEST_PROFILE_TOOLS`' union), and `coworkToolsFor` returns that type. A stale caller that passes ceiling classes, or an arbitrary string list, is now a compile error and not only a run-time `invalid_request`. Two `@ts-expect-error` lines pin this: widening the parameter back to `string[]` fails `tsc`, because the directives become unused. #88's review fixes are merged in.

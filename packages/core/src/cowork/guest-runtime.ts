@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
-import { coworkToolsFor } from "../runtime-sdk/mode-options";
+import { coworkToolsFor, type CoworkGuestTool } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
 import { coworkGuestCwdFor, coworkGuestPermissionModeFor, type CoworkGuestPermissionMode } from "./conversation-set";
@@ -68,15 +68,15 @@ function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
 /** The host-query guest's tools, in the order a launch lists them. */
-const GUEST_TOOL_ORDER: readonly string[] = Object.freeze(["Read", "Edit", "Write", "Bash"]);
+const GUEST_TOOL_ORDER: readonly CoworkGuestTool[] = Object.freeze(["Read", "Edit", "Write", "Bash"] as const);
 /**
  * The launch's tool list: the OFFERED list (`coworkToolsFor`, the same list the prompt names), in the guest's order.
  * It derives nothing from the ceiling itself (session door D2). No pre-approval is inferred from it. Fails closed with
  * `invalid_request` on anything the host-query guest cannot carry: an unknown or repeated name, a ceiling class passed
  * by a stale caller, or Edit without both Read and Write (the guest refuses that whole configuration).
  */
-export function confinedToolVisibility(offered: readonly string[]): readonly string[] {
-  if (!Array.isArray(offered) || new Set(offered).size !== offered.length || offered.some(name => typeof name !== "string" || !GUEST_TOOL_ORDER.includes(name))) throw new CoworkError("invalid_request");
+export function confinedToolVisibility(offered: readonly CoworkGuestTool[]): readonly CoworkGuestTool[] {
+  if (!Array.isArray(offered) || new Set(offered).size !== offered.length || offered.some(name => typeof name !== "string" || !(GUEST_TOOL_ORDER as readonly string[]).includes(name))) throw new CoworkError("invalid_request");
   const has = new Set(offered);
   if (has.has("Edit") && !(has.has("Read") && has.has("Write"))) throw new CoworkError("invalid_request");
   return Object.freeze(GUEST_TOOL_ORDER.filter(name => has.has(name)));
@@ -86,7 +86,7 @@ export function confinedToolVisibility(offered: readonly string[]): readonly str
  * effective ceiling, in the guest's order. The launch and the conversation set (`conversation-set.ts`) both take it from
  * here, so the host query's Options and the guest's own config can never name different tools.
  */
-export function coworkGuestOfferedTools(policy: ConversationBinding["policy"], capabilities: { readonly toolClasses: readonly string[]; readonly network: CapabilityCeiling["network"] }, readiness: readonly CoworkGuestReadinessKey[]): readonly string[] {
+export function coworkGuestOfferedTools(policy: ConversationBinding["policy"], capabilities: { readonly toolClasses: readonly string[]; readonly network: CapabilityCeiling["network"] }, readiness: readonly CoworkGuestReadinessKey[]): readonly CoworkGuestTool[] {
   return confinedToolVisibility(coworkToolsFor({ profile: "host-query-v1", approvalPolicy: policy, toolClasses: [...capabilities.toolClasses], network: capabilities.network, readiness }));
 }
 interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: ConversationBinding; source: WorkspaceSource }

@@ -171,7 +171,7 @@ async function until(predicate: () => boolean, what = "condition") {
   const deadline = Date.now() + 3000;
   while (!predicate()) { if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`); await Bun.sleep(2); }
 }
-const types = (events: readonly SessionEvent[]) => events.map(event => event.type);
+const types = (events: readonly SessionEvent[]): string[] => events.map(event => event.type);
 /** A guest turn: system/init with the offered tools, one reply, a result. */
 const reply = (text: string, tools = ["Read", "Edit", "Write", "Bash"]) => (_: string, guest: ScriptedGuest) => {
   guest.data(systemInit({ session_id: guest.set.conversations[0]!.authority.sessionId, model: FIXTURE_MODEL, tools, permissionMode: SDK_HOST_QUERY_MODES[guest.set.conversations[0]!.policy] }));
@@ -235,8 +235,8 @@ test("for every policy the host launch's mode equals the mode the guest's own ma
     await session.open();
     const sentPolicy = h.guests[0]!.set.conversations[0]!.policy, launch = h.launched[0]!;
     expect([policy, sentPolicy]).toEqual([policy, policy === "plan" ? "plan" : "ask"]);
-    expect([policy, launch.permissionMode]).toEqual([policy, SDK_HOST_QUERY_MODES[sentPolicy]]);
-    expect([policy, launch.permissionMode]).toEqual([policy, COWORK_GUEST_RUNTIME_MODES[sentPolicy as "ask" | "plan"]]);
+    expect([policy, launch.permissionMode as string]).toEqual([policy, SDK_HOST_QUERY_MODES[sentPolicy]!]);
+    expect([policy, launch.permissionMode as string]).toEqual([policy, COWORK_GUEST_RUNTIME_MODES[sentPolicy as "ask" | "plan"]]);
     await session.send("hi", "cli"); await session.idle();
     expect(h.guests[0]!.refusals).toEqual([]);
   }

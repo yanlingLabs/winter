@@ -556,6 +556,8 @@ export function coworkOfferedTools(input: CoworkToolInputs): string[] {
  */
 export const COWORK_GUEST_PROFILE_TOOLS = Object.freeze({ "host-query-v1": Object.freeze(["Bash", "Edit", "Read", "Write"] as const) });
 export type CoworkGuestProfile = keyof typeof COWORK_GUEST_PROFILE_TOOLS;
+/** A tool a guest runtime profile can carry (the union of every profile's set). */
+export type CoworkGuestProfileTool = (typeof COWORK_GUEST_PROFILE_TOOLS)[CoworkGuestProfile][number];
 
 /**
  * The whole withheld list for an incarnation on `profile`, sorted: the host's own withholdings, every allowlisted name

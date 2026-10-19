@@ -217,6 +217,15 @@ describe("2. positive control: the same request reaches an injected door, and on
     expect((await harness.request(METHODS.sessionCreate, { scope: "global" })).error?.data?.code).not.toBe("invalid_request");
   });
 
+  test("WITHOUT a door too (every production daemon), a Cowork binding beside any other mode is invalid_request and mints nothing", async () => {
+    const { harness, admin, store: sessions } = await bootWithDoor(undefined);
+    const binding = { workspaceId: "w_one", location: { kind: "source", sourceId: "src_one" }, requestId: "req_mode_nodoor" };
+    for (const client of [harness, admin]) for (const mode of [undefined, "code", "chat", "dispatch"]) {
+      expect([mode, (await client.request(METHODS.sessionCreate, { scope: "global", ...(mode ? { mode } : {}), cowork: binding })).error]).toEqual([mode, INVALID]);
+    }
+    expect(sessions.list()).toEqual([]);
+  });
+
   test("a malformed binding fails the schema before the door: an absolute, parent-escaping or NUL cwd, an outputs location with a source, an unknown key", async () => {
     const { door, seen } = stubDoor(), { harness } = await bootWithDoor(door);
     const location = (value: unknown) => ({ scope: "global", mode: "cowork", cowork: { workspaceId: "w_one", location: value, requestId: "req_bad" } });

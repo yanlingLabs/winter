@@ -19,7 +19,7 @@ const POLICIES: ApprovalPolicy[] = ["plan", "dont-ask", "ask", "accept-edits", "
 const CLASSES = ["read", "write", "execute"];
 const KEYS = Object.keys(COWORK_READINESS) as CoworkReadinessKey[];
 const PROFILE: string[] = ["Bash", "Edit", "Read", "Write"];
-const ORDER = ["Read", "Edit", "Write", "Bash"];
+const ORDER: string[] = ["Read", "Edit", "Write", "Bash"];
 const subsets = <T,>(values: readonly T[]): T[][] => Array.from({ length: 1 << values.length }, (_unused, mask) => values.filter((_value, bit) => mask & (1 << bit)));
 const refused = (run: () => unknown): string => { try { run(); return "accepted"; } catch (error) { return error instanceof CoworkError ? error.code : String(error); } };
 const base = (over: Partial<CoworkGuestToolInputs> = {}): CoworkGuestToolInputs =>
@@ -66,14 +66,14 @@ describe("coworkToolsFor: one composition, swept across every combination", () =
       const input = base({ toolClasses, approvalPolicy, readiness, network }), tools = coworkToolsFor(input);
       combinations++;
       // The ONE function, over the ONE normalisation.
-      expect(tools).toEqual(coworkOfferedTools(coworkGuestToolInputs(input)));
+      expect(tools as string[]).toEqual(coworkOfferedTools(coworkGuestToolInputs(input)));
       // Never beyond the profile, and exactly the class rule once the compartment is declared (nothing else matters).
       const compartment = readiness.includes("guest-compartment"), has = (name: string) => toolClasses.includes(name);
       const expected = compartment ? [has("execute") && "Bash", has("read") && has("write") && "Edit", has("read") && "Read", has("write") && "Write"].filter((name): name is string => typeof name === "string") : [];
       if (JSON.stringify(tools) !== JSON.stringify(expected)) expect([toolClasses, approvalPolicy, readiness, network, tools]).toEqual([toolClasses, approvalPolicy, readiness, network, expected]);
       // The guest launch's list is the same set, in the guest's order, and never throws for an offered list.
       const launch = confinedToolVisibility(tools);
-      if (JSON.stringify(launch) !== JSON.stringify(ORDER.filter(name => tools.includes(name)))) expect(launch).toEqual(ORDER.filter(name => tools.includes(name)));
+      if (JSON.stringify(launch) !== JSON.stringify(ORDER.filter(name => (tools as string[]).includes(name)))) expect(launch as readonly string[]).toEqual(ORDER.filter(name => (tools as string[]).includes(name)));
     }
     expect(combinations).toBe(8 * 6 * 512 * 2);
   });
@@ -134,7 +134,7 @@ describe("the prompt names only what the guest is offered (G4)", () => {
 
 describe("the launch's visibility takes the offered list and fails closed", () => {
   test("canonical order, frozen, and the same set", () => {
-    expect(confinedToolVisibility(["Bash", "Write", "Read", "Edit"])).toEqual(ORDER);
+    expect(confinedToolVisibility(["Bash", "Write", "Read", "Edit"]) as readonly string[]).toEqual(ORDER);
     expect(confinedToolVisibility(["Write", "Read"])).toEqual(["Read", "Write"]);
     expect(confinedToolVisibility([])).toEqual([]);
     expect(Object.isFrozen(confinedToolVisibility(["Read"]))).toBe(true);
@@ -144,6 +144,12 @@ describe("the launch's visibility takes the offered list and fails closed", () =
     for (const bad of [["read", "write"], ["execute"], ["Glob"], ["Read", "Read"], ["Edit"], ["Edit", "Read"], ["Edit", "Write"], ["Bash", "mcp__x__y"], "Read", [7]]) {
       expect([bad, refused(() => confinedToolVisibility(bad as never))]).toEqual([bad, "invalid_request"]);
     }
+    // ...and a stale caller fails at COMPILE time (`tsc` reports an unused directive if either line ever compiles).
+    // @ts-expect-error a ceiling class is not a guest tool
+    expect(refused(() => confinedToolVisibility(["read", "write"]))).toBe("invalid_request");
+    const fromAnywhere: string[] = ["Read"];
+    // @ts-expect-error an arbitrary string list is not a guest tool list
+    expect(refused(() => confinedToolVisibility(fromAnywhere))).toBe("accepted");
   });
 });
 
