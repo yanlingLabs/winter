@@ -2188,6 +2188,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } });
         const result = opts.cowork.call(connection, method as CoworkMethod, params ?? {});
         opts.coworkEvents?.drain();
+        opts.coworkEvents?.rearm(); // work still owed after the inline drain re-arms an idle outbox timer (never arms a daemon with nothing pending)
         return result;
       }
       catch (error) {

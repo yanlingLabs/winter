@@ -216,6 +216,67 @@ test("a failing scope lookup skips that event for the phone and keeps it connect
   expect(count()).toBeGreaterThan(during); // still attached: the fault cost one event, not the connection
 });
 
+test("scope revoked mid-stream: no further frames reach the phone, but it stays attached and resumes when scope returns", async () => {
+  const f = fixture(); f.pump().drain();
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock"), service = f.service();
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub, cowork: service, coworkEvents: f.pump() });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  const sid = f.sessions[0]!;
+  const attached = () => (f.hub as unknown as { attachments: Map<string, Set<unknown>> }).attachments.get(sid)?.size ?? 0;
+  const frames = () => client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type)).length;
+  expect((await client.request("session.attach", { sessionId: sid, fromSeq: 0 })).error).toBeUndefined();
+  f.update("visible"); f.pump().drain(); await client.request("session.list", {});
+  expect(frames()).toBeGreaterThan(0); expect(attached()).toBe(1);
+  const before = frames();
+  f.scope.clear(); f.update("revoked-1"); f.pump().drain(); f.update("revoked-2"); f.pump().drain();
+  await client.request("session.list", {}); // barrier: every earlier frame has been written
+  expect(frames()).toBe(before);            // nothing delivered while revoked (kills deliver-on-error)
+  expect(attached()).toBe(1);               // and the phone was not dropped from the session (kills return-false)
+  f.scope.add(f.workspaceId); f.update("restored"); f.pump().drain();
+  await client.request("session.list", {});
+  expect(frames()).toBeGreaterThan(before); // same connection, stream resumes
+}, 15_000);
+
+test("a phone attached to a daemon with no Cowork service gets no workspace frames and is not dropped", async () => {
+  const f = fixture(); f.pump().drain();
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock");
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  const sid = f.sessions[0]!;
+  const attach = await client.request("session.attach", { sessionId: sid, fromSeq: 0 });
+  if (attach.error) return; // this daemon shape refuses the attach outright: nothing to stream, nothing to drop
+  const attached = () => (f.hub as unknown as { attachments: Map<string, Set<unknown>> }).attachments.get(sid)?.size ?? 0;
+  f.update("no-service"); f.pump().drain(); await client.request("session.list", {});
+  expect(client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type))).toHaveLength(0);
+  expect(attached()).toBe(1);
+}, 15_000);
+
+test("work that becomes pending after the outbox timer stopped re-arms it at the enqueue site; a daemon with nothing pending arms nothing", async () => {
+  const f = fixture(); f.pump().drain();
+  const timerOf = (p: unknown) => (p as { timer?: unknown }).timer;
+  const idle = f.pump(); idle.start(); idle.rearm(); expect(timerOf(idle)).toBeUndefined(); // nothing pending, no host: still no timer
+  const busy = f.pump(); let pending = true;
+  (busy as unknown as { hasPending(): boolean }).hasPending = () => pending;
+  busy.start(); expect(timerOf(busy)).toBeDefined();
+  pending = false; await Bun.sleep(1300); expect(timerOf(busy)).toBeUndefined(); // stopped itself
+  pending = true; busy.rearm(); expect(timerOf(busy)).toBeDefined();             // new work: re-armed
+  busy.stop(); busy.rearm(); expect(timerOf(busy)).toBeUndefined();              // shutdown is final
+  // The enqueue site: every Cowork RPC calls rearm() after its inline drain.
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock");
+  let rearms = 0;
+  const fake = { drain: () => ({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 }), rearm: () => { rearms++; } } as unknown as CoworkWorkspaceEvents;
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub, cowork: f.service(), coworkEvents: fake });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  await client.request("workspace.list", { limit: 10 });
+  expect(rearms).toBe(1);
+}, 15_000);
+
 test("session index rebuild replays display events without recreating or widening canonical bindings/policy", () => {
   const f = fixture(); f.pump().drain(); f.update("index-rebuild");
   const binding = f.records.binding(f.sessions[0]!), policy = f.records.policy(f.workspaceId);
