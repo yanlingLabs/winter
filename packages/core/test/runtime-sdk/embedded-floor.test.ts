@@ -14,7 +14,7 @@ test("actual Core embedded host refuses active protection without asking an olde
   try {
     expect(() => host.spawn({ command: "winter-embedded", args: [], cwd: root, env: {} })).toThrow(EmbeddedRuntimeUnavailable);
     expect(called).toBe(0);
-  } finally { unregister(); }
+  } finally { unregister(); void host.shutdown(); }
 });
 
 test("actual Core embedded host independently refuses requireHostFloor and native-floor command options", () => {
@@ -24,6 +24,7 @@ test("actual Core embedded host independently refuses requireHostFloor and nativ
     expect(() => host.spawn({ ...options, args: [], cwd: "/", env: {} } as never)).toThrow(EmbeddedRuntimeUnavailable);
   }
   expect(called).toBe(0);
+  void host.shutdown(); // unregisters the host's storage-policy consumer (process-global)
 });
 
 test("actual use-point recheck refuses storage enabled by host preparation before the worker is constructed", () => {
@@ -35,7 +36,7 @@ test("actual use-point recheck refuses storage enabled by host preparation befor
     spawnWorker: () => { called++; throw new Error("older SDK ignores flags"); },
   });
   try { expect(() => host.spawn({ command: "winter-embedded", args: [], cwd: root, env: {} })).toThrow(EmbeddedRuntimeUnavailable); expect(called).toBe(0); }
-  finally { unregister?.(); }
+  finally { unregister?.(); void host.shutdown(); }
 });
 
 for (const mode of ["live", "retired", "daemon"]) test(mode === "daemon" ? "real daemon wiring rejects active embedded topology, direct host spawn and captured closure" : `real ${mode} embedded Worker closes resumably before storage activation without third-party descendant debt`, async () => {
