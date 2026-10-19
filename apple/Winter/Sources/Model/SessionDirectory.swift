@@ -52,7 +52,7 @@ final class SessionDirectory: ObservableObject {
     @discardableResult
     func refreshReportingSuccess() async -> Bool {
         guard var fetched = try? await lister() else { return false }
-        if let coworkLister, fetched.contains(where: { $0.mode == "cowork" }) {
+        if let coworkLister, SessionMode.cowork.isAvailable, fetched.contains(where: { $0.mode == "cowork" }) {
             // A failed read of the references leaves the rows as listed, without a binding: never a blank list.
             let listed = (try? await coworkLister()) ?? [:]
             fetched = SessionDirectory.mergingCowork(into: fetched, listed: listed, created: createdCowork)

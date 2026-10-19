@@ -163,22 +163,18 @@ final class CoworkSessionDoorUITests: XCTestCase {
         XCTAssertNil(SessionDirectory.mergingCowork(into: [cowork], listed: [:], created: [:])[0].cowork)
     }
 
-    func testTheCoworkReferenceListIsReadOnlyWhenARowIsCowork() async {
+    func testTheCoworkReferenceListIsNeverReadWhileTheConstantIsOff() async {
+        XCTAssertFalse(SessionMode.cowork.isAvailable)
         var asked = 0
         let plain = SessionDirectory(lister: { [self] in [row(mode: nil), row(mode: "chat")] },
                                      coworkLister: { asked += 1; return [:] })
         await plain.refresh()
-        XCTAssertEqual(asked, 0, "an ordinary list costs no extra request")
         let withCowork = SessionDirectory(lister: { [self] in [row(mode: "cowork")] },
                                           coworkLister: { asked += 1; return ["s_1": CoworkRowFacts(workspaceId: "w_one")] })
         await withCowork.refresh()
-        XCTAssertEqual(asked, 1)
-        XCTAssertEqual(withCowork.rows.first?.cowork?.workspaceId, "w_one")
-        let failing = SessionDirectory(lister: { [self] in [row(mode: "cowork")] },
-                                       coworkLister: { throw RpcError(code: -1, message: "down") })
-        await failing.refresh()
-        XCTAssertEqual(failing.rows.count, 1, "a failed reference read never blanks the list")
-        XCTAssertNil(failing.rows.first?.cowork)
+        XCTAssertEqual(asked, 0, "a cowork row in the list sends no extra session.list while Cowork is off")
+        XCTAssertEqual(withCowork.rows.count, 1)
+        XCTAssertNil(withCowork.rows.first?.cowork)
     }
 
     // MARK: /spawn

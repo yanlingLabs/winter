@@ -62,14 +62,23 @@ public enum CoworkFolderChoice: Equatable, Sendable {
     private let modeAvailable: () -> Bool
     private let call: Call
     private let createSession: (CoworkSessionBinding) async throws -> String
-    /// The ids and progress of the one intent being retried.
+    /// The ids and progress of the one intent being retried. The workspace belongs to the FOLDER or Project
+    /// choice (`key`); the policy write and the session belong to the approval choice too (`approvalKey`), so
+    /// changing only the approval after an acknowledged `workspace.create` keeps that workspace and mints fresh
+    /// policy and session ids instead of creating a second workspace from a consumed selection.
     private struct Attempt {
         let key: String
         let workspaceRequestId = UUID().uuidString
-        let policyRequestId = UUID().uuidString
-        let sessionRequestId = UUID().uuidString
         var workspaceId: String?
+        var approvalKey: String
+        var policyRequestId = UUID().uuidString
+        var sessionRequestId = UUID().uuidString
         var policyDone = false
+        init(key: String, approvalKey: String) { self.key = key; self.approvalKey = approvalKey }
+        mutating func adopt(approvalKey new: String) {
+            guard new != approvalKey else { return }
+            approvalKey = new; policyRequestId = UUID().uuidString; sessionRequestId = UUID().uuidString; policyDone = false
+        }
     }
     private var attempt: Attempt?
     /// Selections a successful `workspace.create` already turned into a source. Releasing one would be wrong.
@@ -174,8 +183,10 @@ public enum CoworkFolderChoice: Equatable, Sendable {
         capabilities = (try? await send(CoworkRequest<CoworkCapabilities>.capabilities())) ?? CoworkCapabilities()
         if let reason = gate.closedReason { phase = .failed(reason); return nil }
 
-        let key = Self.intentKey(choice: choice, approval: approval)
-        var current = attempt?.key == key ? attempt! : Attempt(key: key)
+        let key = Self.intentKey(choice: choice)
+        let approvalKey = approval?.rawValue ?? "-"
+        var current = attempt?.key == key ? attempt! : Attempt(key: key, approvalKey: approvalKey)
+        current.adopt(approvalKey: approvalKey)
         do {
             let workspaceId: String
             switch choice {
@@ -216,10 +227,10 @@ public enum CoworkFolderChoice: Equatable, Sendable {
 
     // MARK: Pure helpers
 
-    static func intentKey(choice: CoworkFolderChoice, approval: CoworkApprovalPolicy?) -> String {
+    static func intentKey(choice: CoworkFolderChoice) -> String {
         switch choice {
-        case let .newWorkspace(folder): return ["new", folder.selectionId, approval?.rawValue ?? "-"].joined(separator: "\u{1f}")
-        case let .existingProject(id, _): return ["project", id, approval?.rawValue ?? "-"].joined(separator: "\u{1f}")
+        case let .newWorkspace(folder): return ["new", folder.selectionId].joined(separator: "\u{1f}")
+        case let .existingProject(id, _): return ["project", id].joined(separator: "\u{1f}")
         }
     }
 

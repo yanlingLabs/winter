@@ -354,6 +354,20 @@ import WinterProtocol
         XCTAssertNil(daemon.params["workspace.selection.revoke"], "sel_one became a source; releasing it would be wrong")
     }
 
+    func testChangingOnlyTheApprovalAfterAnAcknowledgedWorkspaceKeepsThatWorkspace() async throws {
+        let daemon = Daemon(); daemon.failSessionCreate = [coded("provider_unavailable")]
+        let composer = model(daemon)
+        composer.chooseFolder(try prepared("sel_one"))
+        _ = await composer.start(draft: "go")
+        composer.setApproval(.auto)
+        let started = await composer.start(draft: "go")
+        XCTAssertNotNil(started)
+        XCTAssertEqual(daemon.createdWorkspaces, 1, "the consumed selection is never sent to a second workspace.create")
+        XCTAssertEqual(daemon.bindings.count, 2)
+        XCTAssertNotEqual(daemon.bindings[0].requestId, daemon.bindings[1].requestId, "a new approval is a new session intent")
+        XCTAssertTrue(daemon.calls.contains("workspace.setDefaultPolicy"))
+    }
+
     func testAReplacedUnusedSelectionIsReleased() async throws {
         let daemon = Daemon(); let composer = model(daemon)
         composer.chooseFolder(try prepared("sel_one"))
