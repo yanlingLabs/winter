@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { COWORK_TABLES } from "../../src/cowork/schema";
-import { downgradeCoworkRuntimeStateToV7 } from "../../src/runtime-state/db";
+import { downgradeCoworkRuntimeStateToV7, RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
 
 // Cowork cannot be created or run in production, so a production-shaped daemon must start NO Cowork timer and a failing Cowork boot
 // step must not abort startup. (The unit-level timer rules live in workspace-events.test.ts and folder-selections.test.ts.)
@@ -59,6 +59,6 @@ test("a daemon that booted and stopped leaves every Cowork table empty, so the s
     const populated = COWORK_TABLES.filter(table => db.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) && db.query(`SELECT 1 FROM ${table} LIMIT 1`).get());
     expect(populated).toEqual([]);
   } finally { db.close(); }
-  expect(downgradeCoworkRuntimeStateToV7(home)).toMatchObject({ from: 18, to: 7 });
+  expect(downgradeCoworkRuntimeStateToV7(home)).toMatchObject({ from: RUNTIME_STATE_SCHEMA_VERSION, to: 7 });
 });
 
