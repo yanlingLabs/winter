@@ -118,11 +118,15 @@ It detects corruption and truncation. It does not detect a deliberate rewrite of
 - **Opaque output ids (gap 3, decided).** The bundle names each session folder `s<n>` and each file directly under `outputs/` `f/<name>`; the reverse table is kept in the `cowork_exports` row. Restore maps back and refuses an id the record does not hold.
 - **Pins.** Imports are resolved to files (extensionless, `.js`, dynamic, `require`, re-export, multi-line); the exact `dlopen` symbol table of `export-io.ts` is pinned; the `cowork/git/` exemption is replaced by the exact internal edge list.
 
-### NEEDS FROM DOOR (migration), definitions
+### NEEDS FROM DOOR (migration 20), definitions
 
 ```sql
-ALTER TABLE cowork_exports ADD COLUMN content_digest TEXT CHECK(content_digest IS NULL OR length(content_digest)=64);
-ALTER TABLE cowork_exports ADD COLUMN output_map_json TEXT CHECK(output_map_json IS NULL OR json_valid(output_map_json));
+ALTER TABLE cowork_exports ADD COLUMN content_digest TEXT CHECK (content_digest IS NULL OR (length(content_digest) = 64 AND content_digest NOT GLOB '*[^0-9a-f]*'));
+CREATE TABLE cowork_export_output_ids (
+  export_id TEXT NOT NULL REFERENCES cowork_exports(export_id),
+  opaque_id TEXT NOT NULL CHECK (length(opaque_id) = 17 AND opaque_id GLOB 's*' AND substr(opaque_id, 2) NOT GLOB '*[^0-9a-f]*'),
+  session_id TEXT NOT NULL,
+  PRIMARY KEY (export_id, opaque_id), UNIQUE (export_id, session_id));
 ```
 
-`CoworkExportContentBinding.record(exportId, { contentDigest, outputIds })` writes both columns on the prepared row (before `complete()`), and `read(exportId)` returns them (null while NULL). `output_map_json` is `{ "s1": "<sessionId>", ... }`.
+`content_digest` is nullable (existing rows stay NULL; NULL means "no binding", which the restorer refuses) and is the lowercase hex sha256 of the exact bytes of `integrity.json`, written once while the row is `prepared`. Opaque ids are `s` + 16 random hex characters, minted per export and per session folder, never derived from the session id. `SqliteExportContentBinding` (`export-binding.ts`) is the only caller and uses raw statements, no `CoworkRepository` method. The table belongs in `COWORK_TABLES` and the downgrade handling.
