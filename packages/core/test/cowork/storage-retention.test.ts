@@ -155,7 +155,7 @@ test("an archived, deleting or deleted workspace refuses any disk admission and 
 // under src/cowork fails here until the retention rules above are reviewed for it.
 const DESTRUCTIVE = new RegExp([
   String.raw`\b(?:rmSync|unlinkSync|rmdirSync|truncateSync|ftruncateSync|renameSync|unlink|rmdir|truncate|rename|ftruncate)\s*\(`, // fs calls, sync or promise
-  String.raw`\brm\s*\(`, String.raw`\bunlinkat\b`, String.raw`\brenameat\b`,
+  String.raw`\brm\s*\(`, String.raw`\bunlinkat\b`, String.raw`\brenameat\b`, String.raw`\brenamex_np\b`, // renamex_np: RENAME_SWAP exchanges two names, RENAME_EXCL never overwrites
   String.raw`\bO_TRUNC\b`, // an open that truncates
   String.raw`\bBun\.write\s*\(`, // Bun's overwrite-by-default writer
   String.raw`["'\x60](?:/(?:usr/)?bin/)?rm(?:["'\x60\s])`, // spawning rm: ["rm", ...], "/bin/rm", "rm -rf ...", and Bun shell $\`rm ...\`
@@ -163,7 +163,7 @@ const DESTRUCTIVE = new RegExp([
 test("the ratchet pattern recognizes each removal, rename-over and truncation form, and not lookalikes", () => {
   for (const code of [
     "rmSync(p, { recursive: true })", "await rm(p, { force: true })", "unlinkSync(p)", "await unlink(p)", "rmdirSync(d)", "await rmdir(d)", "truncateSync(p, 0)", "await truncate(p)",
-    "ftruncateSync(fd, 0)", "await ftruncate(fd, 0)", "renameSync(a, b)", "await rename(a, b)", "native().symbols.renameat!(d, a, d, b)", "unlinkat(fd, name, 0)",
+    "ftruncateSync(fd, 0)", "await ftruncate(fd, 0)", "renameSync(a, b)", "await rename(a, b)", "native().symbols.renameat!(d, a, d, b)", "lib().symbols.renamex_np!(a, b, 2)", "unlinkat(fd, name, 0)",
     "openSync(p, O_WRONLY | O_TRUNC)", "constants.O_TRUNC", "await Bun.write(path, bytes)", 'spawnSync("rm", ["-rf", p])', 'Bun.spawn(["/bin/rm", "-rf", p])', 'execFileSync("/usr/bin/rm", [p])',
     'execSync("rm -rf " + p)', "await $`rm -rf ${p}`",
   ]) expect([code, DESTRUCTIVE.test(code)]).toEqual([code, true]);
@@ -193,6 +193,16 @@ test("no Cowork source file removes, renames-over or truncates anything beyond t
     // The approved WINTER.md write: renameat replaces the instruction file's directory entry atomically
     // (a content-bound, user-approved edit); it never removes workspace data.
     /^instruction-fs\.ts:\d+: .*renameat/,
+    // The export writer and the restore flow (export-io.ts). `renamex_np` is only ever called with RENAME_EXCL (the finished
+    // bundle appears under a name that does not exist, or a restore places an image where none is) or RENAME_SWAP (an
+    // atomic exchange of a verified staged image with the live one, after an explicit confirmation). The exchanged-out
+    // image is kept in `restore-aside-<exportId>/`; nothing is unlinked or truncated.
+    /^export-io\.ts:\d+: .*renamex_np/,
+    // A failed export removes only its own dot-named `.partial` folder in the destination, which it created this call.
+    /^export-writer\.ts:\d+: .*rmSync\(partial/,
+    // A restore that failed BEFORE its first exchange removes only its own `.restore-<exportId>` staging folder, which holds
+    // copies from the bundle and no live data. After the first exchange nothing is removed (the staging folder holds the old images).
+    /^restore-bundle\.ts:\d+: .*rmSync\(staging/,
   ];
   const unexpected = found.filter(line => !audited.some(pattern => pattern.test(line)));
   expect(unexpected).toEqual([]);

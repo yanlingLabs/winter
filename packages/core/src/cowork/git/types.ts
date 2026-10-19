@@ -45,7 +45,9 @@ export interface PublicationJournal {
 export interface GitCommand { cwd: string; home: string; args: readonly string[]; signal?: AbortSignal; withinBudget?: () => boolean | Promise<boolean> }
 export interface GitResult { code: number; stdout: string }
 export interface GitExecutor { run(command: GitCommand): Promise<GitResult> }
-export type GitPublicationErrorCode = "invalid_request" | "authority_denied" | "revision_conflict" | "ref_denied" | "remote_conflict" | "invalid_bundle" | "non_fast_forward" | "object_budget" | "command_failed" | "cancelled" | "request_conflict" | "integration_unavailable";
+export type GitPublicationErrorCode = "invalid_request" | "authority_denied" | "revision_conflict" | "ref_denied" | "remote_conflict" | "invalid_bundle" | "non_fast_forward" | "object_budget" | "command_failed" | "cancelled" | "request_conflict" | "integration_unavailable"
+  /** Publish service only: the guest bundle could not be read intact, or this workspace is already publishing / over its budget. */
+  | "bundle_unavailable" | "bundle_stale" | "publication_busy" | "publication_budget";
 /** Deliberately excludes raw Git stderr, paths, credential values and adapter errors. */
 export class GitPublicationError extends Error {
   constructor(readonly code: GitPublicationErrorCode) { super(code); this.name = "GitPublicationError"; }
