@@ -594,6 +594,11 @@ class TrustedConfigTests(InitModuleCase):
                "a DEL byte": good.replace("/opt/winter/runtime", "/opt/winter/run\x7ftime", 1), "a control byte": good.replace("/opt/winter/runtime", "/opt/winter/run\x01time", 1),
                "a missing colon": good.replace('"uid":65534', '"uid"65534', 1),
                "a trailing comma": good.replace('"dependencies":[]', '"dependencies":[,]', 1), "a non-ASCII byte": good.replace("/opt/winter/runtime", "/opt/winter/runt\u00efme", 1)}
+        # a repeated name must not stand in for the member that is missing: the object has the right NUMBER of members, so only the `seen` mask refuses it
+        artifacts = rb.text(rb.guided_block()["artifacts"])
+        bad["artifacts twice and no reader"] = '{"artifacts":' + artifacts + ',"artifacts":' + artifacts + '}'
+        bad["launcher twice and no ownerLibrary"] = good.replace('"ownerLibrary":{', '"launcher":{', 1)
+        self.assertNotEqual(bad["launcher twice and no ownerLibrary"], good)
         two = rb.text(rb.guided_block([rb.dependency("/lib/a"), rb.dependency("/lib/b")]))
         self.assertTrue(self.block_valid(2, two))
         bad["a missing comma between dependencies"] = two.replace('},{"guestPath"', '}{"guestPath"', 1)

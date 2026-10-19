@@ -34,6 +34,8 @@ def unpack(archive, output, pins=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--help"]:
+        raise SystemExit(0 if print("usage: unpack_bun.py ARCHIVE.zip OUTPUT") is None else 1)
     if len(sys.argv) != 3:
         raise SystemExit("usage: unpack_bun.py ARCHIVE.zip OUTPUT")
     unpack(sys.argv[1], sys.argv[2])

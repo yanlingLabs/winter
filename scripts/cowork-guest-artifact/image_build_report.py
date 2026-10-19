@@ -10,6 +10,9 @@ digests.json is then the input of the re-pin. Nothing here changes a pin file.
 import argparse, hashlib, json, shutil, sys
 from pathlib import Path
 
+# Under `python3 -I` the script's own directory is NOT on sys.path (that is the point of -I), so the sibling modules are found by an explicit insert of this file's directory
+# and nothing else: the interpreter still ignores PYTHON* variables, the user site and the current directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import runtime_image_digest as rid
 
 HERE = Path(__file__).resolve().parent
