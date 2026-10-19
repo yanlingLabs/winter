@@ -5,7 +5,14 @@ import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../agen
 import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
-import type { Mode as SessionMode } from "../agent/tools/registry";
+import type { Mode as RunnableMode } from "../agent/tools/registry";
+
+/**
+ * The modes the bridge can be constructed for: the runnable ones plus `cowork`, so a Cowork session reaches the bridge as itself and
+ * not through a `mode: "code"` stand-in. (Alias of the session door's `DrivableSessionMode` once that lands; the bridge's own Code,
+ * chat and dispatch logic never sees `cowork` - it routes to `cowork-approval.ts`, and a `cowork` bridge without its ports denies.)
+ */
+export type SessionMode = RunnableMode | "cowork";
 import { projectScopeRootFor } from "./run-home-input";
 import { protectedPathsFor, protectedWriteDecision } from "./protected-paths";
 import { bashProtectedWriteHit } from "./hooks";
@@ -18,6 +25,7 @@ import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
 import { isHumanTurnOrigin } from "../sessions/turn-origins";
+import { bashLooksSafe, ReviewerNoRunnableModel } from "../agent/reviewer";
 import { coworkCardPrefix, coworkDeniedMessage, projectCoworkCall, type CoworkApprovalPorts } from "./cowork-approval";
 import { connectorDenialMessage, connectorFactsFor, connectorVerdict, isConnectorToolName, statedServerFromCanUseTool, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
@@ -135,6 +143,20 @@ export interface CanUseToolDeps {
    * no Code, chat or dispatch session can reach that branch. Tests build the path with fakes.
    */
   cowork?: CoworkApprovalPorts;
+  /**
+   * COWORK, `auto` only in effect: the existing bash safety reviewer (`agent/reviewer.ts`'s `BashReviewer`), run INSIDE the Cowork
+   * route when the projection allows a Bash call with `bashReview` - the guest's host-query profile registers no hooks, so the
+   * reviewer hook cannot do it. Same semantics as `hooks.ts`'s `bashReviewerHook`: a `bashLooksSafe` command skips the review, an
+   * `unsafe` verdict denies with the reviewer's reason, no runnable model (or `enabled() === false`, or no reviewer at all) allows
+   * the otherwise admitted confined command as Code does, and a reviewer that throws, times out (`timeoutMs`, default 60 s) or
+   * answers anything but a definite verdict asks - a card, never an allow. No `open` exemption: those are Mac actions.
+   */
+  coworkBashReview?: {
+    reviewer: { review(request: { class: "bash"; command: string }, signal?: AbortSignal): Promise<{ verdict: "safe" | "unsafe"; reason: string }> };
+    allow?: () => readonly string[];
+    enabled?: () => boolean;
+    timeoutMs?: number;
+  };
   /**
    * The capability server KEYS (`sessions`, `browser`, …) the session's CURRENT incarnation built, read per
    * call. An `mcp__winter__<key>__<tool>` name is the daemon's own — stripped to its host name for the gate
@@ -512,8 +534,23 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       return await deps.planBridge.onExitPlanMode(planRequestFor(deps, toolName, gateToolNameFor(toolName), input, ctx, now));
     }
     const liveKeys = deps.capabilityKeys?.();
-    const project = () => projectCoworkCall(ports, { toolName, input, ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}), ctx, ...(deps.connectors !== undefined ? { connectors: deps.connectors } : {}), ...(liveKeys !== undefined ? { liveKeys } : {}) });
-    const projection = project();
+    const project = () => projectCoworkCall(ports, { toolName, input, sessionId: deps.sessionId, ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}), ctx, ...(deps.connectors !== undefined ? { connectors: deps.connectors } : {}), ...(liveKeys !== undefined ? { liveKeys } : {}) });
+    let projection = project();
+    // `auto` x Bash: the reviewer's verdict, in the bridge (see `CanUseToolDeps.coworkBashReview`).
+    if (projection.kind === "allow" && projection.bashReview && toolName === "Bash") {
+      const review = await reviewCoworkBash(input, ctx.signal);
+      if (ctx.signal.aborted) return { behavior: "deny", message: `${toolName} was not run — the turn was aborted while the command was being reviewed.` };
+      if (review.kind === "deny") {
+        log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=cowork-reviewer-unsafe`);
+        return { behavior: "deny", message: `${toolName} was not run — ${review.reason}` };
+      }
+      if (review.kind === "ask") {
+        log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=cowork-reviewer-no-verdict`);
+        projection = { kind: "ask", policy: "auto", connector: false };
+      }
+      // The review may have taken a while: judge the call again under the policy now in force (a narrowing meanwhile denies it).
+      if (project().kind === "deny") return { behavior: "deny", message: coworkDeniedMessage(toolName, "policy_changed") };
+    }
     if (projection.kind === "deny") {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${projection.policy} reason=cowork-${projection.reason}`);
       const message = projection.reason === "policy_table" && projection.connector !== undefined
@@ -535,14 +572,43 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     }, toolName, gateToolNameFor(toolName, liveKeys), input, ctx);
   };
 
+  const reviewCoworkBash = async (input: Record<string, unknown>, signal: AbortSignal): Promise<{ kind: "allow" } | { kind: "ask" } | { kind: "deny"; reason: string }> => {
+    const r = deps.coworkBashReview;
+    if (r === undefined || r.enabled?.() === false) return { kind: "allow" };
+    const command = typeof input.command === "string" ? input.command : "";
+    if (command === "") return { kind: "allow" };
+    try {
+      if (bashLooksSafe(command, r.allow?.() ?? [], deps.cwd ? { cwd: deps.cwd, originalCwd: deps.cwd } : undefined)) return { kind: "allow" };
+      const bound = new AbortController();
+      const onAbort = () => bound.abort();
+      signal.addEventListener("abort", onAbort, { once: true });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const verdict = await Promise.race([
+          r.reviewer.review({ class: "bash", command }, bound.signal),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => { bound.abort(); reject(new Error("review timed out")); }, r.timeoutMs ?? 60_000); }),
+        ]);
+        if (verdict?.verdict === "unsafe") return { kind: "deny", reason: verdict.reason || "the safety reviewer judged this command unsafe" };
+        return verdict?.verdict === "safe" ? { kind: "allow" } : { kind: "ask" };   // anything but a definite verdict asks
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+      }
+    } catch (err) {
+      return err instanceof ReviewerNoRunnableModel ? { kind: "allow" } : { kind: "ask" };
+    }
+  };
+
   const canUse: CanUseTool = async (toolName, input, ctx): Promise<PermissionResult> => {
     // (1) A question, not a permission.
     if (toolName === ASK_USER_QUESTION_TOOL) {
       return await askQuestion(ctx.toolUseID, input, ctx);
     }
 
-    // (1c) COWORK: the host policy matrix decides, off the gate entirely. See `CanUseToolDeps.cowork`.
+    // (1c) COWORK: the host policy matrix decides, off the gate entirely. See `CanUseToolDeps.cowork`. A `cowork`-mode bridge
+    // built without its ports has no policy to apply and denies everything (fail closed).
     if (deps.cowork !== undefined) return await coworkCanUse(deps.cowork, toolName, input, ctx);
+    if (deps.mode === "cowork") return { behavior: "deny", message: `${toolName} was not run — this Cowork conversation has no approval policy wired, so it fails closed.` };
 
     // (2) THE CONTROL-PLANE FENCE (P8b-27b) — before the gate, under EVERY policy, `bypass`
     // included.
