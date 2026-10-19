@@ -27,8 +27,8 @@ PRODUCTION_TREES = ["packages/core/src/cowork", "apple/Cowork/WinterCoworkHVFWor
 
 
 def standin_values(pins):
-    """The digests that exist only for the test image: its initramfs digest and its runtimeImageDigest (the kernel is the production one)."""
-    return [v for v in (pins.get("initramfsSha256"), pins.get("runtimeImageDigest")) if v]
+    """The digests that exist only for the test image: its initramfs, its init, its provider worker and its runtimeImageDigest (the kernel and the base cpio are the production ones)."""
+    return [v for v in (pins.get(key) for key in ("initramfsSha256", "runtimeImageDigest", "initStandinSha256", "initStandinSourceSha256", "providerSha256")) if v]
 
 
 def production_paths():
@@ -85,11 +85,22 @@ class StandinSeparationTests(unittest.TestCase):
         self.assertIs(STANDIN["kernelSharedWithProduction"], True)
         self.assertNotIn("kernelSha256", STANDIN)
 
-    def test_its_digests_are_null_or_a_consistent_pair_that_differs_from_production_once_filled(self):
+    def test_the_hashes_of_the_stand_in_files_in_the_repository_are_pinned_now(self):
+        guest = REPO / "apple/Cowork/WinterCoworkGuest/standin"
+        self.assertEqual(STANDIN["prepareScriptSha256"], hashlib.sha256((guest / "standin_prepare.py").read_bytes()).hexdigest())
+        self.assertEqual(STANDIN["profileSha256"], hashlib.sha256((guest / "profile.json").read_bytes()).hexdigest())
+        self.assertEqual(STANDIN["workerUid"], json.loads((guest / "profile.json").read_text())["workerUid"])
+
+    def test_its_digests_are_null_or_a_consistent_set_that_differs_from_production_once_filled(self):
+        built = ("baseCpioSha256", "initStandinSha256", "initStandinSourceSha256", "providerSha256", "initramfsSha256", "runtimeImageDigest")
         cpio, runtime = STANDIN["initramfsSha256"], STANDIN["runtimeImageDigest"]
-        if cpio is None and runtime is None:
-            self.assertEqual(STANDIN["status"], "stopped-not-built")
+        if all(STANDIN[key] is None for key in built):
+            self.assertEqual(STANDIN["status"], "designed-source-only-not-built")
             return
+        for key in built:
+            self.assertRegex(STANDIN[key], r"^[0-9a-f]{64}$", key)
+        self.assertEqual(STANDIN["baseCpioSha256"], PINS["expectedArtifact"]["cpioSha256"])
+        self.assertNotIn(STANDIN["initStandinSha256"], json.dumps(PINS))
         self.assertRegex(cpio, r"^[0-9a-f]{64}$")
         self.assertRegex(runtime, r"^[0-9a-f]{64}$")
         self.assertNotEqual(cpio, PINS["expectedArtifact"]["cpioSha256"])
@@ -119,6 +130,7 @@ class StandinSeparationTests(unittest.TestCase):
             self.assertEqual(files_containing([planted], [clean, dirty]), [("dirty.json", planted)])
         self.assertEqual(standin_values({"initramfsSha256": planted, "runtimeImageDigest": None}), [planted])
         self.assertEqual(standin_values({"initramfsSha256": None, "runtimeImageDigest": None}), [])
+        self.assertEqual(standin_values({"providerSha256": planted, "initStandinSha256": planted}), [planted, planted])
 
     def test_the_production_pin_file_has_no_standin_profile_or_test_only_marker(self):
         text = (HERE / "pins.json").read_text().lower()

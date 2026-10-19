@@ -20,6 +20,7 @@
 #include "ext4sb.h"
 #include "mounts.h"
 #include "skeleton.h"
+#include "standin_hooks.h"
 #include "trusted_config.h"
 
 #include <dirent.h>
@@ -246,6 +247,8 @@ static void reap_children(int dispatch) {
         } else if (pid == G.relay) {
             G.relay = 0;
             if (dispatch) wg_boot_relay_exited(&boot);
+        } else {
+            WG_STANDIN_CHILD(pid);
         }
     }
 }
@@ -392,6 +395,7 @@ static int op_prepare_conversation_dirs(void *ctx, const struct wg_conversation_
         if (make_private_dir(WORKSPACE_CONVERSATIONS, set->session_id[i], (uid_t)set->runtime_uid[i]) != 0) return -1;
         if (make_private_dir(RUN_CONVERSATIONS, set->session_id[i], (uid_t)set->runtime_uid[i]) != 0) return -1;
     }
+    WG_STANDIN_NOTE_SET(set);
     return 0;
 }
 static int op_read_base_config(void *ctx, char *out, size_t capacity, size_t *length) {
@@ -470,6 +474,7 @@ static void op_stop_helper(void *ctx, long long deadline_ms) {
 }
 static void op_stop_supervisor(void *ctx, long long deadline_ms) {
     (void)ctx;
+    WG_STANDIN_STOP();
     close_fd(&G.sup_stdin_w);           /* the supervisor serves until its stdin ends, then closes its service */
     if (G.supervisor > 0) {
         pid_t group = G.supervisor;
@@ -581,6 +586,7 @@ static void pump_supervisor_ready(void) {
                 G.ready_seen = 1;
                 supervisor_deadline = 0;
                 wg_boot_supervisor_ready(&boot);
+                WG_STANDIN_READY();
             } else if (G.ready_have + 1 >= sizeof G.ready_line) {
                 G.ready_seen = 1;
                 supervisor_deadline = 0;
@@ -631,6 +637,7 @@ int main(void) {
         if (null_fd != fd) { dup2(null_fd, fd); close(null_fd); }
     }
     kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC | O_NOCTTY);
+    WG_STANDIN_INIT(kmsg_fd);
     if (mount_pseudo("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0) die_early("mount-proc");
     if (mount_pseudo("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0) die_early("mount-sys");
     if (mount_pseudo("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755,size=32m") != 0) die_early("mount-run");
@@ -704,6 +711,7 @@ int main(void) {
             if (left <= 0) { supervisor_deadline = 0; wg_boot_supervisor_not_ready(&boot, "supervisor-ready-timeout"); continue; }
             timeout = (int)(left > 1000 ? 1000 : left);
         }
+        WG_STANDIN_TIMEOUT(timeout);
         if (poll(fds, 4, timeout) < 0) { if (errno == EINTR) continue; wg_boot_fail_stop(&boot, "poll"); }
         if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             int result = pump(G.r2p_r, &relay_reader, dispatch_relay);
@@ -716,5 +724,6 @@ int main(void) {
             while (read(signal_fd, &info, sizeof info) == (ssize_t)sizeof info) { /* drained; the reaping below is the work */ }
             reap_children(1);
         }
+        WG_STANDIN_TICK();
     }
 }

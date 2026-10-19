@@ -525,7 +525,10 @@ class ProviderBridgeAbsenceTests(unittest.TestCase):
         source=(HERE/'image.py').read_text()
         for needle in ('providerWorker','provider.ts','host-client.ts','compile.ts'):self.assertNotIn(needle,source.replace('providerWorker\',',''))
     def test_the_guest_side_has_no_provider_socket_or_provider_class_traffic(self):
-        for path in list((GUEST/'init').glob('*.[ch]'))+[GUEST/'relay/relay.c',GUEST/'bootstrap/guest_bootstrap.py']:
+        # the four sources of the separate stand-in PID 1 (init-standin, never part of `init`; see test_standin_hygiene.py) are the ONLY exception, by exact name
+        standin={'standin.c','standin.h','standin_linux.c','standin_linux.h'}
+        self.assertEqual({p.name for p in (GUEST/'init').glob('standin*')}-{'standin_hooks.h'},standin)
+        for path in [p for p in (GUEST/'init').glob('*.[ch]') if p.name not in standin]+[GUEST/'relay/relay.c',GUEST/'bootstrap/guest_bootstrap.py']:
             text=path.read_text()
             self.assertNotIn('provider.sock',text,path.name)
             self.assertNotIn('AF_UNIX',text.replace('/* AF_UNIX */',''),path.name)

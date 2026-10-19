@@ -42,9 +42,14 @@ test("the guest sources and scripts exist where the artifact build expects them"
 test("the guest has no network bring-up: no socket, interface, address or vsock code in its C sources", () => {
   const sources = files(join(root, "apple", "Cowork", "WinterCoworkGuest", "init"), /\.(c|h)$/).concat(files(join(root, "apple", "Cowork", "WinterCoworkGuest", "relay"), /\.(c|h)$/));
   expect(sources.map(file => basename(file)).sort()).toContain("init_linux.c");
+  // The stand-in image's PID 1 (init-standin, never the production init) binds ONE filesystem socket for the provider worker: AF_UNIX stream, and nothing network. Its sources
+  // are named exactly; they may use socket( and SOCK_STREAM only with AF_UNIX, and every network needle stays forbidden in them too.
+  const STANDIN = new Set(["standin.c", "standin.h", "standin_hooks.h", "standin_linux.c", "standin_linux.h"]);
+  const NETWORK = ["AF_INET", "AF_VSOCK", "AF_NETLINK", "SIOCSIF", "SIOCGIF", "dhcp", "netlink", "<netinet", "<linux/if", "<net/if", "IFF_UP"];
   for (const file of sources) {
-    const text = readFileSync(file, "utf8");
-    for (const needle of ["AF_INET", "AF_VSOCK", "AF_NETLINK", "SOCK_STREAM", "socket(", "SIOCSIF", "SIOCGIF", "dhcp", "netlink", "<netinet", "<linux/if", "<net/if", "IFF_UP"])
-      expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
+    const text = readFileSync(file, "utf8"), name = basename(file);
+    for (const needle of STANDIN.has(name) ? NETWORK : [...NETWORK, "SOCK_STREAM", "socket("])
+      expect(`${name}:${needle}:${text.includes(needle)}`).toBe(`${name}:${needle}:false`);
+    if (STANDIN.has(name)) for (const call of text.match(/socket\([^)]*\)/g) ?? []) expect(`${name}:${call.startsWith("socket(AF_UNIX,")}`).toBe(`${name}:true`);
   }
 });
