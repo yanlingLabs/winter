@@ -187,9 +187,11 @@ export interface CoworkGuestRun {
   /** Settles once with the incarnation's stop outcome, whoever stopped it. */
   readonly ended: Promise<CoworkGuestStopOutcome>;
 }
-/** The native environment's start (S7B's host `start(workspaceId, {conversations})`). Injected only by code; production
- *  supplies none while `COWORK_NATIVE_ENVIRONMENT_ACTIVATED` is false. It begins the incarnation in the repository, asks
- *  `conversations` once at `mounted`, and resolves after `runtime_ready`. */
+/** The native start the Cowork driver needs: the service's `CoworkGuestStartPort` (cowork/service.ts), narrowed to resolve the
+ *  running incarnation. S7B's `CoworkNativeWiring.start(workspaceId, request?)` (#87) is this shape; the twin pin lands with
+ *  whichever of #87 and the session door merges second. Injected only by code; production supplies none while
+ *  `COWORK_NATIVE_ENVIRONMENT_ACTIVATED` is false. It begins the incarnation in the repository, asks `conversations` once at
+ *  `mounted`, and resolves after `runtime_ready`. */
 export interface CoworkGuestStarter {
-  start(workspaceId: string, request: CoworkGuestStartRequest): Promise<CoworkGuestRun>;
+  start(workspaceId: string, request?: CoworkGuestStartRequest): Promise<CoworkGuestRun>;
 }

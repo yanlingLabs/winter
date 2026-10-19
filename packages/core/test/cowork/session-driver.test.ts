@@ -143,7 +143,7 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
       const context = f.begin(`incarnation-${guests.length + 1}`);
       let set: CoworkGuestConversationSet | null;
       // The host fails the start on a refused set (a bootstrap fault); the driver must still surface ITS typed refusal.
-      try { set = request.conversations(context); } catch { f.power("stopped"); throw new Error("bootstrap fault: bad_conversations"); }
+      try { set = request!.conversations(context); } catch { f.power("stopped"); throw new Error("bootstrap fault: bad_conversations"); }
       if (set === null) throw new Error("no set");
       f.power("running");
       const guest = new ScriptedGuest(context, onTheWire(set, context.incarnationId), () => f.power("stopped"));
@@ -368,7 +368,7 @@ test("evict and shutdown stop the incarnation through the native owner; after sh
   await two.open();
   await h.drivers.beginShutdown();
   expect(h.guests[1]!.stops).toEqual(["shutdown"]);
-  await expect(h.drivers.ensure(h.sessions[1]!)).rejects.toThrow("daemon_shutting_down");
+  await expect(h.drivers.ensure(h.sessions[1]!)).rejects.toMatchObject({ code: "daemon_shutting_down" });
   await expect(h.drivers.beginShutdown()).resolves.toBeUndefined();
 });
 

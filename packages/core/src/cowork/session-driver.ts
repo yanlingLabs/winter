@@ -218,7 +218,6 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       projector: projectorFor,
       append: event => { const stamped = deps.hub.append(sessionId, event); claimedInBatch = 0; return stamped; },
       broadcast: event => { deps.hub.broadcastTransient(sessionId, event); },
-      messaging: { attach: unsupported as unknown as WinterSessionDeps["messaging"]["attach"] },
       ...(deps.sessionRecords === undefined ? {} : { records: deps.sessionRecords }),
       hasTranscript: () => false,
       logFacts: () => { const events = deps.store.read(sessionId); return { unconsumed: unconsumedUserMessages(events), danglingTurn: mainTurnOpenInLog(events) }; },

@@ -193,7 +193,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
         const rec = { session, detached: 0, refreshed: 0 };
         attachments.push(rec);
         return { address: `winter-agent:session:${session.backendSessionId}`, ready: Promise.resolve(), refresh: () => { rec.refreshed++; }, detach: () => { rec.detached++; } };
-      }) as unknown as WinterSessionDeps["messaging"]["attach"],
+      }) as unknown as NonNullable<WinterSessionDeps["messaging"]>["attach"],
     },
     records: {
       bumpGeneration: () => ({ generation: ++h.records.generation }),

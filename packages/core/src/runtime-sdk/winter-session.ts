@@ -267,7 +267,10 @@ export interface WinterSessionDeps {
   append: (event: NewSessionEvent) => SessionEvent;
   /** Broadcast one TRANSIENT (the hub's `broadcastTransient`). Never persisted. */
   broadcast: (event: NewSessionEvent) => void;
-  messaging: {
+  /** The router's directory attach. REQUIRED for every runnable mode (the constructor refuses without it); a Cowork
+   *  conversation passes none: its `attach` takes only the router's run modes, and same-Project messaging reaches a Cowork
+   *  conversation through the host peer inbox instead (session door design section 3). */
+  messaging?: {
     /** Task 12's door. */
     attach: typeof attachWinterSession;
     /** Attachment facts beyond the pinned four, read at attach time (title, cwd, selection…). */
@@ -593,6 +596,7 @@ class WinterSessionImpl implements WinterSession {
   private heldForHandoff = 0;
 
   constructor(private readonly deps: WinterSessionDeps) {
+    if (deps.mode !== "cowork" && deps.messaging === undefined) throw new TypeError(`a ${deps.mode} session needs the router's messaging attach`);
     this.sessionId = deps.sessionId;
     this.backendSessionId = deps.backendSessionId;
     this.mode = deps.mode;
@@ -1494,9 +1498,10 @@ class WinterSessionImpl implements WinterSession {
     if (inc.attachment !== undefined) return;
     // A Cowork conversation never enters the router's directory: same-Project messaging reaches it through the host peer
     // inbox, and the router's run modes do not include it (session door design section 3).
-    if (this.mode === "cowork") return;
+    const messaging = this.deps.messaging;
+    if (this.mode === "cowork" || messaging === undefined) return;
     try {
-      inc.attachment = this.deps.messaging.attach(this.deps.runtime, {
+      inc.attachment = messaging.attach(this.deps.runtime, {
         sessionId: this.sessionId,
         backendSessionId: this.backendSessionId,
         query: inc.query,
@@ -1505,7 +1510,7 @@ class WinterSessionImpl implements WinterSession {
         generation: inc.generation,
         status: () => (this.inFlight > 0 ? "running" : "idle"),
         log: (line) => this.log(line),
-        ...(this.deps.messaging.facts?.() ?? {}),
+        ...(messaging.facts?.() ?? {}),
       });
     } catch (err) {
       this.log(`messaging attach failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`);
