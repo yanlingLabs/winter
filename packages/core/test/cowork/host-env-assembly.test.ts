@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join } from "node:path";
 import { CoworkImagePins } from "../../src/cowork/images";
 import { COWORK_HOME_BINDING_DDL, createCoworkHomeBindingStore } from "../../src/cowork/host-env/stores";
-import { createCoworkNativeProductionEnvironment, hostBootFromProbes, type CoworkNativeProductionOptions } from "../../src/cowork/host-env/environment";
+import { COWORK_DEFAULT_TEAM, COWORK_LAUNCHER_IDENTIFIER, createCoworkNativeProductionEnvironment, hostBootFromProbes, type CoworkNativeProductionOptions } from "../../src/cowork/host-env/environment";
 import { COWORK_INSTALLATION_ID_FILE } from "../../src/cowork/host-env/coordination";
 import { createCoworkNativeWiring, type CoworkNativeEnvironment } from "../../src/cowork/native-wiring";
 import { CoworkNativeSimulatedCrash } from "../../src/cowork/native/host";
@@ -57,6 +57,13 @@ describe("construction", () => {
     h.db.db.run("DROP TABLE IF EXISTS cowork_home_binding"); // migration 18 (DOOR) creates it in a fresh database; this test is about a database that lacks it
     expect(() => createCoworkNativeProductionEnvironment(options(h, w))).toThrow(expect.objectContaining({ code: "home_binding_unavailable" }));
     expect(existsSync(join(h.root, "coord", "cowork-admission.sqlite"))).toBe(false);
+  });
+  test("a coordination directory equal to, inside or above the home is refused before anything is created", () => {
+    const h = createHarness(), w = world(); withBindingTable(h);
+    for (const where of [h.home, join(h.home, "coord"), h.root]) {
+      expect(() => createCoworkNativeProductionEnvironment(options(h, w, { coordination: { env: { WINTER_COWORK_COORDINATION_DIR: where }, homeDirectory: "/nonexistent" } }))).toThrow(expect.objectContaining({ code: "path_inside_winter_home" }));
+    }
+    expect(existsSync(join(h.home, "coord"))).toBe(false);
   });
   test("a coordination directory inside a Winter home is refused before anything is created", () => {
     const h = createHarness(), w = world(); withBindingTable(h);
@@ -118,6 +125,14 @@ describe("construction", () => {
     for (let i = 0; i < 5; i += 1) env.hostBoot.bootId();
     expect(w.ioregCalls).toBe(before);
     env.close?.();
+  });
+});
+
+describe("the launcher's identity", () => {
+  test("the identifier and team the daemon expects are the ones the launcher package compiles in (read from the Swift source)", () => {
+    const swift = readFileSync(join(import.meta.dir, "..", "..", "..", "..", "apple", "Cowork", "WinterCoworkLauncher", "Sources", "LauncherCore", "Identity", "CodeIdentity.swift"), "utf8");
+    expect(swift).toContain(`launcherIdentifier = "${COWORK_LAUNCHER_IDENTIFIER}"`);
+    expect(swift).toContain(`teamID = "${COWORK_DEFAULT_TEAM}"`);
   });
 });
 

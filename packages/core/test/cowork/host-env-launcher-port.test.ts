@@ -57,6 +57,14 @@ describe.skipIf(!supported)("spawn: identity first, then hello", () => {
     await expect(r.port.spawn(request)).rejects.toMatchObject({ code: "launcher_identity" });
     expect(r.calls.killed).toBe(1); expect(r.calls.opened).toEqual([]); expect(r.calls.closed).toHaveLength(1);
   });
+  test("a verifier that returns a truthy non-boolean is a refusal: only exactly true passes", async () => {
+    for (const answer of [1, "true", {}, [] ] as unknown[]) {
+      const r = rig({ verify: answer as never });
+      sendMessage(r.peerFd, line(HELLO));
+      await expect(r.port.spawn(request)).rejects.toMatchObject({ code: "launcher_identity" });
+      expect(r.calls.killed).toBe(1); expect(r.calls.opened).toEqual([]);
+    }
+  });
   test("a verifier that throws is a refusal, not a pass", async () => {
     const r = rig({ verifyProcess: () => { throw new Error("sec failure"); } });
     await expect(r.port.spawn(request)).rejects.toMatchObject({ code: "launcher_identity" });

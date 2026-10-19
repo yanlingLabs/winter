@@ -106,7 +106,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   // ---- pressure and resources
   let halt: (() => Promise<boolean>) | null = null;
   const space = options.space ?? createStatfsReader();
-  const guard = new CoworkPressureGuard({ space, writers: { haltWriters: async () => ({ halted: halt === null ? true : await halt() }) }, reserveBytes: COWORK_FREE_SPACE_RESERVE_BYTES, now });
+  const guard = new CoworkPressureGuard({ space, writers: { haltWriters: async () => ({ halted: halt === null ? false : await halt() }) }, reserveBytes: COWORK_FREE_SPACE_RESERVE_BYTES, now });
   guard.watch("home", { kind: "path", path: canonicalHome });
   guard.watch("coordination", { kind: "path", path: directory });
   const observeResources = createCoworkResourceObserver({ sysctl: adapters.sysctl, disk: guard, budget: coworkResourceBudget, now });
