@@ -217,6 +217,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { USAGE_INERT_ENV } from "../packages/core/src/usage/wiring";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
@@ -376,6 +377,9 @@ function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     // the user's DISTRIBUTION app, which is indistinguishable from their daily driver in the menu
     // bar. The CLI's autolaunch path is the only door to it and this closes it.
     WINTER_NO_AUTOLAUNCH: "1",
+    // The gate's daemon never reads or spawns the user's own Codex / Claude Code / Antigravity / OpenCode, nor runs the
+    // background plan beat (docs/claude/usage.md).
+    ...USAGE_INERT_ENV,
     ...extra,
   };
 }

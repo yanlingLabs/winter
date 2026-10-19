@@ -15,3 +15,6 @@ bun run scripts/release.ts                       # real release (bumps first; --
 
 - Pipeline: `scripts/release.ts` + `scripts/release-lib.ts`; `packaging/winter.rb.tmpl` is the Homebrew cask template it renders.
 - `releases/notes/<version>.md` is REQUIRED — the GitHub release body and the Sparkle appcast `<description>`, rendered by `releaseNotesHtml`, which throws (naming the line) on anything outside `#`/`##`/`###`, paragraphs, `- ` bullets with indented continuations (no nesting), ``` fences, `` `code` `` and `**bold**`. The preflight fails BEFORE the bump when it is absent: write and commit the notes for the next version, bump and sync, release with `--no-bump`.
+
+## Rolling back across a schema bump
+A release that raises `RUNTIME_STATE_SCHEMA_VERSION` (v18 added the Cowork tables) cannot be undone by installing the older app: the older build refuses the newer store. A revert release reverts the feature, never the schema. The user-facing way back is `winter migrate --cowork-schema --rollback` with the newer CLI and the daemon stopped, before installing the older app; put that line in the release notes of any release that bumps the schema (see `docs/RELEASE-NOTES-cowork-schema-v18.md`).

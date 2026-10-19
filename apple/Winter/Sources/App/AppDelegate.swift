@@ -518,6 +518,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if ok { Haptics.messageSent() }
             return ok
         }
+        // Image and file attachments (2026-10-19): the bound session's row (its mode turns the paste/drop intake on —
+        // code or dispatch — and its model is what an image is checked against), the catalogue for that check, and the
+        // doors a draft with chips is sent through — the code windows' own, on this client. The send THROWS the
+        // daemon's refusal, so its sentence reaches the pill and an unreadable image file is restaged.
+        pill.currentSessionRow = { [weak model] in
+            guard let model, let sid = model.focusedSessionId else { return nil }
+            return model.directory.rows.first { $0.sessionId == sid }
+        }
+        pill.refreshSessionRows = { [weak model] in await model?.directory.refresh() }
+        pill.fetchModelCatalogue = { [weak model] in await model?.fetchModelCatalogue() }
+        pill.attachmentSender = DispatchPillAttachmentSender(
+            session: { [weak model] in await model?.ensureFocusedSession() },
+            features: { [weak model] in
+                guard let client = model?.client else { return (originalPaths: false, attachmentFiles: false) }
+                return (originalPaths: await client.supportsOriginalImagePaths,
+                        attachmentFiles: await client.supportsAttachmentFiles)
+            },
+            stage: { [weak model] sessionId, image in
+                guard let client = model?.client else { throw CancellationError() }
+                return try await client.stageImage(sessionId: sessionId, mediaType: image.mediaType, data: image.data)
+            },
+            send: { [weak model] sessionId, outgoing, steer in
+                guard let client = model?.client else { throw CancellationError() }
+                if steer {
+                    _ = try await client.steer(sessionId: sessionId, text: outgoing.text, images: outgoing.images, files: outgoing.files)
+                } else {
+                    _ = try await client.send(sessionId: sessionId, text: outgoing.text, images: outgoing.images, files: outgoing.files)
+                }
+                Haptics.messageSent()
+            }
+        )
         pill.onEsc = { [weak self] in
             guard let self, self.appModel?.session.state.turnRunning == true else { return false }
             Task { await self.appModel?.interruptTurn() }
@@ -1245,6 +1276,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             island?.tabModels.sessions.openFromIsland(sid, hosts: hosts, isDispatch: isDispatch)
         }
         activity.disarm = { sid, wakeId in (try? await client.cancelWake(sessionId: sid, wakeId: wakeId)) ?? false }
+        // A fired plan alarm's notification opens the island on its Usage tab.
+        activity.openUsageTab = { [weak island] in island?.open(tab: IslandTabRegistry.usage.id) }
+        // …and is acknowledged only once dismissed, opened or shown its whole time (until then the daemon keeps it).
+        activity.ackAlarm = { id in Task { try? await client.usageAckAlarm(id: id) } }
         let coordinator = mirrorCoordinator
         activity.onCursorSessionsChange = { [weak coordinator] ids in coordinator?.setIslandCursorSessions(ids) }
         coordinator?.onIslandCursor = { [weak activity] sid, kind, text, app in
@@ -1286,6 +1321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessions.refreshDirectory = { [weak model] in await model?.directory.refresh() }
         sessions.fetchHosts = { try await client.islandHosts() }
         sessions.waiting = { [weak island] in Set(island?.store.cards.map(\.answerSessionId) ?? []) }
+        sessions.waits = { [weak island] in IslandSessionsBuilder.waits(island?.store.cards ?? []) }
         sessions.childStatuses = { [weak model] in
             Dictionary((model?.session.state.children ?? []).map { ($0.sessionId, $0.status) }, uniquingKeysWith: { a, _ in a })
         }
@@ -1302,6 +1338,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usage.fetch = { sid in try await client.islandUsage(sessionId: sid) }
         usage.fetchRoles = { try await client.settingsModelRoles() }
         usage.fetchSummary = { range in try await client.usageSummary(range: range) }
+        usage.setAlarm = { provider, key, pct in try await client.usageSetAlarm(provider: provider, windowKey: key, thresholdPercent: pct) }
+        usage.removeAlarm = { id in try await client.usageRemoveAlarm(id: id) }
         usage.openUsage = { [weak self, weak island] in
             island?.close()
             self?.showUsageWindow()

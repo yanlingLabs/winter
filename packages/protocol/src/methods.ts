@@ -391,7 +391,7 @@ export const SessionHistoryResult = z.object({
   oldestSeq: z.number().int().nullable(), // seq of events[0]; null iff events is empty
 });
 
-/** Code-mode image input: `text` keeps its `[Image #n]` placeholders (what the user's bubble shows)
+/** Image input (code and, since 2026-10-19, dispatch): `text` keeps its `[Image #n]` placeholders (what the user's bubble shows)
  *  and `images` names each one's file — the daemon hands the MODEL the text with every placeholder
  *  replaced by its path, and stores the `user_message` with the placeholders and `images`. Every
  *  entry is checked before anything is appended (typed refusals, never echoing a path). A path is one
@@ -408,15 +408,15 @@ export const SessionHistoryResult = z.object({
  *      runtime's Read tool prepares it for the model. A path with a control or direction-changing
  *      character, or leading/trailing whitespace (Read trims it), is refused. A file the daemon cannot
  *      read answers `image_file_unreadable`.
- *  `n` is unique and `[Image #n]` appears in `text`; a non-code session refuses
- *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
- *  images. The array length is checked by the handler (typed), not here. */
+ *  `n` is unique and `[Image #n]` appears in `text`; a session that takes no attachments (chat — code and,
+ *  since 2026-10-19, dispatch do) refuses `image_session_not_code`, a non-local caller `image_reference_invalid`.
+ *  Omitted (or empty) = no images. The array length is checked by the handler (typed), not here. */
 export const SessionSendImagesParam = z.array(UserMessageImageRef).optional();
-/** Code-mode file attachments (2026-10-13, hello feature `DAEMON_FEATURE_ATTACHMENT_FILES`): `text` keeps its
+/** File attachments (code 2026-10-13, hello feature `DAEMON_FEATURE_ATTACHMENT_FILES`; dispatch 2026-10-19): `text` keeps its
  *  `[File #n]` placeholders and `files` names each one's path — the user's own file or folder, any type. The
  *  daemon hands the MODEL the text with every placeholder replaced by its path and stores the `user_message`
  *  with the placeholders and `files`. Every entry is checked before anything is appended (typed refusals,
- *  never echoing a path): a local caller only, a code session only (`file_session_not_code`), an absolute
+ *  never echoing a path): a local caller only, a code or dispatch session only (`file_session_not_code`), an absolute
  *  path with no control or direction-changing character and no edge whitespace, that resolves (`realpath`)
  *  to a regular file or a directory (`file_unreadable` with `data.n` when it cannot be resolved), outside the
  *  runtime Read tool's read-deny set; `n` unique and `[File #n]` in `text`; at most `USER_MESSAGE_FILES_MAX`.
@@ -587,10 +587,29 @@ export const IslandWatchItemSchema = z.object({
   expiresAt: z.number().int().nonnegative(),
   session: IslandActivitySessionFacts,
 });
+/** A plan alarm that just fired (`docs/claude/usage.md`): the island's notification pill. No session behind it. */
+export const IslandUsageAlarmItemSchema = z.object({
+  /** The alarm's own id (it fires once). */
+  id: z.string().min(1),
+  provider: z.enum(["codex", "claude-code", "antigravity"]),
+  windowKey: z.string().min(1),
+  /** The window's kind, scope and length, so the client names it as its plan lines do. */
+  kind: z.string().min(1),
+  scope: z.string().optional(),
+  windowMinutes: z.number().optional(),
+  thresholdPercent: z.number().int().min(1).max(100),
+  /** The used share (0…100) that met it. */
+  usedPercent: z.number(),
+  /** Epoch ms. */
+  resetsAt: z.number().optional(),
+  /** Epoch ms: when it fired. */
+  at: z.number().int().nonnegative(),
+});
 export const IslandActivityResult = z.object({
   computerUse: z.array(IslandComputerUseItemSchema),
   results: z.array(IslandResultItemSchema),
   watches: z.array(IslandWatchItemSchema),
+  usageAlarms: z.array(IslandUsageAlarmItemSchema),
 });
 /** The daemon → island-client notification: the island's activity may have changed — ask `island.activity` again. */
 export const ISLAND_ACTIVITY_CHANGED_NOTIFICATION = "island.activityChanged";
@@ -649,6 +668,28 @@ export const UsageSetTrackingParams = z.object({
   codex: z.boolean().optional(), claudeCode: z.boolean().optional(), antigravity: z.boolean().optional(), opencode: z.boolean().optional(),
 });
 export const UsageSubscriptionsRemoveParams = z.object({ id: z.string().min(1).max(64) });
+/** The user's one-shot plan alarms: a plan, one of its windows by its STABLE key (the plan reading's `windowKey` — its
+ *  kind and scope), a whole-percent threshold. A fired alarm is deleted. `set` answers the alarm (one already set for the
+ *  same window and threshold is answered instead) and the whole list; `list` and `remove` the list. */
+export const UsageAlarmProviderSchema = z.enum(["codex", "claude-code", "antigravity"]);
+export const UsageAlarmsListParams = z.object({});
+export const UsageAlarmsSetParams = z.object({
+  provider: UsageAlarmProviderSchema,
+  windowKey: z.string().trim().min(1).max(120),
+  thresholdPercent: z.number().int().min(1).max(100),
+});
+export const UsageAlarmsRemoveParams = z.object({ id: z.string().min(1).max(64) });
+/** A fired alarm's notice was acknowledged — dismissed, opened, or shown its full time: the daemon forgets it (until
+ *  then `island.activity` lists it, across restarts). */
+export const UsageAlarmsAckParams = z.object({ id: z.string().min(1).max(64) });
+export const UsageAlarmSchema = z.object({
+  id: z.string(),
+  provider: UsageAlarmProviderSchema,
+  windowKey: z.string(),
+  thresholdPercent: z.number().int(),
+  /** Epoch ms. */
+  createdAt: z.number(),
+});
 
 /** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the
  *  latest report per provider and window kind (each tagged with its `provider`) since the daemon started; `subscription` — Winter's background jobs' subscription
@@ -861,10 +902,11 @@ export const ComputerUseWakesCancelParams = z.object({
 });
 export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), cancelled: z.boolean() });
 
-/** Code-mode image input (2026-09-29, raw paths 2026-10-10): a composer image that has NO file of its
+/** Image input (code 2026-09-29, raw paths 2026-10-10; dispatch 2026-10-19): a composer image that has NO file of its
  *  own (clipboard data, a screenshot in the clipboard), STAGED as it is into the session's own temp
  *  directory (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created
- *  atomically and never over an existing file, mode 0600); the client names the returned absolute
+ *  atomically and never over an existing file, mode 0600; staging first removes the session's staged copies
+ *  older than two weeks that no recent message names — `STAGED_IMAGE_RETENTION_MS`); the client names the returned absolute
  *  path beside its `[Image #n]` placeholder in `session.send`/`session.steer`'s `images`, and the
  *  daemon gives the model the text with the path in place — the model then reads it. The bytes are
  *  written UNCHANGED: nothing downscales or re-encodes them here (a client only downscales an image
@@ -873,11 +915,12 @@ export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), canc
  *
  *  LOCAL role only (never remote-allowlisted; an explicit harness-role check like `elicitation.url`).
  *  Every refusal is typed in `data.code`:
- *    - `image_session_not_code` — the session is not a code session (`INVALID_PARAMS`);
+ *    - `image_session_not_code` — the session takes no attachments: chat (`INVALID_PARAMS`; code and dispatch do);
  *    - `image_session_no_model` — the session has no model at all (`unstated/unstated`, or none and
  *      no live default), message `IMAGE_SESSION_NO_MODEL_MESSAGE` (`INVALID_PARAMS`);
- *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
- *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
+ *    - `image_input_unsupported` — the session's CURRENT model row does not accept images (its own model,
+ *      else — dispatch — the live `pins.dispatch`, else the live default), with the exact message
+ *      `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
  *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` decoded (what one request line can
  *      carry), message `IMAGE_TOO_LARGE_MESSAGE`. No pixel limit is applied: the runtime Read tool
@@ -947,7 +990,7 @@ export const IMAGE_FILE_UNREADABLE = "image_file_unreadable";
 /** `session.send`/`session.steer`'s `files` refusals (2026-10-13). `file_reference_invalid`: a caller other
  *  than a local client, a relative or unsafe path, a path in the Read tool's read-deny set, something that is
  *  neither a regular file nor a directory, a repeated `n`, an `n` with no `[File #n]` in the text, or too many
- *  entries. `file_session_not_code`: the session is not a code session. `file_unreadable` (`data.n`): the path
+ *  entries. `file_session_not_code`: the session takes no attachments (chat; code and dispatch do). `file_unreadable` (`data.n`): the path
  *  does not resolve — it moved, or macOS keeps its folder from the daemon. */
 export const FILE_REFERENCE_INVALID = "file_reference_invalid";
 export const FILE_SESSION_NOT_CODE = "file_session_not_code";
@@ -3552,6 +3595,10 @@ export const METHODS = {
   usageSubscriptionsSet: "usage.subscriptions.set",
   usageSubscriptionsRemove: "usage.subscriptions.remove",
   usageSetTracking: "usage.setTracking",
+  usageAlarmsList: "usage.alarms.list",
+  usageAlarmsSet: "usage.alarms.set",
+  usageAlarmsRemove: "usage.alarms.remove",
+  usageAlarmsAck: "usage.alarms.ack",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",

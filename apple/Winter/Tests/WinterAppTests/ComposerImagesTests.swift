@@ -512,13 +512,14 @@ final class ComposerImagesTests: XCTestCase {
         return a
     }
 
-    func testIntakeIsLiveOnlyForACodeSessionAndFailsClosed() {
+    func testIntakeIsLiveForCodeAndDispatchSessionsOnlyAndFailsClosed() {
         // The intake holds its adapter weakly (as a view's render does), so each is kept alive here.
         func enabled(_ a: FieldStateAdapter) -> Bool { withExtendedLifetime(a) { a.composerImageIntake.isEnabled() } }
         XCTAssertTrue(enabled(adapter(mode: nil)), "an absent mode is code")
         XCTAssertTrue(enabled(adapter(mode: "code")))
+        XCTAssertTrue(enabled(adapter(mode: "dispatch")), "Dispatch takes attachments (2026-10-19), as the daemon does")
         XCTAssertFalse(enabled(adapter(mode: "chat")))
-        XCTAssertFalse(enabled(adapter(mode: "dispatch")))
+        XCTAssertFalse(enabled(adapter(mode: "cowork")), "an unknown mode is no intake")
         XCTAssertFalse(enabled(adapter(mode: "code", hasRow: false)), "a row not loaded yet is no intake — never a guess")
         XCTAssertFalse(enabled(FieldStateAdapter(session: SessionModel())),
                        "an unwired surface (the orb's field) never takes attachments")
@@ -746,7 +747,7 @@ final class ComposerImagesTests: XCTestCase {
             XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true)
         }
         XCTAssertNil(sent, "nothing is sent")
-        XCTAssertEqual(a.composerNotice, "Attachments work in Code sessions — this chat can't take them")
+        XCTAssertEqual(a.composerNotice, "Attachments work in Code and Dispatch — this chat can't take them")
         XCTAssertEqual(a.composerAttachments.items.count, 1, "the chips stay")
         a.resetComposerAttachments()
         let plain = await a.composerTextForSend("see") { _ in XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true) }
@@ -756,5 +757,42 @@ final class ComposerImagesTests: XCTestCase {
             XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true)
         }
         XCTAssertEqual(stale?.text, "see")
+    }
+
+    // MARK: - Dispatch (2026-10-19)
+
+    /// A Dispatch row runs the daemon's dispatch PIN, which `sync.config` does not name: with no model of its own the
+    /// attach is let through (the daemon checks the pin at submit) — never refused off the code default. A model on
+    /// the row is still checked, and a code row with no model still reads the default.
+    func testADispatchRowIsNeverJudgedOffTheCodeDefault() {
+        let dispatch = adapter(mode: "dispatch", model: nil, images: false)
+        XCTAssertNil(dispatch.composerImageModel)
+        XCTAssertTrue(dispatch.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertNil(dispatch.composerNotice)
+        let pinnedRow = adapter(mode: "dispatch", model: "anthropic/claude-sonnet-5-5", images: false)
+        XCTAssertFalse(pinnedRow.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertEqual(pinnedRow.composerNotice, "The selected model doesn't support images")
+        let code = adapter(mode: "code", model: nil, images: false)
+        XCTAssertEqual(code.composerImageModel, "anthropic/claude-sonnet-5-5")
+        XCTAssertFalse(code.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+    }
+
+    /// A Dispatch draft goes out exactly as a code one: image data staged, a file as its own path, placeholders where
+    /// the chips were — what the daemon's dispatch session now takes.
+    func testADispatchDraftIsSentLikeACodeOne() async {
+        let a = adapter(mode: "dispatch", model: nil)
+        XCTAssertTrue(a.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertTrue(a.attachChip(.file(path: "/tmp")))
+        a.composerDraft += "what are these?"
+        var staged = 0
+        let out = await a.composerTextForSend(a.composerDraft) { _ in
+            staged += 1
+            return StagedImage(path: "/t/winter-session-s_1/images/image_1.png", imagesOnSend: true)
+        }
+        XCTAssertEqual(staged, 1)
+        XCTAssertEqual(out?.text, "[Image #1] [File #1] what are these?")
+        XCTAssertEqual(out?.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/t/winter-session-s_1/images/image_1.png")])
+        XCTAssertEqual(out?.files, [SessionEvent.UserMessageFileRef(n: 1, path: "/tmp")])
+        XCTAssertNil(a.composerNotice)
     }
 }

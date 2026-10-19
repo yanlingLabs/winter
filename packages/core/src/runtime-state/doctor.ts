@@ -275,7 +275,7 @@ export async function diagnoseRuntimeState(home: string, deps: { tmpDirOf?: (ses
     if (!(e instanceof RuntimeStateUnavailableError)) throw e;
     // §14: an authoritative store that is missing or corrupt refuses runtime resume/routing — and
     // NOTHING further is inferred from the rebuildable index, so this is the only finding returned.
-    if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Winter; this build will not open it`, repairable: [] }];
+    if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Winter; this build will not open it. To go back to an older Winter, first run "winter migrate --cowork-schema --rollback" with the NEWER Winter's CLI (daemon stopped), then install the older one`, repairable: [] }];
     if (e.reason === "missing") {
       // A home that has never run a daemon has no `runtimes/` at all, and therefore no backups
       // either — offering `restore-backup` there sends the operator hunting for a file that cannot
@@ -882,6 +882,27 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
 /** True when the (copied) store holds an owed peer-message body. Read-only; throws when the copy cannot be inspected. */
+/** Can a copy we could not open still hold owed peer-message rows? SQLite stores a table's name in plain text in the schema pages, so a file that
+ *  never mentions `cowork_peer_inbox` has no such table and therefore no owed message. A file that does mention it, or that cannot be read, is
+ *  treated as "may hold" (fail toward the warning). Reads in bounded chunks with an overlap so a name split across chunks is still seen. */
+function mayMentionPeerInbox(path: string): boolean {
+  const needle = Buffer.from("cowork_peer_inbox"), chunk = 1 << 20;
+  let fd: number | undefined;
+  if (!existsSync(path)) return false; // an absent sidecar holds nothing
+  try {
+    fd = openSync(path, "r");
+    let tail: Buffer = Buffer.alloc(0), position = 0;
+    for (;;) {
+      const buffer = Buffer.alloc(chunk), read = readSync(fd, buffer, 0, chunk, position);
+      if (read <= 0) return false;
+      position += read;
+      const haystack = Buffer.concat([tail, buffer.subarray(0, read)]);
+      if (haystack.includes(needle)) return true;
+      tail = haystack.subarray(Math.max(0, haystack.length - (needle.length - 1)));
+    }
+  } catch { return true; } finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
+}
+
 function hasOwedPeerBodies(path: string): boolean {
   const db = new Database(path, { readonly: true });
   try {
@@ -1058,7 +1079,7 @@ function restoreBackup(home: string, backupPath: string, promote: typeof renameS
   for (const suffix of ["-wal", "-shm"]) {
     if (existsSync(`${real}${suffix}`)) copyFileSync(`${real}${suffix}`, `${dest}${suffix}`);
   }
-  const warning = keptUnscrubbed && snapshot
+  const warning = keptUnscrubbed && snapshot && (mayMentionPeerInbox(snapshot) || mayMentionPeerInbox(`${snapshot}-wal`))
     ? `the pre-restore copy ${snapshot} could not be opened to clear it, so it was kept as the raw copy and may contain undelivered Cowork peer messages (message bodies); protect or delete it accordingly`
     : cleanupWarning;
   return {
