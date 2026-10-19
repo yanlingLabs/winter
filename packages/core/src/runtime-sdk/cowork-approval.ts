@@ -58,16 +58,20 @@ export type CoworkDenyReason =
 const FILE_READ = new Set(["Read", "Glob", "Grep"]);
 
 /**
- * The directory a Glob `pattern` / Grep `glob` can reach, as an absolute path: its literal prefix (up to the last `/` before the
- * first glob character), resolved against `cwd` - so `/workspace/.winter/**` and `../../../etc/*` name what they reach. A `..` segment
- * AFTER the first glob character cannot be resolved lexically, so it names the filesystem root (never admitted).
+ * The directory a Glob `pattern` / Grep `glob` can reach, as an absolute path - or `"/"` (never admitted) for anything this
+ * module cannot reason about lexically. An ALLOWLIST, not a blacklist: only `[A-Za-z0-9._ -]`, `*`, `?` and `/` are accepted.
+ * Every other character - braces, extglob groups (`@(`, `+(`, `?(`, `*(`, `!(`), brackets, `|`, a backslash escape, `~` (a tool may
+ * expand it to a home directory), `!` - makes the reach `"/"`, wherever it sits, prefix included. A `..` segment after the first
+ * wildcard also names `"/"`. Otherwise the literal prefix (up to the last `/` before the first `*` or `?`) is resolved against `cwd`,
+ * so `/workspace/.winter/**` and `../../../etc/*` name what they reach.
  */
 function globReach(value: unknown, cwd: string): string | undefined {
   if (typeof value !== "string" || value === "") return undefined;
-  if (value.includes("\0")) return "/";
-  const meta = value.search(/[*?[\]{}!]/);
+  if (!/^[A-Za-z0-9._ \-*?/]+$/.test(value)) return "/";
+  const meta = value.search(/[*?]/);
   if (meta >= 0 && value.slice(meta).split("/").includes("..")) return "/";
-  const literal = meta < 0 ? value : value.slice(0, Math.max(0, value.lastIndexOf("/", meta)) + (value.lastIndexOf("/", meta) < 0 ? 0 : 1));
+  const slash = meta < 0 ? -1 : value.lastIndexOf("/", meta);
+  const literal = meta < 0 ? value : slash < 0 ? "" : value.slice(0, slash + 1);
   return posix.resolve(posix.isAbsolute(cwd) ? cwd : "/", literal === "" ? "." : literal);
 }
 

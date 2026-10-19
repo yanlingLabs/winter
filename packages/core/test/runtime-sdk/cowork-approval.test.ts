@@ -127,10 +127,17 @@ test("Glob, Grep and MultiEdit take the Read and Edit rows; Glob and Grep defaul
       ["Glob", { pattern: "/workspace/.winter/**" }], ["Glob", { pattern: "../../../etc/*" }], ["Grep", { pattern: "x", glob: "/etc/*" }],
       ["Glob", { pattern: "/workspace/.winter/conversations/*/x.jsonl", path: "/workspace/repos/app" }], ["Grep", { pattern: "x", glob: "src/*/../../../../etc/*" }],
       ["Glob", { pattern: "/proc/**" }], ["Glob", { pattern: "/workspace/outputs/**" }], ["Glob", { pattern: "../../.winter/*" }],
+      // Brace alternatives, escapes, extglob groups, `~`: nothing outside the allowlist is ever classified from the cwd.
+      ["Glob", { pattern: "{/etc,x}/passwd" }], ["Grep", { pattern: "x", glob: "{/etc,y}/*" }], ["Glob", { pattern: "{..,x}/etc/*" }],
+      ["Glob", { pattern: "\\.\\./\\.\\./etc/*" }], ["Glob", { pattern: "..\\/..\\/etc/*" }], ["Glob", { pattern: "@(..|x)/etc/*" }],
+      ["Glob", { pattern: "+(/etc)/*" }], ["Glob", { pattern: "~/x/*" }], ["Glob", { pattern: "~root/*" }], ["Grep", { pattern: "x", glob: "~/*" }],
+      ["Glob", { pattern: "!(a)/*" }], ["Glob", { pattern: "?(a)/*" }], ["Glob", { pattern: "*(a)/*" }], ["Glob", { pattern: "[/]etc/*" }],
+      ["Glob", { pattern: "src/~x/*" }], ["Glob", { pattern: "src\\x/*" }], ["Glob", { pattern: "a/b\n/c" }],
     ] as const) expect({ policy, tool, input, kind: (await outcome(build(state(policy)), tool, { ...input })).kind }).toEqual({ policy, tool, input, kind: "deny" });
     // In-workspace patterns, relative or absolute, still take the Read row.
     for (const [tool, input] of [
-      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
+      ["Glob", { pattern: "**" }], ["Glob", { pattern: "**/*.md" }], ["Glob", { pattern: "" }], ["Grep", { pattern: "x", glob: "" }], ["Glob", { pattern: "src/my file-1_a.b/*.ts" }],
+      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
       ["Grep", { pattern: "x", glob: "*.ts" }], ["Grep", { pattern: "x", glob: "../other/*.ts" }],
     ] as const) expect({ policy, tool, input, kind: (await outcome(build(state(policy)), tool, { ...input })).kind }).toEqual({ policy, tool, input, kind: "allow" });
   }
