@@ -881,6 +881,15 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  the source must live in THIS home's backup directory (realpath'd, so a symlink cannot point out
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
+/** True when the (copied) store holds an owed peer-message body. Read-only; throws when the copy cannot be inspected. */
+function hasOwedPeerBodies(path: string): boolean {
+  const db = new Database(path, { readonly: true });
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cowork_peer_inbox'").get()) return false;
+    return db.query("SELECT 1 FROM cowork_peer_inbox WHERE body IS NOT NULL LIMIT 1").get() != null;
+  } finally { db.close(); }
+}
+
 function restoreBackup(home: string, backupPath: string, promote: typeof renameSync = renameSync): RepairResult {
   // The lock probe moved up to `repairRuntimeState`, which now gates EVERY op — it is kept here as
   // well because this is the one irreversible repair, and a future caller reaching it directly must
@@ -942,6 +951,8 @@ function restoreBackup(home: string, backupPath: string, promote: typeof renameS
   let sidecarsCaptured = true;
   /** The byte-copy snapshot could not be opened and scrubbed, so it was kept as the raw copy it is. */
   let keptUnscrubbed = false;
+  /** The snapshot is a REBUILT copy (owed peer messages removed), not the replaced file's bytes. */
+  let rebuiltSnapshot = false;
   /** The snapshot was scrubbed and promoted, but a leftover could not be cleaned up. */
   let cleanupWarning: string | undefined;
   if (existsSync(dest)) {
@@ -984,33 +995,38 @@ function restoreBackup(home: string, backupPath: string, promote: typeof renameS
         for (const suffix of ["", "-wal", "-shm"]) rmSync(`${snapshot}${suffix}`, { force: true });
         snapshot = undefined;
       }
-      // A BYTE COPY CAN CARRY OWED PEER-MESSAGE BODIES, and "excluded from backups" would cover this snapshot too. So when
-      // the copy CAN be opened, scrub it (empty the inbox tables, checkpoint, vacuum, prove) like a `backup()` copy. The
-      // scrub runs on a WORKING COPY of the snapshot and replaces the snapshot only on success, so a failed scrub never
-      // touches the raw copy. OWNER DECISION (2026-10-18): when the copy cannot be opened or scrubbed, whether or not it has
-      // a valid SQLite header, the raw copy is KEPT byte-for-byte and the restore RUNS: the file may be corrupt or written
-      // by a newer Winter, and the copy can be the user's only good data. The result then says plainly that the copy is
-      // unscrubbed and may hold undelivered Cowork peer messages, and where it is.
+      // THE RAW COPY ABOVE IS THE CORRUPTION EVIDENCE and it is kept BYTE-FOR-BYTE unless it holds owed peer-message bodies.
+      // (An earlier revision always scrubbed an openable copy; the scrub VACUUMs, so a corrupted file came back as a rebuilt,
+      // smaller, healthy-looking file that the message still called "the replaced file".) Now: inspect a WORKING copy
+      // read-only. No owed body -> nothing to scrub, the raw copy stays as it is and is the replaced file. Owed bodies
+      // present -> "excluded from backups" applies, so scrub the working copy and promote it over the snapshot by one atomic
+      // rename; the original bytes are NOT kept (they hold message bodies) and the message says the copy is a rebuilt one.
+      // OWNER DECISION (2026-10-18): when the working copy cannot be inspected or scrubbed, whether or not it has a valid
+      // SQLite header, the raw copy is KEPT byte-for-byte and the restore RUNS (it may be the user's only good data); the
+      // result then says plainly that it is unscrubbed and may hold undelivered Cowork peer messages, and where it is.
       if (snapshot !== undefined) {
         const work = `${snapshot}.scrub`, sidecars = ["-wal", "-shm", "-journal"];
         const dropWork = () => { for (const suffix of ["", ...sidecars]) rmSync(`${work}${suffix}`, { force: true }); };
         let promoted = false;
         try {
           for (const suffix of ["", ...sidecars]) if (existsSync(`${snapshot}${suffix}`)) copyFileSync(`${snapshot}${suffix}`, `${work}${suffix}`);
-          scrubExcludedTables(work);
-          // THE ATOMIC STEP: a rename over the existing path. Until it succeeds the raw copy is untouched; if anything above
-          // or this rename throws, only the working copy is deleted and the raw copy stays (keptUnscrubbed, warning shown).
-          promote(work, snapshot);
-          promoted = true;
-          // The scrubbed main file is now the snapshot. Its old sidecars describe the RAW copy and must not sit beside it;
-          // the scrub checkpointed, so the working copy normally has none, and any it does have belong with it.
-          for (const suffix of sidecars) rmSync(`${snapshot}${suffix}`, { force: true });
-          for (const suffix of sidecars) if (existsSync(`${work}${suffix}`)) promote(`${work}${suffix}`, `${snapshot}${suffix}`);
+          if (hasOwedPeerBodies(work)) {
+            scrubExcludedTables(work);
+            // THE ATOMIC STEP: a rename over the existing path. Until it succeeds the raw copy is untouched; if anything above
+            // or this rename throws, only the working copy is deleted and the raw copy stays (keptUnscrubbed, warning shown).
+            promote(work, snapshot);
+            promoted = true;
+            // The scrubbed main file is now the snapshot. Its old sidecars describe the RAW copy and must not sit beside it;
+            // the scrub checkpointed, so the working copy normally has none, and any it does have belong with it.
+            for (const suffix of sidecars) rmSync(`${snapshot}${suffix}`, { force: true });
+            for (const suffix of sidecars) if (existsSync(`${work}${suffix}`)) promote(`${work}${suffix}`, `${snapshot}${suffix}`);
+            rebuiltSnapshot = true;
+          } else dropWork();
         } catch {
           dropWork();
           // After the rename the snapshot IS the scrubbed copy, whatever failed later: report that, not "unscrubbed".
           keptUnscrubbed = !promoted && existsSync(snapshot);
-          if (promoted) cleanupWarning = `the pre-restore copy ${snapshot} was scrubbed, but removing its stale write-ahead sidecars failed; delete ${snapshot}-wal, ${snapshot}-shm and ${snapshot}-journal by hand if they exist`;
+          if (promoted) { rebuiltSnapshot = true; cleanupWarning = `the pre-restore copy ${snapshot} was scrubbed, but removing its stale write-ahead sidecars failed; delete ${snapshot}-wal, ${snapshot}-shm and ${snapshot}-journal by hand if they exist`; }
         }
       }
     }
@@ -1047,7 +1063,7 @@ function restoreBackup(home: string, backupPath: string, promote: typeof renameS
     : cleanupWarning;
   return {
     applied: true,
-    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}${warning ? `. WARNING: ${warning}` : ""}`,
+    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? (rebuiltSnapshot ? `a rebuilt copy of the replaced file, without its owed Cowork peer messages (the original bytes held them and were not kept), is at ${snapshot}` : `the replaced file is at ${snapshot}`) : "there was no file to replace"}${warning ? `. WARNING: ${warning}` : ""}`,
     ...(warning ? { warning } : {}),
   };
 }

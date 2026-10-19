@@ -3170,7 +3170,6 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  workspace --help | project --help                Cowork workspace metadata administration (creation unavailable)
   login [--api-key] [--anthropic-key] [--anthropic-console] [--exa-key]
   logout [--anthropic] [--anthropic-console] [--openai]           (bare: signs out of ChatGPT/Codex)
   credentials [list] | credentials set <providerId> | credentials remove <providerId>   every provider's API key (masked prompt)

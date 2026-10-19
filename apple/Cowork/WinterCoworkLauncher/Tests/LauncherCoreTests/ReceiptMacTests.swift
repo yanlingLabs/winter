@@ -152,4 +152,23 @@ final class ReceiptMacTests: XCTestCase {
         chmod(path, 0o600)
         XCTAssertThrowsError(try store.load(scope, key: Fixture.receiptKey)) { XCTAssertEqual($0 as? ReceiptStoreFailure, .macInvalid) }
     }
+
+    func testComparingTheSamePairInOppositeOrdersFromManyThreadsNeverDeadlocks() {
+        // Everything runs on detached threads under ONE deadline, so a deadlock (two threads, or a key compared with itself) is a test failure, not a hung test run.
+        let a = Fixture.receiptKey, b = Fixture.receiptKey, c = ReceiptKey(bytes: [UInt8](repeating: 4, count: 32))!
+        let group = DispatchGroup()
+        var results = [Bool](repeating: false, count: 3); let lock = NSLock()
+        group.enter(); Thread.detachNewThread { let same = a == a; lock.lock(); results[0] = same; lock.unlock(); group.leave() }   // a key equals itself without taking its lock twice
+        for t in 0..<8 {
+            group.enter()
+            Thread.detachNewThread {
+                for _ in 0..<20_000 { _ = (t % 2 == 0) ? (a == b) : (b == a); _ = (t % 2 == 0) ? (a == c) : (c == a) }
+                group.leave()
+            }
+        }
+        // On a timeout stop at once: the deadlocked threads still hold the keys' locks, so comparing them again here would hang the test run itself.
+        guard group.wait(timeout: .now() + 30) == .success else { return XCTFail("a key compared with itself, or two threads comparing the same pair in opposite orders, deadlocked") }
+        lock.lock(); XCTAssertTrue(results[0]); lock.unlock()
+        XCTAssertTrue(a == b); XCTAssertFalse(a == c)
+    }
 }

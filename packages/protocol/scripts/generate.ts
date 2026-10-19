@@ -34,7 +34,12 @@ const fixtures: Record<string, unknown> = {
   // Cowork (session door): `cowork` is a RECOGNISED mode on the same additive field. Nothing creates a
   // Cowork session (`session.create` refuses it), but a stored log, a replayed stream or a newer daemon can
   // carry one, so Swift must decode and re-encode the value rather than drop or reject it.
-  "session_created_with_cowork_mode": { ...base, type: "session_created", scope: "global", mode: "cowork" },
+  // Session door D1: the SAME fixture also carries the additive `cowork` binding facts (no new fixture — the Swift
+  // round-trip test pins the exact count), so Swift decodes and re-encodes the nested object rather than dropping it.
+  "session_created_with_cowork_mode": {
+    ...base, type: "session_created", scope: "global", mode: "cowork",
+    cowork: { workspaceId: "w_one", projectId: null, location: "outputs", sourceId: null, policyRevision: 1 },
+  },
   "harness_attached": { ...base, type: "harness_attached", clientName: "orb" },
   "harness_detached": { ...base, type: "harness_detached", clientName: "orb" },
   "user_message": { ...base, type: "user_message", threadId: "main", text: "héllo \"world\" — done ✓", clientName: "cli-1" },

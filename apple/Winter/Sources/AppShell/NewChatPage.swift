@@ -1,4 +1,5 @@
 import SwiftUI
+import WinterKit
 
 // MARK: - chatgpt-ui T2: the new-chat page (spec §2 — the pass's ONE behavior change)
 
@@ -153,8 +154,11 @@ func newChatShowsCoworkControls(mode: SessionMode) -> Bool {
 /// to Cowork so the design is visible, but `session.create` has no supported Cowork mode and this
 /// page's create door creates CHAT sessions. Refusing with a reason is the honest alternative to
 /// either hiding the mode or quietly lying about what was created.
-func newChatSendBlockedReason(draft: String, mode: SessionMode) -> String? {
+@MainActor func newChatSendBlockedReason(draft: String, mode: SessionMode, cowork: CoworkComposerModel? = nil) -> String? {
+    // First, and unconditionally: while the mode is unavailable nothing below — least of all the Cowork model —
+    // is consulted.
     if !mode.isAvailable { return "\(mode.title) isn't built yet" }
+    if mode == .cowork, let cowork { return cowork.blockedReason(draft: draft) }
     if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "" }
     return nil
 }
@@ -466,6 +470,7 @@ struct NewChatPage: View {
         // unconditionally: `onAppear` can fire again for the same live page (a window re-show),
         // and re-rolling the words while someone is mid-thought would be worse than repeating one.
         .onAppear {
+            takeRequestedMode()
             if greetingLine.isEmpty {
                 greetingLine = newChatGreetings(hour: newChatGreetingHour(Date()))
                     .randomElement() ?? ""
@@ -475,6 +480,12 @@ struct NewChatPage: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: host.newChatDraft.isEmpty)
+        .onChange(of: host.newChatRequestedMode) { _, _ in takeRequestedMode() }
+        // Read what the daemon can do when the Cowork segment is shown. A no-op, with no request, while Cowork's
+        // availability constant is off.
+        .task(id: mode) {
+            if mode == .cowork { await host.coworkComposer?.refresh() }
+        }
     }
 
     /// The greeting — the reference's shape (brand mark + a serif line), Winter's own words.
@@ -578,10 +589,12 @@ struct NewChatPage: View {
             // page fires the instant the session exists, resolves at the global default.
             model: host.newChatModelControl,
             stripEdge: .below,
+            // Only the Cowork segment carries the wiring; it draws the original placeholders until Cowork opens.
+            cowork: coworkWiring,
             announcement: newChatAnnouncement(announcement, fallback: announcementLine),
             isEnabled: ui.composerEnabled,
             showsWorkingIndicator: ui.showsWorkingIndicator,
-            sendBlockedReason: newChatSendBlockedReason(draft: host.newChatDraft, mode: mode),
+            sendBlockedReason: newChatSendBlockedReason(draft: host.newChatDraft, mode: mode, cowork: host.coworkComposer),
             // office-live-ux Job 1: no session exists yet, so there is no turn to stop — the same
             // reason `policy` is nil above. The button keeps its send/blocked pair here and Esc keeps
             // whatever AppKit already gave it. Written out rather than defaulted: `stop` is a `let`
@@ -596,8 +609,34 @@ struct NewChatPage: View {
     /// live session (the composer content carries — the host seeds the attached adapter's draft
     /// until the send lands, so there is no empty-composer flicker and no lost text).
     private func submit() {
+        // The Cowork segment never reaches the chat create: Enter on an unavailable mode used to fall through to
+        // `sendFirstChatMessage`, which would have minted a CHAT session behind a "not built yet" button.
+        // Cowork has its own sequence, and it creates nothing while the mode is off (it says why instead).
+        if mode == .cowork {
+            host.sendFirstCoworkMessage(host.newChatDraft) { sessionId in
+                nav.navigate(to: .session(sessionId))
+            }
+            return
+        }
         host.sendFirstChatMessage(host.newChatDraft) { sessionId in
             nav.navigate(to: .session(sessionId))
         }
+    }
+
+    /// Adopts a mode another door asked for (`/spawn`), once.
+    private func takeRequestedMode() {
+        guard let requested = host.newChatRequestedMode else { return }
+        host.newChatRequestedMode = nil
+        mode = requested
+    }
+
+    /// The Cowork composer's wiring, present only on the Cowork segment of a shell that has a management
+    /// connection. Reading the gate is free: nothing is requested until Cowork's availability constant is on.
+    private var coworkWiring: CoworkComposerWiring? {
+        guard mode == .cowork, let composer = host.coworkComposer else { return nil }
+        let workspaces = host.coworkWorkspaces
+        return CoworkComposerWiring(model: composer, pickFolder: {
+            coworkPickFolder(into: composer, workspaces: workspaces)
+        })
     }
 }

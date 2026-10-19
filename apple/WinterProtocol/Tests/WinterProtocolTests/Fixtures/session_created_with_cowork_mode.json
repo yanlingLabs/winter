@@ -4,5 +4,12 @@
   "ts": 1781270000000,
   "type": "session_created",
   "scope": "global",
-  "mode": "cowork"
+  "mode": "cowork",
+  "cowork": {
+    "workspaceId": "w_one",
+    "projectId": null,
+    "location": "outputs",
+    "sourceId": null,
+    "policyRevision": 1
+  }
 }

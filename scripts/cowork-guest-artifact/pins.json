@@ -12,7 +12,11 @@
   },
   "zig": {
     "version": "0.14.1",
-    "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+    "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa",
+    "archiveUrl": "https://ziglang.org/download/0.14.1/zig-aarch64-macos-0.14.1.tar.xz",
+    "linuxArchiveSha256": "f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b",
+    "linuxArchiveUrl": "https://ziglang.org/download/0.14.1/zig-aarch64-linux-0.14.1.tar.xz",
+    "note": "Both are the official ziglang.org archives (the digests equal the ones in ziglang.org/download/index.json for 0.14.1). The macOS one is what the local pins were made with; the Linux one is what the one-run image build uses. image.py accepts either; whether the two hosts produce byte-identical outputs is exactly what that run records."
   },
   "keys": [
     {
@@ -147,5 +151,11 @@
       "path": "/opt/winter/runtime/winter-host-query",
       "sha256": "c13918b426d62615640280df47d8e1b4602cddb486c20e4ce15942d635472217"
     }
+  },
+  "pnpm": {
+    "version": "10.34.6",
+    "url": "https://github.com/pnpm/pnpm/releases/download/v10.34.6/pnpm-linux-arm64",
+    "sha256": "5e18e460aec11c0d39b345a732fbbdee0811354f6f384e2da230c6438ae2137c",
+    "note": "The official standalone Linux ARM64 binary (the digest equals the one GitHub publishes for the release asset). Used only to provision the SDK's locked dependencies, with --frozen-lockfile --ignore-scripts, in the one-run image build; the SDK's own CI uses pnpm 10."
   }
 }
