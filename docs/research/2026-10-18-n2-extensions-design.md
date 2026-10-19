@@ -87,7 +87,7 @@ The N2 contract is `docs/cowork-native-worker.md` plus `packages/core/src/cowork
     - Shares: folders, guidance, memory and outputs, read on the host, even while the VM is stopped.
     - The channel (#91's streams 4 and 5): repos and scratch on `data.ext4`, while the VM runs.
 
-    The guest file service resolves with `RESOLVE_NO_XDEV`, so it can never answer for a share.
+    The guest file service refuses any root that is not on the data volume (an `fstatfs` ext4 check plus the data volume's device) and walks below it with `RESOLVE_NO_XDEV`, so it can never answer for a share.
 
     **Two corrections to #91's note.**
     - FILE_IN must NOT share the runtime IN counter. A busy file service would otherwise "prove" a stalled runtime is reading, and the guest's 4 MiB runtime ring could overflow.
@@ -571,7 +571,7 @@ GM2 (held input; 4.5) adds Winter-only host → runtime control subtypes and one
 | `host_input_hold` | `inputId` (the ledger `receiptId`), `epoch {incarnationId, leaseEpoch}`, `text`, `clientName` | refuse unless the epoch equals the admitted scope; write a held record stamped with that epoch (store-owned file, fsync, directory fsync); invisible to the model | `{held: true}`. The same id and digest → `{held: true, again: true}`, and the record's epoch is RE-STAMPED to this hold's epoch (fsync). The same id and another digest → error `conflict` |
 | `host_input_commit` | `inputId`, `epoch` (the epoch the host acked under) | only if the record is undecided AND stamped with exactly `epoch`: mark it committed (fsync); feed it into the existing host-input path (fold into the running turn at the next tool boundary, else queue, else start a turn); emit `system/host_input_committed {inputId, outcome}` | `{outcome: "folded" \| "queued" \| "started" \| "already"}`; unknown id → error `unknown_input`; epoch mismatch → error `stale_epoch`, changing nothing |
 | `host_input_discard` | `inputId`, `epoch` (the epoch the verdict is about) | only if the record is undecided AND stamped with exactly `epoch`: delete it (fsync) | `{discarded: true}`. Idempotent for an unknown id. Epoch mismatch → `{discarded: false, reason: "restamped"}`, changing nothing. Already committed → error `committed` |
-| (runtime → host) `system/held_inputs` | `[{inputId, digest}]` | emitted once after `init`, before the first input is read; nothing held starts a turn until the host decides | none |
+| (runtime → host) `system/held_inputs` | `[{inputId, digest, epoch}]` (`epoch` = the record's CURRENT stamp, after any re-stamp) | emitted once after `init`, before the first input is read; nothing held starts a turn until the host decides | none |
 
 `checkLinuxHostQueryFrame` admits exactly these three new control subtypes (closed payloads, size-bounded to the 64 KiB message cap plus the envelope). The host `Query` gains `holdInput`, `commitInput` and `discardInput`, and `clearQueuedInput` never touches held records.
 
@@ -614,7 +614,7 @@ drainOnce(recipient):                                                   // ONE c
 
 Two ordering rules make this exact. Without them, a late verdict for an old epoch could delete a record that a newer hold had just reused.
 
-1. **Reconciliation before any offer.** When a Cowork runtime starts (a new incarnation, or a relaunch), its driver does NOT publish `coworkEpoch` until the reconciliation has finished. That is: every id in `system/held_inputs` has been answered with `commit` or `discard`, carrying the epoch it was held under. Reconciliation runs inside the same per-recipient drain chain. While `coworkEpoch` is unpublished, `drainOnce` returns at once (#83 already treats an absent epoch as "stays owed"), so no new offer and no new hold can overtake a verdict.
+1. **Reconciliation before any offer.** When a Cowork runtime starts (a new incarnation, or a relaunch), its driver does NOT publish `coworkEpoch` until the reconciliation has finished. That is: every id in `system/held_inputs` has been answered with `commit` (with the ledger's `ackedEpoch`) or `discard` (with the epoch the runtime REPORTED for that record in `system/held_inputs`, so a re-stamped record is addressed by its current stamp). Reconciliation runs inside the same per-recipient drain chain. While `coworkEpoch` is unpublished, `drainOnce` returns at once (#83 already treats an absent epoch as "stays owed"), so no new offer and no new hold can overtake a verdict.
 2. **Delivered first, and epoch-exact verdicts.**
    - Every `commit` and `discard` names the epoch it is about. The guest acts only on a record stamped with exactly that epoch.
    - A re-hold of the same id under a newer epoch re-stamps it. A stale discard then answers `restamped` and deletes nothing, so a message held again under the new epoch cannot be lost to an old verdict.
@@ -728,7 +728,7 @@ The rule is **one reader per location, never both**:
 | Cloned repositories (`/workspace/repos/<id>`), conversation scratch, anything else on `data.ext4` | the guest data volume | **the file channel** (streams 4 and 5) | yes (a visible wake, per the spec) |
 
 This rule is enforced structurally:
-- The guest file service resolves with `RESOLVE_NO_XDEV` (4b.3). It can never read through a virtio-fs mount, so it can never answer for a share.
+- The guest file service checks the ROOT's device before it walks (4b.3, step 2): the root must be on the data volume (`fstatfs` reports ext4, and its `st_dev` is the data volume's). A folder or outputs root IS the virtiofs mount point, so its root fd already sits on the FUSE mount. `RESOLVE_NO_XDEV` alone would not stop that; it refuses only crossings below the root, and it still guards those. So the service can never answer for a share.
 - The host's authority composition (#91's NEEDS for DOOR) maps a share-backed `locationId` to the host reader and never to the channel.
 - The two paths never give two views of the same bytes.
 
@@ -807,19 +807,20 @@ With separate counters, each stream's own reader is the only proof of its own pr
 
 **The path walk (file worker, new `stat` and `browse-read` operations).**
 
-1. `root = openat2(AT_FDCWD, guestPath, {O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS})`.
-2. `file = openat2(root, relativePath, {O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV})`. This is the kernel-enforced form of a component-by-component `O_NOFOLLOW` walk: any symlink in any component, any `..` escape, any mount crossing and any magic link is refused.
-3. `fstat`:
+1. `root = openat2(AT_FDCWD, guestPath, {O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS})`. There is no `RESOLVE_NO_XDEV` here: `/workspace` is itself a mount, so that open would always fail.
+2. **Root-device check:** `fstatfs(root).f_type == EXT4_SUPER_MAGIC`, and `fstat(root).st_dev` equals the data volume's device, which PID 1 passes to the service from its own mount of `/workspace`. Otherwise `file_unavailable`. This is what keeps a share root (a virtiofs mount point, so the root fd is ON the FUSE mount) out of the channel; `RESOLVE_NO_XDEV` in the next step only refuses crossings below the root.
+3. `file = openat2(root, relativePath, {O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV})`. This is the kernel-enforced form of a component-by-component `O_NOFOLLOW` walk: any symlink in any component, any `..` escape, any mount crossing and any magic link is refused.
+4. `fstat`:
    - it must be `S_ISREG`;
    - `st_nlink == 1` (no hard-link alias, since the reader has `CAP_DAC_READ_SEARCH`);
    - `st_dev` must equal the root's.
 
    PID 1 also sets `fs.protected_hardlinks=1`, so a tool cannot even create a link to a file it cannot write.
-4. `generation` = lowercase hex SHA-256 of `"v1|" incarnationId "|" dev "|" ino "|" size "|" mtime_ns "|" ctime_ns "|" mode "|" nlink "|" uid`. It is opaque to the host (64 hex, the channel's grammar), and bound to the incarnation, so a token never carries across a boot.
-5. A read compares the request's `expectedGeneration` first (mismatch → `stale_file`), then `pread(offset, min(maxBytes, size − offset))`, then `fstat` again:
+5. `generation` = lowercase hex SHA-256 of `"v1|" incarnationId "|" dev "|" ino "|" size "|" mtime_ns "|" ctime_ns "|" mode "|" nlink "|" uid`. It is opaque to the host (64 hex, the channel's grammar), and bound to the incarnation, so a token never carries across a boot.
+6. A read compares the request's `expectedGeneration` first (mismatch → `stale_file`), then `pread(offset, min(maxBytes, size − offset))`, then `fstat` again:
    - changed generation → `stale_file`;
    - size now below the bytes promised → `file_incomplete`.
-6. The worker never returns a guest path; the reply echoes the relative path only.
+7. The worker never returns a guest path; the reply echoes the relative path only.
 
 **Error codes (the channel's six, and nothing else).**
 
@@ -828,7 +829,7 @@ With separate counters, each stream's own reader is the only proof of its own pr
 | A well-formed line whose values are out of range (`maxBytes` outside 1 to 262,144, `offset` beyond the file) | `invalid_request` |
 | A line too broken to echo (not JSON, no `requestId`, over 16 KiB) | no reply: the service ends FILE_OUT. #91's port then fails closed (`file_unavailable` for every call), so a slot can never leak. The host port parses every line before sending, so this needs a host bug |
 | `ENOENT`, `ENOTDIR` on a component | `file_missing` |
-| A symlink anywhere (`ELOOP`), a mount crossing (`EXDEV`), not a regular file, `st_nlink > 1`, `EACCES`, an unknown `locationId`, a `workspaceId`/`sessionId` that is not delivered, the browse compartment unavailable | `file_unavailable` |
+| A root not on the data volume (a share root), a symlink anywhere (`ELOOP`), a mount crossing (`EXDEV`), not a regular file, `st_nlink > 1`, `EACCES`, an unknown `locationId`, a `workspaceId`/`sessionId` that is not delivered, the browse compartment unavailable | `file_unavailable` |
 | `incarnationId` differs, `expectedGeneration` differs, the file changed during the read | `stale_file` |
 | The file shrank under the read | `file_incomplete` |
 | A response line that would pass 384 KiB (unreachable with `maxBytes` at most 256 KiB, kept as a guard) | `response_too_large` |
@@ -841,13 +842,13 @@ Never `authority_denied`: revocation is a host fact (channel note).
 
 | # | Threat | Mitigation |
 | --- | --- | --- |
-| F1 | A tool plants a symlink or hard link so the privileged browser reads a protected file (another conversation's store, a run home, the trusted config) | the mount view holds only the conversation's admitted roots, read-only; `RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`, `RESOLVE_NO_XDEV`; `nlink == 1`; `fs.protected_hardlinks=1`; the browse uid owns nothing |
+| F1 | A tool plants a symlink or hard link so the privileged browser reads a protected file (another conversation's store, a run home, the trusted config) | the mount view holds only the conversation's admitted roots, read-only; the root-device check; `RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`, `RESOLVE_NO_XDEV`; `nlink == 1`; `fs.protected_hardlinks=1`; the browse uid owns nothing |
 | F2 | The browser writes or executes | read-only view, `O_RDONLY`, seccomp without write or exec syscalls on files, no capability but `CAP_DAC_READ_SEARCH` |
 | F3 | A tool tampers with the browser (ptrace, signals) | a separate uid and its own PID namespace per launch |
 | F4 | A flood of requests or huge reads starves turns or overflows a ring | 4 outstanding requests; separate FILE_IN ring and counter; FILE_OUT under the reserve gate, round-robin with OUT |
 | F5 | The guest forges replies (wrong scope, generation or length) | #91's port and the channel parser judge every reply; any unattributable line closes the port |
 | F6 | A guest path reaches a Mac filesystem API | never: the host maps `locationId` to a share or to the channel, and a guest path never leaves the guest (#91 section 4) |
-| F7 | The same bytes are read through two paths with different views | 4b.1's one-reader rule, held by `RESOLVE_NO_XDEV` and the host's location mapping |
+| F7 | The same bytes are read through two paths with different views | 4b.1's one-reader rule, held by three checks: the root-device check (only data-volume roots), `RESOLVE_NO_XDEV` below the root, and the host's location mapping |
 
 ### 4b.5 Files and slices (file channel)
 
@@ -880,7 +881,7 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | --- | --- | --- |
 | **G0-S** (amends G0) | `--sandbox-check` of the production worker with two share parameters (one `ro`, one `rw`) on disposable fixture folders, plus a protected fixture | reads inside both shares; writes inside `rw` only; denial outside, of `/.vol/...` spellings, of xattr and setugid writes, and in a protected subtree; firmlink spelling behaviour; whether the operation names in 2.4 suffice; no VM starts |
 | **G1-S** (amends G1) | G1's sequence with the three Winter shares and one folder fixture | inventory check, mounts, `shares_mounted`, alias, the drain unmounts the shares before `halting` |
-| **G1-F** (amends G1) | G1's sequence plus file-channel reads of a cloned-repo fixture: `stat`, whole `read` and `readRange` across chunk sizes; a tool-planted symlink, hard link, FIFO and an out-of-root `..`; a read of a share path (must be refused by `RESOLVE_NO_XDEV`); a file changed mid-read; four outstanding plus a fifth; a drain mid-read | the guest service's walk and codes in a real kernel; that FILE_OUT never clears the runtime counter (a stalled runtime with an active browser keeps its ring bounded); the drain order (FILE_OUT end before `halting`) |
+| **G1-F** (amends G1) | G1's sequence plus file-channel reads of a cloned-repo fixture: `stat`, whole `read` and `readRange` across chunk sizes; a tool-planted symlink, hard link, FIFO and an out-of-root `..`; a read through a folder or outputs root (must be refused by the root-device check), and a bind or nested mount below a repo root (refused by `RESOLVE_NO_XDEV`); a file changed mid-read; four outstanding plus a fifth; a drain mid-read | the guest service's walk and codes in a real kernel; that FILE_OUT never clears the runtime counter (a stalled runtime with an active browser keeps its ring bounded); the drain order (FILE_OUT end before `halting`) |
 | **G2-S/M** (amends G2) | forged L1 `shares` lines (wrong identity, nested paths, too many fds, a fd that is not a directory), a forged argv, a second revoke; forged `host_input_*` frames and answers | the launcher and the worker refuse; nothing is mounted; the guest refuses foreign ids |
 | **G4-S** (amends G4) | the three-cycle reclaim on ext4 PLUS sustained share I/O on every device at the production profile | reclaim holds with fs devices registered; the pin high-water stays under the re-sized budget; no exit 77 |
 | **G7** (new) | a hostile-guest share suite: a test-only guest tool image issues raw FUSE requests (`..`, `/`, absolute and dangling links, mknod, `setupmapping`, cross-share link and rename, handle exhaustion); a Mac-side mutator renames and swaps directories during resolution; host-read-only exports re-mounted writable in the guest; the revoke switch mid-read; TCC on Documents and Desktop, an iCloud Drive folder and a removable volume; case-insensitivity and many-small-file timing | confinement against a hostile guest; three-layer RO ("a denial behind a guest RO bind proves only guest enforcement"); immediate cutoff; the TCC attribution |
@@ -906,7 +907,7 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | X13 | Host path disclosure: existing links in user folders show the user's home path and name to the guest and the model. | Document as a residual; do not rewrite link text. |
 | X14 | DAX is not mentioned anywhere. | Off in v1 at four points (R6). |
 | X15 | Previous-boot termination evidence for the SDK store lease has no producer (the guest cannot know). | The host-attested `endedGuestBoots` (3.2, L6). |
-| X16 | The spec wants both host-backed shares and a guest file channel, but does not say which serves which location. | One reader per location (4b.1): shares for folders, guidance, memory and outputs; the channel for `data.ext4`-only locations. This is enforced by `RESOLVE_NO_XDEV` and the host's location mapping. |
+| X16 | The spec wants both host-backed shares and a guest file channel, but does not say which serves which location. | One reader per location (4b.1): shares for folders, guidance, memory and outputs; the channel for `data.ext4`-only locations. This is enforced by the guest's root-device check, `RESOLVE_NO_XDEV` below the root, and the host's location mapping. |
 | X17 | #91 recommends one IN counter for runtime and file streams. That can let a busy file service mask a stalled runtime and overflow the guest's runtime ring. | Two counters (4b.2). |
 | X18 | The file channel refuses hard-linked files (`nlink > 1`), so files that package managers hard-link (for example a pnpm store) are not browsable. | Accept it in v1; the refusal is what keeps the privileged browser from being a confused deputy. Revisit only with a non-privileged browser. |
 
