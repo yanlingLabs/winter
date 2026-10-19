@@ -150,6 +150,8 @@ export function registerHostStoragePolicyConsumer(refresh: () => Promise<void>):
   policyConsumers.add(refresh);
   return () => { policyConsumers.delete(refresh); };
 }
+/** How many policy consumers are registered process-wide. Test inspection only (the core test preload asserts it is 0 after each file). */
+export function hostStoragePolicyConsumerCount(): number { return policyConsumers.size; }
 export async function refreshHostStoragePolicies(): Promise<void> {
   await Promise.all([...policyConsumers].map(refresh => refresh()));
 }

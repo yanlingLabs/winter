@@ -3324,6 +3324,9 @@ export async function startDaemon(opts: {
       // ended (then aborted) every tracked session, so an ordinary Worker has closed by now; this bounds
       // a straggler (`EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). Its iteration's tail writes the
       // generation's end into `runtime-state.db`, which is why this is not left to process exit.
+      // A daemon with no runtime SDK still built the embedded host, and the host's storage-policy consumer is process-global: its
+      // shutdown() unregisters it synchronously (nothing is live without a runtime), so call it here too and keep stop() synchronous.
+      if (runtimeSdk === undefined) void embeddedSessions.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {});
       const winterDone = runtimeSdk === undefined
         ? undefined
         : runtimeSdk.dispose()

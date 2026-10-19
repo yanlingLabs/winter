@@ -66,3 +66,13 @@ process.env.WINTER_LOGIN_SHELL_PATH = "off";
   writeFileSync(gitConfig, "[user]\n\tname = winter-test\n\temail = winter-test@example.invalid\n");
   process.env.GIT_CONFIG_GLOBAL = gitConfig;
 }
+
+// Guard (test-infra/fence-consumer-leak): the host-storage policy-consumer set is process-global, and a consumer left registered over a
+// closed store makes every later `refreshHostStoragePolicies()` in the same process throw. Whoever registers one (a session-driver
+// table, an embedded host, a daemon) must unregister it before the file ends.
+import { afterAll } from "bun:test";
+import { hostStoragePolicyConsumerCount } from "../src/runtime-sdk/host-storage-fence";
+afterAll(() => {
+  const left = hostStoragePolicyConsumerCount();
+  if (left > 0) throw new Error(`${left} host-storage policy consumer(s) left registered at the end of this test file; stop every daemon / drivers / embedded host the file creates`);
+});
