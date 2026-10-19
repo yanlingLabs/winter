@@ -12,6 +12,8 @@ and stay unconditional. The result has its own initramfs digest and so its own r
 import argparse, hashlib, json, stat, struct, sys, tempfile
 from pathlib import Path
 
+# Under `python3 -I` the script's own directory is NOT on sys.path, so the sibling modules are found by an explicit insert of this file's directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import image
 import runtime_image_digest as rid
 

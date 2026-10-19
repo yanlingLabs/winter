@@ -10,6 +10,8 @@ import { join, relative } from "node:path";
 
 const REPO = join(import.meta.dir, "../../../..");
 const TOKEN = /init-standin|standin_|winter-standin|WG_STANDIN|standin-pins|init_standin|profile standin|standin\.sock/i;
+// The allow-list scan also catches the prose spellings ("stand-in", "standin"); the production scans keep the narrow token because ordinary prose elsewhere says "stand-in".
+const WIDE = new RegExp(`${TOKEN.source}|\\bstand-?in\\b`, "i");
 const ARTIFACT = "scripts/cowork-guest-artifact";
 const GUEST = "apple/Cowork/WinterCoworkGuest";
 
@@ -22,7 +24,7 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 const text = (rel: string) => readFileSync(join(REPO, rel), "utf8");
-const naming = (dirs: string[]) => dirs.flatMap(d => walk(d)).filter(rel => !/\.(png|jpg|a|o|dylib|cpio|pyc)$/.test(rel) && TOKEN.test(text(rel)));
+const naming = (dirs: string[], token: RegExp = TOKEN) => dirs.flatMap(d => walk(d)).filter(rel => !/\.(png|jpg|a|o|dylib|cpio|pyc)$/.test(rel) && token.test(text(rel)));
 
 // Everything that may name the stand-in: the guest tree's own stand-in sources and tests, and the two image tools and their tests. Nothing else.
 const ALLOWED = [
@@ -32,6 +34,9 @@ const ALLOWED = [
   `${GUEST}/tests/test_standin_hygiene.py`, `${GUEST}/tests/test_standin_linux.py`, `${GUEST}/tests/test_standin_prepare.py`,
   `${ARTIFACT}/build_standin_image.py`, `${ARTIFACT}/test_standin_image.py`, `${ARTIFACT}/test_image.py`, `${ARTIFACT}/test_runtime_image_digest.py`,
   "packages/core/test/cowork/guest-boot-anti-wiring.test.ts", "packages/core/test/cowork/guest-standin-unselectable.test.ts",
+  // Named only by the wider "stand-in" spelling: the image pin gates and the pin file, and files whose prose uses "stand-in" for a fake (no stand-in image behaviour).
+  `${GUEST}/tests/derive_guided_config_fixture.py`, `${GUEST}/tests/fake_supervisor.c`, `${ARTIFACT}/standin-pins.json`, `${ARTIFACT}/kernel/test_native_build.py`,
+  "packages/core/test/cowork/guest-image-build-gates.test.ts", "packages/core/test/cowork/guest-image-pin-separation.test.ts", "packages/core/test/cowork/native-wiring.test.ts", "packages/core/test/cowork/native/fake-launcher.ts",
 ].sort();
 
 test("no production source names the stand-in: the daemon, the Swift host and launcher, the workflows and the embed scripts", () => {
@@ -46,7 +51,7 @@ test("no production source names the stand-in: the daemon, the Swift host and la
 });
 
 test("the files that name the stand-in are exactly the reviewed allow-list", () => {
-  const found = naming([GUEST, ARTIFACT, "packages/core/test/cowork"]).sort();
+  const found = naming([GUEST, ARTIFACT, "packages/core/test/cowork"], WIDE).sort();
   expect(found).toEqual(ALLOWED);
 });
 
