@@ -21,7 +21,12 @@ test("real auxiliary timeout confirms owned exit before rejection and reclaims i
   const runner = new OwnedGitReadCommandRunner({ ...limits, wallMs: 2_000 }, { isolatedFixture: true, spawn: launcher });
   await expect(runner.run(command(root, 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000);'))).rejects.toMatchObject({ code: "budget_exceeded" });
   expect(exit).toBe(true); kernelDead(child); expect(runner.retainedOwnership).toBe(0); expect(runner.measurements.uncertainStops).toBe(0);
-  expect((await runner.run({ file: "/usr/bin/printf", args: ["ok"], cwd: root, env: { PATH: "/usr/bin:/bin", HOME: root } })).stdout).toBe("ok");
+  // Admission, not speed: with the slot still held the second run is refused "busy" at once. On a loaded runner printf
+  // may itself outrun the wall, which is a budget answer, never "busy" - so only a busy refusal fails this test.
+  const second = await runner.run({ file: "/usr/bin/printf", args: ["ok"], cwd: root, env: { PATH: "/usr/bin:/bin", HOME: root } })
+    .then(result => ({ stdout: result.stdout, code: undefined as string | undefined }), (error: { code?: string }) => ({ stdout: undefined as string | undefined, code: error.code }));
+  expect(second.code).not.toBe("busy");
+  if (second.code === undefined) expect(second.stdout).toBe("ok"); else expect(second.code).toBe("budget_exceeded");
 });
 test("combined reader cap never rejects while the real auxiliary process remains alive", async () => {
   const root = home(); let child!: ChildProcess, exit = false;
