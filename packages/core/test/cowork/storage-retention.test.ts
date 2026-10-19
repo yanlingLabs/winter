@@ -198,8 +198,8 @@ test("no Cowork source file removes, renames-over or truncates anything beyond t
     // atomic exchange of a verified staged image with the live one, after an explicit confirmation). The exchanged-out
     // image is kept in `restore-aside-<exportId>/`; nothing is unlinked or truncated.
     /^export-io\.ts:\d+: .*renamex_np/,
-    // A failed export removes only its own dot-named `.partial` folder in the destination, which it created this call.
-    /^export-writer\.ts:\d+: .*rmSync\(partial/,
+    // A failed export removes only the dot-named `.partial` folder it created this call in the destination (or, if the record then refused to complete, the bundle it had just renamed into place).
+    /^export-writer\.ts:\d+: .*rmSync\(owned/,
     // A restore that failed BEFORE its first exchange removes only its own `.restore-<exportId>` staging folder, which holds
     // copies from the bundle and no live data. After the first exchange nothing is removed (the staging folder holds the old images).
     /^restore-bundle\.ts:\d+: .*rmSync\(staging/,

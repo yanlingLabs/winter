@@ -206,6 +206,17 @@ test("hostile or malformed chunk replies are refused with no guest text in the e
   }
 }, 30_000);
 
+test("a guest that dribbles one byte per reply is refused at the first short chunk, after one read", async () => {
+  const f = await fixture();
+  f.guest.onRead = (_n, chunk) => ({ content: chunk.content.subarray(0, 1), nextOffset: chunk.offset + 1, eof: false });
+  await refused(f.service.publish(f.caller, f.input), "bundle_unavailable");
+  expect(f.guest.readCalls).toHaveLength(1); expect(f.operations()).toBe(0);
+  // And a multi-chunk file is read in exactly ceil(size / 256 KiB) calls, never more.
+  const g = await fixture(); g.guest.files.set("big", Uint8Array.from({ length: 600_000 }, (_v, i) => i & 0xff));
+  await pullPublishBundle(g.guest, { workspaceId: "w", sessionId: "s", locationId: "l", relativePath: "big", incarnationId: "i", sourceRevision: 1 }, { maxBytes: 1_000_000 });
+  expect(g.guest.readCalls).toHaveLength(3);
+});
+
 test("a stat reply that names another workspace, path or incarnation is refused before any read", async () => {
   for (const lie of [{ workspaceId: "other" }, { relativePath: "elsewhere.bundle" }, { incarnationId: "incarnation-two" }, { sessionId: "other-session" }, { locationId: "other-location" }, { sourceRevision: 99 }, { kind: "directory" as never }]) {
     const f = await fixture(); f.guest.onStat = () => lie;

@@ -2,7 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExportIoError, copyImageFile, hasExtendedAttributes, hashDescriptor, renameDirect, stampDescriptor, stripExtendedAttributes } from "../../src/cowork/export-io";
+import { ExportIoError, attributeNameBuffers, copyImageFile, hasExtendedAttributes, hasWritableAcl, hashDescriptor, listDirectoryAt, openAt, openDirectoryNoFollow, renameDirect, stampDescriptor, stripExtendedAttributes } from "../../src/cowork/export-io";
+import { spawnSync } from "node:child_process";
+import { constants, renameSync, symlinkSync } from "node:fs";
 import { BACKUP_XATTR, listXattrs, setXattr } from "./export-fixture";
 
 const dirs: string[] = [];
@@ -72,4 +74,44 @@ test("renameDirect: exclusive refuses an existing target, swap exchanges two exi
   expect(() => renameDirect(join(dir, "a"), join(dir, "missing"), "swap")).toThrow(ExportIoError);
   renameDirect(join(dir, "a"), join(dir, "c"), "exclusive");
   expect(readFileSync(join(dir, "c/f"), "utf8")).toBe("B");
+});
+
+test("extended-attribute names are handled as raw bytes: a name that is not valid UTF-8 is passed back unchanged", () => {
+  // APFS refuses to create such a name, so the splitting that feeds fremovexattr is tested directly.
+  const list = Buffer.concat([Buffer.from([0x61, 0xff, 0xfe, 0x62, 0]), Buffer.from("plain\0"), Buffer.from([0xc3, 0x28, 0])]);
+  const names = attributeNameBuffers(list);
+  expect(names.map(name => [...name])).toEqual([[0x61, 0xff, 0xfe, 0x62, 0], [...Buffer.from("plain\0")], [0xc3, 0x28, 0]]);
+  expect(Buffer.concat(names).equals(list)).toBe(true);
+  expect(attributeNameBuffers(Buffer.alloc(0))).toEqual([]);
+});
+
+test("a held directory cannot be redirected: openat and listing follow the descriptor, not the path, and links are refused", () => {
+  const dir = temp(); mkdirSync(join(dir, "root")); mkdirSync(join(dir, "root/a")); writeFileSync(join(dir, "root/a/file"), "original"); writeFileSync(join(dir, "root/top"), "t");
+  mkdirSync(join(dir, "decoy")); writeFileSync(join(dir, "decoy/file"), "DECOY"); symlinkSync(join(dir, "decoy"), join(dir, "root/link"));
+  const root = openDirectoryNoFollow(join(dir, "root"));
+  try {
+    expect(listDirectoryAt(root)).toEqual(["a", "link", "top"]);
+    expect(listDirectoryAt(root)).toEqual(["a", "link", "top"]); // a second listing of the same descriptor is not empty
+    const held = openAt(root, "a", constants.O_RDONLY | constants.O_DIRECTORY);
+    // The path is swapped for the decoy; the held descriptors still see the original.
+    renameSync(join(dir, "root/a"), join(dir, "moved-a")); symlinkSync(join(dir, "decoy"), join(dir, "root/a"));
+    expect(listDirectoryAt(held)).toEqual(["file"]);
+    const file = openAt(held, "file", constants.O_RDONLY); expect(readFileSync(`/dev/fd/${file}`, "utf8")).toBe("original"); closeSync(file); closeSync(held);
+    expect(() => openAt(root, "a", constants.O_RDONLY | constants.O_DIRECTORY)).toThrow(ExportIoError); // now a link: refused
+    expect(() => openAt(root, "link", constants.O_RDONLY)).toThrow(ExportIoError);
+    for (const bad of ["", ".", "..", "a/b", "a\0b"]) expect(() => openAt(root, bad, constants.O_RDONLY)).toThrow(ExportIoError);
+  } finally { closeSync(root); }
+  expect(() => openDirectoryNoFollow(join(dir, "root/link"))).toThrow(); // a final symlink is refused
+});
+
+test("a destination ACL that lets another principal add files or delete children is detected, a read-only one is not", () => {
+  const dir = temp();
+  expect(hasWritableAcl(dir)).toBe(false);
+  expect(spawnSync("/bin/chmod", ["+a", "everyone allow read,list", dir]).status).toBe(0);
+  expect(hasWritableAcl(dir)).toBe(false);
+  expect(spawnSync("/bin/chmod", ["+a", "everyone allow add_file", dir]).status).toBe(0);
+  expect(hasWritableAcl(dir)).toBe(true);
+  const other = temp(); expect(spawnSync("/bin/chmod", ["+a", "everyone allow delete_child", other]).status).toBe(0);
+  expect(hasWritableAcl(other)).toBe(true);
+  expect(hasWritableAcl(join(dir, "does-not-exist"))).toBe(false); // no path, no ACL: the caller's own existence check judges it
 });

@@ -6,7 +6,7 @@
  * Nothing here removes or truncates anything of the workspace. A destination is always CREATED (`O_EXCL`), never opened with
  * `O_TRUNC`, and a sparse copy sets the final size with one positioned write rather than `ftruncate`.
  */
-import { dlopen, FFIType, read } from "bun:ffi";
+import { CString, dlopen, FFIType, read, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, openSync, readSync, writeSync } from "node:fs";
 
@@ -21,6 +21,14 @@ function load() {
     renamex_np: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
     flistxattr: { args: [FFIType.i32, FFIType.ptr, FFIType.u64, FFIType.i32], returns: FFIType.i64 },
     fremovexattr: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    // Descriptor-relative reads (a held directory cannot be redirected by swapping a path component) and the ACL check.
+    openat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    fdopendir: { args: [FFIType.i32], returns: FFIType.ptr },
+    readdir: { args: [FFIType.ptr], returns: FFIType.ptr },
+    closedir: { args: [FFIType.ptr], returns: FFIType.i32 },
+    acl_get_file: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.ptr },
+    acl_to_text: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
+    acl_free: { args: [FFIType.ptr], returns: FFIType.i32 },
     __error: { args: [], returns: FFIType.ptr },
   });
 }
@@ -50,20 +58,72 @@ export function stripExtendedAttributes(fd: number): void {
     if (size === 0) return;
     const names = Buffer.alloc(size), got = Number(symbols.flistxattr!(fd, names, BigInt(size), 0));
     if (got < 0) { if (errno() === 34 /* ERANGE: the list grew */) continue; throw new ExportIoError("xattr_list_refused", errno()); }
-    let start = 0;
-    for (let i = 0; i < got; i++) {
-      if (names[i] !== 0) continue;
-      if (symbols.fremovexattr!(fd, cstr(names.subarray(start, i).toString("utf8")), 0) !== 0 && errno() !== 93 /* ENOATTR */) throw new ExportIoError("xattr_remove_refused", errno());
-      start = i + 1;
+    // Each name is passed back as the RAW bytes the kernel listed: a name that is not valid UTF-8 must not be re-encoded.
+    for (const raw of attributeNameBuffers(names.subarray(0, got))) {
+      if (symbols.fremovexattr!(fd, raw, 0) !== 0 && errno() !== 93 /* ENOATTR */) throw new ExportIoError("xattr_remove_refused", errno());
     }
+    if (hasExtendedAttributes(fd)) throw new ExportIoError("xattr_remain");
     return;
   }
   throw new ExportIoError("xattr_list_unstable");
+}
+/** Split a `flistxattr` buffer into NUL-terminated raw names (the terminator kept), byte for byte. */
+export function attributeNameBuffers(list: Buffer): Buffer[] {
+  const out: Buffer[] = []; let start = 0;
+  for (let i = 0; i < list.length; i++) if (list[i] === 0) { out.push(Buffer.from(list.subarray(start, i + 1))); start = i + 1; }
+  return out;
 }
 export function hasExtendedAttributes(fd: number): boolean {
   const size = Number(lib().symbols.flistxattr!(fd, null, 0n, 0));
   if (size < 0) throw new ExportIoError("xattr_list_refused", errno());
   return size > 0;
+}
+
+/** Open `name` (one component) relative to a held directory, never following a link. Throws with the errno. */
+export function openAt(directoryFd: number, name: string, flags: number): number {
+  if (name === "" || name === "." || name === ".." || name.includes("/") || name.includes("\0")) throw new ExportIoError("bad_component");
+  const fd = lib().symbols.openat!(directoryFd, cstr(name), flags | constants.O_NOFOLLOW | 0x01000000 /* O_CLOEXEC */) as number;
+  if (fd < 0) throw new ExportIoError("openat_refused", errno());
+  return fd;
+}
+/** Open an absolute directory path for descriptor-relative work; a final symlink is refused. */
+export function openDirectoryNoFollow(path: string): number {
+  return openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | 0x01000000);
+}
+/** The entries of a held directory, sorted bytewise, without "." and "..". Names are returned only when they are valid UTF-8. */
+export function listDirectoryAt(directoryFd: number): string[] {
+  // A fresh open file description of the SAME held directory (`.` relative to it): a dup would share the read offset, so a
+  // second listing of the same descriptor would come back empty.
+  const symbols = lib().symbols, copy = symbols.openat!(directoryFd, cstr("."), constants.O_RDONLY | constants.O_DIRECTORY | 0x01000000) as number;
+  if (copy < 0) throw new ExportIoError("reopen_refused", errno());
+  const dir = symbols.fdopendir!(copy);
+  if (dir === null) { closeSync(copy); throw new ExportIoError("fdopendir_refused", errno()); }
+  const names: Buffer[] = [];
+  try {
+    for (;;) {
+      const entry = symbols.readdir!(dir);
+      if (entry === null) break;
+      const length = read.u16(entry, 18), raw = Buffer.from(new Uint8Array(toArrayBuffer(entry, 21, length)));
+      if (raw.equals(Buffer.from("."))|| raw.equals(Buffer.from(".."))) continue;
+      names.push(raw);
+    }
+  } finally { symbols.closedir!(dir); }
+  names.sort(Buffer.compare);
+  return names.map(raw => { const text = raw.toString("utf8"); if (!Buffer.from(text, "utf8").equals(raw)) throw new ExportIoError("invalid_name"); return text; });
+}
+/** Does this directory carry an ACL that lets anyone add files, delete children or change its contents? A chmod 0700 alone
+ * does not exclude an ACL entry. Fails closed (true) on a path it cannot judge. */
+export function hasWritableAcl(path: string): boolean {
+  const symbols = lib().symbols, acl = symbols.acl_get_file!(cstr(path), 0x100 /* ACL_TYPE_EXTENDED */);
+  if (acl === null) { const code = errno(); return code !== 2 && code !== 0; } // ENOENT: the path has no ACL; any other failure is not "safe"
+  try {
+    const text = symbols.acl_to_text!(acl, null);
+    if (text === null) return true;
+    try {
+      const dangerous = new Set(["write", "add_file", "add_subdirectory", "delete_child", "append", "delete", "writeattr", "writeextattr", "writesecurity", "chown"]);
+      return new CString(text).toString().split("\n").some(line => { const parts = line.split(":"); return parts.at(-2) === "allow" && parts.at(-1)!.split(",").some(permission => dangerous.has(permission)); });
+    } finally { symbols.acl_free!(text); }
+  } finally { symbols.acl_free!(acl); }
 }
 
 export type CopyMethod = "clone" | "sparse";

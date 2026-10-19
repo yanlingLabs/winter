@@ -11,8 +11,8 @@ import type { CoworkVolumeFilesystemAuthority, VolumeFilesystemPlan, VolumeFiles
 import type { CoworkVolumeBackup } from "../../src/cowork/volume-backup";
 import { CoworkImagePins } from "../../src/cowork/images";
 import { CoworkExports } from "../../src/cowork/exports";
-import { CoworkWorkspaceExporter, type CoworkExportImageDoor, type CoworkExportWriterPorts } from "../../src/cowork/export-writer";
-import { CoworkWorkspaceRestorer, type CoworkRestoreApproval, type CoworkRestoreConfirmation, type CoworkRestoreIdentityPort, type CoworkRestorePorts } from "../../src/cowork/restore-bundle";
+import { CoworkWorkspaceExporter, type CoworkExportContentBinding, type CoworkExportImageDoor, type CoworkExportWriterPorts } from "../../src/cowork/export-writer";
+import { createCoworkWorkspaceRestorer, type CoworkRestoreApproval, type CoworkRestoreConfirmation, type CoworkRestoreIdentityPort, type CoworkRestorePorts } from "../../src/cowork/restore-bundle";
 import { CoworkLifecycleError, type CoworkLifecycleAuthority, type LifecycleFailure } from "../../src/cowork/storage-lifecycle";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 
@@ -130,16 +130,20 @@ export async function fixture(options: { ready?: boolean; pin?: boolean; backupF
   const proofs = { PROOF };
   const checkpoints: Array<(phase: string) => void | Promise<void>> = [];
   const checkpoint = async (phase: string) => { for (const fn of checkpoints) await fn(phase); };
-  const writerPorts: CoworkExportWriterPorts = { exports: exportsRecords, rs: db, home, images: door, checkpoint };
+  const syncCheckpoint = (phase: string) => { for (const fn of checkpoints) fn(phase); };
+  // Test-side stand-in for the two `cowork_exports` columns (`content_digest`, `output_map_json`) DOOR still has to add.
+  const bound = new Map<string, { contentDigest: string; outputIds: Record<string, string> }>();
+  const binding: CoworkExportContentBinding = { record: (id, value) => { bound.set(id, { contentDigest: value.contentDigest, outputIds: { ...value.outputIds } }); }, read: id => bound.get(id) ?? null };
+  const writerPorts: CoworkExportWriterPorts = { exports: exportsRecords, rs: db, home, images: door, binding, checkpoint };
   const confirmations: CoworkRestoreConfirmation[] = [];
   let answer: boolean | (() => boolean | Promise<boolean>) = true;
   const approval: CoworkRestoreApproval = { confirm: async request => { confirmations.push(request); return typeof answer === "function" ? answer() : answer; } };
-  const restorePorts: CoworkRestorePorts = { exports: exportsRecords, rs: db, home, backup, identity, approval, checkpoint };
+  const restorePorts: CoworkRestorePorts = { exports: exportsRecords, rs: db, home, backup, identity, approval, binding, checkpoint, syncCheckpoint };
   return {
     base, home, homeId, db, repo, workspaceId, dir, destination, image, shared, volumes, request, backup, excluded, authority, pins, exportsRecords, door, opened,
-    writerPorts, restorePorts, identity, confirmations, proofs, checkpoints,
+    writerPorts, restorePorts, identity, binding, bound, confirmations, proofs, checkpoints,
     exporter: (extra: Partial<CoworkExportWriterPorts> = {}) => new CoworkWorkspaceExporter({ ...writerPorts, ...extra }),
-    restorer: (extra: Partial<CoworkRestorePorts> = {}) => new CoworkWorkspaceRestorer({ ...restorePorts, ...extra }),
+    restorer: (extra: Partial<CoworkRestorePorts> = {}) => createCoworkWorkspaceRestorer({ ...restorePorts, ...extra }),
     setAnswer: (value: typeof answer) => { answer = value; },
     failIdentity: (value: boolean) => { identityFails = value; },
     identityCalls: () => identityCalls,

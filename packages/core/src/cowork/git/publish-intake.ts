@@ -13,7 +13,7 @@ import { GitPublicationError } from "./types";
  * The port below is STRUCTURAL on purpose. The guest file channel's own anti-wiring pin forbids any other src file from
  * naming that module, so the real client is proven assignable to this port in a test, not by an import. Everything the
  * port returns is untrusted guest bytes and is checked as such: binding echo, generation pinning, contiguous offsets,
- * exact end of file, strict base64-free decoding done by the channel, and a second stat after the last byte.
+ * exact end of file, and a second stat after the last byte.
  */
 
 /** What every channel call binds. The HOST derives all of it; none of it comes from the guest. */
@@ -64,14 +64,18 @@ export async function pullPublishBundle(port: PublishBundlePort, binding: Publis
   // The size budget is judged BEFORE one byte is read.
   if (first.bytes > limits.maxBytes) return fail("object_budget");
   const out = new Uint8Array(first.bytes), hash = createHash("sha256");
-  let offset = 0;
+  // Every reply but the last is EXACTLY as long as asked, so the number of calls is fixed by the size: a guest that dribbles a
+  // byte at a time (or replies empty) cannot hold the host in this loop.
+  const maxCalls = Math.ceil(first.bytes / chunkBytes);
+  let offset = 0, calls = 0;
   while (offset < first.bytes) {
+    if (++calls > maxCalls) return fail("bundle_unavailable");
     const want = Math.min(chunkBytes, first.bytes - offset);
     const chunk = await guard(() => port.readRange({ ...binding, expectedGeneration: first.generation, offset, maxBytes: want }, options));
     if (!chunk || !sameBinding(chunk, binding) || chunk.generation !== first.generation || chunk.bytes !== first.bytes || chunk.kind !== "file") return fail("bundle_stale");
     const length = chunk.content?.length;
-    // Contiguous, non-empty, never more than asked, never past the stat'ed size, EOF exactly where the size ends.
-    if (!(chunk.content instanceof Uint8Array) || chunk.offset !== offset || length < 1 || length > want || chunk.nextOffset !== offset + length
+    // Contiguous, exactly as long as asked, never past the stat'ed size, EOF exactly where the size ends.
+    if (!(chunk.content instanceof Uint8Array) || chunk.offset !== offset || length !== want || chunk.nextOffset !== offset + length
       || chunk.eof !== (offset + length === first.bytes)) return fail("bundle_unavailable");
     out.set(chunk.content, offset); hash.update(chunk.content); offset += length;
   }

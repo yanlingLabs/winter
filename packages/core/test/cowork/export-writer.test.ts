@@ -3,8 +3,8 @@
 import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, mkfifoSyncForTest, openSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "./export-fs";
 import { join } from "node:path";
-import { BUNDLE_IMAGE_FILES, DEFAULT_BUNDLE_LIMITS, serializeIntegrity, verifyBundle, walkRegularFiles } from "../../src/cowork/export-bundle";
-import { ExportIoError, hasExtendedAttributes } from "../../src/cowork/export-io";
+import { BUNDLE_IMAGE_FILES, DEFAULT_BUNDLE_LIMITS, serializeIntegrity, verifyBundle, walkRegularFilesAt } from "../../src/cowork/export-bundle";
+import { ExportIoError, hasExtendedAttributes, openDirectoryNoFollow } from "../../src/cowork/export-io";
 import { EXPORT_PLAINTEXT_DISCLOSURE } from "../../src/cowork/exports";
 import { CoworkLifecycleError, canonicalJson, sha256Hex } from "../../src/cowork/storage-lifecycle";
 import { A, BACKUP_XATTR, PROOF, SECRET, failsWith, fixture, listXattrs, onCleanup, poke, runCleanup, setXattr, type Fixture } from "./export-fixture";
@@ -23,7 +23,7 @@ test("an export is a folder bundle holding exactly the whitelist: the recorded m
   expect(result.path).toBe(join(f.destination, "my-backup.winterworkspace"));
   expect(result.disclosure).toBe(EXPORT_PLAINTEXT_DISCLOSURE);
   expect(bundleFiles(result.path)).toEqual(["data.ext4", "env.ext4", "integrity.json", "manifest.json",
-    "shared/instructions/WINTER.md", "shared/memory/deep/er/fact.txt", "shared/memory/notes.md", "shared/outputs/session-one/empty.txt", "shared/outputs/session-one/report.pdf"]);
+    "shared/instructions/WINTER.md", "shared/memory/deep/er/fact.txt", "shared/memory/notes.md", "shared/outputs/s1/empty.txt", "shared/outputs/s1/report.pdf"]);
   // The manifest is the RECORD, byte for byte: validateImport digests it against the row.
   const row = record(f, result.exportId);
   expect(readFileSync(join(result.path, "manifest.json"), "utf8")).toBe(row.manifest_json);
@@ -34,6 +34,11 @@ test("an export is a folder bundle holding exactly the whitelist: the recorded m
   const verified = await verifyBundle(result.path);
   expect(verified.integrity.exportId).toBe(result.exportId);
   expect(verified.files.size).toBe(8);
+  // The database-side binding holds the digest of integrity.json and the only copy of the session ids.
+  expect(verified.integrityDigest).toBe(result.contentDigest); expect(f.bound.get(result.exportId)).toEqual({ contentDigest: result.contentDigest, outputIds: { s1: "session-one" } });
+  for (const file of bundleFiles(result.path)) expect(file).not.toContain("session-one");
+  expect(readFileSync(join(result.path, "integrity.json"), "utf8")).not.toContain("session-one");
+  verified.close();
   // No absolute path, home path or host name in anything the bundle states about itself.
   for (const name of ["manifest.json", "integrity.json"]) { const text = readFileSync(join(result.path, name), "utf8"); expect(text).not.toContain(f.base); expect(text).not.toContain("/Users"); }
   // Owner-only, nothing executable, and backup-eligible: the original's sticky exclusion and xattrs did not travel.
@@ -127,27 +132,38 @@ test("a claim, run and release of the workspace during the copy refuses the expo
   expect(readdirSync(g.destination)).toEqual([]);
 });
 
-test("the bundle appears atomically: only a dot-named partial exists until the single exclusive rename", async () => {
+test("the bundle appears atomically, and the generation is complete only after the exclusive rename", async () => {
   const f = await fixture();
-  const seen: string[][] = [];
-  f.checkpoints.push(phase => { if (["before-complete", "before-rename"].includes(phase)) seen.push(readdirSync(f.destination)); });
+  const seen: Record<string, { listing: string[]; state: string }> = {};
+  f.checkpoints.push(phase => { if (["before-rename", "before-complete"].includes(phase)) seen[phase] = { listing: readdirSync(f.destination), state: f.db.db.query<{ state: string }, []>("SELECT state FROM cowork_exports").get()!.state }; });
   const result = await f.exportOnce("atomic");
-  expect(seen).toHaveLength(2);
-  for (const listing of seen) { expect(listing).toHaveLength(1); expect(listing[0]).toMatch(/^\.[0-9a-f-]+\.partial$/); }
+  expect(seen["before-rename"]!.listing).toHaveLength(1); expect(seen["before-rename"]!.listing[0]).toMatch(/^\.[0-9a-f-]+\.partial$/); expect(seen["before-rename"]!.state).toBe("prepared");
+  expect(seen["before-complete"]).toEqual({ listing: ["atomic.winterworkspace"], state: "prepared" });
   expect(readdirSync(f.destination)).toEqual(["atomic.winterworkspace"]);
+  expect(f.db.db.query("SELECT state FROM cowork_exports").all()).toEqual([{ state: "complete" }]);
   expect(result.files).toBe(9);
+});
+
+test("a generation is never complete for a bundle that does not exist: a refusal at complete takes the bundle back and marks the generation failed", async () => {
+  const f = await fixture();
+  f.checkpoints.push(phase => { if (phase === "before-complete") f.db.db.run("UPDATE cowork_workspaces SET power='running' WHERE workspace_id=?", [f.workspaceId]); });
+  await failsWith(f.exportOnce("late-stale"), "generation_stale");
+  expect(readdirSync(f.destination)).toEqual([]);
+  expect(f.db.db.query("SELECT state FROM cowork_exports").all()).toEqual([{ state: "failed" }]);
 });
 
 test("an existing target is never overwritten or merged, whether it appears before or during the export", async () => {
   const f = await fixture();
   mkdirSync(join(f.destination, "taken.winterworkspace")); writeFileSync(join(f.destination, "taken.winterworkspace/mine.txt"), "mine");
   await failsWith(f.exportOnce("taken"), "bundle_exists");
+  expect(f.db.db.query("SELECT count(*) AS n FROM cowork_exports").get()).toEqual({ n: 0 }); // refused before a generation was prepared
   expect(readFileSync(join(f.destination, "taken.winterworkspace/mine.txt"), "utf8")).toBe("mine");
   expect(readdirSync(join(f.destination, "taken.winterworkspace"))).toEqual(["mine.txt"]);
   const g = await fixture();
   g.checkpoints.push(phase => { if (phase === "before-rename") { mkdirSync(join(g.destination, "late.winterworkspace")); writeFileSync(join(g.destination, "late.winterworkspace/mine.txt"), "mine"); } });
   await failsWith(g.exportOnce("late"), "bundle_exists");
   expect(readdirSync(join(g.destination, "late.winterworkspace"))).toEqual(["mine.txt"]);
+  expect(g.db.db.query("SELECT state FROM cowork_exports").all()).toEqual([{ state: "failed" }]); // never a phantom complete
   expect(readdirSync(g.destination)).toEqual(["late.winterworkspace"]); // the partial was removed
 });
 
@@ -164,6 +180,31 @@ test("destinations are judged: absolute, an existing owner-only folder, outside 
   expect(readdirSync(f.destination)).toEqual([]);
   // Judged before any record is made: no generation was prepared for a bad destination.
   expect(f.db.db.query("SELECT count(*) AS n FROM cowork_exports").get()).toEqual({ n: 0 });
+});
+
+test("a destination with an ACL granting writes to others is refused, even though its mode bits are owner-only", async () => {
+  const f = await fixture(); const acl = join(f.base, "acl"); mkdirSync(acl, { mode: 0o700 });
+  expect((await import("node:child_process")).spawnSync("/bin/chmod", ["+a", "everyone allow add_file,delete_child", acl]).status).toBe(0);
+  await failsWith(f.exporter().export({ workspaceId: f.workspaceId, destinationParent: acl, proof: PROOF }), "destination_invalid");
+  expect(readdirSync(acl)).toEqual([]); expect(f.db.db.query("SELECT count(*) AS n FROM cowork_exports").get()).toEqual({ n: 0 });
+  // A read-only ACL does not matter.
+  const reading = join(f.base, "reading"); mkdirSync(reading, { mode: 0o700 });
+  (await import("node:child_process")).spawnSync("/bin/chmod", ["+a", "everyone allow read,list", reading]);
+  await f.exporter().export({ workspaceId: f.workspaceId, destinationParent: reading, name: "ok", proof: PROOF });
+});
+
+test("a shared directory swapped for a link between the two passes is never followed: the export refuses and nothing of the decoy is read", async () => {
+  const f = await fixture(); const decoy = join(f.base, "decoy"); mkdirSync(join(decoy, "er"), { recursive: true }); writeFileSync(join(decoy, "er/fact.txt"), SECRET);
+  f.checkpoints.push(async phase => { if (phase === "shared-pass-1") { const deep = join(f.shared, "memory/deep"); (await import("./export-fs")).renameForTest(deep, join(f.base, "deep-moved")); symlinkSync(decoy, deep); } });
+  await failsWith(f.exportOnce("swapped"), "bundle_unsafe");
+  expect(readdirSync(f.destination)).toEqual([]);
+  // The same swap one level up (a whole root) is held by descriptor: the held directory is still the original, and the export
+  // either completes from it or refuses; it never contains the decoy.
+  const g = await fixture(); const decoy2 = join(g.base, "decoy2"); mkdirSync(decoy2); writeFileSync(join(decoy2, "notes.md"), SECRET);
+  g.checkpoints.push(async phase => { if (phase === "shared-pass-1") { (await import("./export-fs")).renameForTest(join(g.shared, "memory"), join(g.base, "memory-moved")); symlinkSync(decoy2, join(g.shared, "memory")); } });
+  const result = await g.exportOnce("held");
+  for (const file of bundleFiles(result.path)) expect(readFileSync(join(result.path, file)).includes(Buffer.from(SECRET))).toBe(false);
+  expect(readFileSync(join(result.path, "shared/memory/notes.md"), "utf8")).toBe("- remembered\n");
 });
 
 test("a symlinked destination parent resolves to a real folder; the bundle lands in the real one", async () => {
@@ -237,10 +278,14 @@ test("images are read only through the pinned-descriptor door, one open per imag
 test("the walk and the index reject what a bundle may not hold", async () => {
   const f = await fixture();
   const result = await f.exportOnce("walk");
-  expect(walkRegularFiles(join(result.path, "shared"), DEFAULT_BUNDLE_LIMITS).map(file => file.path)).toEqual(["instructions/WINTER.md", "memory/deep/er/fact.txt", "memory/notes.md", "outputs/session-one/empty.txt", "outputs/session-one/report.pdf"]);
-  expect(() => walkRegularFiles(join(result.path, "shared"), { ...DEFAULT_BUNDLE_LIMITS, files: 2 })).toThrow(CoworkLifecycleError);
-  expect(() => walkRegularFiles(join(result.path, "shared"), { ...DEFAULT_BUNDLE_LIMITS, depth: 1 })).toThrow(CoworkLifecycleError);
-  expect(() => walkRegularFiles(join(result.path, "shared"), { ...DEFAULT_BUNDLE_LIMITS, sharedBytes: 10 })).toThrow(CoworkLifecycleError);
-  expect(serializeIntegrity((await verifyBundle(result.path)).integrity)).toBe(readFileSync(join(result.path, "integrity.json"), "utf8"));
+  const sharedFd = openDirectoryNoFollow(join(result.path, "shared"));
+  try {
+    expect(walkRegularFilesAt(sharedFd, DEFAULT_BUNDLE_LIMITS).map(file => file.path)).toEqual(["instructions/WINTER.md", "memory/deep/er/fact.txt", "memory/notes.md", "outputs/s1/empty.txt", "outputs/s1/report.pdf"]);
+    expect(() => walkRegularFilesAt(sharedFd, { ...DEFAULT_BUNDLE_LIMITS, files: 2 })).toThrow(CoworkLifecycleError);
+    expect(() => walkRegularFilesAt(sharedFd, { ...DEFAULT_BUNDLE_LIMITS, depth: 1 })).toThrow(CoworkLifecycleError);
+    expect(() => walkRegularFilesAt(sharedFd, { ...DEFAULT_BUNDLE_LIMITS, sharedBytes: 10 })).toThrow(CoworkLifecycleError);
+  } finally { closeSync(sharedFd); }
+  const again = await verifyBundle(result.path);
+  expect(serializeIntegrity(again.integrity)).toBe(readFileSync(join(result.path, "integrity.json"), "utf8")); again.close();
   void A; void canonicalJson; void existsSync; void setXattr;
 });

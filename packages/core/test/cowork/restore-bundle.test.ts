@@ -3,6 +3,7 @@ import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { cpSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { comparePaths, serializeIntegrity, verifyBundle, type BundleIntegrity } from "../../src/cowork/export-bundle";
+import { createCoworkWorkspaceRestorer } from "../../src/cowork/restore-bundle";
 import { CoworkVolumeError } from "../../src/cowork/volumes";
 import { sha256Hex } from "../../src/cowork/storage-lifecycle";
 import { BACKUP_XATTR, PROOF, failsWith, fixture, listXattrs, poke, runCleanup, type Fixture } from "./export-fixture";
@@ -173,7 +174,7 @@ test("a bundle damaged in any way is refused before the workspace is touched", a
     ["missing integrity", p => unlinkSync(join(p, "integrity.json")), "bundle_invalid"],
     ["extra top-level file", p => writeFileSync(join(p, "notes.txt"), "x"), "bundle_invalid"],
     ["unknown shared root", p => { mkdirSync(join(p, "shared/other")); writeFileSync(join(p, "shared/other/x"), "x"); }, "bundle_invalid"],
-    ["manifest edited alone", p => writeFileSync(join(p, "manifest.json"), readFileSync(join(p, "manifest.json"), "utf8").replace("export_fixture_1", "export_fixture_9")), "bundle_invalid"],
+    ["manifest edited alone", p => writeFileSync(join(p, "manifest.json"), readFileSync(join(p, "manifest.json"), "utf8").replace("export_fixture_1", "export_fixture_9")), "generation_unknown"],
     ["integrity not canonical", p => writeFileSync(join(p, "integrity.json"), JSON.stringify(JSON.parse(readFileSync(join(p, "integrity.json"), "utf8")), null, 1)), "bundle_invalid"],
     ["integrity oversized", p => writeFileSync(join(p, "integrity.json"), " ".repeat(17 * 1024 * 1024)), "bundle_invalid"],
     ["integrity with traversal", p => { const i = JSON.parse(readFileSync(join(p, "integrity.json"), "utf8")); i.files.push({ path: "shared/memory/../../data.ext4", bytes: 0, sha256: "0".repeat(64) }); writeFileSync(join(p, "integrity.json"), serializeIntegrity(i)); }, "bundle_invalid"],
@@ -242,10 +243,86 @@ test("a leftover aside, shared or staging folder of this generation refuses a se
   for (const name of [`restore-aside-${exported.exportId}`, `restored-shared-${exported.exportId}`, `.restore-${exported.exportId}`]) {
     mkdirSync(join(f.dir, name)); await failsWith(f.restorer().restore(restoreInput(exported.path)), "restore_conflict"); rmSync(join(f.dir, name), { recursive: true });
   }
-  const restorer = f.restorer(); let second: Promise<unknown> | undefined;
-  f.setAnswer(() => { second = restorer.restore(restoreInput(exported.path)).catch(error => error); return true; });
-  await restorer.restore(restoreInput(exported.path));
+  // A DIFFERENT instance on the same workspace while the first is mid-restore: the lock is process-wide, not per instance.
+  const first = f.restorer(), other = f.restorer(); let second: Promise<unknown> | undefined;
+  f.setAnswer(() => { second = other.restore(restoreInput(exported.path)).catch(error => error); return true; });
+  await first.restore(restoreInput(exported.path));
   expect((await second as any).code).toBe("restore_conflict");
+  // The lock is released: a later restore of the next generation proceeds.
+  poke(f.image("data"), 9100, "NEXT"); const next = await f.exportOnce("next"); f.setAnswer(true);
+  await f.restorer().restore(restoreInput(next.path));
+});
+
+test("the workspace is held from the last check to the identity record: a claim that lands while the copy is staged ends in a refusal, not in 'restored'", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup"); driftAfterExport(f);
+  const before = snapshot(f), listing = workspaceListing(f);
+  f.checkpoints.push(phase => { if (phase === "staged") f.volumes.claim(f.request); });
+  await failsWith(f.restorer().restore(restoreInput(exported.path)), "volume_busy");
+  expect(snapshot(f)).toEqual(before); expect(f.identityCalls()).toBe(0);
+  expect(workspaceListing(f)).toEqual(listing); // the staging folder was cleaned, nothing was exchanged
+  // The same for a workspace that starts running, and for a live image replaced at that moment.
+  const g = await fixture(); const eg = await g.exportOnce("b");
+  g.checkpoints.push(phase => { if (phase === "staged") g.db.db.run("UPDATE cowork_workspaces SET power='running' WHERE workspace_id=?", [g.workspaceId]); });
+  await failsWith(g.restorer().restore(restoreInput(eg.path)), "recovery_required");
+  const h = await fixture(); const eh = await h.exportOnce("c");
+  h.checkpoints.push(phase => { if (phase === "staged") { unlinkSync(h.image("environment")); writeFileSync(h.image("environment"), "replaced at the last moment", { mode: 0o600 }); } });
+  await failsWith(h.restorer().restore(restoreInput(eh.path)), "restore_conflict");
+  expect(readFileSync(h.image("environment"), "utf8")).toBe("replaced at the last moment");
+});
+
+test("two instances restoring the same workspace cannot both succeed", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  const results = await Promise.allSettled([f.restorer().restore(restoreInput(exported.path)), f.restorer().restore(restoreInput(exported.path))]);
+  expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+  expect(results.filter(result => result.status === "rejected").map(result => (result as PromiseRejectedResult).reason.code)).toEqual(["restore_conflict"]);
+});
+
+test("a bundle that was rewritten and re-indexed is refused: the database binds the index, and without that column the restorer cannot be built", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup"); const before = snapshot(f);
+  const forged = join(f.destination, "rewritten.winterworkspace"); cpSync(exported.path, forged, { recursive: true });
+  poke(join(forged, "data.ext4"), 8192, "EVIL"); // rewrite the image, then recompute the index over it
+  const idx = JSON.parse(readFileSync(join(forged, "integrity.json"), "utf8")) as BundleIntegrity;
+  const { createHash } = await import("node:crypto");
+  idx.files.find(file => file.path === "data.ext4")!.sha256 = createHash("sha256").update(readFileSync(join(forged, "data.ext4"))).digest("hex");
+  writeFileSync(join(forged, "integrity.json"), serializeIntegrity(idx));
+  await verifyBundle(forged).then(bundle => bundle.close()); // internally consistent: the old check alone would accept it
+  await failsWith(f.restorer().restore(restoreInput(forged)), "bundle_invalid");
+  expect(snapshot(f)).toEqual(before); expect(f.confirmations).toHaveLength(0);
+  // No binding recorded for the generation, or a binding for another digest: refused.
+  f.bound.clear(); await failsWith(f.restorer().restore(restoreInput(exported.path)), "bundle_invalid");
+  // The shape production can build today refuses everything; a ports object without the binding cannot be built at all.
+  await failsWith(createCoworkWorkspaceRestorer(undefined).restore(restoreInput(exported.path)), "integration_unavailable");
+  expect(() => createCoworkWorkspaceRestorer({ ...f.restorePorts, binding: undefined as never })).toThrow();
+});
+
+test("authority and the recorded sizes are judged before a byte of any image is hashed", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  poke(join(exported.path, "data.ext4"), 8192, "Z"); // a corrupt image: hashing would say bundle_invalid
+  await failsWith(f.restorer().restore({ bundlePath: exported.path, proof: { wrong: true } }), "authority_denied");
+  await failsWith(f.restorer().restore(restoreInput(exported.path)), "bundle_invalid"); // with authority, the hash does run
+  const g = await fixture(); const eg = await g.exportOnce("b"); poke(join(eg.path, "data.ext4"), 8192, "Z");
+  g.bound.set(eg.exportId, { ...g.bound.get(eg.exportId)!, contentDigest: "0".repeat(64) });
+  await failsWith(g.restorer().restore(restoreInput(eg.path)), "bundle_invalid"); // the binding is judged first too
+});
+
+test("opaque output ids map back to the real session folders, and an id the record does not hold is refused", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  expect(f.bound.get(exported.exportId)!.outputIds).toEqual({ s1: "session-one" });
+  f.setAnswer(true);
+  f.bound.set(exported.exportId, { ...f.bound.get(exported.exportId)!, outputIds: {} });
+  await failsWith(f.restorer().restore(restoreInput(exported.path)), "bundle_invalid");
+  f.bound.set(exported.exportId, { ...f.bound.get(exported.exportId)!, outputIds: { s1: "session-one" } });
+  const result = await f.restorer().restore(restoreInput(exported.path));
+  expect(existsSync(join(f.dir, result.sharedName!, "outputs/session-one/report.pdf"))).toBe(true);
+  expect(existsSync(join(f.dir, result.sharedName!, "outputs/s1"))).toBe(false);
+});
+
+test("a staging folder created by someone else in the moment before ours is never removed by us", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  const theirs = join(f.dir, `.restore-${exported.exportId}`);
+  f.setAnswer(() => { mkdirSync(theirs); writeFileSync(join(theirs, "keep.txt"), "theirs"); return true; });
+  await expect(f.restorer().restore(restoreInput(exported.path))).rejects.toThrow();
+  expect(readFileSync(join(theirs, "keep.txt"), "utf8")).toBe("theirs");
 });
 
 test("a restore is not an un-archive and not an import: an archived workspace restores in place, and an exported-then-deleted record cannot be resurrected", async () => {
@@ -276,7 +353,7 @@ test("a live image that is a link, a workspace folder with loose permissions, an
 test("the restore reads the bundle only: it creates and removes nothing inside it", async () => {
   const f = await fixture(); const exported = await f.exportOnce("backup");
   const listing = () => readdirSync(exported.path, { recursive: true }).map(String).sort();
-  const before = listing(); const verified = await verifyBundle(exported.path);
+  const before = listing(); const verified = await verifyBundle(exported.path); verified.close();
   await f.restorer().restore(restoreInput(exported.path));
-  expect(listing()).toEqual(before); expect(existsSync(join(exported.path, "data.ext4"))).toBe(true); void verified;
+  expect(listing()).toEqual(before); expect(existsSync(join(exported.path, "data.ext4"))).toBe(true); 
 });
