@@ -31,7 +31,7 @@ const ALLOWED = [
   `${GUEST}/tests/fake_worker.c`, `${GUEST}/tests/standin_linux_tool.c`, `${GUEST}/tests/test_hygiene.py`, `${GUEST}/tests/test_mutants.py`, `${GUEST}/tests/test_standin.c`, `${GUEST}/tests/test_standin.py`,
   `${GUEST}/tests/test_standin_hygiene.py`, `${GUEST}/tests/test_standin_linux.py`, `${GUEST}/tests/test_standin_prepare.py`,
   `${ARTIFACT}/build_standin_image.py`, `${ARTIFACT}/test_standin_image.py`, `${ARTIFACT}/test_image.py`, `${ARTIFACT}/test_runtime_image_digest.py`,
-  "packages/core/test/cowork/guest-standin-unselectable.test.ts",
+  "packages/core/test/cowork/guest-boot-anti-wiring.test.ts", "packages/core/test/cowork/guest-standin-unselectable.test.ts",
 ].sort();
 
 test("no production source names the stand-in: the daemon, the Swift host and launcher, the workflows and the embed scripts", () => {
