@@ -107,6 +107,7 @@ import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttac
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
 import { CAPABILITY_PLAIN_NAMES, permissionModeFor, toolSurfaceViolations } from "./mode-options";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import type { DrivableSessionMode } from "../sessions/session-mode";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 import { clearQueuedInput, hostInputFoldedCount, runtimeFolds } from "./fold";
@@ -228,7 +229,9 @@ export interface WinterSessionDeps {
   /** The BACKEND uuid allocated by the creation transaction: `Options.sessionId` on a fresh start,
    *  `Options.resume` afterwards, the messaging address, the name of the child's transcript. */
   backendSessionId: string;
-  mode: SessionMode;
+  /** A Cowork conversation's driver (cowork/session-driver.ts) passes "cowork": the only mode beyond the runnable three,
+   *  admitted here and nowhere in the Options/prompt/tool/run-home builders (sessions/session-mode.ts). */
+  mode: DrivableSessionMode;
   runtime: WinterRuntimeSdk;
   /** `Options` for ONE incarnation. Re-reads the session's LIVE facts (model, effort, policy) and
    *  re-resolves the spawn hook, so a `session.setModel` while resumable is honoured on resume. May
@@ -372,7 +375,7 @@ export function unconsumedUserMessages(events: readonly SessionEvent[]): string[
 export interface WinterSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  readonly mode: DrivableSessionMode;
   readonly state: WinterSessionState;
   /** The 8a generation of the current (or last) incarnation; 0 before the first opens. */
   readonly generation: number;
@@ -533,7 +536,7 @@ export function startWinterSession(deps: WinterSessionDeps): WinterSession {
 class WinterSessionImpl implements WinterSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  readonly mode: DrivableSessionMode;
   private stateValue: WinterSessionState = "resumable";
   private inc: Incarnation | undefined;
   private lastDone: Promise<void> = Promise.resolve();
@@ -1489,6 +1492,9 @@ class WinterSessionImpl implements WinterSession {
 
   private attachMessaging(inc: Incarnation): void {
     if (inc.attachment !== undefined) return;
+    // A Cowork conversation never enters the router's directory: same-Project messaging reaches it through the host peer
+    // inbox, and the router's run modes do not include it (session door design section 3).
+    if (this.mode === "cowork") return;
     try {
       inc.attachment = this.deps.messaging.attach(this.deps.runtime, {
         sessionId: this.sessionId,
