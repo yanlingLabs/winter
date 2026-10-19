@@ -136,6 +136,20 @@ describe("embed-cowork-native.sh (the Cowork native pair's build phase, standalo
     expect(existsSync(stray)).toBe(false);
   });
 
+  test("COWORK_NATIVE=omit removes a stale pair and a stale pins file, embeds nothing and succeeds", () => {
+    const r = rig();
+    expect(embed(r).status).toBe(0); // a previous build left the pair behind
+    const pins = join(r.dir, "built", "Winter.app", "Contents", "Resources", "cowork-native-pins.json");
+    mkdirSync(join(pins, ".."), { recursive: true });
+    writeFileSync(pins, "{}");
+    expect(existsSync(dest(r))).toBe(true);
+    const out = embed(r, { COWORK_NATIVE: "omit" });
+    expect(out.status).toBe(0);
+    expect(out.stdout).toContain("COWORK_NATIVE=omit");
+    expect(existsSync(dest(r))).toBe(false);
+    expect(existsSync(pins)).toBe(false);
+  });
+
   test("refuses a missing input", () => {
     const r = rig();
     rmSync(r.worker);
