@@ -683,9 +683,6 @@ struct UsagePlanLine: View {
                     Capsule().fill(Color.white.opacity(0.08))
                     Capsule().fill(ring.stale ? Color(nsColor: .systemGray) : color)
                         .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
-                    ForEach(alarms) { alarm in
-                        UsageAlarmTick(x: UsageAlarmRules.tickX(alarm.thresholdPercent, width: proxy.size.width), height: height, hovered: hovered)
-                    }
                     if hovered {
                         // A lighter weight than the titles: the figures sit in the line, they do not shout. Under the marker
                         // (or its label) a figure or the reset words step aside.
@@ -717,7 +714,18 @@ struct UsagePlanLine: View {
                         .font(Typography.tinyDigits(.regular))
                         .lineLimit(1)
                         .transition(.opacity)
-                        if let at, let aside {
+                    }
+                }
+                .frame(width: proxy.size.width, height: height)
+                // The ticks and the marker reach past the track (taller than it): an OVERLAY, so they never size it — in
+                // the stack they made the fills stretch to their height and the line thickened under the marker
+                // (user 2026-10-19: the alarm hover thickens nothing beyond the ordinary hover).
+                .overlay(alignment: .leading) {
+                    ZStack(alignment: .leading) {
+                        ForEach(alarms) { alarm in
+                            UsageAlarmTick(x: UsageAlarmRules.tickX(alarm.thresholdPercent, width: proxy.size.width), height: height, hovered: hovered)
+                        }
+                        if hovered, let at, let aside {
                             UsageAlarmMarker(x: at, height: height,
                                              text: flash != nil ? "Already past" : "\(UsageAlarmRules.percent(x: at, width: proxy.size.width))%",
                                              onRight: flash != nil ? at + 80 <= proxy.size.width : aside.labelOnRight)

@@ -211,6 +211,34 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePlanSlotCard.headerScale(hovered: false), 1)
     }
 
+    /// The ticks (and the marker) are taller than the track: they must never size it. In the track's stack they did, and
+    /// the fill stretched to their height — the line thickened under an alarm (user 2026-10-19). Drawn: the fill's rows,
+    /// in a column clear of the tick, are the line's own thickness, with and without a tick.
+    @MainActor
+    func testAnAlarmTickNeverThickensTheLine() throws {
+        func fillRows(_ alarms: [UsageAlarm]) throws -> Int {
+            let ring = UsagePlanRing(id: "weekly", title: "Weekly", fraction: 0.5, resets: nil, stale: false)
+            let view = UsagePlanLine(ring: ring, color: Color(red: 1, green: 0, blue: 0), compact: true, alarms: alarms)
+                .frame(width: 300).background(Color.black)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            let image = try XCTUnwrap(renderer.cgImage)
+            let w = image.width, h = image.height
+            var px = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = try XCTUnwrap(CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            // A column inside the fill (about a quarter along the track), far from the 80 % tick.
+            let x = Int(Double(w) * 0.32)
+            return (0..<h).filter { y in let i = (y * w + x) * 4; return px[i] > 200 && px[i + 1] < 60 && px[i + 2] < 60 }.count
+        }
+        let plain = try fillRows([])
+        let ticked = try fillRows([UsageAlarm(id: "a", provider: "codex", windowKey: "weekly", thresholdPercent: 80)])
+        XCTAssertEqual(plain, Int(UsagePlanLine.thickness(compact: true, hovered: false) * 2), accuracy: 1)
+        XCTAssertEqual(ticked, plain, "a tick must not thicken the line")
+    }
+
     func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
         XCTAssertEqual(UsagePlanLine.percents(0.344).used, 34)
         XCTAssertEqual(UsagePlanLine.percents(0.344).left, 66)
