@@ -5,6 +5,7 @@
 //
 // These doubles prove host composition only. They are never native, Linux or image admission evidence (that is D5's
 // real-host run after S7B lands).
+import { coworkHeldInputVerbs } from "../../src/cowork/held-input";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -142,7 +143,7 @@ const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs"; shares?: (context: CoworkGuestConversationContext, request: CoworkGuestStartRequest) => void;
-  deps?: Partial<CoworkSessionDriverDeps>; capabilities?: string[]; wrapQuery?: (query: ReturnType<typeof agentQuery>) => unknown } = {}) {
+  deps?: Partial<CoworkSessionDriverDeps>; capabilities?: string[]; echo?: ("fresh" | "resume" | undefined)[]; beforeSet?: (n: number) => void; wrapQuery?: (query: ReturnType<typeof agentQuery>) => unknown } = {}) {
   const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness], ...(opts.capabilities ? { runtimeCapability: { ...OFFER.runtimeCapability, capabilities: opts.capabilities } } : {}) };
   const starts: CoworkGuestStartRequest[] = [];
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
@@ -155,6 +156,7 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
       starts.push(request!);
       const context = f.begin(`incarnation-${guests.length + 1}`);
       let set: CoworkGuestConversationSet | null;
+      opts.beforeSet?.(guests.length);
       // #92 N2: a v3 host reports `shares_mounted` before it asks for the set (a bootstrap fault if refused).
       if (opts.shares) { try { opts.shares(context, request!); } catch { f.power("stopped"); throw new Error("bootstrap fault: share_mount_failed"); } }
       // The host fails the start on a refused set (a bootstrap fault); the driver must still surface ITS typed refusal.
@@ -164,6 +166,8 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
       f.power("running");
       const guest = new ScriptedGuest(context, onTheWire(set, context.incarnationId), () => f.power("stopped"));
       guest.onUser = opts.script ?? (() => {});
+      const echoed = opts.echo?.[guests.length];
+      if (echoed !== undefined) Object.assign(guest.run, { continuation: echoed });
       guests.push(guest);
       return guest.run;
     },
@@ -651,7 +655,7 @@ test("N3 gated on: a created store resumes under the SAME backend identity and u
 });
 
 test("N3 gated on: a started store (no completed turn) resumes as `either`; a lost store refuses and starts nothing", async () => {
-  const h = harness({ script: () => {}, deps: { coldResume: { ownerPatchApplied: true } } });
+  const h = harness({ script: () => {}, echo: [undefined, "fresh"], deps: { coldResume: { ownerPatchApplied: true } } });
   const first = await h.drivers.ensure(h.sid);
   await first.open(); await first.end();
   await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
@@ -659,12 +663,78 @@ test("N3 gated on: a started store (no completed turn) resumes as `either`; a lo
   const second = await h.drivers.ensure(h.sid);
   await second.open();
   expect(h.starts[1]!.resume).toEqual({ continuation: "either", endedGuestBoots: [] });
-  expect((h.launched[1] as { resume?: string }).resume).toBeUndefined(); // `either`: the guest decides from its own store
+  expect((h.launched[1] as { resume?: string }).resume).toBeUndefined(); // `either`, the guest echoed `fresh`: no store to resume
   await second.end();
   await until(() => h.drivers.get(h.sid) === undefined, "the second incarnation to end");
   h.f.records.markStoreLost(h.sid);
   await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
   expect(h.starts).toHaveLength(2);
+});
+
+/** Ends the first incarnation of a started-store conversation (no completed turn), so the next `ensure` plans `either`. */
+async function startedThenEnded(h: ReturnType<typeof harness>) {
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  expect(h.f.records.storeState(h.sid).storeState).toBe("started");
+}
+
+test("N3 (CR2): an `either` start sets the query's resume only when the guest echoes `resume`; no echo is refused, never guessed", async () => {
+  const found = harness({ script: () => {}, echo: [undefined, "resume"], deps: { coldResume: { ownerPatchApplied: true } } });
+  await startedThenEnded(found);
+  const second = await found.drivers.ensure(found.sid);
+  await second.open();
+  expect((found.launched[1] as { resume?: string }).resume).toBe(second.backendSessionId);
+  // No echo: the host cannot tell fresh from resume, so the incarnation is stopped before any query is built.
+  const silent = harness({ script: () => {}, deps: { coldResume: { ownerPatchApplied: true } } });
+  await startedThenEnded(silent);
+  const third = await silent.drivers.ensure(silent.sid);
+  await expect(third.open()).rejects.toThrow("recovery_required");
+  expect(silent.launched).toHaveLength(1);
+  expect(silent.guests[1]!.stops).toEqual(["user"]);
+  // A created store whose guest says `fresh` lost its store: never started fresh under the old identity.
+  const missing = harness({ script: reply("ok"), echo: [undefined, "fresh"], deps: { coldResume: { ownerPatchApplied: true } } });
+  const one = await missing.drivers.ensure(missing.sid);
+  await one.open(); await one.send("hi", "cli"); await one.idle(); await one.end();
+  await until(() => missing.drivers.get(missing.sid) === undefined, "the incarnation to end");
+  await expect((await missing.drivers.ensure(missing.sid)).open()).rejects.toThrow("recovery_required");
+  expect(missing.launched).toHaveLength(1);
+});
+
+test("N3 (L8): a store marked lost while the native start runs is refused at the set, in the repository and in the driver", async () => {
+  const h = harness({ script: reply("ok"), beforeSet: n => { if (n === 1) h.f.records.markStoreLost(h.sid); }, deps: { coldResume: { ownerPatchApplied: true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.send("hi", "cli"); await first.idle(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  await expect((await h.drivers.ensure(h.sid)).open()).rejects.toThrow("cold_resume_unavailable");
+  expect(h.guests).toHaveLength(1);
+  expect(h.f.records.storeState(h.sid).storeState).toBe("lost");
+  // The repository refuses to assign (and so to send) over a lost store, and never moves it back to started.
+  expect(() => h.f.records.assignConversationBackend(h.sid, first.backendSessionId, "incarnation-9")).toThrow("cold_resume_unavailable");
+  expect(h.f.records.storeState(h.sid)).toMatchObject({ storeState: "lost", lastIncarnationId: "incarnation-1" });
+});
+
+test("N3 (L8): a plan that no longer matches the store state at the set (started became created) is refused by the driver", async () => {
+  const h = harness({ script: () => {}, echo: [undefined, "resume"], beforeSet: n => { if (n === 1) h.f.records.markStoreCreated(h.sid); }, deps: { coldResume: { ownerPatchApplied: true } } });
+  await startedThenEnded(h);
+  await expect((await h.drivers.ensure(h.sid)).open()).rejects.toThrow("cold_resume_unavailable");
+  expect(h.guests).toHaveLength(1);
+});
+
+test("N3 gate: the cold-resume port without ownerPatchApplied true refuses like no port", async () => {
+  const h = harness({ script: reply("ok"), deps: { coldResume: { ownerPatchApplied: undefined as unknown as true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.send("hi", "cli"); await first.idle(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+  expect(h.starts).toHaveLength(1);
+  for (const unset of [false, 1, "true", null] as unknown[]) {
+    const g = harness({ script: reply("ok"), deps: { coldResume: { ownerPatchApplied: unset as true } } });
+    const s = await g.drivers.ensure(g.sid);
+    await s.open(); await s.send("hi", "cli"); await s.idle(); await s.end();
+    await until(() => g.drivers.get(g.sid) === undefined, "the incarnation to end");
+    await expect(g.drivers.ensure(g.sid)).rejects.toThrow("cold_resume_unavailable");
+  }
 });
 
 const HOLD_HEX = "b".repeat(64);
@@ -676,26 +746,107 @@ function heldQuery(calls: unknown[]) {
   });
 }
 
+const heldGate = (reconcile: (context: { sessionId: string; inputs: readonly unknown[]; epoch: { incarnationId: string; leaseEpoch: number }; verbs: unknown }) => void | Promise<void> = () => {}) => ({ enabled: true as const, reconcile: reconcile as never });
+const HELD_CAPS = ["confined-guest-posture-v1", "held-input-v1"];
+/** A guest turn that also emits `system/held_inputs` (once, after init), carrying `inputs`. */
+const heldReply = (inputs: unknown, times = 1) => (_: string, guest: ScriptedGuest) => {
+  const sessionId = guest.set.conversations[0]!.authority.sessionId;
+  guest.data(systemInit({ session_id: sessionId, model: FIXTURE_MODEL, tools: ["Read", "Edit", "Write", "Bash"], permissionMode: SDK_HOST_QUERY_MODES[guest.set.conversations[0]!.policy] }));
+  for (let i = 0; i < times; i++) guest.data({ type: "system", subtype: "held_inputs", inputs, uuid: "11111111-1111-4111-8111-111111111111", session_id: sessionId } as never);
+  guest.data(assistantText("ok")); guest.data(result());
+};
+const holdOne = (session: Awaited<ReturnType<ReturnType<typeof harness>["drivers"]["ensure"]>>) => session.heldInput!.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "hello", clientName: "peer" });
+
 test("N4 gate: heldInput exists only with the host's gate AND a runtime offering held-input-v1", async () => {
-  const withBoth = harness({ script: reply("ok"), capabilities: ["confined-guest-posture-v1", "held-input-v1"], deps: { heldInput: { enabled: true } } });
+  const withBoth = harness({ script: reply("ok"), capabilities: HELD_CAPS, deps: { heldInput: heldGate() } });
   expect((await withBoth.drivers.ensure(withBoth.sid)).heldInput).toBeDefined();
-  const noGate = harness({ script: reply("ok"), capabilities: ["confined-guest-posture-v1", "held-input-v1"] });
+  const noGate = harness({ script: reply("ok"), capabilities: HELD_CAPS });
   expect((await noGate.drivers.ensure(noGate.sid)).heldInput).toBeUndefined();
-  const oldRuntime = harness({ script: reply("ok"), deps: { heldInput: { enabled: true } } });
+  const oldRuntime = harness({ script: reply("ok"), deps: { heldInput: heldGate() } });
   expect((await oldRuntime.drivers.ensure(oldRuntime.sid)).heldInput).toBeUndefined();
 });
 
-test("N4: the verbs reach the live query bound to the running incarnation; before the start and after the end they refuse", async () => {
-  const calls: unknown[] = [];
-  const h = harness({ script: reply("ok"), capabilities: ["confined-guest-posture-v1", "held-input-v1"], deps: { heldInput: { enabled: true } }, wrapQuery: heldQuery(calls) });
+test("N4: the verbs reach the live query bound to the running incarnation, only after system/held_inputs was reconciled", async () => {
+  const calls: unknown[] = [], reconciled: unknown[] = [];
+  const h = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(({ inputs, epoch }) => { reconciled.push([inputs, epoch]); }) }, wrapQuery: heldQuery(calls) });
   const session = await h.drivers.ensure(h.sid);
-  await expect(session.heldInput!.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "hello", clientName: "peer" })).rejects.toThrow("cold_resume_unavailable");
+  await expect(holdOne(session)).rejects.toThrow("cold_resume_unavailable");
   await session.open();
-  expect(await session.heldInput!.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "hello", clientName: "peer" })).toEqual({ held: true });
-  expect(await session.heldInput!.commit("r1", HOLD_HEX)).toEqual({ outcome: "queued" });
+  // The run exists but the runtime has not reported its held inputs: no verb may bind yet.
+  expect(session.coworkEpoch).toBeUndefined(); // rule 1: the epoch is not published before the reconcile
+  await expect(holdOne(session)).rejects.toThrow("cold_resume_unavailable");
+  await session.send("hi", "cli"); await session.idle();
+  await until(() => reconciled.length === 1, "the reconcile");
   const context = h.guests[0]!.context;
+  expect(reconciled).toEqual([[[], { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }]]);
+  expect(session.coworkEpoch).toEqual({ incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch });
+  expect(await holdOne(session)).toEqual({ held: true });
+  expect(await session.heldInput!.commit("r1", HOLD_HEX)).toEqual({ outcome: "queued" });
   expect(calls).toEqual([["hold", { inputId: "r1", holdToken: HOLD_HEX, epoch: { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }, text: "hello", clientName: "peer" }], ["commit", "r1", HOLD_HEX]]);
   await session.end();
   await expect(session.heldInput!.commit("r1", HOLD_HEX)).rejects.toThrow("cold_resume_unavailable");
   expect(calls).toHaveLength(2);
+});
+
+test("N4 rule 1: the epoch is published only when the reconcile RESOLVES; a throw, a malformed list or no reconcile leaves the verbs refused; it runs once", async () => {
+  // Pending until released.
+  let release!: () => void, count = 0;
+  const pending = harness({ script: heldReply([], 2), capabilities: HELD_CAPS, deps: { heldInput: heldGate(() => { count++; return new Promise<void>(r => { release = r; }); }) }, wrapQuery: heldQuery([]) });
+  const a = await pending.drivers.ensure(pending.sid);
+  await a.open(); await a.send("hi", "cli"); await a.idle();
+  await until(() => count === 1, "the reconcile to start");
+  await expect(holdOne(a)).rejects.toThrow("cold_resume_unavailable");
+  release();
+  await Bun.sleep(30);
+  expect(await holdOne(a)).toEqual({ held: true });
+  expect(count).toBe(1); // the repeat message did not reconcile again
+  // A throw: refused for the incarnation.
+  const failing = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(() => { throw new Error("ledger"); }), log: () => {} }, wrapQuery: heldQuery([]) });
+  const b = await failing.drivers.ensure(failing.sid);
+  await b.open(); await b.send("hi", "cli"); await b.idle(); await Bun.sleep(30);
+  await expect(holdOne(b)).rejects.toThrow("cold_resume_unavailable");
+  // A malformed list never reaches the reconcile.
+  let called = 0;
+  const bad = harness({ script: heldReply([{ inputId: "r1", digest: "nope", holdToken: HOLD_HEX, state: "held" }]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(() => { called++; }), log: () => {} }, wrapQuery: heldQuery([]) });
+  const c = await bad.drivers.ensure(bad.sid);
+  await c.open(); await c.send("hi", "cli"); await c.idle(); await Bun.sleep(30);
+  expect(called).toBe(0);
+  await expect(holdOne(c)).rejects.toThrow("cold_resume_unavailable");
+  // A gate with no reconcile is not a gate: the verbs never bind.
+  const bare = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: { enabled: true } as never, log: () => {} }, wrapQuery: heldQuery([]) });
+  const d = await bare.drivers.ensure(bare.sid);
+  await d.open(); await d.send("hi", "cli"); await d.idle(); await Bun.sleep(30);
+  await expect(holdOne(d)).rejects.toThrow("cold_resume_unavailable");
+});
+
+test("N4 rule 1: the reconcile's verbs work BEFORE the epoch is published, and `published` fires only after it is", async () => {
+  const calls: unknown[] = [], order: string[] = [];
+  const h = harness({
+    script: heldReply([{ inputId: "r9", digest: "a".repeat(64), holdToken: HOLD_HEX, state: "held" }]), capabilities: HELD_CAPS, wrapQuery: heldQuery(calls),
+    deps: { heldInput: { enabled: true, reconcile: (async ({ sessionId, inputs, verbs }: { sessionId: string; inputs: readonly { inputId: string; holdToken: string }[]; verbs: { discard(id: string, token: string): Promise<unknown> } }) => {
+      order.push(`reconcile:${sessionId === h.sid}`);
+      expect(h.drivers.get(h.sid)!.coworkEpoch).toBeUndefined(); // not yet published ...
+      await verbs.discard(inputs[0]!.inputId, inputs[0]!.holdToken); // ... but the reconcile can decide the held input
+    }) as never, published: sessionId => { order.push(`published:${sessionId === h.sid}:${h.drivers.get(h.sid)!.coworkEpoch !== undefined}`); } } },
+  });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle();
+  await until(() => order.length === 2, "the reconcile and the publication");
+  expect(order).toEqual(["reconcile:true", "published:true:true"]);
+});
+
+test("N4 (rule 1): a gate-on runtime WITHOUT held-input-v1 that forges system/held_inputs gets no reconcile, no verbs and no tap effect", async () => {
+  let reconciled = 0;
+  const h = harness({ script: heldReply([{ inputId: "r9", digest: "a".repeat(64), holdToken: HOLD_HEX, state: "held" }]), deps: { heldInput: heldGate(() => { reconciled++; }) } });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle(); await Bun.sleep(30);
+  expect(reconciled).toBe(0);
+  expect(session.heldInput).toBeUndefined();
+  expect(session.coworkEpoch).toBeDefined(); // not held back: this runtime is not a held-input runtime
+});
+
+test("N4: the hold verb refuses text whose trimStart starts with `/` (a slash command ends the host-query guest)", async () => {
+  const verbs = coworkHeldInputVerbs(() => ({ holdInput: async () => ({ held: true }), commitInput: async () => ({}), discardInput: async () => ({}), forgetInput: async () => ({}) }), () => ({ incarnationId: "i", leaseEpoch: 1 }));
+  for (const text of ["/clear", "  \n/x", "\t/compact now"]) await expect(verbs.hold({ inputId: "r1", holdToken: HOLD_HEX, text, clientName: "peer" })).rejects.toThrow("invalid_request");
+  expect(await verbs.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "a/b", clientName: "peer" })).toEqual({ held: true });
 });

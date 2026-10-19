@@ -91,6 +91,34 @@ export function coworkHeldInputsEvent(value: unknown): readonly CoworkHeldInputR
   }));
 }
 
+/** A `system/held_inputs` message's records, or undefined when `message` is some other message. A malformed one throws
+ *  `recovery_required` (the caller never publishes the epoch). */
+export function coworkHeldInputsFrom(message: unknown): readonly CoworkHeldInputRecord[] | undefined {
+  if (!plain(message) || message.type !== "system" || message.subtype !== "held_inputs") return undefined;
+  return coworkHeldInputsEvent({ inputs: message.inputs });
+}
+
+/**
+ * Observes the query's messages for `system/held_inputs` (emitted once after init, always) and hands the first to `onHeldInputs`.
+ * Every message is passed on unchanged and in order; every other member of the query is the query's own.
+ */
+export function coworkTapHeldInputs<Q extends object>(query: Q, onHeldInputs: (message: unknown) => void): Q {
+  return new Proxy(query, {
+    get(target, property) {
+      if (property === Symbol.asyncIterator) {
+        return async function* tapped() {
+          for await (const message of target as unknown as AsyncIterable<unknown>) {
+            if (plain(message) && message.type === "system" && message.subtype === "held_inputs") onHeldInputs(message);
+            yield message;
+          }
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 /** The four verbs a Cowork driver exposes (gated; see the header). Every call is bound to the incarnation that is live. */
 export interface CoworkHeldInputVerbs {
   hold(input: { readonly inputId: string; readonly holdToken: string; readonly text: string; readonly clientName: string }): Promise<CoworkHoldAnswer>;
@@ -130,7 +158,8 @@ export function coworkHeldInputVerbs(query: () => unknown, epoch: () => { readon
   const verbs: CoworkHeldInputVerbs = {
     async hold(input) {
       checkRef(input?.inputId, input?.holdToken);
-      if (typeof input.text !== "string" || input.text.length === 0 || Buffer.byteLength(input.text, "utf8") > TEXT_MAX_BYTES) throw new CoworkError("invalid_request");
+      // A leading `/` is a slash command to the host-query guest, which ends its runtime: refused here, like `guestText` does.
+      if (typeof input.text !== "string" || input.text.length === 0 || input.text.trimStart().startsWith("/") || Buffer.byteLength(input.text, "utf8") > TEXT_MAX_BYTES) throw new CoworkError("invalid_request");
       if (typeof input.clientName !== "string" || input.clientName.length === 0 || input.clientName.length > CLIENT_MAX) throw new CoworkError("invalid_request");
       const now = epoch();
       if (now === undefined) throw new CoworkError("cold_resume_unavailable");
@@ -177,4 +206,17 @@ export function coworkHostMessageListAnswer(value: unknown): CoworkHostMessageLi
     return Object.freeze({ ...item }) as CoworkHostMessageListAnswer["sessions"][number];
   });
   return Object.freeze({ sessions: Object.freeze(sessions), ...(value.omitted === undefined ? {} : { omitted: value.omitted as number }) });
+}
+
+/** The content of the note shown once per stall of a recipient's held-input queue (3 failed drains in a row on transport or
+ *  malformed answers): fixed text, no sender, no message detail. */
+export function coworkStalledInboxNotice(): { readonly warning: "peer_inbox_stalled"; readonly text: string } {
+  return Object.freeze({ warning: "peer_inbox_stalled", text: "Messages from other sessions in this project are waiting to be delivered to this conversation; delivery is being retried." } as const);
+}
+
+/** The content of the note a recipient's conversation shows for a peer message that was accepted but lost (`unknown_input`,
+ *  4.5): a `continuity_warning` event's `warning` and `text`. The composition appends it; the sender is not named, because
+ *  the guest never saw the message. */
+export function coworkLostInputNotice(): { readonly warning: "peer_message_lost"; readonly text: string } {
+  return Object.freeze({ warning: "peer_message_lost", text: "A message from another session in this project was accepted but could not be delivered to this conversation." } as const);
 }
