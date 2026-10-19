@@ -54,6 +54,7 @@ const pinned = (h: Harness) => { const store = new CoworkImagePins(h.db, { autho
 describe("construction", () => {
   test("a database without the binding table cannot build the environment, and nothing is created in the coordination directory's ledger", () => {
     const h = createHarness(), w = world();
+    h.db.db.run("DROP TABLE IF EXISTS cowork_home_binding"); // migration 18 (DOOR) creates it in a fresh database; this test is about a database that lacks it
     expect(() => createCoworkNativeProductionEnvironment(options(h, w))).toThrow(expect.objectContaining({ code: "home_binding_unavailable" }));
     expect(existsSync(join(h.root, "coord", "cowork-admission.sqlite"))).toBe(false);
   });
