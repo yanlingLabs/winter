@@ -89,26 +89,27 @@ final class IslandQuietTabsTests: XCTestCase {
                         armedAt: armedAt, expiresAt: expiresAt, session: IslandSessionFacts(mode: "code", title: title))
     }
 
-    func testAWatchsLineFillsAsItsTimeRunsOutAndSaysTheTimeLinesTwoHalvesInside() {
+    func testAWatchsLineIsTheTimeLeftEmptyingAsItRunsOut() {
         let w = watch(armedAt: 0, expiresAt: 60 * 60_000)
-        XCTAssertEqual(IslandWatchesPresentation.elapsed(w, nowMs: 0), 0)
-        XCTAssertEqual(IslandWatchesPresentation.elapsed(w, nowMs: 15 * 60_000), 0.25, accuracy: 0.0001)
-        XCTAssertEqual(IslandWatchesPresentation.elapsed(w, nowMs: 2 * 60 * 60_000), 1)
-        XCTAssertEqual(IslandWatchesPresentation.elapsed(watch(armedAt: 5, expiresAt: 5), nowMs: 9), 1, "no span: full")
-        let words = IslandWatchesPresentation.lineWords(w, nowMs: 4 * 60_000)
-        XCTAssertEqual(words.atFill, "armed 4 min ago")
-        XCTAssertEqual(words.end, "56 min left")
-        // The same words as the time line the row used to show, split in two.
-        XCTAssertEqual("\(words.atFill!) · \(words.end!)", islandWatchTimeLine(w, nowMs: 4 * 60_000))
-        let fresh = IslandWatchesPresentation.lineWords(watch(armedAt: 0, expiresAt: 3 * 60 * 60_000), nowMs: 30_000)
-        XCTAssertEqual("\(fresh.atFill!) · \(fresh.end!)", islandWatchTimeLine(watch(armedAt: 0, expiresAt: 3 * 60 * 60_000), nowMs: 30_000))
+        XCTAssertEqual(IslandWatchesPresentation.left(w, nowMs: 0), 1, "just armed: all of it left")
+        XCTAssertEqual(IslandWatchesPresentation.left(w, nowMs: 15 * 60_000), 0.75, accuracy: 0.0001)
+        XCTAssertEqual(IslandWatchesPresentation.left(w, nowMs: 2 * 60 * 60_000), 0, "expired: none left, never negative")
+        XCTAssertEqual(IslandWatchesPresentation.left(w, nowMs: -60_000), 1, "a clock skew never overfills it")
+        XCTAssertEqual(IslandWatchesPresentation.left(watch(armedAt: 5, expiresAt: 5), nowMs: 9), 0, "no span: none left")
+        XCTAssertEqual(IslandWatchesPresentation.leftWords(w, nowMs: 4 * 60_000), "56 min left")
+        XCTAssertEqual(IslandWatchesPresentation.armedWords(w, nowMs: 4 * 60_000), "armed 4 min ago")
+        XCTAssertEqual(IslandWatchesPresentation.armedWords(w, nowMs: 30_000), "armed just now")
+        // Between them, the same words as the time line the row has always said.
+        XCTAssertEqual("\(IslandWatchesPresentation.armedWords(w, nowMs: 4 * 60_000)) · \(IslandWatchesPresentation.leftWords(w, nowMs: 4 * 60_000))",
+                       islandWatchTimeLine(w, nowMs: 4 * 60_000))
+        let long = watch(armedAt: 0, expiresAt: 3 * 60 * 60_000)
+        XCTAssertEqual("\(IslandWatchesPresentation.armedWords(long, nowMs: 30_000)) · \(IslandWatchesPresentation.leftWords(long, nowMs: 30_000))",
+                       islandWatchTimeLine(long, nowMs: 30_000))
     }
 
-    func testAWatchSaysItsSessionAtRestAndItsTargetUnderThePointer() {
-        let w = watch(armedAt: 0, expiresAt: 1)
-        XCTAssertEqual(IslandWatchesPresentation.sideWords(w, hovered: false), "List the extension")
-        XCTAssertEqual(IslandWatchesPresentation.sideWords(w, hovered: true), "List the extension · Chrome — Inbox")
+    func testThePointerRevealsAWatchsSessionTargetAndArmingAndVoiceOverHearsItAtRest() {
         let timed = watch(armedAt: 0, expiresAt: 60 * 60_000)
+        XCTAssertEqual(IslandWatchesPresentation.details(timed, nowMs: 4 * 60_000), "List the extension · Chrome — Inbox · armed 4 min ago")
         XCTAssertEqual(IslandWatchesPresentation.accessibilityLabel(timed, nowMs: 4 * 60_000, error: nil),
                        "You click “Send”, List the extension · Chrome — Inbox, armed 4 min ago · 56 min left",
                        "VoiceOver hears the time line at rest")
