@@ -19,6 +19,8 @@ from test_native import CC, ROOT, build
 
 sys.path.insert(0, str(ROOT / "bootstrap"))
 import guest_bootstrap as gb  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import runtime_blocks as rb  # noqa: E402
 from superblock_fixture import make_sb  # noqa: E402
 
 UUID_A = "11111111-2222-4333-8444-555555555555"
@@ -511,16 +513,16 @@ class TrustedConfigTests(InitModuleCase):
         return int(code), text
 
     def test_a_host_query_profile_gets_its_artifact_pins_under_its_own_key(self):
-        artifacts = '{"artifacts":{"launcher":{"path":"/opt/r/launcher","sha256":"' + "0" * 64 + '"}}}'
-        for key in ("hostQueryRuntime", "hostQueryGuidedRuntime"):
+        artifacts = rb.text(rb.v1_block())
+        for key, block in (("hostQueryRuntime", rb.v1_block()), ("hostQueryGuidedRuntime", rb.guided_block())):
             with self.subTest(key=key):
-                code, text = self.build_runtime_config('{"controlDirectory":"/run/winter/control"}', '[{"logicalSessionId":"s1"}]', key, artifacts)
+                code, text = self.build_runtime_config('{"controlDirectory":"/run/winter/control"}', '[{"logicalSessionId":"s1"}]', key, rb.text(block))
                 self.assertEqual(code, 0)
                 parsed = json.loads(text)
                 self.assertEqual(list(parsed), ["guestBootId", "conversations", "controlDirectory", key])
-                self.assertEqual(parsed[key], json.loads(artifacts))
+                self.assertEqual(parsed[key], block)
         code, text = self.build_runtime_config("{}", "[]", "hostQueryRuntime", artifacts)
-        self.assertEqual((code, json.loads(text)["hostQueryRuntime"]["artifacts"]["launcher"]["path"]), (0, "/opt/r/launcher"))   # no stray comma with an empty static part
+        self.assertEqual((code, json.loads(text)["hostQueryRuntime"]["artifacts"]["launcher"]["path"]), (0, "/opt/winter/helpers/linux-runtime-compartment"))   # no stray comma with an empty static part
         self.assertEqual(self.build_runtime_config("{}", "[]", "-", artifacts)[0], 0)   # a tools-only set carries no runtime key at all
         self.assertNotIn("hostQuery", self.build_runtime_config("{}", "[]", "-", artifacts)[1])
 
@@ -534,7 +536,7 @@ class TrustedConfigTests(InitModuleCase):
                 self.assertEqual(self.build_runtime_config("{}", "[]", "hostQueryRuntime", bad)[0], 6)
 
     def test_the_runtime_member_is_counted_in_the_size_check_to_the_byte(self):
-        artifacts = '{"artifacts":{"a":1}}'
+        artifacts = rb.text(rb.guided_block())
         code, text = self.build_runtime_config("{}", "[]", "hostQueryGuidedRuntime", artifacts)
         self.assertEqual(code, 0)
         whole = len(text)
@@ -542,6 +544,96 @@ class TrustedConfigTests(InitModuleCase):
         for capacity in (whole, whole - 1, whole - 2, whole - 10):
             with self.subTest(capacity=capacity):
                 self.assertEqual(self.build_runtime_config("{}", "[]", "hostQueryGuidedRuntime", artifacts, capacity=capacity)[0], 5)
+
+    def block_valid(self, profile, text):
+        path = self.dir / "block.json"
+        path.write_text(text)
+        return self.run_tool("runtimeblock", profile, path) == "1"
+
+    def test_the_runtime_objects_the_image_carries_are_accepted(self):
+        self.assertTrue(self.block_valid(1, rb.text(rb.v1_block())))
+        self.assertTrue(self.block_valid(2, rb.text(rb.guided_block())))
+        deps = [rb.dependency("/lib/ld-linux-aarch64.so.1"), rb.dependency("/lib/aarch64-linux-gnu/libc.so.6"), rb.dependency("/usr/lib/aarch64-linux-gnu/libz.so.1"), rb.dependency("/lib64/x")]
+        self.assertTrue(self.block_valid(2, rb.text(rb.guided_block(deps))))
+        # key order is not part of the shape; only the key SET is
+        reordered = rb.guided_block()
+        reordered["reader"] = {"uid": rb.READER_UID, "dependencies": [], "artifacts": dict(reversed(list(reordered["reader"]["artifacts"].items())))}
+        self.assertTrue(self.block_valid(2, json.dumps(reordered, separators=(",", ":"))))
+        many = [rb.dependency("/lib/d%02d" % k, path="/opt/winter/reader/deps/" + "x" * 100 + "%02d" % k) for k in range(32)]
+        self.assertTrue(self.block_valid(2, rb.text(rb.guided_block(many))))      # 32 dependencies fit the guided bound (the v1 bound could not hold them)
+
+    def test_the_guided_object_must_have_exactly_the_shape_the_supervisor_reads(self):
+        for label, block in rb.guided_refused_cases().items():
+            with self.subTest(label):
+                self.assertFalse(self.block_valid(2, rb.text(block)), label)
+        # neighbours of the refused spellings that ARE valid, so a guard cannot be satisfied by refusing everything
+        for label, block in rb.guided_accepted_cases().items():
+            with self.subTest(label):
+                self.assertTrue(self.block_valid(2, rb.text(block)), label)
+
+    def test_the_host_query_object_has_exactly_artifacts_and_never_a_reader(self):
+        self.assertFalse(self.block_valid(1, rb.text(rb.guided_block())))        # reader is absent for v1, not empty or ignored
+        self.assertFalse(self.block_valid(1, rb.text(rb.mutated(rb.v1_block(), lambda v: v.__setitem__("reader", {})))))
+        self.assertFalse(self.block_valid(1, "{}"))
+        self.assertFalse(self.block_valid(2, rb.text(rb.v1_block())))             # and guided needs it
+        for text in ('{"artifacts":{}}', '[]', '{', 'null', '', '{"artifacts":null}'):
+            with self.subTest(text):
+                self.assertFalse(self.block_valid(1, text))
+                self.assertFalse(self.block_valid(2, text))
+        for profile in (0, 3, 4):
+            self.assertFalse(self.block_valid(profile, rb.text(rb.v1_block())))
+
+    def test_the_object_text_must_be_compact_escape_free_and_have_no_duplicate_key(self):
+        good = rb.text(rb.guided_block())
+        self.assertTrue(self.block_valid(2, good))
+        bad = {"trailing bytes": good + "x", "leading space": " " + good, "a space after a colon": good.replace('"uid":', '"uid": ', 1), "a newline": good[:-1] + "\n}",
+               "a space after a comma": good.replace(",", ", ", 1), "an escape in a string": good.replace("/opt/winter/runtime", "/opt/winter/ru\\u006ftime", 1),
+               "a duplicate key": good.replace('"uid":65534', '"uid":65534,"uid":65534', 1), "an escaped key": good.replace('"uid"', '"u\\u0069d"', 1),
+               "a leading zero": good.replace('"uid":65534', '"uid":065534', 1), "a plus sign": good.replace('"uid":65534', '"uid":+65534', 1), "an exponent": good.replace('"uid":65534', '"uid":6.5534e4', 1),
+               "a missing comma between members": good.replace('},"reader"', '}"reader"', 1), "a missing comma between a key's members": good.replace('"path":"/opt/winter/runtime/winter-host-query","sha256"', '"path":"/opt/winter/runtime/winter-host-query""sha256"', 1),
+               "a DEL byte": good.replace("/opt/winter/runtime", "/opt/winter/run\x7ftime", 1), "a control byte": good.replace("/opt/winter/runtime", "/opt/winter/run\x01time", 1),
+               "a missing colon": good.replace('"uid":65534', '"uid"65534', 1),
+               "a trailing comma": good.replace('"dependencies":[]', '"dependencies":[,]', 1), "a non-ASCII byte": good.replace("/opt/winter/runtime", "/opt/winter/runt\u00efme", 1)}
+        two = rb.text(rb.guided_block([rb.dependency("/lib/a"), rb.dependency("/lib/b")]))
+        self.assertTrue(self.block_valid(2, two))
+        bad["a missing comma between dependencies"] = two.replace('},{"guestPath"', '}{"guestPath"', 1)
+        bad["a trailing comma after the last dependency"] = two.replace('}],"uid"', '},],"uid"', 1)
+        self.assertNotEqual(bad["a missing comma between dependencies"], two)
+        self.assertNotEqual(bad["a trailing comma after the last dependency"], two)
+        for label, text in bad.items():
+            with self.subTest(label):
+                self.assertFalse(self.block_valid(2, text), label)
+        # the bounds: the v1 object stops at 4096 bytes, the guided one at 16384
+        padded_v1 = rb.mutated(rb.v1_block(), lambda v: v["artifacts"]["launcher"].__setitem__("path", "/" + "a" * 1023))
+        self.assertTrue(self.block_valid(1, rb.text(padded_v1)))
+        too_big = rb.guided_block([rb.dependency("/lib/d%02d" % k, path="/" + "q" * 1000 + "%02d" % k) for k in range(20)])
+        self.assertGreater(len(rb.text(too_big)), 16384)
+        self.assertFalse(self.block_valid(2, rb.text(too_big)))
+
+    def guidance_ok(self, profile, count, text):
+        path = self.dir / "conv-guidance.json"
+        path.write_text(text)
+        return self.run_tool("guidance", profile, count, path) == "1"
+
+    def test_guided_conversations_carry_exactly_one_guidance_directory_each_and_no_other_profile_any(self):
+        item = '{"hostQueryGuidedRuntime":{"guidanceDirectory":"/run/winter/shared-instructions","model":"m"},"logicalSessionId":"%s"}'
+        one, two = "[" + item % "s1" + "]", "[" + item % "s1" + "," + item % "s2" + "]"
+        self.assertTrue(self.guidance_ok(2, 1, one))
+        self.assertTrue(self.guidance_ok(2, 2, two))
+        self.assertFalse(self.guidance_ok(2, 2, one))                                  # fewer than the conversations
+        self.assertFalse(self.guidance_ok(2, 1, two))                                  # more than the conversations
+        self.assertFalse(self.guidance_ok(2, 1, "[" + item.replace("shared-instructions", "other") % "s1" + "]"))
+        self.assertFalse(self.guidance_ok(2, 1, "[" + item.replace('"guidanceDirectory"', '"guidanceDirectoryX"') % "s1" + "]"))
+        self.assertFalse(self.guidance_ok(2, 1, "[" + item.replace("/run/winter/shared-instructions", "/run/winter/shared-instructions/") % "s1" + "]"))
+        self.assertFalse(self.guidance_ok(2, 1, '[{"hostQueryGuidedRuntime":{},"logicalSessionId":"s1"}]'))
+        # the right directory once and another one beside it: the member count is right, the second is not ours
+        self.assertFalse(self.guidance_ok(2, 1, '[{"hostQueryGuidedRuntime":{"guidanceDirectory":"/run/winter/shared-instructions"},"y":{"guidanceDirectory":"/run/winter/other"}}]'))
+        self.assertFalse(self.guidance_ok(2, 1, '[{"hostQueryGuidedRuntime":{"guidanceDirectory":"/run/winter/other"},"y":{"guidanceDirectory":"/run/winter/shared-instructions"}}]'))
+        self.assertFalse(self.guidance_ok(2, 1, one[:-1] + ',"extra":{"guidanceDirectory":"/run/winter/shared-instructions"}]'))
+        for profile in (0, 1):
+            self.assertTrue(self.guidance_ok(profile, 1, '[{"hostQueryRuntime":{"model":"m"},"logicalSessionId":"s1"}]'))
+            self.assertFalse(self.guidance_ok(profile, 1, one))                         # the supervisor refuses it outside the guided profile
+        self.assertTrue(self.guidance_ok(0, 2, '[{"logicalSessionId":"a"},{"logicalSessionId":"b"}]'))
 
     def test_the_static_part_cannot_name_a_runtime_profile_key_either(self):
         for key in ("hostQueryRuntime", "hostQueryGuidedRuntime"):
