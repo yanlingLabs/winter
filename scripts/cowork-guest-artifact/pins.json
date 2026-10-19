@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "7e71929d0231be2d77645bfa47ee2b550f3add22",
+  "sdkCommit": "9c980c326638489e0183d7fcddcf1a93553be0ba",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -82,7 +82,7 @@
     "intermediateCommits": [
       "093fb3ead915d967e8a01b358abdbcc39a76f447"
     ],
-    "mainAt": "7e71929d0231be2d77645bfa47ee2b550f3add22",
+    "mainAt": "9c980c326638489e0183d7fcddcf1a93553be0ba",
     "mergedPullRequests": [
       27,
       28,
@@ -92,8 +92,8 @@
     "contains": [
       "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])"
     ],
-    "supervisorSha256": "2c5be1e8b2cf30956ae14f3ca02224db52aeb4387c2eac22ceceb49a875ceaa8",
-    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) are source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests."
+    "supervisorSha256": "a26dacd86b805ca47b3e4805d06af2b178eee82003ebe6c38f2aeeb85e48035d",
+    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) are source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests. The pin then moved to 9c980c32 (agent-sdk main after #35 and the #37 holder patch applied as #38): the supervisor is the one from #35, linux-session-owner.c and linux-tool-compartment.c changed, and expectedArtifact is STALE until the one-run build's digests are re-pinned."
   },
   "guest": {
     "target": "aarch64-linux-musl",
@@ -141,7 +141,7 @@
     },
     "ownerLibrary": {
       "source": "linux-session-owner.c",
-      "sourceSha256": "c149d451eaa79442dfd41e9375c891ae8c9a06135d2cfc85851bcc8b5ce51fd8",
+      "sourceSha256": "95457d8f6ff256257b3b211e0201c64a4ed0b575aac6a9f933b3178b823b0d76",
       "target": "aarch64-linux-gnu.2.36",
       "path": "/opt/winter/helpers/linux-session-owner.so",
       "binarySha256": "0ca42e9f22fdccfb3a67b74434c5c4a34e225169e728fa1b495dd1d4fc49df42"

@@ -1,5 +1,5 @@
 """The two small tools the one-run image build uses: the Bun unpacker and the two-build report. Synthetic inputs only; nothing is built."""
-import contextlib, hashlib, io, json, shutil, tempfile, unittest, zipfile
+import contextlib, hashlib, io, json, os, shutil, tempfile, unittest, zipfile
 from pathlib import Path
 
 import image
@@ -160,6 +160,83 @@ class ReportTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             ibr.collect(self.dir / "k1", self.dir / "i1", self.dir / "publish")
 
+    def good(self, **kw):
+        digests = self.build(**kw)
+        digests["image"]["pinsHold"] = {key: True for key in digests["image"]["pinsHold"]}
+        return digests
+
+    def test_green_means_everything_matches_the_pins(self):
+        digests = self.good()
+        self.assertEqual(ibr.classify(digests), (ibr.EXIT_OK, []))
+        for edit in (lambda d: d["image"]["pinsHold"].__setitem__("cpioSha256", False), lambda d: d["image"].__setitem__("imageExitStatus", [3, 0]),
+                     lambda d: d["image"].__setitem__("imageExitStatus", [0, 3]), lambda d: d["kernel"].__setitem__("reproducible", False)):
+            changed = self.good()
+            edit(changed)
+            self.assertNotEqual(ibr.classify(changed)[0], ibr.EXIT_OK)
+
+    def test_stale_pins_with_reproducible_builds_is_its_own_code(self):
+        digests = self.build()                                   # the synthetic image does not hold the real pins
+        code, details = ibr.classify(digests)
+        self.assertEqual(code, ibr.EXIT_PINS_STALE)
+        self.assertIn("pins.json cpioSha256 does not hold", details)
+        only_status = self.good(s1=3, s2=3)
+        self.assertEqual(ibr.classify(only_status)[0], ibr.EXIT_PINS_STALE)
+
+    def test_a_build_that_is_not_reproducible_outranks_stale_pins_and_an_odd_status(self):
+        for kw in ({"kernel2": {"image": b"other"}}, {"image2": {"cpio": b"other"}}):
+            digests = self.build(**kw)
+            self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_NOT_REPRODUCIBLE, kw)
+            digests["image"]["imageExitStatus"] = [1, 1]
+            self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_NOT_REPRODUCIBLE, kw)
+
+    def test_an_unexpected_image_status_is_its_own_code_when_the_builds_agree(self):
+        digests = self.good()
+        digests["image"]["imageExitStatus"] = [1, 0]
+        self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_UNEXPECTED_STATUS)
+
+    def test_the_four_exit_codes_and_labels_are_distinct(self):
+        codes = [ibr.EXIT_OK, ibr.EXIT_PINS_STALE, ibr.EXIT_NOT_REPRODUCIBLE, ibr.EXIT_UNEXPECTED_STATUS]
+        self.assertEqual(len(set(codes)), 4)
+        self.assertEqual(codes[0], 0)
+        self.assertEqual(sorted(ibr.LABELS), sorted(codes))
+        self.assertEqual(len(set(ibr.LABELS.values())), 4)
+        self.assertEqual(sorted(ibr.MEANINGS), sorted(codes))
+
+    def test_assert_writes_the_classification_to_the_step_summary_and_returns_the_code(self):
+        for kw, code, label in (({}, ibr.EXIT_PINS_STALE, "PINS_STALE"), ({"kernel2": {"image": b"other"}}, ibr.EXIT_NOT_REPRODUCIBLE, "NOT_REPRODUCIBLE")):
+            digests = self.build(**kw)
+            path, summary = self.dir / f"digests-{label}.json", self.dir / f"summary-{label}.md"
+            path.write_text(json.dumps(digests))
+            previous = os.environ.get("GITHUB_STEP_SUMMARY")
+            os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    self.assertEqual(ibr.main(["assert", str(path)]), code)
+            finally:
+                if previous is None:
+                    del os.environ["GITHUB_STEP_SUMMARY"]
+                else:
+                    os.environ["GITHUB_STEP_SUMMARY"] = previous
+            text = summary.read_text()
+            self.assertIn(f"## Guest image build: {label}", text)
+            self.assertIn(digests["image"]["cpioSha256"], text)
+            self.assertIn(digests["runtimeImageDigest"], text)
+            self.assertIn(f"RESULT: {label} (exit {code})", printed.getvalue())
+        self.assertIn("EXPECTED result after an sdkCommit bump", ibr.MEANINGS[ibr.EXIT_PINS_STALE])
+        self.assertIn("do not pin anything", ibr.MEANINGS[ibr.EXIT_NOT_REPRODUCIBLE])
+
+    def test_without_a_step_summary_nothing_is_written_and_the_code_is_still_returned(self):
+        digests = self.good()
+        path = self.dir / "d.json"
+        path.write_text(json.dumps(digests))
+        previous = os.environ.pop("GITHUB_STEP_SUMMARY", None)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ibr.main(["assert", str(path)]), ibr.EXIT_OK)
+        finally:
+            if previous is not None:
+                os.environ["GITHUB_STEP_SUMMARY"] = previous
+
     def test_the_report_command_writes_the_file_and_exits_zero_while_assert_exits_one_on_problems(self):
         self.build()
         out = self.dir / "digests.json"
@@ -167,7 +244,7 @@ class ReportTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(ibr.main(args), 0)
             self.assertTrue(out.is_file())
-            self.assertEqual(ibr.main(["assert", str(out)]), 1)
+            self.assertEqual(ibr.main(["assert", str(out)]), ibr.EXIT_PINS_STALE)
 
 
 if __name__ == "__main__":
