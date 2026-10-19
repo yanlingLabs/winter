@@ -8,6 +8,7 @@ import type { EventInput } from "../sessions/store";
 import { CoworkAuthority, type CoworkGrantResolver, type CoworkPrincipal } from "./authority";
 import type { CoworkRepository } from "./repository";
 import { CoworkError } from "./types";
+import { coworkHostDecision } from "./host-policy";
 import { durableCoworkTransaction } from "./durable-transaction";
 import { fullSyncInstructionFd } from "./instruction-fullsync";
 import { openInstructionAt, openTemporaryAt, replaceInstructionAt } from "./instruction-fs";
@@ -397,9 +398,12 @@ export class CoworkInstructions {
   }
   private agentScope(principal: Extract<CoworkPrincipal, { kind: "runtime" }>): string {
     const binding = this.records.binding(principal.sessionId), workspace = this.records.get(principal.workspaceId);
-    if (binding.workspaceId !== principal.workspaceId || binding.state !== "active" || workspace.state !== "retained" || binding.policy === "plan" || binding.policy === "dont-ask") fail("authority_denied");
+    if (binding.workspaceId !== principal.workspaceId || binding.state !== "active" || workspace.state !== "retained") fail("authority_denied");
     const capabilities = this.authority.effectiveCapabilities(principal.sessionId);
     if (!capabilities.toolClasses.includes("write") || !capabilities.hostServices.includes("workspace.instructions.update")) fail("authority_denied");
+    // The shared-guidance edit column of the host policy matrix: Deny under plan and dont-ask, Ask otherwise (the card below).
+    // Was a literal `plan || dont-ask`; one source of truth now.
+    if (coworkHostDecision({ policy: binding.policy, tool: "InstructionEdit", path: "shared-instructions", ceiling: capabilities }).verdict !== "ask") fail("authority_denied");
     this.authority.requireSource(principal.workspaceId, binding.sourceId);
     return JSON.stringify({ binding, policy: this.records.policy(principal.workspaceId), grantRevision: workspace.grantRevision, incarnationId: workspace.incarnationId, leaseEpoch: workspace.leaseEpoch });
   }

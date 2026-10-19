@@ -309,16 +309,21 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-test("anti-wiring: only the transition module imports the matrix, it has no barrel export and only type-only imports", () => {
+test("wired behind the refusal: only the transition module, the instruction owner and the Cowork approval projection reach the matrix; no barrel export; type-only imports", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "host-policy.ts"), sibling = join(packages, "core", "src", "cowork", "policy-transition.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
+  // Who may name the matrix: the classifier (policy-transition.ts), the shared-guidance edit's agentScope (instructions.ts) and the Cowork
+  // approval projection (runtime-sdk/cowork-approval.ts, reached only from the approval bridge's injected `cowork` port; see
+  // test/runtime-sdk/cowork-approval.test.ts, which also proves production never supplies that port).
+  const offenders = new Set<string>();
   for (const file of sources.filter(candidate => candidate !== module && candidate !== sibling)) {
     const text = readFileSync(file, "utf8");
     for (const needle of ["./host-policy", "cowork/host-policy", "coworkHostDecision", "coworkConnectorVerdict", "COWORK_APPROVAL_POLICIES", "COWORK_GUEST_TOOL_CLASSES", "COWORK_PATH_CLASSES", "isCoworkApprovalPolicy", "CoworkHostDecision"])
-      expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
+      if (text.includes(needle)) offenders.add(basename(file));
   }
+  expect([...offenders].sort()).toEqual(["cowork-approval.ts", "instructions.ts"]);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/host-policy|policy-transition|from "\.\/cowork/);
   const own = readFileSync(module, "utf8");
