@@ -3,7 +3,10 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, 
 import { join, sep } from "node:path";
 import { AGY_TIMEOUT_BACKOFF_MS, antigravityPlanFromCli } from "./antigravity";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudeCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
-import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
+import {
+  CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, CLAUDE_TRANSCRIPT_RETENTION_DAYS, estimateKey, isPartialDay, overlapFrom, parseClaudeStats, refreshEstimates,
+  statsDate, statsRows, utcDay, utcNoon, type ClaudeStats, type StatsCoverage, type StatsEstimate,
+} from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
 import { USAGE_SOURCES, type AlarmProvider, type FiredUsageAlarm, type Subscription, type SyntheticRow, type UsageAlarm, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
@@ -138,6 +141,70 @@ function differs(s: SyntheticRow, r: UsageRecordInput): boolean {
     || Math.abs((s.cacheSavingsUsd ?? 0) - (r.cacheSavingsUsd ?? 0)) > 1e-9;
 }
 
+/** Where Claude Code's `/stats` history keeps its own state in `ingest_files` (`sourceState`): when Winter first and last
+ *  read the transcripts in full, the spans between reads too far apart, and the per-day estimates. */
+export const CLAUDE_STATS_STATE_KEY = "claude-code:stats-history";
+/** A complete read's time is written at most this often (a gap is measured in weeks). */
+const PASS_NOTE_EVERY_MS = 6 * 3_600_000;
+
+export interface ClaudeStatsHistory {
+  firstPassAt?: number;
+  lastPassAt?: number;
+  gaps: Array<[string, string]>;
+  estimates: Map<string, StatsEstimate>;
+  /** The estimates were made at least once: until then the rows already stored are left alone. */
+  planned: boolean;
+}
+
+const finiteNum = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+/** PURE: the stored state, validated — anything malformed is dropped, never trusted. */
+export function parseStatsHistory(state: Record<string, unknown> | undefined): ClaudeStatsHistory {
+  const firstPassAt = finiteNum(state?.firstPassAt);
+  const lastPassAt = finiteNum(state?.lastPassAt);
+  const gaps: Array<[string, string]> = [];
+  if (Array.isArray(state?.gaps)) {
+    for (const g of state.gaps) {
+      if (!Array.isArray(g)) continue;
+      const a = statsDate(g[0]);
+      const b = statsDate(g[1]);
+      if (a !== undefined && b !== undefined && a <= b) gaps.push([a, b]);
+    }
+  }
+  const estimates = new Map<string, StatsEstimate>();
+  const stored = state?.estimates;
+  if (typeof stored === "object" && stored !== null && !Array.isArray(stored)) {
+    for (const [key, v] of Object.entries(stored)) {
+      if (statsDate(key.slice(0, 10)) === undefined || key[10] !== ":" || key.length < 12 || typeof v !== "object" || v === null) continue;
+      const e = v as Record<string, unknown>;
+      const raw = finiteNum(e.raw);
+      const cal = finiteNum(e.cal);
+      const days = finiteNum(e.days);
+      if (raw === undefined || raw < 0 || cal === undefined || cal < 0 || cal > 1 || days === undefined || days < 0) continue;
+      const split = Array.isArray(e.split) && e.split.length === 4 && e.split.every((x) => finiteNum(x) !== undefined && (x as number) >= 0)
+        ? e.split as [number, number, number, number] : undefined;
+      const usdPerToken = finiteNum(e.usdPerToken);
+      estimates.set(key, { raw, cal, days, ...(split === undefined ? {} : { split }), ...(usdPerToken !== undefined && usdPerToken > 0 ? { usdPerToken } : {}) });
+    }
+  }
+  return {
+    ...(firstPassAt === undefined ? {} : { firstPassAt }), ...(lastPassAt === undefined ? {} : { lastPassAt }),
+    gaps, estimates, planned: state?.planned === true,
+  };
+}
+
+/** PURE: `gaps` with the span [a, b] added, overlapping or touching spans merged; undefined when it adds nothing. */
+export function addGap(gaps: ReadonlyArray<readonly [string, string]>, a: string, b: string): Array<[string, string]> | undefined {
+  if (gaps.some(([x, y]) => x <= a && b <= y)) return undefined;
+  const next = (d: string): string => utcDay(Date.parse(`${d}T00:00:00Z`) + 86_400_000);
+  const out: Array<[string, string]> = [];
+  for (const [x, y] of [...gaps.map(([x, y]) => [x, y] as [string, string]), [a, b] as [string, string]].sort(([x], [y]) => x.localeCompare(y))) {
+    const last = out[out.length - 1];
+    if (last !== undefined && x <= next(last[1])) { if (y > last[1]) last[1] = y; } else out.push([x, y]);
+  }
+  return out;
+}
+
 /** Wait for `p`, at most `ms`. */
 async function within(p: Promise<unknown>, ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -270,8 +337,12 @@ export class UsageService {
   private claudeFileOverCapLogged = false;
   /** Claude Code's `stats-cache.json`, parsed only when its mtime or size changed. */
   private statsFile: { stamp: string; stats?: ClaudeStats } | undefined;
-  /** The last applied backfill's inputs (file stamp, transcript cutoff day, today): unchanged → nothing to do. */
+  /** The last estimate refresh's inputs (file stamp, coverage): unchanged → nothing to do. */
   private statsSignature: string | undefined;
+  /** The last row plan's inputs (the estimates, coverage, transcript totals on partial days): unchanged → nothing to do. */
+  private statsRowsSignature: string | undefined;
+  /** Claude Code's `/stats` history state (`CLAUDE_STATS_STATE_KEY`), loaded once. */
+  private statsHistoryState: ClaudeStatsHistory | undefined;
   private statsLogged = new Set<string>();
   /** Test seam: how many times `stats-cache.json` was parsed. */
   claudeStatsParses = 0;
@@ -349,14 +420,14 @@ export class UsageService {
           codexRecordOf(line, state, fileKey("codex", file.path).slice(6, 22), this.deps.pricer, file.mtimeMs))) || more;
       }
       if (tracking.claudeCode && this.deps.claudeHome !== undefined) {
+        const passAt = this.now();
         const files = await claudeCodeTranscripts(this.deps.claudeHome);
         const ccMore = await this.ingestFiles("claude-code", files, (line, _state, file) => claudeCodeRecordOf(line, this.deps.pricer, file.mtimeMs));
         more = ccMore || more;
-        // Transcripts win, EVERY pass (a chunked import, a missing or corrupt stats file included): a synthetic row on a
-        // day the transcripts now cover goes. New history is planned only once the transcripts are all in — its boundary
-        // is the first transcript day.
-        this.dropCoveredSynthetic();
-        if (!ccMore) await this.importClaudeStats(this.deps.claudeHome);
+        this.noteClaudePass(passAt, !ccMore);
+        // Transcripts win, EVERY pass (a chunked import, a missing or corrupt stats file included): the rows are re-planned
+        // against the transcript totals as they are. New estimates only once the transcripts are all in.
+        await this.importClaudeStats(this.deps.claudeHome, !ccMore);
       }
       const opencode = this.deps.opencodeExecutable?.();
       if (tracking.opencode && opencode !== undefined) more = (await this.ingestOpencode(opencode)) || more;
@@ -372,34 +443,69 @@ export class UsageService {
     this.deps.log?.warn?.(msg);
   }
 
-  /** The UTC day of the earliest TRANSCRIPT-derived Claude Code record (synthetic rows never move it). */
-  private cutoffDay(): string | undefined {
-    const earliest = this.deps.db.earliestReal("claude-code");
-    return earliest === undefined ? undefined : utcDay(earliest);
+  private statsState(): ClaudeStatsHistory {
+    this.statsHistoryState ??= parseStatsHistory(this.deps.db.sourceState(CLAUDE_STATS_STATE_KEY));
+    return this.statsHistoryState;
   }
 
-  /** Remove every synthetic Claude Code row on or after the first transcript day — an indexed seek; a write only when
-   *  there is something to remove. Independent of the stats file: it may be missing, corrupt or unchanged. */
-  private dropCoveredSynthetic(): void {
-    const cutoffDay = this.cutoffDay();
-    if (cutoffDay === undefined) return;
-    const covered = this.deps.db.syntheticDedupesFrom("claude-code", Date.parse(`${cutoffDay}T00:00:00Z`));
-    if (covered.length === 0) return;
-    const { removed } = this.deps.db.reconcileSynthetic("claude-code", covered, []);
-    if (removed > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added: 0, removed });
+  private saveStatsState(h: ClaudeStatsHistory): void {
+    this.deps.db.setSourceState(CLAUDE_STATS_STATE_KEY, "claude-code", {
+      ...(h.firstPassAt === undefined ? {} : { firstPassAt: h.firstPassAt }), ...(h.lastPassAt === undefined ? {} : { lastPassAt: h.lastPassAt }),
+      gaps: h.gaps, estimates: Object.fromEntries(h.estimates), planned: h.planned,
+    }, this.now());
   }
 
   /**
-   * Backfill Claude Code's history from its own `/stats` cache (`usage/claude-stats.ts`) for the days its transcripts no
-   * longer cover. The file is parsed only when its mtime or size changed; the rows are re-planned (and re-calibrated)
-   * only when the file or the transcript coverage (the first transcript day) changed — never merely because a day
-   * passed — and written only where they differ. A day the cache no longer lists keeps its rows (history). A missing,
-   * corrupt or over-cap file plans nothing; `dropCoveredSynthetic` runs before this regardless.
+   * Claude Code's transcripts were just read (`complete`: all of them, no chunk left). Note when Winter FIRST read them —
+   * on a DB from before this note, the oldest file read-state (a file read once and never grown since keeps the time of
+   * its first read) — and, when no complete read happened for longer than Claude Code's retention (the daemon not
+   * running, the tracking switch off), the days that may have been emptied in between.
    */
-  private async importClaudeStats(claudeHome: string): Promise<void> {
+  private noteClaudePass(passAt: number, complete: boolean): void {
+    const h = this.statsState();
+    let dirty = false;
+    if (h.firstPassAt === undefined) {
+      h.firstPassAt = Math.min(this.deps.db.firstFileReadAt("claude-code", CLAUDE_STATS_STATE_KEY) ?? passAt, passAt);
+      dirty = true;
+    }
+    const lost = passAt - CLAUDE_TRANSCRIPT_RETENTION_DAYS * DAY;
+    if (h.lastPassAt !== undefined && lost > h.lastPassAt) {
+      const gaps = addGap(h.gaps, utcDay(h.lastPassAt), utcDay(lost));
+      if (gaps !== undefined) { h.gaps = gaps; dirty = true; }
+    }
+    if (complete && (h.lastPassAt === undefined || passAt - h.lastPassAt >= PASS_NOTE_EVERY_MS)) { h.lastPassAt = passAt; dirty = true; }
+    if (dirty) this.saveStatsState(h);
+  }
+
+  /** Which days Winter's Claude Code transcript rows may not hold in full (`StatsCoverage`). */
+  private coverage(): StatsCoverage {
+    const h = this.statsState();
+    const earliest = this.deps.db.earliestReal("claude-code");
+    return {
+      ...(earliest === undefined ? {} : { firstTranscriptDay: utcDay(earliest) }),
+      ...(h.firstPassAt === undefined ? {} : { partialThrough: utcDay(h.firstPassAt - CLAUDE_TRANSCRIPT_RETENTION_DAYS * DAY) }),
+      gaps: h.gaps,
+    };
+  }
+
+  /** Winter's transcript totals (all four kinds) per model on each partial day, keyed like the estimates. An index seek
+   *  per span: partial days hold few transcript rows (most of theirs are gone). */
+  private partialRealTotals(c: StatsCoverage): Map<string, number> {
+    const spans: Array<[number, number]> = [];
+    if (c.partialThrough !== undefined) spans.push([Number.MIN_SAFE_INTEGER, Date.parse(`${c.partialThrough}T00:00:00Z`) + DAY]);
+    for (const [a, b] of c.gaps) spans.push([Date.parse(`${a}T00:00:00Z`), Date.parse(`${b}T00:00:00Z`) + DAY]);
+    const out = new Map<string, number>();
+    for (const [from, to] of spans) {
+      for (const r of this.deps.db.dailyRealTotals("claude-code", from, to)) if (isPartialDay(c, r.day)) out.set(estimateKey(r.model, r.day), r.all);
+    }
+    return out;
+  }
+
+  /** Claude Code's `stats-cache.json`, parsed only when its mtime or size changed; undefined when there is none. */
+  private async readClaudeStats(claudeHome: string): Promise<{ stamp: string; stats?: ClaudeStats } | undefined> {
     const path = join(claudeHome, CLAUDE_STATS_FILE);
     let st: { mtimeMs: number; size: number };
-    try { st = statSync(path); } catch { return; }
+    try { st = statSync(path); } catch { return undefined; }
     const stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
     if (this.statsFile?.stamp !== stamp) {
       const cap = this.deps.claudeStatsMaxBytes ?? CLAUDE_STATS_MAX_BYTES;
@@ -413,33 +519,70 @@ export class UsageService {
       }
       this.statsFile = { stamp, ...(stats === undefined ? {} : { stats }) };
     }
-    const stats = this.statsFile.stats;
-    if (stats === undefined) return;
-    const now = this.now();
-    const today = utcDay(now);
-    const cutoffDay = this.cutoffDay();
-    const signature = `${stamp}|${cutoffDay ?? ""}`;
-    if (signature === this.statsSignature) return;
-    const from = overlapFrom(now);
-    const real = cutoffDay === undefined ? [] : this.deps.db.dailyRealTotals("claude-code", Date.parse(`${from}T00:00:00Z`));
-    const wanted = claudeStatsRecords({ stats, ...(cutoffDay === undefined ? {} : { cutoffDay }), today, real, overlapFromDay: from, pricer: this.deps.pricer });
+    return this.statsFile;
+  }
+
+  /**
+   * Backfill Claude Code's history from its own `/stats` cache (`usage/claude-stats.ts`) for the days its transcripts may
+   * no longer hold in full — the PARTIAL days (`StatsCoverage`): before Winter first read them less Claude Code's
+   * retention, before the first transcript day, and any span Winter was away longer than the retention.
+   *  - After a COMPLETE transcript read, the cache refreshes the estimates (`refreshEstimates`) — parsed only when its
+   *    mtime or size changed, re-estimated only when it or the coverage changed (never merely because a day passed).
+   *    The estimates live in the usage DB: a day the cache stops listing or shrinks keeps its estimate.
+   *  - EVERY pass the rows are re-planned (`statsRows`) when the estimates, the coverage or the transcript totals on
+   *    partial days changed: each partial day gets what its surviving transcripts lack, a day transcripts now cover in
+   *    full loses its row — written only where they differ. A missing, corrupt or over-cap file refreshes nothing;
+   *    the rows still follow the transcripts.
+   */
+  private async importClaudeStats(claudeHome: string, complete: boolean): Promise<void> {
+    const h = this.statsState();
+    const coverage = this.coverage();
+    const coverageKey = JSON.stringify(coverage);
+    if (complete) {
+      const read = await this.readClaudeStats(claudeHome);
+      const signature = `${read?.stamp ?? ""}|${coverageKey}`;
+      if (read?.stats !== undefined && signature !== this.statsSignature) {
+        const now = this.now();
+        const from = overlapFrom(now);
+        const real = this.deps.db.dailyRealTotals("claude-code", Date.parse(`${from}T00:00:00Z`));
+        const r = refreshEstimates(h.estimates, { stats: read.stats, coverage, today: utcDay(now), real, overlapFromDay: from });
+        if (r.changed || !h.planned) {
+          h.estimates = r.estimates;
+          h.planned = true;
+          this.saveStatsState(h);
+          this.statsRowsSignature = undefined;
+        }
+        this.statsSignature = signature;
+      }
+    }
+    if (!h.planned) return; // never estimated yet: the rows already stored stay as they are
+    const real = this.partialRealTotals(coverage);
+    const rowsSignature = `${coverageKey}|${[...real].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join(",")}`;
+    if (rowsSignature === this.statsRowsSignature) return;
+    const wanted = statsRows(h.estimates, coverage, real, this.deps.pricer);
     const stored = new Map(this.deps.db.syntheticRows("claude-code").map((r) => [r.dedupe, r]));
-    // Covered days were removed by `dropCoveredSynthetic` this very pass; the plan never reaches them.
+    const keep = new Set(wanted.map((r) => r.dedupe));
+    const remove = [...stored.keys()].filter((d) => !keep.has(d));
     const upsert = wanted.filter((r) => { const s = stored.get(r.dedupe); return s === undefined || differs(s, r); });
-    const { removed, added } = this.deps.db.reconcileSynthetic("claude-code", [], upsert);
-    this.statsSignature = signature;
+    const { removed, added } = remove.length + upsert.length > 0 ? this.deps.db.reconcileSynthetic("claude-code", remove, upsert) : { removed: 0, added: 0 };
+    this.statsRowsSignature = rowsSignature;
     if (removed + added > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added, removed });
   }
 
-  /** Where the Claude Code history came from (the Usage window's footnote). */
+  /** Where the Claude Code history came from (the Usage window's footnote): its first day, and the first day after the
+   *  partial ones — the later of the first transcript day and the day after Winter's first read less the retention;
+   *  with no transcripts at all, the day after the last imported day. */
   history(): UsageHistory {
     const span = this.deps.db.syntheticSpan("claude-code");
     if (span === undefined) return {};
-    // The first transcript day when there is one (every synthetic row lies before it); with no transcripts at all, the
-    // day after the last imported day.
-    const cutoffDay = this.cutoffDay();
-    const before = cutoffDay !== undefined ? utcNoon(cutoffDay) : utcNoon(utcDay(span.last + 86_400_000));
-    return { claudeCodeStats: { from: span.first, before } };
+    const c = this.coverage();
+    let before: string;
+    if (c.firstTranscriptDay === undefined) before = utcDay(span.last + DAY);
+    else {
+      const afterPartial = c.partialThrough === undefined ? c.firstTranscriptDay : utcDay(Date.parse(`${c.partialThrough}T00:00:00Z`) + DAY);
+      before = afterPartial > c.firstTranscriptDay ? afterPartial : c.firstTranscriptDay;
+    }
+    return { claudeCodeStats: { from: span.first, before: utcNoon(before) } };
   }
 
   /**
