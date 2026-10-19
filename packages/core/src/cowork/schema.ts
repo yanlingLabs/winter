@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 export const COWORK_BACKUP_EXCLUDED_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox"] as const;
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_binding", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -278,6 +278,18 @@ export function migrateCoworkPeerInboxSchema(db: Database): void {
   `);
 }
 
+/** S7B's home binding table, byte for byte its `COWORK_HOME_BINDING_DDL` (cowork/host-env/stores.ts). */
+const COWORK_HOME_BINDING_TABLE = `CREATE TABLE IF NOT EXISTS cowork_home_binding (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  home_id TEXT NOT NULL UNIQUE REFERENCES cowork_home_identity(home_id),
+  canonical_path TEXT NOT NULL,
+  volume_id TEXT NOT NULL,
+  directory_id TEXT NOT NULL,
+  origin_machine_id TEXT NOT NULL,
+  origin_installation_id TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`;
+
 /** v18, session door spine (D1; docs/research/2026-10-18-cowork-session-door-design.md, gaps G1 and G9). Rebuilds
  * `cowork_conversations` (SQLite's generalized ALTER TABLE: the registration sets `rebuildsParentTable`, so foreign keys are
  * off around the transaction and `foreign_key_check` must be no worse at the end) to add two facts:
@@ -286,9 +298,16 @@ export function migrateCoworkPeerInboxSchema(db: Database): void {
  *    source and the location's own root as its cwd. The CHECK makes any other combination unrepresentable.
  *  - `backend_session_id`: the guest runtime's durable backend identity (G9), minted at bind by a later slice; NULL for
  *    every existing row. Unique when present. A Cowork conversation never gets a host `runtime_sessions` record.
- * Records only: nothing reads either column yet, and no row can be created through any door. Idempotent: a store whose
- * table already has `location_kind` is left alone (fixtures that rewind only `user_version` replay this). */
+ * It also creates `cowork_home_binding` for S7B (N2 integration; its store is `createCoworkHomeBindingStore` in
+ * cowork/host-env/stores.ts, which exports the same text as `COWORK_HOME_BINDING_DDL`): the singleton record of which
+ * prepared Mac home this Cowork home is bound to (canonical path, volume and directory ids, the machine and installation
+ * it was first prepared on). Written once and never updated; it is Cowork authority (COWORK_TABLES), so a populated
+ * binding refuses both downgrades.
+ * Records only: nothing reads the new conversation columns yet, and no row can be created through any door.
+ * Idempotent: the binding table is `IF NOT EXISTS`, and a conversations table that already has `location_kind` is left
+ * alone (fixtures that rewind only `user_version` replay this). */
 export function migrateCoworkSessionBindingSchema(db: Database): void {
+  db.exec(COWORK_HOME_BINDING_TABLE);
   const columns = db.query<{ name: string }, []>("PRAGMA table_info(cowork_conversations)").all().map(column => column.name);
   if (columns.includes("location_kind")) return;
   db.exec(`
