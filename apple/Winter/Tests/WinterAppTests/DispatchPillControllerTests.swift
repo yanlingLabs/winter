@@ -1,6 +1,8 @@
 import XCTest
 import AppKit
 import SwiftUI
+import WinterKit
+import WinterProtocol
 @testable import Winter
 
 /// `DispatchPillController` against a real (harness-dimmed) panel: visibility, the bottom-centred
@@ -530,6 +532,155 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.onSubmit = { _ in sent += 1; return true }
         pill.submit("   \n ")
         XCTAssertEqual(sent, 0)
+    }
+
+    // MARK: - Attachments (2026-10-19)
+
+    private let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13])
+
+    /// Lets the submit's Task run until `condition` holds (or 2 s pass).
+    private func settle(_ condition: () -> Bool) async {
+        for _ in 0..<200 where !condition() {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func row(_ mode: String?) -> SessionSummary {
+        SessionSummary(sessionId: "s_d", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: mode, model: nil)
+    }
+
+    /// What the fake sender saw.
+    private final class SenderLog {
+        var staged: [String] = []
+        var sent: [(sessionId: String, outgoing: ComposerOutgoing, steer: Bool)] = []
+        var refusal: RpcError?
+    }
+
+    private func sender(_ log: SenderLog) -> DispatchPillAttachmentSender {
+        DispatchPillAttachmentSender(
+            session: { "s_d" },
+            features: { (originalPaths: true, attachmentFiles: true) },
+            stage: { sessionId, _ in
+                log.staged.append(sessionId)
+                return StagedImage(path: "/t/winter-session-s_d/images/image_\(log.staged.count).png", imagesOnSend: true)
+            },
+            send: { sessionId, outgoing, steer in
+                if let refusal = log.refusal { throw refusal }
+                log.sent.append((sessionId, outgoing, steer))
+            })
+    }
+
+    func testThePillTakesAttachmentsOnlyWhileItsSessionIsCodeOrDispatch() {
+        let pill = makePill()
+        func live() -> Bool { pill.adapter.composerImageIntake.isEnabled() }
+        XCTAssertFalse(live(), "unwired (no directory yet): a paste types the file's name, as before")
+        var current: SessionSummary? = row("dispatch")
+        pill.currentSessionRow = { current }
+        XCTAssertTrue(live(), "the Dispatch session")
+        current = row(nil)
+        XCTAssertTrue(live(), "a code session the pill follows")
+        current = row("chat")
+        XCTAssertFalse(live(), "never chat")
+        current = nil
+        XCTAssertFalse(live(), "a row not loaded is no intake")
+    }
+
+    func testADraftWithChipsGoesThroughTheAttachmentDoorNeverAsTextAndClearsWhatItSent() async {
+        let pill = makePill()
+        let log = SenderLog()
+        var plainSends = 0
+        pill.onSubmit = { _ in plainSends += 1; return true }
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.attachmentSender = sender(log)
+        pill.show()
+        XCTAssertTrue(pill.adapter.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        XCTAssertTrue(pill.adapter.attachChip(.file(path: "/tmp")))
+        pill.adapter.composerDraft += "what's in these?"
+        let draft = pill.adapter.composerDraft
+        XCTAssertTrue(pill.draftHoldsChips(draft))
+        pill.submit(draft)
+        await settle { !log.sent.isEmpty && pill.adapter.composerDraft.isEmpty }
+        XCTAssertEqual(plainSends, 0, "a draft with chips never goes out as text (its markers would be sent as characters)")
+        XCTAssertEqual(log.staged, ["s_d"], "the image data is staged into the session it is sent to")
+        XCTAssertEqual(log.sent.count, 1)
+        XCTAssertEqual(log.sent.first?.sessionId, "s_d")
+        XCTAssertEqual(log.sent.first?.steer, false)
+        XCTAssertEqual(log.sent.first?.outgoing.text, "[Image #1] [File #1] what's in these?")
+        XCTAssertEqual(log.sent.first?.outgoing.images, [SessionEvent.UserMessageImageRef(n: 1, path: "/t/winter-session-s_d/images/image_1.png")])
+        XCTAssertEqual(log.sent.first?.outgoing.files, [SessionEvent.UserMessageFileRef(n: 1, path: "/tmp")])
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+        XCTAssertTrue(pill.adapter.composerAttachments.isEmpty, "what was sent is gone from the draft")
+    }
+
+    func testAChipDraftSteersARunningTurn() async {
+        let session = SessionModel()
+        let pill = makePill(session)
+        let log = SenderLog()
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.attachmentSender = sender(log)
+        pill.show()
+        session.applyForTesting { s in s.turnRunning = true; s.exchanges = [Exchange(prompt: "go", reply: "")] }
+        XCTAssertTrue(pill.adapter.attachChip(.file(path: "/tmp")))
+        pill.adapter.composerDraft += "and this"
+        pill.submit(pill.adapter.composerDraft)
+        await settle { !log.sent.isEmpty }
+        XCTAssertEqual(log.sent.first?.steer, true)
+    }
+
+    func testARefusedAttachmentSendKeepsTheDraftAndItsChipsAndShowsTheDaemonsSentence() async {
+        let pill = makePill()
+        let log = SenderLog()
+        log.refusal = RpcError(code: -32602, message: "The selected model doesn't support images",
+                               data: .object(["code": .string("image_input_unsupported")]))
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.attachmentSender = sender(log)
+        pill.show()
+        XCTAssertTrue(pill.adapter.attachChip(.image(ComposerImage(data: png, mediaType: "image/png"))))
+        let draft = pill.adapter.composerDraft
+        pill.submit(draft)
+        await settle { pill.commandNotice != nil }
+        XCTAssertEqual(pill.commandNotice, "The selected model doesn't support images")
+        XCTAssertEqual(pill.adapter.composerDraft, draft, "never lost")
+        XCTAssertEqual(pill.adapter.composerAttachments.items.count, 1)
+    }
+
+    func testAChipDraftInAChatSessionIsNotSentAndSaysWhy() async {
+        let pill = makePill()
+        let log = SenderLog()
+        var current: SessionSummary? = row("dispatch")
+        pill.currentSessionRow = { current }
+        pill.attachmentSender = sender(log)
+        pill.show()
+        XCTAssertTrue(pill.adapter.attachChip(.file(path: "/tmp")))
+        current = row("chat") // the pill moved to a chat with the draft
+        pill.submit(pill.adapter.composerDraft)
+        await settle { pill.commandNotice != nil }
+        XCTAssertEqual(pill.commandNotice, "Attachments work in Code and Dispatch — this chat can't take them")
+        XCTAssertTrue(log.sent.isEmpty)
+        XCTAssertFalse(pill.adapter.composerDraft.isEmpty)
+    }
+
+    func testClearDraftDropsItsAttachments() {
+        let pill = makePill()
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.show()
+        XCTAssertTrue(pill.adapter.attachChip(.file(path: "/tmp")))
+        pill.clearDraft()
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+        XCTAssertTrue(pill.adapter.composerAttachments.items.isEmpty)
+    }
+
+    func testChipsSurviveAHideAndShow() {
+        let pill = makePill()
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.show()
+        XCTAssertTrue(pill.adapter.attachChip(.file(path: "/tmp")))
+        let draft = pill.adapter.composerDraft
+        pill.hide()
+        pill.show()
+        XCTAssertEqual(pill.adapter.composerDraft, draft, "the draft comes back with its marker")
+        XCTAssertEqual(pill.adapter.composerAttachments.live(in: pill.adapter.composerDraft).count, 1,
+                       "…and the attachment behind it, so the rebuilt text view draws the chip again")
     }
 
     // MARK: - Commands typed into the pill (2026-10-07)

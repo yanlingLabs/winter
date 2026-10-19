@@ -427,6 +427,21 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertNil(mode.ghost(for: "open /tmp/x/notes.m"), "a ghost belongs to the text it was computed for")
     }
 
+    /// Attachments in the pill (2026-10-19): a draft holding a chip (a private-use marker character) is a message —
+    /// never a command, however valid the words around it, and no ghost.
+    func testADraftHoldingAnAttachmentChipIsNeverACommand() {
+        let mode = makeMode()
+        mode.evaluateNowForTesting("open /tmp/x/notes.md")
+        XCTAssertTrue(mode.isActive(for: "open /tmp/x/notes.md"))
+        for draft in ["open \(composerAttachmentMarker(1))", "open /tmp/x/notes.md \(composerAttachmentMarker(2))",
+                      "\(composerAttachmentMarker(3)) ls"] {
+            mode.evaluateNowForTesting(draft)
+            XCTAssertFalse(mode.isActive(for: draft), draft)
+            XCTAssertFalse(mode.shouldRunOnReturn(draft), draft)
+            XCTAssertNil(mode.ghost(for: draft), draft)
+        }
+    }
+
     func testTheDisplayIsStickyUntilTheNextVerdictLands() {
         let mode = makeMode()
         mode.evaluateNowForTesting("ls /tmp")

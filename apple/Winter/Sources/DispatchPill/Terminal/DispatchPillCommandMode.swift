@@ -243,6 +243,9 @@ final class DispatchPillCommandMode: ObservableObject {
     nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment, workingDirectory: String,
                                      onScreenPaths: [String] = [],
                                      ghost wantsGhost: Bool = true) -> CommandEvaluation {
+        // A draft holding an attachment chip (a private-use marker character) is a message, never a shell line: the
+        // shell would be handed the marker as a word (2026-10-19, attachments in the pill).
+        guard composerAttachmentMarkerIDs(in: text).isEmpty else { return CommandEvaluation(valid: false, ghost: nil, candidates: nil) }
         let snapshot = environment.snapshot()
         guard snapshot.enabled else { return CommandEvaluation(valid: false, ghost: nil, candidates: nil) }
         let context = snapshot.context(workingDirectory: workingDirectory)
