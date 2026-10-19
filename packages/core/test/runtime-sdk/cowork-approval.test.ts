@@ -196,7 +196,7 @@ test("the glob allowlist holds for outputs and scratch patterns: only the own fo
 
 test("hard denials hold under bypass: protected, outside, outputs and scratch paths, a missing ceiling class, unmapped paths", async () => {
   const bypass = () => build(state("bypass"));
-  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/Users/someone/.ssh/id_rsa",
+  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/home/x/.ssh/id_rsa",
     // Another conversation's outputs/scratch, the roots, and look-alike prefixes: never the OWN folder.
     "/workspace/outputs/other-session/report.pdf", "/workspace/outputs", "/workspace/outputs/", "/workspace/outputs/cowork-10/x", "/workspace/outputs/cowork-1/../other/x",
     "/workspace/.winter/scratch/other/tmp.txt", "/workspace/.winter/scratch", "/workspace/.winter/scratch/cowork-12/t"]) {

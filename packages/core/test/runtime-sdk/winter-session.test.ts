@@ -394,6 +394,15 @@ describe("startWinterSession — one incarnation", () => {
     expect(h.attachments[0]!.session.status?.()).toBe("idle");
   });
 
+  test("a Cowork session given the router's messaging still never attaches it: its system/init records the facts and attaches nothing", async () => {
+    const h = harness({ mode: "cowork" });
+    await h.session.open();
+    h.q().emit(init(h.q().options, ["Read"]));
+    await h.settled();
+    expect(h.session.init).toEqual({ sessionId: "be-x", model: "winter-test/echo", tools: ["Read"] });
+    expect(h.attachments).toHaveLength(0);
+  });
+
   test("send: user_message (the client's name), then beginTurn's turn_started, then the push; the result closes the turn", async () => {
     const h = harness();
     await h.session.open();
