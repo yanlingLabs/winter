@@ -270,7 +270,7 @@ export class CoworkRepository {
     const normalized = normalizedCreation(input);
     return this.mutate(context, "workspace.create", "new", normalized, () => {
       const workspaceId = this.mint("workspace"), ownerId = input.ownership === "project" ? this.mint("project") : this.sessionIdOf(this.mintSessionId()), at = this.now();
-      this.run("INSERT INTO cowork_workspaces VALUES(?,?,?,?,'retained',1,1,1,NULL,0,'stopped',?,?)", workspaceId, input.ownership, ownerId, normalized.title, at, at);
+      this.run("INSERT INTO cowork_workspaces(workspace_id,ownership,owner_id,title,state,config_revision,grant_revision,instruction_revision,incarnation_id,lease_epoch,power,created_at,updated_at) VALUES(?,?,?,?,'retained',1,1,1,NULL,0,'stopped',?,?)", workspaceId, input.ownership, ownerId, normalized.title, at, at);
       this.run("INSERT INTO cowork_policies VALUES(?,?,?,?,?,1,1,1)", workspaceId, this.mint("policy"), normalized.defaultPolicy, "github-only-feature-branches", canonical(normalized.ceiling));
       if (input.ownership === "project") this.run("INSERT INTO cowork_projects VALUES(?,?,?)", ownerId, workspaceId, at);
       const sources = normalized.sources.map(value => this.insertSource(workspaceId, value));

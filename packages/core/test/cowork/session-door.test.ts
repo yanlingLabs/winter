@@ -397,7 +397,7 @@ test("the store: createSession still refuses cowork; ensureCoworkSession admits 
 
 // ------------------------------------------------------------------------------------------------ migration 19
 test("migration 19: the reservation table is Cowork authority with its constraints; populated, it refuses both downgrades and survives them", () => {
-  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(19);
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(21);
   expect(COWORK_TABLES).toContain("cowork_session_reservations");
   expect(COWORK_TABLES.indexOf("cowork_session_reservations")).toBeLessThan(COWORK_TABLES.indexOf("cowork_workspaces")); // drop order: child first
   const w = world(), insert = (sessionId: string, requestId: string, digest = "a".repeat(64), state = "pending") =>
@@ -419,8 +419,8 @@ test("migration 19 downgrades: an empty table rolls back with the rest; one rese
   const empty = mkdtempSync(join(tmpdir(), "winter-door-d4-v19-")), populated = mkdtempSync(join(tmpdir(), "winter-door-d4-v19-"));
   cleanups.push(() => { rmSync(empty, { recursive: true, force: true }); rmSync(populated, { recursive: true, force: true }); });
   openRuntimeStateDb(empty).close();
-  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 19, to: 7 });
-  let db = openRuntimeStateDb(empty); expect(db.schemaVersion()).toBe(19); db.close();
+  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 21, to: 7 });
+  let db = openRuntimeStateDb(empty); expect(db.schemaVersion()).toBe(21); db.close();
   // One reservation and nothing else (foreign keys off for the fixture row): it alone must refuse the rollback.
   db = openRuntimeStateDb(populated);
   db.db.run("PRAGMA foreign_keys=OFF");
