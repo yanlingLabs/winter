@@ -116,6 +116,13 @@ class FakeGpgTests(unittest.TestCase):
     def test_a_valid_signature_by_the_pinned_signer_with_exit_zero_passes(self):
         self.verify("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-10-18 1 0 4 0 22 8 00 " + "B" * 40, 0, {"B" * 40})
 
+    def test_the_signing_key_matches_field_0_and_the_primary_only_field_9_never_another_field(self):
+        self.verify("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-10-18 1 0 4 0 22 8 00 " + "B" * 40, 0, {"A" * 40})
+        for line in ("[GNUPG:] VALIDSIG " + "A" * 40 + " " + "C" * 40 + " 1 0 4 0 22 8 00 " + "B" * 40,  # pinned value in a middle field
+                     "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-10-18 1 0 4 0 22 8 00"):  # no primary field at all, so the last field is not one
+            with self.assertRaises(ValueError):
+                self.verify(line, 0, {"C" * 40} if "C" in line else {"00"})
+
     def test_a_nonzero_exit_is_a_refusal_even_if_the_status_line_looks_valid(self):
         with self.assertRaises(ValueError) as caught:
             self.verify("[GNUPG:] VALIDSIG " + "A" * 40 + " x x x x x x x x " + "B" * 40, 1, {"A" * 40})

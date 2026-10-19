@@ -115,7 +115,8 @@ def gpg_verify(signature, data, public_key, fingerprints, gpg="gpg"):
     for line in result.stdout.splitlines():
         if line.startswith("[GNUPG:] VALIDSIG "):
             fields = line.split()[2:]
-            if fields and (fields[0] in fingerprints or fields[-1] in fingerprints):
+            # VALIDSIG <signing-key fpr> <date> <ts> <expire> <ver> <res> <pk-algo> <hash-algo> <class> <primary fpr>: the signing key is field 0, the primary field 9.
+            if len(fields) > 9 and (fields[0] in fingerprints or fields[9] in fingerprints):
                 return
     raise ValueError("signature is valid but not by the pinned signer")
 
