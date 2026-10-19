@@ -154,9 +154,12 @@ export class CoworkRepository {
     const backend = id(backendSessionId);
     if (incarnationId !== undefined) id(incarnationId);
     durableCoworkTransaction(this.rs, () => {
-      const row = this.one("SELECT backend_session_id, state FROM cowork_conversations WHERE session_id=?", id(sessionId));
+      const row = this.one("SELECT backend_session_id, state, store_state FROM cowork_conversations WHERE session_id=?", id(sessionId));
       if (!row) throw new CoworkError("not_found");
       if (row.state !== "active") throw new CoworkError("authority_denied");
+      // `lost` is terminal (L8): a store the host marked lost (even DURING a native start) is never assigned or sent again,
+      // so no empty disk starts fresh under the old identity.
+      if (row.store_state === "lost") throw new CoworkError("cold_resume_unavailable");
       if (row.backend_session_id !== null && row.backend_session_id !== undefined && row.backend_session_id !== backend) throw new CoworkError("authority_denied");
       this.run("UPDATE cowork_conversations SET backend_session_id=? WHERE session_id=? AND backend_session_id IS NULL", backend, sessionId);
       // #92 N3 (section 3.2): WRITE-AHEAD before the guest receives the set: `none` becomes `started`, so no later resume is

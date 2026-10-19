@@ -11,8 +11,8 @@ import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { turnOriginIndexFor } from "../sessions/turn-origin-index";
 import { coworkApprovalPortsFor, type CoworkHostApprovalPorts } from "./approval-ports";
-import { coworkResumePlan, type CoworkResumePlan } from "./cold-resume";
-import { coworkHeldInputVerbs, coworkOffersHeldInput } from "./held-input";
+import { coworkContinuationFor, coworkResumePlan, type CoworkResumePlan } from "./cold-resume";
+import { coworkHeldInputsFrom, coworkHeldInputVerbs, coworkOffersHeldInput, coworkTapHeldInputs, type CoworkHeldInputRecord } from "./held-input";
 import type { CoworkAuthority } from "./authority";
 import { COWORK_GUEST_IDENTITIES, COWORK_GUEST_RUNTIME_MODES, coworkConversationCeiling, coworkConversationFor, coworkGuestToolsFromClasses } from "./conversation-set";
 import { buildCoworkGuestQueryOptions } from "./guest-query";
@@ -78,7 +78,14 @@ export interface CoworkSessionDriverDeps {
   readonly coldResume?: { readonly ownerPatchApplied: true };
   /** #92 N4: held-input messaging. Absent (every production composition, pinned): no driver exposes `heldInput`. Present,
    *  a driver exposes it only to a runtime that offered `held-input-v1`. */
-  readonly heldInput?: { readonly enabled: true };
+  readonly heldInput?: {
+    readonly enabled: true;
+    /** Design rule 1 (4.5): the verbs bind to the incarnation's epoch only AFTER the runtime's `system/held_inputs` was
+     *  reconciled with the host's ledger. The driver calls this once with that list and the live epoch; the verbs stay
+     *  refused until it resolves, and a throw (or a malformed list) leaves them refused for the incarnation. A gate without
+     *  it is not a gate: PEER-INBOX supplies the ledger side. */
+    readonly reconcile: (inputs: readonly CoworkHeldInputRecord[], epoch: { readonly incarnationId: string; readonly leaseEpoch: number }) => void | Promise<void>;
+  };
 }
 
 /**
@@ -147,6 +154,8 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
     // A resumed conversation keeps its recorded backend identity (its guest store is keyed by it); a fresh one mints one.
     const backendSessionId = resume?.backendSessionId ?? (deps.mintBackendSessionId ?? randomUUID)();
     let liveQuery: unknown;
+    /** N4 rule 1: the verbs bind to the epoch only once `system/held_inputs` was reconciled (`heldInput.reconcile`). */
+    let heldReconciled = false, heldReconciling = false;
     const turnOrigin = () => turnOriginIndexFor(deps.hub, deps.store).origin(sessionId);
     let bridge: (CanUseTool & { withdrawPending(callId: string): boolean }) | undefined;
     let stopping: Promise<CoworkGuestStopOutcome | undefined> | undefined;
@@ -174,6 +183,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       entry.consumed = true;
       if (shuttingDown) throw shutdownRefusal();
       let admitted: Admitted | undefined, refusal: unknown;
+      let resumeOption = false;
       const conversations = (context: CoworkGuestConversationContext) => {
         try {
           // A refused `shares_mounted` faulted this boot: no set follows it.
@@ -184,6 +194,11 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
           const current = deps.records.conversation(sessionId);
           if (current.workspaceId !== binding.workspaceId || current.location !== binding.location || current.revision !== binding.revision
             || (current.location === "source" && binding.location === "source" && current.sourceId !== binding.sourceId)) throw new CoworkError("stale_acknowledgment");
+          // L8: `lost` is terminal. The store state may have changed since `ensure` planned this start (the host marks it
+          // lost during the native start: a format-new plan over a started store); the plan must still hold at the set.
+          const stateNow = deps.records.storeState(sessionId).storeState;
+          if (stateNow === "lost") throw new CoworkError("cold_resume_unavailable");
+          if (resume !== undefined && coworkContinuationFor(stateNow) !== resume.plan.continuation) throw new CoworkError("cold_resume_unavailable");
           const epoch = deps.records.refreshEpoch(context.workspaceId, context.incarnationId, context.leaseEpoch);
           const source = current.location === "source" ? deps.authority.requireSource(current.workspaceId, current.sourceId) : undefined;
           const ceiling = current.location === "source" ? deps.authority.effectiveCapabilities(sessionId) : coworkConversationCeiling(deps.records, sessionId);
@@ -217,6 +232,14 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       const refuse = async (code: ConstructorParameters<typeof CoworkError>[0]): Promise<never> => { await stopRun("user"); throw new CoworkError(code); };
       if (admitted === undefined) return refuse("recovery_required");
       if (run.workspaceId !== binding.workspaceId || run.incarnationId !== admitted.context.incarnationId || run.leaseEpoch !== admitted.context.leaseEpoch || run.guestBootId !== admitted.context.guestBootId) return refuse("authority_denied");
+      // CR2: the query's `resume` follows what the guest actually took. `resume` is known to exist; `either` needs the
+      // guest's echo (no echo is refused, never guessed); a fresh start never meets an existing store.
+      const echo = run.continuation;
+      if (echo !== undefined && echo !== "fresh" && echo !== "resume") return refuse("recovery_required");
+      if (resume === undefined) { if (echo === "resume") return refuse("recovery_required"); }
+      else if (resume.plan.continuation === "resume") { if (echo === "fresh") return refuse("recovery_required"); resumeOption = true; }
+      else if (resume.plan.continuation === "either") { if (echo === undefined) return refuse("recovery_required"); resumeOption = echo === "resume"; }
+      else if (echo === "resume") return refuse("recovery_required");
       const ports: CoworkHostApprovalPorts = coworkApprovalPortsFor({ binding: admitted.binding, ...(admitted.source === undefined ? {} : { source: admitted.source }), ceiling: admitted.ceiling });
       bridge = approvals.canUseToolFor({ sessionId, binding: admitted.binding, policyRevision: deps.records.policy(binding.workspaceId).revision, cowork: ports,
         cwd: admitted.conversation.roots[0]!.guestPath, turnOrigin,
@@ -226,7 +249,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       const supervisor = new CoworkGuestRuntimeSupervisor({
         records: deps.records, authority: deps.authority,
         // `resume` only when the store is known to exist; `either` lets the guest decide from its own store (CR2).
-        identity: () => ({ backendSessionId, model: route.model, resume: resume?.plan.continuation === "resume" }),
+        identity: () => ({ backendSessionId, model: route.model, resume: resumeOption }),
         bootId: () => run.guestBootId,
         runtimeCapability: offer.runtimeCapability, readiness: offer.readiness,
         port: { open: launch => coworkGuestRuntimeChannel({ link: run.runtime(0), launch, stop: () => { void stopRun(shuttingDown ? "shutdown" : "user"); } }) },
@@ -252,8 +275,22 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       now: () => new Date().toISOString(),
       log: { warn: (message, fields) => log(`${message} ${fields === undefined ? "" : JSON.stringify(fields)}`.trim()) },
     });
+    const reconcileHeldInputs = (message: unknown): void => {
+      const gate = deps.heldInput;
+      if (gate === undefined || heldReconciling || heldReconciled) return; // emitted once; a repeat changes nothing
+      heldReconciling = true;
+      void (async () => {
+        try {
+          const inputs = coworkHeldInputsFrom(message);
+          const epoch = handle.coworkEpoch;
+          if (inputs === undefined || epoch === undefined) throw new CoworkError("recovery_required");
+          await gate.reconcile(inputs, epoch);
+          if (handle.coworkEpoch?.incarnationId === epoch.incarnationId && handle.coworkEpoch.leaseEpoch === epoch.leaseEpoch) heldReconciled = true;
+        } catch (error) { log(`cowork ${sessionId}: held inputs not reconciled (${error instanceof Error ? error.name : "unknown"})`); }
+      })();
+    };
     // Only the agent SDK's own `query` (the runtime process is the guest's); no router selection, run home or messaging.
-    const runtime = { sdk: { query: (input: Parameters<typeof agentQuery>[0]) => { const q = sdkQuery(input); liveQuery = q; return q; } }, trackQuery: () => {}, untrack: () => {} } as unknown as WinterRuntimeSdk;
+    const runtime = { sdk: { query: (input: Parameters<typeof agentQuery>[0]) => { const q = sdkQuery(input); liveQuery = q; return deps.heldInput?.enabled === true ? coworkTapHeldInputs(q, reconcileHeldInputs) : q; } }, trackQuery: () => {}, untrack: () => {} } as unknown as WinterRuntimeSdk;
     const sessionDeps: WinterSessionDeps = {
       sessionId, backendSessionId, mode: "cowork", runtime,
       options: ({ abort }) => start(abort),
@@ -307,7 +344,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       idle: () => session.idle(),
       // N4: only with the host's gate AND a runtime that offered `held-input-v1`; bound to the incarnation that is live.
       ...(deps.heldInput?.enabled === true && coworkOffersHeldInput(offer.runtimeCapability)
-        ? { heldInput: coworkHeldInputVerbs(() => (entry.closed || session.state !== "live" ? undefined : liveQuery), () => handle.coworkEpoch) } : {}),
+        ? { heldInput: coworkHeldInputVerbs(() => (entry.closed || session.state !== "live" ? undefined : liveQuery), () => (heldReconciled ? handle.coworkEpoch : undefined)) } : {}),
     };
     const entry: Entry = {
       sessionId, workspaceId: binding.workspaceId, session, handle, run: undefined, closed: false, consumed: false,

@@ -388,6 +388,13 @@ export function migrateCoworkExportBindingSchema(db: Database): void {
  *    recorded backend) start as `started`, never `none`, so a later resume can never be told "fresh" over a real store.
  *  - `cowork_workspaces`: the data volume's `store_volume_uuid` (kept and re-sent; CR4 step 9) and the per-workspace
  *    `browse_uid` (4b.3).
+ *  - KNOWN GAP, dev rows only (no backfill, deliberately): before v21 every conversation's set carried the fixed pair
+ *    2001/2002 and nothing recorded it, so a pre-v21 conversation with a guest store has NO `cowork_guest_uids` row and a
+ *    NULL `runtime_uid`/`tool_uid`. A backfill is not safe: several conversations of one workspace may all have stores
+ *    owned by 2001/2002, and the table allows one owner per (workspace, uid). The first conversation to resume allocates
+ *    the lowest free pair (2001/2002 when free), any other gets a different pair, and its old store is not owned by the new
+ *    uids. That affects only pre-v21 dev stores (production has never created a Cowork guest store); such a store is
+ *    recreated, never migrated in place. Every store created after v21 has its rows.
  *  - RULE for N3 (the allocator): a guest uid (runtime, tool or browse) is ONLY ever allocated through `cowork_guest_uids`,
  *    in the same transaction that writes it to `cowork_conversations`/`cowork_workspaces`; no column is ever set to a uid
  *    that has no row there, and no row is deleted before `released_at` (the trigger below).

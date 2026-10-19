@@ -91,6 +91,34 @@ export function coworkHeldInputsEvent(value: unknown): readonly CoworkHeldInputR
   }));
 }
 
+/** A `system/held_inputs` message's records, or undefined when `message` is some other message. A malformed one throws
+ *  `recovery_required` (the caller never publishes the epoch). */
+export function coworkHeldInputsFrom(message: unknown): readonly CoworkHeldInputRecord[] | undefined {
+  if (!plain(message) || message.type !== "system" || message.subtype !== "held_inputs") return undefined;
+  return coworkHeldInputsEvent({ inputs: message.inputs });
+}
+
+/**
+ * Observes the query's messages for `system/held_inputs` (emitted once after init, always) and hands the first to `onHeldInputs`.
+ * Every message is passed on unchanged and in order; every other member of the query is the query's own.
+ */
+export function coworkTapHeldInputs<Q extends object>(query: Q, onHeldInputs: (message: unknown) => void): Q {
+  return new Proxy(query, {
+    get(target, property) {
+      if (property === Symbol.asyncIterator) {
+        return async function* tapped() {
+          for await (const message of target as unknown as AsyncIterable<unknown>) {
+            if (plain(message) && message.type === "system" && message.subtype === "held_inputs") onHeldInputs(message);
+            yield message;
+          }
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 /** The four verbs a Cowork driver exposes (gated; see the header). Every call is bound to the incarnation that is live. */
 export interface CoworkHeldInputVerbs {
   hold(input: { readonly inputId: string; readonly holdToken: string; readonly text: string; readonly clientName: string }): Promise<CoworkHoldAnswer>;
