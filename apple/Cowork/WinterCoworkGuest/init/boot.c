@@ -12,7 +12,7 @@
 #define UMOUNT_ATTEMPTS 4
 #define FAIL_STOP_BUDGET_MS 10000u
 
-static char runtime_buffer[WG_CONFIG_RUNTIME_ARTIFACTS_MAX + 1];
+static char runtime_buffer[WG_CONFIG_RUNTIME_MAX + 1];
 static char base_buffer[WG_CONFIG_BASE_MAX + 1];
 static char config_buffer[WG_CONFIG_MAX_BYTES + 1];
 
@@ -176,11 +176,12 @@ static void start_conversations(struct wg_boot *boot, const uint8_t *payload, si
         conversations_failed(boot, 2, "runtime-artifacts-missing");   /* the image cannot run this profile: the supervisor cannot start */
         return;
     }
-    if (wg_build_trusted_config(boot_id, base_buffer, base_length, set.json, set.json_length, runtime_key, runtime_buffer, runtime_length, config_buffer,
-                                sizeof config_buffer, &config_length) != WG_CONFIG_OK) {
-        conversations_failed(boot, 1, "config-refused");
-        return;
-    }
+    /* The supervisor requires `guidanceDirectory` in every guided conversation and refuses it in any other: the helper writes it, PID 1 checks it. */
+    if (!wg_guidance_members_ok(set.profile, set.count, set.json, set.json_length)) { conversations_failed(boot, 1, "config-refused"); return; }
+    enum wg_config_result built = wg_build_trusted_config(boot_id, base_buffer, base_length, set.json, set.json_length, runtime_key, runtime_buffer, runtime_length,
+                                                          config_buffer, sizeof config_buffer, &config_length);
+    if (built == WG_CONFIG_RUNTIME_SHAPE) { conversations_failed(boot, 2, "runtime-artifacts-invalid"); return; }   /* the image's own file is not what the supervisor reads */
+    if (built != WG_CONFIG_OK) { conversations_failed(boot, 1, "config-refused"); return; }
     if (ops->prepare_conversation_dirs(ops->ctx, &set) != 0) { conversations_failed(boot, 2, "conversation-dirs-failed"); return; }
     if (ops->start_supervisor(ops->ctx, config_buffer, config_length, set.profile != 0) != 0) { conversations_failed(boot, 2, "supervisor-start-failed"); return; }
     boot->supervisor_started = 1;

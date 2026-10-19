@@ -1594,7 +1594,8 @@ class ConversationSetTests(unittest.TestCase):
         self.assertEqual((runtime["model"], runtime["timeoutMs"], runtime["toolClasses"]), ("model-alpha", 600000, ["read", "write", "execute"]))
         self.assertEqual(runtime["requiredRuntimeContext"], {"version": 1, "bindingId": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"})
         self.assertEqual(runtime["generation"], 1)
-        self.assertEqual(set(runtime), {"storeDirectory", "runhomeDirectory", "provider", "model", "timeoutMs", "toolClasses", "requiredRuntimeContext", "generation"})
+        self.assertEqual(runtime["guidanceDirectory"], "/run/winter/shared-instructions")
+        self.assertEqual(set(runtime), {"storeDirectory", "runhomeDirectory", "provider", "model", "timeoutMs", "toolClasses", "requiredRuntimeContext", "generation", "guidanceDirectory"})
         plain = self.parsed("bootstrap-down-conversations-guided")
         plain = copy.deepcopy(plain)
         plain["profile"] = "host-query-v1"
@@ -1602,6 +1603,8 @@ class ConversationSetTests(unittest.TestCase):
         runtime = gb.supervisor_items(plain)[0]["hostQueryRuntime"]
         self.assertNotIn("requiredRuntimeContext", runtime)
         self.assertNotIn("generation", runtime)
+        self.assertNotIn("guidanceDirectory", runtime)   # the supervisor refuses it for any profile but the guided one (`runtime_config`)
+        self.assertEqual(set(runtime), {"storeDirectory", "runhomeDirectory", "provider", "model", "timeoutMs", "toolClasses"})
 
     def test_a_tools_only_set_has_no_runtime_member_at_all(self):
         items = gb.supervisor_items(self.parsed("bootstrap-down-conversations-tools-only"))
