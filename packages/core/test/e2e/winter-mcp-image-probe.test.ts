@@ -78,7 +78,9 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
       log: () => {},
     });
     cleanups.push(async () => {
-      drivers.beginShutdown?.(); // unregisters the host-storage policy consumer: left registered over a closed store it fails every later refresh in this process
+      // Unregister the storage-policy consumer: a leaked one outlives this store and makes any later
+      // `refreshHostStoragePolicies()` in the same process throw "Cannot use a closed database".
+      drivers.beginShutdown?.();
       await drivers.endAll();
       await runtime.dispose();
       store.close(); rs.close();
