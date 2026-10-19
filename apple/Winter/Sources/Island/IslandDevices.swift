@@ -31,9 +31,14 @@ struct IslandDeviceRow: Identifiable, Equatable {
     let id: String
     let symbol: String
     let title: String
-    let detail: String
+    /// Its state in a word or two, beside its status dot ("Connected", "Running · 1.4.0"; empty: no status).
+    var status: String = ""
+    /// What the pointer reveals under the title ("Paired 9 d ago", a browser's reason); empty: nothing more to say.
+    var detail: String = ""
     let tone: IslandDeviceTone
     var chips: [IslandDeviceChip] = []
+    /// The detail is worth scanning at rest too (a status that could not be read, how to pair a phone).
+    var detailAtRest = false
 }
 
 enum IslandDevicesPresentation {
@@ -54,14 +59,15 @@ enum IslandDevicesPresentation {
                 let on = connected.contains(r.phoneEndpointID)
                 let label = r.label.trimmingCharacters(in: .whitespacesAndNewlines)
                 return IslandDeviceRow(id: "phone-\(r.phoneEndpointID)", symbol: "iphone", title: label.isEmpty ? "iPhone" : label,
-                                       detail: "\(on ? "Connected" : "Not connected") · paired \(islandRelativePast(date(r.createdAt), now: now))",
+                                       status: on ? "Connected" : "Not connected",
+                                       detail: "Paired \(islandRelativePast(date(r.createdAt), now: now))",
                                        tone: on ? .ok : .off)
             }
         if !mirrored.isEmpty {
             let names = mirrored.map { titleFor($0) ?? "a session" }
             let what = names.count == 1 ? names[0] : "\(names.count) sessions"
             rows.append(IslandDeviceRow(id: "mirror", symbol: "rectangle.on.rectangle", title: "Phone mirror",
-                                        detail: "Watching \(what)", tone: .ok))
+                                        status: "Watching", detail: what, tone: .ok))
         }
         return rows
     }
@@ -69,8 +75,8 @@ enum IslandDevicesPresentation {
     /// PURE: the helper and the browsers (nil status: the daemon could not be asked).
     static func helpers(_ status: ComputerUseStatus?) -> [IslandDeviceRow] {
         guard let status else {
-            return [IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper",
-                                    detail: "Couldn't read its status", tone: .warning)]
+            return [IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper", status: "Unknown",
+                                    detail: "Couldn't read its status", tone: .warning, detailAtRest: true)]
         }
         var rows: [IslandDeviceRow] = []
         let helper = status.helper
@@ -78,8 +84,8 @@ enum IslandDevicesPresentation {
         if !status.enabled { tone = .off } else if helper.protocolMismatch != nil || !helper.installed { tone = .warning }
         else if let p = helper.permissions, !(p.accessibility && p.screenRecording) { tone = .warning }
         else { tone = helper.running ? .ok : .off }
-        let detail = status.enabled ? computerUseHelperSummary(helper) : "Computer use is off"
-        rows.append(IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper", detail: detail, tone: tone,
+        rows.append(IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper",
+                                    status: helperStatus(status), detail: helperDetail(status), tone: tone,
                                     chips: [chip("Accessibility", helper.permissions?.accessibility),
                                             chip("Screen Recording", helper.permissions?.screenRecording)]))
         for b in status.browsers ?? [] {
@@ -92,39 +98,63 @@ enum IslandDevicesPresentation {
             }
             let reason = b.reason.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
             rows.append(IslandDeviceRow(id: "browser-\(b.id)", symbol: symbol, title: title,
-                                        detail: b.connected ? "Connected" : (reason ?? "Not connected"),
+                                        status: b.connected ? "Connected" : "Not connected",
+                                        detail: b.connected ? "" : (reason ?? ""),
                                         tone: b.connected ? .ok : .off))
         }
         return rows
+    }
+
+    /// PURE: the helper's state in a word or two — "Running · 1.4.0", "Not running", "Not installed", "Needs an update",
+    /// "Off".
+    static func helperStatus(_ status: ComputerUseStatus) -> String {
+        let helper = status.helper
+        if !status.enabled { return "Off" }
+        if helper.protocolMismatch != nil { return "Needs an update" }
+        if !helper.installed { return "Not installed" }
+        if !helper.running { return "Not running" }
+        if let version = helper.version, !version.isEmpty { return "Running · \(version)" }
+        return "Running"
+    }
+
+    /// PURE: what the helper's row reveals beyond its status — Settings' own words ("Installed — starts when a session
+    /// needs it", an incompatibility's message, "Computer use is off"); nothing while it runs (the status says it all).
+    static func helperDetail(_ status: ComputerUseStatus) -> String {
+        guard status.enabled else { return "Computer use is off" }
+        let helper = status.helper
+        if helper.protocolMismatch == nil, helper.installed, helper.running { return "" }
+        let summary = computerUseHelperSummary(helper)
+        return summary == helperStatus(status) ? "" : summary
     }
 
     static func chip(_ label: String, _ granted: Bool?) -> IslandDeviceChip {
         IslandDeviceChip(label: label, state: granted.map { $0 ? .granted : .denied } ?? .unknown)
     }
 
-    // MARK: The quiet row (the island's visual language)
+    // MARK: The row (the island's visual language: a glyph, a name, a status dot and its word)
 
-    /// PURE: a row's line — full in its tone's colour when connected (green) or needing attention (amber), the grey
-    /// track alone when off. Nothing is estimated: no phone or helper reports a level, so the line is all or nothing.
-    static func lineFraction(_ tone: IslandDeviceTone) -> Double { tone == .off ? 0 : 1 }
-
-    /// PURE: a permission as words inside its half of the helper's line — "✓ Accessibility", "✕ Screen Recording",
-    /// "? Accessibility" (unknown while the helper is not running).
-    static func chipWords(_ chip: IslandDeviceChip) -> String {
-        switch chip.state {
-        case .granted: return "✓ \(chip.label)"
-        case .denied: return "✕ \(chip.label)"
-        case .unknown: return "? \(chip.label)"
+    /// PURE: the status dot — green while connected or running, amber while it needs something, hollow grey while off.
+    static func mark(_ tone: IslandDeviceTone) -> IslandStatusMark {
+        switch tone {
+        case .ok: return .dot(Color(nsColor: .systemGreen))
+        case .warning: return .dot(pillReviewAmber)
+        case .off: return .ring(Color.white.opacity(0.35))
         }
     }
 
-    /// PURE: a permission's half of the line — granted green, not granted amber, unknown grey.
-    static func chipColor(_ state: IslandPermissionState) -> Color {
-        switch state {
-        case .granted: return islandToneColor(.ok)
-        case .denied: return pillReviewAmber
-        case .unknown: return Color.white.opacity(0.16)
+    /// PURE: a permission as a small labelled mark — ✓ granted (quiet), ✕ missing (amber: it needs you), ? unknown while
+    /// the helper is not running (quiet).
+    static func permissionMark(_ chip: IslandDeviceChip) -> (symbol: String, color: Color) {
+        switch chip.state {
+        case .granted: return ("checkmark", Theme.textMuted)
+        case .denied: return ("xmark", pillReviewAmber)
+        case .unknown: return ("questionmark", Theme.textMuted)
         }
+    }
+
+    /// PURE: whether the line under the name shows its detail — under the pointer, or at rest when it is worth scanning.
+    static func showsDetail(_ row: IslandDeviceRow, hovered: Bool) -> Bool {
+        !row.detail.isEmpty && (hovered || row.detailAtRest)
     }
 
     /// PURE: a permission as VoiceOver says it — "Accessibility: granted".
@@ -132,10 +162,9 @@ enum IslandDevicesPresentation {
         "\(chip.label): \(chip.state == .granted ? "granted" : chip.state == .denied ? "not granted" : "unknown")"
     }
 
-    /// PURE: a row as VoiceOver says it — its title, its detail and its permissions (what the row showed as text and
-    /// chips, now partly only under the pointer).
+    /// PURE: a row as VoiceOver says it, at rest — its title, its status, its detail and its permissions.
     static func accessibilityLabel(_ row: IslandDeviceRow) -> String {
-        ([row.title, row.detail] + row.chips.map(chipAccessibility)).joined(separator: ", ")
+        ([row.title, row.status, row.detail].filter { !$0.isEmpty } + row.chips.map(chipAccessibility)).joined(separator: ", ")
     }
 }
 
@@ -179,11 +208,12 @@ struct IslandDevicesTab: View {
         if !model.loaded {
             IslandEmptyTab(symbol: "laptopcomputer.and.iphone", line: "Reading devices…")
         } else {
-            VStack(alignment: .leading, spacing: IslandDeviceRowView.gap) {
+            VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
                 section("Phones")
                 if model.phones.isEmpty {
                     IslandDeviceRowView(row: IslandDeviceRow(id: "none", symbol: "iphone.slash", title: "No phone paired",
-                                                             detail: "Pair one from Winter's phone panel", tone: .off))
+                                                             detail: "Pair one from Winter's phone panel", tone: .off,
+                                                             detailAtRest: true))
                 } else {
                     ForEach(model.phones) { IslandDeviceRowView(row: $0) }
                 }
@@ -200,76 +230,58 @@ struct IslandDevicesTab: View {
             .font(Typography.tiny(.semibold))
             .tracking(0.6)
             .foregroundStyle(Theme.textMuted)
-            .padding(.top, 2)
+            .padding(.top, 4)
     }
 }
 
-/// A phone or a helper as a quiet row (the island's visual language): its symbol and name over a line — green while
-/// connected, amber while it needs something, the grey track alone while off; the Computer Use helper's line is its
-/// two permissions side by side (granted green, not granted amber, unknown grey). Under the pointer the name lifts and
-/// the line says its detail — or each permission — inside itself; the helper's detail shows beside its name.
+/// A phone or a helper as a row in the island's language: its glyph and name, and its state as a small dot and a word
+/// ("● Connected", "● Running · 1.4.0") — the Computer Use helper's two permissions as small labelled marks under it
+/// (✓ Accessibility, ✕ Screen Recording in amber when missing). Under the pointer the name lifts and the detail shows
+/// (when it was paired, why a browser is not connected). No line: nothing here is an amount.
 struct IslandDeviceRowView: View {
     let row: IslandDeviceRow
 
-    static let gap: CGFloat = 8
-
     var body: some View {
         HoverLiftReader(id: "device:\(row.id)") { hovered in
-            VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
-                HStack(spacing: 8) {
-                    Image(systemName: row.symbol)
-                        .font(Typography.caption(.semibold))
-                        .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.7))
-                        .frame(width: IslandQuietRow.markWidth)
-                    Text(row.title)
-                        .font(Typography.composerField())
-                        .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.9))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .hoverLiftLabel(hovered)
-                        .padding(.trailing, hovered ? 18 : 0)
-                        .layoutPriority(1)
-                    Spacer(minLength: 8)
-                    if !row.chips.isEmpty, hovered {
-                        // The helper's line is its permissions: its own words go beside its name, two lines at most
-                        // as before.
-                        Text(row.detail)
-                            .font(Typography.tiny())
-                            .foregroundStyle(Theme.textMuted)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.trailing)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .transition(.opacity)
-                    }
+            IslandLiftRow(title: row.title, hovered: hovered) {
+                Image(systemName: row.symbol)
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(Color.white.opacity(hovered ? 0.95 : 0.7))
+            } trailing: {
+                if !row.status.isEmpty {
+                    IslandStatusWord(mark: IslandDevicesPresentation.mark(row.tone), word: row.status)
                 }
-                .frame(minHeight: IslandQuietRow.titleHeight)
-                Group {
-                    if row.chips.isEmpty {
-                        HoverLine(fraction: IslandDevicesPresentation.lineFraction(row.tone), color: islandToneColor(row.tone),
-                                  hovered: hovered, words: HoverLineWords(start: row.detail, startTruncates: true),
-                                  inkOnFill: row.tone == .warning ? .black : .white)
-                    } else {
-                        HoverSegmentLine(segments: row.chips.map { chip in
-                            HoverSegment(id: chip.id, fraction: 1 / Double(row.chips.count),
-                                         color: IslandDevicesPresentation.chipColor(chip.state),
-                                         label: IslandDevicesPresentation.chipWords(chip),
-                                         ink: chip.state == .denied ? .black : .white)
-                        }, hovered: hovered)
-                    }
+            } below: {
+                if !row.chips.isEmpty {
+                    IslandPermissionMarks(chips: row.chips)
                 }
-                .padding(.leading, IslandQuietRow.markWidth + 8)
+                if IslandDevicesPresentation.showsDetail(row, hovered: hovered) {
+                    IslandRowWords(text: row.detail, lines: 2)
+                        .transition(.opacity)
+                }
             }
-            .contentShape(Rectangle())
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(IslandDevicesPresentation.accessibilityLabel(row))
     }
 }
 
-func islandToneColor(_ tone: IslandDeviceTone) -> Color {
-    switch tone {
-    case .ok: return Color(nsColor: .systemGreen)
-    case .warning: return pillReviewAmber
-    case .off: return Color.white.opacity(0.25)
+/// The helper's permissions as small labelled marks — "✓ Accessibility   ✕ Screen Recording".
+struct IslandPermissionMarks: View {
+    let chips: [IslandDeviceChip]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(chips) { chip in
+                let mark = IslandDevicesPresentation.permissionMark(chip)
+                HStack(spacing: 4) {
+                    Image(systemName: mark.symbol).font(Typography.micro(.bold))
+                    Text(chip.label).font(IslandQuietRow.wordsFont)
+                }
+                .foregroundStyle(mark.color)
+                .lineLimit(1)
+            }
+        }
+        .frame(minHeight: 16)
     }
 }

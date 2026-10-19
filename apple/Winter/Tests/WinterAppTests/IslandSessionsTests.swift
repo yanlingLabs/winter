@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 import WinterKit
 @testable import Winter
@@ -203,11 +204,14 @@ final class IslandSessionsTests: XCTestCase {
 
     func testTheRowStillSaysItsModeOnScreen() throws {
         // The mode ("Code", "Chat", "Dispatch task") is the row's content: it stays in the muted words beside the host,
-        // never only in the VoiceOver label.
+        // at rest, never only in the VoiceOver label or under the pointer.
+        let r = IslandSessionRow(sessionId: "a", title: "T", mode: "Dispatch task", state: .idle, host: .terminal(tty: "/dev/ttys004"))
+        XCTAssertEqual(IslandSessionsBuilder.whereWords(r), "Dispatch task · Terminal · ttys004")
         let source = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("../../Sources/Island/IslandSessions.swift").standardizedFileURL, encoding: .utf8)
         let view = try XCTUnwrap(source.range(of: "struct IslandSessionRowView").map { String(source[$0.lowerBound...]) })
-        XCTAssertTrue(view.contains("Text(row.mode)"), "the mode is drawn")
+        let trailing = try XCTUnwrap(view.range(of: "} trailing: {").map { String(view[$0.upperBound...]) })
+        XCTAssertTrue(trailing.prefix(200).contains("whereWords(row)"), "the mode and host trail the title, at rest")
     }
 
     func testTheModelFamilyPicksOneSourcesAccentAndWinterBlueOtherwise() {
@@ -226,29 +230,73 @@ final class IslandSessionsTests: XCTestCase {
         XCTAssertEqual(IslandModelFamily.other.color, Theme.accent)
     }
 
-    func testTheStatusLineIsFullUnlessIdleAndSaysStateModelAgeAndFolderOnlyUnderThePointer() {
-        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.waiting), 1)
-        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.working), 1)
-        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.finished), 1)
-        XCTAssertEqual(IslandSessionsBuilder.lineFraction(.idle), 0, "idle: the grey track alone")
+    func testTheMarkIsADotInTheModelsColourAmberWhileWaitingHollowWhileIdle() {
+        let working = IslandSessionRow(sessionId: "a", title: "T", mode: "Code", state: .working, host: .winterWindow,
+                                       model: "anthropic/claude-sonnet-4.5")
+        XCTAssertEqual(IslandSessionsBuilder.mark(working), .dot(UsagePlanColor.claudeCode))
+        let waiting = IslandSessionRow(sessionId: "w", title: "T", mode: "Code", state: .waiting, host: .nowhere, model: "gpt-5")
+        XCTAssertEqual(IslandSessionsBuilder.mark(waiting), .dot(pillReviewAmber), "waiting is amber whatever the model")
+        let idle = IslandSessionRow(sessionId: "i", title: "T", mode: "Code", state: .idle, host: .nowhere, providerId: "codex-oauth")
+        XCTAssertEqual(IslandSessionsBuilder.mark(idle), .ring(UsagePlanColor.codex), "idle: the same colour, hollow")
+        let other = IslandSessionRow(sessionId: "o", title: "T", mode: "Chat", state: .working, host: .nowhere, model: "example/model")
+        XCTAssertEqual(IslandSessionsBuilder.mark(other), .dot(Theme.accent), "no source of its own: Winter's accent")
+        let done = IslandSessionRow(sessionId: "d", title: "T", mode: "Dispatch task", state: .finished, host: .nowhere)
+        XCTAssertEqual(IslandSessionsBuilder.mark(done), .glyph("checkmark", Color.white.opacity(0.55)))
+        var failed = done
+        failed.failed = true
+        XCTAssertEqual(IslandSessionsBuilder.mark(failed), .dot(Color(nsColor: .systemRed)))
+    }
+
+    func testARowIsOneLineUnlessItNeedsYouOrEndedWithAnError() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let working = IslandSessionRow(sessionId: "a", title: "T", mode: "Code", state: .working, host: .winterWindow)
+        XCTAssertNil(IslandSessionsBuilder.note(working, now: now), "nothing worth scanning: one line")
+        var waiting = IslandSessionRow(sessionId: "w", title: "T", mode: "Code", state: .waiting, host: .nowhere)
+        XCTAssertEqual(IslandSessionsBuilder.note(waiting, now: now), IslandRowNote(text: "Waiting for you", color: pillReviewAmber),
+                       "an armed watch, no card: the state's words")
+        waiting.wait = IslandSessionWait(kind: .approval, since: now.addingTimeInterval(-2 * 60 - 5))
+        XCTAssertEqual(IslandSessionsBuilder.note(waiting, now: now)?.text, "Needs your approval · 2 min")
+        waiting.wait = IslandSessionWait(kind: .question, since: now.addingTimeInterval(-20))
+        XCTAssertEqual(IslandSessionsBuilder.note(waiting, now: now)?.text, "Has a question for you · just now")
+        waiting.wait = IslandSessionWait(kind: .elicitation)
+        XCTAssertEqual(IslandSessionsBuilder.note(waiting, now: now)?.text, "Needs you to open a link", "no issue time: no age")
+        waiting.wait = IslandSessionWait(kind: .viewRequest, since: now.addingTimeInterval(-70 * 60))
+        XCTAssertEqual(IslandSessionsBuilder.note(waiting, now: now)?.text, "Asks to switch desktops · 1 h 10 min")
+        var failed = IslandSessionRow(sessionId: "f", title: "T", mode: "Dispatch task", state: .finished, host: .nowhere)
+        XCTAssertNil(IslandSessionsBuilder.note(failed, now: now))
+        failed.failed = true
+        XCTAssertEqual(IslandSessionsBuilder.note(failed, now: now),
+                       IslandRowNote(text: "Ended with an error", color: Color(nsColor: .systemRed)))
+    }
+
+    func testTheRowsCarryTheOldestCardAndAChildsError() {
+        func card(_ id: String, session: String, kind: IslandCard.Kind, at: Int?) -> IslandCard {
+            IslandCard(callId: id, sessionId: session, answerSessionId: session, kind: kind,
+                       payload: .question([]), facts: IslandSessionFacts(mode: "code"), hosts: [], issuedAt: at)
+        }
+        let waits = IslandSessionsBuilder.waits([card("c1", session: "a", kind: .question, at: 2_000_000),
+                                                 card("c2", session: "a", kind: .approval, at: 1_000_000),
+                                                 card("c3", session: "b", kind: .viewRequest, at: nil)])
+        XCTAssertEqual(waits["a"], IslandSessionWait(kind: .approval, since: Date(timeIntervalSince1970: 1_000)), "the oldest card")
+        XCTAssertEqual(waits["b"], IslandSessionWait(kind: .viewRequest, since: nil))
+        let rows = IslandSessionsBuilder.rows(directory: [row("a", working: true), row("c", parent: "d"), row("e", parent: "d")],
+                                              hosts: [:], waiting: ["a"], childStatuses: ["c": "error", "e": "completed"],
+                                              windows: IslandWindowFacts(), waits: waits)
+        XCTAssertEqual(rows.first { $0.sessionId == "a" }?.wait?.kind, .approval)
+        XCTAssertEqual(rows.first { $0.sessionId == "c" }?.failed, true, "a child that ended with an error says so")
+        XCTAssertEqual(rows.first { $0.sessionId == "e" }?.failed, false)
+        XCTAssertEqual(rows.first { $0.sessionId == "c" }?.state, .finished, "still ordered with the finished ones")
+    }
+
+    func testThePointerRevealsTheModelAgeAndFolder() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let r = IslandSessionRow(sessionId: "a", title: "T", mode: "Code", state: .working, host: .winterWindow,
                                  model: "anthropic/claude-sonnet-4.5", folder: "winter",
                                  createdAt: Int((now.timeIntervalSince1970 - 3 * 3600) * 1000))
-        let words = IslandSessionsBuilder.lineWords(r, now: now)
-        XCTAssertEqual(words.start, "Working · claude-sonnet-4.5", "the provider prefix dropped")
-        XCTAssertEqual(words.end, "3 h ago · winter")
-        XCTAssertNil(words.atFill)
+        XCTAssertEqual(IslandSessionsBuilder.details(r, now: now), "claude-sonnet-4.5 · 3 h ago · winter", "the provider prefix dropped")
         let bare = IslandSessionRow(sessionId: "b", title: "T", mode: "Chat", state: .idle, host: .nowhere)
-        XCTAssertEqual(IslandSessionsBuilder.lineWords(bare, now: now), HoverLineWords(start: "Idle", end: nil))
-        XCTAssertEqual(IslandSessionsBuilder.lineColor(IslandSessionRow(sessionId: "w", title: "T", mode: "Code", state: .waiting,
-                                                                        host: .nowhere, model: "gpt-5")), pillReviewAmber,
-                       "waiting is amber whatever the model")
-        XCTAssertEqual(IslandSessionsBuilder.lineColor(r), UsagePlanColor.claudeCode)
-        XCTAssertEqual(IslandSessionsBuilder.markColor(r), UsagePlanColor.claudeCode, "the mark wears its line's colour")
-        XCTAssertEqual(IslandSessionsBuilder.markColor(bare), Theme.textMuted)
+        XCTAssertEqual(IslandSessionsBuilder.details(bare, now: now), "Idle", "nothing known: the state's words")
     }
-
     func testIslandChangedSaysWhetherThePendingSetOrAWorkingStateChanged() {
         XCTAssertEqual(IslandChangeKind(.object([:])), IslandChangeKind(pending: true, working: false), "phase 1's payload")
         XCTAssertEqual(IslandChangeKind(.object(["working": .bool(true)])), IslandChangeKind(pending: false, working: true))

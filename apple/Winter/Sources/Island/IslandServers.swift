@@ -447,32 +447,23 @@ enum IslandServers {
         return restHours == 0 ? "up \(days) d" : "up \(days) d \(restHours) h"
     }
 
-    // MARK: The quiet row's line (the island's visual language)
+    // MARK: The row (the island's visual language: a logo, a name, a live dot; chips under the pointer)
 
-    /// A server's line fills over its first day up (full from then on): a fresh one shows a sliver, one left running
-    /// since yesterday a full line.
-    static let uptimeScale: TimeInterval = 24 * 3600
-
-    /// PURE: how full a server's uptime line is, 0…1.
-    static func uptimeFraction(since start: Date, now: Date) -> Double {
-        min(1, max(0, now.timeIntervalSince(start) / uptimeScale))
-    }
-
-    /// PURE: what a hovered server line says inside itself — its uptime (or its Stop's state) glued to the fill's end, its
-    /// ports at the track's end.
-    static func lineWords(status: String, ports: String) -> HoverLineWords {
-        HoverLineWords(atFill: status, end: ports.isEmpty ? nil : ports)
-    }
-
-    /// PURE: the line's colour through Stop's phases — the running green, amber while Stop waits for its second click,
-    /// dimmed while stopping, red while a force quit is offered or asked.
-    static func lineColor(_ phase: IslandServerStopPhase?) -> Color {
+    /// PURE: a server's live dot through Stop's phases — green while it runs, amber while Stop waits for its second click,
+    /// hollow while it is stopping, red while a force quit is offered or asked.
+    static func mark(_ phase: IslandServerStopPhase?) -> IslandStatusMark {
         switch phase {
-        case nil: return islandToneColor(.ok)
-        case .confirming?: return pillReviewAmber
-        case .stopping?, .killing?: return Color.white.opacity(0.3)
-        case .forceOffered?, .confirmingForce?: return Color(nsColor: .systemRed)
+        case nil: return .dot(Color(nsColor: .systemGreen))
+        case .confirming?: return .dot(pillReviewAmber)
+        case .stopping?, .killing?: return .ring(Color.white.opacity(0.45))
+        case .forceOffered?, .confirmingForce?: return .dot(Color(nsColor: .systemRed))
         }
+    }
+
+    /// PURE: the ports a row's chips name as plain labels — every TCP port its shown links do not already carry.
+    static func plainPorts(_ ports: [UInt16], links: [IslandServerLink]) -> [UInt16] {
+        let linked = Set(links.map(\.port))
+        return Array(Set(ports)).sorted().filter { !linked.contains($0) }
     }
 
     /// PURE: a server's state as words — its uptime, or Stop's ("Stopping…", "Still running").
@@ -484,8 +475,8 @@ enum IslandServers {
         }
     }
 
-    /// PURE: a server row as VoiceOver says it — its name, ports and state, and its whole folder: what the row showed as
-    /// text at rest before, now partly only inside its line under the pointer.
+    /// PURE: a server row as VoiceOver says it, at rest — its name, ports and state, and its whole folder (what the row
+    /// shows only under the pointer).
     static func accessibilityLabel(_ row: IslandServerRow, phase: IslandServerStopPhase?, now: Date) -> String {
         var parts = [row.name, "\(row.portsLine) · \(statusWords(row, phase: phase, now: now))"]
         if let detail = detailLine(row, hovered: true) { parts.append(detail) }
@@ -505,17 +496,12 @@ enum IslandServers {
         }
     }
 
-    /// PURE: the words' colour inside the line — black on the light amber of a Stop waiting for its second click.
-    static func inkOnFill(_ phase: IslandServerStopPhase?) -> Color {
-        if case .confirming? = phase { return .black }
-        return .white
-    }
-
-    /// PURE: a bundle row's muted words at rest — "2 servers · Discord Waifus" (its count and folder), a single server's
-    /// folder alone; the full folder under the pointer.
+    /// PURE: a bundle row's muted words beside its name — "2 servers" at rest (a single server with several links: its
+    /// folder); under the pointer its count, its whole folder and its package.
     static func bundleWords(_ bundle: IslandServerBundle, hovered: Bool) -> String? {
+        let count = bundle.isBundle ? serversWord(bundle.rows.count) : nil
         let folder = bundle.rows.first.flatMap { detailLine($0, hovered: hovered) }
-        let words = [bundle.isBundle ? serversWord(bundle.rows.count) : nil, folder].compactMap { $0 }
+        let words = hovered || count == nil ? [count, folder].compactMap { $0 } : [count].compactMap { $0 }
         return words.isEmpty ? nil : words.joined(separator: " · ")
     }
 
@@ -1192,7 +1178,7 @@ struct IslandServersTab: View {
 
     private var list: some View {
         let time = now()
-        return VStack(alignment: .leading, spacing: IslandServerRowView.gap) {
+        return VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
             ForEach(model.bundles) { bundle in
                 if model.drills(bundle) {
                     IslandServerBundleRowView(model: model, bundle: bundle, now: time)
@@ -1208,37 +1194,41 @@ struct IslandServersTab: View {
     }
 }
 
-/// A bundle's page, inside the Servers tab: back, its name and "Stop all", then each of its servers with its own Stop
-/// and every link.
+/// A bundle's page, inside the Servers tab: back (‹, in the rows' mark column), its name, how many servers and "Stop
+/// all", then each of its servers as a row — its own Stop and every link.
 struct IslandServersPage: View {
     @ObservedObject var model: IslandServersModel
     let bundle: IslandServerBundle
     let now: Date
 
     var body: some View {
-        VStack(alignment: .leading, spacing: IslandLayout.rowGap) {
-            HStack(spacing: 10) {
-                // The island's "previous" (a question deck's): back to the list.
-                IslandAnswerButton(role: .refuse, symbol: "chevron.left") { model.back() }
-                    .accessibilityLabel("Back to servers")
-                IslandServerIcon(image: model.icons[bundle.key])
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(bundle.name)
-                        .font(Typography.composerField())
+        VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
+            HStack(spacing: IslandQuietRow.markGap) {
+                // The island's "previous": back to the list.
+                Button { model.back() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(Typography.caption(.bold))
                         .foregroundStyle(Color.white)
-                        .lineLimit(1)
-                    Text(IslandServers.serversWord(bundle.rows.count))
-                        .font(Typography.caption(.medium))
-                        .foregroundStyle(Theme.textMuted)
+                        .frame(width: IslandQuietRow.markWidth, height: IslandChip.height + 4)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(IslandPressStyle())
+                .accessibilityLabel("Back to servers")
+                Text(bundle.name)
+                    .font(IslandQuietRow.titleFont)
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                Text(IslandServers.serversWord(bundle.rows.count))
+                    .font(IslandQuietRow.wordsFont)
+                    .foregroundStyle(Theme.textMuted)
                 Spacer(minLength: 8)
                 IslandServerStopButton(phase: model.stops[bundle.stopId], name: "every \(bundle.name) server",
                                        idleTitle: "Stop all") { model.tapAll(bundle) }
             }
-            .padding(.bottom, 4)
+            .padding(.bottom, 2)
             ForEach(bundle.rows) { row in
-                IslandServerRowView(row: row, phase: model.stops[row.id], now: now, icon: nil, links: model.links(row),
-                                    onLink: model.open) { model.tap(row) }
+                IslandServerRowView(row: row, phase: model.stops[row.id], now: now, icon: model.icons[bundle.key],
+                                    links: model.links(row), onLink: model.open) { model.tap(row) }
             }
         }
         .padding(.horizontal, IslandQuietRow.inset)
@@ -1246,10 +1236,10 @@ struct IslandServersPage: View {
     }
 }
 
-/// A bundle's row in the list (several servers, or one with several links), quiet (the island's visual language): its
-/// icon, its name and "2 servers · its folder" (muted) over its uptime line — the oldest member's. Under the pointer
-/// the name lifts, the line says how long it has been up and every port inside itself, its folder is shown whole and
-/// its one link appears. A click opens its page.
+/// A bundle's row in the list (several servers, or one with several links), in the island's language: its logo stacked
+/// as many times as it has servers (a project's servers share its one logo), its name and "2 servers" (muted), a live
+/// dot and a chevron. Under the pointer the name lifts, its whole folder shows, and its ports, its one link and its
+/// uptime appear under it as chips and words. A click opens its page.
 struct IslandServerBundleRowView: View {
     @ObservedObject var model: IslandServersModel
     let bundle: IslandServerBundle
@@ -1257,39 +1247,26 @@ struct IslandServerBundleRowView: View {
 
     var body: some View {
         HoverLiftReader(id: "server:\(bundle.key)") { hovered in
-            HStack(alignment: .center, spacing: 12) {
-                IslandServerIcon(image: model.icons[bundle.key])
-                VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
-                    HStack(spacing: 8) {
-                        IslandServerName(name: bundle.name, hovered: hovered)
-                        if let words = IslandServers.bundleWords(bundle, hovered: hovered) {
-                            Text(words)
-                                .font(Typography.tiny())
-                                .foregroundStyle(Theme.textMuted)
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                        }
-                        Spacer(minLength: 8)
-                        if let link = model.link(bundle) {
-                            IslandServerLinkButton(link: link) { model.open(link) }
-                                .opacity(hovered ? 1 : 0)
-                        }
-                    }
-                    .frame(height: IslandQuietRow.titleHeight)
-                    HoverLine(fraction: IslandServers.uptimeFraction(since: oldest, now: now), color: IslandServers.lineColor(nil),
-                              hovered: hovered,
-                              words: IslandServers.lineWords(status: IslandServers.uptime(since: oldest, now: now),
-                                                             ports: IslandServers.portsLine(bundle.tcpPorts)))
+            IslandLiftRow(title: bundle.name, side: IslandServers.bundleWords(bundle, hovered: hovered), hovered: hovered) {
+                IslandServerIconStack(image: model.icons[bundle.key], count: bundle.rows.count)
+            } trailing: {
+                HStack(spacing: 10) {
+                    IslandStatusMarkView(mark: IslandServers.mark(nil))
+                    Image(systemName: "chevron.right")
+                        .font(Typography.tiny(.bold))
+                        .foregroundStyle(hovered ? Color.white : Theme.textMuted)
                 }
-                Image(systemName: "chevron.right")
-                    .font(Typography.caption(.semibold))
-                    .foregroundStyle(hovered ? Color.white : Theme.textMuted)
-                    .frame(width: IslandCircleButtonStyle.size)
+            } below: {
+                if hovered {
+                    let links = model.link(bundle).map { [$0] } ?? []
+                    IslandServerDetails(links: links, ports: IslandServers.plainPorts(bundle.tcpPorts, links: links),
+                                        status: IslandServers.uptime(since: oldest, now: now), onLink: model.open) { EmptyView() }
+                        .transition(.opacity)
+                }
             }
-            .contentShape(Rectangle())
         }
         .onTapGesture { model.open(bundle) }
-        // One element for VoiceOver, which never hovers: its words, and its link as an action (hidden at rest).
+        // One element for VoiceOver, which never hovers: its words, and its link as an action (shown under the pointer).
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(bundle.name), \(secondLine)")
@@ -1300,7 +1277,7 @@ struct IslandServerBundleRowView: View {
         }
     }
 
-    /// The bundle's oldest start: its line is the project's uptime.
+    /// The bundle's oldest start: the project's uptime.
     private var oldest: Date { bundle.rows.map(\.startedAt).min() ?? now }
 
     private var secondLine: String {
@@ -1311,11 +1288,11 @@ struct IslandServerBundleRowView: View {
     }
 }
 
-/// A server as a quiet row (the island's visual language): its icon, its name and folder (muted) over its uptime line —
-/// green while it runs, amber while Stop waits for its second click, red while a force quit is offered. Under the
-/// pointer the name lifts, the line says how long it has been up and its ports inside itself, the whole folder shows,
-/// and its link and Stop appear; once Stop is pressed it stays on screen through every phase whatever the pointer does.
-/// Stop's two clicks, its force quit and every guard are `IslandServerStopMachine`'s, untouched.
+/// A server as a row in the island's language: its logo (else a small glyph), its name and folder (muted) and a small
+/// live dot. Under the pointer the name lifts, the whole folder shows, and under it its links and ports as small chips
+/// (a link opens the page), its uptime in words, and Stop — in the row's flow after the links. Once Stop is pressed the
+/// chips and Stop stay on screen through every phase whatever the pointer does. Stop's two clicks, its force quit and
+/// every guard are `IslandServerStopMachine`'s and `IslandServersModel`'s, untouched.
 struct IslandServerRowView: View {
     let row: IslandServerRow
     let phase: IslandServerStopPhase?
@@ -1326,50 +1303,26 @@ struct IslandServerRowView: View {
     var onLink: (IslandServerLink) -> Void = { _ in }
     let onStop: () -> Void
 
-    /// The gap between rows.
-    static let gap: CGFloat = 10
-
     var body: some View {
         HoverLiftReader(id: "server:\(row.id)") { hovered in
             let actions = IslandQuietRow.showsActions(hovered: hovered, busy: phase != nil)
-            HStack(alignment: .center, spacing: 12) {
+            IslandLiftRow(title: row.name, side: IslandServers.detailLine(row, hovered: hovered), hovered: hovered) {
                 IslandServerIcon(image: icon)
-                VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
-                    HStack(spacing: 8) {
-                        IslandServerName(name: row.name, hovered: hovered)
-                        if let line = IslandServers.detailLine(row, hovered: hovered) {
-                            // The folder and the package; the whole folder under the pointer (the island's panels are
-                            // never key, so a tooltip may not show).
-                            Text(line)
-                                .font(Typography.tiny())
-                                .foregroundStyle(Theme.textMuted)
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                                .help(IslandServers.detailLine(row, hovered: true) ?? line)
-                        }
-                        Spacer(minLength: 8)
-                        ForEach(links) { link in
-                            IslandServerLinkButton(link: link) { onLink(link) }
-                                .opacity(actions ? 1 : 0)
-                        }
+            } trailing: {
+                IslandStatusMarkView(mark: IslandServers.mark(phase))
+            } below: {
+                if actions {
+                    IslandServerDetails(links: links, ports: IslandServers.plainPorts(row.tcpPorts, links: links),
+                                        status: IslandServers.statusWords(row, phase: phase, now: now), onLink: onLink) {
+                        IslandServerStopButton(phase: phase, name: row.name, action: onStop)
                     }
-                    .frame(height: IslandQuietRow.titleHeight)
-                    HoverLine(fraction: IslandServers.uptimeFraction(since: row.startedAt, now: now),
-                              color: IslandServers.lineColor(phase), hovered: hovered,
-                              words: IslandServers.lineWords(status: statusLine, ports: row.portsLine),
-                              inkOnFill: IslandServers.inkOnFill(phase))
+                    .transition(.opacity)
                 }
-                // Stop in the row's flow after the links: its column is kept at rest (nothing moves when it appears),
-                // and a phase's wider capsule ("Force quit?") narrows the row rather than covering a link.
-                IslandServerStopButton(phase: phase, name: row.name, action: onStop)
-                    .opacity(actions ? 1 : 0)
-                    .frame(minWidth: IslandCircleButtonStyle.size, alignment: .trailing)
             }
             .animation(HoverLift.animation, value: phase)
-            .contentShape(Rectangle())
         }
         // One element for VoiceOver, which never hovers: its words, and Stop (the same two clicks) and every link as
-        // its actions, whatever their opacity.
+        // its actions, whatever is shown.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(IslandServers.accessibilityLabel(row, phase: phase, now: now))
         .accessibilityActions {
@@ -1377,33 +1330,37 @@ struct IslandServerRowView: View {
             ForEach(links) { link in Button("Open \(link.label)") { onLink(link) } }
         }
     }
-
-    private var statusLine: String { IslandServers.statusWords(row, phase: phase, now: now) }
 }
 
-/// A server's name, lifting under the pointer.
-struct IslandServerName: View {
-    let name: String
-    let hovered: Bool
+/// What a server row reveals under its name: its links (a page first) and its other ports as small chips, its uptime
+/// (or Stop's state) in words, and — at its end, in the row's flow after the links — Stop.
+struct IslandServerDetails<Stop: View>: View {
+    let links: [IslandServerLink]
+    let ports: [UInt16]
+    let status: String
+    let onLink: (IslandServerLink) -> Void
+    @ViewBuilder let stop: () -> Stop
 
     var body: some View {
-        Text(name)
-            .font(Typography.composerField())
-            .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.9))
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .hoverLiftLabel(hovered)
-            .padding(.trailing, hovered ? 10 : 0)
-            .layoutPriority(1)
+        HStack(spacing: 6) {
+            ForEach(links) { link in IslandServerLinkButton(link: link) { onLink(link) } }
+            ForEach(ports, id: \.self) { port in IslandChip(text: ":\(port)") }
+            Text(status)
+                .font(Typography.tinyDigits())
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
+                .padding(.leading, 2)
+            Spacer(minLength: 8)
+            stop()
+        }
+        .frame(minHeight: IslandChip.height + 4)
     }
 }
 
-/// A row's icon: the server's own (its page's, its project's) with rounded corners, else the server symbol, muted — the
-/// size of the island's other row icons.
+/// A row's mark: the server's own logo (its page's, its project's) with rounded corners, else the server glyph, muted.
 struct IslandServerIcon: View {
     let image: NSImage?
-
-    static let size: CGFloat = 30
+    var size: CGFloat = 16
 
     var body: some View {
         if let image {
@@ -1411,37 +1368,53 @@ struct IslandServerIcon: View {
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
-                .frame(width: Self.size, height: Self.size)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
                 .accessibilityHidden(true)
         } else {
             Image(systemName: "server.rack")
-                .font(Typography.label(.semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(Theme.textMuted)
-                .frame(width: Self.size, height: Self.size)
+                .frame(width: size, height: size)
                 .accessibilityHidden(true)
         }
     }
 }
 
-/// A link to a server's page: "localhost:3888 ↗", opened in the default browser — a small capsule sized to the quiet
-/// rows' main line.
+/// A project's servers as its logo stacked — one layer per server (up to three), the ones behind peeking out above and
+/// to the right, fainter: the members share the project's one logo, so the stack says how many, not whose.
+struct IslandServerIconStack: View {
+    let image: NSImage?
+    let count: Int
+
+    static let size: CGFloat = 14
+    static let step: CGFloat = 2.5
+
+    var body: some View {
+        let layers = max(1, min(count, 3))
+        ZStack(alignment: .bottomLeading) {
+            ForEach(Array((0..<layers).reversed()), id: \.self) { i in
+                IslandServerIcon(image: image, size: Self.size)
+                    .background(RoundedRectangle(cornerRadius: Self.size * 0.24, style: .continuous).fill(Color.black))
+                    .opacity(i == 0 ? 1 : (i == 1 ? 0.55 : 0.3))
+                    .offset(x: CGFloat(i) * Self.step, y: -CGFloat(i) * Self.step)
+            }
+        }
+        .frame(width: Self.size + Self.step * 2, height: Self.size + Self.step * 2, alignment: .bottomLeading)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A link to a server's page — "localhost:3888 ↗" as a small chip, opened in the default browser.
 struct IslandServerLinkButton: View {
     let link: IslandServerLink
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 3) {
-                Text(link.label).font(Typography.tinyDigits(.medium))
-                Image(systemName: "arrow.up.right").font(Typography.micro(.bold))
-            }
-            .foregroundStyle(Color.white.opacity(0.9))
-            .padding(.horizontal, 8)
-            .frame(height: IslandQuietRow.titleHeight)
-            .background(Capsule().fill(Color.white.opacity(0.08)))
-            .contentShape(Capsule())
-            .pillHoverGlow(Color.white)
+            IslandChip(text: link.label, arrow: true, bright: true)
+                .contentShape(Capsule())
+                .pillHoverGlow(Color.white)
         }
         .buttonStyle(IslandPressStyle())
         .help("Open \(link.url.absoluteString)")
@@ -1449,52 +1422,31 @@ struct IslandServerLinkButton: View {
     }
 }
 
-/// Stop's button through its phases: the white stop circle (or a titled capsule — "Stop all"); "Stop?" (amber) waiting
+/// Stop's button through its phases, in the chips' size: "Stop" (or a bundle's "Stop all"); "Stop?" (amber) waiting
 /// for the second click; "Stopping…" (dimmed); "Force quit", then "Force quit?" (red).
 struct IslandServerStopButton: View {
     let phase: IslandServerStopPhase?
     let name: String
-    /// At rest, a capsule with these words instead of the circle.
+    /// At rest, these words instead of "Stop" ("Stop all").
     var idleTitle: String? = nil
     let action: () -> Void
 
     var body: some View {
         switch phase {
         case nil:
-            if let idleTitle {
-                capsule(idleTitle, fill: Color.white, text: Color.black)
-                    .accessibilityLabel("Stop \(name)")
-            } else {
-                IslandAnswerButton(role: .refuse, symbol: "stop.fill", action: action)
-                    .accessibilityLabel("Stop \(name)")
-            }
+            IslandRowActionButton(title: idleTitle ?? "Stop", action: action)
+                .accessibilityLabel("Stop \(name)")
         case .confirming?:
-            capsule(idleTitle.map { "\($0)?" } ?? "Stop?", fill: pillReviewAmber, text: Color.black)
+            IslandRowActionButton(title: idleTitle.map { "\($0)?" } ?? "Stop?", fill: pillReviewAmber, action: action)
                 .accessibilityLabel("Click again to stop \(name)")
         case .stopping?, .killing?:
-            capsule("Stopping…", fill: Color.white.opacity(0.1), text: Color.white, enabled: false)
+            IslandRowActionButton(title: "Stopping…", fill: Color.white.opacity(0.1), ink: Color.white, enabled: false, action: action)
         case .forceOffered?:
-            capsule("Force quit", fill: Color.white.opacity(0.1), text: Color.white)
+            IslandRowActionButton(title: "Force quit", fill: Color.white.opacity(0.1), ink: Color.white, action: action)
                 .accessibilityLabel("Force quit \(name)")
         case .confirmingForce?:
-            capsule("Force quit?", fill: Color(nsColor: .systemRed), text: Color.white)
+            IslandRowActionButton(title: "Force quit?", fill: Color(nsColor: .systemRed), ink: Color.white, action: action)
                 .accessibilityLabel("Click again to force quit \(name)")
         }
-    }
-
-    private func capsule(_ title: String, fill: Color, text: Color, enabled: Bool = true) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(text)
-                .padding(.horizontal, 12)
-                .frame(height: IslandCircleButtonStyle.size)
-                .background(Capsule().fill(fill))
-                .contentShape(Capsule())
-                .pillHoverGlow(fill)
-        }
-        .buttonStyle(IslandPressStyle())
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.6)
     }
 }

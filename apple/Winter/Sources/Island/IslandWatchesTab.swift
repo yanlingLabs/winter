@@ -3,17 +3,17 @@ import WinterCUPresentation
 import WinterKit
 
 // The Winter island's Watches tab in the island's visual language (`docs/claude/island.md`): each armed computer-use
-// watch as a quiet row — what the agent waits for, the session it is in (muted) — over a thin line that fills as its
-// time runs out (armed → expires). Under the pointer the condition lifts, the line says how long ago it was armed and
-// how long is left inside itself, the target shows, and Stop appears (`computerUse.wakes.cancel`, the store's own
-// `disarmWatch`). A Stop in flight, or one that failed, stays on screen whatever the pointer does.
+// watch as a row — what the agent waits for, and beside it the one real amount here, the TIME LEFT: a short thin line
+// that empties as the watch runs out, with its minutes. Under the pointer the condition lifts and the session, the
+// target and when it was armed show under it, with Stop (`computerUse.wakes.cancel`, the store's own `disarmWatch`). A
+// Stop in flight, or one that failed, stays on screen whatever the pointer does.
 
 enum IslandWatchesPresentation {
-    /// PURE: how much of a watch's time has run, 0…1 (armed → expires; a watch with no span is full).
-    static func elapsed(_ w: IslandWatchItem, nowMs: Int) -> Double {
+    /// PURE: how much of a watch's time is LEFT, 0…1 (armed → expires; a watch with no span has none left).
+    static func left(_ w: IslandWatchItem, nowMs: Int) -> Double {
         let span = w.expiresAt - w.armedAt
-        guard span > 0 else { return 1 }
-        return min(1, max(0, Double(nowMs - w.armedAt) / Double(span)))
+        guard span > 0 else { return 0 }
+        return min(1, max(0, Double(w.expiresAt - nowMs) / Double(span)))
     }
 
     /// PURE: a span as the tab says it — "under a minute", "4 min", "2 h", "1 h 10 min".
@@ -25,26 +25,28 @@ enum IslandWatchesPresentation {
         return m == 0 ? "\(h) h" : "\(h) h \(m) min"
     }
 
-    /// PURE: what a hovered watch line says inside itself — when it was armed, glued to the fill's end ("armed 4 min
-    /// ago"), and what is left at the track's end ("56 min left"): the time line's own two halves.
-    static func lineWords(_ w: IslandWatchItem, nowMs: Int) -> HoverLineWords {
-        let armed = nowMs - w.armedAt < 60_000 ? "armed just now" : "armed \(span(nowMs - w.armedAt)) ago"
-        return HoverLineWords(atFill: armed, end: "\(span(w.expiresAt - nowMs)) left")
+    /// PURE: the time left as words beside its line — "56 min left".
+    static func leftWords(_ w: IslandWatchItem, nowMs: Int) -> String { "\(span(w.expiresAt - nowMs)) left" }
+
+    /// PURE: when it was armed — "armed 4 min ago", "armed just now".
+    static func armedWords(_ w: IslandWatchItem, nowMs: Int) -> String {
+        nowMs - w.armedAt < 60_000 ? "armed just now" : "armed \(span(nowMs - w.armedAt)) ago"
     }
 
-    /// PURE: a watch row as VoiceOver says it — the condition, session and target, and its time line (or why its Stop
-    /// failed): what the row showed as text at rest before, now partly only inside its line under the pointer.
+    /// PURE: what the pointer reveals under the condition — its session, its target and when it was armed ("List the
+    /// extension · Chrome — Inbox · armed 4 min ago").
+    static func details(_ w: IslandWatchItem, nowMs: Int) -> String {
+        "\(islandWatchSessionLine(w)) · \(w.targetLabel) · \(armedWords(w, nowMs: nowMs))"
+    }
+
+    /// PURE: a watch row as VoiceOver says it, at rest — the condition, session and target, and its time line (or why its
+    /// Stop failed).
     static func accessibilityLabel(_ w: IslandWatchItem, nowMs: Int, error: String?) -> String {
         "\(islandWatchConditionLine(w)), \(islandWatchSessionLine(w)) · \(w.targetLabel), \(error ?? islandWatchTimeLine(w, nowMs: nowMs))"
     }
-
-    /// PURE: the muted words beside the condition — its session at rest; its session and target under the pointer.
-    static func sideWords(_ w: IslandWatchItem, hovered: Bool) -> String {
-        hovered ? "\(islandWatchSessionLine(w)) · \(w.targetLabel)" : islandWatchSessionLine(w)
-    }
 }
 
-/// Every armed computer-use watch, each a quiet row with Stop under the pointer.
+/// Every armed computer-use watch, each a row with Stop under the pointer.
 struct IslandWatchesTab: View {
     @ObservedObject var activity: IslandActivityStore
     var scrolls = true
@@ -61,7 +63,7 @@ struct IslandWatchesTab: View {
 
     private var rows: some View {
         let now = nowMs()
-        return VStack(alignment: .leading, spacing: IslandQuietWatchRow.gap) {
+        return VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
             ForEach(activity.watches, id: \.wakeId) { watch in
                 IslandQuietWatchRow(watch: watch, nowMs: now, stopping: activity.disarming.contains(watch.wakeId),
                                     error: activity.disarmErrors[watch.wakeId]) { activity.disarmWatch(watch) }
@@ -73,6 +75,9 @@ struct IslandWatchesTab: View {
     }
 }
 
+/// A watch as a row: its condition's glyph and words (two lines at most), and beside them its time left — a short thin
+/// line emptying as it runs out, and its minutes. Under the pointer the condition lifts and its session, target and
+/// arming time show under it with Stop.
 struct IslandQuietWatchRow: View {
     let watch: IslandWatchItem
     let nowMs: Int
@@ -80,52 +85,64 @@ struct IslandQuietWatchRow: View {
     let error: String?
     let onStop: () -> Void
 
-    static let gap: CGFloat = 10
-
     var body: some View {
         HoverLiftReader(id: "watch:\(watch.wakeId)") { hovered in
             let actions = IslandQuietRow.showsActions(hovered: hovered, busy: stopping || error != nil)
-            HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: islandWatchSymbol(watch.condition))
-                            .font(Typography.caption(.semibold))
-                            .foregroundStyle(IslandCUColors.accent)
-                            .frame(width: IslandQuietRow.markWidth)
-                        // Two lines at most, as before: the condition is the row's content.
-                        Text(islandWatchConditionLine(watch))
-                            .font(Typography.composerField())
-                            .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.9))
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .hoverLiftLabel(hovered, anchor: .topLeading)
-                            .padding(.trailing, hovered ? 18 : 0)
-                            .layoutPriority(1)
-                        Spacer(minLength: 8)
-                        // A failed Stop says so, in amber, at rest too.
-                        Text(error ?? IslandWatchesPresentation.sideWords(watch, hovered: hovered))
-                            .font(Typography.tiny())
-                            .foregroundStyle(error == nil ? Theme.textMuted : pillReviewAmber)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .frame(minHeight: IslandQuietRow.titleHeight)
-                    HoverLine(fraction: IslandWatchesPresentation.elapsed(watch, nowMs: nowMs), color: IslandCUColors.accent,
-                              hovered: hovered, words: IslandWatchesPresentation.lineWords(watch, nowMs: nowMs))
-                        .padding(.leading, IslandQuietRow.markWidth + 8)
+            IslandLiftRow(title: islandWatchConditionLine(watch), titleLines: 2, hovered: hovered) {
+                Image(systemName: islandWatchSymbol(watch.condition))
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(IslandCUColors.accent)
+            } trailing: {
+                IslandWatchCountdown(left: IslandWatchesPresentation.left(watch, nowMs: nowMs),
+                                     words: IslandWatchesPresentation.leftWords(watch, nowMs: nowMs))
+            } below: {
+                // A failed Stop says so, in amber, at rest too.
+                if let error {
+                    IslandRowWords(text: error, color: pillReviewAmber)
                 }
-                // Stop's column is kept at rest: nothing moves when it appears.
-                IslandAnswerButton(role: .refuse, symbol: "stop.fill", enabled: !stopping, action: onStop)
-                    .accessibilityLabel("Stop waiting")
-                    .opacity(actions ? 1 : 0)
+                if actions {
+                    IslandRowWords(text: IslandWatchesPresentation.details(watch, nowMs: nowMs)) {
+                        IslandRowActionButton(title: stopping ? "Stopping…" : "Stop", enabled: !stopping, action: onStop)
+                            .accessibilityLabel("Stop waiting")
+                    }
+                    .transition(.opacity)
+                }
             }
-            .contentShape(Rectangle())
         }
-        // One element for VoiceOver, which never hovers: its words, and Stop as its action whatever its opacity.
+        // One element for VoiceOver, which never hovers: its words, and Stop as its action whatever is shown.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(IslandWatchesPresentation.accessibilityLabel(watch, nowMs: nowMs, error: error))
         .accessibilityActions {
             if !stopping { Button("Stop waiting", action: onStop) }
         }
+    }
+}
+
+/// A watch's time left: its minutes, then a short thin line (the plan lines' resting weight) filled with what is left —
+/// it empties toward its start as the watch runs out. Redrawn whenever the tab is (the island opening on it, a tab change,
+/// a watch armed or ended — `island.activityChanged`), never on a timer of its own (the idle rule).
+struct IslandWatchCountdown: View {
+    /// 0…1 of its time still to run.
+    let left: Double
+    let words: String
+
+    static let width: CGFloat = 64
+
+    var body: some View {
+        let thickness = HoverLift.restThickness
+        let fill = CGFloat(min(1, max(0, left)))
+        HStack(spacing: 8) {
+            Text(words)
+                .font(Typography.tinyDigits())
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(IslandCUColors.accent)
+                    .frame(width: fill > 0 ? max(thickness, Self.width * fill) : 0)
+            }
+            .frame(width: Self.width, height: thickness)
+        }
+        .accessibilityHidden(true)
     }
 }

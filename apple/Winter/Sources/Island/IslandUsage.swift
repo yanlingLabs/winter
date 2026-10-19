@@ -409,7 +409,8 @@ struct IslandUsageCompact: View {
 
     var body: some View {
         let summary = model.summary
-        VStack(alignment: .leading, spacing: 12) {
+        // The cost block sits on the plan block's own rhythm: the same gap above it as between two plans.
+        VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
             // Codex and its lines, then Claude Code's, then Antigravity's (user 2026-10-18) — only the apps on this Mac,
             // one title column for every line (wider than 52 pt only when a title needs it) — the cost block's lines
             // included, so every track starts at one x.
@@ -417,7 +418,7 @@ struct IslandUsageCompact: View {
                 .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
             let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) } + IslandCostBlock.lineTitles,
                                                                 compact: true)
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
                 ForEach(slots) { slot in
                     UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth, alarms: model.alarms ?? [],
                                       alarmActions: model.alarmActions)
@@ -446,9 +447,9 @@ struct IslandCostSegment: Identifiable, Equatable {
     /// Its name with its source when another shown model shares the name ("gpt-5 · Codex").
     var qualifiedName: String = ""
 
-    /// Under the pointer, the most telling words that fit inside the segment: its name (and source) with the figure,
-    /// else the figure alone.
-    var hoverLabels: [String] { qualifiedName.isEmpty ? [label] : ["\(qualifiedName) \(label)", label] }
+    /// Under the pointer, the name the segment says at its start (its source added when another shown model shares the
+    /// name) — beside its figure, at its end, as a plan line says its reset and its figure; nil for "Other".
+    var hoverName: String? { qualifiedName.isEmpty ? nil : qualifiedName }
 }
 
 /// One name under the cost line: a top model (as the old list showed them), its colour from its segment — an unpriced
@@ -576,6 +577,9 @@ struct IslandCostBlock: View {
     /// The two lines' titles (they share the plan lines' title column).
     static let lineTitles = ["Models", "Trend"]
 
+    /// Between two plans, and between the last plan and this block: one rhythm.
+    static let gapAbove: CGFloat = 10
+
     var body: some View {
         let summary = model.summary
         let segments = IslandCostPresentation.segments(summary)
@@ -606,7 +610,8 @@ struct IslandCostBlock: View {
                 }
                 line(Self.lineTitles[0], hovered: hovered) {
                     HoverSegmentLine(segments: segments.map {
-                        HoverSegment(id: $0.id, fraction: $0.fraction, color: IslandCostPresentation.color($0), labels: $0.hoverLabels)
+                        HoverSegment(id: $0.id, fraction: $0.fraction, color: IslandCostPresentation.color($0), name: $0.hoverName,
+                                     figure: $0.label)
                     }, hovered: hovered)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(IslandCostPresentation.accessibilityLine(segments))
@@ -674,14 +679,15 @@ struct IslandRangeWords: View {
         HStack(spacing: 10) {
             ForEach(UsageRange.allCases, id: \.self) { r in
                 Button { range = r } label: {
+                    // A plan header's height (the line under the chosen one hangs below the words, sizing nothing), so the
+                    // block's header sits on the plans' rhythm; the hit area reaches past the words.
                     Text(UsagePresentation.rangeShort(r))
                         .font(Typography.tiny(range == r ? .semibold : .medium))
                         .foregroundStyle(range == r ? Color.white : Theme.textMuted)
-                        .padding(.vertical, 3)
                         .overlay(alignment: .bottom) {
-                            Capsule().fill(Color.white).frame(height: 1.5).opacity(range == r ? 1 : 0)
+                            Capsule().fill(Color.white).frame(height: 1.5).offset(y: 3).opacity(range == r ? 1 : 0)
                         }
-                        .contentShape(Rectangle())
+                        .contentShape(Rectangle().inset(by: -4))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(UsagePresentation.rangeTitle(r))
