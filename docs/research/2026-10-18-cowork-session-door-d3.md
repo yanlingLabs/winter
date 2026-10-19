@@ -215,3 +215,23 @@ The one survivor is equivalent: the driver's outputs-row check (owner decision 4
 
 1. **Sync lines must refuse duplicate JSON keys.** Today a line such as `{"type":"session_created",…,"cowork":…,"type":"user_message"}` is stored byte-for-byte, while every daemon reader sees the `user_message`. This predates D1. Close it in `sync.push`'s and `appendSynced`'s raw-line checks.
 2. **`coworkToolsFor` narrows with an unchecked `as CoworkGuestTool[]`.** It is safe today, because the normalisation withholds every non-profile tool. When the function is next touched, replace the cast with a checked filter.
+
+## Agent SDK #39 (main `5183d3a9`): (B) landed
+
+I re-checked agent SDK #39 at main `5183d3a9` against D3:
+- **The supervisor map** now sends every non-plan policy to `default`: `{auto, ask, accept-edits, dont-ask, bypass} -> default`, and `plan -> plan`.
+- **The host-query validator** (`linux-host-query-profile.ts`) accepts only:
+  - `permissionMode` `default` or `plan`;
+  - `allowDangerouslySkipPermissions: false`;
+  - `permissions` exactly `{disableBypassPermissionsMode: true}`.
+
+D3's host launch literals already satisfy all of these. They are pinned by `guest-query.test.ts` and `session-driver.test.ts`.
+
+Once Winter repins its guest image to an SDK at or after `5183d3a9`, the set can carry the binding's real policy instead of `ask`, and the guest-recorded policy will then match. That is a one-line change in `coworkGuestPolicyFor`, plus moving the mirrored map in `conversation-set.test.ts` to the new citation. It is owed at the repin, not before, because an older guest would map `bypass` to `bypassPermissions`.
+
+**For D4:** D10 (cold resume and host-backed shares) is in scope as of today (design #92). D4 builds neither, but nothing in D4's provisioning may block them:
+- the write-once backend identity;
+- `cold_resume_unavailable`;
+- `resume: false` in the supervisor identity.
+
+Each of these is the single point that a later resume branch replaces.
