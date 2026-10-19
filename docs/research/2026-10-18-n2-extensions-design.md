@@ -1,0 +1,768 @@
+# N2 extensions: host-backed shares, cold resume, guest-side messaging (design, no code)
+
+Status: DESIGN ONLY, 2026-10-18 (written 2026-10-19). Nothing in this document is built, and no code changes with it. `session.create {mode: "cowork"}` still answers `unsupported_topology`, and nothing here changes that. No VM, Hypervisor call, libkrun run, worker, launcher or `sandbox_init` was started to write it. The provider path (mux class 3, the provider bridge) is out of scope and was not designed or analysed; section 10 says where a piece touches it and stops there.
+
+Sources, read at these revisions:
+
+| Abbreviation | Revision |
+| --- | --- |
+| OI | `cowork/output-integration` at `f55ea4bd` (this branch's base) |
+| SDK | `yanlingLabs/winter-agent-sdk` main at `68e57c64` (`packages/runtime/src/guest/`, `packages/runtime/src/engine.ts`, `packages/sdk/src/`) |
+| LK | upstream libkrun v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, the pin in `apple/Cowork/WinterCoworkLibkrun/upstream-pin.json`. I read an extracted copy whose git tree hash I recomputed and found equal to the pinned `16c2ac4cdd03e394e813b244e4be3b6325215f0b` |
+| DOOR | `docs/research/2026-10-18-cowork-session-door-design.md` on `cowork/session-door-2` (PR #79) |
+| #83 | `cowork/peer-inbox-wiring` at `a0ac4d5a` (draft): `drainCoworkInbox` |
+| #84 | `cowork/approvals-projection` at `6cd6591e` (draft): the Cowork approval route |
+| L | `cowork/n2-launcher-receipt-mac` (PR #85, stacked on #57): the Swift launcher |
+
+The N2 contract is `docs/cowork-native-worker.md` plus `packages/core/src/cowork/native/protocol.ts` and its vectors. Every wire change below is a proposed change to that contract, to be made by its owner (section 8).
+
+## 0. Summary
+
+1. **libkrun's virtio-fs is turned off by construction in the production profile.** Patch 0018 lists the virtio-fs device (`r.fs`) as a refused clause. Every `krun_add_virtiofs*` and `krun_set_root` call "flips" the context out of the profile. Patch 0019 says the stock device set "can never start". Turning shares on is therefore a patch-queue change (0024 onward) plus a G4 re-run, not a setting.
+2. **Upstream virtio-fs on macOS cannot be confined as written, and must not be re-enabled as is.**
+   - The upstream README says virtio-fs gives "**no** protection against the guest attempting to access other directories in the same filesystem, or even other filesystems in the host".
+   - The macOS passthrough builds `/.vol/<dev>/<ino>/<name>` strings from guest-supplied names (`name_to_path`). The FUSE server checks only for an interior NUL (`bytes_to_cstr`), so a `..` or `/` in a name walks out of the share.
+   - `open_inode` strips `O_NOFOLLOW`.
+3. **Shares design (piece 1).**
+   - **The server.** A Winter-owned "confined passthrough" replaces it. It works relative to descriptors (`openat` with `O_NOFOLLOW_ANY` and `O_RESOLVE_BENEATH`, both in the macOS 26 SDK), never builds a `/.vol` path, and validates every name.
+   - **Options.** No DAX, no xattrs, `LinuxSimplified` ownership, a host mode mask, and no special files.
+   - **Devices.** One device per share. Read-only is enforced in three layers: the server, the open flags and the sandbox.
+4. **How a share reaches the worker.**
+   - The daemon resolves the folder grant and opens each share root as a directory descriptor.
+   - The launcher receives those descriptors on a new L1 line and spawns the worker with one sandbox parameter per share.
+   - The worker installs its sandbox first and receives the descriptors afterwards. The share paths therefore never come from guest input.
+5. **Shares are fixed for each incarnation, because libkrun has no hotplug.** Adding a source is a pending restart. Revoking one is immediate (a revoke switch in the worker) and is completed by a restart. Both are behaviours the spec already allows.
+6. **Shares make a folder source honestly `ready` for the first time.** The guest mounts it and acknowledges, and the host calls `acknowledgeSource`. That resolves DOOR's blocker A (G1) for folder sources, and DOOR G11: guest outputs land in the host `shared/outputs` folder.
+7. **Cold resume (piece 2) is blocked at five exact points today**, all in the SDK:
+   - `resume` is not in the host-query profile's `configKeys`;
+   - the bootstrap record requires `freshOnly: true`;
+   - the supervisor refuses `runtime_fresh_store_required` and `runtime_fresh_only`;
+   - `previousBootTermination` is hard-wired to `() => null`, so every lease from an earlier guest boot reads as alive.
+
+   `store-bootstrap.ts` already accepts `resume === sessionId`.
+8. **Cold resume design.**
+   - The conversation set gains `continuation: fresh | resume` and `endedGuestBoots`.
+   - `endedGuestBoots` is a host-attested list: the guest boot ids the host recorded at `hello`, whose disks were later released by real D1 proof. The owner library mints previous-boot evidence only for those ids. A guest-written marker is never evidence.
+9. **Resume is always a new incarnation.** It starts only from `stopped` with ownership released. Every revision is re-read, so authority can never grow back.
+   - A stable `runtimeUid`/`toolUid` per conversation is recorded on the host, so files and the store keep their owners.
+   - A store whose data volume was lost or reformatted is refused visibly. It is never started fresh.
+10. **The supervisor's `timeoutMs` (at most 600 s) is a wall-clock cap on each runtime run.** Without a fix, ten minutes is the effective conversation lifetime, even inside one incarnation. This needs an owner decision (O7): remove the cap for host-query runtimes, or relaunch in place with the same resume key.
+11. **Resume also needs the guidance load on resume:** the guided profile plus the instructions share. It is therefore ordered after shares slice SH6 and Track A, or the owner accepts a resume without guidance (O8).
+12. **Guest messaging (piece 3) needs no mux change.**
+    - `host_message_send`, `host_message_list` and `host_session_stop` are runtime control requests. They already travel up OUT on runtime class 2, and their answers come back down IN.
+    - The SDK change has four parts: the profile admits `hostMessaging` and the extra tools; `allowedSubtypes` grows; the confined-guest registry gate grows; and `checkLinuxHostQueryFrame` must accept host-message answers. Today that checker DROPS them, so a guest `SendMessage` would hang.
+13. **AskUserQuestion needs no new transport.** It already rides the `permission` subtype with `updatedInput.answers`, which the frame checker admits. Only the tool allowlists and the host bridge are missing, which contradicts part of DOOR's G4.
+14. **Task tools.**
+    - TaskCreate, TaskGet, TaskList and TaskUpdate run in-process, with no transport. Their graph is in memory, so it is lost on cold resume (parity with Code).
+    - TaskOutput needs guest background Bash, which refuses `background_unsupported` today.
+    - TaskStop has nothing of its own to stop in the guest.
+
+    Recommendation: offer the first four and withhold the last two (O10).
+15. **The coordinator's requirement, end to end.** Delivery INTO a guest recipient becomes two-phase:
+    1. offer, then **hold**: the guest records the input durably, outside the model's queue;
+    2. `inbox.ack`;
+    3. then **commit**, or **discard** on `authority_denied`, a stale epoch or any ack throw.
+
+    The runtime reports undecided holds at start and the host resolves each through the ledger. That closes the window between ack and commit. With this, a revocation between push and ack delivers nothing, and a re-grant delivers exactly once.
+16. **Biggest functional gap: N2 serves one host-query conversation per guest, and same-Project peers share one guest.** A guest sender's peer can therefore never run while the sender runs. Its messages stay owed until the sender's incarnation ends. Guest-to-guest messaging has real value only after the one-conversation limit is lifted (O12, a separate contract slice).
+17. **PR #84 denies SendMessage, ListAgents and Task\* as unmapped tools.** They need a class row: read-only for ListAgents and Task\*, coordination for SendMessage. That is listed as NEEDS FROM APPROVALS.
+18. **Slices.**
+
+    | Piece | Slices | Size |
+    | --- | --- | --- |
+    | Shares | SH1–SH6 | XL in total (SH2, the libkrun server, is the long pole) |
+    | Cold resume | CR1–CR6 | L |
+    | Messaging | GM1–GM4 | L |
+
+    The contract slices and the three agent-SDK slices can start now in parallel.
+19. **New gates.**
+    - Amendments: G0-S, G1-S/R, G2-S/M and G4-S.
+    - Three new live gates: G7 (share confinement in a VM), G8 (cold resume) and G9 (guest messaging).
+    - Every one needs a review of the exact commit and the owner's approval. None is run by an agent.
+20. **Provider path.** A model-driven `SendMessage` or subagent continuation in G8 and G9 needs one of two things:
+    - a stand-in that can emit tool calls (the merged stub is text-only), or
+    - the provider bridge, which is HELD.
+
+    I stopped there (section 10).
+
+## 1. What the source says today
+
+| Fact | Where |
+| --- | --- |
+| Production profile refuses any virtio-fs device; `krun_add_virtiofs`, `2`, `3`, `4` and `krun_set_root` flip the context | `apple/Cowork/WinterCoworkLibkrun/patches/0018-proposed-production-gate-matrix-tests.patch` (clause "virtiofs device (r.fs)", setter table); `0019` ("the stock libkrun device set (implicit vsock, virtiofs, ...) can never start") |
+| Admitted inventory: two virtio-blk, one generic console port, rng, balloon, PL011; "no virtiofs" | `docs/cowork-native-worker.md` section 8; `WinterCoworkLibkrun/README.md` |
+| Every guest-memory device registers with the reclaim `Access` (`MAX_DEVICES` 3: data, environment, runtime) and pins its ranges; 48 pins / 8 MiB, overflow is fatal (exit 77) | patches 0004 (`reclaim_access.rs`), 0012 (`workspace_disks::MAX_DEVICES`) |
+| virtio-fs: "libkrun **does not** provide any protection against the guest attempting to access other directories ... or even other filesystems in the host" | LK `README.md`, "Security model / virtio-fs" |
+| macOS passthrough addresses inodes as `/.vol/<dev>/<ino>` and children as `/.vol/<dev>/<ino>/<name>` | LK `src/devices/src/virtio/fs/macos/passthrough.rs` `inode_to_handle`, `name_to_path` |
+| `lookup` formats the guest name without checking it; the server's `bytes_to_cstr` checks only for an interior NUL | `passthrough.rs` `lookup`; `src/devices/src/virtio/fs/server.rs` `bytes_to_cstr` |
+| `open_inode` opens the volfs path with `O_NOFOLLOW` removed | `passthrough.rs` `open_inode` |
+| `LinuxComplete` (the default) stores guest uid/gid/mode in the xattr `user.containers.override_stat` on the host file; `init` sets the process umask to 0 | `passthrough.rs` (`XATTR_KEY`, `PermissionSemantics`, `init`) |
+| DAX: `setupmapping` `mmap`s the host file `MAP_SHARED` (writable if the guest asks) and maps it into guest physical memory through HVF | `passthrough.rs` `setupmapping` |
+| One worker thread per fs device, two queues of 1024, request bound 1 MiB | LK `virtio/fs/worker.rs`, `virtio/fs/mod.rs`, `server.rs` `MAX_BUFFER_SIZE` |
+| Read-only wrapper refuses mutating ops with `EROFS` | LK `virtio/fs/read_only.rs` |
+| Guest kernel has `CONFIG_FUSE_FS`, `CONFIG_VIRTIO_FS`, `CONFIG_FUSE_DAX`, `CONFIG_FS_DAX` | `scripts/cowork-guest-artifact/kernel/base-apple-6.18.35.config` |
+| Worker sandbox: deny default, no `file-write*` at all, `file-read*` only under `/System`, `/usr/lib` and the `GUESTDIR` parameter; installed before anything is read | `apple/Cowork/WinterCoworkHVFWorker/Sources/WorkerNative/Sandbox.c` |
+| Worker argv is exactly `[path]`; descriptors 3 (L2) and 4 (L3) | `docs/cowork-native-worker.md` section 5 |
+| `SCM_RIGHTS` is allowed on the L1 `volumes` line and nowhere else | `docs/cowork-native-worker.md` section 4.3 |
+| PID 1 creates `/workspace/.winter/{conversations,scratch,memory}`, `outputs`, `folders`, `repos` on `data.ext4` and an empty `/run/winter/shared-instructions`; the environment disk is attached but not mounted | `docs/research/2026-10-17-cowork-n2-guest-boot.md` section 2; `docs/cowork-native-worker.md` section 6.1 |
+| The host-query profile's `configKeys` has no `resume` | SDK `guest/linux-host-query-profile.ts:9` |
+| The bootstrap record requires `freshOnly: true` | SDK `guest/linux-session-admission.ts:32,50` |
+| The admission's owner returns `previousBootTermination: () => null` | SDK `guest/linux-session-admission.ts:124` |
+| A lease from another boot counts as alive unless `confirmPreviousBootTerminated` returns true | SDK `packages/sdk/src/store/leases.ts` `isLeaseHolderAlive`; `guest/store-bootstrap.ts:169-176` |
+| The store bootstrap already accepts `config.resume === scope.sessionId` | SDK `guest/store-bootstrap.ts:100,142` |
+| Supervisor refuses a non-empty store or run home (`runtime_fresh_store_required`) and a second launch (`runtime_fresh_only`) | SDK `guest/linux-supervisor.py:1149,1208,1218` |
+| Runtime run killed after `timeoutMs` (default and maximum 600000) of wall-clock time, mid-turn or not | SDK `guest/linux-supervisor.py:1138,1150,1254` |
+| Engine allows only `permission` (host-query) or `permission` + `runtime_context` (guided) outbound | SDK `runtime/src/engine.ts:3036-3040` |
+| Host messaging rides the run's control bridge (`host_message_send` / `host_message_list`) when `config.hostMessaging === true` | SDK `engine.ts:3848-3851`; `packages/sdk/src/protocol/config.ts:311-378`; `packages/sdk/src/query.ts:544-610` |
+| Confined-guest executor refuses every tool but Read, Write, Edit, Bash (`guest_tool_unsupported`) | SDK `runtime/src/tools/registry.ts:1851` |
+| `checkLinuxHostQueryFrame` accepts `user`, `end_input`/`interrupt`, and `control_response` only for ids `ownsPermission` claims; any other answer is DROPPED | SDK `guest/linux-host-query-profile.ts:35-61` |
+| AskUserQuestion is answered through `canUseTool` with `updatedInput.answers` (the `permission` subtype) | SDK `runtime/src/tools/impl/ask-user-question.ts` header; `permissions/evaluator.ts` |
+| TaskCreate/Get/List/Update use an in-memory, session-keyed graph | SDK `runtime/src/tools/task-graph-store.ts` header |
+| Guest Bash refuses `run_in_background` (`background_unsupported`) | SDK `guest/process-tools.ts` |
+| `drainCoworkInbox`: offer, then `deliverInto` (steer or send into the recipient's turn), then `inbox.ack` | #83 `packages/core/src/agent/session-messaging.ts` `drainOnce` |
+| The ledger: "An ack that finds authority revoked answers `authority_denied`, parks the record and delivers nothing. That is the signal for the recipient runtime to discard the input it was holding: the ack is the commit point." | `docs/research/2026-10-16-cowork-peer-inbox.md`, state machine notes |
+| #84 routes AskUserQuestion and ExitPlanMode to their own bridges and denies unmapped tools (SendMessage, Task\*) | #84 body, "REVIEW NEEDED 1" |
+| The host-query root check refuses every `/workspace/.winter` root; the supervisor and the native contract allow `/workspace/.winter/memory` | SDK `guest/linux-host-query-profile.ts` `assertLinuxHostQueryRoots`; `linux-supervisor.py` (allowed views); `native/protocol.ts` `allowedView` |
+
+## 2. Piece 1: host-backed shares
+
+### 2.1 What is shared
+
+| Share | Host root (canonical, opened by the daemon) | Guest mount | Mode | Device tag |
+| --- | --- | --- | --- | --- |
+| Folder source | the user's granted folder (`cowork_folder_grants`: bookmark, `root_device:root_inode`, access) | `/workspace/folders/<grantId>` | per grant: `ro` or `rw` | `src-<n>` (n 0 to 8) |
+| Shared guidance | `<home>/cowork/workspaces/<id>/shared/instructions/` | `/run/winter/shared-instructions`, with the supervisor alias `/workspace/.winter/WINTER.md` | `ro` | `winter-guidance` |
+| Project memory | `<home>/cowork/workspaces/<id>/shared/memory/` | `/workspace/.winter/memory` | `rw` | `winter-memory` |
+| Outputs | `<home>/cowork/workspaces/<id>/shared/outputs/` | `/workspace/outputs` (each conversation's tool view sees only `/workspace/outputs/<sid>`) | `rw` | `winter-outputs` |
+
+At most 12 shares per incarnation: nine folder sources plus three Winter shares. That fits one `recvmsg` (the launcher's `LC_MAX_RIGHTS` is 17) and keeps the pin budget sizeable (2.4).
+
+**One device per share, never a multiplexed root.** All three Winter shares sit on one APFS volume. Suppose one device served several roots. A guest `link` or `rename` from the read-only `instructions` root into the writable `memory` root would then make `WINTER.md` writable, bypassing the approval rule for shared guidance.
+
+With one device per share, two things stop that:
+- every device has its own inode table, so a node id from another share is unknown to it;
+- the guest kernel answers `EXDEV` across mounts.
+
+The confined server also refuses cross-root `link` and `rename` outright (R5), in case a later change ever multiplexes roots.
+
+### 2.2 Why virtio-fs, and why not the stock server
+
+| Option | Verdict |
+| --- | --- |
+| Stock libkrun virtio-fs (`krun_add_virtiofs*`) | **No.** Unconfined by its own README; the `..` and `/` escape and the symlink-following open (section 1). It is also refused by the production gate, correctly. |
+| A Winter-owned confined passthrough on the libkrun virtio-fs transport (this design) | **Recommended.** It reuses the virtio-fs device model, the queues and the guest's in-kernel FUSE client, and replaces only the host filesystem server. It keeps the "live direct files" property the spec requires ("Shares are direct files, not periodically synchronized replicas"). |
+| A file service over the runtime streams (FUSE in the guest, served by the daemon) | **No.** It puts a guest-facing filesystem parser in `winter-core`, which the spec forbids ("No raw guest packet parser belongs in the credential daemon"). Every operation would also cross worker, launcher and daemon, which is too slow for repositories and builds. |
+| Copy-in/copy-out on boot and stop | **No.** The spec rules out synchronization loops. |
+| virtio-9p, vsock or network filesystems | **No.** libkrun has no 9p, and vsock or a NIC is excluded. |
+
+### 2.3 The confined passthrough: requirements
+
+A new server under `src/devices/src/virtio/fs/macos/` (patches 0024 onward). The stock `PassthroughFs` stays unreachable from the production profile. Each requirement below is one reviewable clause with its own VM-free test (2.9).
+
+- **R1. Names.**
+  - On every name-taking operation, refuse with `EINVAL`: an empty name, `.`, `..`, any `/`, NUL, more than 255 bytes, or invalid UTF-8.
+  - The operations are `lookup`, `create`, `mkdir`, `mknod`, `symlink` (the new name), `link` (the new name), `rename` (both names), `unlink` and `rmdir`.
+- **R2. Descriptor-relative only.**
+  - Each directory inode holds an `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` descriptor; the root's is the descriptor the worker received.
+  - Every host operation is `*at(dirfd, name, ...)` with `O_NOFOLLOW` (or `AT_SYMLINK_NOFOLLOW`) and `O_RESOLVE_BENEATH` (or `AT_RESOLVE_BENEATH`).
+  - The server never formats a `/.vol` path, never opens an absolute path and never calls `realpath`.
+  - A non-directory inode is reopened through its parent's descriptor and its last name. It is then confirmed by `fstat` (dev, ino); a mismatch is `ESTALE`.
+  - Directory descriptors are bounded: an LRU of 1,024 per device. An evicted directory is re-resolved from its parent chain and confirmed by (dev, ino), never through volfs.
+- **R3. Symlinks are data.**
+  - `readlink` returns the text and `symlink` creates one, so repositories keep working.
+  - The server never follows one; the guest kernel resolves them inside the guest's own namespace.
+  - A guest-planted link in a user folder is a host-side hazard only for host readers that follow links (2.7, T3).
+- **R4. Mount points.**
+  - A lookup that lands on a different `st_dev` than the share root is refused with `EXDEV`. A disk image mounted inside a granted folder therefore never becomes reachable.
+  - `ATTR_SUBMOUNT` is never announced.
+- **R5. Links and renames.**
+  - Both inodes must belong to this device's table. Cross-device is impossible by construction.
+  - `link` of a directory is refused.
+  - A user's pre-existing hard link from inside a share to a file outside it cannot be told apart. That is a documented residual.
+- **R6. No DAX.**
+  - The device is built with no shared-memory region.
+  - `setupmapping` and `removemapping` answer `ENOSYS` unconditionally.
+  - The production gate refuses `shm_size` on a Cowork share.
+  - Defence in depth: a kernel fragment `CONFIG_FUSE_DAX=n` at the next kernel pin.
+- **R7. Ownership and modes.**
+  - `PermissionSemantics::LinuxSimplified` and `xattr = false`, so nothing is ever written into the user's file xattrs.
+  - The process umask is never changed; the stock `init` sets it to 0.
+  - Modes created or changed on the host are masked: `& ~0o022`, and never `S_ISUID`, `S_ISGID` or `S_ISVTX`.
+  - Under Simplified the guest sees every file as owned by the calling uid. That matches the spec: "guest UID/GID/modes are not an access boundary on host-backed virtiofs".
+- **R8. Read-only shares.** Read-only is enforced in three layers:
+  - the read-only wrapper refuses every mutating op with `EROFS`;
+  - opens are `O_RDONLY`;
+  - the sandbox grants `file-read*` only (2.4).
+- **R9. No special files.**
+  - `mknod` is refused for FIFOs, sockets and devices; only regular files can be created, through `create`.
+  - An existing FIFO in a user folder is opened `O_NONBLOCK`, so a substituted FIFO cannot hang the worker.
+- **R10. Bounds.**
+  - At most 4,096 open handles per device; beyond that the answer is `ENFILE`.
+  - Request size stays at 1 MiB.
+  - One worker thread per device processes one request at a time.
+  - A full handle table refuses; it never evicts a live handle.
+- **R11. Revoke switch.**
+  - A process-global table in the server, set by the worker from an L2 `share_revoke` envelope.
+  - After it is set, every request on that device answers `EACCES`, and its descriptors (root, LRU, handles) are closed.
+  - This is immediate cutoff, not "revocation complete" (2.6).
+- **R12. Caching.**
+  - `CachePolicy::Auto`, with entry and attribute timeouts of 1 s, because the Mac side edits the same files.
+  - Writeback cache off; the stock code itself warns against it without exclusive access.
+- **R13. Durability.**
+  - A guest `fsync` maps to `F_FULLFSYNC` on the Winter shares (memory, outputs) and to `fsync` on folder sources, the same as Mac apps.
+  - The exit path stops and joins every fs worker before the exit hook, so no write completes after the receipt's facts are read.
+- **R14. Guest memory and reclaim.**
+  - Each fs device registers with the reclaim `Access` and pins its descriptor ranges for each request.
+  - It honours `freeze`, in the same way as the guarded block device and the runtime port.
+  - `MAX_DEVICES` grows from 3 to 3 + shares.
+  - The structural pin maximum is recomputed: one request in flight per device (one worker thread each), each request's descriptor ranges bounded by the 1 MiB request size plus its headers, and the number of ranges per request capped by the device (a longer chain is refused, not pinned). The 48-pin / 8 MiB budget is re-sized to that figure in the same patch (O1, G4-S). As today, an overflow is fatal (exit 77), so the cap must make overflow structurally impossible rather than unlikely.
+
+The new ABI follows the S1 pattern: borrowed descriptors and no path opens.
+
+```c
+/* flags: bit 0 = read-only; every other bit zero. tag: [a-z0-9-]{1,32}, distinct. root_fd: a directory, borrowed. */
+int32_t krun_cowork_add_share_v1(uint32_t ctx_id, const char *tag, int32_t root_fd, uint32_t flags);
+```
+
+The production gate admits `r.fs` only when every entry came from this function: confined server, no shared memory, Simplified, no xattr. `krun_add_virtiofs*` and `krun_set_root` keep flipping the context out of the profile, and the gate matrix test (0018) gains the new clauses.
+
+### 2.4 How a share reaches the worker
+
+The worker's sandbox is installed before it reads anything, so the share paths cannot come from the L2 envelope. They must already be fixed when the worker is spawned.
+
+```
+daemon (grant authority)                        launcher (signed, unsandboxed)              worker (sandbox first)
+resolve bookmark (folder-bookmark.ts)
+open root O_DIRECTORY|O_NOFOLLOW_ANY  ──L1 `shares` (N fds, after hello, before begin)──►  fstat + F_GETPATH each fd,
+check (dev,ino) = grant identity                                                            compare with the line
+                                                                    spawn suspended: argv [path, "--shares-v1", N, mode₀, path₀, ...]
+                                                                    ◄── sandbox installed with SHARE_RO_n / SHARE_RW_n
+                                                          ──L2 `shares` envelope (N fds)──►  fstat + F_GETPATH = param, S_ISDIR
+                                                                                              krun_cowork_add_share_v1 × N
+```
+
+- **L1 `shares` (new line type; contract text version 3).**
+  - Daemon to launcher. It is sent at most once, after `hello` and before `begin`.
+  - Keys `v, t, id, shares`. `shares` holds 1 to 12 records `{tag, kind (folder|guidance|memory|outputs), mode (ro|rw), device, inode, path}`, in descriptor order.
+  - `SCM_RIGHTS` with exactly N directory descriptors, on one `sendmsg`, under the same rules as `volumes` (`recvmsg`, wrong count is `bad_rights`, `MSG_CTRUNC` is fatal).
+  - The launcher refuses with the new `shares_rejected` code if any of these holds:
+    - a descriptor's `fstat` differs from its record, or it is not a directory;
+    - `F_GETPATH` differs from `path`;
+    - `path` is not canonical (absolute; no `.`, `..` or empty component; at most 1024 bytes; printable);
+    - two paths are equal or nested;
+    - tags are not distinct.
+  - It holds the descriptors until it forwards them.
+- **Worker argv (contract change).**
+  - With shares: `[path, "--shares-v1", "<N>", ("ro"|"rw", "<path>")×N]`. Without shares: `[path]` as today.
+  - The worker parses this strictly before the sandbox, under these rules: a canonical decimal N from 1 to 12, closed tokens, and the same path rules as above. Any deviation exits 2 (usage).
+  - This is the one input read before the sandbox. It comes from the signed launcher, which spawned the worker suspended and validated its image, never from the guest or the envelope.
+  - The alternative is sandbox extension tokens, which are more Apple SPI (O2).
+- **Sandbox profile (a sketch; the exact operation names are a G0-S item).**
+
+  ```
+  (allow file-read* (subpath (param "SHARE_0")))                                   ; every share
+  (allow file-write-data file-write-create file-write-unlink file-write-mode
+         file-write-times (subpath (param "SHARE_0")))                             ; rw shares only
+  ; no file-write-xattr, no file-write-setugid, no file-write-flags, no process-*, no network-*
+  ```
+
+  - Deny-default stays, so nothing outside the share subpaths opens, `/.vol` included.
+  - Explicit denies for the Winter home, the coordination directory and the user's keychains (each a parameter) are optional defence in depth. They must not shadow the Winter shares, which live under the home; their precedence is a G0-S check.
+  - Whether Seatbelt matches a firmlinked spelling (`/Users/...` against `/System/Volumes/Data/Users/...`) is unverified. It is a G0-S item, not a design dependency, because the server never uses a path.
+- **L2 `shares` envelope (kind 6).**
+  - Launcher to worker, after the worker's `sandboxed` status and before `volumes_accepted` matters.
+  - Header plus N 48-byte records `{tag[32], u64 device, u64 inode}`, with flags carrying ro.
+  - Exactly N descriptors, which the worker checks against its argv parameters by `F_GETPATH` and `fstat`.
+- **L2 `share_revoke` envelope (kind 7).** `{tag[32]}`; it sets R11. A second one for the same tag is ignored.
+- **Daemon side.**
+  - A new `packages/core/src/cowork/native/shares.ts` prepares the records. It depends on `folder-grants.ts` (identity, access) and `folder-bookmark.ts` (resolution), and opens through the existing `bun:ffi` `openat` pattern (`output-fs.ts`).
+  - It refuses three kinds of grant (O5):
+    - a grant whose root contains a protected root: the Winter home, the coordination directory, the workspace's image directory or `~/Library/Keychains`;
+    - aliases, found by (dev, ino) and by the firmlink-free spelling, porting the ancestry check of `apple/Cowork/WinterCoworkVM/Sources/WinterCoworkPrimitives/SharePolicy.swift`;
+    - a root whose (dev, ino) no longer matches the grant.
+
+### 2.5 The guest side
+
+After `mounted`, and before `conversations`, the host sends a new bootstrap-class message:
+
+`shares {operationId, nonce, shares: [{tag, guestPath, readOnly, kind}]}`
+
+It must echo the plan's operation and nonce, as `conversations` does. PID 1 then does the following, in order:
+
+1. It reads the virtio-fs tag inventory from sysfs. The inventory must equal the declared tags exactly; an extra or missing device is the bootstrap fault `share_inventory`.
+2. It mounts each tag with `mount("<tag>", guestPath, "virtiofs", MS_NOSUID|MS_NODEV [|MS_RDONLY] [|MS_NOEXEC], "dax=never")`:
+   - `noexec` on guidance, memory and outputs;
+   - folder sources keep exec, because builds run there.
+3. It checks `/proc/self/mountinfo` for each mount.
+4. It creates the `/workspace/.winter/WINTER.md` alias for the guidance share.
+5. It answers `shares_mounted`, or the bootstrap fault `share_mount_failed`.
+
+The host waits for `shares_mounted` and only then sends the conversation set. That is the moment a folder source becomes honestly `ready` for this incarnation (`CoworkRepository.acknowledgeSource(epoch, sourceId, revision, "ready")`).
+
+- **Drain.** PID 1 unmounts the virtiofs mounts before the ext4 volumes. `halting` keeps meaning "every filesystem this boot mounted is unmounted".
+- **Supervisor roots.**
+  - Folder roots keep today's shape (`source` = the mount point).
+  - Outputs keep `/workspace/outputs/<sid>`.
+  - Memory: the SDK host-query root check refuses every `/workspace/.winter` root, although the supervisor and the native contract allow `/workspace/.winter/memory`. The memory share therefore needs that one exact path admitted in `assertLinuxHostQueryRoots` (SDK, slice SH6b, spec gap X5).
+
+### 2.6 Lifecycle, revocation and TCC
+
+- **Fixed per incarnation.** libkrun has no virtio-mmio hotplug. The share set is part of the start, like the disks.
+- **Adding a source** while running records it and shows "pending restart". At a safe boundary (no turn, approval or tool in flight; the spec's "coordinated checkpoint/restart") the workspace restarts with the new share.
+  - Before cold resume exists, such a restart ends the conversation (`cold_resume_unavailable`). So live source addition should ship after CR4 (O6).
+- **Revoking a source** takes two steps:
+  1. The daemon sends `share_revoke` at once. Every later FUSE operation on that device fails, so no new byte crosses.
+  2. Then the stop/start without the share. The spec's "revocation complete" is reported only after that restart, because the guest page cache can still hold content.
+
+  Other Project conversations see the interruption reason (spec).
+- **The minimum-source rule** is unchanged and never blocks a security revocation (spec).
+- **TCC.**
+  - The daemon resolves the bookmark and opens the root, so the consent attaches where the grant was made.
+  - The worker is a separate signed identity, spawned through the launcher. Whether its `openat` under a protected location (Desktop, Documents, iCloud Drive, removable or network volumes) is attributed to the responsible app or prompts again is unverified. That is a G7 item; the spec already requires "Validate actual picker/bookmark/TCC handoff".
+
+### 2.7 Threat analysis (shares)
+
+| # | Threat | Mitigation | Residual | Proof |
+| --- | --- | --- | --- | --- |
+| T1 | A compromised guest kernel sends crafted FUSE requests (`..`, `/`, absolute names, forged node ids) | R1, R2, per-device inode tables, deny-default sandbox scoped to the share subpaths | none known | VM-free server tests with crafted messages (SH2); G0-S; G7 |
+| T2 | Symlink following on the host (`open` of a link inode, `create` through a dangling link) | `O_NOFOLLOW`, `O_RESOLVE_BENEATH`, R3 | none in the server | SH2 tests: dangling link create, link inode open, rename race with a host-side mutator |
+| T3 | A host reader follows a guest-planted link (confused deputy: Winter host readers, Dreamer, artifact bridge, Mac apps) | Winter readers already use held `O_NOFOLLOW` directories (`output-fs.ts`, `instruction-fs.ts`); every new reader of a share does the same | the user's own Mac apps follow links in their own folders | reader tests; spec text "Host reads of guest-writable shared data must reject traversal and symlink escapes" |
+| T4 | Hard link from inside to outside | the server cannot reach outside inodes; R5 | a link the USER made before granting the folder | documented |
+| T5 | Mount-point crossing inside a granted folder | R4 | none | SH2 test with a nested device (no VM: a disk image is not needed, a second APFS volume fixture is) |
+| T6 | Cross-share write into read-only guidance | one device per share; R5; RO in three layers | none | SH2; G7 |
+| T7 | DAX: guest-chosen host `mmap` | R6 (gate, server, guest mount option, kernel fragment) | none if all four hold | gate matrix test; SH6 mount-option test |
+| T8 | Ownership forgery and host xattr pollution | R7 (Simplified, no xattr) | the guest sees every file as its own (accepted by spec) | SH2 |
+| T9 | World-writable or setuid files planted in user folders | R7 mask | none | SH2 |
+| T10 | Worker descriptor or thread exhaustion | R10; one thread per device | the workspace's own worker fails, not the daemon | SH2 |
+| T11 | Disk filling through a writable share | the S6 pressure guard covers "host-backed memory/outputs" and "selected writable host sources" (`docs/cowork-execution-contracts.md`, disk pressure) | in-flight overshoot (accepted by spec) | G5 extended |
+| T12 | Host path disclosure: `readlink` of the user's existing links and Mac error texts | none in the server (rewriting link text would break repositories) | the guest and the model can learn the user's home path and name from existing links | documented as residual |
+| T13 | Winter control state exposed by a broad grant (for example the home folder) | O5: refuse grants containing protected roots; optional sandbox denies | none | SH5 tests |
+| T14 | Revocation bypass through open guest handles or the page cache | R11 switch, then restart | content already read (accepted by spec: "cannot recall it") | G7 |
+| T15 | TCC prompt misattributed or bypassed | the daemon opens roots under its consent; the worker inherits descriptors | unknown until measured | G7 |
+| T16 | A guest-visible share after the worker's owner is lost | the drain unmounts; the worker exits on owner loss (existing timeline) | none new | G2-S |
+
+### 2.8 Files and repos (shares)
+
+| Repo | Files | Owner lane |
+| --- | --- | --- |
+| winter | `apple/Cowork/WinterCoworkLibkrun/patches/0024…` (confined server, guarded fs device, `krun_cowork_add_share_v1`, gate clauses), `patch-queue.json`, `expected-hashes.json`, `README.md`, `tests/test_queue_guards.py` | the libkrun lane (S4 lineage) |
+| winter | `apple/Cowork/WinterCoworkHVFWorker/Sources/WorkerNative/{WorkspaceWorker,Sandbox,Envelope}.c` and headers, `CoworkAbi.h`, tests (`test_sandbox_profile.c`, `test_envelope.c`, new `test_shares.c`), `pins.json` | worker (S3 lineage) |
+| winter | `apple/Cowork/WinterCoworkLauncher/Sources/LauncherCore/{Wire,Session,Launcher}/*`, `LauncherNative/native.c` (argv), tests, vectors | launcher (S2 lineage, PR #57 and #85) |
+| winter | `docs/cowork-native-worker.md`, `packages/core/src/cowork/native/protocol.ts`, `test/cowork/native/vectors/*` | contract owner (S7B under wave 4) |
+| winter | new `packages/core/src/cowork/native/shares.ts` and tests; `native/host.ts` sends `shares` and `share_revoke` | S7B (`host.ts`) |
+| winter | `apple/Cowork/WinterCoworkGuest/init/{boot,init_linux,mounts}.c`, `bootstrap/guest_bootstrap.py`, `vectors/*`, `scripts/cowork-guest-artifact/kernel/` (optional fragment) | N2 guest lane |
+| winter | `cowork/repository.ts` caller of `acknowledgeSource` at `shares_mounted` | DOOR (`repository.ts`) |
+| agent SDK | `packages/runtime/src/guest/linux-host-query-profile.ts` (admit the exact memory root) | SDK lane |
+
+### 2.9 Slices (shares)
+
+| Slice | What | Size | Depends on | Tests (no VM) |
+| --- | --- | --- | --- | --- |
+| SH1 | Contract text version 3: L1 `shares`, `shares_rejected`; L2 kinds 6 and 7; worker argv; bootstrap `shares`, `shares_mounted`, faults `share_inventory` and `share_mount_failed`; vectors | M | none | vectors round-trip in TS, Swift, C and Python |
+| SH2 | libkrun confined passthrough + guarded fs device + ABI + gate clauses; R1–R14 | XL | SH1 for names only | `cargo test`, one thread, never `--ignored`: a FUSE-message harness drives the server in-process against temp trees (escape suite, race suite with a host mutator thread, RO suite, bounds); gate matrix; ABI smoke; independent review before any run |
+| SH3 | Worker: argv parse, per-share sandbox parameters, L2 intake, `krun_cowork_add_share_v1`, revoke | M | SH1; SH2's header | strict-C tests; profile text tests; the `sandbox_init` stub stays aborting |
+| SH4 | Launcher: L1 `shares`, identity checks, argv, L2 forward, revoke | M | SH1 | `swift test` with the FakeWorker |
+| SH5 | Daemon `shares.ts`: grant to descriptor, protected-root refusal, alias dedupe; `host.ts` sends it | M | SH1 | `bun test` with the fake launcher |
+| SH6 | Guest: inventory check, mounts, alias, drain unmount; SDK memory root (SH6b) | M | SH1 | native tool tests, `python3 -I -S -B -m unittest`, SDK `bun test` |
+
+## 3. Piece 2: cold resume
+
+### 3.1 What persists across a stop
+
+| State | Where | Survives a cold stop | Notes |
+| --- | --- | --- | --- |
+| SDK session store (transcripts, subagent transcripts, lease file) | `data.ext4`: `/workspace/.winter/conversations/<sid>` | yes | each append is fsynced by the SDK store; a Class A stop also proves the final flush |
+| Repositories, worktrees, dirty files | `data.ext4`: `/workspace/repos` | yes | |
+| Conversation scratch | `data.ext4`: `/workspace/.winter/scratch/<sid>` | yes | |
+| Held peer inputs (piece 3, new) | inside the store directory | yes | 4.5 |
+| Installed tools and packages | `env.ext4` | **only once CR5 mounts it** | N2 attaches and formats it but mounts nothing (`docs/cowork-native-worker.md` section 6.1) |
+| Guidance, memory, outputs | host shares (piece 1) | yes, and readable while stopped | before piece 1 they live on `data.ext4` |
+| Run homes | `/run/winter/conversations/<sid>` (tmpfs) | no; rebuilt each boot | spec: run homes are materialized, not restored |
+| Task graph (TaskCreate…) | runtime memory | **no** | same as Code (spec gap X9) |
+| Processes, sockets, RAM, `/tmp` | | no | spec: "Arbitrary processes, sockets and RAM are not promised to survive" |
+| Host event log, bindings, epochs, peer inbox, launcher receipts | host | yes | |
+
+### 3.2 The design
+
+**Wire (contract, CR1).** A conversation's `runtime` object gains two keys:
+
+| Key | Values | Meaning |
+| --- | --- | --- |
+| `continuation` | `"fresh"` or `"resume"` | `resume` is only legal when the host recorded that this conversation's store was created |
+| `endedGuestBoots` | 0 to 4 guest boot ids (UUID text) | boots that the host attests have ended |
+
+The host lists a boot id only when both hold:
+- the host recorded it from that incarnation's bootstrap `hello`, durably, BEFORE it sent that incarnation's conversation set;
+- that incarnation's ownership was released by real D1 proof: a Class A receipt, a changed host boot id, or the owner's Recover.
+
+Two new bootstrap fault codes: `resume_store_missing` and `fresh_store_not_empty`.
+
+**Guest (CR3).** PID 1 splices `continuation` and `endedGuestBoots` into the trusted config untouched. It creates nothing in an existing store directory; the skeleton already "creates or adopts" component by component. The guest adds nothing of its own to either field.
+
+**SDK (CR2).**
+- `linux-host-query-profile.ts`, in `configKeys` and `assertLinuxHostQueryConfig`:
+  - admit `resume`, but only equal to `sessionId`;
+  - keep refusing `continue`, `forkSession`, `resumeSessionAt` and `resumeDropsTurn`.
+
+  The guided profile inherits this through `assertLinuxHostQueryConfig`.
+- `linux-session-admission.ts`:
+  - `freshOnly: true` becomes `continuation: "fresh" | "resume"` (closed);
+  - `resume` requires `runtimeConfig.resume === scope.sessionId`;
+  - `previousBootTermination(bootId)` returns `{scope, ownerToken, previousBootId: bootId}` exactly when `bootId` is in the record's `endedGuestBoots` and differs from `currentBootId`, and `null` otherwise. The lease logic in `store-bootstrap.ts` and `leases.ts` stays unchanged.
+- `linux-supervisor.py` `_configure_runtime` and `_runtime_record`:
+  - `hostQueryRuntime.continuation` and `endedGuestBoots`;
+  - for `fresh`, today's empty-store rule;
+  - for `resume`, the store must be a non-empty directory owned by `runtimeUid` with mode 0700, and the run home must be empty. Otherwise `runtime_resume_store_missing`.
+  - The `flock` exclusivity stays.
+  - The record carries `continuation` and `endedGuestBoots` instead of `freshOnly`.
+- The fresh fixture profile keeps `freshOnly` semantics.
+
+**Host (CR4).** The driver's `ensure(sessionId)` on a `stopped` workspace:
+
+1. Refuse `recovery_required` unless the workspace is `stopped` with ownership released.
+2. Read `store_state` and the stored identity:
+   - `none` → `fresh`;
+   - `created` → `resume`;
+   - `lost` → refuse `cold_resume_unavailable`, reason "the conversation's store is gone", and never start fresh.
+3. `native.start(workspaceId, {conversations})` with a new incarnation (`beginIncarnation`: epoch + 1) and a `probe-existing` plan, or `replay-journal-then-probe` after a Class B.
+4. On `hello`, durably record `(workspaceId, incarnationId, leaseEpoch, guestBootId)` before the set is sent.
+5. Build the set with the conversation's stable `runtimeUid`/`toolUid`, current revisions, `continuation` and `endedGuestBoots` (that conversation's last incarnation, when released by proof).
+6. On `runtime_ready`, build `WinterSession` with `query({resume: backendSessionId})`. This already exists: `guest-runtime.ts` passes `resume` when `identity.resume`.
+7. Before the first user frame:
+   - reconcile held peer inputs (4.5);
+   - deliver current guidance (guided profile, `runtime_context`), as the spec requires on resume.
+8. Mark `store_state = created` when the first launch of a conversation reaches `runtime_ready`.
+9. Record the data volume's filesystem UUID from the bootstrap receipt. At resume the receipt's UUID must match, or the store is `lost`.
+
+### 3.3 Incarnation and lease rules
+
+| # | Rule | Enforced by |
+| --- | --- | --- |
+| L1 | A resume is always a NEW incarnation (new `incarnationId`, `leaseEpoch` + 1). No live adoption of a guest from an earlier daemon. | `beginIncarnation`, spec |
+| L2 | A start begins only from `stopped` with the disks released by D1 proof. `uncertain` refuses `recovery_required`. | native host, `stop-proof.ts` |
+| L3 | Exactly one valid incarnation: one start mutex per workspace in the driver, plus the `stopped → starting` compare-and-set. A second `ensure` waits for the in-flight start. Input arriving after shutdown commits is queued for the next incarnation (host send queue, peer inbox). | DOOR driver, `power.ts` |
+| L4 | Every host callback carries the epoch: approval answers, peer `offer`/`ack`, `hold`/`commit`/`discard`, schedule claims. A stale epoch refuses (`stale_acknowledgment`) and changes nothing. | ledger, approval bridge, driver |
+| L5 | Authority is re-read at every start (`configRevision`, `grantRevision`, `policyRevision`). The guest's stored authority snapshot cannot raise it; the SDK checks current authority on continuation (agent SDK PR #2). | supervisor admission, SDK |
+| L6 | Previous-boot evidence is minted only for host-attested boot ids. A lease from an unlisted boot reads as alive, so the runtime refuses, and the host shows `recovery_required` (the owner's Recover with its two guards). A guest-written marker never counts (`docs/research/2026-10-17-cowork-n2-guest-boot.md` section 10). | CR2, CR4 |
+| L7 | `runtimeUid` and `toolUid` are stable per conversation, recorded on the host at bind. Store and file ownership on `data.ext4` therefore match across incarnations. The N2 builder uses fixed picks for index 0, which is stable only by accident. | DOOR schema (section 8) |
+| L8 | A lost or reformatted data volume (UUID mismatch, or a `format-new` plan for a workspace with a created store) never yields a fresh conversation under the old identity. | CR4 |
+| L9 | Pending approval callbacks keep the guest occupied (spec), so a cold stop never strands one. A crash withdraws the card, and the SDK's interrupted-history repair marks the call interrupted on resume. | #84 bridge, SDK |
+
+### 3.4 The 600 s cap and relaunch in place
+
+`_run_runtime` kills the runtime `timeoutMs` after launch (default and maximum 600,000), whether or not a turn is running (`linux-supervisor.py:1254`). The supervisor also refuses a second launch (`runtime_fresh_only`). So today a host-query conversation lives at most ten minutes per incarnation, and the next send refuses. Two ways out (O7):
+
+1. **Recommended.** For host-query profiles, `timeoutMs` stops being a wall-clock kill. The runtime's life is governed by the host: `end_input`, interrupt, stop, and the drain. The fixture `fresh` profile keeps its cap.
+2. **Alternative.** Relaunch in place with `continuation: resume`. That needs:
+   - a supervisor re-launch after `cleanupConfirmed`;
+   - re-armable `RuntimeDuplexPorts`;
+   - a contract message that resets the conversation's runtime streams. Today a stream that ended can never carry bytes again, so this would be `runtime_relaunch` / `runtime_relaunched`, bound to the plan's operation and nonce and carrying a generation.
+
+   It costs CR6 (M). It is also the only way to survive a runtime crash without a VM restart.
+
+### 3.5 The environment disk (CR5)
+
+The spec says "Retain installed tools/packages across normal cold stops", and that the writable environment is pinned to its base-image digest. That needs four things:
+
+1. PID 1 mounts `env.ext4` at `/opt/winter/environment/disk`.
+2. An overlay of the read-only base with an upper directory on that disk.
+3. The supervisor's `environment` pointing at the merged view.
+4. A base-digest stamp on the disk. A mismatch keeps the old environment and refuses, until migration or an explicit rebuild ("retain the previous environment until migration or explicit rebuild succeeds").
+
+Tool installs then run as the tool identity inside its compartment ("Any user-namespace root used for installation remains confined to tool-owned storage"). Size L, because it touches the SDK's compartment.
+
+### 3.6 Threat analysis (cold resume)
+
+| # | Threat | Mitigation |
+| --- | --- | --- |
+| C1 | A guest tool forges "the previous boot ended" to steal a live lease | Evidence comes only from the root-owned trusted config, through the native owner record. Tools cannot write either (L6). |
+| C2 | A stale incarnation acts after the new one starts | Epoch fences (L4); the old worker cannot hold the disks (D1) |
+| C3 | Two incarnations run at once (a wake/stop race) | L3, plus D1 disk ownership |
+| C4 | Authority grows back through the stored snapshot | L5 |
+| C5 | A silent fresh start after data loss | L8 |
+| C6 | A resume without current guidance | ordering: CR4 activates only with the guided profile and the guidance share (O8) |
+| C7 | A replayed external effect (an interrupted Bash, a push) | SDK interrupted-history repair; spec: "mark uncertain effects for reconciliation", never blind replay |
+
+### 3.7 Files and repos (cold resume)
+
+| Repo | Files | Owner lane |
+| --- | --- | --- |
+| agent SDK | `packages/runtime/src/guest/{linux-host-query-profile,linux-session-admission,linux-supervisor.py}` and tests (CR2); CR5 environment option; CR6 relaunch, if chosen | SDK lane (D4 says N2 owns these SDK pieces) |
+| winter | `docs/cowork-native-worker.md` section 6.1, `native/protocol.ts`, vectors (CR1) | contract owner |
+| winter | `apple/Cowork/WinterCoworkGuest/init/trusted_config.c`, `bootstrap/guest_bootstrap.py` (CR3); `init/{boot,mounts}.c` (CR5) | N2 guest lane |
+| winter | DOOR's `cowork/session-driver.ts`, `conversation-set.ts` (CR4); `native/host.ts` records the guest boot id (S7B); schema columns (DOOR) | DOOR, S7B |
+| winter | `scripts/cowork-guest-artifact/{pins.json,image.py}` re-pin to the SDK commit that carries CR2, and the host↔guest SDK pairing test (DOOR G8) | N2 guest lane |
+
+### 3.8 Slices (cold resume)
+
+| Slice | What | Size | Depends on |
+| --- | --- | --- | --- |
+| CR1 | Contract: `continuation`, `endedGuestBoots`, two faults, vectors | S | none (can share a PR with SH1) |
+| CR2 | SDK: profile `resume`, record `continuation`, evidence from `endedGuestBoots`, supervisor store checks | M | none |
+| CR3 | Guest PID 1 passes the two keys through | S | CR1 |
+| CR4 | Host: driver resume path, `store_state`, guest boot id record, stable uids, UUID check, reconciliation hook | M | CR1, DOOR D3/D4, S7B |
+| CR5 | Environment disk overlay and base-digest stamp | L | CR3, SDK |
+| CR6 | Relaunch in place (only if O7 picks it) | M | CR2 |
+
+## 4. Piece 3: guest-side messaging, questions and task tools
+
+### 4.1 What each tool needs
+
+| Tool | Transport | SDK change | Host change |
+| --- | --- | --- | --- |
+| SendMessage | runtime → host `host_message_send` (OUT); answer `control_response` (IN) | profile admits the tool and `hostMessaging: true`; `allowedSubtypes` adds it; registry gate; frame checker accepts the answer | DOOR binds `Options.hostMessaging` to `SessionMessaging.handlerFor(binding.sessionId, incarnation)`; #83 Cowork branch; #84 class row |
+| ListAgents | `host_message_list` | the same | the same; the host lists own descendants and same-Project peers only (contract table) |
+| AskUserQuestion | `permission` with `updatedInput.answers` (already admitted) | profile and registry gate only | #84's AskUserQuestion bridge on the Cowork route (question card, phone answer); unattended → typed deny or timeout |
+| TaskCreate/Get/List/Update | none (in-process graph) | profile and registry gate | #84 read-only class row |
+| TaskStop | in-process, or `host_session_stop` | **withheld** (O10): no guest background tasks or subagents to stop, and Project membership does not authorize stopping a sibling (contract) | none |
+| TaskOutput | in-process | **withheld** (O10): guest Bash refuses `run_in_background` | none |
+
+### 4.2 How the calls travel
+
+```
+guest runtime (host-query)                    relay / worker / launcher                     daemon
+SendMessage → messaging runtime → host port
+  control_request{subtype:"host_message_send", requestId, payload}
+  ── runtime class 2, conversation i, stream OUT ──►  (opaque bytes; relayed blind)  ──► query() control dispatcher
+                                                                                           Options.hostMessaging.send(request)
+                                                                                           = SessionMessaging(caller = the binding's
+                                                                                             session, incarnation = the driver's)
+  ◄── stream IN ── control_response{requestId, ok, payload: HostMessageSendAnswer} ◄───────
+checkLinuxHostQueryFrame: accept only if requestId is an outstanding host-message request
+```
+
+- No new mux class and no network: these are SDK frames inside the existing runtime streams (contract section 6.2). Class 3 stays reserved and refused.
+- Flow control is unchanged: every IN answer follows an OUT request, so the 1 MiB unanswered-IN bound holds. Host-initiated `hold`, `commit` and `discard` (4.5) are each answered with OUT bytes and are serialized per conversation by the driver.
+- The sender is taken from the channel, never from the payload. `fromAgentId` is information only (SDK `config.ts`), as for Code.
+
+### 4.3 The agent-SDK change (GM1, GM2)
+
+GM1 (profile and transport):
+
+- `linux-host-query-profile.ts`:
+  - `tools` may be a subset of `Read, Write, Edit, Bash, SendMessage, ListAgents, AskUserQuestion, TaskCreate, TaskGet, TaskList, TaskUpdate` (the cap of four is raised accordingly).
+  - Add `hostMessaging` to `configKeys`, allowed only as `true` and only with SendMessage or ListAgents present.
+  - `checkLinuxHostQueryFrame(frame, ownsPermission, ownsHostRequest)`: a `control_response` whose id `ownsHostRequest` claims is checked against the closed answer shapes (`isHostMessageSendAnswer`, `normaliseHostMessageListAnswer`). Anything else stays `drop`.
+- `engine.ts:3036-3040`: for both host-query profiles, `allowedSubtypes` adds `host_message_send` and `host_message_list`, and `host_session_stop` only if TaskStop is ever offered.
+- `tools/registry.ts:1851`: the confined-guest allowlist becomes the same closed set. Grep, Glob, NotebookEdit, Workflow and TaskOutput keep `guestToolUnsupported`.
+- `linux-supervisor.py` `host_query_config`: `toolClasses` gains a `coordinate` class that maps to SendMessage, ListAgents and the Task\* graph tools. AskUserQuestion is always present when any prompt-capable policy is set.
+
+GM2 (held input; 4.5) adds Winter-only host → runtime control subtypes and one runtime → host system message:
+
+| Subtype | Payload | Runtime effect | Answer |
+| --- | --- | --- | --- |
+| `host_input_hold` | `inputId` (the ledger `receiptId`), `epoch {incarnationId, leaseEpoch}`, `text`, `clientName` | refuse unless the epoch equals the admitted scope; write a held record (store-owned file, fsync, directory fsync); invisible to the model | `{held: true}`; the same id and digest → `{held: true, again: true}`; the same id and another digest → error `conflict` |
+| `host_input_commit` | `inputId` | mark the record committed (fsync); feed it into the existing host-input path (fold into the running turn at the next tool boundary, else queue, else start a turn); emit `system/host_input_committed {inputId, outcome}` | `{outcome: "folded" \| "queued" \| "started" \| "already"}`; unknown → error `unknown_input` |
+| `host_input_discard` | `inputId` | delete the held record (fsync) | `{discarded: true}`, idempotent; already committed → error `committed` |
+| (runtime → host) `system/held_inputs` | `[{inputId, digest}]` | emitted once after `init`, before the first input is read; nothing held starts a turn until the host decides | none |
+
+`checkLinuxHostQueryFrame` admits exactly these three new control subtypes (closed payloads, size-bounded to the 64 KiB message cap plus the envelope). The host `Query` gains `holdInput`, `commitInput` and `discardInput`, and `clearQueuedInput` never touches held records.
+
+### 4.4 Guest to host: reaching the peer inbox
+
+1. SendMessage in the guest becomes `host_message_send`. The host `query()` calls the handler that DOOR's driver bound at construction: `SessionMessaging.handlerFor(binding.sessionId, "<incarnationId>:<leaseEpoch>:<launch>")`. The incarnation string makes a restarted sender's `messageId` a new message, which #83 requires: "no incarnation is refused".
+2. #83's `deliverViaPeerInbox`:
+   - `inbox.accept` (same-Project authority, caps, dedupe), then `drainCoworkInbox(recipient)`;
+   - the truthful answer is `delivered` only if acked, else `queued` with the receipt;
+   - a Cowork-to-host target is uniform `not_found`.
+3. ListAgents becomes `host_message_list`. The host answers with own descendants and same-Project peers. No host Code or Dispatch rows are listed (contract table).
+
+### 4.5 Host to guest: hold until ack, then commit or discard
+
+This is the coordinator's requirement, and it is the ledger's own rule ("the ack is the commit point"). Today `drainOnce` calls `deliverInto` (steer or send into the recipient's turn) and only then `inbox.ack`. If authority is revoked in between:
+- the message is already in the model's input;
+- the ack answers `authority_denied`, so the sender is told `not_found`;
+- after a re-grant, the record is offered and delivered again.
+
+For a Cowork recipient, the delivery becomes this:
+
+```
+drainOnce(recipient):
+  offer   = inbox.offer(recipient, driver.coworkEpoch)                 // unchanged
+  held    = await driver.holdInput(offer.receiptId, epoch, text)       // guest: durable, invisible to the model
+            on throw: return (stays owed; an unacked offer is offered again)
+  try     inbox.ack({receiptId, recipient, epoch})                     // THE commit point
+  catch   → await driver.discardInput(receiptId)  (best effort)        // authority_denied, stale_acknowledgment, any throw
+            return
+  outcome = await driver.commitInput(receiptId)                         // guest: into the turn
+            on throw: leave it; the runtime-start reconciliation commits it
+  record outcome for the sender's answer
+```
+
+Why each window is safe:
+
+| Failure point | Ledger state | Guest state | What happens next | Delivered to the model |
+| --- | --- | --- | --- | --- |
+| Hold fails or the guest dies before holding | accepted (offered) | nothing, or an undecided hold | re-offer under the live epoch, or reconciliation discards (not delivered) | 0 so far |
+| Authority revoked between hold and ack | blocked (authority); ack answered `authority_denied` | undecided hold | `discard` now, or reconciliation discards later; on re-grant: re-offer, hold (`again`), ack, commit | **exactly 1, after the re-grant** |
+| Ack throws for a store fault (store contract: "if it throws, none of it is visible") | accepted | undecided hold | discard; the next drain re-offers | 0, then 1 |
+| Host dies after ack, before commit | **delivered** (body deleted) | undecided hold (the body is in the guest's held record) | at the next runtime start, `system/held_inputs` → the host looks it up → delivered → commit | exactly 1 |
+| Commit sent and the guest dies before recording it | delivered | undecided hold (the commit fsync did not happen) | reconciliation → commit | exactly 1 (the commit is idempotent by id) |
+| Guest restarts with a new epoch while holding | accepted | undecided hold from the old epoch | reconciliation discards (not delivered); re-offer under the new epoch | exactly 1 |
+
+Two ledger additions make the reconciliation decidable (NEEDS FROM PEER-INBOX):
+
+1. `verdict(receiptId, recipientSessionId): "commit" | "discard"`:
+   - `delivered` → commit;
+   - `accepted`, `blocked` or `refused` → discard;
+   - an unknown id → discard, but only if the record cannot have been delivered (2).
+2. A delivered receipt is not pruned until the guest confirmed the commit. This is a `commitConfirmed` marker set from the commit answer or the reconciliation, and `prune` skips delivered records without it. Otherwise a long-stopped recipient (beyond the one-day / 100-record retention) would hold an input whose verdict the host can no longer give.
+
+The body still lives on the host only while owed (the owner's 2026-10-16 decision). After the ack the only copy is the guest's held record. That record is durable on `data.ext4` by the hold's fsync, and covered by the Class A final flush on an orderly stop.
+
+The rendered text is still `renderAttributedTurn` from the receipt. The commit makes the runtime emit `system/host_input_committed`, and the host projector records the attributed agent message from it (DOOR's projector, section 8).
+
+### 4.6 Approvals and questions
+
+- **#84's table has no cell for SendMessage, ListAgents or Task\*.** All three are denied today as unknown classes. Recommended rows (NEEDS FROM APPROVALS):
+  - ListAgents and TaskCreate, TaskGet, TaskList and TaskUpdate: read-only class, allow under every policy;
+  - SendMessage: a `coordination` class, allow under every policy.
+
+  SendMessage gets no prompt, because the messaging contract, not the approval policy, decides who may be reached. The recipient executes under its own policy ("Messages and returned results do not confer authority on their recipient"). `plan` allows it, because it mutates no workspace file.
+- **AskUserQuestion keeps #84's own bridge.** The card is a question card on the conversation's log, answerable from the Mac and the phone. Under `dont-ask` and for unattended turns it is a typed deny or timeout, never an auto-answer.
+
+### 4.7 The one-conversation limit
+
+N2 serves at most ONE host-query conversation per guest (`docs/cowork-native-worker.md` section 6.1), and a Project's conversations share one guest. So a guest sender's same-Project peer can never be running at the same time:
+- the message is accepted and stays owed;
+- the peer's next `ensure` refuses `conversation_limit` while the sender's guest runs.
+
+Delivery happens only after the sender's incarnation ends and the peer's starts. Same-Project messaging is truly useful only after the limit is lifted (O12). That needs:
+- a conversation-set change while running (an add-only `conversation_add` bootstrap message bound like `conversations`, or a restart at a safe boundary);
+- the supervisor's limit raised from one host-query conversation;
+- the runtime stream index above 0 (the prefix already carries it).
+
+That is a separate contract slice. GM1–GM3 can be built and tested with fakes before it.
+
+### 4.8 Threat analysis (messaging)
+
+| # | Threat | Mitigation |
+| --- | --- | --- |
+| M1 | A guest forges the sender (`fromAgentId`, `to` tricks) | the sender comes from the driver binding; `fromAgentId` is information only; host-side caller/target/workspace check (#83, contract) |
+| M2 | A guest reaches host Code/Dispatch sessions or other Projects | uniform `not_found` (#83); ListAgents lists only own descendants and same-Project peers |
+| M3 | A guest floods the inbox | the ledger's caps (32 per sender pair, 256 / 4 MiB per recipient) |
+| M4 | A forged `control_response` or a forged answer to a host request | the guest frame checker accepts only ids it owns, with closed shapes |
+| M5 | Duplicate or lost delivery across revocation and crashes | 4.5 (hold, ack, commit or discard; reconciliation; prune guard) |
+| M6 | A held record tampered with by tools | it lives in the protected store directory, omitted from tool views (the contract's protected store rules) |
+| M7 | A question card spoofed by a peer | cards belong to the target conversation; only authorized user clients answer (contract, #84) |
+
+### 4.9 Files and repos (messaging)
+
+| Repo | Files | Owner lane |
+| --- | --- | --- |
+| agent SDK | `packages/runtime/src/guest/linux-host-query-profile.ts`, `runtime/src/engine.ts` (allowed subtypes; host-input subtypes), `runtime/src/tools/registry.ts`, `guest/linux-supervisor.py` (`host_query_config`, the `coordinate` class), the store's held-input journal (`guest/store-bootstrap.ts` or a sibling), `packages/sdk/src/query.ts` (`holdInput`, `commitInput`, `discardInput`), tests | SDK lane |
+| winter | `agent/session-messaging.ts` `drainOnce` reorder; `MessagingDriverHandle` gains `holdInput`, `commitInput`, `discardInput` | PEER-INBOX |
+| winter | `cowork/peer-inbox.ts` (`verdict`, the `commitConfirmed` prune guard) and `peer-inbox-sqlite.ts` (a column, through DOOR's migration) | PEER-INBOX; DOOR for the schema |
+| winter | `runtime-sdk/cowork-approval.ts` and `approval-bridge.ts` class rows | APPROVALS |
+| winter | `cowork/session-profile.ts` `COWORK_GUEST_PROFILE_TOOLS`, the driver's `hostMessaging` binding, the projector for `host_input_committed` | DOOR |
+
+### 4.10 Slices (messaging)
+
+| Slice | What | Size | Depends on |
+| --- | --- | --- | --- |
+| GM1 | SDK: profile tools and `hostMessaging`, allowed subtypes, registry gate, frame checker for host answers | M | none |
+| GM2 | SDK: held input (hold, commit, discard), journal, `system/held_inputs`, `Query` methods; a release | M–L | GM1 |
+| GM3 | Winter host: the driver binding and `hold`/`commit`/`discard` on the Cowork driver (DOOR); the `drainOnce` reorder, `verdict` and prune guard (PEER-INBOX); class rows (APPROVALS); reconciliation at runtime start | M | GM2 pinned, #83, #84, DOOR D3 |
+| GM4 | Prompt and tool-surface text for the newly offered tools (DOOR's generated blocks) | S | GM3 |
+| (MC) | Lift the one-conversation limit (separate contract slice; O12) | L | CR4 |
+
+## 5. Combined order
+
+| Wave | Slices (in parallel inside a wave) | Why this order |
+| --- | --- | --- |
+| A, now | SH1 + CR1 (one contract PR); SH2 (long pole, independent review); CR2, GM1, GM2 (agent SDK, separate draft PRs into SDK main) | no dependencies; the SDK and libkrun work is the longest |
+| B | SH3, SH4, SH5, SH6 | they all code against SH1 |
+| C | CR3, CR4 (with DOOR D3/D4), CR5 | needs CR1 and CR2; CR4 waits for the instructions share (SH6) and the guided profile before activation (O8) |
+| D | GM3, GM4 | needs GM2 released and pinned, #83 and #84 merged, DOOR D3 |
+| E | MC; CR6 if chosen | after CR4 |
+| Gates | G0-S after SH3; G4-S and G7 after SH2–SH6; G8 after wave C; G9 after D and MC | each needs a review of the exact commit and the owner's approval |
+
+## 6. Gates added to G0–G6
+
+None of these is run by an agent. Each needs a review of the exact commit, the owner's approval, and a disposable `WINTER_HOME` with no credentials.
+
+| Gate | Exact run | What it proves |
+| --- | --- | --- |
+| **G0-S** (amends G0) | `--sandbox-check` of the production worker with two share parameters (one `ro`, one `rw`) on disposable fixture folders, plus a protected fixture | reads inside both shares; writes inside `rw` only; denial outside, of `/.vol/...` spellings, of xattr and setugid writes, and in a protected subtree; firmlink spelling behaviour; whether the operation names in 2.4 suffice; no VM starts |
+| **G1-S** (amends G1) | G1's sequence with the three Winter shares and one folder fixture | inventory check, mounts, `shares_mounted`, alias, the drain unmounts the shares before `halting` |
+| **G2-S/M** (amends G2) | forged L1 `shares` lines (wrong identity, nested paths, too many fds, a fd that is not a directory), a forged argv, a second revoke; forged `host_input_*` frames and answers | the launcher and the worker refuse; nothing is mounted; the guest refuses foreign ids |
+| **G4-S** (amends G4) | the three-cycle reclaim on ext4 PLUS sustained share I/O on every device at the production profile | reclaim holds with fs devices registered; the pin high-water stays under the re-sized budget; no exit 77 |
+| **G7** (new) | a hostile-guest share suite: a test-only guest tool image issues raw FUSE requests (`..`, `/`, absolute and dangling links, mknod, `setupmapping`, cross-share link and rename, handle exhaustion); a Mac-side mutator renames and swaps directories during resolution; host-read-only exports re-mounted writable in the guest; the revoke switch mid-read; TCC on Documents and Desktop, an iCloud Drive folder and a removable volume; case-insensitivity and many-small-file timing | confinement against a hostile guest; three-layer RO ("a denial behind a guest RO bind proves only guest enforcement"); immediate cutoff; the TCC attribution |
+| **G8** (new) | conversation turn, Class A stop, resume of the same conversation; `kill -9` of the worker mid-turn, then Recover (or a host reboot), then resume with interrupted-history repair; a reformatted data volume; a stale-epoch callback; a wake/stop race | transcript and subagent continuity after a real VM restart; L1–L9; refusal on data loss; exactly one incarnation. A model-driven `SendMessage` to a resumed child needs section 10 |
+| **G9** (new) | two Project conversations (needs MC); `SendMessage` and `ListAgents` from the guest; revoke between hold and ack, then re-grant; host SIGKILL after ack and before commit; AskUserQuestion answered from the Mac and the phone; TaskCreate/List | the coordinator's case delivers nothing and then exactly once; the reconciliation commits exactly once; question cards. Model-driven tool calls need section 10 |
+
+## 7. Spec gaps, each with a recommendation
+
+| # | Gap | Recommendation |
+| --- | --- | --- |
+| X1 | The spec and the execution contracts describe shares in VZ terms (`VZMultipleDirectoryShare`, VZ `EACCES`, VZ live share replacement). The selected backend is libkrun, whose virtio-fs is unconfined by its own statement. | Restate the share contract for the libkrun confined server (2.3) and record that libkrun has no hotplug. |
+| X2 | "Use a live share update ... when the backend supports and validates it": libkrun cannot. | Every source addition is a pending restart at a safe boundary. Ship it after cold resume (O6), so a restart does not end the conversation. |
+| X3 | "Validate macOS access for the actual signed worker/share accessor" has no mechanism. | Daemon-opened root descriptors (2.4); measure the attribution at G7. |
+| X4 | Grants that contain Winter's own control storage: the spec says "refuse grants whose required exclusions cannot be enforced". | Refuse any grant containing a protected root in v1 (O5), rather than serving holes. |
+| X5 | The memory share has no admitted tool view in the host-query profile: the SDK refuses every `/workspace/.winter` root, while the supervisor and the native contract allow `/workspace/.winter/memory`. | Admit exactly `/workspace/.winter/memory` in `assertLinuxHostQueryRoots` when the memory share is present (SH6b). |
+| X6 | The supervisor's wall-clock `timeoutMs` (at most 10 minutes) contradicts long-lived Cowork conversations, and kills mid-turn. | O7: no wall cap for host-query; relaunch in place only for crashes. |
+| X7 | Stable guest uids per conversation are not specified, but `data.ext4` file and store ownership depend on them. | Record `runtimeUid`/`toolUid` per binding on the host (L7). |
+| X8 | "On parent or child resume, load current workspace guidance before the first model request" cannot hold in `host-query-v1` (DOOR G3). | Activate cold resume together with the guided profile and the instructions share (O8). Build it behind the refusal now. |
+| X9 | Durability of the Task\* graph across cold stop is not stated. It is in memory in the SDK, and so lost. | Accept parity with Code for v1 and document it. Persisting the graph in the store is a later SDK option. |
+| X10 | Same-Project messaging and concurrent Project conversations need more than one host-query conversation per guest (DOOR G5). | O12: a separate contract slice (4.7). Until then, guest-sent peer messages are honestly `queued`. |
+| X11 | The ledger's ack is the commit point, but the host path pushes before the ack (#83 review), and pruning can make a held input's verdict unknowable. | Two-phase hold, ack, then commit or discard, plus the prune guard (4.5). |
+| X12 | Mode bits on user files: guest modes would apply verbatim (0777, setuid). | Host mask `~0o022`, no special bits (R7). |
+| X13 | Host path disclosure: existing links in user folders show the user's home path and name to the guest and the model. | Document as a residual; do not rewrite link text. |
+| X14 | DAX is not mentioned anywhere. | Off in v1 at four points (R6). |
+| X15 | Previous-boot termination evidence for the SDK store lease has no producer (the guest cannot know). | The host-attested `endedGuestBoots` (3.2, L6). |
+
+## 8. NEEDS FROM OTHER LANE
+
+| Lane | Need |
+| --- | --- |
+| Contract owner (S7B) | Text version 3 for SH1 and CR1: L1 `shares` (rights allowed on `volumes` and `shares`), the refusal `shares_rejected`; L2 kinds 6 `shares` and 7 `share_revoke`; worker argv `--shares-v1`; bootstrap `shares`, `shares_mounted`, faults `share_inventory`, `share_mount_failed`, `resume_store_missing`, `fresh_store_not_empty`; conversation `runtime.continuation` and `runtime.endedGuestBoots`; vectors. Optionally `runtime_relaunch` (CR6). |
+| S7B (`native/host.ts`) | Send `shares` before `begin` and `share_revoke` on revocation; wait for `shares_mounted` before `conversations`; durably record `(workspaceId, incarnationId, leaseEpoch, guestBootId)` at `hello` and keep it after release; build `endedGuestBoots` from released incarnations; read the data volume UUID from the bootstrap receipt. |
+| DOOR (`cowork/schema.ts`, migration 18 or later) | Table definitions, sent here rather than built: `cowork_conversations` gains `runtime_uid`, `tool_uid` (allocated once at bind, distinct per workspace), `store_state` (`none`, `created`, `lost`), `store_volume_uuid`, `last_incarnation_id`. A new `cowork_guest_boots(workspace_id, incarnation_id, lease_epoch, guest_boot_id, recorded_at, ended_proof NULL, ended_at NULL)`. The `peer_inbox` record gains `commit_confirmed_at NULL`. |
+| DOOR (`repository.ts`, driver) | Call `acknowledgeSource(epoch, sourceId, revision, "ready")` at `shares_mounted`. The resume branch of `ensure` (3.2). `hostMessaging` bound to `handlerFor(binding.sessionId, incarnation)`. `holdInput`, `commitInput`, `discardInput` on the Cowork `MessagingDriverHandle`. The projector consumes `system/host_input_committed`. `COWORK_GUEST_PROFILE_TOOLS` grows to GM1's set once the pinned image carries it. |
+| PEER-INBOX (`agent/session-messaging.ts`, `cowork/peer-inbox.ts`) | `drainOnce` for a Cowork recipient: `offer`, `holdInput`, `ack`, then `commitInput`, or `discardInput` on any ack throw (4.5); never `deliverInto` for a Cowork driver. A ledger `verdict(receiptId, recipient)`. The `commitConfirmed` mark, and `prune` skipping delivered records without it. Reconciliation at runtime start. |
+| APPROVALS (`runtime-sdk/cowork-approval.ts`, `approval-bridge.ts`) | Class rows: ListAgents and Task\* read-only (allow everywhere); SendMessage as `coordination` (allow everywhere). The AskUserQuestion bridge on the Cowork route with `mode: "cowork"` cards. |
+| N2 guest lane | SH6, CR3, CR5; an image re-pin to the SDK commit carrying CR2, GM1 and GM2; the optional `CONFIG_FUSE_DAX=n` fragment at the next kernel pin. |
+| libkrun lane | SH2 as patches 0024 onward in the vendored queue, with the independent review the README requires. |
+
+## 9. Owner decisions (each with my recommendation)
+
+| # | Decision | Recommendation |
+| --- | --- | --- |
+| O1 | Re-enable virtio-fs at all, given libkrun's own "no protection" statement | Yes, but only as the Winter confined server (2.3) with its own independent review and G4-S. Never the stock server. |
+| O2 | How the worker's sandbox learns the share paths | Launcher argv parameters (`--shares-v1`), from the signed launcher, checked against the received descriptors. The alternative, sandbox extension tokens, is more Apple SPI. |
+| O3 | DAX | Off permanently in v1, at four points (R6). |
+| O4 | Ownership semantics on host shares | `LinuxSimplified`, no xattrs, host mask `~0o022`, no setuid/setgid/sticky, no special files. |
+| O5 | Grants that contain a protected root (for example the home folder) | Refuse in v1. |
+| O6 | Source changes while running | Restart at a safe boundary, after cold resume ships; an immediate worker-side revoke switch; "revocation complete" only after the restart. |
+| O7 | The supervisor's 600 s wall-clock cap on host-query runtimes | Remove it for host-query profiles (the host governs life); relaunch in place (CR6) later, for crash recovery only. |
+| O8 | May cold resume activate before guidance-on-resume exists | No. Build CR1–CR4 behind the refusal now; activate with the guided profile and the instructions share. |
+| O9 | Stable per-conversation guest uids | Yes, recorded on the host at bind (L7). |
+| O10 | The guest tool set | Offer SendMessage, ListAgents, AskUserQuestion and TaskCreate/Get/List/Update. Withhold TaskStop and TaskOutput until guest background work and guest subagents exist. |
+| O11 | Peer delivery into a guest | Two-phase hold, ack, then commit or discard, plus the prune guard (4.5). This is the coordinator's requirement; it changes #83's order. |
+| O12 | More than one host-query conversation per guest | Yes, as a separate contract slice after CR4. Same-Project messaging between live guest conversations and concurrent Project conversations need it. |
+| O13 | The gate stand-in for model-driven tool calls (G8, G9) | Extend the runtime-sdk stub to emit tool calls, under the same reserved stand-in selection as DOOR's O2. Otherwise those parts of G8 and G9 wait for the held provider bridge. |
+
+## 10. Provider path: where I stopped
+
+None of the three pieces carries model traffic: shares are a device, resume is a restart, and messaging uses runtime streams. Two parts of the gates still need a model that calls tools:
+- G8's "SDK SendMessage continues the same child after actual process/VM restart";
+- G9's model-driven `SendMessage` and `ListAgents`.
+
+The merged runtime-sdk stub answers text only (DOOR section 5.4). A model that calls tools therefore needs one of two things:
+- an extended stand-in (O13), which is a guest-side image change and no network;
+- the provider bridge (mux class 3), which is HELD by the owner.
+
+I did not design or analyse the bridge. The rest of G8 and G9 (stop and resume continuity, the hold, ack and commit windows, question cards answered by a user) needs no model call beyond the stand-in's text turns.
+
+## 11. Docs owed (for the controller's doc pass)
+
+- `docs/claude/cowork.md`:
+  - This design exists. Nothing in it is built.
+  - Shares need the confined server, because libkrun's own virtio-fs is unconfined.
+  - Cold resume is blocked at the five SDK points in section 1.
+  - Guest messaging delivery into a guest is two-phase.
+- `docs/cowork-status.md`, under "Still open":
+  - shares (SH1–SH6), cold resume (CR1–CR6) and guest messaging (GM1–GM4) are designed and not built;
+  - the 600 s supervisor cap (X6) and the one-conversation limit (X10) are blockers for long and concurrent conversations.
+- `docs/cowork-spec.md` and `docs/cowork-execution-contracts.md` (a later spec pass, not this lane): X1, X2, X4, X5, X12 and X14.
+- `docs/cowork-native-worker.md`: text version 3, after SH1 and CR1 land, by its owner.
