@@ -261,8 +261,10 @@ describe("the shared receiver hub", () => {
     }
     // The count is process-wide, so another test file's late cleanup can move it for a moment. A real leak is
     // permanent (one per round, twelve rounds), so wait for the count to settle, bounded, then demand equality.
-    for (let attempt = 0; attempt < 100 && openCount() !== before; attempt++) await Bun.sleep(20);
-    expect(openCount()).toBe(before);
+    // A leak only ever ADDS descriptors; the count may also FALL here when a descriptor held by some other test's garbage is finalized meanwhile (seen in CI as a drop of six, which is not a leak),
+    // so the demand is "no more than before", not equality.
+    for (let attempt = 0; attempt < 100 && openCount() > before; attempt++) await Bun.sleep(20);
+    expect(openCount()).toBeLessThanOrEqual(before);
   });
   live("many receivers at once are served independently and each ends exactly once", async () => {
     const received = new Map<number, string>(), ends = new Map<number, number>(), receivers: FdReceiver[] = [], ends2: Promise<void>[] = [];
