@@ -15,7 +15,7 @@ Inputs: the Cowork host policy matrix and transition machine (`docs/research/202
 1. A narrowing in flight (pending, or failed with admission not `open`): deny. The old, broader state is never used to admit new work while its replacement is installed (`transition_pending`, `restart_required`).
 2. `dangerouslyDisableSandbox: true` on Bash: deny in every policy. Bash `allowNetwork: true` under a `none` network ceiling: deny.
 3. Connector action: the Cowork connector row, inside the ceiling's `connectors` grant (not listed: deny). An explicit ask stays a card under bypass.
-4. Read/Glob/Grep, Write, Edit/MultiEdit, Bash, Workflow: the policy matrix. The host classifies the target path; relative paths resolve against the conversation's cwd. A file tool with no resolvable target is `none`, which the matrix denies.
+4. Read/Glob/Grep, Write, Edit/MultiEdit, Bash, Workflow: the policy matrix. Glob and Grep also classify the literal prefix of `pattern` / `glob` (absolute, `..`, protected, outside all resolved against the cwd; a `..` after the first glob character names the filesystem root), and every reached path must pass. The host classifies the target path; relative paths resolve against the conversation's cwd. A file tool with no resolvable target is `none`, which the matrix denies.
 5. Anything else is an unknown class: deny under every policy, bypass included.
 
 ## How decisions reach the clients (no new event, no protocol field)
@@ -40,6 +40,8 @@ The control-plane fence, the home fence and the protected-write checks judge Mac
 1. When Cowork is activated, the driver builds `CoworkApprovalPorts` for the conversation and passes `cowork` to `canUseToolFor`. Required members: `identity()` from the binding and workspace revision, `snapshot()` from a per-conversation `CoworkPolicyTransitionMachine`, `classifyPath()` from the admitted roots (it must return `admitted`, `shared-instructions`, `outputs`, `scratch`, `protected` or `outside`), and `planViewInstalled()` from the plan execution view. It must also pass `turnOrigin` (an unknown origin is bounded to 10 minutes).
 2. Under `bypassPermissions`, `auto` and a saved allow rule the child never calls `canUseTool` for an allowed tool, so the matrix must also run before execution. Register a PreToolUse hook that calls `projectCoworkCall` and maps `deny` to `permissionDecision: "deny"`, `ask` to `"ask"` and `allow` to nothing (and `allow` with `bashReview` to the existing Bash reviewer hook). The connector floor hook for Cowork must use `coworkConnectorVerdict`, not `connectorVerdict`.
 3. A tool-surface decision for the tools the matrix leaves unknown (see below).
+4. Path classes are lexical (the projection resolves `.`/`..` against the cwd and classifies the string). Symlinks are the host classifier's and the mount view's to own; a symlink inside an admitted root that points at protected state must be refused by them.
+5. `bashReview` on an allow is advisory here: under `auto` the review itself depends on the PreToolUse reviewer hook DOOR owes (item 2); the bridge ignores the flag on an allow.
 
 No `cowork/types.ts` code, no protocol field and no `SessionEvent` is needed.
 

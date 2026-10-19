@@ -57,8 +57,22 @@ export type CoworkDenyReason =
 
 const FILE_READ = new Set(["Read", "Glob", "Grep"]);
 
-/** The guest tool class and target path for a wire tool name; `undefined` is an unknown class. */
-function classFor(toolName: string, input: Record<string, unknown>, cwd: string): { tool: string; path: string | undefined } | undefined {
+/**
+ * The directory a Glob `pattern` / Grep `glob` can reach, as an absolute path: its literal prefix (up to the last `/` before the
+ * first glob character), resolved against `cwd` - so `/workspace/.winter/**` and `../../../etc/*` name what they reach. A `..` segment
+ * AFTER the first glob character cannot be resolved lexically, so it names the filesystem root (never admitted).
+ */
+function globReach(value: unknown, cwd: string): string | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  if (value.includes("\0")) return "/";
+  const meta = value.search(/[*?[\]{}!]/);
+  if (meta >= 0 && value.slice(meta).split("/").includes("..")) return "/";
+  const literal = meta < 0 ? value : value.slice(0, Math.max(0, value.lastIndexOf("/", meta)) + (value.lastIndexOf("/", meta) < 0 ? 0 : 1));
+  return posix.resolve(posix.isAbsolute(cwd) ? cwd : "/", literal === "" ? "." : literal);
+}
+
+/** The guest tool class, target path and any further paths the call can reach; `undefined` is an unknown class. */
+function classFor(toolName: string, input: Record<string, unknown>, cwd: string): { tool: string; path: string | undefined; extra?: string[] } | undefined {
   const str = (value: unknown) => typeof value === "string" && value !== "" ? value : undefined;
   const target = (value: unknown): string | undefined => {
     const raw = str(value);
@@ -68,7 +82,8 @@ function classFor(toolName: string, input: Record<string, unknown>, cwd: string)
   if (FILE_READ.has(toolName)) {
     // Glob and Grep default to the working directory; Read names its file.
     const named = toolName === "Read" ? input.file_path : input.path;
-    return { tool: "Read", path: named === undefined && toolName !== "Read" ? target(".") : target(named) };
+    const extra = toolName === "Glob" ? globReach(input.pattern, cwd) : toolName === "Grep" ? globReach(input.glob, cwd) : undefined;
+    return { tool: "Read", path: named === undefined && toolName !== "Read" ? target(".") : target(named), ...(extra === undefined ? {} : { extra: [extra] }) };
   }
   if (toolName === "Write") return { tool: "Write", path: target(input.file_path) };
   if (toolName === "Edit" || toolName === "MultiEdit") return { tool: "Edit", path: target(input.file_path) };
@@ -121,11 +136,14 @@ export function projectCoworkCall(
     const explicit = ports.explicit?.({ toolName: call.toolName, input });
     // A file tool with no resolvable target, and Bash/Workflow, carry the path class `none` (the matrix denies the former).
     const path = klass?.path === undefined ? "none" : ports.classifyPath(klass.path);
-    const decision = coworkHostDecision({
+    const decide = (pathClass: string) => coworkHostDecision({
       // An unmapped wire name can never spell a known class by accident: it is prefixed.
-      policy, tool: klass?.tool ?? `unmapped:${call.toolName}`, path,
+      policy, tool: klass?.tool ?? `unmapped:${call.toolName}`, path: pathClass,
       ceiling: state.ceiling, alreadyAuthorized: explicit === "allow", explicitDeny: explicit === "deny",
     });
+    // Every path the call can reach must pass: a pattern aimed outside the roots is a denial even when the search directory is admitted.
+    const reached = (klass?.extra ?? []).map(extra => decide(ports.classifyPath(extra))).find(d => d.verdict === "deny");
+    const decision = reached ?? decide(path);
     if (decision.verdict === "deny") return deny(policy, decision.reason);
     if (decision.verdict === "ask") return Object.freeze({ kind: "ask", policy, connector: false });
     if (decision.verdict === "allow-in-plan-view") {

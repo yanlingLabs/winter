@@ -121,6 +121,19 @@ test("Glob, Grep and MultiEdit take the Read and Edit rows; Glob and Grep defaul
     expect((await outcome(build(state(policy)), "Grep", { pattern: "x", path: "/workspace/repos/app/src" })).kind).toBe("allow");
     expect((await outcome(build(state(policy)), "MultiEdit", { file_path: "/workspace/repos/app/a.ts", edits: [] })).kind).toBe(GRID[policy].Edit);
   }
+  // A pattern can reach beyond the search directory: its literal prefix is classified too (absolute, `..`, protected, outside).
+  for (const policy of POLICIES) {
+    for (const [tool, input] of [
+      ["Glob", { pattern: "/workspace/.winter/**" }], ["Glob", { pattern: "../../../etc/*" }], ["Grep", { pattern: "x", glob: "/etc/*" }],
+      ["Glob", { pattern: "/workspace/.winter/conversations/*/x.jsonl", path: "/workspace/repos/app" }], ["Grep", { pattern: "x", glob: "src/*/../../../../etc/*" }],
+      ["Glob", { pattern: "/proc/**" }], ["Glob", { pattern: "/workspace/outputs/**" }], ["Glob", { pattern: "../../.winter/*" }],
+    ] as const) expect({ policy, tool, input, kind: (await outcome(build(state(policy)), tool, { ...input })).kind }).toEqual({ policy, tool, input, kind: "deny" });
+    // In-workspace patterns, relative or absolute, still take the Read row.
+    for (const [tool, input] of [
+      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
+      ["Grep", { pattern: "x", glob: "*.ts" }], ["Grep", { pattern: "x", glob: "../other/*.ts" }],
+    ] as const) expect({ policy, tool, input, kind: (await outcome(build(state(policy)), tool, { ...input })).kind }).toEqual({ policy, tool, input, kind: "allow" });
+  }
   // A search aimed outside the admitted roots is a hard denial even though Read is Allow in every policy.
   expect((await outcome(build(state("bypass")), "Grep", { pattern: "x", path: "/etc" })).kind).toBe("deny");
 });
