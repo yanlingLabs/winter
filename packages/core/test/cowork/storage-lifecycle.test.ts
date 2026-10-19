@@ -63,8 +63,8 @@ const pinned = (f: F) => f.pins.pin(f.workspaceId, digests(), PROOF);
 // the lower layer beneath an old installation overlay."
 test("schema 16 adds the lifecycle tables; they are Cowork authority (a populated pin blocks the rollback), and an empty store still rolls back", () => {
   const f = fixture();
-  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(18);
-  expect(f.db.schemaVersion()).toBe(18);
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(19);
+  expect(f.db.schemaVersion()).toBe(19);
   expect(COWORK_TABLES).toContain("cowork_workspace_images"); expect(COWORK_TABLES).toContain("cowork_exports");
   for (const table of ["cowork_workspace_images", "cowork_exports"]) expect(f.db.db.query("SELECT name FROM sqlite_master WHERE name=?").get(table)).not.toBeNull();
   pinned(f);
@@ -83,18 +83,18 @@ const userVersion = (home: string): number => {
 test("an empty current-schema store downgrades to v7 and to v6, loses the lifecycle tables, and upgrades again cleanly", () => {
   const home = mkdtempSync(join(tmpdir(), "winter-lifecycle-schema-")); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
   let db = openRuntimeStateDb(home); db.close();
-  expect(userVersion(home)).toBe(18);
+  expect(userVersion(home)).toBe(19);
   expect(tablesOf(home)).toEqual(expect.arrayContaining(["cowork_workspace_images", "cowork_exports"]));
-  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 18, to: 7 });
+  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 19, to: 7 });
   expect(userVersion(home)).toBe(7);
   expect(tablesOf(home).filter(name => name.startsWith("cowork_"))).toEqual([]);
   db = openRuntimeStateDb(home);
-  expect(db.schemaVersion()).toBe(18); expect(db.integrity().ok).toBe(true);
+  expect(db.schemaVersion()).toBe(19); expect(db.integrity().ok).toBe(true);
   for (const table of ["cowork_workspace_images", "cowork_exports"]) expect(db.db.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
   db.close();
-  expect(downgradeRuntimeStateToV6(home)).toEqual({ from: 18, to: 6 });
+  expect(downgradeRuntimeStateToV6(home)).toEqual({ from: 19, to: 6 });
   expect(userVersion(home)).toBe(6);
-  db = openRuntimeStateDb(home); expect(db.schemaVersion()).toBe(18); expect(db.integrity().ok).toBe(true); db.close();
+  db = openRuntimeStateDb(home); expect(db.schemaVersion()).toBe(19); expect(db.integrity().ok).toBe(true); db.close();
 });
 
 test("each lifecycle table alone is Cowork authority: one recorded row refuses both downgrades and survives them", () => {
@@ -106,7 +106,7 @@ test("each lifecycle table alone is Cowork authority: one recorded row refuses b
     const db = openRuntimeStateDb(home); db.db.run("PRAGMA foreign_keys=OFF"); db.db.run(insert); db.close();
     expect(() => downgradeCoworkRuntimeStateToV7(home)).toThrow("Cowork authority");
     expect(() => downgradeRuntimeStateToV6(home)).toThrow("Cowork authority");
-    expect(userVersion(home)).toBe(18);
+    expect(userVersion(home)).toBe(19);
     const raw = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
     try { expect(raw.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 1 }); } finally { raw.close(); }
   }

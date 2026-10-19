@@ -71,8 +71,8 @@ const codeOf = (operation: () => unknown): string | undefined => { try { operati
 
 test("schema 17: the version, the tables, the Cowork table list and the closed column set", () => {
   const { rs } = opened();
-  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(18);
-  expect(rs.schemaVersion()).toBe(18);
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(19);
+  expect(rs.schemaVersion()).toBe(19);
   expect(COWORK_TABLES).toContain("cowork_peer_inbox"); expect(COWORK_TABLES).toContain("cowork_peer_inbox_sequences");
   expect([...COWORK_BACKUP_EXCLUDED_TABLES].sort()).toEqual(["cowork_peer_inbox", "cowork_peer_inbox_sequences"]);
   for (const table of COWORK_TABLES) expect(rs.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)).not.toBeNull();
@@ -85,7 +85,7 @@ test("the migration is idempotent: rewinding user_version to 16 and reopening ke
   put(store, 1);
   rs.db.run("PRAGMA user_version=16"); rs.close();
   const again = openRuntimeStateDb(home); cleanup.push(() => again.close());
-  expect(again.schemaVersion()).toBe(18);
+  expect(again.schemaVersion()).toBe(19);
   expect(rawRows(again, "SELECT receipt_id FROM cowork_peer_inbox")).toEqual([{ receipt_id: "r1" }]);
   expect(again.integrity().ok).toBe(true);
 });
@@ -95,7 +95,7 @@ test("a v16 store (no inbox tables) upgrades to the current schema in place and 
   const first = openRuntimeStateDb(home);
   first.db.run("DROP TABLE cowork_peer_inbox"); first.db.run("DROP TABLE cowork_peer_inbox_sequences"); first.db.run("PRAGMA user_version=16"); first.close();
   const second = openRuntimeStateDb(home); cleanup.push(() => second.close());
-  expect(second.schemaVersion()).toBe(18);
+  expect(second.schemaVersion()).toBe(19);
   expect(put(new SqlitePeerInboxStore(second), 1).status).toBe("created");
 });
 
@@ -114,15 +114,15 @@ test("downgrade from the current schema drops the inbox tables cleanly when empt
   put(store, 1, "x"); store.update("r1", 1, { state: "delivered", reason: null, updatedAt: 5 }); store.remove("r1"); // empty inbox, one surviving counter
   expect(rawRows(rs, "SELECT * FROM cowork_peer_inbox_sequences")).toHaveLength(1);
   rs.close();
-  expect(userVersion(home)).toBe(18);
-  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 18, to: 7 });
+  expect(userVersion(home)).toBe(19);
+  expect(downgradeCoworkRuntimeStateToV7(home)).toEqual({ from: 19, to: 7 });
   expect(userVersion(home)).toBe(7);
   expect(tablesOf(home).filter(name => name.startsWith("cowork_"))).toEqual([]);
-  const again = openRuntimeStateDb(home); expect(again.schemaVersion()).toBe(18); expect(again.integrity().ok).toBe(true);
+  const again = openRuntimeStateDb(home); expect(again.schemaVersion()).toBe(19); expect(again.integrity().ok).toBe(true);
   expect(rawRows(again, "SELECT * FROM cowork_peer_inbox")).toEqual([]); again.close();
-  expect(downgradeRuntimeStateToV6(home)).toEqual({ from: 18, to: 6 });
+  expect(downgradeRuntimeStateToV6(home)).toEqual({ from: 19, to: 6 });
   expect(tablesOf(home).filter(name => name.startsWith("cowork_peer"))).toEqual([]);
-  const last = openRuntimeStateDb(home); expect(last.schemaVersion()).toBe(18); last.close();
+  const last = openRuntimeStateDb(home); expect(last.schemaVersion()).toBe(19); last.close();
 });
 
 test("an owed or retained inbox row is Cowork authority: both downgrades refuse and the row survives", () => {
@@ -134,7 +134,7 @@ test("an owed or retained inbox row is Cowork authority: both downgrades refuse 
     rs.close();
     expect(() => downgradeCoworkRuntimeStateToV7(home)).toThrow("Cowork authority");
     expect(() => downgradeRuntimeStateToV6(home)).toThrow("Cowork authority");
-    expect(userVersion(home)).toBe(18);
+    expect(userVersion(home)).toBe(19);
     const raw = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
     try { expect(raw.query("SELECT count(*) AS n FROM cowork_peer_inbox").get()).toEqual({ n: 1 }); } finally { raw.close(); }
   }
@@ -146,9 +146,9 @@ test("the downgrade functions and Migration C's raw handle pin secure_delete too
   expect(read("migration/migrate-c.ts")).toContain('PRAGMA secure_delete = FAST');
 });
 
-test("a schema newer than 18 is refused by the downgrade ladder", () => {
+test("a schema newer than the current one is refused by the downgrade ladder", () => {
   const home = tempHome();
-  const { rs } = opened(home); rs.db.run("PRAGMA user_version=19"); rs.close();
+  const { rs } = opened(home); rs.db.run("PRAGMA user_version=20"); rs.close();
   expect(() => downgradeCoworkRuntimeStateToV7(home)).toThrow("newer-schema");
   expect(() => downgradeRuntimeStateToV6(home)).toThrow("newer-schema");
 });
@@ -397,7 +397,7 @@ test("a backup never carries a body, a record or a counter, and the copy opens a
     const raw = new Database(copy, { readonly: true });
     try {
       for (const table of COWORK_BACKUP_EXCLUDED_TABLES) expect(raw.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
-      expect(raw.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(18);
+      expect(raw.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(19);
       expect(raw.query<{ integrity_check: string }, []>("PRAGMA integrity_check").get()!.integrity_check).toBe("ok");
     } finally { raw.close(); }
     // Not in the file at all: the freed pages are vacuumed away, so the marker is not recoverable from the backup bytes.
@@ -546,13 +546,28 @@ test("doctor restore-backup over garbage bytes restores and keeps the copy, with
   const home = tempHome();
   const { rs } = opened(home);
   const backup = rs.backup(); const dest = rs.path; rs.close();
-  writeFileSync(dest, Buffer.concat([Buffer.from(`${MARKER} not a database `), Buffer.alloc(8_192, 7)]));
+  // The damaged file still carries the inbox table's name in its schema text, so it MAY hold owed bodies: the warning shows.
+  writeFileSync(dest, Buffer.concat([Buffer.from(`${MARKER} not a database CREATE TABLE cowork_peer_inbox `), Buffer.alloc(8_192, 7)]));
   rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
   const original = readFileSync(dest);
   const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
   expectKeptUnscrubbed(result, original, home);
   const reopened = openRuntimeStateDb(home); cleanup.push(() => reopened.close());
   expect(reopened.integrity().ok).toBe(true);
+});
+
+test("doctor restore-backup shows no peer-message warning for an unreadable copy that cannot hold an inbox table, but still keeps the raw copy", async () => {
+  const home = tempHome();
+  const { rs } = opened(home);
+  const backup = rs.backup(); const dest = rs.path; rs.close();
+  writeFileSync(dest, Buffer.concat([Buffer.from("not a database at all "), Buffer.alloc(8_192, 7)])); // no table name anywhere in the bytes
+  rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
+  const original = readFileSync(dest);
+  const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+  expect(result.applied).toBe(true);
+  expect(result.warning).toBeUndefined(); expect(result.detail).not.toContain("WARNING"); expect(result.detail).not.toContain("peer messages");
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(readFileSync(snapshot)).toEqual(original); // evidence untouched
 });
 
 test("a failing rename of the scrubbed copy leaves the raw copy byte-identical, removes only the working copy, warns, and the restore still runs", async () => {

@@ -2,7 +2,7 @@ import type { CoworkWorkspaceEvents } from "../cowork/workspace-events";
 import { COWORK_RPC, COWORK_REMOTE_METHODS, type CoworkMethod } from "@yanlinglabs/winter-protocol";
 import { CoworkWorkspaceService } from "../cowork/service";
 import { CoworkError } from "../cowork/types";
-import type { CoworkSessionDoor } from "../cowork/session-ports";
+import type { CoworkSessionDoor, CoworkSessionDrivers } from "../cowork/session-ports";
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
 import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
@@ -102,7 +102,7 @@ import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { imagesAcceptedBy, rowForTag, toolSearchSupportedBy } from "../runtime-sdk/provider-selection";
-import { StageImageRefusal, stageSessionImage, validateFileRefs, validateImageRefs } from "../agent/stage-image";
+import { StageImageRefusal, stageSessionImage, stagedPathsNamedBy, validateFileRefs, validateImageRefs } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -981,6 +981,24 @@ function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
   }
 }
 
+/** Image and file attachments (`session.stageImage`, `session.send`/`steer`'s `images`/`files`): the session
+ *  modes that take them — code (an absent mode, the store-wide convention) and, since 2026-10-19, dispatch, whose
+ *  model has `Read` and `Bash` too. Chat never does: it has no file tools to open a path with. One predicate for
+ *  the three doors, so they can never disagree with each other (or with the Mac's `composerImageInputEnabled`). */
+export function sessionTakesAttachments(mode: string | null | undefined): boolean {
+  const m = mode ?? "code";
+  return m === "code" || m === "dispatch";
+}
+
+/** The refusal sentence for a session that takes no attachments (`image_session_not_code` / `file_session_not_code`
+ *  — the wire codes keep their names). */
+const ATTACHMENTS_SESSION_MESSAGE = (kind: "images" | "files"): string => `${kind} can only be added to code and dispatch sessions`;
+
+/** How much of a session's log `session.stageImage`'s prune reads for the staged copies its messages still name
+ *  (`pruneStagedImages`'s `keep`): the RECENT past, one bounded read — never the whole log of a session that
+ *  lives for months (Dispatch). */
+const STAGED_IMAGE_KEEP_TAIL_BYTES = 4 * 1024 * 1024;
+
 /** WS-21 (spec §4.4): the MCP doors speak claude's three scopes. `local` and `project` name a project,
  *  so they need the caller's `cwd`. The local entry in `sdk/.winter.json` is keyed by `localScopeKeyFor`
  *  (review I5 — exactly the run home's key); the project file lives at the project root the run home reads
@@ -1242,24 +1260,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
 
   /**
-   * Code-mode image input: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
-   * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
-   * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
-   * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
-   * so a remote `images` is never one it could have meant. A non-code session refuses
-   * `image_session_not_code`; every entry is then held to `validateImageRefs` (a file this session
-   * staged, or the user's own image file that the Read tool may itself read; `n` unique and in `text`).
+   * The model-capability BACKSTOP for attached images: the session's CURRENT model, by the precedence
+   * the session's own driver spawns it with (`session-driver.ts`'s `optionsFor`) — its own override,
+   * else, for DISPATCH, the live `pinsFor(settings).dispatch` (`session.setModel` refuses a dispatch
+   * target, so the pin is what it runs), and for code the daemon's live default — for a model switched
+   * after the client attached the image. No catalog row at all refuses too: there is no evidence the
+   * model reads an image. Run by `session.stageImage` and by `session.send`/`session.steer` carrying
+   * `images` (a dragged file is never staged, so the send is the only door its image passes through).
    */
-  /**
-   * The model-capability BACKSTOP for code-mode images: the session's CURRENT model, by the same
-   * precedence `assertEffortSelectable` resolves it (its own override, else the daemon's live
-   * default) — for a model switched after the client attached the image. No catalog row at all
-   * refuses too: there is no evidence the model reads an image. Run by `session.stageImage` and by
-   * `session.send`/`session.steer` carrying `images` (a dragged file is never staged, so the send is
-   * the only door its image passes through).
-   */
-  function assertModelAcceptsImages(meta: { model?: string | null | undefined }): void {
-    const model = meta.model ?? opts.liveModel?.() ?? "";
+  function assertModelAcceptsImages(meta: { model?: string | null | undefined; mode?: string | null | undefined }): void {
+    const model = meta.model ?? (meta.mode === "dispatch" ? pinsFor(liveSettingsFor(opts)).dispatch : opts.liveModel?.()) ?? "";
     // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
     // answer — "this model doesn't support images" would name a model that does not exist.
     if (model === "" || model === UNSTATED_TAG) {
@@ -1270,13 +1280,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
+  /**
+   * Image and file attachments: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
+   * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
+   * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
+   * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
+   * so a remote `images` is never one it could have meant. A session that takes no attachments (chat —
+   * `sessionTakesAttachments`) refuses `image_session_not_code`; every entry is then held to
+   * `validateImageRefs` (a file this session staged, or the user's own image file that the Read tool may
+   * itself read; `n` unique and in `text`).
+   */
   function checkedImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined, role: string | undefined): UserMessageImageRef[] | undefined {
     if (images === undefined || images.length === 0) return undefined;
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be sent by a local client", { code: IMAGE_REFERENCE_INVALID });
     let meta: ReturnType<SessionStore["meta"]>;
     try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-    if ((meta.mode ?? "code") !== "code") {
-      throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+    if (!sessionTakesAttachments(meta.mode)) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, ATTACHMENTS_SESSION_MESSAGE("images"), { code: IMAGE_SESSION_NOT_CODE });
     }
     assertModelAcceptsImages(meta);
     try {
@@ -1288,9 +1308,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
 
   /**
-   * Code-mode file attachments (2026-10-13): `session.send`/`session.steer`'s `files`, checked beside the
+   * File attachments (code 2026-10-13, dispatch 2026-10-19): `session.send`/`session.steer`'s `files`, checked beside the
    * images and BEFORE anything is resumed or appended. Same doors as `checkedImageRefs` — a local client
-   * only, a code session only — but no model-capability check (the model is given a path, as text) and
+   * only, a code or dispatch session only — but no model-capability check (the model is given a path, as text) and
    * every entry held to `validateFileRefs` (any file or folder the Read tool may read). Images and files together
    * are at most `USER_MESSAGE_ATTACHMENTS_MAX` (`imageCount` is the message's images), which keeps a message's
    * paths inside the per-event cap.
@@ -1300,8 +1320,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be sent by a local client", { code: FILE_REFERENCE_INVALID });
     let meta: ReturnType<SessionStore["meta"]>;
     try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-    if ((meta.mode ?? "code") !== "code") {
-      throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be added to code sessions", { code: FILE_SESSION_NOT_CODE });
+    if (!sessionTakesAttachments(meta.mode)) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, ATTACHMENTS_SESSION_MESSAGE("files"), { code: FILE_SESSION_NOT_CODE });
     }
     if (files.length + imageCount > USER_MESSAGE_ATTACHMENTS_MAX) {
       throw new RpcFailure(ERR.INVALID_PARAMS, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, { code: FILE_REFERENCE_INVALID });
@@ -1448,6 +1468,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       pendingReaps.add(cancel);
     }
     return { sessionId, trusted };
+  }
+
+  /** Session door D4b: a stored Cowork row's driver table, ONLY when a door was passed (tests only until the flip). Without
+   *  one this is undefined and every Cowork refusal below stays exactly as it was. The stored mode only routes: the
+   *  door's drivers re-read the host binding, which alone is authority (a row with no binding refuses there). */
+  function coworkDriversOf(sessionId: string): CoworkSessionDrivers | undefined {
+    const door = opts.coworkSessions;
+    if (door === undefined) return undefined;
+    let stored: string | undefined;
+    try { stored = opts.store.meta(sessionId).mode; } catch { return undefined; }
+    return stored === "cowork" ? door.drivers : undefined;
   }
 
   /** P8c-14: `session.send`/`session.interrupt`/`session.compact` gate on this BEFORE resuming —
@@ -2354,7 +2385,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const providerId = opts.records?.get(s.sessionId)?.providerId;
           // ComputerV2 wake triggers (2026-10-12): the "waiting for you" mark — how many triggers the session has armed.
           const wakesArmed = opts.computerUse?.wakesArmed?.(s.sessionId) ?? 0;
-          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}) };
+          // Session door D4b: a Cowork row's safe workspace reference, from the host binding (never the log's display fact).
+          // A row whose reference cannot be read lists without it: one bad row never fails the whole list.
+          let cowork: { workspaceId: string; projectId: string | null } | undefined;
+          if (s.mode === "cowork") { try { cowork = opts.cowork?.records.conversationRef(s.sessionId); } catch { cowork = undefined; } }
+          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}), ...(cowork === undefined ? {} : { cowork }) };
           if (!participatesInActivity(s.mode)) return { ...s, signals, ...rowFields };
           const dirs = opts.store.dirs(s.sessionId);
           return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...rowFields };
@@ -2514,6 +2549,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
         // under this client's name exactly as `hub.send` would, then begins the turn (P8b-5).
+        // Session door D4b: a Cowork conversation runs on the door's drivers (only when a door exists). Same attachment
+        // check first; images and files were already refused above (they are Code-only).
+        const coworkSend = coworkDriversOf(p.sessionId);
+        if (coworkSend !== undefined) {
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
+          try {
+            const session = coworkSend.get(p.sessionId) ?? await coworkSend.ensure(p.sessionId);
+            return { seq: (await session.send(p.text, socket.data.clientName)).seq };
+          } catch (err) { rpcFromWinterRefusal(err); }
+        }
         if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           // The attachment check FIRST (the same condition and message `hub.send` throws for), so a
           // client attached elsewhere can never trigger a resume-spawn that is then refused.
@@ -2571,6 +2618,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionSteerParams, params);
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
         const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole, images?.length ?? 0);
+        // A Cowork steer reaches only a LIVE driver: `send` is the one door that may start a guest, so a steer never boots one.
+        const coworkSteer = coworkDriversOf(p.sessionId);
+        if (coworkSteer !== undefined) {
+          const live = coworkSteer.get(p.sessionId);
+          if (live === undefined) return { ok: true, injected: false };
+          try { return { ok: true, injected: (await live.steer(p.text)).injected }; } catch (err) { rpcFromWinterRefusal(err); }
+        }
         {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
@@ -2586,6 +2640,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
+        // Session door D4b: a Cowork conversation's interrupt is its driver's (which refuses typed until the guest carries one);
+        // nothing live means nothing was running, and nothing is started to say so.
+        const coworkInterrupt = coworkDriversOf(p.sessionId);
+        if (coworkInterrupt !== undefined) {
+          const live = coworkInterrupt.get(p.sessionId);
+          if (live === undefined) return { ok: true, wasRunning: false };
+          try { return { ok: true, ...(await live.interrupt()) }; } catch (err) { rpcFromWinterRefusal(err); }
+        }
         // P8b Task 16: only a LIVE driver has anything to interrupt; a resumable Winter session has
         // no child, so the answer is "nothing was running" without spawning one to say so.
         {
@@ -2636,6 +2698,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // text typed into the Mac's composer. The outcome lands in the log as a `continuity_warning`
         // (`compacted` / `compaction_failed`, projector/index.ts). Until 0.0.4's carry this was a typed
         // `not_supported_on_winter_leg`; the runtime has had the built-in all along.
+        // A Cowork conversation cannot compact (the host-query guest refuses slash text): refused typed, with a door too.
+        if (coworkDriversOf(p.sessionId) !== undefined) throw coworkSessionUnsupported("cowork");
         if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           const instructions = p.instructions?.trim() ?? "";
           const text = instructions.length > 0 ? `/compact ${instructions}` : "/compact";
@@ -3800,16 +3864,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionStageImageParams, params);
         let meta: ReturnType<SessionStore["meta"]>;
         try { meta = opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-        // `mode ?? "code"` — an absent mode IS code, the store-wide convention.
-        if ((meta.mode ?? "code") !== "code") {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+        // Code (an absent mode IS code, the store-wide convention) and dispatch; never chat.
+        if (!sessionTakesAttachments(meta.mode)) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, ATTACHMENTS_SESSION_MESSAGE("images"), { code: IMAGE_SESSION_NOT_CODE });
         }
         // The backstop on the session's CURRENT model (see `assertModelAcceptsImages`).
         assertModelAcceptsImages(meta);
         try {
           // `imagesOnSend`: this daemon takes `images` on `session.send`/`session.steer`, so the
-          // client keeps `[Image #n]` in the text and names the paths beside it.
-          return { path: stageSessionImage({ sessionId: p.sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }), imagesOnSend: true as const };
+          // client keeps `[Image #n]` in the text and names the paths beside it. In DISPATCH only — ONE session that
+          // lives for months — staging first lets go of the session's stale staged copies (`pruneStagedImages`), never
+          // one a recent message still names. A code session's copies are never pruned: it ends, and an old one's
+          // clipboard screenshots may be the only copy its thumbnails and Read have.
+          const sessionId = p.sessionId;
+          const keep = (): Set<string> => stagedPathsNamedBy(opts.store.readTail(sessionId, STAGED_IMAGE_KEEP_TAIL_BYTES));
+          const staging = meta.mode === "dispatch" ? { keep } : {};
+          return { path: stageSessionImage({ sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }, staging), imagesOnSend: true as const };
         } catch (err) {
           if (err instanceof StageImageRefusal) {
             throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });

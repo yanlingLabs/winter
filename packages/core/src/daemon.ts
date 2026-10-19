@@ -1,5 +1,6 @@
 import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents } from "./cowork/workspace-events";
 import { createMacCoworkHost } from "./cowork/mac-host";
+import { coworkNativeProductionEnvironment } from "./cowork/native-activation";
 import { createCoworkNativeWiring, type CoworkNativeWiring, type CoworkNativeWiringOptions } from "./cowork/native-wiring";
 import { CoworkRepository } from "./cowork/repository";
 import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
@@ -380,7 +381,7 @@ function describeCoworkBootError(error: unknown): string {
   return typeof code === "string" ? code : (error as Error | undefined)?.name ?? "error";
 }
 
-export async function startDaemon(opts: {
+async function startDaemonInner(onEmbeddedHost: (host: { shutdown(budgetMs?: number): Promise<void> }) => void, opts: {
   /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
   coworkHost?: CoworkHostPorts;
   /** Isolated clock for host schedule metadata tests. */
@@ -1651,6 +1652,7 @@ export async function startDaemon(opts: {
   // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
   // frames still pass through the session store and `runtime-state.db` on the way out).
   const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), home: winterHome, log: (line) => console.error(`runtime-sdk: ${line}`) });
+  onEmbeddedHost(embeddedSessions);
   // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
   // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
   {
@@ -3041,9 +3043,11 @@ export async function startDaemon(opts: {
   // N2 S7: the native worker host's wiring. INERT: building it builds no host, process, socket, timer or file (the host appears on the
   // first start a caller asks for, from an injected environment that production never has). The Cowork service gets it as its
   // `native` port only when a caller injected an environment, so the production service refuses exactly as before.
+  // The production environment comes ONLY through the activation seam (cowork/native-activation.ts), which answers undefined until the owner flips it.
+  const nativeEnvironment = opts.coworkNative?.environment ?? (runtime ? coworkNativeProductionEnvironment(() => ({ home: winterHome, db: runtime.db, records: coworkRecords!, env: process.env })) : undefined);
   const coworkNative: CoworkNativeWiring | undefined = runtime
-    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative }) : undefined;
-  const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;
+    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative, ...(nativeEnvironment ? { environment: nativeEnvironment } : {}) }) : undefined;
+  const coworkNativePort = nativeEnvironment ? coworkNative : undefined;
   const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
   const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
   coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
@@ -3334,6 +3338,9 @@ export async function startDaemon(opts: {
       // ended (then aborted) every tracked session, so an ordinary Worker has closed by now; this bounds
       // a straggler (`EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). Its iteration's tail writes the
       // generation's end into `runtime-state.db`, which is why this is not left to process exit.
+      // A daemon with no runtime SDK still built the embedded host, and the host's storage-policy consumer is process-global: its
+      // shutdown() unregisters it synchronously (nothing is live without a runtime), so call it here too and keep stop() synchronous.
+      if (runtimeSdk === undefined) void embeddedSessions.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {});
       const winterDone = runtimeSdk === undefined
         ? undefined
         : runtimeSdk.dispose()
@@ -3354,6 +3361,14 @@ export async function startDaemon(opts: {
       return settled === undefined ? closeRest() : settled.then(closeRest);
     },
   };
+}
+
+/** Starts the daemon. A start that THROWS after the embedded host registered its (process-global) storage-policy consumer would leave that
+ *  consumer behind with no handle to stop it, so the failure path shuts the host down. */
+export async function startDaemon(opts: Parameters<typeof startDaemonInner>[1] = {}): Promise<RunningDaemon> {
+  let embedded: { shutdown(budgetMs?: number): Promise<void> } | undefined;
+  try { return await startDaemonInner(host => { embedded = host; }, opts); }
+  catch (error) { void embedded?.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {}); throw error; }
 }
 
 // Direct execution: `bun run src/daemon.ts` (also the compiled binary's `daemon run` path).

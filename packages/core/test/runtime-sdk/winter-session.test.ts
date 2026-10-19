@@ -193,7 +193,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
         const rec = { session, detached: 0, refreshed: 0 };
         attachments.push(rec);
         return { address: `winter-agent:session:${session.backendSessionId}`, ready: Promise.resolve(), refresh: () => { rec.refreshed++; }, detach: () => { rec.detached++; } };
-      }) as unknown as WinterSessionDeps["messaging"]["attach"],
+      }) as unknown as NonNullable<WinterSessionDeps["messaging"]>["attach"],
     },
     records: {
       bumpGeneration: () => ({ generation: ++h.records.generation }),
@@ -392,6 +392,15 @@ describe("startWinterSession — one incarnation", () => {
     expect(h.attachments[0]!.session).toMatchObject({ sessionId: "s_x", backendSessionId: "be-x", mode: "chat", generation: 1 });
     expect(h.attachments[0]!.session.query).toBe(h.q() as unknown as Query);
     expect(h.attachments[0]!.session.status?.()).toBe("idle");
+  });
+
+  test("a Cowork session given the router's messaging still never attaches it: its system/init records the facts and attaches nothing", async () => {
+    const h = harness({ mode: "cowork" });
+    await h.session.open();
+    h.q().emit(init(h.q().options, ["Read"]));
+    await h.settled();
+    expect(h.session.init).toEqual({ sessionId: "be-x", model: "winter-test/echo", tools: ["Read"] });
+    expect(h.attachments).toHaveLength(0);
   });
 
   test("send: user_message (the client's name), then beginTurn's turn_started, then the push; the result closes the turn", async () => {
@@ -1535,6 +1544,24 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
     expect(unconsumedUserMessages(h.events)).toEqual([]);    // the folded text was read: a resume owes nothing
     // and the session takes the next message as a fresh turn at once
     expect((await h.session.send("C", "cli")).queued).toBe(false);
+  });
+
+  test("Dispatch (2026-10-19): a steer with an image and a file folded into the running turn reaches the child with the PATHS; the log keeps the placeholders; nothing is owed after", async () => {
+    const h = harness({ mode: "dispatch" });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "orb");
+    const images = [{ n: 1, path: "/tmp/winter-session-s_x/images/image_1.png" }];
+    const files = [{ n: 1, path: "/Users/me/Notes/plan.md" }];
+    expect((await h.session.steer("look at [Image #1] with [File #1]", "orb", images, files)).injected).toBe(true);
+    expect(h.q().pushed).toEqual(["A", "look at /tmp/winter-session-s_x/images/image_1.png with /Users/me/Notes/plan.md"]);
+    fq(h).emitFold(1);
+    await h.settled();
+    const steered = h.events.filter((e) => e.type === "user_message")[1] as Extract<SessionEvent, { type: "user_message" }>;
+    expect(steered).toMatchObject({ text: "look at [Image #1] with [File #1]", clientName: "orb", images, files });
+    h.q().emit(assistant("done")); h.q().emit(result());
+    await h.settled();
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
 
   test("a resume after a fold re-pushes nothing — even when the child died before the running turn's result", async () => {

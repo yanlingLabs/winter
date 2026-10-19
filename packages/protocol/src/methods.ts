@@ -391,7 +391,7 @@ export const SessionHistoryResult = z.object({
   oldestSeq: z.number().int().nullable(), // seq of events[0]; null iff events is empty
 });
 
-/** Code-mode image input: `text` keeps its `[Image #n]` placeholders (what the user's bubble shows)
+/** Image input (code and, since 2026-10-19, dispatch): `text` keeps its `[Image #n]` placeholders (what the user's bubble shows)
  *  and `images` names each one's file — the daemon hands the MODEL the text with every placeholder
  *  replaced by its path, and stores the `user_message` with the placeholders and `images`. Every
  *  entry is checked before anything is appended (typed refusals, never echoing a path). A path is one
@@ -408,15 +408,15 @@ export const SessionHistoryResult = z.object({
  *      runtime's Read tool prepares it for the model. A path with a control or direction-changing
  *      character, or leading/trailing whitespace (Read trims it), is refused. A file the daemon cannot
  *      read answers `image_file_unreadable`.
- *  `n` is unique and `[Image #n]` appears in `text`; a non-code session refuses
- *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
- *  images. The array length is checked by the handler (typed), not here. */
+ *  `n` is unique and `[Image #n]` appears in `text`; a session that takes no attachments (chat — code and,
+ *  since 2026-10-19, dispatch do) refuses `image_session_not_code`, a non-local caller `image_reference_invalid`.
+ *  Omitted (or empty) = no images. The array length is checked by the handler (typed), not here. */
 export const SessionSendImagesParam = z.array(UserMessageImageRef).optional();
-/** Code-mode file attachments (2026-10-13, hello feature `DAEMON_FEATURE_ATTACHMENT_FILES`): `text` keeps its
+/** File attachments (code 2026-10-13, hello feature `DAEMON_FEATURE_ATTACHMENT_FILES`; dispatch 2026-10-19): `text` keeps its
  *  `[File #n]` placeholders and `files` names each one's path — the user's own file or folder, any type. The
  *  daemon hands the MODEL the text with every placeholder replaced by its path and stores the `user_message`
  *  with the placeholders and `files`. Every entry is checked before anything is appended (typed refusals,
- *  never echoing a path): a local caller only, a code session only (`file_session_not_code`), an absolute
+ *  never echoing a path): a local caller only, a code or dispatch session only (`file_session_not_code`), an absolute
  *  path with no control or direction-changing character and no edge whitespace, that resolves (`realpath`)
  *  to a regular file or a directory (`file_unreadable` with `data.n` when it cannot be resolved), outside the
  *  runtime Read tool's read-deny set; `n` unique and `[File #n]` in `text`; at most `USER_MESSAGE_FILES_MAX`.
@@ -902,10 +902,11 @@ export const ComputerUseWakesCancelParams = z.object({
 });
 export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), cancelled: z.boolean() });
 
-/** Code-mode image input (2026-09-29, raw paths 2026-10-10): a composer image that has NO file of its
+/** Image input (code 2026-09-29, raw paths 2026-10-10; dispatch 2026-10-19): a composer image that has NO file of its
  *  own (clipboard data, a screenshot in the clipboard), STAGED as it is into the session's own temp
  *  directory (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created
- *  atomically and never over an existing file, mode 0600); the client names the returned absolute
+ *  atomically and never over an existing file, mode 0600; staging first removes the session's staged copies
+ *  older than two weeks that no recent message names — `STAGED_IMAGE_RETENTION_MS`); the client names the returned absolute
  *  path beside its `[Image #n]` placeholder in `session.send`/`session.steer`'s `images`, and the
  *  daemon gives the model the text with the path in place — the model then reads it. The bytes are
  *  written UNCHANGED: nothing downscales or re-encodes them here (a client only downscales an image
@@ -914,11 +915,12 @@ export const ComputerUseWakesCancelResult = z.object({ ok: z.literal(true), canc
  *
  *  LOCAL role only (never remote-allowlisted; an explicit harness-role check like `elicitation.url`).
  *  Every refusal is typed in `data.code`:
- *    - `image_session_not_code` — the session is not a code session (`INVALID_PARAMS`);
+ *    - `image_session_not_code` — the session takes no attachments: chat (`INVALID_PARAMS`; code and dispatch do);
  *    - `image_session_no_model` — the session has no model at all (`unstated/unstated`, or none and
  *      no live default), message `IMAGE_SESSION_NO_MODEL_MESSAGE` (`INVALID_PARAMS`);
- *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
- *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
+ *    - `image_input_unsupported` — the session's CURRENT model row does not accept images (its own model,
+ *      else — dispatch — the live `pins.dispatch`, else the live default), with the exact message
+ *      `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
  *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` decoded (what one request line can
  *      carry), message `IMAGE_TOO_LARGE_MESSAGE`. No pixel limit is applied: the runtime Read tool
@@ -988,7 +990,7 @@ export const IMAGE_FILE_UNREADABLE = "image_file_unreadable";
 /** `session.send`/`session.steer`'s `files` refusals (2026-10-13). `file_reference_invalid`: a caller other
  *  than a local client, a relative or unsafe path, a path in the Read tool's read-deny set, something that is
  *  neither a regular file nor a directory, a repeated `n`, an `n` with no `[File #n]` in the text, or too many
- *  entries. `file_session_not_code`: the session is not a code session. `file_unreadable` (`data.n`): the path
+ *  entries. `file_session_not_code`: the session takes no attachments (chat; code and dispatch do). `file_unreadable` (`data.n`): the path
  *  does not resolve — it moved, or macOS keeps its folder from the daemon. */
 export const FILE_REFERENCE_INVALID = "file_reference_invalid";
 export const FILE_SESSION_NOT_CODE = "file_session_not_code";
