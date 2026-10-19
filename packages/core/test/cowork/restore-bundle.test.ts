@@ -258,6 +258,21 @@ test("a restore is not an un-archive and not an import: an archived workspace re
   await failsWith(g.restorer().restore(restoreInput(ex.path)), "generation_unknown");
 });
 
+test("a live image that is a link, a workspace folder with loose permissions, and a bundle image with loose permissions", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  const real = f.image("data"); const kept = join(f.base, "kept.img"); cpSync(real, kept); unlinkSync(real); symlinkSync(kept, real);
+  await failsWith(f.restorer().restore(restoreInput(exported.path)), "restore_conflict");
+  expect(lstatSync(real).isSymbolicLink()).toBe(true); expect(f.confirmations).toHaveLength(0);
+  const g = await fixture(); const ex = await g.exportOnce("b");
+  require("node:fs").chmodSync(g.dir, 0o755);
+  await failsWith(g.restorer().restore(restoreInput(ex.path)), "recovery_required");
+  const h = await fixture(); const eh = await h.exportOnce("c");
+  for (const image of ["data.ext4", "env.ext4"]) require("node:fs").chmodSync(join(eh.path, image), 0o644);
+  await h.restorer().restore(restoreInput(eh.path));
+  expect(statSync(h.image("data")).mode & 0o777).toBe(0o600); expect(statSync(h.image("environment")).mode & 0o777).toBe(0o600);
+  h.volumes.claim(h.request); // and the volume layer, which requires 0600, accepts them
+});
+
 test("the restore reads the bundle only: it creates and removes nothing inside it", async () => {
   const f = await fixture(); const exported = await f.exportOnce("backup");
   const listing = () => readdirSync(exported.path, { recursive: true }).map(String).sort();

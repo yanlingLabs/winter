@@ -189,9 +189,9 @@ test("hostile or malformed chunk replies are refused with no guest text in the e
   const cases: Array<[string, (n: number, chunk: PublishBundleChunk) => Partial<PublishBundleChunk>]> = [
     ["wrong offset", (_n, chunk) => ({ offset: chunk.offset + 1 })],
     ["gap", (_n, chunk) => ({ nextOffset: chunk.nextOffset + 1 })],
-    ["empty chunk", () => ({ content: new Uint8Array(0), nextOffset: 0 })],
+    ["empty chunk", (_n, chunk) => ({ content: new Uint8Array(0), nextOffset: chunk.offset, eof: false })],
     ["early eof", (_n, chunk) => ({ eof: !chunk.eof })],
-    ["oversized chunk", (_n, chunk) => ({ content: new Uint8Array(chunk.content.length + 5), nextOffset: chunk.offset + chunk.content.length + 5 })],
+    ["oversized chunk", (_n, chunk) => ({ content: new Uint8Array(chunk.content.length + 5), nextOffset: chunk.offset + chunk.content.length + 5, eof: false })],
     ["foreign workspace", () => ({ workspaceId: "other" })],
     ["foreign path", () => ({ relativePath: "elsewhere.bundle" })],
     ["foreign incarnation", () => ({ incarnationId: "incarnation-two" })],
@@ -205,6 +205,24 @@ test("hostile or malformed chunk replies are refused with no guest text in the e
     expect(f.operations()).toBe(0);
   }
 }, 30_000);
+
+test("a stat reply that names another workspace, path or incarnation is refused before any read", async () => {
+  for (const lie of [{ workspaceId: "other" }, { relativePath: "elsewhere.bundle" }, { incarnationId: "incarnation-two" }, { sessionId: "other-session" }, { locationId: "other-location" }, { sourceRevision: 99 }, { kind: "directory" as never }]) {
+    const f = await fixture(); f.guest.onStat = () => lie;
+    await refused(f.service.publish(f.caller, f.input), "bundle_unavailable"); expect(f.guest.readCalls).toHaveLength(0);
+  }
+});
+
+test("caller ids are validated for every verb", async () => {
+  const f = await fixture();
+  for (const bad of [{ principalId: "bad id" }, { sessionId: "" }, { taskId: "x/y" }]) {
+    await refused(f.service.publish({ ...f.caller, ...bad }, f.input), "invalid_request");
+    expect(() => f.service.status({ ...f.caller, ...bad }, "request-one")).toThrow(GitPublicationError);
+  }
+  await refused(f.service.publish(f.caller, { ...f.input, requestId: "bad id" }), "invalid_request");
+  await refused(f.service.publish(f.caller, { ...f.input, sourceId: "" }), "invalid_request");
+  expect(f.guest.locateCalls).toHaveLength(0);
+});
 
 test("an empty bundle file is refused at stat", async () => {
   const f = await fixture(); f.guest.files.set(publishBundlePath("request-one"), new Uint8Array(0));

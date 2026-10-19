@@ -29,6 +29,7 @@ test("clone and sparse copy produce identical bytes, strip every xattr, and keep
     // A destination that exists is never opened for writing: EEXIST, content untouched.
     writeFileSync(join(dir, "taken"), "mine");
     await expect(copyImageFile(fd, join(dir, "taken"))).rejects.toThrow();
+    await expect(copyImageFile(fd, join(dir, "taken"), { allowClone: false })).rejects.toThrow();
     expect(readFileSync(join(dir, "taken"), "utf8")).toBe("mine");
   } finally { closeSync(fd); }
 });
@@ -55,6 +56,9 @@ test("hashing and stamps: the stream hash is sha256 of exactly the first N bytes
     await expect(hashDescriptor(fd, 1000)).rejects.toThrow(ExportIoError); // a short source is an error, never a silent partial hash
     const controller = new AbortController(); controller.abort();
     await expect(hashDescriptor(fd, 5, controller.signal)).rejects.toMatchObject({ reason: "cancelled" });
+    // A change that moves only the change time (an xattr or a mode) still changes the stamp.
+    const beforeMeta = stampDescriptor(fd); await new Promise(resolve => setTimeout(resolve, 20)); setXattr(path, "com.example.b", "1");
+    expect(stampDescriptor(fd)).not.toBe(beforeMeta); stripExtendedAttributes(fd);
     setXattr(path, "com.example.a", "1"); expect(hasExtendedAttributes(fd)).toBe(true); stripExtendedAttributes(fd); expect(hasExtendedAttributes(fd)).toBe(false);
   } finally { closeSync(fd); }
 });

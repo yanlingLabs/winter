@@ -71,6 +71,7 @@ test("a symlink, hard link or FIFO in a shared root refuses the whole export; th
     (f: Fixture) => linkSync(join(f.shared, "memory/notes.md"), join(f.shared, "memory/notes-hard.md")),
     (f: Fixture) => mkfifoSyncForTest(join(f.shared, "outputs/session-one/pipe")),
     (f: Fixture) => symlinkSync(join(f.shared, "memory"), join(f.shared, "outputs/loop")),
+    (f: Fixture) => writeFileSync(join(f.shared, "memory", "bad\nname.md"), "x"),
   ]) {
     const f = await fixture(); make(f);
     await failsWith(f.exportOnce("unsafe"), "bundle_unsafe");
@@ -83,6 +84,13 @@ test("a symlink, hard link or FIFO in a shared root refuses the whole export; th
   await (await import("./export-fs")).renameForTest(memory, join(g.base, "moved/memory")); symlinkSync(target, memory);
   await failsWith(g.exportOnce("rootlink"), "bundle_unsafe");
   expect(readdirSync(g.destination)).toEqual([]);
+});
+
+test("a shared folder that is not where the record says it is, because a component was replaced by a link, is refused", async () => {
+  const f = await fixture(); const moved = join(f.base, "moved-shared");
+  await (await import("./export-fs")).renameForTest(f.shared, moved); symlinkSync(moved, f.shared);
+  await failsWith(f.exportOnce("moved"), "bundle_unsafe");
+  expect(readdirSync(f.destination)).toEqual([]);
 });
 
 test("the shared snapshot is two passes: a file that changes between them refuses the export", async () => {
