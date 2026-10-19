@@ -11,10 +11,12 @@ import type { CoworkNativeConversation } from "../../src/cowork/native/protocol"
 import { COWORK_READINESS, type CoworkReadinessKey } from "../../src/cowork/session-profile";
 import type { CoworkProviderScope } from "../../src/cowork/provider-broker";
 import type { LegSession } from "../../src/runtime-sdk/session-driver";
+import type { GuestEpoch } from "../../src/cowork/types";
 import type {
   CoworkGuestConversation, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestReadinessKey, CoworkGuestStartRequest,
-  CoworkGuestStopOutcome, CoworkLegSession, CoworkProviderRouteScope,
+  CoworkGuestStarter, CoworkGuestStopOutcome, CoworkLegSession, CoworkProviderRouteScope,
 } from "../../src/cowork/session-ports";
+import type { CoworkGuestStartPort } from "../../src/cowork/service";
 
 /** Exactly the same type (readonly-ness included). */
 type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
@@ -34,13 +36,17 @@ const PINS = {
   readinessKeys: true as Same<CoworkGuestReadinessKey, CoworkReadinessKey>,
   providerScope: true as Mutual<CoworkProviderRouteScope, CoworkProviderScope>,
   providerScopeKeys: true as Same<keyof CoworkProviderRouteScope, keyof CoworkProviderScope>,
-  legSession: true as Same<Omit<CoworkLegSession, "mode">, Omit<LegSession, "mode">>,
+  legSession: true as Same<Omit<CoworkLegSession, "mode" | "coworkEpoch">, Omit<LegSession, "mode">>,
   legSessionMode: true as Same<CoworkLegSession["mode"], "cowork">,
+  // D3: the peer inbox's `PeerEpoch` (`Pick<GuestEpoch, "incarnationId" | "leaseEpoch">`), absent before the guest starts.
+  legSessionEpoch: true as Mutual<CoworkLegSession["coworkEpoch"], Pick<GuestEpoch, "incarnationId" | "leaseEpoch"> | undefined>,
+  // D3: the driver's starter IS a service start port (S7B's `CoworkNativeWiring` implements the port, #87).
+  starterIsStartPort: true as ([CoworkGuestStarter] extends [CoworkGuestStartPort] ? true : false),
 } satisfies Record<string, true>;
 
 test("every structural copy is assignable both ways to its native twin (the compile-time pins above)", () => {
   expect(Object.values(PINS).every(value => value === true)).toBe(true);
-  expect(Object.keys(PINS)).toHaveLength(13);
+  expect(Object.keys(PINS)).toHaveLength(15);
 });
 
 test("the readiness keys are the profile's own, at runtime too", () => {

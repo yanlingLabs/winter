@@ -127,7 +127,7 @@ test("forged objects, clones and DTOs are refused by capture and by prepare", ()
   const forged: unknown[] = [structuredClone(launch), JSON.parse(JSON.stringify(launch)), { ...launch }, null, "launch", [], {},
     frozen({ ...launch, limits: { ...launch.limits } }), frozen({ ...launch, scope: { ...launch.scope, homeId: "home_foreign" } }),
     frozen({ ...launch, scope: { ...launch.scope, backendSessionId: "backend-other" } }), frozen({ ...launch, runtime: { ...launch.runtime, sessionId: "trusted-other" } }),
-    frozen({ ...launch, runtime: { ...launch.runtime, cwd: `${f.root}/elsewhere` } }), frozen({ ...launch, source: { ...launch.source, revision: launch.source.revision + 1 } }),
+    frozen({ ...launch, runtime: { ...launch.runtime, cwd: `${f.root}/elsewhere` } }), frozen({ ...launch, source: { ...launch.source!, revision: launch.source!.revision + 1 } }),
     frozen({ ...launch, capabilities: { ...launch.capabilities, hostServices: ["git.publish", "extra.service"] } }),
     frozen({ ...launch, scope: Object.defineProperty({ ...launch.scope }, "workspaceId", { get: () => f.workspaceId, enumerable: true }) }),
     frozen({ ...launch, protocolVersion: 2 }), frozen({ ...launch, runtime: { ...launch.runtime, executionPosture: "host" } }),
@@ -144,7 +144,7 @@ test("a launch naming another source of the same workspace is refused by the bin
   const other = f.records.addSource({ principalId: "fixture", requestId: "add-second", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId,
     { kind: "githubRepository", label: "second", access: "read-write", detail: { repositoryId: "repo-two", authorityRef: "private-authority", initialRef: "main" } }).value;
   const otherRoot = coworkGuestSourceRoot(other);
-  const forged = Object.freeze({ ...launch, source: Object.freeze({ ...launch.source, sourceId: other.sourceId, revision: other.revision, access: other.access }),
+  const forged = Object.freeze({ ...launch, source: Object.freeze({ ...launch.source!, sourceId: other.sourceId, revision: other.revision, access: other.access }),
     runtime: Object.freeze({ ...launch.runtime, cwd: `${otherRoot}/directory` }) });
   expect(otherRoot).not.toBe(f.root); expect(code(() => captureCoworkGuestOwner(f.deps, forged))).toBe("stale_acknowledgment");
   expect(() => captureCoworkGuestOwner(f.deps, launch)).not.toThrow();

@@ -296,12 +296,30 @@ describe("3. source pins: the switch stays off", () => {
     const daemon = "core/src/daemon.ts";
     // session-ports.ts names the option only in its header comment; the protocol names the door only in a comment.
     const naming = (needle: string) => sources.filter(path => readFileSync(path, "utf8").includes(needle)).map(shown).filter(name => name !== daemon).sort();
-    expect(naming("coworkSessions")).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts"]);
+    // The OPTION is judged in code, not prose (D3): a module may explain the switch in a comment without wiring it.
+    const namingInCode = (needle: string) => sources.filter(path => code(path).includes(needle)).map(shown).filter(name => name !== daemon).sort();
+    expect(namingInCode("coworkSessions")).toEqual(["core/src/ipc/server.ts"]);
     expect(code(join(PACKAGES, "core", "src", "cowork", "session-ports.ts")).includes("coworkSessions")).toBe(false);
-    expect(naming("CoworkSessionDoor")).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts", "protocol/src/cowork.ts"]);
+    // D4: the door module is the one implementation (its factory's return type); it names no option and is built by nothing.
+    expect(naming("CoworkSessionDoor")).toEqual(["core/src/cowork/session-door.ts", "core/src/cowork/session-ports.ts", "core/src/ipc/server.ts", "protocol/src/cowork.ts"]);
     expect(code(join(PACKAGES, "protocol", "src", "cowork.ts")).includes("CoworkSessionDoor")).toBe(false);
     // Nothing implements or constructs one: no `implements`, no `satisfies`, no `: CoworkSessionDoor =`, no cast.
     for (const path of sources) expect([shown(path), /(?:implements|satisfies|as)\s+CoworkSessionDoor\b|:\s*CoworkSessionDoor\s*=/.test(code(path))]).toEqual([shown(path), false]);
+  });
+
+  test("D3: nothing in src builds the Cowork driver table, and the driver reaches the guest only through injected ports", () => {
+    const sources = allSources(), driver = join(PACKAGES, "core", "src", "cowork", "session-driver.ts");
+    expect(sources).toContain(driver);
+    // Only its own module names the factory: no daemon, server, CLI or door constructs a table before the flip (D6).
+    // D4: the door module composes the table, and only its own module names the door's factory.
+    expect(sources.filter(path => /\bcreateCoworkSessionDrivers\b/.test(code(path))).map(shown).sort()).toEqual(["core/src/cowork/session-door.ts", "core/src/cowork/session-driver.ts"]);
+    expect(sources.filter(path => /\bcreateCoworkSessionDoor\b/.test(code(path))).map(shown)).toEqual(["core/src/cowork/session-door.ts"]);
+    const text = code(driver);
+    // No native module, no provider broker or socket, no process, no network, no router: the route, the starter, the
+    // offer and the approval port are all injected, and production injects none of them.
+    for (const forbidden of [/from "[^"]*\/native\//, /native-wiring|native-activation/, /provider-broker/, /node:(net|child_process|http|https|dgram)/, /\bBun\.(spawn|connect|listen)\b/, /\bfetch\(/, /winter-runtime-sdk/])
+      expect([forbidden.source, forbidden.test(text)]).toEqual([forbidden.source, false]);
+    expect(text).toMatch(/route === undefined \|\| native === undefined \|\| offer === undefined \|\| approvals === undefined\) throw new CoworkError\("provider_unavailable"\)/);
   });
 
   test("a plugin connection never reaches session.create (the role gate precedes the switch)", () => {
