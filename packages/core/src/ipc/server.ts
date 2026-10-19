@@ -2397,8 +2397,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               try {
                 opts.cowork?.requireSessionRead({ role: "remote", connectionId: socket.data.connId }, p.sessionId,
                   "workspaceId" in event ? event.workspaceId : undefined);
-                if ("workspaceId" in event && !opts.cowork) return false;
-              } catch { return false; }
+                if ("workspaceId" in event && !opts.cowork) return true;
+              } catch { return true; } // skip THIS event (fail closed for the frame) but keep the phone connected: `false` would drop the client on a transient lookup error
 
               const allowed = remoteFilter(event);
               // Filtered, not failed: return `true` so hub.attach's replay loop keeps going and
