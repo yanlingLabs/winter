@@ -9,7 +9,7 @@ import { CoworkError, type CapabilityCeiling, type MutationContext, type Mutatio
 
 import { CoworkWorkspaceWatches, type CoworkWatchOptions, type CoworkWatchSink } from "./watch";
 import type { CoworkFolderSelections } from "./folder-selections";
-import type { CoworkProvisioningPort } from "./session-ports";
+import type { CoworkGuestStartRequest, CoworkProvisioningPort } from "./session-ports";
 
 export interface CoworkConnection { role: string; connectionId: number }
 /** Host-only injection. Never construct from method parameters or clientName. A gateway token
@@ -32,7 +32,10 @@ export interface CoworkHostPorts {
   provisioning?: CoworkProvisioningPort;
 }
 /** The one thing the service asks of the native host: start a stopped workspace's guest. The daemon owns the stop tail separately. */
-export interface CoworkGuestStartPort { start(workspaceId: string): Promise<unknown> }
+/** The native start, as S7B's `CoworkNativeWiring` implements it. Session door D3: it may carry the conversation set's
+ *  callback (`CoworkGuestStartRequest`, asked once at `mounted`); the Cowork driver takes the narrower `CoworkGuestStarter`
+ *  (session-ports.ts), whose result is the running incarnation. */
+export interface CoworkGuestStartPort { start(workspaceId: string, request?: CoworkGuestStartRequest): Promise<unknown> }
 const NO_GRANTS: CoworkGrantResolver = { folder: () => undefined, repository: () => undefined };
 const RESPONSE_BUDGET = 128 * 1024;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");

@@ -687,7 +687,7 @@ function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map((entry) => join(entry.parentPath, entry.name));
 }
 
-test("anti-wiring, wired behind the refusal: one src importer (mode-options), whose Cowork functions only the unconstructed guest supervisor calls; no barrel export; it imports nothing but types and the error class", () => {
+test("anti-wiring, wired behind the refusal: one src importer (mode-options), whose Cowork functions only the guest supervisor calls, built only by the unconstructed Cowork driver table; no barrel export; it imports nothing but types and the error class", () => {
   const packages = root("packages");
   expect(existsSync(MODULE)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap((entry) => sourceFiles(join(packages, entry.name, "src")));
@@ -711,7 +711,10 @@ test("anti-wiring, wired behind the refusal: one src importer (mode-options), wh
   const callers = sources.filter((file) => file !== MODE_OPTIONS_FILE && /\b(coworkToolsFor|coworkGuestToolInputs|COWORK_CAPABILITY_SERVERS)\b/.test(code(file)));
   expect(callers).toEqual([GUEST_RUNTIME]);
   expect(code(GUEST_RUNTIME)).not.toMatch(/\b(coworkGuestToolInputs|COWORK_CAPABILITY_SERVERS)\b/);
-  expect(sources.filter((file) => /new\s+CoworkGuestRuntimeSupervisor\b/.test(code(file)))).toEqual([]);
+  // Session door D3: the Cowork driver table builds the supervisor, and nothing else in src names that table's factory.
+  const COWORK_DRIVER = root("packages", "core", "src", "cowork", "session-driver.ts");
+  expect(sources.filter((file) => /new\s+CoworkGuestRuntimeSupervisor\b/.test(code(file)))).toEqual([COWORK_DRIVER]);
+  expect(sources.filter((file) => file !== COWORK_DRIVER && /\bcreateCoworkSessionDrivers\b/.test(code(file)))).toEqual([]);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/session-profile|from "\.\/cowork/);
   const own = readFileSync(MODULE, "utf8");

@@ -109,7 +109,39 @@ export class CoworkRepository {
   binding(sessionId: string): ConversationBinding {
     const row = this.one("SELECT * FROM cowork_conversations WHERE session_id=?", id(sessionId));
     if (!row) throw new CoworkError("not_found");
+    // Migration 18's outputs location has no source. Every reader of ConversationBinding assumes one, so such a row is
+    // refused here, typed, until the outputs slice (D3b) widens the type; it is never read with a null source id.
+    if (row.location_kind !== "source" || row.source_id === null) throw new CoworkError("unsupported_topology");
     return { sessionId, workspaceId: row.workspace_id, projectId: row.project_id, sourceId: row.source_id, relativeCwd: row.relative_cwd, policy: row.policy, restrictions: JSON.parse(row.restrictions_json), revision: row.revision, state: row.state, createdAt: row.created_at };
+  }
+  /** Where a bound conversation works (migration 18). `outputs` rows exist only once the outputs slice binds them. */
+  conversationLocation(sessionId: string): "source" | "outputs" {
+    const row = this.one("SELECT location_kind FROM cowork_conversations WHERE session_id=?", id(sessionId));
+    if (!row) throw new CoworkError("not_found");
+    if (row.location_kind !== "source" && row.location_kind !== "outputs") throw new CoworkError("recovery_required");
+    return row.location_kind;
+  }
+  /** The guest runtime's durable backend identity for a conversation (G9), or null before its first guest start. */
+  conversationBackend(sessionId: string): string | null {
+    const row = this.one("SELECT backend_session_id FROM cowork_conversations WHERE session_id=?", id(sessionId));
+    if (!row) throw new CoworkError("not_found");
+    return row.backend_session_id ?? null;
+  }
+  /** Records the backend identity once, at the moment a guest receives the conversation (the conversation set at
+   *  `mounted`). Write-once: the same value again is a no-op, any other value is `authority_denied`. A conversation with
+   *  a recorded identity has had a guest store, so without cold resume (D10) it can never start fresh again. */
+  assignConversationBackend(sessionId: string, backendSessionId: string): void {
+    const backend = id(backendSessionId);
+    durableCoworkTransaction(this.rs, () => {
+      const row = this.one("SELECT backend_session_id, state FROM cowork_conversations WHERE session_id=?", id(sessionId));
+      if (!row) throw new CoworkError("not_found");
+      if (row.state !== "active") throw new CoworkError("authority_denied");
+      if (row.backend_session_id !== null && row.backend_session_id !== undefined) {
+        if (row.backend_session_id !== backend) throw new CoworkError("authority_denied");
+        return;
+      }
+      this.run("UPDATE cowork_conversations SET backend_session_id=? WHERE session_id=? AND backend_session_id IS NULL", backend, sessionId);
+    });
   }
   private insertSource(workspaceId: string, input: SourceSelection): WorkspaceSource {
     const normalized = selection(input), sourceId = this.mint("source"), locationId = this.mint("location"), at = this.now();

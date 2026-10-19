@@ -198,7 +198,7 @@ test("the glob allowlist holds for outputs and scratch patterns: only the own fo
 
 test("hard denials hold under bypass: protected, outside, outputs and scratch paths, a missing ceiling class, unmapped paths", async () => {
   const bypass = () => build(state("bypass"));
-  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/Users/someone/.ssh/id_rsa",
+  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/home/x/.ssh/id_rsa",
     // Another conversation's outputs/scratch, the roots, and look-alike prefixes: never the OWN folder.
     "/workspace/outputs/other-session/report.pdf", "/workspace/outputs", "/workspace/outputs/", "/workspace/outputs/cowork-10/x", "/workspace/outputs/cowork-1/../other/x",
     "/workspace/.winter/scratch/other/tmp.txt", "/workspace/.winter/scratch", "/workspace/.winter/scratch/cowork-12/t"]) {
@@ -664,7 +664,12 @@ test("wired behind the refusal: only the bridge reaches the projection, producti
   const driver = readFileSync(join(packages, "core", "src", "runtime-sdk", "session-driver.ts"), "utf8");
   const construction = driver.slice(driver.indexOf("canUseToolFor({"), driver.indexOf("canUseToolFor({") + 1600);
   expect(construction).not.toMatch(/\bcowork\b/);
-  expect(reaching(["canUseToolFor({"]).filter(name => name !== "approval-bridge.ts")).toEqual(["session-driver.ts"]);
+  // The bridge is constructed (imported from approval-bridge and called) by the Code driver alone. Session door D3: the
+  // Cowork driver (cowork/session-driver.ts) never imports the bridge; it calls the injected `CoworkApprovalPort`, which
+  // production never supplies.
+  const constructing = sources.filter(file => basename(file) !== "approval-bridge.ts" && /from "[^"]*approval-bridge"/.test(readFileSync(file, "utf8")) && readFileSync(file, "utf8").includes("canUseToolFor({"));
+  expect(constructing.map(file => file.slice(packages.length + 1))).toEqual([join("core", "src", "runtime-sdk", "session-driver.ts")]);
+  expect(readFileSync(join(packages, "core", "src", "cowork", "session-driver.ts"), "utf8")).not.toMatch(/approval-bridge|cowork-approval/);
   // The door still refuses.
   expect(isUnrunnableSessionMode("cowork")).toBe(true); expect(runnableModeOf("cowork")).toBeUndefined();
   // The bridge's only cowork seam is the injected dependency.
