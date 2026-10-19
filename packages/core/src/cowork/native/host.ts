@@ -4,10 +4,12 @@ import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumeRequest, CoworkVolumes } from "../volumes";
 import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-filesystem";
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
-import { CoworkNativeRuntimeStreams, CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
+import { CoworkNativeRuntimeStreams, CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeShareKind, type CoworkNativeShareRecord, type CoworkNativeGuestShare, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
 import type { CoworkNativeReceiptKey } from "./receipt-mac";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
 import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
+import { CoworkGuestDirectoryError, CoworkPlanEpochGuard, parseCoworkPlanView } from "./guest-dirs";
+import type { CoworkNativeGuestRecords } from "./guest-records";
 import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFreeToken, mintOrderlyStopProof, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeObserved, type CoworkNativeStopRegistry } from "./stop-proof";
 
 /*
@@ -28,7 +30,7 @@ import { CoworkNativeStopEvidenceError, mintControllerInstanceId, mintVolumesFre
 
 export { CoworkNativeSimulatedCrash };
 
-export type CoworkNativeHostFailure = "busy" | "not_stopped" | "not_allocated" | "owner_held" | "bad_image_digest" | "bad_boot" | "launcher_refused" | "protocol" | "timeout" | "guest_fault" | "start_failed" | "not_running" | "closed" | "no_receipt_key";
+export type CoworkNativeHostFailure = "busy" | "not_stopped" | "not_allocated" | "owner_held" | "bad_image_digest" | "bad_boot" | "launcher_refused" | "protocol" | "timeout" | "guest_fault" | "start_failed" | "not_running" | "closed" | "no_receipt_key" | "store_lost" | "prepare_failed";
 export class CoworkNativeHostError extends Error {
   constructor(readonly code: CoworkNativeHostFailure, readonly detail?: string, options?: { cause?: unknown }) { super(detail ? `${code}: ${detail}` : code, options); this.name = "CoworkNativeHostError"; }
 }
@@ -74,6 +76,12 @@ export interface CoworkNativeHostDeps {
   readonly timers?: { every(ms: number, run: () => void): () => void };
   /** This daemon process as the admission ledger knows it (pid, start token, boot id, instance nonce). */
   readonly daemon: () => AdmissionOwner;
+  /** The durable guest records (DOOR's migration 21): the boot at `hello`, the data volume's UUID. Absent means nothing is recorded, no boot is ever attested as ended and the store volume is not compared. */
+  readonly guestRecords?: CoworkNativeGuestRecords;
+  /** Creates `/workspace/outputs/<logicalSessionId>` where the outputs share is served from, before the set is sent. Idempotent, never follows a symlink. Absent: nothing is created. */
+  readonly outputs?: { ensure(workspaceId: string, logicalSessionId: string): void };
+  /** Opens a share's host directory as exactly that directory (a canonical path, O_NOFOLLOW|O_DIRECTORY), described by its own descriptor. Absent: a start that asks for shares is refused. */
+  readonly shareDirectories?: { open(hostPath: string): { readonly fd: number; readonly device: string; readonly inode: string; close(): void } };
   readonly timeouts?: Partial<CoworkNativeHostTimeouts>; readonly memoryMiB?: number;
   /** TEST ONLY: lets a test pass timeouts shorter than the contract's floor. Never set outside tests. */
   readonly unsafeTestTimeouts?: boolean;
@@ -88,7 +96,20 @@ export type CoworkNativeStopOutcome =
   | { readonly released: true; readonly evidence: CoworkNativeEvidenceKind }
   | { readonly released: false; readonly reason: string };
 /** What a caller of `start` may add: the conversation set comes from the caller (a Cowork session), not only from `deps.conversations`. */
+/** One host-backed share the host prepared (contract revision 3). `hostPath` is a canonical directory the host opens itself; a folder share names the source it backs. */
+export interface CoworkNativeHostShare {
+  readonly tag: string; readonly kind: CoworkNativeShareKind; readonly guestPath: string; readonly readOnly: boolean; readonly hostPath: string;
+  readonly sourceId?: string; readonly revision?: number;
+}
 export interface CoworkNativeStartRequest {
+  /** The shares this incarnation mounts, or null/absent for none. Asked once, before `begin`; the L1 `shares` line carries one open directory per share. */
+  readonly shares?: () => readonly CoworkNativeHostShare[] | null;
+  /** At the guest's `shares_mounted`, BEFORE the conversation set: each mounted folder source, mapped from its tag. A throw faults the boot (`share_mount_failed`). */
+  readonly sharesMounted?: (context: CoworkNativeConversationContext, mounted: readonly { readonly sourceId: string; readonly revision: number }[]) => void;
+  /** A gated cold resume: put on every host-query conversation's runtime record, and checked against the guest's `continuation` echo. */
+  readonly resume?: { readonly continuation: "fresh" | "resume" | "either"; readonly endedGuestBoots: readonly string[] };
+  /** The host decided the conversation's guest store is gone: the guest said `resume_store_missing`, or the data volume is not the one the store lived on. */
+  readonly storeLost?: (reason: "resume_store_missing" | "volume_mismatch" | "volume_unformatted") => void;
   /** Called once at `mounted`; returns this incarnation's set (N2: at most one host-query conversation), or null for none. Takes precedence over `deps.conversations`. */
   readonly conversations?: (context: CoworkNativeConversationContext) => CoworkNativeConversationSet | null;
 }
@@ -105,6 +126,8 @@ export interface CoworkNativeRunning {
   readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly admissionId: string; readonly owner: CoworkVolumeOwner;
   /** The guest's boot id from its `hello` (what the conversation set was bound to). */
   readonly guestBootId: string;
+  /** What the guest reported for each host-query conversation at `runtime_ready`: `fresh` or `resume`, as the supervisor ran it (contract 12.2). Empty for a tools-only set. */
+  readonly continuations: readonly ("fresh" | "resume")[];
   /** The runtime link of conversation 0; throws `not_running` when this incarnation has no host-query conversation. */
   runtime(conversation: 0): CoworkNativeRuntimeLink;
   /** Resolves when the incarnation's stop outcome is known (released or not), however it ended. */
@@ -127,7 +150,9 @@ interface Run {
   readySeen: boolean; readyAccepted: boolean; duplicateSeqAnomaly: boolean; pendingDuplicates: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>[];
   /** Set when a runtime violation must end the incarnation but the start has not finished yet (a stop needs a running guest): the start stops it as soon as it is running. */
   overflowStop?: boolean;
-  request: CoworkNativeStartRequest | undefined; guestBootId: string;
+  request: CoworkNativeStartRequest | undefined; guestBootId: string; continuations: readonly ("fresh" | "resume")[];
+  /** The shares the start sent, by tag (for the `shares_mounted` mapping). */
+  shares: readonly CoworkNativeHostShare[];
   /** The runtime class, created when the conversation set goes out. */
   runtime: RuntimeEnd | null;
   /** How this incarnation ended, known to `ended`; set before `dispose`. */
@@ -204,6 +229,7 @@ class SessionInbox {
 
 export class CoworkNativeHost {
   private readonly runs = new Map<string, Run>();
+  private readonly planEpochs = new CoworkPlanEpochGuard();
   private readonly timeouts: CoworkNativeHostTimeouts;
   private readonly uncertainHandlers: ((event: CoworkNativeUncertainEvent) => void)[] = [];
   private readonly now: () => number;
@@ -244,6 +270,7 @@ export class CoworkNativeHost {
     const before = volumes.records(workspaceId);
     if (before.length !== 2 || before.some(v => v.state !== "allocated")) throw new CoworkNativeHostError("not_allocated");
     if (before.some(v => v.owner !== null)) throw new CoworkNativeHostError("owner_held", "a previous owner still holds the volumes; recover first");
+    this.checkStoreVolume(workspaceId, before, request);
     const runtimeImageDigest = this.deps.images.runtimeImageDigest(workspaceId);
     if (typeof runtimeImageDigest !== "string" || !/^[a-f0-9]{64}$/.test(runtimeImageDigest)) throw new CoworkNativeHostError("bad_image_digest");
     const receiptKey = this.deps.receiptKey();
@@ -260,7 +287,7 @@ export class CoworkNativeHost {
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
     const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, receiptKey, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
       observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, duplicateSeqAnomaly: false, pendingDuplicates: [],
-      request, guestBootId: "", runtime: null, outcome: null, endedResolve: () => {}, ended: Promise.resolve({ released: false, reason: "never started" }) };
+      request, guestBootId: "", continuations: [], shares: [], runtime: null, outcome: null, endedResolve: () => {}, ended: Promise.resolve({ released: false, reason: "never started" }) };
     run.ended = new Promise<CoworkNativeStopOutcome>(resolve => { run.endedResolve = resolve; });
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
@@ -276,7 +303,26 @@ export class CoworkNativeHost {
     this.hook("power-running");
     this.watch(run);
     if (run.overflowStop) void this.stop(workspaceId, "shutdown").catch(() => {});
-    return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, guestBootId: run.guestBootId, ended: run.ended, runtime: (conversation: 0) => this.runtimeLink(run, conversation), stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
+    return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, guestBootId: run.guestBootId, continuations: run.continuations, ended: run.ended, runtime: (conversation: 0) => this.runtimeLink(run, conversation), stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
+  }
+
+  /** CR4 step 9: the data volume is the one the guest store lives on. Runs before the incarnation moves, so a refusal leaves nothing behind.
+   *  - a store the host believes exists (`resume`/`either`) over a volume that was never formatted (a format-new would follow) is a lost store;
+   *  - the volume's filesystem UUID is kept per workspace, write-once, and a different one is refused (a lost store when one was expected). */
+  private checkStoreVolume(workspaceId: string, volumes: readonly CoworkVolumeRecord[], request: CoworkNativeStartRequest | undefined): void {
+    const data = volumes.find(volume => volume.purpose === "data");
+    if (!data || data.filesystemUUID === null) throw new CoworkNativeHostError("not_allocated");
+    const resuming = request?.resume !== undefined && request.resume.continuation !== "fresh";
+    const lost = (reason: "volume_mismatch" | "volume_unformatted"): never => {
+      try { request?.storeLost?.(reason); } catch { /* the refusal below stands either way */ }
+      throw new CoworkNativeHostError("store_lost", reason);
+    };
+    if (resuming && data.filesystemState === "unformatted") lost("volume_unformatted");
+    const records = this.deps.guestRecords;
+    if (records && records.recordStoreVolumeUuid(workspaceId, data.filesystemUUID) === "mismatch") {
+      if (resuming) lost("volume_mismatch");
+      throw new CoworkNativeHostError("store_lost", "volume_mismatch");
+    }
   }
 
   private async launch(run: Run): Promise<void> {
@@ -315,6 +361,9 @@ export class CoworkNativeHost {
     const binding = authority.adopt(session, { workspaceId, homeId: run.homeId, admissionId: reserved.admissionId, owner });
     run.binding = binding;
     this.moveAdmission(run, "booting");
+
+    // 2b. host-backed shares (contract revision 3): ONE open directory per share on L1, after `hello` and before `begin`, at most once.
+    run.shares = this.sendShares(run, session);
 
     // 3. begin: the worker is spawned suspended, validated, sandboxed
     const full: CoworkNativeScope = { ...scope, admissionId: reserved.admissionId };
@@ -357,6 +406,8 @@ export class CoworkNativeHost {
     // 5. bootstrap: hello, plan(nonce), receipt, confirm
     const hello = await run.inbox.expect(message => message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "hello" ? message.frame : undefined, this.timeouts.guestHelloMs, "guest hello");
     run.upSeq.accept(hello, "up");
+    // The boot is recorded when the guest says hello, before anything else is asked of it: a boot that is not recorded can never be attested as ended.
+    if (hello.message.t === "hello") this.deps.guestRecords?.recordHello({ workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, guestBootId: hello.message.guestBootId });
     const { nonce } = binding.issuePlan(plan);
     this.sendBootstrap(run, { t: "plan", operationId: plan.operationId, nonce, plan: sortedCanonical(plan) as Record<string, unknown> });
     this.hook("bootstrap-sent");
@@ -383,6 +434,7 @@ export class CoworkNativeHost {
     if (run.earlyReady) throw new CoworkNativeHostError("protocol", "runtime_ready before the conversation set");
     run.upSeq.accept(mounted, "up");
     run.guestBootId = hello.message.t === "hello" ? hello.message.guestBootId : "";
+    await this.deliverShares(run, { workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, guestBootId: run.guestBootId }, plan.operationId, nonce);
     await this.deliverConversations(run, { workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, guestBootId: run.guestBootId }, plan.operationId, nonce);
     binding.advance("ready");
     this.deps.power.transition(run.key, "starting", "running");
@@ -398,12 +450,76 @@ export class CoworkNativeHost {
   /** The up-direction bootstrap sequence number the host expects next for a workspace it runs (diagnostics and tests). */
   nextBootstrapUpSequence(workspaceId: string): number | undefined { return this.runs.get(workspaceId)?.upSeq.nextExpected("bootstrap", "up"); }
 
+  /** The L1 `shares` line. Every directory is opened here with O_NOFOLLOW|O_DIRECTORY from a canonical path (the realpath must equal the path), described by its own
+   *  descriptor (device, inode), sent, and closed: the launcher owns its copies. A share that cannot be opened as exactly that directory refuses the start. */
+  private sendShares(run: Run, session: CoworkLauncherSession): readonly CoworkNativeHostShare[] {
+    const wanted = run.request?.shares?.() ?? null;
+    if (wanted === null || wanted.length === 0) return [];
+    const opener = this.deps.shareDirectories;
+    if (opener === undefined) throw new CoworkNativeHostError("prepare_failed", "no share directory opener");
+    const handles: { readonly fd: number; close(): void }[] = [];
+    try {
+      const records: CoworkNativeShareRecord[] = wanted.map(share => {
+        let handle: ReturnType<typeof opener.open>;
+        try { handle = opener.open(share.hostPath); } catch (error) { throw new CoworkNativeHostError("prepare_failed", "a share could not be opened", { cause: error }); }
+        handles.push(handle);
+        return { tag: share.tag, kind: share.kind, mode: share.readOnly ? "ro" : "rw", device: handle.device, inode: handle.inode, path: share.hostPath, guestPath: share.guestPath };
+      });
+      const id = `req-${this.uuid()}`.slice(0, 63);
+      try { session.send({ t: "shares", id, shares: records }, handles.map(handle => handle.fd)); } catch (error) { throw new CoworkNativeHostError("prepare_failed", error instanceof Error ? error.name : "shares refused", { cause: error }); }
+      return Object.freeze([...wanted]);
+    } finally { for (const handle of handles) { try { handle.close(); } catch { /* already closed */ } } }
+  }
+
+  /** After `mounted`, before the set: the bootstrap `shares` (what the guest must find), then `shares_mounted` (or a fault), then the request's `sharesMounted` with each mounted
+   *  FOLDER source mapped from its tag. A throw there is the bootstrap fault `share_mount_failed`: the start fails and the stop that follows is orderly. */
+  private async deliverShares(run: Run, context: CoworkNativeConversationContext, operationId: string, nonce: string): Promise<void> {
+    if (run.shares.length === 0) return;
+    const guestShares: CoworkNativeGuestShare[] = run.shares.map(share => ({ tag: share.tag, guestPath: share.guestPath, readOnly: share.readOnly, kind: share.kind }));
+    this.sendBootstrap(run, { t: "shares", operationId, nonce, shares: guestShares });
+    const reply = await run.inbox!.expect(item => item.t === "mux_up" && item.frame.class === "bootstrap" && (item.frame.message.t === "shares_mounted" || item.frame.message.t === "fault") ? item.frame : undefined, this.timeouts.mountedMs, "shares_mounted");
+    run.upSeq.accept(reply, "up");
+    const answer = (reply as Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>).message;
+    if (answer.t === "fault") throw new CoworkNativeHostError("guest_fault", answer.code);
+    if (answer.t !== "shares_mounted" || answer.operationId !== operationId || answer.nonce !== nonce) throw new CoworkNativeHostError("protocol", "shares_mounted does not answer these shares");
+    this.hook("shares-mounted");
+    const mounted = run.shares.flatMap(share => share.kind === "folder" && share.sourceId !== undefined && share.revision !== undefined ? [{ sourceId: share.sourceId, revision: share.revision }] : []);
+    if (mounted.length === 0 || run.request?.sharesMounted === undefined) return;
+    try { run.request.sharesMounted(context, mounted); } catch (error) {
+      if (isCrash(error)) throw error;
+      throw new CoworkNativeHostError("guest_fault", "share_mount_failed", { cause: error });
+    }
+  }
+
+  /** What the host adds to a set before it is bound and sent: the resume record on each host-query runtime, the outputs directory a conversation names, and the plan view's
+   *  epoch rule. A refusal here means nothing was sent. */
+  private prepareSet(run: Run, context: CoworkNativeConversationContext, set: CoworkNativeConversationSet): CoworkNativeConversationSet {
+    const resume = run.request?.resume;
+    const conversations = set.conversations.map(item => {
+      if (resume !== undefined && item.runtime !== null) return { ...item, runtime: { ...item.runtime, continuation: resume.continuation, endedGuestBoots: [...resume.endedGuestBoots] } };
+      return item;
+    });
+    for (const item of conversations) {
+      for (const root of item.roots) {
+        if (root.guestPath === `/workspace/outputs/${item.logicalSessionId}` && this.deps.outputs !== undefined) {
+          try { this.deps.outputs.ensure(context.workspaceId, item.logicalSessionId); } catch (error) { throw new CoworkNativeHostError("prepare_failed", error instanceof CoworkGuestDirectoryError ? error.code : "outputs directory", { cause: error }); }
+        }
+        const plan = parseCoworkPlanView(root.guestPath);
+        if (plan !== null) {
+          try { this.planEpochs.admit(context.workspaceId, plan.logicalSessionId, plan.epoch); } catch (error) { throw new CoworkNativeHostError("protocol", error instanceof CoworkGuestDirectoryError ? error.code : "plan epoch", { cause: error }); }
+        }
+      }
+    }
+    return { profile: set.profile, conversations };
+  }
+
   /** Contract 6.1: the conversation set goes out ONCE, after `mounted`, bound to the plan's operation and nonce; `running` waits for `runtime_ready`.
    * A refusal to bind or to serialize means nothing was sent. A bootstrap fault, a wrong echo or a wrong count fails the start (and the stop that follows is orderly). */
   private async deliverConversations(run: Run, context: CoworkNativeConversationContext, operationId: string, nonce: string): Promise<void> {
     const source = run.request?.conversations ?? this.deps.conversations;
-    const set = source?.(context) ?? null;
-    if (set === null) return;
+    const built = source?.(context) ?? null;
+    if (built === null) return;
+    const set = this.prepareSet(run, context, built);
     // `browseUid` is null until the file channel is routed (FC5); contract revision 3.
     const message = { t: "conversations" as const, operationId, nonce, incarnationId: context.incarnationId, profile: set.profile, browseUid: null, conversations: set.conversations };
     if (set.profile !== null && set.conversations.length !== 1) throw new CoworkNativeHostError("protocol", "a host-query profile carries exactly one conversation");
@@ -422,8 +538,18 @@ export class CoworkNativeHost {
     run.readyAccepted = true;
     for (const frame of run.pendingDuplicates.splice(0)) this.acceptDuplicate(run, frame);
     const answer = (reply as Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>).message;
-    if (answer.t === "fault") throw new CoworkNativeHostError("guest_fault", answer.code);
+    if (answer.t === "fault") {
+      // The guest's own store is gone (a `resume` it could not find): the conversation can neither resume nor start fresh under its identity. The other cold-resume
+      // fault, `fresh_store_not_empty`, is a refusal only: a store exists, so nothing is lost.
+      if (answer.code === "resume_store_missing") { try { run.request?.storeLost?.("resume_store_missing"); } catch { /* the failed start stands either way */ } }
+      throw new CoworkNativeHostError("guest_fault", answer.code);
+    }
     if (answer.t !== "runtime_ready" || answer.operationId !== operationId || answer.nonce !== nonce || answer.conversations !== set.conversations.length) throw new CoworkNativeHostError("protocol", "runtime_ready does not answer this set");
+    // The continuation echo (contract 12.2): one entry per host-query conversation, and the guest never runs one differently from what the host decided
+    // (`either` is the guest's own choice between the two).
+    const sent = set.conversations.flatMap(item => item.runtime === null ? [] : [item.runtime.continuation]);
+    if (answer.continuations.length !== sent.length || answer.continuations.some((ran, index) => sent[index] !== "either" && sent[index] !== ran)) throw new CoworkNativeHostError("protocol", "the guest's continuation does not match the set");
+    run.continuations = answer.continuations;
     this.hook("runtime-ready");
   }
 

@@ -6,6 +6,7 @@ import type { RuntimeStateDb } from "../runtime-state/db";
 import { CoworkVolumes } from "./volumes";
 import type { CoworkVolumeBackup } from "./volume-backup";
 import { CoworkNativeAuthority } from "./native/authority";
+import type { CoworkNativeGuestRecords } from "./native/guest-records";
 import { CoworkNativeHost, type CoworkLauncherPort, type CoworkNativeHostDeps, type CoworkNativeImagePins, type CoworkNativeRunning, type CoworkNativeStartRequest } from "./native/host";
 import { CoworkNativePower } from "./native/power";
 import { COWORK_NATIVE_LIMITS, coworkNativeHostStopWaitMs } from "./native/protocol";
@@ -55,6 +56,11 @@ export interface CoworkNativeEnvironment {
   /** Called at shutdown, after the guests were drained: timers stopped, the ledger closed. */
   readonly close?: () => void;
   readonly journal?: CoworkNativeLaunchJournalPort;
+  /** The host's durable guest records (the boot at `hello`, its end proof, the data volume's UUID). Absent: nothing is recorded and no boot is attested as ended. */
+  readonly guestRecords?: CoworkNativeGuestRecords;
+  /** The outputs directory preparer and the share directory opener (see `native/host.ts`). Absent: nothing is created, and a start that asks for shares is refused. */
+  readonly outputs?: { ensure(workspaceId: string, logicalSessionId: string): void };
+  readonly shareDirectories?: { open(hostPath: string): { readonly fd: number; readonly device: string; readonly inode: string; close(): void } };
   /** Timers, clocks, checkpoints and the conversation source: everything of the host's own that is not one of the structural ports above. */
   readonly hostOptions?: Partial<Omit<CoworkNativeHostDeps, "records" | "volumes" | "admission" | "authority" | "power" | "recovery" | "registry" | "hostBoot" | "launcher" | "images" | "journal" | "daemon">>;
 }
@@ -132,11 +138,12 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
     const volumes = new CoworkVolumes(db, home, authority.volumes, environment.backup, undefined, authority.filesystem);
     const power = new CoworkNativePower(db);
     const recovery = new CoworkNativeRecovery({ records, volumes, admission: environment.admission, power, registry, hostBoot: environment.hostBoot, receiptKey: () => this.receiptKey,
-      receipts: environment.receipts, ownerRecover: environment.ownerRecover, guards: typeof environment.guards === "function" ? environment.guards({ volumes }) : environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
+      receipts: environment.receipts, ownerRecover: environment.ownerRecover, guestRecords: environment.guestRecords, guards: typeof environment.guards === "function" ? environment.guards({ volumes }) : environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
     const images = bindCoworkImagePins(this.options.imagePins ?? readOnlyImagePins(db));
     this.drainBudgetMs = environment.hostOptions?.timeouts?.drainBudgetMs ?? COWORK_NATIVE_LIMITS.drainBudgetMs;
     this.hostInstance = new CoworkNativeHost({ ...environment.hostOptions, records, volumes, admission: environment.admission, authority, power, recovery, registry, hostBoot: environment.hostBoot,
-      launcher: environment.launcher, images, receiptKey: () => this.receiptKey, journal: environment.journal, daemon: environment.daemon });
+      launcher: environment.launcher, images, receiptKey: () => this.receiptKey, journal: environment.journal, daemon: environment.daemon,
+      ...(environment.guestRecords ? { guestRecords: environment.guestRecords } : {}), ...(environment.outputs ? { outputs: environment.outputs } : {}), ...(environment.shareDirectories ? { shareDirectories: environment.shareDirectories } : {}) });
     try { environment.bindHost?.({ activeWorkspaces: () => this.hostInstance!.activeWorkspaces(), stop: (workspaceId, reason) => this.hostInstance!.stop(workspaceId, reason) }); } catch { /* an environment that cannot bind has no pressure halt; the guard then reports unconfirmed */ }
     return this.hostInstance;
   }

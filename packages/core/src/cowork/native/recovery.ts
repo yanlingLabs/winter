@@ -4,6 +4,7 @@ import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumes } from "../vo
 import type { CoworkNativeReceiptKey } from "./receipt-mac";
 import { parseCoworkNativeStopReceipt, type CoworkNativeOrderlyReceipt } from "./protocol";
 import { CoworkNativePower, type CoworkPower, type CoworkPowerKey } from "./power";
+import type { CoworkNativeGuestRecords } from "./guest-records";
 import {
   CoworkNativeStopEvidenceError, ledgerStopReceipt, mintVolumesFreeToken, mintNewBootStopProof, mintOrderlyStopProof, mintOwnerRecoverStopProof, mintReleaseToken, sameOwnerTuple, stopProofState,
   type CoworkNativeAdmissionView, type CoworkNativeEvidenceKind, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeOwnerRecoverAttestation, type CoworkNativeRecoverGuards, type CoworkNativeStopProof, type CoworkNativeStopRegistry,
@@ -72,6 +73,8 @@ export interface CoworkNativeRecoveryDeps {
   readonly receipts?: CoworkNativeDurableReceiptPort; readonly ownerRecover?: CoworkNativeOwnerRecoverPort; readonly guards?: CoworkNativeRecoverGuards;
   /** The durable record of which processes each launch started; consulted by owner recovery and forgotten once an incarnation is released. */
   readonly journal?: CoworkNativeLaunchJournalPort;
+  /** Records the proof that ended a guest boot, after a release this recovery accepted (never for a ledger-only release, which proves nothing about the guest). */
+  readonly guestRecords?: Pick<CoworkNativeGuestRecords, "recordEnd">;
   readonly now?: () => number;
   /** Isolated crash/fault testing only, never serialized: called after each durable step. */
   readonly checkpoint?: (phase: string) => void;
@@ -254,6 +257,9 @@ export class CoworkNativeRecovery {
     }
     const free = this.deps.volumes.records(key.workspaceId);
     this.finishPower(key, mintReleaseToken({ proof, volumes: this.deps.volumes }));
+    // The end of this incarnation's guest boot is proven by exactly the evidence that released its disks. A record that cannot be written leaves the boot un-attested,
+    // which is the safe side (it is simply never listed as ended); the release itself does not wait on it.
+    try { this.deps.guestRecords?.recordEnd({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, proof: proof.kind }); } catch { /* un-attested */ }
     this.deps.registry.consume(proof);
     this.deps.journal?.forget({ workspaceId: key.workspaceId, incarnationId: key.incarnationId, leaseEpoch: key.leaseEpoch });
     // A receipt is still needed while a replay debt names its owner: the successor must prove THAT writer stopped. It is retired by `settleDebt`,

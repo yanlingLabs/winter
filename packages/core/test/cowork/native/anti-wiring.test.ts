@@ -8,7 +8,7 @@ import * as ts from "typescript";
 const packages = join(import.meta.dir, "..", "..", "..", "..");
 const repositoryRoot = join(packages, "..");
 const nativeDirectory = join(packages, "core", "src", "cowork", "native");
-const MODULES = ["authority", "fd-channel", "fd-receiver-worker", "host", "power", "protocol", "receipt-mac", "recovery", "stop-proof"];
+const MODULES = ["authority", "fd-channel", "fd-receiver-worker", "guest-dirs", "guest-records", "host", "power", "protocol", "receipt-mac", "recovery", "stop-proof"];
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs|mts|cts)$/.test(entry.name) && !entry.parentPath.split(sep).includes("node_modules")).map(entry => join(entry.parentPath, entry.name));
 }
@@ -164,7 +164,7 @@ export function namesTheWiring(source: string): boolean {
 
 test("N2 S7: the wiring is the only importer of cowork/native, the daemon is the only importer of the wiring, and the wiring is lazy and reaches no process, socket, setting or environment", () => {
   const wiringText = readFileSync(WIRING, "utf8"), code = wiringText.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
-  expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/host", "./native/power", "./native/protocol", "./native/receipt-mac", "./native/recovery", "./native/stop-proof"]);
+  expect(astSpecifiers(wiringText, WIRING).filter(target => target.startsWith("./native/")).sort()).toEqual(["./native/authority", "./native/guest-records", "./native/host", "./native/power", "./native/protocol", "./native/receipt-mac", "./native/recovery", "./native/stop-proof"]);
   const importers = [...allSources, ...scriptSources].filter(file => file !== WIRING && namesTheWiring(readFileSync(file, "utf8"))).map(file => relative(repositoryRoot, file).split(sep).join("/")).sort();
   // the daemon imports the wiring; the host-env environment and the activation seam import only its TYPES
   expect(importers).toEqual(["packages/core/src/cowork/host-env/environment.ts", "packages/core/src/cowork/native-activation.ts", "packages/core/src/daemon.ts"]);

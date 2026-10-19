@@ -161,15 +161,22 @@ test("the set is refused for a binding that is not active, in another workspace,
   expect(() => coworkConversationFor({ ...input, offered: ["Read", "Write"] })).toThrow("invalid_request");
 });
 
-test("plan view: under plan with an epoch the set carries the own writable plan scratch beside the read-only roots; the native wire refuses it today", () => {
+test("plan view: under plan with an epoch the set carries the own writable plan scratch beside the read-only roots; the native wire admits it (revision 3, S7B) and the driver still passes no epoch", () => {
   const plan = fixture({ policy: "plan" }), input = inputFor(plan);
   const item = coworkConversationFor({ ...input, planScratchEpoch: 3 }).conversations[0]!;
   expect(item.roots).toEqual([
     { id: plan.sourceId, guestPath: "/workspace/folders/grant", source: "/workspace/folders/grant", readOnly: true },
     { id: "plan-scratch", guestPath: "/workspace/plan/conversation/3", source: "/workspace/plan/conversation/3", readOnly: false },
   ]);
-  // The cross-lane gap: the contract's allowed views and plan's read-only rule do not admit it (S7B + the supervisor).
-  expect(() => onTheWire({ profile: "host-query-v1", conversations: [item] }, "incarnation")).toThrow();
+  // The wire admits exactly this view (S7B, contract 12.5): the own session, a canonical epoch, writable, under plan only, once.
+  expect(() => onTheWire({ profile: "host-query-v1", conversations: [item] }, "incarnation")).not.toThrow();
+  const view = item.roots[1]!;
+  const refused = (change: object) => expect(() => onTheWire({ profile: "host-query-v1", conversations: [{ ...item, ...change } as never] }, "incarnation")).toThrow();
+  refused({ roots: [item.roots[0], { ...view, readOnly: true }] });                                              // the plan view is writable by definition
+  refused({ policy: "ask" });                                                                                      // and exists under plan only
+  for (const path of ["/workspace/plan/other/3", "/workspace/plan/conversation/03", "/workspace/plan/conversation/-1", "/workspace/plan/conversation", "/workspace/plan/conversation/3/x"])
+    refused({ roots: [item.roots[0], { ...view, guestPath: path, source: path }] });                              // not the own session, a non-canonical epoch, a bare or deeper path
+  refused({ roots: [item.roots[0], view, { ...view, id: "second", guestPath: "/workspace/plan/conversation/4", source: "/workspace/plan/conversation/4" }] }); // at most one
   expect(coworkConversationFor(input).conversations[0]!.roots).toHaveLength(1);
   for (const epoch of [-1, 1.5, Number.NaN]) expect(() => coworkConversationFor({ ...input, planScratchEpoch: epoch })).toThrow("invalid_request");
   // Outside plan the epoch is ignored: no plan scratch is ever mounted writable beside a writable source.

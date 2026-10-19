@@ -54,7 +54,7 @@ export const COWORK_GUEST_IDENTITIES = Object.freeze({ runtimeUid: 2001, toolUid
  *  supervisor before its CR2 release refuses more than 600000, so the host sends 600000 until the image pins CR2. */
 export const COWORK_GUEST_RUNTIME_TIMEOUT_MS = 600_000;
 
-type GuestToolClass = "read" | "write" | "execute";
+type GuestToolClass = "read" | "write" | "execute" | "coordinate";
 const CLASS_ORDER: readonly GuestToolClass[] = ["read", "write", "execute"];
 
 /** The guest supervisor's own derivation of tools from classes (`host_query_config`), in its order. */

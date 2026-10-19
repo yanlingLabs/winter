@@ -156,7 +156,7 @@ export interface CoworkGuestConversation {
   readonly policy: "auto" | "plan" | "ask" | "accept-edits" | "dont-ask" | "bypass";
   readonly roots: readonly { readonly id: string; readonly guestPath: string; readonly source: string; readonly readOnly: boolean }[];
   readonly runtime: {
-    readonly model: string; readonly timeoutMs: number; readonly toolClasses: readonly ("read" | "write" | "execute")[];
+    readonly model: string; readonly timeoutMs: number; readonly toolClasses: readonly ("read" | "write" | "execute" | "coordinate")[];
     readonly provider: Readonly<Record<string, unknown>>;
     readonly guided: Readonly<{ bindingId: string; generation: number }> | null;
     /** Cold resume (native contract revision 3): `fresh`, `resume` or `either`, and the host-attested ended guest boots. */
