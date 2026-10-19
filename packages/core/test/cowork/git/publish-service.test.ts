@@ -199,12 +199,18 @@ test("hostile or malformed chunk replies are refused with no guest text in the e
   ];
   const f = await fixture();
   for (const [name, mutate] of cases) {
-    f.guest.onRead = (n, chunk) => n === 1 ? mutate(n, chunk) : undefined; f.guest.readCalls.length = 0;
+    f.guest.onRead = (n, chunk) => mutate(n, chunk); f.guest.readCalls.length = 0; // every reply is hostile, so a missing guard loops or times out
     let error: unknown; try { await f.service.publish(f.caller, f.input); } catch (caught) { error = caught; }
     expect([name, error instanceof GitPublicationError && ["bundle_unavailable", "bundle_stale"].includes(error.code)]).toEqual([name, true]);
     expect(f.operations()).toBe(0);
   }
 }, 30_000);
+
+test("an empty bundle file is refused at stat", async () => {
+  const f = await fixture(); f.guest.files.set(publishBundlePath("request-one"), new Uint8Array(0));
+  await refused(f.service.publish(f.caller, f.input), "bundle_unavailable");
+  expect(f.guest.readCalls).toHaveLength(0); expect(f.operations()).toBe(0);
+});
 
 test("a throwing guest port, a missing file and an unlocatable guest leak nothing and claim nothing", async () => {
   for (const which of ["stat", "read"] as const) {
