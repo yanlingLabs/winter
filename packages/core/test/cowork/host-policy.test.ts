@@ -66,9 +66,9 @@ function tableOutcome(policy: Policy, tool: Tool, authorized: boolean): Expected
 
 /** Literal path rule grid: where the table applies and where the host denies regardless of policy. */
 const PATH_RULES: Readonly<Record<Tool, Readonly<Record<Path, "table" | "deny">>>> = {
-  Read:            { "admitted": "table", "shared-instructions": "table", "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
-  Write:           { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
-  Edit:            { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
+  Read:            { "admitted": "table", "shared-instructions": "table", "outputs": "table", "scratch": "table", "protected": "deny", "outside": "deny", "none": "deny" },
+  Write:           { "admitted": "table", "shared-instructions": "deny",  "outputs": "table", "scratch": "table", "protected": "deny", "outside": "deny", "none": "deny" },
+  Edit:            { "admitted": "table", "shared-instructions": "deny",  "outputs": "table", "scratch": "table", "protected": "deny", "outside": "deny", "none": "deny" },
   Bash:            { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "table" },
   Workflow:        { "admitted": "table", "shared-instructions": "deny",  "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "table" },
   InstructionEdit: { "admitted": "deny",  "shared-instructions": "table", "outputs": "deny", "scratch": "deny", "protected": "deny", "outside": "deny", "none": "deny" },
@@ -104,7 +104,9 @@ test("spec table copy: every policy row matches the module for every tool x path
   for (const policy of POLICIES) for (const tool of TOOLS) for (const path of PATHS) for (const c of ceilings()) for (const alreadyAuthorized of [false, true]) {
     const got = coworkHostDecision({ policy, tool, path, ceiling: c, alreadyAuthorized });
     const hard = PATH_RULES[tool][path] === "deny" || !granted(tool, c);
-    const want = hard ? exp("deny") : tableOutcome(policy, tool, alreadyAuthorized);
+    // Plan's planning scratch is writable inside the plan view: the one cell that differs from an admitted root.
+    const planScratch = policy === "plan" && path === "scratch" && (tool === "Write" || tool === "Edit");
+    const want = hard ? exp("deny") : planScratch ? exp("allow-in-plan-view") : tableOutcome(policy, tool, alreadyAuthorized);
     expect({ policy, tool, path, alreadyAuthorized, c, got: shape(got) }).toEqual({ policy, tool, path, alreadyAuthorized, c, got: want });
     expect(Object.isFrozen(got)).toBe(true);
     // Absent `alreadyAuthorized` is the same as false.
@@ -205,18 +207,34 @@ test("fail-closed shape: plan x Bash is a distinct verdict that is not \"allow\"
   const inPlanView: string[] = [];
   for (const policy of POLICIES) for (const tool of TOOLS) for (const path of PATHS) for (const alreadyAuthorized of [false, true])
     if (decide({ policy, tool, path, alreadyAuthorized }).verdict === "allow-in-plan-view") inPlanView.push(`${policy}/${tool}/${path}/${alreadyAuthorized}`);
-  expect(inPlanView).toEqual(["plan/Bash/admitted/false", "plan/Bash/admitted/true", "plan/Bash/none/false", "plan/Bash/none/true"]);
+  expect(inPlanView).toEqual(["plan/Write/scratch/false", "plan/Write/scratch/true", "plan/Edit/scratch/false", "plan/Edit/scratch/true",
+    "plan/Bash/admitted/false", "plan/Bash/admitted/true", "plan/Bash/none/false", "plan/Bash/none/true"]);
   // Plan allows plain "allow" only for reads.
   for (const tool of TOOLS.filter(name => name !== "Read")) for (const path of PATHS) expect(decide({ policy: "plan", tool, path }).verdict).not.toBe("allow");
 });
 
-test("outputs and conversation scratch have no table cell: denied as path_unclassified for every policy and tool class, bypass included", () => {
-  // DECISION (see host-policy.ts): the spec table names neither, so neither may ever be satisfied by calling it admitted.
-  for (const policy of POLICIES) for (const tool of TOOLS) for (const path of ["outputs", "scratch"] as const) for (const alreadyAuthorized of [false, true])
-    expect(decide({ policy, tool, path, alreadyAuthorized })).toMatchObject({ verdict: "deny", reason: "path_unclassified", bashReview: false });
+test("outputs and conversation scratch (the conversation's OWN folders): read everywhere, write like an admitted root, plan's scratch only inside the plan view", () => {
+  for (const policy of POLICIES) for (const alreadyAuthorized of [false, true]) {
+    for (const path of ["outputs", "scratch"] as const) {
+      expect(decide({ policy, tool: "Read", path, alreadyAuthorized })).toMatchObject({ verdict: "allow", reason: "policy_table" });
+      for (const tool of ["Write", "Edit"] as const) {
+        const admitted = decide({ policy, tool, path: "admitted", alreadyAuthorized }).verdict;
+        const got = decide({ policy, tool, path, alreadyAuthorized }).verdict;
+        expect({ policy, path, tool, got }).toEqual({ policy, path, tool, got: policy === "plan" && path === "scratch" ? "allow-in-plan-view" : admitted });
+      }
+      // Pathless tools and the host operation never take these classes.
+      for (const tool of ["Bash", "Workflow"] as const) expect(decide({ policy, tool, path, alreadyAuthorized })).toMatchObject({ verdict: "deny", reason: "path_unclassified" });
+      expect(decide({ policy, tool: "InstructionEdit", path, alreadyAuthorized })).toMatchObject({ verdict: "deny", reason: "path_class_mismatch" });
+    }
+  }
+  // Plan x outputs is a plain Deny (outputs are deliverables, not planning scratch); the spec rows are otherwise unchanged.
+  expect(decide({ policy: "plan", tool: "Write", path: "outputs" }).verdict).toBe("deny");
+  expect(decide({ policy: "ask", tool: "Write", path: "outputs" }).verdict).toBe("ask");
+  expect(decide({ policy: "auto", tool: "Edit", path: "outputs" }).verdict).toBe("allow");
   // An explicit deny and a missing ceiling still say why first.
   expect(decide({ policy: "ask", tool: "Read", path: "scratch", explicitDeny: true }).reason).toBe("explicit_deny");
   expect(coworkHostDecision({ policy: "ask", tool: "Read", path: "outputs", ceiling: ceiling([]) }).reason).toBe("ceiling");
+  expect(decide({ policy: "plan", tool: "Write", path: "scratch", explicitDeny: true }).verdict).toBe("deny");
 });
 
 // ── connector row ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -309,16 +327,21 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-test("anti-wiring: only the transition module imports the matrix, it has no barrel export and only type-only imports", () => {
+test("wired behind the refusal: only the transition module, the instruction owner and the Cowork approval projection reach the matrix; no barrel export; type-only imports", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "host-policy.ts"), sibling = join(packages, "core", "src", "cowork", "policy-transition.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
+  // Who may name the matrix: the classifier (policy-transition.ts), the shared-guidance edit's agentScope (instructions.ts) and the Cowork
+  // approval projection (runtime-sdk/cowork-approval.ts, reached only from the approval bridge's injected `cowork` port; see
+  // test/runtime-sdk/cowork-approval.test.ts, which also proves production never supplies that port).
+  const offenders = new Set<string>();
   for (const file of sources.filter(candidate => candidate !== module && candidate !== sibling)) {
     const text = readFileSync(file, "utf8");
     for (const needle of ["./host-policy", "cowork/host-policy", "coworkHostDecision", "coworkConnectorVerdict", "COWORK_APPROVAL_POLICIES", "COWORK_GUEST_TOOL_CLASSES", "COWORK_PATH_CLASSES", "isCoworkApprovalPolicy", "CoworkHostDecision"])
-      expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
+      if (text.includes(needle)) offenders.add(basename(file));
   }
+  expect([...offenders].sort()).toEqual(["cowork-approval.ts", "instructions.ts"]);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/host-policy|policy-transition|from "\.\/cowork/);
   const own = readFileSync(module, "utf8");

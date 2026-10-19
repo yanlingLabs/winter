@@ -434,16 +434,26 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-test("anti-wiring: no src file imports the transition module, it has no barrel export and it reaches only the matrix", () => {
+test("wired behind the refusal: only the Cowork approval projection names the transition module (a type), no barrel export, and it reaches only the matrix", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "policy-transition.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
+  // runtime-sdk/cowork-approval.ts imports the snapshot TYPE so the approval bridge can read the machine's phase and admission. Session door
+  // D3: the DOOR's approval ports (cowork/approval-ports.ts) construct ONE machine per conversation incarnation, stable at the binding's
+  // policy, whose ports refuse every change; only the Cowork driver table builds those ports, and nothing in src constructs that table
+  // (test/cowork/session-door-off.test.ts).
+  const offenders = new Set<string>(), constructors = new Set<string>();
   for (const file of sources.filter(candidate => candidate !== module)) {
     const text = readFileSync(file, "utf8");
     for (const needle of ["./policy-transition", "cowork/policy-transition", "CoworkPolicyTransitionMachine", "classifyCoworkPolicyChange", "CoworkTransitionPorts", "CoworkTransitionSnapshot", "COWORK_CLASSIFIER_CELLS"])
-      expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
+      if (text.includes(needle)) offenders.add(basename(file));
+    if (text.includes("CoworkPolicyTransitionMachine") || text.includes("classifyCoworkPolicyChange")) constructors.add(basename(file));
   }
+  expect([...offenders].sort()).toEqual(["approval-ports.ts", "cowork-approval.ts"]);
+  expect([...constructors]).toEqual(["approval-ports.ts"]);
+  const projection = readFileSync(join(packages, "core", "src", "runtime-sdk", "cowork-approval.ts"), "utf8");
+  expect(projection).toMatch(/import type \{ CoworkTransitionSnapshot \} from "\.\.\/cowork\/policy-transition"/);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/policy-transition|from "\.\/cowork/);
   const own = readFileSync(module, "utf8");

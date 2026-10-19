@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 export const COWORK_BACKUP_EXCLUDED_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox"] as const;
 
 /** Reverse dependency order also permits removing an unused additive schema on explicit rollback. */
-export const COWORK_TABLES = ["cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_binding", "cowork_home_identity"] as const;
+export const COWORK_TABLES = ["cowork_guest_boots", "cowork_guest_uids", "cowork_export_output_ids", "cowork_session_reservations", "cowork_peer_inbox_sequences", "cowork_peer_inbox", "cowork_exports", "cowork_workspace_images", "cowork_output_directory_intents", "cowork_output_locations", "cowork_output_directories", "cowork_schedule_quarantines", "cowork_instruction_mutations", "cowork_instructions", "cowork_instruction_directories", "cowork_schedule_occurrences", "cowork_schedules", "cowork_folder_grants", "cowork_volumes", "cowork_volume_directories", "cowork_outbox_deliveries", "cowork_outbox", "cowork_conversations", "cowork_projects", "cowork_policies", "cowork_sources", "cowork_operations", "cowork_workspaces", "cowork_home_binding", "cowork_home_identity"] as const;
 
 /** Host authority only. A guest manifest or rebuilt session index never populates these tables. */
 export function migrateCoworkSchema(db: Database): void {
@@ -339,4 +339,103 @@ export function migrateCoworkSessionBindingSchema(db: Database): void {
     ALTER TABLE cowork_conversations_v18 RENAME TO cowork_conversations;
     CREATE INDEX IF NOT EXISTS cowork_conversations_workspace ON cowork_conversations(workspace_id);
   `);
+}
+
+/** v19, session door D4 (docs/research/2026-10-18-cowork-session-door-d4.md): the durable first step of a Cowork
+ * `session.create`. One row per (principal, workspace, requestId) reserves the conversation's session id and the digest of
+ * the request it answers, in one runtime-state transaction, BEFORE the session store row or the binding exist. A retry
+ * finds it and resumes at the missing step (store row, then binding); a different request under the same id is
+ * `request_conflict`. `session_id` is unique, so two requests can never reserve one id, and a standalone workspace's
+ * single conversation (its `owner_id`) is reserved at most once. `state` is `pending` until the binding commits, then
+ * `bound`. It is Cowork authority (COWORK_TABLES), so a populated table refuses both downgrades.
+ * Records only: no production door constructs the module that writes it. Idempotent (`IF NOT EXISTS`). */
+export function migrateCoworkSessionReservationSchema(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_session_reservations (
+    principal_id TEXT NOT NULL, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+    request_id TEXT NOT NULL, request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+    session_id TEXT NOT NULL UNIQUE CHECK(session_id GLOB 's_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]' AND length(session_id)=14),
+    scope TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','bound')), created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,workspace_id,request_id)
+  );`);
+}
+
+const columnsOf = (db: Database, table: string): string[] => db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map(column => column.name);
+
+/** v20, content-out (#97; definitions from that lane, DOOR owns the migration): an export's content binding.
+ *  - `cowork_exports.content_digest`: lowercase hex SHA-256 of the bundle's exact `integrity.json` bytes, written once while
+ *    the row is `prepared`; NULL means no binding (the restorer refuses).
+ *  - `cowork_export_output_ids`: the export's reverse map from opaque output ids (`s` + 16 lowercase hex, random per session
+ *    folder per export, never derived from the session id) to session ids. No foreign key on `session_id`: a session can be
+ *    deleted while its export stays valid. Cowork authority (COWORK_TABLES), listed before `cowork_exports`.
+ * Idempotent (rewound `user_version` replays it). */
+export function migrateCoworkExportBindingSchema(db: Database): void {
+  if (!columnsOf(db, "cowork_exports").includes("content_digest")) {
+    db.exec("ALTER TABLE cowork_exports ADD COLUMN content_digest TEXT CHECK (content_digest IS NULL OR (length(content_digest) = 64 AND content_digest NOT GLOB '*[^0-9a-f]*'))");
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS cowork_export_output_ids (
+    export_id TEXT NOT NULL REFERENCES cowork_exports(export_id),
+    opaque_id TEXT NOT NULL CHECK (length(opaque_id) = 17 AND opaque_id GLOB 's*' AND substr(opaque_id, 2) NOT GLOB '*[^0-9a-f]*'),
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (export_id, opaque_id),
+    UNIQUE (export_id, session_id)
+  );`);
+}
+
+/** v21, #92 host side (design section 8, DOOR rows; records only, nothing reads them yet):
+ *  - `cowork_conversations`: stable guest `runtime_uid`/`tool_uid` (L7, allocated once at bind), the four-state
+ *    `store_state` (`none` at bind, `started` write-ahead before the first set, `created` at the first completed turn, `lost`
+ *    when the store is gone; section 3.2) and `last_incarnation_id`. Existing rows whose guest already received a set (a
+ *    recorded backend) start as `started`, never `none`, so a later resume can never be told "fresh" over a real store.
+ *  - `cowork_workspaces`: the data volume's `store_volume_uuid` (kept and re-sent; CR4 step 9) and the per-workspace
+ *    `browse_uid` (4b.3).
+ *  - `cowork_guest_uids`: the allocation table. One row per (workspace, uid), never reused while its owner's files may
+ *    remain: a row is deleted only once `released_at` is set, and `released_at` needs `retired_at`.
+ *  - `cowork_guest_boots`: the host's durable record of each guest boot at `hello`, and its end proof (the D1 evidence)
+ *    after release; `endedGuestBoots` is built only from rows with a proof.
+ *  - `cowork_peer_inbox` (PEER-INBOX's table; its columns come through DOOR's migration): `offer_count`,
+ *    `acked_hold_token`, `commit_confirmed_at` and `commit_outcome` (4.5; set together).
+ * Idempotent. */
+export function migrateCoworkResumeSchema(db: Database): void {
+  const conversations = columnsOf(db, "cowork_conversations");
+  if (!conversations.includes("runtime_uid")) db.exec("ALTER TABLE cowork_conversations ADD COLUMN runtime_uid INTEGER CHECK (runtime_uid IS NULL OR runtime_uid BETWEEN 1000 AND 65533)");
+  if (!conversations.includes("tool_uid")) db.exec("ALTER TABLE cowork_conversations ADD COLUMN tool_uid INTEGER CHECK (tool_uid IS NULL OR (tool_uid BETWEEN 1000 AND 65533 AND tool_uid != runtime_uid))");
+  if (!conversations.includes("store_state")) {
+    db.exec("ALTER TABLE cowork_conversations ADD COLUMN store_state TEXT NOT NULL DEFAULT 'none' CHECK (store_state IN ('none','started','created','lost'))");
+    db.exec("UPDATE cowork_conversations SET store_state='started' WHERE backend_session_id IS NOT NULL");
+  }
+  if (!conversations.includes("last_incarnation_id")) db.exec("ALTER TABLE cowork_conversations ADD COLUMN last_incarnation_id TEXT");
+  const workspaces = columnsOf(db, "cowork_workspaces");
+  if (!workspaces.includes("store_volume_uuid")) db.exec("ALTER TABLE cowork_workspaces ADD COLUMN store_volume_uuid TEXT CHECK (store_volume_uuid IS NULL OR (length(store_volume_uuid) = 36 AND store_volume_uuid GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'))");
+  if (!workspaces.includes("browse_uid")) db.exec("ALTER TABLE cowork_workspaces ADD COLUMN browse_uid INTEGER CHECK (browse_uid IS NULL OR browse_uid BETWEEN 1000 AND 65533)");
+  const peer = columnsOf(db, "cowork_peer_inbox");
+  if (!peer.includes("offer_count")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN offer_count INTEGER NOT NULL DEFAULT 0 CHECK (offer_count >= 0)");
+  if (!peer.includes("acked_hold_token")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN acked_hold_token TEXT CHECK (acked_hold_token IS NULL OR (length(acked_hold_token) = 64 AND acked_hold_token NOT GLOB '*[^0-9a-f]*'))");
+  if (!peer.includes("commit_confirmed_at")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN commit_confirmed_at REAL");
+  if (!peer.includes("commit_outcome")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN commit_outcome TEXT CHECK (commit_outcome IS NULL OR commit_outcome IN ('folded','queued','started','already','lost'))");
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS cowork_conversations_runtime_uid ON cowork_conversations(workspace_id, runtime_uid) WHERE runtime_uid IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS cowork_conversations_tool_uid ON cowork_conversations(workspace_id, tool_uid) WHERE tool_uid IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS cowork_guest_uids (
+      workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+      uid INTEGER NOT NULL CHECK (uid BETWEEN 1000 AND 65533),
+      role TEXT NOT NULL CHECK (role IN ('runtime','tool','browse')),
+      session_id TEXT, allocated_at TEXT NOT NULL, retired_at TEXT, released_at TEXT,
+      PRIMARY KEY (workspace_id, uid),
+      CHECK ((role = 'browse') = (session_id IS NULL)),
+      CHECK (released_at IS NULL OR retired_at IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS cowork_guest_uids_owner ON cowork_guest_uids(workspace_id, session_id, role) WHERE session_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS cowork_guest_uids_browse ON cowork_guest_uids(workspace_id) WHERE role = 'browse';
+    CREATE TRIGGER IF NOT EXISTS cowork_guest_uids_kept BEFORE DELETE ON cowork_guest_uids WHEN OLD.released_at IS NULL
+      BEGIN SELECT RAISE(ABORT, 'a guest uid is kept until its files are proven removed'); END;
+    CREATE TABLE IF NOT EXISTS cowork_guest_boots (
+      workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
+      incarnation_id TEXT NOT NULL, lease_epoch INTEGER NOT NULL CHECK (lease_epoch > 0),
+      guest_boot_id TEXT NOT NULL UNIQUE CHECK (length(guest_boot_id) = 36),
+      recorded_at TEXT NOT NULL,
+      ended_proof TEXT CHECK (ended_proof IS NULL OR ended_proof IN ('orderly-receipt','new-boot','owner-recover')),
+      ended_at TEXT,
+      PRIMARY KEY (workspace_id, incarnation_id),
+      CHECK ((ended_proof IS NULL) = (ended_at IS NULL))
+    );`);
 }

@@ -24,7 +24,7 @@ const CHAIN = 6, RECORDED = CHAIN + 1; // cowork, workspaces, <ws>, shared, outp
 function intend(f: ReturnType<typeof fixture>, relative: string) { f.db.db.run("INSERT INTO cowork_output_directory_intents VALUES(?,?,?)", [relative, f.records.recordedHomeIdentity(), new Date().toISOString()]); }
 function request(f: ReturnType<typeof fixture>, locationId: string, relativePath = "file.bin") { return { workspaceId: f.workspaceId, locationId, expectedLocationRevision: 1, relativePath }; }
 test("schema15 is additive, empty output authority cannot be inferred from ordinary OUTDIR", () => {
- const f = fixture(); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(18); expect(f.db.integrity().ok).toBe(true);
+ const f = fixture(); expect(f.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(21); expect(f.db.integrity().ok).toBe(true);
  const path = join(ensureOutdir(f.home, f.sessionId), "ordinary.bin"); writeFileSync(path, "ordinary");
  expect(outdirPath(f.home, f.sessionId)).not.toBe(f.root); expect(f.outputs.list(outputUser, { workspaceId: f.workspaceId })).toEqual({ locations: [], nextCursor: null });
  refusal(() => f.outputs.stat(outputUser, request(f, "unknown")), "authority_denied"); expect(existsSync(f.root)).toBe(false); expect(readFileSync(path, "utf8")).toBe("ordinary");
@@ -238,7 +238,7 @@ test("schema14 upgrades to15 preserving existing workspace/HomeIdentity and defa
  const f = fixture(), before = f.records.get(f.workspaceId), homeId = f.records.recordedHomeIdentity();
  const settings = () => ["synchronous", "fullfsync", "checkpoint_fullfsync"].map(name => f.db.db.query<Record<string, number>, []>(`PRAGMA ${name}`).get()![name]); const prior = settings();
  f.db.db.run("DROP TABLE cowork_output_locations"); f.db.db.run("DROP TABLE cowork_output_directories"); f.db.db.run("DROP TABLE cowork_output_directory_intents"); f.db.db.run("PRAGMA user_version=14");
- const upgraded = openRuntimeStateDb(f.home); try { expect(upgraded.schemaVersion()).toBe(18); const records = new CoworkRepository(upgraded); expect(records.get(f.workspaceId)).toEqual(before); expect(records.recordedHomeIdentity()).toBe(homeId); expect(upgraded.integrity().ok).toBe(true); expect(upgraded.db.query("SELECT COUNT(*) AS n FROM cowork_output_directory_intents").get()).toEqual({ n: 0 }); } finally { upgraded.close(); }
+ const upgraded = openRuntimeStateDb(f.home); try { expect(upgraded.schemaVersion()).toBe(21); const records = new CoworkRepository(upgraded); expect(records.get(f.workspaceId)).toEqual(before); expect(records.recordedHomeIdentity()).toBe(homeId); expect(upgraded.integrity().ok).toBe(true); expect(upgraded.db.query("SELECT COUNT(*) AS n FROM cowork_output_directory_intents").get()).toEqual({ n: 0 }); } finally { upgraded.close(); }
  expect(settings()).toEqual(prior);
 });
 native("owner transaction failure rolls back root authority; once the fault clears the retry adopts the leftover", () => {

@@ -1,7 +1,6 @@
 import { hostToolNameFor } from "./tool-names";
 import { canonicalHostJson } from "./host-code-json";
 import * as sdk from "@yanlinglabs/winter-agent-sdk";
-import * as runtime from "@yanlinglabs/winter-agent-runtime";
 import type {
   Options,
   SpawnClaudeCodeProcess,
@@ -161,8 +160,10 @@ export interface HostCodeSdkAdapter {
   };
 }
 export function installedHostCodeAdapter(): HostCodeSdkAdapter | undefined {
+  // The server-side runtime package is large; it is loaded here, on the first capability probe, not at daemon start. A daemon that
+  // never runs an owned-bridge Code session (every production daemon today) never pays for it.
   const client = sdk as unknown as Record<string, unknown>,
-    server = runtime as unknown as Record<string, unknown>;
+    server = require("@yanlinglabs/winter-agent-runtime") as Record<string, unknown>;
   if (
     client.MANDATORY_FLOOR_CONTRACT_VERSION !== 1 ||
     client.HOST_CODE_PROCESS_BROKER_VERSION !== 1 ||
@@ -316,6 +317,8 @@ interface LiveGeneration {
 
 /** One service per daemon; cross-home coordinator must collect policy acknowledgments from
  * every participating daemon before provisioning. Only explicit owned bridges enroll in real floors. This service never materializes storage itself. */
+const LAZY_ADAPTER = Symbol("lazy-host-code-adapter");
+
 export class HostCodeExecutionService {
   private readonly live = new Map<string, LiveGeneration>();
   private refreshing = false;
@@ -326,17 +329,25 @@ export class HostCodeExecutionService {
   private retiredFloorOverflow = false;
   constructor(
     readonly home: string,
-    private readonly adapter:
+    adapterInput:
       | HostCodeSdkAdapter
       | undefined
-      | null = installedHostCodeAdapter(),
+      | null
+      | typeof LAZY_ADAPTER = LAZY_ADAPTER,
     private readonly spawn: SpawnClaudeCodeProcess = sdk.defaultSpawn,
     private readonly lifecycle?: {
       createOutputTransport?: HostCodeOutputTransportFactory;
       confirmDescendantsStopped?(generationId: string): Promise<boolean>;
       confirmRetiredDescendantsStopped?(): Promise<boolean>;
     },
-  ) {}
+  ) { this.adapterInput = adapterInput; }
+  private readonly adapterInput: HostCodeSdkAdapter | undefined | null | typeof LAZY_ADAPTER;
+  private resolvedAdapter: { value: HostCodeSdkAdapter | undefined | null } | undefined;
+  /** The SDK adapter, probed on first use (see `installedHostCodeAdapter`). An explicit `null` (no adapter) or an adapter object is honoured; an explicit `undefined` falls through the default parameter and becomes `LAZY_ADAPTER`, i.e. probed on first use. */
+  private get adapter(): HostCodeSdkAdapter | undefined | null {
+    if (this.adapterInput !== LAZY_ADAPTER) return this.adapterInput;
+    return (this.resolvedAdapter ??= { value: installedHostCodeAdapter() }).value;
+  }
   assertReady(home: string): void {
     if (resolve(home) !== resolve(this.home))
       throw new HostCodeUnavailable("foreign-service-home");

@@ -1,0 +1,10 @@
+# Cowork N2 launcher: small hardening follow-up
+
+Status: SOURCE ONLY, 2026-10-19. Branched from #85 (`cowork/n2-launcher-receipt-mac`) because #85 had not merged yet.
+
+1. **`ReceiptKey ==` lock order.** The comparison took `a.lock` then `b.lock`; two threads comparing the same pair in opposite argument order could deadlock. The locks are now taken in a fixed order (by `ObjectIdentifier`), and `a === b` returns before any lock. Test: eight threads compare the same pairs in both orders 20 000 times each, with a 30 s deadline.
+2. **Overwriting the raw `begin` line after parse: NOT done, deliberately.** The line reaches the session as `FramedLine.bytes`, an immutable `[UInt8]` the framer produced from its own buffer; the parser then builds a JSON tree whose strings (including the key's base64 text) are separate heap copies, and `Data(base64Encoded:)` and CryptoKit's `SymmetricKey` make more. Zeroing the one array we hold would leave those copies and would claim a guarantee Swift cannot give. The honest statement stays as in the receipt-MAC note: the long-lived copy (`ReceiptKey`'s block) is zeroed, the transient copies are not.
+3. **#57 LOWs.**
+   - F6d: the shipped 120 s total-pause cap is the constant `LauncherRuntime.defaultRelayPauseCapMs`, asserted by a test on the constant and on a runtime built the way production builds it.
+   - F5: `testTheProfileIdentifierIsTheRunningProcessesNotTheFileAtItsPath` runs a harmless ad-hoc-signed copy of FakeWorker (no privilege, no VM, nothing of the launcher), replaces the file at its path with another ad-hoc identity (a new inode), and compares the kernel's reading (`SecTask`, what the profile uses) with the path-based reading (`SecCodeCopySelf` + `SecCodeCopyStaticCode`). The path reading follows the swapped file; the kernel reading does not move. The test would fail if the profile went back to the path-based reading.
+   - The Authenticity paragraph of `docs/research/2026-10-17-cowork-n2-launcher.md` now points at section 7.1 and says the launcher mints and verifies the MAC (it no longer calls Keychain use an open item).

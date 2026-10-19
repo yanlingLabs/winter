@@ -52,6 +52,14 @@ enum SessionMode: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// What the Cowork row's detail pane shows. While Cowork is unavailable (`isAvailable == false`, today) it is ALWAYS the placeholder,
+    /// even with a management connection: the workspace view can open a folder picker, which must not be reachable from a row that
+    /// says "Soon". The workspace view returns with the flip.
+    enum CoworkDetail: Equatable { case workspace, placeholder }
+    static func coworkDetail(available: Bool, hasWorkspaceModel: Bool) -> CoworkDetail {
+        available && hasWorkspaceModel ? .workspace : .placeholder
+    }
+
     /// chatgpt-ui T1 (spec §1): Chats directly under the New chat action row, then the working
     /// modes, then the coming-soon shell. See the type doc for the deliberate iOS divergence.
     static let sidebarOrder: [SessionMode] = [.chat, .code, .dispatch, .cowork]
