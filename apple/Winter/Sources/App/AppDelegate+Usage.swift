@@ -11,6 +11,8 @@ extension AppDelegate {
         }
         guard let client = appModel?.client else { return }
         let model = UsageWindowModel()
+        // The plans the island last read, until the window's own answer lands.
+        model.seed = islandController?.tabModels.usage.summary
         model.fetchSeries = { range, sources in try await client.usageSeries(range: range, sources: sources) }
         model.fetchSummary = { range, sources in try await client.usageSummary(range: range, sources: sources) }
         model.fetchSubscriptions = { try await client.usageSubscriptions() }

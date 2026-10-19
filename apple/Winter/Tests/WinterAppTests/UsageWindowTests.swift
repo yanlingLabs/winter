@@ -140,6 +140,18 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertTrue(seen.allSatisfy { !$0.contains(.opencode) })
     }
 
+    func testTheWindowShowsTheIslandsPlansUntilItsOwnAnswerLands() async {
+        // User 2026-10-19: the cached limits until the fresh read arrives — the window opens on the island's last plans.
+        let model = UsageWindowModel()
+        model.seed = UsageSummary(range: "24h", codexPlan: UsagePlanReading(provider: "codex", source: "codex-app-server", at: 1, windows: []))
+        XCTAssertEqual(model.plansSummary?.codexPlan?.source, "codex-app-server")
+        model.fetchSeries = { r, _ in UsageSeries(range: r.rawValue) }
+        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue) }
+        await model.refresh()
+        // Its own answer replaces the seed.
+        XCTAssertNil(model.plansSummary?.codexPlan)
+    }
+
     func testTheWindowModelSendsEachTrackingSwitch() async {
         let model = UsageWindowModel()
         var sent: [[Bool?]] = []
