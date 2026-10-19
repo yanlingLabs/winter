@@ -59,3 +59,11 @@ export function createCoworkShareDirectoryOpener(): { open(hostPath: string): { 
     },
   };
 }
+
+/** `<home>/cowork/workspaces/<id>/shared/{guidance,memory,outputs}`, each a real directory owned by this user (mode 0700), made if missing and never through a symlink. */
+export function ensureSharedDirectories(home: string, workspaceId: string): void {
+  if (!SESSION_ID.test(workspaceId)) throw new CoworkGuestDirectoryError("invalid_name");
+  const workspace = join(realpathSync(home), "cowork", "workspaces", workspaceId);
+  ensureOwnedDirectory(workspace, "shared");
+  for (const name of ["guidance", "memory", "outputs"]) ensureOwnedDirectory(join(workspace, "shared"), name);
+}
