@@ -11,8 +11,8 @@
  *     session_id TEXT NOT NULL,
  *     PRIMARY KEY (export_id, opaque_id), UNIQUE (export_id, session_id));
  *
- * Nothing constructs this class in production: the restorer is unbuildable without a binding, and the binding is unbuildable
- * until the migration exists.
+ * Nothing constructs this class in production: `createCoworkWorkspaceRestorer(undefined)` is the only production shape and
+ * refuses every restore, and `test/cowork/content-out-wiring.test.ts` pins that no src file outside this lane names this class.
  */
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { durableCoworkTransaction } from "./durable-transaction";
@@ -40,11 +40,12 @@ export class SqliteExportContentBinding implements CoworkExportContentBinding {
 
   /** The binding of a generation, or null while none was recorded (the column is NULL, or there is no such row). */
   read(exportId: string): { readonly contentDigest: string; readonly outputIds: Readonly<Record<string, string>> } | null {
-    const row = this.rs.db.query<Row, [string]>("SELECT content_digest FROM cowork_exports WHERE export_id=?").get(lifecycleId(exportId));
+    const id = lifecycleId(exportId);
+    const row = this.rs.db.query<Row, [string]>("SELECT content_digest FROM cowork_exports WHERE export_id=?").get(id);
     const digest = row?.content_digest;
     if (typeof digest !== "string" || !HEX64.test(digest)) return null;
     const outputIds: Record<string, string> = {};
-    for (const entry of this.rs.db.query<Row, [string]>("SELECT opaque_id,session_id FROM cowork_export_output_ids WHERE export_id=?").all(exportId)) outputIds[entry.opaque_id!] = entry.session_id!;
+    for (const entry of this.rs.db.query<Row, [string]>("SELECT opaque_id,session_id FROM cowork_export_output_ids WHERE export_id=?").all(id)) outputIds[entry.opaque_id!] = entry.session_id!;
     return { contentDigest: digest, outputIds };
   }
 }
