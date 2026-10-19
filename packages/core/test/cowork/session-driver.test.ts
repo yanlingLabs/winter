@@ -19,6 +19,7 @@ import { parseCoworkNativeMuxFrame, serializeCoworkNativeMuxFrame } from "../../
 import { coworkGuestPermissionAnswer, createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "../../src/cowork/session-driver";
 import type { CoworkApprovalPort, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestRun, CoworkGuestRuntimeLink, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkGuestStopOutcome } from "../../src/cowork/session-ports";
 import { canUseToolFor } from "../../src/runtime-sdk/approval-bridge";
+import { startWinterSession } from "../../src/runtime-sdk/winter-session";
 import { ProjectionCheckpoints } from "../../src/runtime-state/checkpoints";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
@@ -73,7 +74,8 @@ class ScriptedGuest {
     this.run = {
       workspaceId: context.workspaceId, incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch, guestBootId: context.guestBootId,
       runtime: () => this.link,
-      stop: async reason => { this.stops.push(reason); return this.terminate({ released: true, evidence: "orderly-receipt" }); },
+      // A slow drain holds the outcome until the test settles it; otherwise the stop is orderly at once.
+      stop: async reason => { this.stops.push(reason); return this.slowStop ? this.endedOutcome.promise : this.terminate({ released: true, evidence: "orderly-receipt" }); },
       ended: this.endedOutcome.promise,
     };
   }
@@ -96,7 +98,8 @@ class ScriptedGuest {
       const frame = JSON.parse(line) as Record<string, unknown>;
       this.frames.push(frame);
       const refusal = hostQueryFrameRefusal(frame, id => this.answers.has(id));
-      if (refusal !== undefined) { this.refusals.push(refusal); continue; }
+      // The real guest's check throws: its runtime dies, and with it the incarnation's runtime streams.
+      if (refusal !== undefined) { this.refusals.push(refusal); this.endRuntime(); continue; }
       if (frame.type === "user") { this.users.push(String(frame.text)); this.onUser(String(frame.text), this); }
       else if (frame.type === "control_request") this.write({ type: "control_response", requestId: frame.requestId, ok: true });
       else if (frame.type === "control_response") { const pending = this.answers.get(String(frame.requestId)); this.answers.delete(String(frame.requestId)); pending?.resolve(frame); }
@@ -111,8 +114,11 @@ class ScriptedGuest {
     return answered.promise;
   }
   /** The incarnation ends (the guest's side, or the host's stop). */
+  slowStop = false;
+  /** The runtime process exits: OUT and ERR end; the incarnation's stop outcome is not known yet. */
+  endRuntime(): void { if (!this.outEnded) { this.outEnded = true; this.handler?.("out", new Uint8Array(0), true); this.handler?.("err", new Uint8Array(0), true); } }
   terminate(outcome: CoworkGuestStopOutcome): CoworkGuestStopOutcome {
-    if (!this.outEnded) { this.outEnded = true; this.handler?.("out", new Uint8Array(0), true); this.handler?.("err", new Uint8Array(0), true); }
+    this.endRuntime();
     this.endedOutcome.resolve(outcome);
     this.onStopped();
     return outcome;
@@ -132,7 +138,8 @@ const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void } = {}) {
+function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void } = {}) {
+  const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness] };
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const sessions = Array.from({ length: opts.conversations ?? 1 }, () => store.createSession("t", { mode: "code" }));
   const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions });
@@ -145,6 +152,7 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
       // The host fails the start on a refused set (a bootstrap fault); the driver must still surface ITS typed refusal.
       try { set = request!.conversations(context); } catch { f.power("stopped"); throw new Error("bootstrap fault: bad_conversations"); }
       if (set === null) throw new Error("no set");
+      opts.afterSet?.();
       f.power("running");
       const guest = new ScriptedGuest(context, onTheWire(set, context.incarnationId), () => f.power("stopped"));
       guest.onUser = opts.script ?? (() => {});
@@ -159,13 +167,13 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
   };
   const deps: CoworkSessionDriverDeps = {
     records: f.records, authority: f.authority, store, hub, checkpoints: new ProjectionCheckpoints(f.db),
-    ...(opts.production ? {} : { route: opts.route ?? standinRoute(), native, offer: OFFER, approvals: port }),
+    ...(opts.production ? {} : { route: opts.route ?? standinRoute(), native, offer, approvals: port }),
     query: input => { launched.push(input.options as Options); return agentQuery(input); },
     endGraceMs: 200,
   };
   const drivers = createCoworkSessionDrivers(deps);
   cleanups.push(async () => { await drivers.beginShutdown(); store.close(); f.close(); rmSync(storeHome, { recursive: true, force: true }); });
-  return { f, store, hub, sessions, sid: sessions[0]!, drivers, guests, launched, approvals, deps };
+  return { f, store, hub, sessions, sid: sessions[0]!, drivers, guests, launched, approvals, deps, offer };
 }
 async function until(predicate: () => boolean, what = "condition") {
   const deadline = Date.now() + 3000;
@@ -379,4 +387,42 @@ test("runTurn runs one headless turn to its end", async () => {
   expect(types(log)).toContain("turn_completed");
   expect(log.some(event => event.type === "assistant_message" && JSON.stringify(event).includes("headless"))).toBe(true);
   expect(h.guests[0]!.refusals).toEqual([]);
+});
+
+test("the host launch must agree with the set the guest received, or the incarnation is stopped and nothing runs", async () => {
+  // The image's declared readiness changes between the set and the launch: the launch would offer no tool, the guest all four.
+  let h: ReturnType<typeof harness> | undefined;
+  h = harness({ script: reply("never"), afterSet: () => { (h!.offer.readiness as string[]).length = 0; } });
+  const session = await h.drivers.ensure(h.sid);
+  await expect(session.open()).rejects.toThrow("stale_acknowledgment");
+  expect(h.guests[0]!.stops).toEqual(["user"]);
+  expect(h.launched).toEqual([]);
+  // The guest received the set, so the conversation never starts fresh.
+  await until(() => h!.drivers.get(h!.sid) === undefined, "the close");
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+});
+
+test("the router's messaging attach is required for every runnable mode; only a Cowork driver goes without it", () => {
+  const h = harness();
+  const base = { sessionId: h.sid, backendSessionId: "0b6d7c4e-5a1f-4c2e-9d3b-7e8f9a0b1c2d", runtime: {} as never, options: () => ({}), projector: () => ({}) as never,
+    append: () => ({}) as never, broadcast: () => {}, hasTranscript: () => false, idleTimeoutMs: () => Number.POSITIVE_INFINITY };
+  for (const mode of ["code", "dispatch", "chat"] as const) expect(() => startWinterSession({ ...base, mode })).toThrow("messaging attach");
+  expect(() => startWinterSession({ ...base, mode: "cowork" })).not.toThrow();
+});
+
+test("between the runtime's exit and the incarnation's stop outcome, a send refuses before the log (the runtime is gone, cold resume is D10)", async () => {
+  const h = harness({ script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.send("first", "cli"); await session.idle();
+  const guest = h.guests[0]!, length = h.store.read(h.sid).length;
+  guest.slowStop = true;
+  guest.endRuntime();
+  await until(() => session.state !== "live", "the runtime exit");
+  expect(h.drivers.get(h.sid)).toBe(session); // the incarnation is still draining
+  await expect(session.send("again", "cli")).rejects.toThrow("cold_resume_unavailable");
+  await expect(session.steer("again", "cli")).rejects.toThrow("cold_resume_unavailable");
+  expect(() => session.deliver("again")).toThrow("cold_resume_unavailable");
+  expect(h.store.read(h.sid).length).toBe(length);
+  guest.terminate({ released: true, evidence: "orderly-receipt" });
+  await until(() => h.drivers.get(h.sid) === undefined, "the close");
 });
