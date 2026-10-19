@@ -76,7 +76,8 @@ export class CoworkWorkspaceEvents {
     this.draining = true;
     let delivered = 0, blocked = 0, deferred = 0, pruneBlocked = 0;
     try {
-      const pendingSessions = this.records.pendingChangeSessions();
+      let pendingSessions: string[];
+      try { pendingSessions = this.records.pendingChangeSessions(); } catch { return { delivered, blocked: 1, deferred, pruneBlocked }; }
       const pendingSet = new Set(pendingSessions);
       for (const sessionId of this.failures.keys()) if (!pendingSet.has(sessionId)) this.failures.delete(sessionId);
       for (const sessionId of pendingSessions) {
@@ -130,10 +131,28 @@ export class CoworkWorkspaceEvents {
     } finally { this.draining = false; }
     return { delivered, blocked, deferred, pruneBlocked };
   }
-  start(): void {
+  /** Boot: one guarded drain, then the 1 s timer ONLY when a Cowork host was injected (`keepAlive`) or work is still pending. A production
+   *  daemon has no Cowork host, so it creates no timer. Neither the first drain nor a tick can throw into the caller or the process. */
+  start(opts: { keepAlive?: boolean } = {}): void {
     if (this.timer) return;
-    this.drain();
-    this.timer = setInterval(() => this.drain(), 1000);
+    this.keepAlive = opts.keepAlive === true;
+    this.safeDrain();
+    if (this.keepAlive || this.hasPending()) this.arm();
+  }
+  private keepAlive = false;
+  private logged = false;
+  private hasPending(): boolean { try { return this.records.pendingChangeSessions().length > 0; } catch { return false; } }
+  private safeDrain(): void {
+    try { this.drain(); } catch (error) {
+      if (!this.logged) { this.logged = true; console.error(`cowork: workspace event delivery failed (${error instanceof CoworkError ? error.code : "error"}); retrying`); }
+    }
+  }
+  private arm(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      this.safeDrain();
+      if (!this.keepAlive && !this.hasPending()) this.stop();
+    }, 1000);
     this.timer.unref();
   }
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
