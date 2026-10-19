@@ -206,12 +206,17 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertEqual(legend.map(\.note), [nil, nil, nil])
         // Under the pointer a segment says which model it is when that fits — its source when its name is shared.
         let codex = try XCTUnwrap(IslandCostPresentation.segments(summary).first)
-        XCTAssertEqual(codex.hoverLabels, ["gpt-5 · Codex $4.00", "$4.00"])
-        XCTAssertEqual(HoverSegmentLayout.label(codex.hoverLabels, width: 200), "gpt-5 · Codex $4.00")
-        XCTAssertEqual(HoverSegmentLayout.label(codex.hoverLabels, width: 50), "$4.00", "too narrow for the name: the figure")
-        XCTAssertNil(HoverSegmentLayout.label(codex.hoverLabels, width: 10))
+        XCTAssertEqual(codex.hoverName, "gpt-5 · Codex")
+        XCTAssertEqual(codex.label, "$4.00")
+        // Its name at its start and its figure at its end, as a plan line says its reset and its figure.
+        XCTAssertTrue(HoverSegmentLayout.words(name: codex.hoverName, figure: codex.label, width: 200) == (true, true))
+        XCTAssertTrue(HoverSegmentLayout.words(name: codex.hoverName, figure: codex.label, width: 50) == (false, true),
+                      "too narrow for the name: the figure")
+        XCTAssertTrue(HoverSegmentLayout.words(name: codex.hoverName, figure: codex.label, width: 10) == (false, false))
         let sonnet = try XCTUnwrap(IslandCostPresentation.segments(summary).first { $0.name == "claude-sonnet-4.5" })
-        XCTAssertEqual(sonnet.hoverLabels, ["claude-sonnet-4.5 $2.00", "$2.00"], "a name no other model shares: no source")
+        XCTAssertEqual(sonnet.hoverName, "claude-sonnet-4.5", "a name no other model shares: no source")
+        let other = IslandCostSegment(id: "other", name: "Other", source: nil, fraction: 0.1, label: "$1.00", rank: 0)
+        XCTAssertNil(other.hoverName, "Other: its figure alone")
     }
 
     func testAnUnpricedModelInAPricedRangeStaysInTheLegendWithItsTokens() throws {

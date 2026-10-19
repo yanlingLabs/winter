@@ -1,25 +1,23 @@
 import SwiftUI
 import WinterCUPresentation
 
-// The usage plan lines' hover language (user 2026-10-18), as primitives the island's tabs draw with
-// (`docs/claude/island.md`, "Island visual language"):
+// The usage plan lines' hover language (user 2026-10-18), as the primitives the island's tabs share
+// (`docs/claude/island.md`, "Island visual language" — user 2026-10-19: shared language, own shapes):
 //
-//   - QUIET AT REST: no card behind a row; its data drawn as a SHAPE — a thin line filling with what it measures —
-//     never as trailing figures; secondary words muted.
-//   - REVEAL ON HOVER, INSIDE THE SHAPE: the line thickens (5 → 14 pt) and lengthens by twice every panel's hover grow
-//     (half on each end); the row's label grows 12 % from its leading (or bottom) edge and brightens; the details show
-//     INSIDE the line in the light tiny digits, each only where it fits whole.
-//   - A UNIT HOVERS AS A WHOLE, and NOTHING JUMPS: the hover is set inside `HoverGrowth.animation` (the Dispatch pill's
-//     spring), rows reserve the thick line's height.
+//   - A UNIT LIFTS UNDER THE POINTER: its title grows 12 % from its leading (or bottom) edge and what it holds back at
+//     rest appears; the hover is set inside `HoverGrowth.animation` (the Dispatch pill's spring), so a unit that grows
+//     moves what is below it smoothly — nothing jumps.
+//   - A LINE ONLY FOR A REAL AMOUNT: the one drawn here is the cost split by model (`HoverSegmentLine`), at the plan
+//     lines' weight — thin at rest, thicker and lengthened under the pointer with its words inside.
 //
-// The constants are the plan lines' own (`UsagePlanLine`, compact), copied rather than shared while that type is
-// being changed elsewhere; `HoverLineTests` pins them equal. The plan lines move onto these primitives later.
+// The measures are the plan lines' own (`UsagePlanLine`, compact), copied rather than shared while that type is
+// changed elsewhere; `HoverLineTests` pins them equal.
 //
 // This file lives outside `Sources/Island/` on purpose: the island's sources never write a `scaleEffect` of their own
-// (`IslandOpenMorphTests` sweeps them) — a row's label lift goes through `hoverLiftLabel`, here.
+// (`IslandOpenMorphTests` sweeps them) — a title's lift goes through `hoverLiftLabel`, here.
 
 enum HoverLift {
-    /// The line at rest and under the pointer.
+    /// A line at rest and under the pointer.
     static let restThickness: CGFloat = 5
     static let hoverThickness: CGFloat = 14
 
@@ -28,7 +26,7 @@ enum HoverLift {
     /// How much longer a line is under the pointer, half on each end: twice every panel's hover grow (≈19 pt).
     static func lengthGrowth(hovered: Bool) -> CGFloat { hovered ? HoverGrowth.points * 2 : 0 }
 
-    /// A label's grow under the pointer, from its leading (or bottom) edge.
+    /// A title's grow under the pointer, from its leading (or bottom) edge.
     static func labelScale(hovered: Bool) -> CGFloat { hovered ? 1.12 : 1 }
 
     /// The spring every lift rides (the Dispatch pill's).
@@ -59,7 +57,7 @@ extension EnvironmentValues {
 
 /// Whether a unit (a row, a tile, a block) is under the pointer — the island's pointer (its panels are never key) or the
 /// window's `onHover` — handed to its content as the state that is SHOWN: set inside `HoverLift.animation`, so whatever
-/// the hover changes (a line thickening, words appearing, a unit growing and pushing the ones below) moves on the
+/// the hover changes (a title growing, details appearing, a unit growing and pushing the ones below) moves on the
 /// spring and never jumps.
 struct HoverLiftReader<Content: View>: View {
     /// The unit's id, for the gallery's forced hover (`hoverLiftPreview`); nil = never forced.
@@ -85,151 +83,31 @@ struct HoverLiftReader<Content: View>: View {
 }
 
 extension View {
-    /// A label's lift under the pointer: 12 % larger from `anchor`, brightened by the caller.
+    /// A title's lift under the pointer: 12 % larger from `anchor`, brightened by the caller.
     func hoverLiftLabel(_ hovered: Bool, anchor: UnitPoint = .leading) -> some View {
         scaleEffect(HoverLift.labelScale(hovered: hovered), anchor: anchor)
     }
 }
 
-// MARK: - One line
+// MARK: - A line in segments (the cost split by model)
 
-/// The words a hovered line may show inside itself.
-struct HoverLineWords: Equatable {
-    /// From the track's start (the row's main fact: "Working · sonnet-4.5").
-    var start: String? = nil
-    /// Glued to the END of the fill, inside it (the plan lines' used figure: "up 3 h", "armed 4 min ago").
-    var atFill: String? = nil
-    /// At the track's end, in the grey (the plan lines' left figure: ":3000 :3001", "56 min left").
-    var end: String? = nil
-    /// The start words are content that must not vanish (a device's detail): too long for the line, they are cut at
-    /// their tail instead of dropped (and take the end words' room).
-    var startTruncates = false
-}
-
-/// PURE: where a hovered line's words go — each shown only where it fits WHOLE, else dropped (start words marked
-/// `startTruncates` are cut at their tail instead).
-struct HoverLineLayout: Equatable {
-    /// The fill as drawn (never under `minFill`: a started line shows at least a dot).
-    var fill: CGFloat
-    /// Where the glued words' region ends: the fill's end when they sit inside it, past it when they follow it.
-    var fillSlot: CGFloat
-    var start: Bool
-    var atFill: Bool
-    /// The glued words fit INSIDE the fill (right-aligned at its end, on the colour); else they follow it in the grey.
-    var atFillInside: Bool
-    var end: Bool
-    /// The room the start words have from the track's start (they are cut to it when they truncate).
-    var startRegion: CGFloat = 0
-
-    static func of(width: CGFloat, fraction: Double, words: HoverLineWords, minFill: CGFloat = 0) -> HoverLineLayout {
-        let f = CGFloat(min(1, max(0, fraction)))
-        let fill = f > 0 ? min(width, max(minFill, width * f)) : 0
-        let glued = HoverLift.wordsWidth(words.atFill)
-        let startW = HoverLift.wordsWidth(words.start)
-        let endW = HoverLift.wordsWidth(words.end)
-        if glued > 0 {
-            let inside = fill >= glued
-            let slot = inside ? fill : fill + glued
-            let atFill = slot <= width
-            let end = endW > 0 && width - (atFill ? slot : fill) >= endW
-            // The start words sit in the fill before the glued ones.
-            let region = inside ? fill - glued : 0
-            let start = startW > 0 && inside && (region >= startW || (words.startTruncates && region >= 24))
-            return HoverLineLayout(fill: fill, fillSlot: slot, start: start, atFill: atFill, atFillInside: inside, end: end,
-                                   startRegion: max(0, region))
-        }
-        // No glued words: the start first, then the end when both fit whole side by side; start words that truncate
-        // always show, cut to the track (the end words then dropped).
-        let fits = startW > 0 && startW <= width
-        let start = fits || (startW > 0 && words.startTruncates)
-        let end = endW > 0 && (start ? min(startW, width) : 0) + endW <= width
-        return HoverLineLayout(fill: fill, fillSlot: fill, start: start, atFill: false, atFillInside: false, end: end,
-                               startRegion: width - (end ? endW : 0))
-    }
-}
-
-/// A thin line filled to `fraction` (0…1) in `color` over a grey track; under the pointer it thickens, lengthens and
-/// shows `words` inside itself in the light tiny digits. The caller reserves `HoverLift.hoverThickness` of height (the
-/// line is drawn centred in it), so nothing below moves.
-struct HoverLine: View {
-    let fraction: Double
-    let color: Color
-    var hovered = false
-    var words = HoverLineWords()
-    /// The words' colour over the fill (white) — a light fill (amber) takes black.
-    var inkOnFill: Color = .white
-
-    var body: some View {
-        let height = HoverLift.thickness(hovered: hovered)
-        let f = min(1, max(0, fraction))
-        return GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.08))
-                Capsule().fill(color)
-                    .frame(width: max(f > 0 ? height : 0, proxy.size.width * f))
-                if hovered {
-                    let layout = HoverLineLayout.of(width: proxy.size.width, fraction: f, words: words, minFill: height)
-                    ZStack(alignment: .leading) {
-                        if layout.start, let s = words.start {
-                            // On the fill, or on the grey of a line with none.
-                            Text(s).foregroundStyle(f > 0 ? inkOnFill.opacity(0.9) : Color.white.opacity(0.75))
-                                .truncationMode(.tail)
-                                .padding(.horizontal, 6)
-                                .frame(width: max(0, layout.startRegion), alignment: .leading)
-                        }
-                        if layout.atFill, layout.atFillInside, let a = words.atFill {
-                            Text(a).foregroundStyle(inkOnFill).padding(.trailing, 6)
-                                .frame(width: max(0, layout.fill), alignment: .trailing)
-                        }
-                        if layout.atFill, !layout.atFillInside, let a = words.atFill {
-                            // Too long for the fill: right after it, in the grey.
-                            Text(a).foregroundStyle(Color.white.opacity(0.85))
-                                .padding(.leading, 6)
-                                .offset(x: layout.fill)
-                        }
-                        if layout.end, let e = words.end {
-                            Text(e).foregroundStyle(f >= 1 ? inkOnFill.opacity(0.75) : Color.white.opacity(0.6))
-                                .padding(.trailing, 6)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                        }
-                    }
-                    .font(Typography.tinyDigits(.regular))
-                    .lineLimit(1)
-                    .transition(.opacity)
-                }
-            }
-        }
-        .frame(height: height)
-        .padding(.horizontal, -HoverLift.lengthGrowth(hovered: hovered) / 2)
-        .frame(height: HoverLift.hoverThickness)
-    }
-}
-
-// MARK: - A line in segments
-
-/// One segment of a `HoverSegmentLine`.
+/// One segment of a `HoverSegmentLine`: its share and colour, and what it says inside itself under the pointer — its
+/// name at its start and its figure at its end, as a plan line says its reset and its figure.
 struct HoverSegment: Identifiable, Equatable {
     let id: String
     /// Its share of the whole track, 0…1.
     let fraction: Double
     let color: Color
-    /// What it says inside itself under the pointer, the most telling first ("gpt-5 · Codex $18.75", "$18.75"): the first
-    /// that fits whole is shown, else none.
-    let labels: [String]
-    /// The label's colour (black on a light fill such as amber).
+    /// Its name ("gpt-5 · Codex"), shown only beside its figure and only when both fit whole; nil: the figure alone.
+    var name: String? = nil
+    /// Its figure ("$18.75"), glued to its end; shown when it fits whole.
+    var figure: String
+    /// The words' colour (black on a light fill such as amber).
     var ink: Color = .white
-
-    init(id: String, fraction: Double, color: Color, label: String?, ink: Color = .white) {
-        self.init(id: id, fraction: fraction, color: color, labels: label.map { [$0] } ?? [], ink: ink)
-    }
-
-    init(id: String, fraction: Double, color: Color, labels: [String], ink: Color = .white) {
-        self.id = id; self.fraction = fraction; self.color = color; self.labels = labels; self.ink = ink
-    }
 }
 
-/// PURE: segment widths along a track — each its share of `width` less the gaps between them; a segment narrower than
-/// its label drops it.
+/// PURE: segment widths along a track — each its share of `width` less the gaps between them — and which of a
+/// segment's words fit it whole.
 enum HoverSegmentLayout {
     static let gap: CGFloat = 2
 
@@ -243,19 +121,18 @@ enum HoverSegmentLayout {
         return fractions.map { usable * CGFloat(max(0, $0)) }
     }
 
-    static func showsLabel(_ label: String?, width: CGFloat) -> Bool {
-        let w = HoverLift.wordsWidth(label)
-        return w > 0 && width >= w
-    }
-
-    /// PURE: the first of a segment's labels that fits its width whole; nil when none does.
-    static func label(_ labels: [String], width: CGFloat) -> String? {
-        labels.first { showsLabel($0, width: width) }
+    /// PURE: which words a segment `width` wide shows — its figure when it fits whole, its name too when both fit side
+    /// by side; nothing cut, nothing straddling its edge.
+    static func words(name: String?, figure: String, width: CGFloat) -> (name: Bool, figure: Bool) {
+        let figureWidth = HoverLift.wordsWidth(figure)
+        guard figureWidth > 0, figureWidth <= width else { return (false, false) }
+        let nameWidth = HoverLift.wordsWidth(name)
+        return (nameWidth > 0 && nameWidth + figureWidth - 6 <= width, true)
     }
 }
 
-/// A thin line split into segments (each a share of the whole), thickening under the pointer with each segment's label
-/// inside it where it fits.
+/// A thin line split into segments (each a share of the whole), thickening and lengthening under the pointer with each
+/// segment's name at its start and its figure at its end where they fit.
 struct HoverSegmentLine: View {
     let segments: [HoverSegment]
     var hovered = false
@@ -272,13 +149,19 @@ struct HoverSegmentLine: View {
                         Rectangle().fill(segment.color)
                             .frame(width: w)
                             .overlay {
-                                if hovered, let label = HoverSegmentLayout.label(segment.labels, width: w) {
-                                    Text(label)
-                                        .font(Typography.tinyDigits(.regular))
-                                        .foregroundStyle(segment.ink)
-                                        .lineLimit(1)
-                                        .fixedSize()
-                                        .transition(.opacity)
+                                if hovered {
+                                    let shows = HoverSegmentLayout.words(name: segment.name, figure: segment.figure, width: w)
+                                    HStack(spacing: 0) {
+                                        if shows.name, let name = segment.name {
+                                            Text(name).foregroundStyle(segment.ink.opacity(0.9))
+                                        }
+                                        Spacer(minLength: 0)
+                                        if shows.figure { Text(segment.figure).foregroundStyle(segment.ink) }
+                                    }
+                                    .font(Typography.tinyDigits(.regular))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 6)
+                                    .transition(.opacity)
                                 }
                             }
                     }
