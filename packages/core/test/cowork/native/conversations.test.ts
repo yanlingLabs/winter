@@ -83,7 +83,7 @@ test("a duplicate runtime_ready with a wrong sequence number is ignored but reco
   const running = await h.host.start(h.workspaceId);
   const set = h.launcher.last.conversationSets[0]!;
   expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(false);
-  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1, continuations: [] } } });
   await Bun.sleep(10);
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
   expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(true);
@@ -97,7 +97,7 @@ test("a duplicate runtime_ready that arrives after the start is counted in the u
   const running = await h.host.start(h.workspaceId);
   const set = h.launcher.last.conversationSets[0]!;
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
-  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1, continuations: [] } } });
   await Bun.sleep(10);
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(6);
   expect(h.records.get(h.workspaceId).power).toBe("running");

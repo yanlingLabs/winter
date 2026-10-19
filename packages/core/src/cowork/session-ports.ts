@@ -142,6 +142,9 @@ export interface CoworkGuestConversation {
     readonly model: string; readonly timeoutMs: number; readonly toolClasses: readonly ("read" | "write" | "execute")[];
     readonly provider: Readonly<Record<string, unknown>>;
     readonly guided: Readonly<{ bindingId: string; generation: number }> | null;
+    /** Cold resume (native contract revision 3): `fresh`, `resume` or `either`, and the host-attested ended guest boots. */
+    readonly continuation: "fresh" | "resume" | "either";
+    readonly endedGuestBoots: readonly string[];
   } | null;
 }
 /** Mirrors `CoworkNativeConversationSet` (native/host.ts). N2: a host-query profile carries exactly one conversation. */
