@@ -34,8 +34,8 @@ D4 is split in two:
    - The row has `cwd` NULL and `dirs` `[]`. `session_created` carries `mode: "cowork"` and the display facts `{workspaceId, projectId, location, sourceId, policyRevision}`. Those facts are read from the same workspace the reservation saw, so a later policy change can leave them stale. They are display only: the binding is authority.
 6. **Bind.**
    - A binding already present is found first (`boundHere`), and must match the request's workspace, source and cwd, or the answer is `request_conflict`. It is never replayed through `bindConversation`'s own idempotency key. That key's digest carries `expectedRevision`, which a landed bind has since advanced, so a replay would answer `request_conflict` for a landed bind.
-   - Otherwise `bindConversation` runs. If it throws and nothing is bound, the failure is DEFINITE: the store row is withdrawn, THEN the reservation. A crash between the two leaves a pending reservation, which resumes. The request then starts over cleanly, and a standalone workspace is never stuck behind a dead reservation.
-   - A non-`CoworkError` throw keeps the reservation pending.
+   - Otherwise `bindConversation` runs. If it throws a `CoworkError` and nothing is bound, the failure is DEFINITE: the store row is withdrawn, THEN the reservation. A crash between the two leaves a pending reservation, which resumes. The request then starts over cleanly.
+   - A non-`CoworkError` throw (or a crash after the store row) keeps the reservation pending, and only that same request resumes it. If that request is never retried, the reservation is ABANDONED. A Project is unaffected, since its other requests mint other ids. A standalone workspace would be held for good (every other request answers `conversation_limit`), so the D4 fixes below add the sweep: past `COWORK_STALE_RESERVATION_MS` (10 minutes), the next authorized create withdraws the abandoned reservation the same way (store row first) and binds the workspace's one conversation itself.
 7. **Complete.** The reservation is marked `bound` (idempotent, and only for a bound session of that workspace).
 
 **Races.**
@@ -197,3 +197,45 @@ D4c is stacked on D4b. This is the coordinator's follow-up to the blocking NEED:
 
 - `docs/claude/cowork.md`: the door's create path and the schedule caller exist, unconstructed in production. Migration 19.
 - `docs/cowork-status.md`: unchanged status. Still nothing is creatable or runnable.
+
+
+## D4 review fixes (after a3f8bf13's review of #107, #108, #109 and #110)
+
+**D4a.**
+- **Abandoned standalone reservation (MED).** `CoworkRepository.abandonedReservation(workspaceId, except, before)` returns a standalone workspace's pending, unbound reservation older than the window that belongs to another request. The door withdraws it (store row, then reservation) before it reserves.
+  - Inside the window, only the original request resumes. The original request, once swept, starts over and meets `conversation_limit`.
+  - The request's own reservation is never swept, so other content under its id still answers `request_conflict`.
+  - A Project's abandoned reservation blocks nothing and is left alone.
+- **Migration 19's key (MED)** is pinned behaviourally: two principals' same request id are two reservations. The PK columns are also pinned.
+- **LOWs, each with a test:**
+  - the withdraw order, as a crash between the two steps;
+  - a non-`CoworkError` keeps the reservation pending;
+  - `recovery_required` for a row at seq 0 whose log has lines;
+  - the standalone log is removed with its row, so the reused owner id starts at one seq-1 line;
+  - an anchored schedule request id;
+  - a look-alike caller inside the dispatch window;
+  - the schedule caller's refusal of an outputs location (D3b).
+
+**D4b.**
+- **The no-production-port pin is structural now.**
+  - A TypeScript AST pass lists every place a src module writes the name `provisioning` or `execution`. It covers assignment, shorthand, method or accessor, class field, interface member, assignment through a property access, and an exact string literal. The list is pinned exactly.
+  - A behavioural pin builds the production host composition (`disabledCoworkHost`, and `createMacCoworkHost` with and without `native`, as `daemon.ts` composes it) and asserts that neither port is present and that capabilities read false/false.
+  - The service's private drive map is renamed `provisionDrives` so it is not a third name.
+- **LOWs, each with a test:**
+  - a source addition goes through the port's `admit`;
+  - a live driver's steer refusal reaches the client typed;
+  - an unknown session never routes to the door.
+
+**D4c.**
+- **`failed` is enforced (MED).** A workspace whose creation concluded `failed` refuses `reserveConversation`, both binds and `beginIncarnation` with `recovery_required`.
+- **The rule for a late `failed`.** `failCreationProvisioning` concludes only for a workspace no guest has ever started (lease epoch 0, `stopped`). A later `failed` on a booted workspace contradicts an earlier `applied` and stays pending. Once concluded, no boot can follow, so no source can become ready after `failed`. Both orders resolve atomically in the runtime-state transaction.
+- **The bound (MED).** `resumeProvisioning` drives EVERY pending creation:
+  - oldest first, in keyset pages of `COWORK_PROVISION_PAGE` (64), with at most `COWORK_PROVISION_CONCURRENCY` (4) drives in flight;
+  - with no row cap, so creations waiting on their guest cannot starve a crash-interrupted one;
+  - creations that answered `applied` in this process are skipped (they wait for the guest), and a boot drives each pending creation once;
+  - one resume at a time;
+  - it never rejects, including on a synchronous throw.
+
+**Mutations (guards and refusals only): 22/24 killed** (`door/d4fix_mutations.py`). Both survivors are equivalent:
+- dropping `state='pending'` from the sweep: a bound reservation always has a binding, which the sweep excludes;
+- admitting an outputs location for the schedule caller: the source comparison right after it refuses, because an outputs location has no source.

@@ -194,11 +194,20 @@ export class CoworkRepository {
     const changed = this.run("UPDATE cowork_operations SET status=?,updated_at=? WHERE workspace_id=? AND operation_id=? AND status='pending'", status, this.now(), workspaceId, operationId);
     if (changed.changes) this.publish(workspaceId, operationId, "workspace_operation_changed", { operationId, status, terminal: true, ...(supersededBy ? { supersededBy } : {}) });
   }
+  /** Session door D4 fix: the workspace's creation concluded `failed` (S7B's provisioning answered `failed` before any
+   *  guest booted). Such a workspace is terminal for execution: it reserves and binds no conversation and never boots. */
+  private requireProvisioned(workspaceId: string): void {
+    if (this.one("SELECT 1 FROM cowork_operations WHERE workspace_id=? AND method IN ('workspace.create','project.create') AND status='failed' LIMIT 1", workspaceId)) throw new CoworkError("recovery_required");
+  }
   /** Session door D4c: workspace and Project creations whose operation is still pending, i.e. the ones whose post-COMMIT
    *  provisioning may never have run or finished (a crash between the commit and `provision`). Oldest first, bounded. */
-  pendingCreations(limit = 1000): { workspaceId: string; operationId: string }[] {
-    return this.all("SELECT workspace_id, operation_id FROM cowork_operations WHERE status='pending' AND method IN ('workspace.create','project.create') AND workspace_id IS NOT NULL ORDER BY created_at, operation_id LIMIT ?", Math.max(1, Math.min(10_000, Math.floor(limit))))
-      .map(row => ({ workspaceId: row.workspace_id, operationId: row.operation_id }));
+  pendingCreations(limit = 1000, after?: { readonly createdAt: string; readonly operationId: string }): { workspaceId: string; operationId: string; createdAt: string }[] {
+    const bounded = Math.max(1, Math.min(10_000, Math.floor(limit)));
+    const where = "status='pending' AND method IN ('workspace.create','project.create') AND workspace_id IS NOT NULL";
+    const rows = after === undefined
+      ? this.all(`SELECT workspace_id, operation_id, created_at FROM cowork_operations WHERE ${where} ORDER BY created_at, operation_id LIMIT ?`, bounded)
+      : this.all(`SELECT workspace_id, operation_id, created_at FROM cowork_operations WHERE ${where} AND (created_at > ? OR (created_at = ? AND operation_id > ?)) ORDER BY created_at, operation_id LIMIT ?`, after.createdAt, after.createdAt, after.operationId, bounded);
+    return rows.map(row => ({ workspaceId: row.workspace_id, operationId: row.operation_id, createdAt: row.created_at }));
   }
   /** Session door D4c: the provisioning port answered `failed` for a creation: its operation concludes `failed` (terminal),
    *  durably, with a `workspace_operation_changed`. Only a pending creation operation; idempotent. The port's reason text is
@@ -208,6 +217,11 @@ export class CoworkRepository {
       const row = this.one("SELECT method, status FROM cowork_operations WHERE workspace_id=? AND operation_id=?", id(workspaceId), id(operationId));
       if (!row || !["workspace.create", "project.create"].includes(row.method)) throw new CoworkError("not_found");
       if (row.status !== "pending") return;
+      // `failed` concludes only for a workspace no guest has ever started (lease epoch 0, stopped): only then can no source
+      // of it become ready. A booted workspace's late `failed` contradicts an earlier `applied` and stays UNCERTAIN (pending).
+      // Once concluded, `beginIncarnation` refuses the workspace, so no source can become ready afterwards either.
+      const workspace = this.get(workspaceId);
+      if (workspace.leaseEpoch !== 0 || workspace.power !== "stopped") return;
       this.concludeOperation(workspaceId, operationId, "failed");
     });
   }
@@ -322,6 +336,7 @@ export class CoworkRepository {
     return this.mutate(context, "conversation.bind", id(workspaceId), normalized, () => {
       if (sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
       const current = this.get(workspaceId), selected = this.source(workspaceId, normalized.sourceId), policy = this.policy(workspaceId);
+      this.requireProvisioned(workspaceId);
       if (current.ownership === "standalone" && current.ownerId !== normalized.sessionId) throw new CoworkError("authority_denied");
       // A conversation may bind a source no guest has acknowledged yet (`preparing`: a workspace is created stopped and its
       // sources become `ready` only when an incarnation acknowledges them), since creation precedes the first boot. This
@@ -357,6 +372,7 @@ export class CoworkRepository {
       }
       const workspace = this.get(input.workspaceId);
       if (workspace.state !== "retained") throw new CoworkError("authority_denied");
+      this.requireProvisioned(input.workspaceId);
       const held = (sessionId: string) => this.one("SELECT 1 FROM cowork_session_reservations WHERE session_id=? UNION ALL SELECT 1 FROM cowork_conversations WHERE session_id=?", sessionId, sessionId) !== null;
       let sessionId: string;
       if (workspace.ownership === "standalone") {
@@ -390,6 +406,17 @@ export class CoworkRepository {
       this.run("DELETE FROM cowork_session_reservations WHERE session_id=? AND state='pending'", sessionId);
     });
   }
+  /** Session door D4 fix: a STANDALONE workspace's pending reservation, unbound and created before `before` (epoch ms), that
+   *  belongs to a request other than `except`. Its request abandoned it (a non-`CoworkError` throw, or a crash, never
+   *  retried); the door withdraws it so the workspace's one conversation can be created again. Read only. */
+  abandonedReservation(workspaceId: string, except: { principalId: string; requestId: string }, before: number): string | undefined {
+    const row = this.one(`SELECT r.session_id FROM cowork_session_reservations r JOIN cowork_workspaces w USING(workspace_id)
+      WHERE r.workspace_id=? AND w.ownership='standalone' AND r.state='pending' AND r.created_at<=?
+        AND NOT (r.principal_id=? AND r.request_id=?)
+        AND NOT EXISTS (SELECT 1 FROM cowork_conversations c WHERE c.session_id=r.session_id)
+      ORDER BY r.created_at LIMIT 1`, workspaceId, before, except.principalId, except.requestId);
+    return row?.session_id;
+  }
   /** Whether a live reservation holds `sessionId` (the session store's admission for a Cowork row). */
   isReservedSession(sessionId: string): boolean {
     return SESSION_ID.test(sessionId) && this.one("SELECT 1 FROM cowork_session_reservations WHERE session_id=?", sessionId) !== null;
@@ -405,6 +432,7 @@ export class CoworkRepository {
     return this.mutate(context, "conversation.bind", id(workspaceId), normalized, () => {
       if (sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
       const current = this.get(workspaceId), policy = this.policy(workspaceId);
+      this.requireProvisioned(workspaceId);
       if (current.ownership === "standalone" && current.ownerId !== normalized.sessionId) throw new CoworkError("authority_denied");
       if (this.one("SELECT session_id FROM cowork_conversations WHERE session_id=?", normalized.sessionId)) throw new CoworkError("authority_denied");
       this.run("INSERT INTO cowork_conversations(session_id,workspace_id,project_id,location_kind,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at) VALUES(?,?,?,'outputs',NULL,'.',?,?,1,'active',?)", normalized.sessionId, workspaceId, current.ownership === "project" ? current.ownerId : null, policy.defaultPolicy, canonical(policy.ceiling), this.now());
@@ -418,6 +446,7 @@ export class CoworkRepository {
       const current = this.get(workspaceId); id(incarnationId);
       if (current.configRevision !== expectedRevision) throw new CoworkError("revision_conflict", current.configRevision);
       if (current.state !== "retained" || current.power !== "stopped") throw new CoworkError("recovery_required");
+      this.requireProvisioned(workspaceId);
       this.run("UPDATE cowork_workspaces SET incarnation_id=?,lease_epoch=lease_epoch+1,power='starting',updated_at=? WHERE workspace_id=?", incarnationId, this.now(), workspaceId);
       this.run("UPDATE cowork_sources SET state='preparing',ack_revision=NULL,ack_incarnation_id=NULL WHERE workspace_id=? AND desired='present' AND state='ready'", workspaceId);
       return { workspaceId, incarnationId, leaseEpoch: current.leaseEpoch + 1, configRevision: current.configRevision, grantRevision: current.grantRevision };
