@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, unlinkSync, writeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { COORDINATION_LEDGER_FILE, coordinationLedgerPath, type CoordinationPathInputs } from "../native/admission-probes";
 
 /*
@@ -26,6 +26,15 @@ const euid = (): number => process.geteuid?.() ?? -1;
 /** A real directory (no symlink on the last component), owned by this user, mode 0700. Created private if missing; an existing one with other bits is refused, never repaired. */
 export function ensurePrivateDirectory(path: string): void {
   if (typeof path !== "string" || !path.startsWith("/") || path.includes("\0")) fail("directory_path_invalid");
+  // Walk the ancestors that exist BEFORE creating anything: a symlinked (or non-directory) ancestor is refused here, so a link planted above the path cannot make the
+  // recursive mkdir below create directories somewhere else first.
+  let walked = "";
+  for (const component of path.split("/").slice(1)) {
+    walked += `/${component}`;
+    let info: ReturnType<typeof lstatSync>;
+    try { info = lstatSync(walked); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") break; throw error; }
+    if (info.isSymbolicLink() || !info.isDirectory()) fail("directory_path_alias");
+  }
   mkdirSync(dirname(path), { recursive: true });
   try { mkdirSync(path, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   const info = lstatSync(path);
@@ -36,6 +45,22 @@ export function ensurePrivateDirectory(path: string): void {
 /** The launcher refuses any path with a `.winter*` component, in any case (volumes are case-insensitive). The daemon refuses the same, before it creates anything. */
 export function assertOutsideWinterHomes(path: string): void {
   for (const component of path.split("/")) if (component.toLowerCase().startsWith(".winter")) fail("path_inside_winter_home");
+}
+
+/** `path` with its deepest existing ancestor resolved through symlinks (the rest, which does not exist yet, appended as written). */
+function canonicalizeExisting(path: string): string {
+  let existing = path, rest = "";
+  for (;;) {
+    try { return join(realpathSync(existing), rest); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const parent = dirname(existing);
+    if (parent === existing) return path;
+    rest = join(basename(existing), rest); existing = parent;
+  }
+}
+/** The Coordination directory must be disjoint from the Winter home: not the home, not inside it (a home wipe or copy would take the ledger, receipts and journal with it), not above it. The name-based `.winter*` refusal above is not enough: the home can be anywhere. */
+export function assertDisjointFromHome(directory: string, home: string): void {
+  const a = canonicalizeExisting(directory), b = canonicalizeExisting(home);
+  if (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)) fail("path_inside_winter_home");
 }
 
 const INSTALLATION_ID = /^inst-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

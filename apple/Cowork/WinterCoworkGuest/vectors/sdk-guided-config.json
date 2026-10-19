@@ -1,0 +1,823 @@
+{
+ "blocks": [
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}",
+   "how": "executed",
+   "label": "host-query: the image's object",
+   "profile": 1,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "host-query: with a reader",
+   "profile": 1,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{}}",
+   "how": "predicate",
+   "label": "host-query: with an empty reader",
+   "profile": 1,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{}",
+   "how": "predicate",
+   "label": "host-query: no artifacts",
+   "profile": 1,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: the image's object",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}",
+   "how": "predicate",
+   "label": "guided: the host-query object",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}",
+   "how": "predicate",
+   "label": "guided: no reader",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader without dependencies (absent, not empty)",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}]}}",
+   "how": "executed",
+   "label": "guided: reader without uid",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader without artifacts",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader without launcher",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader without executable",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"ownerLibrary\":{\"path\":\"/x/y\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader with an owner library",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"extra\":1,\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader with an extra key",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"extra\":{},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: an extra top-level key",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: no artifacts",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: no owner library",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: no launcher",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: no executable",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"providerWorker\":{\"path\":\"/opt/winter/runtime/p\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: a provider worker among the artifacts",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a pin without its path",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a pin without its digest",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"mode\":\"0555\",\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a pin with an extra member",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":null,\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependencies null",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":{},\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependencies an object",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":\"\",\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependencies a string",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[\"/lib/a\"],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a dependency that is not an object",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"path\":\"/x/y\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a dependency without guestPath",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"extra\":1,\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a dependency with an extra member",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65533}}",
+   "how": "executed",
+   "label": "guided: uid in the host range",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":1000}}",
+   "how": "executed",
+   "label": "guided: uid at the bottom of the supervisor's range",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65536}}",
+   "how": "executed",
+   "label": "guided: uid above 65535",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":0}}",
+   "how": "executed",
+   "label": "guided: uid zero",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":\"65534\"}}",
+   "how": "executed",
+   "label": "guided: uid a string",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":-1}}",
+   "how": "executed",
+   "label": "guided: uid negative",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534.0}}",
+   "how": "executed",
+   "label": "guided: uid a float",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":null}}",
+   "how": "executed",
+   "label": "guided: uid null",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":true}}",
+   "how": "executed",
+   "label": "guided: uid true",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"opt/x\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: relative artifact path",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/../x\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path with ..",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt//x\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path with an empty component",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/x/\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path with a trailing slash",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/./x\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path with a dot",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/a b\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path with a space",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path just a slash",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: artifact path too long",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: upper case digest",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: short digest",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: long digest",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: non hex digest",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":7},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: digest a number",
+   "profile": 2,
+   "supervisor": "malformed:TypeError"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/etc/passwd\",\"path\":\"/opt/winter/reader/deps/etc/passwd\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path outside the library directories",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib\",\"path\":\"/opt/winter/reader/deps/lib\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /lib itself",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/\",\"path\":\"/opt/winter/reader/deps/lib/\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /lib/",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/../etc/x\",\"path\":\"/opt/winter/reader/deps/lib/../etc/x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path with ..",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib//x\",\"path\":\"/opt/winter/reader/deps/lib//x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path with an empty component",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/./x\",\"path\":\"/opt/winter/reader/deps/lib/./x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path with a dot component",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a/\",\"path\":\"/opt/winter/reader/deps/lib/a/\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path with a trailing slash",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/libx/a\",\"path\":\"/opt/winter/reader/deps/libx/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /libx/",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/usr/libexec/a\",\"path\":\"/opt/winter/reader/deps/usr/libexec/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /usr/libexec",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib64x/a\",\"path\":\"/opt/winter/reader/deps/lib64x/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /lib64x",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/a\",\"path\":\"/other/path\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: duplicate guest paths",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/a/b\",\"path\":\"/opt/winter/reader/deps/lib/a/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a guest path inside an earlier one",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a/b\",\"path\":\"/opt/winter/reader/deps/lib/a/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: a guest path containing an earlier one",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/d00\",\"path\":\"/opt/winter/reader/deps/lib/d00\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d01\",\"path\":\"/opt/winter/reader/deps/lib/d01\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d02\",\"path\":\"/opt/winter/reader/deps/lib/d02\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d03\",\"path\":\"/opt/winter/reader/deps/lib/d03\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d04\",\"path\":\"/opt/winter/reader/deps/lib/d04\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d05\",\"path\":\"/opt/winter/reader/deps/lib/d05\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d06\",\"path\":\"/opt/winter/reader/deps/lib/d06\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d07\",\"path\":\"/opt/winter/reader/deps/lib/d07\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d08\",\"path\":\"/opt/winter/reader/deps/lib/d08\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d09\",\"path\":\"/opt/winter/reader/deps/lib/d09\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d10\",\"path\":\"/opt/winter/reader/deps/lib/d10\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d11\",\"path\":\"/opt/winter/reader/deps/lib/d11\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d12\",\"path\":\"/opt/winter/reader/deps/lib/d12\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d13\",\"path\":\"/opt/winter/reader/deps/lib/d13\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d14\",\"path\":\"/opt/winter/reader/deps/lib/d14\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d15\",\"path\":\"/opt/winter/reader/deps/lib/d15\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d16\",\"path\":\"/opt/winter/reader/deps/lib/d16\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d17\",\"path\":\"/opt/winter/reader/deps/lib/d17\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d18\",\"path\":\"/opt/winter/reader/deps/lib/d18\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d19\",\"path\":\"/opt/winter/reader/deps/lib/d19\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d20\",\"path\":\"/opt/winter/reader/deps/lib/d20\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d21\",\"path\":\"/opt/winter/reader/deps/lib/d21\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d22\",\"path\":\"/opt/winter/reader/deps/lib/d22\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d23\",\"path\":\"/opt/winter/reader/deps/lib/d23\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d24\",\"path\":\"/opt/winter/reader/deps/lib/d24\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d25\",\"path\":\"/opt/winter/reader/deps/lib/d25\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d26\",\"path\":\"/opt/winter/reader/deps/lib/d26\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d27\",\"path\":\"/opt/winter/reader/deps/lib/d27\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d28\",\"path\":\"/opt/winter/reader/deps/lib/d28\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d29\",\"path\":\"/opt/winter/reader/deps/lib/d29\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d30\",\"path\":\"/opt/winter/reader/deps/lib/d30\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d31\",\"path\":\"/opt/winter/reader/deps/lib/d31\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/d32\",\"path\":\"/opt/winter/reader/deps/lib/d32\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: 33 dependencies",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"path\":\"/x/y\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path too long",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifact\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: top-level artifacts renamed",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"readers\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: reader renamed",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"pins\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader artifacts renamed",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependency\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependencies renamed",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"id\":65534}}",
+   "how": "executed",
+   "label": "guided: uid renamed",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"loader\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: launcher renamed",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerlibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "predicate",
+   "label": "guided: owner library renamed",
+   "profile": 2,
+   "supervisor": "runtime_artifacts"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"exe\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader executable renamed",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"file\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: pin path renamed",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: pin digest renamed",
+   "profile": 2,
+   "supervisor": "artifact_pin"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/../x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependency path with ..",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt//x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependency path with an empty component",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/x/\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependency path with a trailing slash",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"opt/x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependency path relative",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependency path too long",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guest\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: dependency guestPath renamed",
+   "profile": 2,
+   "supervisor": "guided_reader_config"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/usr/lib/x\",\"path\":\"/opt/winter/reader/deps/usr/lib/x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /usr/lib/x",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib64/x\",\"path\":\"/opt/winter/reader/deps/lib64/x\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path /lib64/x",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/ab\",\"path\":\"/opt/winter/reader/deps/lib/ab\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: siblings sharing a prefix",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65535}}",
+   "how": "executed",
+   "label": "guided: uid 65535",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: uid 65534",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/a\",\"path\":\"/opt/winter/reader/deps/lib/a\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},{\"guestPath\":\"/lib/b\",\"path\":\"/opt/winter/reader/deps/lib/b\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: path of 1024 bytes",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[{\"guestPath\":\"/lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"path\":\"/x/y\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: guest path of 1024 bytes",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":20001}}",
+   "how": "executed",
+   "label": "guided: reader uid 20001",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":20002}}",
+   "how": "executed",
+   "label": "guided: reader uid 20002",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":20003}}",
+   "how": "executed",
+   "label": "guided: reader uid 20003",
+   "profile": 2,
+   "supervisor": "guided_reader_identity"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":20004}}",
+   "how": "executed",
+   "label": "guided: reader uid 20004",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":1000}}",
+   "how": "executed",
+   "label": "guided: reader uid 1000",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":65533}}",
+   "how": "executed",
+   "label": "guided: reader uid 65533",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":65534}}",
+   "how": "executed",
+   "label": "guided: reader uid 65534",
+   "profile": 2,
+   "supervisor": "accepted"
+  },
+  {
+   "block": "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":65535}}",
+   "how": "executed",
+   "label": "guided: reader uid 65535",
+   "profile": 2,
+   "supervisor": "accepted"
+  }
+ ],
+ "guidanceDirectory": "/run/winter/shared-instructions",
+ "items": [
+  {
+   "keys": [
+    "generation",
+    "guidanceDirectory",
+    "model",
+    "provider",
+    "requiredRuntimeContext",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "guided: every key",
+   "profile": "host-query-guided-v1",
+   "supervisor": "keys_ok"
+  },
+  {
+   "keys": [
+    "generation",
+    "model",
+    "provider",
+    "requiredRuntimeContext",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "guided: no guidanceDirectory",
+   "profile": "host-query-guided-v1",
+   "supervisor": "guided_guidance_required"
+  },
+  {
+   "keys": [
+    "extra",
+    "generation",
+    "guidanceDirectory",
+    "model",
+    "provider",
+    "requiredRuntimeContext",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "guided: an unknown key",
+   "profile": "host-query-guided-v1",
+   "supervisor": "runtime_config"
+  },
+  {
+   "keys": [
+    "generation",
+    "guidanceDirectory",
+    "model",
+    "provider",
+    "requiredRuntimeContext",
+    "runhomeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "guided: no storeDirectory",
+   "profile": "host-query-guided-v1",
+   "supervisor": "runtime_config"
+  },
+  {
+   "keys": [
+    "model",
+    "provider",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "host-query: its keys",
+   "profile": "host-query-v1",
+   "supervisor": "keys_ok"
+  },
+  {
+   "keys": [
+    "guidanceDirectory",
+    "model",
+    "provider",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "host-query: with guidanceDirectory",
+   "profile": "host-query-v1",
+   "supervisor": "runtime_config"
+  },
+  {
+   "keys": [
+    "generation",
+    "model",
+    "provider",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "host-query: with generation",
+   "profile": "host-query-v1",
+   "supervisor": "runtime_config"
+  },
+  {
+   "keys": [
+    "model",
+    "provider",
+    "requiredRuntimeContext",
+    "runhomeDirectory",
+    "storeDirectory",
+    "timeoutMs",
+    "toolClasses"
+   ],
+   "label": "host-query: with requiredRuntimeContext",
+   "profile": "host-query-v1",
+   "supervisor": "runtime_config"
+  }
+ ],
+ "note": "Derived from the agent SDK supervisor at the pinned commit by tests/derive_guided_config_fixture.py (the real functions run non-root; see its docstring). The guest's writer must agree: PID 1's validator never accepts what the supervisor refuses, and refuses what it accepts only where listed in test_guided_config.py.",
+ "readerDependencyLimit": 32,
+ "readerViewsRoot": "/run/winter/instruction-reader-views",
+ "sdkCommit": "68e57c646f23feba09b00c78d05d8c80d6f2962d",
+ "sourceLines": {
+  "guidanceRequiredAtConstruction": "if 'guidanceDirectory' not in entry[runtime_key]:raise Refusal('guided_guidance_required')",
+  "guidanceRequiredPerItem": "if profile==GUIDED_PROFILE and 'guidanceDirectory' not in value:raise Refusal('guided_guidance_required')",
+  "perItemKeysBase": "allowed={'storeDirectory','runhomeDirectory','provider','model','timeoutMs'}",
+  "perItemKeysGuided": "if profile==GUIDED_PROFILE:allowed.update(('requiredRuntimeContext','generation','guidanceDirectory'))",
+  "perItemKeysToolClasses": "if profile in ('host-query-v1',GUIDED_PROFILE):allowed.add('toolClasses')",
+  "perItemRequired": "or not {'storeDirectory','runhomeDirectory','provider','model'}<=set(value):raise Refusal('runtime_config')",
+  "readerDependencyKeys": "set(dependency)!={'path','sha256','guestPath'}",
+  "readerKeys": "set(value)!={'artifacts','dependencies','uid'}",
+  "readerUid": "if type(uid) is not int or not 1000<=uid<=65535 or uid in reserved:raise Refusal('guided_reader_identity')",
+  "runtimeKeys": "RUNTIME_KEYS=(('fresh','freshRuntime'),('host-query-v1','hostQueryRuntime'),(GUIDED_PROFILE,'hostQueryGuidedRuntime'))",
+  "topLevelKeys": "if set(config[runtime_key])!=({'artifacts','reader'} if self.runtime_profile==GUIDED_PROFILE else {'artifacts'}) or set(config[runtime_key]['artifacts'])!={'launcher','executable','ownerLibrary'}:raise Refusal('runtime_artifacts')"
+ },
+ "supervisorPath": "packages/runtime/src/guest/linux-supervisor.py",
+ "supervisorSha256": "a26dacd86b805ca47b3e4805d06af2b178eee82003ebe6c38f2aeeb85e48035d"
+}

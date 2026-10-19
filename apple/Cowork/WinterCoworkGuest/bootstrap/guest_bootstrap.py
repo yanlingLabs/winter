@@ -41,6 +41,7 @@ ENVIRONMENT_SERIAL = "winter-environment"
 MAX_BOOTSTRAP_PAYLOAD = 262_144
 MAX_CONVERSATIONS_BYTES = 20_480      # the `conversations` message; the relay refuses anything above it before it reaches this process
 MAX_CONVERSATIONS = 16
+GUIDANCE_DIRECTORY = "/run/winter/shared-instructions"   # the guided conversation's `guidanceDirectory` (WG_GUIDANCE_DIRECTORY in trusted_config.h); empty in the first session
 UNIX_ID_MIN, UNIX_ID_MAX = 1000, 65533   # 65534 is `nobody` and 65535 the invalid id (contract section 6.1)
 MAX_ROOTS = 16
 MAX_PROVIDER_BYTES = 4096
@@ -1109,6 +1110,7 @@ def supervisor_items(message):
             if runtime["guided"] is not None:
                 config["requiredRuntimeContext"] = {"version": 1, "bindingId": runtime["guided"]["bindingId"]}
                 config["generation"] = runtime["guided"]["generation"]
+                config["guidanceDirectory"] = GUIDANCE_DIRECTORY   # required by the supervisor for a guided conversation, refused for any other
             out[key] = config
         items.append(out)
     return items

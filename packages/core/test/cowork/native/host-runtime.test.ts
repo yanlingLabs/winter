@@ -171,3 +171,40 @@ describe("ended settles however the incarnation ends", () => {
     expect(await running.ended).toEqual(outcome);
   });
 });
+
+describe("the runtime window: nothing before runtime_ready, nothing lost before the first subscriber", () => {
+  test("a frame that arrives after the set went out but before runtime_ready is a violation and is never delivered", async () => {
+    // "late-ready": the fake guest answers the set 600 ms later, so the frame below really precedes runtime_ready.
+    const h = createHarness({ behavior: { conversations: "late-ready" }, timeouts: { runtimeReadyMs: 3000 }, onCheckpoint: (phase, harness) => { if (phase === "conversations-sent") harness.launcher.last.emitRuntime("out", bytesOf("too-early")); } });
+    const { link, session } = await started(h);
+    const seen: string[] = [];
+    link.onData((_stream, bytes) => seen.push(text(bytes)));
+    expect(seen).toEqual([]);
+    expect(h.host.runtimeViolations(h.workspaceId)).toBe(1);
+    session.emitRuntime("out", bytesOf("fine"));
+    await settle();
+    // the early frame's sequence number was consumed (it was the guest's frame 1), so the next frame is accepted in order
+    expect(seen).toEqual(["fine"]);
+  });
+  test("frames the guest sends between runtime_ready and the caller's first onData are held and delivered to that first subscriber, in order, once", async () => {
+    const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { harness.launcher.last.emitRuntime("out", bytesOf("one")); harness.launcher.last.emitRuntime("err", bytesOf("two"), true); } } });
+    const { link, session } = await started(h);
+    const first: string[] = [], second: string[] = [];
+    link.onData((stream, bytes, end) => first.push(`${stream}:${text(bytes)}:${end}`));
+    link.onData((stream, bytes) => second.push(`${stream}:${text(bytes)}`));
+    expect(first).toEqual(["out:one:false", "err:two:true"]);
+    expect(second).toEqual([]); // held frames go to the first subscriber only
+    expect(h.host.runtimeViolations(h.workspaceId)).toBe(0);
+    session.emitRuntime("out", bytesOf("later"));
+    await settle();
+    expect(first.at(-1)).toBe("out:later:false"); expect(second).toEqual(["out:later"]);
+  });
+  test("what is held is bounded: beyond 1 MiB before any subscriber, frames count as violations and are dropped", async () => {
+    const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { for (let i = 0; i < 5; i++) harness.launcher.last.emitRuntime("out", new Uint8Array(256 * 1024)); } } });
+    const { link } = await started(h);
+    let bytes = 0;
+    link.onData((_stream, chunk) => { bytes += chunk.length; });
+    expect(bytes).toBe(4 * 256 * 1024);
+    expect(h.host.runtimeViolations(h.workspaceId)).toBe(1);
+  });
+});

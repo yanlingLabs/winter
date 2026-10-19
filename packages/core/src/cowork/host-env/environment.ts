@@ -11,7 +11,7 @@ import { CoworkPressureGuard } from "../native/pressure";
 import { createCoworkResourceObserver } from "../native/resource-observer";
 import { coworkNativeLedgerStopProbe, type CoworkNativeHostBoot } from "../native/stop-proof";
 import type { CoworkNativeEnvironment } from "../native-wiring";
-import { CoworkHostEnvError, assertOutsideWinterHomes, coordinationDirectory, coordinationLedgerFile, ensurePrivateDirectory, loadOrCreateInstallationId } from "./coordination";
+import { CoworkHostEnvError, assertDisjointFromHome, assertOutsideWinterHomes, coordinationDirectory, coordinationLedgerFile, ensurePrivateDirectory, loadOrCreateInstallationId } from "./coordination";
 import { createCoworkRecoverGuards, processStartToken } from "./guards";
 import { createCoworkLauncherPort, type CoworkLauncherPortOptions } from "./launcher-port";
 import { createCoworkHomeBindingStore, createCoworkLaunchJournal, createCoworkReceiptStore } from "./stores";
@@ -88,6 +88,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   const now = options.now ?? Date.now;
   const directory = coordinationDirectory(options.coordination);
   assertOutsideWinterHomes(directory);
+  assertDisjointFromHome(directory, options.home);
   ensurePrivateDirectory(directory);
   const installationId = loadOrCreateInstallationId(directory);
 
@@ -109,7 +110,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   // ---- pressure and resources
   let halt: (() => Promise<boolean>) | null = null;
   const space = options.space ?? createStatfsReader();
-  const guard = new CoworkPressureGuard({ space, writers: { haltWriters: async () => ({ halted: halt === null ? true : await halt() }) }, reserveBytes: COWORK_FREE_SPACE_RESERVE_BYTES, now });
+  const guard = new CoworkPressureGuard({ space, writers: { haltWriters: async () => ({ halted: halt === null ? false : await halt() }) }, reserveBytes: COWORK_FREE_SPACE_RESERVE_BYTES, now });
   guard.watch("home", { kind: "path", path: canonicalHome });
   guard.watch("coordination", { kind: "path", path: directory });
   const observeResources = createCoworkResourceObserver({ sysctl: adapters.sysctl, disk: guard, budget: coworkResourceBudget, now });

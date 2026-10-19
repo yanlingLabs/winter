@@ -3,7 +3,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { COWORK_INSTALLATION_ID_FILE, CoworkHostEnvError, assertOutsideWinterHomes, coordinationDirectory, ensurePrivateDirectory, loadOrCreateInstallationId } from "../../src/cowork/host-env/coordination";
+import { COWORK_INSTALLATION_ID_FILE, CoworkHostEnvError, assertDisjointFromHome, assertOutsideWinterHomes, coordinationDirectory, ensurePrivateDirectory, loadOrCreateInstallationId } from "../../src/cowork/host-env/coordination";
 import { createCoworkRecoverGuards, processStartToken } from "../../src/cowork/host-env/guards";
 import { COWORK_HOME_BINDING_DDL, createCoworkHomeBindingStore, createCoworkLaunchJournal, createCoworkReceiptStore } from "../../src/cowork/host-env/stores";
 import { parseVolumeUuidReply, readVolumeId } from "../../src/cowork/host-env/volume-identity";
@@ -32,11 +32,27 @@ describe("the Coordination directory and the installation id", () => {
     expect(code(() => ensurePrivateDirectory(open))).toBe("directory_not_private");
     expect(statSync(open).mode & 0o777).toBe(0o755);
     symlinkSync(fresh, join(root, "link"));
-    expect(code(() => ensurePrivateDirectory(join(root, "link")))).toBe("directory_not_private");
+    expect(code(() => ensurePrivateDirectory(join(root, "link")))).toBe("directory_path_alias");
   });
   test("any .winter component, in any case, is refused before anything is created", () => {
     for (const bad of ["/Users/x/.winter/coord", "/Users/x/.winter-dev/c", "/Users/x/.WINTER/c", "/tmp/.Winter-x/y"]) expect(code(() => assertOutsideWinterHomes(bad))).toBe("path_inside_winter_home");
     expect(() => assertOutsideWinterHomes("/Users/x/Library/Application Support/Winter/Coordination/cowork-receipts")).not.toThrow();
+  });
+  test("the coordination directory must be disjoint from the Winter home: not the home, not inside it, not above it, even through a symlink", () => {
+    const root = temp(), home = join(root, "home"); mkdirSync(home);
+    expect(code(() => assertDisjointFromHome(join(root, "coord"), home))).toBe("accepted");
+    expect(code(() => assertDisjointFromHome(home, home))).toBe("path_inside_winter_home");
+    expect(code(() => assertDisjointFromHome(join(home, "not-yet", "coord"), home))).toBe("path_inside_winter_home");
+    expect(code(() => assertDisjointFromHome(root, home))).toBe("path_inside_winter_home");
+    symlinkSync(home, join(root, "alias"));
+    expect(code(() => assertDisjointFromHome(join(root, "alias", "coord"), home))).toBe("path_inside_winter_home");
+    expect(code(() => assertDisjointFromHome(join(root, "homestead"), home))).toBe("accepted"); // a sibling that merely shares a name prefix is fine
+  });
+  test("a symlinked ancestor is refused BEFORE anything is created (the recursive mkdir must not follow it)", () => {
+    const root = temp(), elsewhere = join(root, "elsewhere"); mkdirSync(elsewhere);
+    symlinkSync(elsewhere, join(root, "link"));
+    expect(code(() => ensurePrivateDirectory(join(root, "link", "a", "b")))).toBe("directory_path_alias");
+    expect(readdirSync(elsewhere)).toEqual([]);
   });
   test("the installation id is random, created once at 0600, stable, and never overwritten", () => {
     const dir = join(temp(), "coord");

@@ -133,12 +133,16 @@ interface Run {
 }
 
 const RUNTIME_CHUNK_BYTES = 256 * 1024;
+/** OUT/ERR bytes held for a first subscriber that has not attached yet (the caller can only attach after `start()` resolves). Beyond it, frames count as violations and are dropped. */
+const RUNTIME_PRESUBSCRIBE_BYTES = 1024 * 1024;
 /** The host end of the runtime class of one run: sequence and stream bookkeeping, the handlers, and the senders waiting for the guest to read. */
 class RuntimeEnd {
   readonly streams: CoworkNativeRuntimeStreams;
   readonly handlers = new Set<(stream: "out" | "err", bytes: Uint8Array, end: boolean) => void>();
   readonly waiters: { resolve: () => void; reject: (error: unknown) => void }[] = [];
   downSeq = 0; closed = false; violations = 0;
+  /** Frames that arrived before any subscriber ever attached, in order; the first subscriber receives them, then this stays empty. */
+  readonly held: { stream: "out" | "err"; bytes: Uint8Array; end: boolean }[] = []; heldBytes = 0; everSubscribed = false;
   constructor(conversations: number) { this.streams = new CoworkNativeRuntimeStreams(conversations); }
   wake(): void { for (const waiter of this.waiters.splice(0)) waiter.resolve(); }
   close(): void {
@@ -425,11 +429,18 @@ export class CoworkNativeHost {
   private onRuntimeUp(run: Run, frame: Extract<CoworkNativeMuxFrame, { class: "runtime" }>): void {
     const end = run.runtime;
     if (end === null || end.closed) return;
+    // Contract 6.2: runtime frames are delivered only after `runtime_ready`. `readySeen` is set synchronously when that frame arrives (before it is validated: a
+    // runtime_ready that does not answer the set fails the start), so a frame sent right behind it is not mistaken for an early one.
+    if (!run.readySeen) { try { run.upSeq.accept(frame, "up"); } catch { /* a bad sequence number is a violation too */ } end.violations += 1; return; }
     try {
       if (frame.stream === "in") throw new CoworkNativeHostError("protocol", "the guest sent an IN frame");
       run.upSeq.accept(frame, "up");
       end.streams.accept(frame);
     } catch (error) { if (isCrash(error)) throw error; end.violations += 1; return; }
+    if (!end.everSubscribed) {
+      if (end.heldBytes + frame.payload.length > RUNTIME_PRESUBSCRIBE_BYTES) end.violations += 1;
+      else { end.held.push({ stream: frame.stream as "out" | "err", bytes: frame.payload, end: frame.end }); end.heldBytes += frame.payload.length; }
+    }
     for (const handler of [...end.handlers]) { try { handler(frame.stream as "out" | "err", frame.payload, frame.end); } catch { /* a consumer's fault is not the guest's */ } }
     end.wake();
   }
@@ -438,7 +449,15 @@ export class CoworkNativeHost {
     if (conversation !== 0 || end === null) throw new CoworkNativeHostError("not_running", "this incarnation has no runtime conversation");
     return Object.freeze({
       send: (bytes: Uint8Array, last = false) => this.sendRuntime(run, end, bytes, last),
-      onData: (handler: (stream: "out" | "err", bytes: Uint8Array, end: boolean) => void) => { end.handlers.add(handler); return () => { end.handlers.delete(handler); }; },
+      onData: (handler: (stream: "out" | "err", bytes: Uint8Array, end: boolean) => void) => {
+        end.handlers.add(handler);
+        if (!end.everSubscribed) {
+          end.everSubscribed = true;
+          for (const frame of end.held.splice(0)) { try { handler(frame.stream, frame.bytes, frame.end); } catch { /* a consumer's fault is not the guest's */ } }
+          end.heldBytes = 0;
+        }
+        return () => { end.handlers.delete(handler); };
+      },
       ended: run.ended,
     });
   }
