@@ -75,7 +75,9 @@ public final class ReceiptKey: @unchecked Sendable, Equatable, CustomStringConve
 
     public static func == (a: ReceiptKey, b: ReceiptKey) -> Bool {
         if a === b { return true }
-        a.lock.lock(); b.lock.lock(); defer { b.lock.unlock(); a.lock.unlock() }
+        // Always take the two locks in the same order (by object address), so two threads comparing the same pair in opposite argument order cannot deadlock.
+        let (first, second) = ObjectIdentifier(a) < ObjectIdentifier(b) ? (a, b) : (b, a)
+        first.lock.lock(); second.lock.lock(); defer { second.lock.unlock(); first.lock.unlock() }
         var difference: UInt8 = a.zeroed != b.zeroed ? 1 : 0
         for i in 0..<byteCount { difference |= a.block[i] ^ b.block[i] }
         return difference == 0
