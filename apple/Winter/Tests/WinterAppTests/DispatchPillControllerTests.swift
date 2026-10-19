@@ -660,6 +660,22 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertFalse(pill.adapter.composerDraft.isEmpty)
     }
 
+    func testShowReListsTheSessionsWhenTheBoundRowIsMissing() async {
+        let pill = makePill()
+        var relists = 0
+        var current: SessionSummary? = nil
+        pill.currentSessionRow = { current }
+        pill.refreshSessionRows = { relists += 1; current = self.row("dispatch") }
+        pill.show()
+        await settle { relists > 0 }
+        XCTAssertEqual(relists, 1, "the first summon after a cold start fetches the row the intake needs")
+        XCTAssertTrue(pill.adapter.composerImageIntake.isEnabled())
+        pill.hide()
+        pill.show()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(relists, 1, "a row already there is not re-listed for")
+    }
+
     func testClearDraftDropsItsAttachments() {
         let pill = makePill()
         pill.currentSessionRow = { self.row("dispatch") }

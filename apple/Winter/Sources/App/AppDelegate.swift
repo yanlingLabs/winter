@@ -522,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let model, let sid = model.focusedSessionId else { return nil }
             return model.directory.rows.first { $0.sessionId == sid }
         }
+        pill.refreshSessionRows = { [weak model] in await model?.directory.refresh() }
         pill.fetchModelCatalogue = { [weak model] in await model?.fetchModelCatalogue() }
         pill.attachmentSender = DispatchPillAttachmentSender(
             session: { [weak model] in await model?.ensureFocusedSession() },

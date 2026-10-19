@@ -255,6 +255,12 @@ final class DispatchPillController: ObservableObject {
         didSet { adapter.currentSessionRow = { [weak self] in self?.currentSessionRow?() } }
     }
 
+    /// Re-lists the sessions (the app's directory) — asked when the pill is summoned and the bound session's row is not
+    /// there yet: the directory's first `session.list` can lose its race with the connect, and a long-lived Dispatch
+    /// session announces no `session_created`, so without this the intake (fail-closed without a row) could stay off
+    /// and a paste would type the file's name.
+    var refreshSessionRows: (() async -> Void)?
+
     /// The model catalogue (`sync.config`) the attach-time image check reads — fetched when an image is attached with
     /// none loaded yet (`FieldStateAdapter.attachComposerImage`). Nil leaves the check to the daemon, at submit.
     var fetchModelCatalogue: (() async -> SyncConfigSnapshot?)? {
@@ -479,6 +485,7 @@ final class DispatchPillController: ObservableObject {
         refreshCards()
         snapToTarget()
         isVisible = true
+        refreshSessionRowIfMissing()
         onScreenPaths.activate()
         reconcileChildFeeds()
         installContent()
@@ -708,6 +715,12 @@ final class DispatchPillController: ObservableObject {
     func interrupt() { onInterrupt?() }
 
     // MARK: - Attachments (2026-10-19)
+
+    /// The bound session's row is missing from the directory: re-list once (`refreshSessionRows`). Unwired: nothing.
+    private func refreshSessionRowIfMissing() {
+        guard let rowOf = currentSessionRow, rowOf() == nil, let refresh = refreshSessionRows else { return }
+        Task { @MainActor in await refresh() }
+    }
 
     /// Whether `text` holds an attachment chip — a marker character, whether or not the draft still holds its
     /// attachment (a stale one is dropped by `composerTextForSend`, never sent as a character).
