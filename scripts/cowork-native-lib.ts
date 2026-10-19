@@ -22,6 +22,10 @@ export const COWORK_NATIVE = {
   worker: { identifier: "com.winter.cowork.worker", name: "winter-cowork-worker" },
 } as const;
 export type CoworkNativeRole = keyof typeof COWORK_NATIVE;
+/** "dev" differs only in the launcher's identifier (`devIdentifier`): the worker is the same program under the same identity in both. */
+export type CoworkNativeFlavor = "dist" | "dev";
+export const coworkNativeIdentifier = (role: CoworkNativeRole, flavor: CoworkNativeFlavor = "dist"): string =>
+  role === "launcher" && flavor === "dev" ? COWORK_NATIVE.launcher.devIdentifier : COWORK_NATIVE[role].identifier;
 
 /** Where the pair sits inside Winter.app. S7 wires the embed phase; the path is decided here so every check agrees. */
 export const COWORK_NATIVE_EMBED_RELATIVE = join("Contents", "Helpers", "WinterCowork");
@@ -58,8 +62,8 @@ export function launcherBuildArgs(i: { packagePath: string; scratchPath: string;
 
 /** `codesign` for one of the pair, in the shape `embed-cowork-native.sh` uses for Release (hardened runtime, a secure timestamp,
  *  the stable identifier, the stated requirement; entitlements only when a file is given — the worker's). */
-export function coworkSignArgs(i: { identity: string; role: CoworkNativeRole; teamId?: string; path: string; entitlementsFile?: string; timestamp?: boolean }): string[] {
-  const id = COWORK_NATIVE[i.role].identifier;
+export function coworkSignArgs(i: { identity: string; role: CoworkNativeRole; flavor?: CoworkNativeFlavor; teamId?: string; path: string; entitlementsFile?: string; timestamp?: boolean }): string[] {
+  const id = coworkNativeIdentifier(i.role, i.flavor);
   return ["--force", "--sign", i.identity, "--identifier", id, "--options", "runtime", i.timestamp === false ? "--timestamp=none" : "--timestamp",
     ...(i.entitlementsFile !== undefined ? ["--entitlements", i.entitlementsFile] : []), `-r=designated => ${coworkRequirement(id, i.teamId)}`, i.path];
 }
@@ -98,8 +102,8 @@ export interface SignedNativeFacts {
  * the right entitlements (none for the launcher, exactly the hypervisor key for the worker), platform dylibs only, and no test hook
  * anywhere in the bytes.
  */
-export function checkSignedNative(role: CoworkNativeRole, teamId: string | undefined, facts: SignedNativeFacts): string[] {
-  const want = COWORK_NATIVE[role];
+export function checkSignedNative(role: CoworkNativeRole, teamId: string | undefined, facts: SignedNativeFacts, flavor: CoworkNativeFlavor = "dist"): string[] {
+  const want = { ...COWORK_NATIVE[role], identifier: coworkNativeIdentifier(role, flavor) };
   const failures: string[] = [];
   const signed = signedFacts(facts.codesignDvv);
   if (signed.identifier !== want.identifier) failures.push(`${want.name}: codesign identifier is ${signed.identifier ?? "none"}, expected ${want.identifier}`);

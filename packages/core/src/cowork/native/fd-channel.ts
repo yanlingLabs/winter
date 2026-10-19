@@ -317,6 +317,11 @@ export function runHubLoop(controlFd: number, post: (id: number, event: ReceiveE
 /** The ONE worker thread that serves every receiver in this process. Bun leaves one descriptor open per Worker it ever starts (a
  * Worker that does nothing reproduces it), so a worker per launch would cost one descriptor per launch for the life of the daemon;
  * a shared hub costs one in total. It is created on first use and unref'd, so it never keeps the process alive. */
+/** The compiled daemon reaches the receiver thread by this PLAIN relative string (a `new URL(..., import.meta.url).href` hangs silently in a compiled binary, WS-23 spike #1),
+ * resolved against the binary's `$bunfs` root. It names `packages/cli/src/fd-receiver-worker.ts`, a third `compile:core` entrypoint; `cli/test/compile-core.test.ts` pins the
+ * pairing with the scripts and `bun run verify:fd-receiver` proves it on the real binary. */
+export const COMPILED_FD_RECEIVER_WORKER_ENTRY = "./fd-receiver-worker.ts";
+const inCompiledBinary = (): boolean => import.meta.url.includes("$bunfs") || (typeof Bun !== "undefined" && typeof Bun.main === "string" && Bun.main.includes("$bunfs"));
 class ReceiverHub {
   private readonly worker: Worker;
   private readonly control: [number, number];
@@ -325,7 +330,7 @@ class ReceiverHub {
   private broken = false;
   constructor() {
     this.control = socketPair("stream");
-    this.worker = new Worker(new URL("./fd-receiver-worker.ts", import.meta.url).href);
+    this.worker = new Worker(inCompiledBinary() ? COMPILED_FD_RECEIVER_WORKER_ENTRY : new URL("./fd-receiver-worker.ts", import.meta.url).href);
     (this.worker as unknown as { unref(): void }).unref(); // Bun's Worker has it; the DOM typings do not
     this.worker.onmessage = (message: MessageEvent<{ id: number; event: ReceiveEvent }>) => {
       const { id, event } = message.data, sink = this.sinks.get(id);

@@ -371,6 +371,16 @@ jobs:
       - name: verify:runtime-state
         run: bun run verify:runtime-state
 
+      # N2 S7B: the Cowork native pair's packaging gate. Builds the real launcher (swift build, scratch path), embeds it with a stand-in worker into a
+      # scratch bundle (ad hoc), accepts it and proves seven refusals. Never runs either binary, never signs with a real identity.
+      - name: verify:cowork-native
+        run: bun run verify:cowork-native
+
+      # N2 S7B: the Cowork channel's receiver thread must start in the COMPILED daemon (a third compile:core entrypoint). Compiles winter-core and runs a temp copy's
+      # probe on a socketpair; touches no home, Keychain, daemon or launcher.
+      - name: verify:fd-receiver
+        run: bun run verify:fd-receiver
+
       # WS-23 (fix round 1, minor 6): the vendored ant, pinned and checksum-verified by fetch-ant
       # itself, so verify:runtimes exercises ant's bundle rung and its record's SHA against the pin
       # rather than skipping them.

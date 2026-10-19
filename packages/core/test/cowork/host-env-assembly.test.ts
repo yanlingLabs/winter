@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join } from "node:path";
 import { CoworkImagePins } from "../../src/cowork/images";
 import { COWORK_HOME_BINDING_DDL, createCoworkHomeBindingStore } from "../../src/cowork/host-env/stores";
-import { createCoworkNativeProductionEnvironment, hostBootFromProbes, type CoworkNativeProductionOptions } from "../../src/cowork/host-env/environment";
+import { COWORK_LAUNCHER_DEV_IDENTIFIER, coworkLauncherRequirement, createCoworkNativeProductionEnvironment, hostBootFromProbes, type CoworkNativeProductionOptions } from "../../src/cowork/host-env/environment";
 import { COWORK_INSTALLATION_ID_FILE } from "../../src/cowork/host-env/coordination";
 import { createCoworkNativeWiring, type CoworkNativeEnvironment } from "../../src/cowork/native-wiring";
 import { CoworkNativeSimulatedCrash } from "../../src/cowork/native/host";
@@ -117,6 +117,19 @@ describe("construction", () => {
     for (let i = 0; i < 5; i += 1) env.hostBoot.bootId();
     expect(w.ioregCalls).toBe(before);
     env.close?.();
+  });
+});
+
+describe("the launcher's identity", () => {
+  test("the dist requirement names the dist identifier and the team; the dev daemon asks for the dev identifier, which is what dev:cowork-native signs", async () => {
+    expect(coworkLauncherRequirement()).toBe('identifier "com.winter.cowork.launcher" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ"');
+    expect(coworkLauncherRequirement(undefined, COWORK_LAUNCHER_DEV_IDENTIFIER)).toBe('identifier "com.winter.cowork.launcher.dev" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ"');
+    // the same strings the scripts state (the signing side)
+    const { coworkNativeIdentifier, coworkRequirement } = await import("../../../../scripts/cowork-native-lib");
+    expect(coworkRequirement(coworkNativeIdentifier("launcher", "dev"))).toBe(coworkLauncherRequirement(undefined, COWORK_LAUNCHER_DEV_IDENTIFIER));
+    expect(coworkRequirement(coworkNativeIdentifier("launcher"))).toBe(coworkLauncherRequirement());
+    // and the seam picks the dev identifier from the profile
+    expect(readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "native-activation.ts"), "utf8")).toContain('env.WINTER_PROFILE === "dev" ? { launcherIdentifier: COWORK_LAUNCHER_DEV_IDENTIFIER }');
   });
 });
 

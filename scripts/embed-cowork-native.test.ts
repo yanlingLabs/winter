@@ -263,7 +263,7 @@ describe("cowork-native-lib", () => {
   });
 });
 
-describe("the pair stays unwired and agrees with the Swift launcher", () => {
+describe("the pair is wired only where S7B says, and agrees with the Swift launcher", () => {
   const read = (...p: string[]) => readFileSync(join(REPO, ...p), "utf8");
 
   test("the script's identifiers, team and flag are the lib's and the Swift launcher's", () => {
@@ -290,7 +290,7 @@ describe("the pair stays unwired and agrees with the Swift launcher", () => {
     expect(statSync(SCRIPT).mode & 0o111).not.toBe(0);
   });
 
-  test("nothing in the app project, the release gate or the daemon/CLI sources refers to the launcher, the pair or this script (S7 wires them)", () => {
+  test("only the app project, the release gate and the daemon's host-env refer to the pair; the daemon has no other reference and the feature stays off", () => {
     const needles = ["embed-cowork-native", "cowork-native-lib", "winter-cowork-launcher", "winter-cowork-worker", "WinterCoworkLauncher"];
     const files = [
       join("apple", "Winter", "project.yml"), join("scripts", "release.ts"), join("scripts", "release-lib.ts"), join("package.json"),
@@ -298,7 +298,15 @@ describe("the pair stays unwired and agrees with the Swift launcher", () => {
       ...walk(join(REPO, "packages", "cli", "src")).map((p) => p.slice(REPO.length + 1)),
     ];
     const hits = files.filter((file) => existsSync(join(REPO, file)) && needles.some((needle) => read(file).includes(needle)));
-    expect(hits).toEqual([]);
+    expect(hits.sort()).toEqual([
+      join("apple", "Winter", "project.yml"), join("packages", "core", "src", "cowork", "host-env", "environment.ts"), join("packages", "core", "src", "cowork", "host-env", "launcher-port.ts"), join("scripts", "release.ts"),
+    ]);
+    // The phase runs the script, and the release gate runs the same checks the verify gate does.
+    expect(read("apple", "Winter", "project.yml")).toContain('"${SRCROOT}/../../scripts/embed-cowork-native.sh"');
+    const release = read("scripts", "release.ts");
+    for (const call of ["checkCoworkNativeBundle(readCoworkBundleFacts(", "checkSignedNative(role, TEAM_ID,", "buildCoworkNative({ out: join(ROOT", "process.env.COWORK_LIBKRUN_ARCHIVE"]) expect(release).toContain(call);
+    // The daemon's reading of the pair is behind the activation seam, which is off.
+    expect(read("packages", "core", "src", "cowork", "native-activation.ts")).toContain("COWORK_NATIVE_ENVIRONMENT_ACTIVATED: boolean = false");
   });
 });
 

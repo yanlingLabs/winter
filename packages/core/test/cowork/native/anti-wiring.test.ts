@@ -24,6 +24,10 @@ const WIRING = join(packages, "core", "src", "cowork", "native-wiring.ts");
 const HOST_ENV_DIRECTORY = join(packages, "core", "src", "cowork", "host-env") + sep;
 const ACTIVATION = join(packages, "core", "src", "cowork", "native-activation.ts");
 const isHostEnv = (file: string): boolean => file.startsWith(HOST_ENV_DIRECTORY);
+// N2 S7B part 2: the three files that let the COMPILED daemon start the channel's receiver thread (a third compile:core entrypoint and its probe). They import fd-channel / its worker
+// and nothing else of cowork/native; nothing in the daemon imports them, and `bun run verify:fd-receiver` proves them on the real binary.
+const CLI_FD_RECEIVER_SHIMS = ["fd-receiver-worker.ts", "fd-receiver-worker.source.ts", "fd-receiver-probe.ts"].map(name => join(packages, "cli", "src", name));
+const isNativeAdjacent = (file: string): boolean => isHostEnv(file) || CLI_FD_RECEIVER_SHIMS.includes(file);
 const scriptSources = existsSync(join(repositoryRoot, "scripts")) ? sourceFiles(join(repositoryRoot, "scripts")) : [];
 
 /** Every module specifier a source text names: static imports and re-exports (any form, multi-line included), bare `import "x"`, `import("x")`,
@@ -72,7 +76,7 @@ test("the module set is exactly the reviewed one and has no barrel", () => {
 test("no source file outside cowork/native imports, names or constructs anything from it", () => {
   const needles = ["cowork/native", "CoworkNativeHost", "CoworkNativeAuthority", "CoworkNativeRecovery", "CoworkNativePower", "CoworkNativeStopRegistry", "CoworkLauncherPort", "CoworkLauncherSession", "CoworkNativeImagePins",
     "CoworkNativeDurableReceiptPort", "CoworkNativeOwnerRecoverPort", "parseCoworkNativeLauncherLine", "parseCoworkNativeEnvelope", "parseCoworkNativeMuxFrame", "FdLineChannel", "FdReceiver", "spawnWithChannel", "COWORK_LIBKRUN_"];
-  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING && !isHostEnv(candidate))) {
+  for (const file of allSources.filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING && !isNativeAdjacent(candidate))) {
     const text = readFileSync(file, "utf8").split("cowork/native-wiring").join("").split("cowork/native-activation").join("");
     for (const needle of needles) expect(`${basename(file)}:${needle}:${text.includes(needle)}`).toBe(`${basename(file)}:${needle}:false`);
   }
@@ -81,7 +85,7 @@ test("no source file outside cowork/native imports, names or constructs anything
 test("none of the ports they declare is implemented anywhere in src/", () => {
   const ports = ["CoworkLauncherPort", "CoworkLauncherSession", "CoworkNativeImagePins", "CoworkNativeDurableReceiptPort", "CoworkNativeOwnerRecoverPort", "CoworkNativeRecoverGuards", "CoworkNativeHostBoot", "CoworkNativeLink"];
   // The production environment (host-env/) is where the launcher port, the receipt store and the journal are implemented; the wiring binds the image pins. Both are exempt for their own ports only.
-  for (const file of allSources.filter(candidate => !isHostEnv(candidate) && candidate !== WIRING)) {
+  for (const file of allSources.filter(candidate => !isNativeAdjacent(candidate) && candidate !== WIRING)) {
     const text = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
     for (const port of ports) {
       expect(`${basename(file)}:${port}:${new RegExp(`implements[^{]*\\b${port}\\b|:\\s*${port}\\s*=\\s*\\{|class\\s+\\w+[^{]*\\b${port}\\b|as\\s+${port}\\b`).test(text)}`).toBe(`${basename(file)}:${port}:false`);
@@ -127,7 +131,7 @@ test("no module under cowork/native reads anything at import time", () => {
 
 test("no file anywhere (every package's src, and scripts/) imports from cowork/native, however the specifier is written", () => {
   const offenders: string[] = [];
-  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING && !isHostEnv(candidate)))
+  for (const file of [...allSources, ...scriptSources].filter(candidate => !everyNativeSource.includes(candidate) && candidate !== WIRING && !isNativeAdjacent(candidate)))
     for (const specifier of specifiersOf(readFileSync(file, "utf8"))) if (reachesNative(file, specifier)) offenders.push(`${relative(repositoryRoot, file)} -> ${specifier}`);
   expect(offenders).toEqual([]);
   expect(scriptSources.length).toBeGreaterThan(5);
