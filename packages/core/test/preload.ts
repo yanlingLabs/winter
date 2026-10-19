@@ -71,8 +71,11 @@ process.env.WINTER_LOGIN_SHELL_PATH = "off";
 // closed store makes every later `refreshHostStoragePolicies()` in the same process throw. Whoever registers one (a session-driver
 // table, an embedded host, a daemon) must unregister it before the file ends.
 import { afterAll } from "bun:test";
-import { hostStoragePolicyConsumerCount } from "../src/runtime-sdk/host-storage-fence";
-afterAll(() => {
-  const left = hostStoragePolicyConsumerCount();
-  if (left > 0) throw new Error(`${left} host-storage policy consumer(s) left registered at the end of this test file; stop every daemon / drivers / embedded host the file creates`);
-});
+import { hostStoragePolicyConsumerCount, hostStoragePolicyConsumerOrigins } from "../src/runtime-sdk/host-storage-fence";
+// Compiled-fixture children (`bun run fixture.ts`) load this preload outside the test runner, where `afterAll` throws: skip them.
+try {
+  afterAll(() => {
+    const left = hostStoragePolicyConsumerCount();
+    if (left > 0) throw new Error(`${left} host-storage policy consumer(s) left registered at the end of a test file; stop every daemon / drivers / embedded host the file creates. Registered from: ${hostStoragePolicyConsumerOrigins().join(" ; ")}`);
+  });
+} catch { /* not inside the test runner */ }

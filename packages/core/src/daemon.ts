@@ -380,7 +380,7 @@ function describeCoworkBootError(error: unknown): string {
   return typeof code === "string" ? code : (error as Error | undefined)?.name ?? "error";
 }
 
-export async function startDaemon(opts: {
+async function startDaemonInner(onEmbeddedHost: (host: { shutdown(budgetMs?: number): Promise<void> }) => void, opts: {
   /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
   coworkHost?: CoworkHostPorts;
   /** Isolated clock for host schedule metadata tests. */
@@ -1641,6 +1641,7 @@ export async function startDaemon(opts: {
   // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
   // frames still pass through the session store and `runtime-state.db` on the way out).
   const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), home: winterHome, log: (line) => console.error(`runtime-sdk: ${line}`) });
+  onEmbeddedHost(embeddedSessions);
   // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
   // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
   {
@@ -3347,6 +3348,14 @@ export async function startDaemon(opts: {
       return settled === undefined ? closeRest() : settled.then(closeRest);
     },
   };
+}
+
+/** Starts the daemon. A start that THROWS after the embedded host registered its (process-global) storage-policy consumer would leave that
+ *  consumer behind with no handle to stop it, so the failure path shuts the host down. */
+export async function startDaemon(opts: Parameters<typeof startDaemonInner>[1] = {}): Promise<RunningDaemon> {
+  let embedded: { shutdown(budgetMs?: number): Promise<void> } | undefined;
+  try { return await startDaemonInner(host => { embedded = host; }, opts); }
+  catch (error) { void embedded?.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {}); throw error; }
 }
 
 // Direct execution: `bun run src/daemon.ts` (also the compiled binary's `daemon run` path).
