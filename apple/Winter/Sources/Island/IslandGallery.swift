@@ -256,6 +256,13 @@ enum IslandGallery {
         out.append(try write(openScene(store: unwatched, models: emptyModels, shape: shape, tab: IslandTabRegistry.watches.id),
                              directory, "island-tab-watches-empty@2x.png"))
 
+        // The Devices tab with no phone paired and a helper status that could not be read (each says so at rest).
+        let noDevices = IslandTabModels(shelf: emptyModels.shelf)
+        noDevices.devices.setForTesting(phones: [], helpers: IslandDevicesPresentation.helpers(nil))
+        store.tabs.select(IslandTabRegistry.devices.id)
+        out.append(try write(openScene(store: store, models: noDevices, shape: shape, tab: IslandTabRegistry.devices.id),
+                             directory, "island-tab-devices-empty@2x.png"))
+
         // The Servers tab with nothing listening.
         let noServers = IslandTabModels(shelf: emptyModels.shelf, servers: IslandServersModel())
         noServers.servers.apply([])

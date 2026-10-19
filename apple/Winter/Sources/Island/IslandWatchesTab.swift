@@ -119,8 +119,8 @@ struct IslandQuietWatchRow: View {
 }
 
 /// A watch's time left: its minutes, then a short thin line (the plan lines' resting weight) filled with what is left —
-/// it empties toward its start as the watch runs out. Redrawn with the tab (on open and the open island's beat), never on
-/// a timer of its own.
+/// it empties toward its start as the watch runs out. Redrawn whenever the tab is (the island opening on it, a tab change,
+/// a watch armed or ended — `island.activityChanged`), never on a timer of its own (the idle rule).
 struct IslandWatchCountdown: View {
     /// 0…1 of its time still to run.
     let left: Double
