@@ -29,7 +29,7 @@ export interface CoworkHostPorts {
   /** Session door D4b: S7B's provisioning port. When a host supplies it, `provisioning.admit` is THE admission for creation
    * and source additions (it refuses `unsupported_topology` while unavailable), and `workspace.capabilities.get` reports
    * `provisioning` from `provisioning.available()`. No production host sets it, so `requireProvisioning` above stays the
-   * refusing gate there. Its `provision` effect is not called yet (owed with S7B's operation reporting). */
+   * refusing gate there. Its `provision` effect runs after COMMIT (`provisionAfterCommit`) and reports through the operation. */
   provisioning?: CoworkProvisioningPort;
   /** Session door D4b: whether this daemon has a Cowork session door (`workspace.capabilities.get`'s `execution`). Set only
    * by the composition that passes a door; absent (every production host) reports false. Never a setting or an RPC. */
@@ -247,6 +247,38 @@ export class CoworkWorkspaceService {
       throw error;
     }
   }
+  private readonly provisioning = new Map<string, Promise<void>>();
+  /**
+   * Session door D4c: run S7B's `provision(workspaceId, operationId)` for a committed creation, once at a time per operation.
+   * Only with the port (no production host supplies it). Its answer is recorded through the operation:
+   *  - `{status: "applied"}`: nothing to conclude yet; the operation stays `pending` until the guest acknowledges the sources
+   *    (the existing `acknowledgeSource` path concludes it `applied`);
+   *  - `{status: "failed"}`: the operation concludes `failed` (terminal), durably, with a `workspace_operation_changed`;
+   *  - a throw, a rejection or a malformed answer: UNCERTAIN, so nothing is concluded and the operation stays `pending`.
+   *    The port is idempotent per operation, so `resumeProvisioning` (or a replay of the same create) drives it again.
+   * The port's own reason and error text are never kept.
+   */
+  private provisionAfterCommit(workspaceId: string, operationId: string): Promise<void> {
+    const port = this.host.provisioning;
+    if (port === undefined) return Promise.resolve();
+    const running = this.provisioning.get(operationId);
+    if (running !== undefined) return running;
+    if (this.records.operation(workspaceId, operationId).status !== "pending") return Promise.resolve();
+    const run = (async () => {
+      let answer: unknown;
+      try { answer = await port.provision(workspaceId, operationId); } catch { return; }
+      const status = answer !== null && typeof answer === "object" ? (answer as { status?: unknown }).status : undefined;
+      if (status === "failed") { try { this.records.failCreationProvisioning(workspaceId, operationId); } catch { /* left pending: a later resume decides */ } }
+    })().finally(() => { this.provisioning.delete(operationId); });
+    this.provisioning.set(operationId, run);
+    return run;
+  }
+  /** Session door D4c: drive provisioning for every creation still pending (a crash between COMMIT and `provision`). The host
+   *  that supplies the port calls it once at boot. Resolves when every drive it started has settled; never rejects. */
+  async resumeProvisioning(): Promise<void> {
+    if (this.host.provisioning === undefined) return;
+    await Promise.all(this.records.pendingCreations().map(({ workspaceId, operationId }) => this.provisionAfterCommit(workspaceId, operationId)));
+  }
   /** Session door D4b: S7B's `provisioning.admit` when the host supplies the port, otherwise the host's refusing gate. */
   private admitProvisioning(principal: CoworkPrincipal): void {
     if (this.host.provisioning !== undefined) this.host.provisioning.admit(principal);
@@ -348,6 +380,8 @@ export class CoworkWorkspaceService {
         });
         if (previous) {
           this.requireReplaySources(principal, previous.workspaceId, previous.value.sources);
+          // A replay re-drives a creation whose provisioning never finished (idempotent per operation in the port).
+          this.provisionAfterCommit(previous.workspaceId, previous.operationId);
           return { ...previous, value: WorkspaceDto.parse({ ...projectWorkspace(previous.value.workspace), detailState: "complete", sources: previous.value.sources.map(projectSource), policy: previous.value.policy, automaticPublication: previous.value.automaticPublication }) };
         }
         this.admitProvisioning(principal);
@@ -360,6 +394,8 @@ export class CoworkWorkspaceService {
         const consumption = this.consumption(principal, connection, p.selections); context.bindSources = consumption.bind;
         const receipt = this.records.create(context, { ownership: p.ownership, title: p.title, sources, ceiling });
         consumption.committed();
+        // After COMMIT, never inside it: S7B's allocation runs on its own and reports through the operation.
+        this.provisionAfterCommit(receipt.workspaceId, receipt.operationId);
         return { ...receipt, value: WorkspaceDto.parse({ ...projectWorkspace(receipt.value.workspace), detailState: "complete", sources: receipt.value.sources.map(projectSource), policy: receipt.value.policy, automaticPublication: receipt.value.automaticPublication }) };
       }
       case "workspace.update": case "project.update": {

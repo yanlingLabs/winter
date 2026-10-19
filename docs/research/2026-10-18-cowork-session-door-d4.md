@@ -135,7 +135,12 @@ cowork_session_reservations(principal_id, workspace_id → cowork_workspaces, re
    - pass `COWORK_SCHEDULE_CALLER` to `createCoworkScheduleDoorPort` and `coworkScheduleDispatchView(schedules)` to the door;
    - build the door's approval port with `coworkApprovalPort({approvals, questions, gate, ...})`;
    - set `CoworkHostPorts.execution` beside the door it passes.
-4. **S7B, BLOCKING before any production host supplies `provisioning`.** The service now admits creation through `provisioning.admit`, but it does not yet call `provision(workspaceId, operationId)` after commit. A host that supplies an available port would commit workspaces whose images are never allocated. Do not supply the port on a production host until the service calls `provision()` after COMMIT and reports it through the operation. That call is owed jointly with S7B's operation reporting, and a pin keeps both ports unsupplied in `src`.
+4. **S7B: confirm the port shape and the boot call (D4c made the post-COMMIT call; the coordinator asked S7B to match its reporting).**
+   - `provision(workspaceId, operationId)` must be idempotent per operation.
+   - Its `{status: "failed"}` concludes the creation `failed`. `applied` leaves the operation pending until the guest acknowledges the sources.
+   - A throw is uncertain and is retried.
+   - The host that supplies the port calls `CoworkWorkspaceService.resumeProvisioning()` once at boot.
+   - Until both sides land, the pin stays: no production host supplies `provisioning`.
 
 ## Owner decisions
 
@@ -168,6 +173,25 @@ D4b is stacked on D4a. Nothing in it is reachable in production: each piece is r
 | `coworkApprovalPort` (session-door.ts) | #84's 6-line adapter: `canUseToolFor({mode: "cowork", cowork: input.cowork, ...})`. The D3 driver suite now runs through it. The APPROVALS pin in `cowork-approval.test.ts` names it as the one other bridge constructor (pin edit for acceptance). |
 
 D4b mutations: 24/25 killed (`door/d4b_mutations.py`). The one survivor, a fixed policy in the adapter, is equivalent: with `cowork` present the bridge returns from the Cowork matrix (step 1c) before `policyNow()` is ever read.
+
+## D4c: provision after COMMIT
+
+D4c is stacked on D4b. This is the coordinator's follow-up to the blocking NEED: `service.ts` now calls S7B's `provision(workspaceId, operationId)` itself. It runs only with the port, and no production host supplies one (pinned).
+
+- **When.** After `workspace.create`/`project.create` commits, never inside the transaction. It runs one drive at a time per operation, and a replay or resume that arrives during a drive joins it.
+- **`{status: "applied"}`.** Nothing is concluded. The operation stays `pending` until the guest acknowledges the sources, and the existing `acknowledgeSource` path concludes it `applied`.
+- **`{status: "failed"}`.** `CoworkRepository.failCreationProvisioning` concludes the creation's operation `failed` (terminal), durably, with a `workspace_operation_changed {status: "failed", terminal: true}` (the same shape the instruction mutations already use). It applies only to a creation operation, and the port's reason text is never kept.
+- **A throw, a rejection or a malformed answer.** These are UNCERTAIN. Nothing is concluded and the operation stays `pending`.
+- **Recovery.** A replay of the same create re-drives a pending creation. `resumeProvisioning()` drives every pending creation (`pendingCreations()`, oldest first, bounded); it is the boot call for the host that supplies the port. A crash between COMMIT and `provision` therefore leaves a pending creation that the next boot or replay completes.
+- **Tests.** `session-door-ipc.test.ts` "D4c" covers:
+  - the call happens after COMMIT;
+  - `applied` stays pending;
+  - `failed` concludes and is announced, with no reason text kept;
+  - uncertain answers stay pending, and resume and replay re-drive them;
+  - one drive at a time;
+  - with no port, nothing runs;
+  - only a creation operation can fail this way.
+- **Mutations.** 11/11 killed (`door/d4c_mutations.py`).
 
 ## Docs owed
 
