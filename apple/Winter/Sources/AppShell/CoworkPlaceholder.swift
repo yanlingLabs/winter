@@ -4,9 +4,9 @@ import SwiftUI
 struct CoworkPlaceholder: View {
     var body: some View {
         ContentUnavailableView {
-            Label("Workspace service unavailable", systemImage: "square.stack")
+            Label("Cowork is coming soon", systemImage: "square.stack")
         } description: {
-            Text("Connect to Winter to inspect Cowork workspaces. Cowork conversations are not available yet.")
+            Text("Cowork is not available yet.")
         }.navigationTitle("Cowork")
     }
 }

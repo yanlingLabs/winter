@@ -85,7 +85,7 @@ export function bindCoworkImagePins(pins: Pick<CoworkImagePins, "get" | "assertP
 }
 
 /** A read-only pin view: the update and export paths need an authority and a compatibility oracle, and both refuse everything here. */
-function readOnlyImagePins(db: RuntimeStateDb): CoworkImagePins {
+export function readOnlyImagePins(db: RuntimeStateDb): CoworkImagePins {
   return new CoworkImagePins(db, { authorize: () => false }, { compatible: () => false });
 }
 
