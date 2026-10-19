@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { UsageDb } from "../../src/usage/db";
 import { UsagePricer } from "../../src/usage/pricing";
-import { UsageService } from "../../src/usage/service";
+import { UsageService, type UsageTracking } from "../../src/usage/service";
 import { readNewLines } from "../../src/usage/ingest-files";
 import { stat } from "node:fs/promises";
 import {
@@ -17,11 +17,11 @@ import {
 
 const pricer = new UsagePricer();
 
-function service(opts: { codexHome?: string; claudeHome?: string; tracking?: { codex: boolean; claudeCode: boolean }; now?: () => number; fileBudgetBytes?: number; maxLineBytes?: number } = {}) {
+function service(opts: { codexHome?: string; claudeHome?: string; tracking?: UsageTracking; now?: () => number; fileBudgetBytes?: number; maxLineBytes?: number } = {}) {
   const home = tempDir("home");
   const db = new UsageDb(join(home, "usage", "usage.db"));
   const svc = new UsageService({
-    db, pricer, tracking: () => opts.tracking ?? { codex: true, claudeCode: true },
+    db, pricer, tracking: () => opts.tracking ?? { codex: true, claudeCode: true, antigravity: true, opencode: true },
     ...(opts.codexHome === undefined ? {} : { codexHome: opts.codexHome }),
     ...(opts.claudeHome === undefined ? {} : { claudeHome: opts.claudeHome }),
     codexExecutable: () => undefined, claudeExecutable: () => undefined, winterCodexWindows: () => [],
@@ -153,7 +153,7 @@ describe("Claude Code transcripts", () => {
   test("switched off in settings: nothing is read", async () => {
     const claudeHome = tempDir("claude");
     writeFileSync(claudeTranscriptPath(claudeHome), lines(claudeAssistant(T0, { msgId: "m", requestId: "r" })));
-    const tracking = { codex: true, claudeCode: false };
+    const tracking = { codex: true, claudeCode: false, antigravity: false, opencode: false };
     const { db, svc } = service({ claudeHome, tracking });
     await svc.ingest(true);
     expect(rows(db)).toHaveLength(0);

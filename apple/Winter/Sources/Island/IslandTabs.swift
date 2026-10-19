@@ -3,7 +3,8 @@ import AppKit
 // The Winter island's tabs (`docs/claude/island.md`). The open island shows one tab at a time; a TWO-FINGER horizontal
 // swipe while the pointer is over it moves between them (`TrackpadHorizontalSwipeRecognizer`, the Dispatch pill's), with
 // small dots for where you are. Needs you is always first; phase 2 adds Sessions, Shelf, Usage and Devices (and
-// Watches, from its own lane) — a tab is added by naming it here and giving the island view a body for its id.
+// Watches, from its own lane), then Servers — a tab is added by naming it here and giving the island view a body for
+// its id.
 
 struct IslandTab: Identifiable, Equatable {
     let id: String
@@ -20,9 +21,12 @@ enum IslandTabRegistry {
     static let devices = IslandTab(id: "devices", title: "Devices", symbol: "laptopcomputer.and.iphone")
     /// Every armed computer-use watch (`wakeWhen`), with Stop.
     static let watches = IslandTab(id: "watches", title: "Watches", symbol: "eye")
+    /// The user's own processes listening on a TCP port — servers they started — with Stop.
+    static let servers = IslandTab(id: "servers", title: "Servers", symbol: "server.rack")
 
-    /// The tabs this build shows, in swipe order: Needs you first, then Sessions, Shelf, Usage and limits, Devices, Watches.
-    static let tabs: [IslandTab] = [needsYou, sessions, shelf, usage, devices, watches]
+    /// The tabs this build shows, in swipe order: Needs you first, then Sessions, Shelf, Usage and limits, Devices,
+    /// Watches, Servers.
+    static let tabs: [IslandTab] = [needsYou, sessions, shelf, usage, devices, watches, servers]
 }
 
 /// Which tab is showing. Pure.

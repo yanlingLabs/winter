@@ -136,6 +136,22 @@ class GuestSourceHygiene(unittest.TestCase):
         self.assertIsNone(regex.search(r"sys_calls\.\w+\s*=[^=]", init))                              # only read, never assigned, in PID 1
         self.assertEqual(len(regex.findall(r"static struct \{[^}]*\} sys_calls", init, flags=regex.S)), 1)
 
+    def test_the_guided_reader_block_has_no_source_in_this_image(self):
+        """Guided stays off in the first session (decision D10). PID 1 can write the `reader` block and the guidanceDirectory (trusted_config.c, boot.c) only for
+        a guided set AND a guided artifacts object; nothing in the image carries that object: PID 1 reads no file for profile 2, image.py writes no `reader`, and
+        the one runtime artifacts file the image holds is checked to be exactly launcher, executable, ownerLibrary."""
+        init = strip_comments((ROOT / "init/init_linux.c").read_text())
+        body = init[init.index("static int op_read_runtime_artifacts"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("if (profile != 1) return -1;", body)
+        self.assertNotIn("guided", init.lower().replace("guided profile", ""))
+        image = (REPO / "scripts/cowork-guest-artifact/image.py").read_text()
+        for needle in ("'reader'", '"reader"', "hostQueryGuidedRuntime", "guidanceDirectory", "instruction-reader"):
+            self.assertNotIn(needle, image, needle)
+        verify = (REPO / "scripts/cowork-guest-artifact/verify.py").read_text()
+        self.assertIn("set(config['artifacts'])!=set(RUNTIME_ARTIFACT_PATHS)", verify)
+        self.assertIn("set(config)!={'artifacts'}", verify)
+
     def test_the_supervisor_ready_line_is_compared_by_length_and_bytes(self):
         init = strip_comments((ROOT / "init/init_linux.c").read_text())
         self.assertNotIn("strcmp(G.ready_line", init)
