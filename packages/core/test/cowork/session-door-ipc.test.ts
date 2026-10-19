@@ -202,13 +202,13 @@ test("a Cowork row whose reference cannot be read lists without it, and the list
  *  an assignment (`provisioning: x`), a shorthand (`{ provisioning }`), a method or accessor (`execution() {}`), a class
  *  field, an interface member, an assignment through a property access (`host.provisioning = x`), and any string literal or
  *  template that is exactly the name (computed keys, `Reflect.set`, `defineProperty`). Reads (`this.host.provisioning`) are not writes. */
-function portNameWrites(): string[] {
+function portNameWrites(names: readonly string[] = ["provisioning", "execution"]): string[] {
   const { readdirSync, readFileSync, statSync } = require("node:fs") as typeof import("node:fs");
   const ts = require("typescript") as typeof import("typescript");
   const packages = join(import.meta.dir, "..", "..", "..");
   const files = readdirSync(packages).flatMap(name => { const src = join(packages, name, "src"); try { return statSync(src).isDirectory() ? readdirSync(src, { recursive: true }).map(String).map(file => join(src, file)).filter(file => /\.(ts|tsx|js|mjs|cjs)$/.test(file)) : []; } catch { return []; } });
   expect(files.length).toBeGreaterThan(100);
-  const NAMES = new Set(["provisioning", "execution"]), found: string[] = [];
+  const NAMES = new Set(names), found: string[] = [];
   for (const file of files) {
     const visit = (node: import("typescript").Node): void => {
       const named = (ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && NAMES.has(node.text.replace(/^#/, ""));
@@ -451,4 +451,17 @@ test("D4c fix: resumeProvisioning never rejects, even when reading the pending l
   const fresh = new CoworkWorkspaceService(p.records, { ...disabledCoworkHost, provisioning: { available: () => true, admit: () => {}, provision: async () => ({ status: "applied" }) } });
   await fresh.resumeProvisioning();
   (p.records as unknown as { operation: unknown }).operation = operation;
+});
+
+test("pins (structural): no src module supplies the N3 cold-resume or the N4 held-input gate (resume waits for the owner patch)", () => {
+  // Declared on the driver's deps (and the leg session's verbs); the only value written is the driver's own gated verbs.
+  // A composition that supplied either gate would add a line here: that is the D6 flip, and for cold resume only after the
+  // owner applies the cold-resume owner patch (the unmodified native owner refuses a resume record).
+  expect(portNameWrites(["coldResume", "heldInput", "ownerPatchApplied"])).toEqual([
+    "core/src/cowork/session-driver.ts PropertyAssignment heldInput: coworkHeldInputVerbs(() => (entry.closed || sessi",
+    "core/src/cowork/session-driver.ts PropertySignature readonly coldResume?: { readonly ownerPatchApplied: true };",
+    "core/src/cowork/session-driver.ts PropertySignature readonly heldInput?: { readonly enabled: true };",
+    "core/src/cowork/session-driver.ts PropertySignature readonly ownerPatchApplied: true",
+    "core/src/cowork/session-ports.ts PropertySignature readonly heldInput?: CoworkHeldInputVerbs;",
+  ]);
 });

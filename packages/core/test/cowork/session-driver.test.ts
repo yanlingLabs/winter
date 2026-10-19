@@ -141,8 +141,10 @@ const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs"; shares?: (context: CoworkGuestConversationContext, request: CoworkGuestStartRequest) => void } = {}) {
-  const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness] };
+function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs"; shares?: (context: CoworkGuestConversationContext, request: CoworkGuestStartRequest) => void;
+  deps?: Partial<CoworkSessionDriverDeps>; capabilities?: string[]; wrapQuery?: (query: ReturnType<typeof agentQuery>) => unknown } = {}) {
+  const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness], ...(opts.capabilities ? { runtimeCapability: { ...OFFER.runtimeCapability, capabilities: opts.capabilities } } : {}) };
+  const starts: CoworkGuestStartRequest[] = [];
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const sessions = Array.from({ length: opts.conversations ?? 1 }, () => store.createSession("t", { mode: "code" }));
   const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}), ...(opts.location ? { location: opts.location } : {}), ...(opts.shares ? { ack: false } : {}) });
@@ -150,6 +152,7 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
   const native: CoworkGuestStarter = {
     async start(workspaceId, request) {
       expect(workspaceId).toBe(f.workspaceId);
+      starts.push(request!);
       const context = f.begin(`incarnation-${guests.length + 1}`);
       let set: CoworkGuestConversationSet | null;
       // #92 N2: a v3 host reports `shares_mounted` before it asks for the set (a bootstrap fault if refused).
@@ -170,12 +173,13 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
   const deps: CoworkSessionDriverDeps = {
     records: f.records, authority: f.authority, store, hub, checkpoints: new ProjectionCheckpoints(f.db),
     ...(opts.production ? {} : { route: opts.route ?? standinRoute(), native, offer, approvals: port }),
-    query: input => { launched.push(input.options as Options); return agentQuery(input); },
+    query: input => { launched.push(input.options as Options); const q = agentQuery(input); return (opts.wrapQuery ? opts.wrapQuery(q) : q) as ReturnType<typeof agentQuery>; },
     endGraceMs: 200,
+    ...opts.deps,
   };
   const drivers = createCoworkSessionDrivers(deps);
   cleanups.push(async () => { await drivers.beginShutdown(); store.close(); f.close(); rmSync(storeHome, { recursive: true, force: true }); });
-  return { f, store, hub, sessions, sid: sessions[0]!, drivers, guests, launched, approvals, deps, offer };
+  return { f, store, hub, sessions, sid: sessions[0]!, drivers, guests, launched, approvals, deps, offer, starts };
 }
 async function until(predicate: () => boolean, what = "condition") {
   const deadline = Date.now() + 3000;
@@ -594,4 +598,104 @@ test("#92 N2 fix: a report for another workspace is authority_denied; once a rep
   } });
   await expect((await s.drivers.ensure(s.sid)).open()).rejects.toThrow("invalid_request");
   expect([s.guests.length, s.launched.length]).toEqual([0, 0]);
+});
+
+// ------------------------------------------------------------------------------------------------ #92 N3 + N4
+test("N3: a fresh start allocates the stable uids, writes started ahead of the set, and the first completed turn records created", async () => {
+  const h = harness({ script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  expect(h.f.records.storeState(h.sid)).toEqual({ storeState: "started", lastIncarnationId: "incarnation-1", runtimeUid: 2001, toolUid: 2002 });
+  const item = h.guests[0]!.set.conversations[0]!;
+  expect([item.runtimeUid, item.toolUid]).toEqual([2001, 2002]);
+  expect(h.starts[0]!.resume).toBeUndefined();
+  await session.send("hi", "cli"); await session.idle();
+  expect(h.f.records.storeState(h.sid).storeState).toBe("created");
+  expect(session.resumed).toBe(false);
+  // The set carries the ALLOCATED pair, not fixed picks: with another conversation's uids taken, this one gets the next pair.
+  const two = harness({ conversations: 2, script: reply("ok") });
+  expect(two.f.records.allocateGuestUids(two.sessions[1]!, 2000)).toEqual({ runtimeUid: 2001, toolUid: 2002 });
+  await (await two.drivers.ensure(two.sid)).open();
+  const sent = two.guests[0]!.set.conversations[0]!;
+  expect([sent.runtimeUid, sent.toolUid]).toEqual([2003, 2004]);
+});
+
+test("N3 gate: without the cold-resume port a conversation whose guest received a set never starts again (every production host)", async () => {
+  const h = harness({ script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle(); await session.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+  expect(h.starts).toHaveLength(1);
+});
+
+test("N3 gated on: a created store resumes under the SAME backend identity and uids, with continuation resume and the proven-ended boots", async () => {
+  const h = harness({ script: reply("ok"), deps: { coldResume: { ownerPatchApplied: true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.send("hi", "cli"); await first.idle(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  // S7B records the first boot and its proven end (D1 evidence) after release.
+  h.f.db.db.run("INSERT INTO cowork_guest_boots(workspace_id,incarnation_id,lease_epoch,guest_boot_id,recorded_at,ended_proof,ended_at) VALUES(?,?,?,?,'t','orderly-receipt','t')",
+    [h.f.workspaceId, "incarnation-1", h.guests[0]!.context.leaseEpoch, h.guests[0]!.context.guestBootId]);
+  const second = await h.drivers.ensure(h.sid);
+  expect(second.resumed).toBe(true);
+  expect(second.backendSessionId).toBe(first.backendSessionId);
+  await second.open();
+  expect(h.starts[1]!.resume).toEqual({ continuation: "resume", endedGuestBoots: [h.guests[0]!.context.guestBootId] });
+  const before = h.guests[0]!.set.conversations[0]!, after = h.guests[1]!.set.conversations[0]!;
+  expect([after.runtimeUid, after.toolUid, after.authority.sessionId]).toEqual([before.runtimeUid, before.toolUid, before.authority.sessionId]);
+  expect([(h.launched[0] as { resume?: string }).resume, (h.launched[1] as { resume?: string }).resume]).toEqual([undefined, first.backendSessionId]);
+  expect(h.f.records.storeState(h.sid)).toMatchObject({ storeState: "created", lastIncarnationId: "incarnation-2" });
+  await second.send("again", "cli"); await second.idle();
+  expect(h.guests[1]!.refusals).toEqual([]);
+});
+
+test("N3 gated on: a started store (no completed turn) resumes as `either`; a lost store refuses and starts nothing", async () => {
+  const h = harness({ script: () => {}, deps: { coldResume: { ownerPatchApplied: true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  expect(h.f.records.storeState(h.sid).storeState).toBe("started");
+  const second = await h.drivers.ensure(h.sid);
+  await second.open();
+  expect(h.starts[1]!.resume).toEqual({ continuation: "either", endedGuestBoots: [] });
+  expect((h.launched[1] as { resume?: string }).resume).toBeUndefined(); // `either`: the guest decides from its own store
+  await second.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the second incarnation to end");
+  h.f.records.markStoreLost(h.sid);
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+  expect(h.starts).toHaveLength(2);
+});
+
+const HOLD_HEX = "b".repeat(64);
+function heldQuery(calls: unknown[]) {
+  return (query: ReturnType<typeof agentQuery>) => Object.assign(query, {
+    holdInput: async (request: unknown) => { calls.push(["hold", request]); return { held: true }; },
+    commitInput: async (inputId: string, token: string) => { calls.push(["commit", inputId, token]); return { outcome: "queued" }; },
+    discardInput: async () => ({ discarded: true }), forgetInput: async () => ({ forgotten: true }),
+  });
+}
+
+test("N4 gate: heldInput exists only with the host's gate AND a runtime offering held-input-v1", async () => {
+  const withBoth = harness({ script: reply("ok"), capabilities: ["confined-guest-posture-v1", "held-input-v1"], deps: { heldInput: { enabled: true } } });
+  expect((await withBoth.drivers.ensure(withBoth.sid)).heldInput).toBeDefined();
+  const noGate = harness({ script: reply("ok"), capabilities: ["confined-guest-posture-v1", "held-input-v1"] });
+  expect((await noGate.drivers.ensure(noGate.sid)).heldInput).toBeUndefined();
+  const oldRuntime = harness({ script: reply("ok"), deps: { heldInput: { enabled: true } } });
+  expect((await oldRuntime.drivers.ensure(oldRuntime.sid)).heldInput).toBeUndefined();
+});
+
+test("N4: the verbs reach the live query bound to the running incarnation; before the start and after the end they refuse", async () => {
+  const calls: unknown[] = [];
+  const h = harness({ script: reply("ok"), capabilities: ["confined-guest-posture-v1", "held-input-v1"], deps: { heldInput: { enabled: true } }, wrapQuery: heldQuery(calls) });
+  const session = await h.drivers.ensure(h.sid);
+  await expect(session.heldInput!.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "hello", clientName: "peer" })).rejects.toThrow("cold_resume_unavailable");
+  await session.open();
+  expect(await session.heldInput!.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "hello", clientName: "peer" })).toEqual({ held: true });
+  expect(await session.heldInput!.commit("r1", HOLD_HEX)).toEqual({ outcome: "queued" });
+  const context = h.guests[0]!.context;
+  expect(calls).toEqual([["hold", { inputId: "r1", holdToken: HOLD_HEX, epoch: { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }, text: "hello", clientName: "peer" }], ["commit", "r1", HOLD_HEX]]);
+  await session.end();
+  await expect(session.heldInput!.commit("r1", HOLD_HEX)).rejects.toThrow("cold_resume_unavailable");
+  expect(calls).toHaveLength(2);
 });

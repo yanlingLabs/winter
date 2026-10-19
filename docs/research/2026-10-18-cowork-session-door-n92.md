@@ -86,3 +86,69 @@ DOOR owns every migration. Neither migration has a production writer or reader y
 - The rule for N3 is recorded in the schema doc: a guest uid is allocated ONLY through `cowork_guest_uids`, in the same transaction that writes it to a conversation or workspace.
 
 **CLI (from dc).** The usage no longer names `winter workspace session create|list`, which is unreachable until a daemon carries a door (pinned). The parser stays.
+
+## N3 + N4: cold resume and held-input messaging, the host half (gated)
+
+These are built against agent-sdk #43 (GM1+GM2, dc642bc0) and #44 (CR2, cb759dba), as their author confirmed. Production reaches none of it. The two gates are driver deps that no src composition supplies; a structural AST pin lists every write of `coldResume`, `heldInput` and `ownerPatchApplied`.
+
+### N3, cold resume (`cowork/cold-resume.ts`, repository)
+
+**Stable uids (L7).** `allocateGuestUids` hands each conversation its runtime/tool pair once.
+- It allocates only through `cowork_guest_uids`, in the transaction that writes the conversation's columns.
+- It takes the lowest free pair from 2001, skipping the workspace gid and every uid the table still holds (retired ones included).
+- The set now carries the allocated pair. The first conversation still gets 2001/2002, the old fixed picks.
+
+**Store state.**
+- `none` becomes `started` WRITE-AHEAD in `assignConversationBackend`, which also records the incarnation that received the set.
+- The first `turn_completed` with `end_turn` records `created`.
+- `markStoreLost` is terminal.
+
+**Continuation.** `none` resumes fresh, `started` resumes as `either` (the guest decides from its own store), `created` resumes, and `lost` refuses with `cold_resume_unavailable`.
+
+**Driver.**
+- A recorded backend without the `coldResume` gate refuses as before.
+- With the gate, the driver keeps the recorded backend identity and its uids. It passes `CoworkGuestStartRequest.resume = {continuation, endedGuestBoots}`, where the boots are the last incarnation's ended boots that have a proof.
+- The query's `resume` option is set only for `resume`.
+- A failed resume closes the driver, so the next `ensure` plans the resume again.
+- **Gated off until the owner applies the cold-resume owner patch.** The unmodified native owner refuses a resume record because it requires `freshOnly`.
+
+### N4, held input (`cowork/held-input.ts`)
+
+**When a driver has the verbs.** `CoworkLegSession.heldInput` (hold, commit, discard, forget) exists only with the `heldInput` gate AND a runtime whose capability offers `held-input-v1`.
+
+**How the verbs work.**
+- They read the live SDK query structurally, because winter's pinned SDK 0.0.53 has no verbs; a query without them refuses `unsupported_topology`.
+- They are bound to the running incarnation's epoch; with none live they refuse `cold_resume_unavailable`.
+- Requests are checked before they leave: the closed shape, text non-empty and at most 64 KiB in UTF-8 bytes, `clientName` at most 256, 64-hex tokens.
+- Every answer is checked against its closed shape, and `system/held_inputs` records are checked too. Anything malformed is `recovery_required` (uncertain).
+- A runtime refusal carrying one of the eight known codes is `CoworkHeldInputRefusal`.
+
+**Hold token.** `coworkHoldToken` is sha256("hold-v1|receipt|incarnation|leaseEpoch|offerCount").
+
+**Host-messaging answers.** Their validators (`host_message_send` / `host_message_list`, mirroring the SDK's `isHostMessageSendAnswer` / `normaliseHostMessageListAnswer`) let the answering lane refuse a malformed answer before it leaves the host.
+
+### Tests and mutations
+
+**Tests.**
+- `n34-records.test.ts` (7 tests) covers the uids, the store state, the continuation, the plan, the literals, the token, every answer shape, the verbs and the messaging answers.
+- `session-driver.test.ts` (+6 tests) covers:
+  - a fresh start (allocated uids, write-ahead, `created`);
+  - the gate off (`cold_resume_unavailable`);
+  - a gated resume (same backend and uids, `resume`, proven boots);
+  - `either` and lost;
+  - the held-input gate (both conditions);
+  - the verbs bound to the live incarnation.
+
+**Mutations (guards and refusals): 24/25 killed.** The survivor drops the driver's own "not live" check on the query. It is equivalent, because the verbs are bound to `coworkEpoch`, which is undefined whenever the driver is closed.
+
+### NEEDS
+
+- **S7B (contract v3).**
+  - Put `resume.continuation` and `resume.endedGuestBoots` on the conversation's runtime record and check the guest's `continuation` echo.
+  - Map `runtime_resume_store_missing` to `markStoreLost`, and `runtime_fresh_store_required` to a refusal.
+  - Write `cowork_guest_boots` at `hello` and their end proof after release.
+  - Send the stored volume UUID and map `filesystem_mismatch` or `format-new` over a started store to lost.
+  - Add a `coordinate` tool class to the native class list.
+- **Owner.** Apply the cold-resume owner patch before the `coldResume` gate may be supplied.
+- **PEER-INBOX.** `drainOnce` over `heldInput` with the ledger columns of migration 21: `offerCount` gives the token, the ack stores the token, and the commit stores the outcome; `unknown_input` is terminal and becomes `lost`. Answer the guest's `host_message_send/list` through the DOOR validators.
+- **SDK pin.** Once the SDK release that carries #43 is pinned, replace the structural query read with the typed verbs. The literal pins in `n34-records.test.ts` then compare against the SDK exports.
