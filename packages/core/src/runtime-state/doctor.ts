@@ -882,7 +882,7 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
 /** True when the (copied) store holds an owed peer-message body. Read-only; throws when the copy cannot be inspected. */
-/** Can a copy we could not open still hold peer-inbox rows? SQLite stores a table's name in plain text in the schema pages, so a file that
+/** Can a copy we could not open still hold owed peer-message rows? SQLite stores a table's name in plain text in the schema pages, so a file that
  *  never mentions `cowork_peer_inbox` has no such table and therefore no owed message. A file that does mention it, or that cannot be read, is
  *  treated as "may hold" (fail toward the warning). Reads in bounded chunks with an overlap so a name split across chunks is still seen. */
 function mayMentionPeerInbox(path: string): boolean {
