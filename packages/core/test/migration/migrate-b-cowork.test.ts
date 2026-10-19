@@ -125,6 +125,14 @@ describe("planMigrationB refuses a source that holds Cowork storage, before anyt
     expect((await refusalOf(() => planMigrationB({ legacyHome: source, home: tempDir(), profile: "dev" }))).code).toBe("cowork_storage_present");
   });
 
+  test("a hidden entry that is not OS litter is still Cowork storage (the litter prefix is `._`, not `.`)", () => {
+    for (const name of [".workspace", ".hidden", ".cowork-note", "_.DS_Store", ".DS_Store.bak", ".DS_Storex", ".localizedx"]) {
+      const source = tempDir();
+      write(join(source, "cowork", name), "x");
+      expect({ name, found: inspectCoworkSource(source) }).toMatchObject({ name, found: { present: true, kind: "storage-tree" } });
+    }
+  });
+
   test("a zero-byte runtime-state file (no tables) is not Cowork storage; a file that is not a database still fails closed (corruption could hide records)", () => {
     const source = tempDir();
     write(join(source, "runtimes", "runtime-state.db"), "");
