@@ -2,8 +2,9 @@
 
 Runs, with the pinned offline toolchain and one thread:
   * production features (`blk`): the whole krun-vmm unit suite (fixed by patch 0014), the krun-devices
-    suites the admitted fixture ran plus the confined virtio-fs server's FUSE-message harness (patch 0024),
-    and the whole libkrun suite including the new production tests;
+    suites the admitted fixture ran plus the confined virtio-fs server's FUSE-message harness (patch 0024)
+    and the guarded fs device of the shares (patch 0025), and the whole libkrun suite including the new
+    production tests;
   * production-only features (`blk,cowork-production-only`): the whole libkrun suite again, with the
     start admission refusing any context that is not the production profile;
   * oracle features (`blk,cowork-fixture-oracle`): the whole libkrun suite again, so the fixture
@@ -19,14 +20,14 @@ from libkrun_common import ROOT, OUT, digest, check_toolchain, load_expected, lo
 from prepare_queue import prepare
 
 # (package, features, filter) exactly as the admitted fixture ran them, plus the whole-crate suites.
-DEVICE_FILTERS = ['workspace_disks', 'runtime_port', 'cowork_stream', 'cowork_rng', 'reclaim_access::tests', 'cowork_frq', 'cowork_block', 'block_bounce::tests', 'cowork_counters', 'workspace_fd_tests', 'fs::macos::confined']
+DEVICE_FILTERS = ['workspace_disks', 'runtime_port', 'cowork_stream', 'cowork_rng', 'reclaim_access::tests', 'cowork_frq', 'cowork_block', 'block_bounce::tests', 'cowork_counters', 'workspace_fd_tests', 'fs::macos::confined', 'fs::cowork']
 RUNS = ([('krun-vmm', 'blk', '')]
         + [('krun-devices', 'blk', name) for name in DEVICE_FILTERS]
         + [('libkrun', 'blk', '')]
         + [('libkrun', 'blk,cowork-production-only', '')]
         + [('libkrun', 'blk,cowork-fixture-oracle', '')])
 # The same suites again under the shipped release profile (overflow checks on, debug assertions off, LTO).
-RELEASE_RUNS = [('libkrun', 'blk', ''), ('libkrun', 'blk,cowork-production-only', ''), ('krun-vmm', 'blk', ''), ('krun-devices', 'blk', 'cowork_block'), ('krun-devices', 'blk', 'block_bounce::tests'), ('krun-devices', 'blk', 'workspace_disks'), ('krun-devices', 'blk', 'cowork_counters'), ('krun-devices', 'blk', 'workspace_fd_tests')]
+RELEASE_RUNS = [('libkrun', 'blk', ''), ('libkrun', 'blk,cowork-production-only', ''), ('krun-vmm', 'blk', ''), ('krun-devices', 'blk', 'cowork_block'), ('krun-devices', 'blk', 'block_bounce::tests'), ('krun-devices', 'blk', 'workspace_disks'), ('krun-devices', 'blk', 'cowork_counters'), ('krun-devices', 'blk', 'workspace_fd_tests'), ('krun-devices', 'blk', 'fs::cowork')]
 FORBIDDEN_FLAGS = ('--ignored', '--include-ignored')
 LOG = []  # full cargo output of every run, written next to the receipt
 

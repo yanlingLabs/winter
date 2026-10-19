@@ -14,10 +14,10 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 |---|---|---|
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
-| Patch queue | `patch-queue.json` | 21 patches, 0004-0024, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `8dd731ce782d2c16263aae05c408f179e2526996bfa962f49c4d5fa60817b6e8` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `405dccc3e7e450d4677595d6b2816f50170186909e064b415922628ecc85feb8`, stripped `2a8fc100400e63195a66b8e51545dcb9aa8654cc7afe522c4aaf3b103f2d2ece` |
-| Exports | `expected-hashes.json` | 69 `krun_*` symbols: the 62 upstream ones for this feature set plus 7 `krun_cowork_*_v1`; no `fixture` symbol |
+| Patch queue | `patch-queue.json` | 22 patches, 0004-0025, each SHA-256 pinned (table below) |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `bcb22a3e52db00e6f2d75d9e0b7c24df2f0cca9a0c793ec0693259599cf993ce` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `630dfb7da04cd7b78b884c0dcf8fea517fb11ffed625524ff21be0c31492f82e`, stripped `bc6a243df25de71e57791715d1162fff56ff29d292f15ee3540c3c19c2b0b12d` |
+| Exports | `expected-hashes.json` | 72 `krun_*` symbols: the 62 upstream ones for this feature set plus 10 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
 recipe changes: `scripts/build_archive.py` keeps a build key in `out/` and reuses a matching archive, and it fails if a rebuild
@@ -27,7 +27,7 @@ differs from `expected-hashes.json` (review the change, then update that file on
 
 ```
 upstream-pin.json      libkrun + Rust pins          patch-queue.json   patch hashes, declared file scope, limits, inventory
-expected-hashes.json   composed / archive / exports  patches/           0004-0024 (git-diff format, applied in order)
+expected-hashes.json   composed / archive / exports  patches/           0004-0025 (git-diff format, applied in order)
 scripts/               fetch_inputs.py  prepare_queue.py  build_archive.py  run_cargo_tests.py  libkrun_common.py  abi_smoke.c
 tests/                 test_queue_guards.py (pure Python: no network, no cargo, no VM)
 out/                   git-ignored: fetched inputs, composed source, archives
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (587 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (664 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -77,6 +77,7 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0022-proposed-production-exit-path-final-flush-and-hook.patch` | one exit path, final flush of both volumes, exit hook | production | `965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a` |
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
 | `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, not wired yet (the device, ABI and gate come in later patches) | `4cb81b56ee3da01eb9bc3c66d9cda529ae12ed5f77c7201bee6d5f05e13b18f5` |
+| `0025-proposed-guarded-fs-device-shares-abi-gate.patch` | the guarded fs device of the shares (one device per share, reclaim pins, freeze, chain bounds, revocation by the device thread, exit-path join), the budget from the share count, `krun_cowork_add_share_v1` / `revoke_share_v1` / `next_share_event_v1`, the gate clause for `r.fs` and gate-matrix rows with shares present | production | `953a5e2858ef1e18faa5baf255d790602be8a2952a8970473f0eef8e2fd7fb9c` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
 entry points, but later patches (0007 onward, 0016, 0020) edit the files they create, so leaving one out means rewriting the stack and
@@ -93,7 +94,23 @@ fixture symbol and carries no trace-row string (both checked on every build). Th
 else. Host calls are `*at` on held directory descriptors with `O_NOFOLLOW_ANY | O_RESOLVE_BENEATH` (or the `AT_`/`RENAME_`
 equivalents), confirmed by (dev, ino); `O_UNIQUE`/`AT_UNIQUE` on the Winter shares. Limits: 4,096 handles (`ENFILE`), a directory
 LRU of 1,024, 1 s timeouts, modes masked to `0o755`. The constants the pinned `libc` crate lacks are defined with their SDK header
-lines. Nothing serves it yet: no device, export or gate change is in this patch, and the export list is unchanged.
+lines. It adds no device, export or gate change itself; 0025 serves it.
+
+## Guarded fs device and shares (0025)
+
+`src/devices/src/virtio/fs/cowork.rs` is the device of one share: the stock `Fs` transport with `enable_cowork_share`, and a worker
+that serves the share's `ConfinedFs` the way the guarded block device serves a volume. The device registers with the reclaim
+`Access` (as `3 + i`), pins both rings for the activation and each request's descriptor ranges from pop to used entry, and touches
+guest memory only under a lease: the request is copied out, the server runs on a private bounce copy laid out descriptor for
+descriptor with no lease held, and the reply is copied back; a freeze defers either lease. A chain of more than 260 descriptors or
+1,056,768 bytes (4,096 on the high-priority queue) is refused before anything is pinned (terminal, as a malformed block chain). One
+thread per device, no shared-memory region, no `EVENT_IDX`. The budget is built from the actual share count S:
+`3 + S` devices, `48 + 4 S` pins, `8,388,608 + 1,114,136 S` bytes (15 / 96 / 21,758,240 at S = 12), and
+`krun_cowork_get_pin_counters_v1` reports it once a VM was built. Revocation sets the share's flag; a running device thread is woken
+through its request queue event and closes its own descriptors (at once when idle, otherwise at its next request boundary), a share
+with no running thread is closed by the revoker under the slot lock; only then is `REVOKED` queued for the worker's
+`share_revoked{tag}`. The exit path stops and joins every share worker before the exit hook. `share_notice` events go through a
+`NoticeSink` (the R15/R16 hooks of the next patch report through it) onto the same queue, once per tag and kind.
 
 ## Production ABI (`include/libkrun.h` after the queue)
 
@@ -105,7 +122,10 @@ lines. Nothing serves it yet: no device, export or gate change is in this patch,
 | `krun_cowork_validate_profile_v1(ctx)` | **mandatory** preflight; `krun_start_enter` refuses a production context that never passed it |
 | `krun_cowork_get_flush_counters_v1(out)` | process-global per-disk `requested`, `completed`, `final_sync_attempted`, `final_sync_completed` |
 | `krun_cowork_set_exit_hook_v1(ctx, hook, user_data)` | optional, once; called last, on the exiting thread, with a reason |
-| `krun_cowork_get_pin_counters_v1(out)` | **seventh entry point, beyond the canonical six**: pin budget (48 pins, 8 MiB) and high-water marks |
+| `krun_cowork_get_pin_counters_v1(out)` | **seventh entry point, beyond the canonical six**: pin budget (48 pins, 8 MiB; with S shares the built budget) and high-water marks |
+| `krun_cowork_add_share_v1(ctx, tag, root_fd, flags, guest_path)` | one host-backed share (SH2): tag `[a-z0-9-]{1,32}` distinct, a borrowed directory fd, flags bits 0-2 only, a canonical guest path under `/workspace/` or `/run/winter/`; at most 12, each root and mount point once; production contexts only |
+| `krun_cowork_revoke_share_v1(ctx, tag)` | R11 from any thread; the share's device thread closes its descriptors, then the revocation is queued |
+| `krun_cowork_next_share_event_v1(ctx, out, timeout_ms)` | drains `REVOKED` (send `share_revoked{tag}`) and `NOTICE` (send `share_notice{tag, kind}`) events; 1, or 0 on timeout (at most 60,000 ms) |
 
 Exit reasons (`uint32_t`): `KRUN_COWORK_EXIT_NONE` 0, `OFF` 1 (PSCI SYSTEM_OFF), `RESET` 2 (PSCI SYSTEM_RESET), `VCPU_ERROR` 3,
 `TERMINAL_FAULT` 4 (exit status 77). The hook type is `void (*krun_cowork_exit_hook_v1)(void *user_data, uint32_t reason)`.
@@ -113,10 +133,14 @@ Flush counters: `int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_fl
 `{ uint32_t size; uint32_t device_count; struct krun_cowork_flush_device_v1 device[2]; }`; `device[0]` is `winter-data`, `device[1]` is
 `winter-environment`. `struct krun_cowork_volume_identity` stays unsuffixed. Fixture names (`krun_*_cowork_*`) are declared only under
 `#ifdef KRUN_COWORK_FIXTURE_ORACLE`. Call order: `krun_create_ctx`, the non-device setters, `krun_cowork_enable_profile_v1`,
-`krun_cowork_create_runtime_port_v1`, `krun_cowork_set_workspace_disks_v1`, optionally the exit hook, `krun_cowork_validate_profile_v1`, `krun_start_enter`.
+`krun_cowork_create_runtime_port_v1`, `krun_cowork_set_workspace_disks_v1`, `krun_cowork_add_share_v1` per share, optionally the exit hook, `krun_cowork_validate_profile_v1`, `krun_start_enter`.
+Share event: `struct krun_cowork_share_event_v1 { uint32_t size; uint32_t kind; uint32_t notice; uint32_t reserved; char tag[36]; }` (52 bytes); kinds
+`KRUN_COWORK_SHARE_EVENT_REVOKED` 1 and `NOTICE` 2; notices `ENVRC` 1, `VSCODE_TASKS` 2, `VSCODE_SETTINGS` 3, `CODE_WORKSPACE` 4, `IDEA_PROJECT` 5, `GIT_PROTECTED` 6.
 
-Limits and inventory: exactly 2 vCPUs and 768..=1024 MiB (`KRUN_COWORK_PRODUCTION_*`); devices unchanged from the admitted inventory
-(`0x0002` x2, `0x0003`, `0x0004`, `0x0005`), no GPIO shutdown device (the gate refuses the shutdown eventfd that would attach it).
+Limits and inventory: exactly 2 vCPUs and 768..=1024 MiB (`KRUN_COWORK_PRODUCTION_*`); devices: the admitted inventory
+(`0x0002` x2, `0x0003`, `0x0004`, `0x0005`) plus one virtio-fs device (`0x001a`) per share from `krun_cowork_add_share_v1` (at most 12;
+the gate admits `r.fs` only as that function builds it, so `krun_add_virtiofs*` and `krun_set_root` still refuse the context), no GPIO
+shutdown device (the gate refuses the shutdown eventfd that would attach it).
 Stop is a guest drain frame followed by guest power-off. Every setter that can add a device is classified by a running test.
 
 ## Exit and flush semantics (what a worker may conclude)
@@ -130,7 +154,8 @@ Stop is a guest drain frame followed by guest power-off. Every setter that can a
   claim needs the hook with `OFF`, both disks' `final_sync_completed == final_sync_attempted == 1`, and `completed == requested`.
 * Hard crashes (SIGSEGV, SIGBUS, SIGILL, SIGSYS, abort) are not handled: no signal handler is installed, so the process dies by its
   default disposition with no observer and no hook. Also uncertain.
-* The pin budget is 48 pins / 8 MiB; overflow is fatal (exit 77). The structural maximum is 12 pins and 4,289,930 bytes. The block trace,
+* The pin budget is 48 pins / 8 MiB, plus 4 pins and 1,114,136 bytes per share; overflow is fatal (exit 77). The structural maximum
+  is 12 pins and 4,289,930 bytes, plus each share's 4 pins and 1,114,136 bytes (a test holds 12 shares at their chain maximum at once). The block trace,
   its row cap and the 25 ms completion hold are absent from production; the counters replace the trace for G4.
 * Guest console output goes to the file descriptor the worker supplies; bounded capture belongs to the worker.
 
@@ -141,10 +166,13 @@ Stop is a guest drain frame followed by guest power-off. Every setter that can a
 3. 0016/0020 change the production block and reclaim paths (a production guest no longer ends itself after about 12,000 block requests); 0022/0023 change how the process exits for every stop, the oracle included.
 4. Fatal-stop policy: pin overflow, a stale queue, a long freeze all stop the worker with 77; decide whether a failed request should degrade to `EIO`.
 5. The shipped release profile has overflow checks on and debug assertions off; G4 should run on it.
-6. Independent code review of all 21 patches before any run; every VM or live gate needs the owner's approval.
-7. 0024 (the confined virtio-fs server core) is not reachable yet: no device, entry point or gate serves it until the guarded fs
-   device patch. Its decisions (ownership changes refused, MKNOD always `EPERM`, the revoke answer for requests that take no reply,
+6. Independent code review of all 22 patches before any run; every VM or live gate needs the owner's approval.
+7. 0024 (the confined virtio-fs server core) is reached only through 0025's share devices. Its decisions (ownership changes refused, MKNOD always `EPERM`, the revoke answer for requests that take no reply,
    `O_NOFOLLOW_ANY` in place of `O_NOFOLLOW`) are listed in its pull request and need review with it.
+8. 0025 (the share devices): an over-bound or malformed fs chain is terminal (exit 77), as a malformed block chain; a revocation
+   before the start, or while the device is reset, is closed by the revoking thread under the share's slot lock; no `EVENT_IDX`;
+   the decisions are listed in its pull request. The R15/R16 hooks (their own patch) report `share_notice` through the device
+   layer's `NoticeSink`.
 
 ## Licences
 
