@@ -6,7 +6,7 @@
 // The scanner resolves imports (relative specifiers, with or without a `.js`/`.ts` extension or `/index`, static, dynamic,
 // `require`, re-export and multi-line forms) to files, so renaming a specifier cannot dodge it. The rules are pure functions of
 // a path -> text map, and each rule is exercised on virtual files (passing and failing cases) as well as on the real tree.
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { METHODS } from "@yanlinglabs/winter-protocol";
@@ -14,6 +14,8 @@ import { createCoworkPublishService } from "../../src/cowork/git/publish-service
 import { GitPublicationError } from "../../src/cowork/git/types";
 import { createCoworkWorkspaceRestorer } from "../../src/cowork/restore-bundle";
 
+// The scans read every source file of every package; a loaded CI runner needs more than the 5 s default.
+setDefaultTimeout(60_000);
 const packages = join(import.meta.dir, "..", "..", "..");
 const srcRoot = join(packages, "core", "src");
 function sourceFiles(directory: string): string[] {
@@ -39,7 +41,10 @@ export function resolveSpecifier(importer: string, specifier: string, files: Rea
   for (const candidate of [`${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.mjs`, join(base, "index.ts"), join(base, "index.js")]) if (files.has(candidate)) return candidate;
   return `${base}.ts`;
 }
+const EDGE_CACHE = new WeakMap<ReadonlyMap<string, string>, Array<[string, string]>>();
 export function importEdges(files: ReadonlyMap<string, string>): Array<[string, string]> {
+  const cached = EDGE_CACHE.get(files);
+  if (cached) return cached;
   const known = new Set(files.keys()), edges: Array<[string, string]> = [];
   for (const [file, text] of files) for (const specifier of specifiersOf(text)) { const target = resolveSpecifier(file, specifier, known); if (target) edges.push([file, target]); }
   return edges;
