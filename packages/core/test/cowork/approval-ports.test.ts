@@ -89,3 +89,18 @@ test("through the real bridge: a protected path or another conversation's output
     expect(h.approvals.list("conversation")).toEqual([]);
   }
 });
+
+test("D3b: an outputs-located conversation's own folder stays `outputs` (never `admitted`), and its ports carry no source", () => {
+  const f = doorFixture({ location: "outputs", sessions: ["s_0123456789ab"] }); fixtures.push(f);
+  const conversation = f.records.conversation("s_0123456789ab");
+  const ports = coworkApprovalPortsFor({ binding: conversation, ceiling: { toolClasses: ["read", "write"], hostServices: [], connectors: [], network: "none" } });
+  for (const [path, klass] of [
+    ["/workspace/outputs/s_0123456789ab", "outputs"], ["/workspace/outputs/s_0123456789ab/report.md", "outputs"],
+    ["/workspace/outputs/s_other/x", "protected"], ["/workspace/folders/grant", "outside"], ["/workspace/.winter/memory", "admitted"],
+  ] as const) expect([path, ports.classifyPath(path)]).toEqual([path, klass]);
+  expect(ports.identity()).toEqual({ workspaceId: f.workspaceId, sourceRevision: 0 });
+  expect(ports.planViewInstalled()).toBe(false);
+  // A source binding must name its source; an outputs conversation must not.
+  expect(() => coworkApprovalPortsFor({ binding: conversation, source: f.records.sources(f.workspaceId)[0]!, ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" } })).toThrow("authority_denied");
+  expect(coworkClassifyGuestPath("/workspace/outputs/s_0123456789ab/a", { sessionId: "s_0123456789ab", root: null })).toBe("outputs");
+});

@@ -27,7 +27,7 @@ test("a source binding reads back; its backend identity is null until recorded, 
   expect(() => f.records.assignConversationBackend("other", "2b6d7c4e-5a1f-4c2e-9d3b-7e8f9a0b1c2d")).toThrow("authority_denied");
 });
 
-test("an outputs row is located, but never read as a binding with a null source (the outputs slice is D3b)", () => {
+test("an outputs row is located, and never read as a source binding by other lanes (D3b reads it only through conversation())", () => {
   const f = doorFixture(); fixtures.push(f);
   f.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id='conversation'");
   expect(f.records.conversationLocation("conversation")).toBe("outputs");

@@ -4,7 +4,7 @@ import type { LegSession } from "../runtime-sdk/session-driver";
 import type { CoworkHostApprovalPorts } from "./approval-ports";
 import type { CoworkPrincipal } from "./authority";
 import type { CoworkConnection } from "./service";
-import type { ConversationBinding } from "./types";
+import type { CoworkConversation } from "./types";
 
 /*
  * Cowork session door: the SPINE (D1). TYPES ONLY. Nothing here runs, and nothing in production constructs any of it:
@@ -101,7 +101,7 @@ export interface CoworkProviderRoute {
  *  `turnOrigin` says who started the running turn (an unattended turn's card is bounded and times out to a deny). */
 export interface CoworkApprovalPort {
   canUseToolFor(input: {
-    readonly sessionId: string; readonly binding: Readonly<ConversationBinding>; readonly policyRevision: number;
+    readonly sessionId: string; /** Either location (D3b). */ readonly binding: Readonly<CoworkConversation>; readonly policyRevision: number;
     readonly cowork: CoworkHostApprovalPorts;
     /** The guest cwd (the conversation's root) a relative tool path resolves against. */
     readonly cwd: string;

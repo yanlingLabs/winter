@@ -9,6 +9,7 @@ import { join, relative, sep } from "node:path";
 import type { CoworkScheduleDefinition, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { CoworkAuthority, type CoworkPrincipal } from "../../src/cowork/authority";
 import { CoworkRepository } from "../../src/cowork/repository";
+import { coworkConversationCeiling } from "../../src/cowork/conversation-set";
 import { createCoworkScheduleDoorPort } from "../../src/cowork/schedule-door-port";
 import { CoworkSchedules } from "../../src/cowork/schedules";
 import type { CoworkConnection } from "../../src/cowork/service";
@@ -207,6 +208,43 @@ test("the repository's reservation rules, directly: a taken id is never reserved
   expect(db.db.query("SELECT state FROM cowork_session_reservations WHERE session_id='s_bbbbbbbbbbbb'").get()).toEqual({ state: "bound" });
 });
 
+test("D3b: an outputs create binds the conversation's own outputs location; sources untouched; idempotent; never confused with a source request", async () => {
+  for (const ownership of ["project", "standalone"] as const) {
+    const w = world({ ownership });
+    const { sessionId } = await w.door.create(w.input({ location: { kind: "outputs" } }), HARNESS);
+    if (ownership === "standalone") expect(sessionId).toBe(w.made.value.workspace.ownerId);
+    expect(w.records.conversation(sessionId)).toMatchObject({ location: "outputs", workspaceId: w.workspaceId, state: "active", policy: "ask" });
+    expect(() => w.records.binding(sessionId)).toThrow("unsupported_topology");
+    expect(createdEvent(w.store.read(sessionId))[0]).toMatchObject({ cowork: { location: "outputs", sourceId: null } });
+    expect(w.records.source(w.workspaceId, w.sourceId).state).toBe("preparing");
+    expect(await w.door.create(w.input({ location: { kind: "outputs" } }), HARNESS)).toEqual({ sessionId });
+    await refused(w.door.create(w.input(), HARNESS), "request_conflict"); // the same request id naming a source instead
+    expect([w.reservations(), w.bindings(), w.rows().length]).toEqual([1, 1, 1]);
+  }
+});
+
+test("D3b: the outputs bind's own rules: a committed store row, a standalone workspace's own id, and the DOOR's ceiling rule", () => {
+  const w = world({ ownership: "standalone" }), ctx = (requestId: string) => ({ principalId: "p", requestId, expectedRevision: w.records.get(w.workspaceId).configRevision });
+  expect(() => w.records.bindOutputsConversation(ctx("a"), w.workspaceId, { sessionId: "s_aaaaaaaaaaaa" }, { hasCommittedSession: () => true })).toThrow("authority_denied"); // not its owner id
+  expect(() => w.records.bindOutputsConversation(ctx("b"), w.workspaceId, { sessionId: w.made.value.workspace.ownerId }, { hasCommittedSession: () => false })).toThrow("authority_denied");
+  expect(w.bindings()).toBe(0);
+  const p = world();
+  p.records.bindOutputsConversation({ principalId: "p", requestId: "c", expectedRevision: p.records.get(p.workspaceId).configRevision }, p.workspaceId, { sessionId: "s_bbbbbbbbbbbb" }, { hasCommittedSession: () => true });
+  // The ceiling: the conversation's restrictions inside the workspace's current ceiling, for an active conversation only.
+  p.db.db.run("UPDATE cowork_conversations SET restrictions_json=? WHERE session_id='s_bbbbbbbbbbbb'", [JSON.stringify({ toolClasses: ["read"], hostServices: [], connectors: [], network: "none" })]);
+  expect(coworkConversationCeiling(p.records, "s_bbbbbbbbbbbb").toolClasses).toEqual(["read"]);
+  p.db.db.run("UPDATE cowork_conversations SET state='archived' WHERE session_id='s_bbbbbbbbbbbb'");
+  expect(() => coworkConversationCeiling(p.records, "s_bbbbbbbbbbbb")).toThrow("authority_denied");
+});
+
+test("D3b: a found outputs binding answers only an outputs request, and a found source binding only its source request", async () => {
+  const w = world();
+  const reserved = w.records.reserveConversation({ principalId: "local", workspaceId: w.workspaceId, requestId: "req", scope: "t", requestDigest: requestDigestFor(w) }, id => w.store.hasSession(id));
+  w.store.ensureCoworkSession("t", reserved.sessionId, { approvalPolicy: "ask", model: FIXTURE_MODEL, cowork: { workspaceId: w.workspaceId, projectId: null, location: "outputs", sourceId: null, policyRevision: 1 } }, id => w.records.isReservedSession(id));
+  w.records.bindOutputsConversation({ principalId: "elsewhere", requestId: "other", expectedRevision: w.records.get(w.workspaceId).configRevision }, w.workspaceId, { sessionId: reserved.sessionId }, w.store);
+  await refused(w.door.create(w.input(), HARNESS), "request_conflict");
+});
+
 test("a definite bind refusal leaves nothing behind: no binding, no store row, no reservation; the request can start over", async () => {
   const w = world({ sources: 2 });
   const second = w.made.value.sources[1]!.sourceId;
@@ -219,9 +257,8 @@ test("a definite bind refusal leaves nothing behind: no binding, no store row, n
   expect([w.reservations(), w.bindings(), w.rows().map(row => row.session_id)]).toEqual([1, 1, [sessionId]]);
 });
 
-test("refusals before anything is written: outputs location, bad scope or ids, a deleted workspace", async () => {
+test("refusals before anything is written: bad scope or ids, a deleted workspace", async () => {
   const w = world();
-  await refused(w.door.create(w.input({ location: { kind: "outputs" } }), HARNESS), "unsupported_topology");
   await refused(w.door.create(w.input({ requestId: "x".repeat(201) }), HARNESS), "invalid_request");
   await refused(w.door.create(w.input({ scope: "Bad Scope" }), HARNESS), "invalid_request");
   await refused(w.door.create(w.input({ location: { kind: "source", sourceId: w.sourceId, relativeCwd: "../up" } }), HARNESS), "invalid_request");

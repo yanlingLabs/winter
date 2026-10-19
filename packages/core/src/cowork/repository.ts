@@ -2,7 +2,7 @@ import { durableCoworkTransaction } from "./durable-transaction";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import type { RuntimeStateDb } from "../runtime-state/db";
-import { CoworkError, isTerminalOperationStatus, type OperationStatus, type CapabilityCeiling, type ConversationBinding, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
+import { CoworkError, isTerminalOperationStatus, type OperationStatus, type CapabilityCeiling, type ConversationBinding, type CoworkConversation, type GuestEpoch, type MutationContext, type MutationReceipt, type PublicationPolicy, type SourceSelection, type Workspace, type WorkspacePolicy, type WorkspaceSource } from "./types";
 
 /** Host-owned index dependency. Never RPC/guest data; caller must commit the actual
  * session creation first and bind synchronously while that SessionStore remains open. */
@@ -119,6 +119,15 @@ export class CoworkRepository {
     return { sessionId, workspaceId: row.workspace_id, projectId: row.project_id, sourceId: row.source_id, relativeCwd: row.relative_cwd, policy: row.policy, restrictions: JSON.parse(row.restrictions_json), revision: row.revision, state: row.state, createdAt: row.created_at };
   }
   /** Where a bound conversation works (migration 18). `outputs` rows exist only once the outputs slice binds them. */
+  /** Session door D3b: a conversation of either location (the DOOR's run path only; see `CoworkConversation`). */
+  conversation(sessionId: string): CoworkConversation {
+    const row = this.one("SELECT * FROM cowork_conversations WHERE session_id=?", id(sessionId));
+    if (!row) throw new CoworkError("not_found");
+    const common = { sessionId, workspaceId: row.workspace_id, projectId: row.project_id, policy: row.policy, restrictions: JSON.parse(row.restrictions_json), revision: row.revision, state: row.state, createdAt: row.created_at };
+    if (row.location_kind === "outputs" && row.source_id === null && row.relative_cwd === ".") return { location: "outputs", ...common };
+    if (row.location_kind === "source" && typeof row.source_id === "string") return { location: "source", ...common, sourceId: row.source_id, relativeCwd: row.relative_cwd };
+    throw new CoworkError("recovery_required");
+  }
   conversationLocation(sessionId: string): "source" | "outputs" {
     const row = this.one("SELECT location_kind FROM cowork_conversations WHERE session_id=?", id(sessionId));
     if (!row) throw new CoworkError("not_found");
@@ -384,6 +393,24 @@ export class CoworkRepository {
   /** Whether a live reservation holds `sessionId` (the session store's admission for a Cowork row). */
   isReservedSession(sessionId: string): boolean {
     return SESSION_ID.test(sessionId) && this.one("SELECT 1 FROM cowork_session_reservations WHERE session_id=?", sessionId) !== null;
+  }
+  /**
+   * Session door D3b: bind a conversation to its OWN outputs location (O1, owner decision 2026-10-18). No source is named;
+   * the workspace's sources are untouched and may stay `preparing` (N2 has no shares). Same ownership rules as
+   * `bindConversation`: a standalone workspace binds only its reserved id; the store row must be committed first.
+   */
+  bindOutputsConversation(context: MutationContext, workspaceId: string, input: { sessionId: string }, sessions: CoworkCommittedSessions): MutationReceipt<{ sessionId: string; location: "outputs" }> {
+    const normalized = { sessionId: id(input.sessionId), location: "outputs" as const };
+    if (!sessions || typeof sessions.hasCommittedSession !== "function" || sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
+    return this.mutate(context, "conversation.bind", id(workspaceId), normalized, () => {
+      if (sessions.hasCommittedSession(normalized.sessionId) !== true) throw new CoworkError("authority_denied");
+      const current = this.get(workspaceId), policy = this.policy(workspaceId);
+      if (current.ownership === "standalone" && current.ownerId !== normalized.sessionId) throw new CoworkError("authority_denied");
+      if (this.one("SELECT session_id FROM cowork_conversations WHERE session_id=?", normalized.sessionId)) throw new CoworkError("authority_denied");
+      this.run("INSERT INTO cowork_conversations(session_id,workspace_id,project_id,location_kind,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at) VALUES(?,?,?,'outputs',NULL,'.',?,?,1,'active',?)", normalized.sessionId, workspaceId, current.ownership === "project" ? current.ownerId : null, policy.defaultPolicy, canonical(policy.ceiling), this.now());
+      this.advance(workspaceId);
+      return { workspaceId, value: { sessionId: normalized.sessionId, location: "outputs" as const }, kind: "conversation_bound", payload: { sessionId: normalized.sessionId } };
+    });
   }
   /** Controller/coordination service alone calls this after acquiring disk ownership. */
   beginIncarnation(workspaceId: string, incarnationId: string, expectedRevision: number): GuestEpoch {

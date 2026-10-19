@@ -1,10 +1,10 @@
 import { posix } from "node:path";
-import { coworkGuestCwdFor, coworkGuestPolicyFor } from "./conversation-set";
+import { coworkGuestPolicyFor, coworkGuestRootFor, coworkOutputsOf, type CoworkRunBinding } from "./conversation-set";
 import { CoworkPolicyTransitionMachine, type CoworkTransitionSnapshot } from "./policy-transition";
-import { CoworkError, type CapabilityCeiling, type ConversationBinding, type WorkspaceSource } from "./types";
+import { CoworkError, type CapabilityCeiling, type WorkspaceSource } from "./types";
 
 /*
- * Cowork session door D3: the host ports the APPROVALS lane's projection reads for ONE source-located conversation's
+ * Cowork session door D3 (D3b: either location): the host ports the APPROVALS lane's projection reads for ONE conversation's
  * incarnation (the approval bridge's injected `cowork` dependency). Built only by the Cowork session driver, which production never constructs
  * (no provider route). The HOST decides every path's class here, from the conversation's own guest views; nothing the
  * guest says is consulted.
@@ -29,10 +29,11 @@ const under = (path: string, root: string): boolean => path === root || path.sta
  *   - `outside`: anything else, including the rest of the source above the cwd and the workspace's other sources.
  * A relative, empty or NUL-bearing path is `protected`.
  */
-export function coworkClassifyGuestPath(path: string, input: { readonly sessionId: string; readonly root: string }): CoworkApprovalPathClass {
+export function coworkClassifyGuestPath(path: string, input: { readonly sessionId: string; readonly root: string | null }): CoworkApprovalPathClass {
   if (typeof path !== "string" || !path.startsWith("/") || path.includes("\0")) return "protected";
   const at = posix.normalize(path).replace(/\/+$/, "") || "/";
-  if (under(at, input.root)) return "admitted";
+  // An outputs-located conversation (D3b) has no source root: its cwd IS its own outputs folder, which stays `outputs`.
+  if (input.root !== null && under(at, input.root)) return "admitted";
   if (under(at, "/workspace/.winter/memory")) return "admitted";
   if (at === "/workspace/.winter/WINTER.md") return "shared-instructions";
   if (under(at, `/workspace/outputs/${input.sessionId}`)) return "outputs";
@@ -54,9 +55,11 @@ export interface CoworkHostApprovalPorts {
 }
 
 export interface CoworkHostApprovalInput {
-  readonly binding: Readonly<ConversationBinding>;
-  /** The admitted source the incarnation mounts (its revision is the card's source revision). */
-  readonly source: Readonly<WorkspaceSource>;
+  /** A source binding, or a discriminated conversation of either location (D3b). */
+  readonly binding: CoworkRunBinding;
+  /** A source binding's admitted source (its revision is the card's source revision); absent for the outputs location,
+   *  whose cards say source revision 0 (there is no source). */
+  readonly source?: Readonly<WorkspaceSource>;
   /** The conversation's effective ceiling at admission (`CoworkAuthority.effectiveCapabilities`). */
   readonly ceiling: Readonly<CapabilityCeiling>;
   /** The plan execution view is MOUNTED for this incarnation: read-only roots AND a scratch view separate from (or scoped to
@@ -69,11 +72,12 @@ const refused = (): Promise<never> => Promise.reject(new CoworkError("unsupporte
 
 export function coworkApprovalPortsFor(input: CoworkHostApprovalInput): CoworkHostApprovalPorts {
   const { binding, source } = input;
-  const root = coworkGuestCwdFor(binding, source);
+  // The cwd is validated for either location; only a source root is `admitted`.
+  const cwd = coworkGuestRootFor(binding, source), root = coworkOutputsOf(binding) === undefined ? cwd : null;
   const ceiling: CapabilityCeiling = { toolClasses: [...input.ceiling.toolClasses], hostServices: [...input.ceiling.hostServices], connectors: [...input.ceiling.connectors], network: input.ceiling.network };
   const machine = new CoworkPolicyTransitionMachine({ policy: binding.policy, ceiling }, { closeAdmission: refused, drain: refused, installView: refused });
   const plan = coworkGuestPolicyFor(binding.policy) === "plan" && input.planViewMounted === true;
-  const identity = Object.freeze({ workspaceId: binding.workspaceId, sourceRevision: source.revision });
+  const identity = Object.freeze({ workspaceId: binding.workspaceId, sourceRevision: source?.revision ?? 0 });
   return Object.freeze({
     identity: () => identity,
     snapshot: () => machine.snapshot(),
