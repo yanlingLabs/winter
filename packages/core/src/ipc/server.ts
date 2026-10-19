@@ -640,13 +640,13 @@ export function deferMintSweep(run: () => void): () => void {
 
 class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
 
-/** The refusal a door gives the recognised-but-unrunnable `cowork` session mode: INVALID_PARAMS with
- *  `{ code: "unsupported_topology" }`, the shape of the `Cowork unavailable` answer `COWORK_RPC` methods give
- *  a daemon without the Cowork service (`sessions/session-mode.ts`). */
 /** Session door (D1): what a Cowork `session.create` may NOT carry beside its binding — the daemon derives the cwd, the
  *  policy (the workspace default) and the model (the provider route) itself, and `origin` is not a Cowork concept yet. */
 const COWORK_HOST_DERIVED_CREATE_FIELDS = ["cwd", "approvalPolicy", "model", "effort", "origin"] as const;
 
+/** The refusal a door gives the recognised-but-unrunnable `cowork` session mode: INVALID_PARAMS with
+ *  `{ code: "unsupported_topology" }`, the shape of the `Cowork unavailable` answer `COWORK_RPC` methods give
+ *  a daemon without the Cowork service (`sessions/session-mode.ts`). */
 function coworkSessionUnsupported(storedMode?: string): RpcFailure {
   return new RpcFailure(ERR.INVALID_PARAMS, storedMode === undefined ? COWORK_SESSION_UNSUPPORTED_MESSAGE : unrunnableModeMessage(storedMode), { code: COWORK_SESSION_UNSUPPORTED_CODE });
 }

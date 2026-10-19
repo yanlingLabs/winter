@@ -61,8 +61,10 @@ export const SessionCreatedEvent = Base.extend({
   modelRef: z.string().min(1).optional(),
   // Cowork session door (D1 spine): the binding a Cowork conversation was created with — workspace, Project (null
   // for a standalone workspace), location kind, source (null for the outputs location) and the policy revision.
-  // Durable on seq 1, so an index rebuild and a resume can tell a Cowork log from a Code one without host records.
-  // Additive/optional; no producer yet (nothing can create a Cowork session), and still outside HISTORY_EVENT_TYPES.
+  // A DISPLAY FACT, never authority: the host's `cowork_conversations` row is the binding, and every consumer checks that
+  // row rather than trusting this field alone. Only the daemon's own create writes it; `sync.push` and the store's
+  // `appendSynced` refuse a session_created that carries it, at any seq. Additive/optional; no producer yet (nothing can
+  // create a Cowork session), and still outside HISTORY_EVENT_TYPES.
   cowork: CoworkSessionCreatedFacts.optional(),
 });
 
