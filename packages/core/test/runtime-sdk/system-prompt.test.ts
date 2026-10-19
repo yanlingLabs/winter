@@ -72,6 +72,9 @@ function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "di
     outDir: undefined,
     workdirLess: primary === undefined,
     extraDirs: primary === undefined ? [] : [],
+    // 2026-10-19, the second deliberate departure: Dispatch takes image attachments, so its prompt carries the
+    // image-path line the engine only ever gave a base-keeping (code) prompt.
+    ...(isDispatch ? { imagePathGuidance: true } : {}),
   });
 }
 
@@ -195,7 +198,7 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
 // 2026-10-10 (raw image paths): ONE standing line tells a code session's model what an image path is
 // ------------------------------------------------------------------------------------------------
 
-describe("code-mode image-path guidance", () => {
+describe("image-path guidance (code and dispatch)", () => {
   const LINE = "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
 
   test("the line is exactly the ruled sentence", () => {
@@ -215,11 +218,40 @@ describe("code-mode image-path guidance", () => {
     for (const text of prompts) expect(text.split(LINE).length - 1).toBe(1);
   });
 
-  test("it is NOT in chat's or the dispatch coordinator's prompt", () => {
+  test("it is NOT in chat's prompt (chat takes no attachments)", () => {
     const w = world();
-    for (const mode of ["chat", "dispatch"] as const) {
-      expect(winterSystemPromptFor(w.assembler, { mode, primary: w.cwd, cwd: w.cwd })).not.toContain("never move, rename or edit it");
+    for (const exaKeyPresent of [true, false]) {
+      expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd, exaKeyPresent })).not.toContain("never move, rename or edit it");
+      expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: undefined, cwd: w.cwd, exaKeyPresent, runHomeApplied: true })).not.toContain("never move, rename or edit it");
     }
+  });
+
+  test("it IS in the dispatch coordinator's prompt (dispatch takes attachments, 2026-10-19) — exactly once, after its own base", () => {
+    const w = world();
+    const prompts = [
+      winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: w.cwd, cwd: w.cwd }),
+      winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: w.cwd, exaKeyPresent: false, computerOffered: false }),
+      winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: w.cwd, outDir: join(w.home, "outputs", "d"), runHomeApplied: true }),
+    ];
+    for (const text of prompts) {
+      expect(text.split(LINE).length - 1).toBe(1);
+      expect(text.startsWith("You are Winter in Dispatch mode")).toBe(true);
+      expect(text.indexOf(LINE)).toBeLessThan(text.indexOf("Today's date is"));
+    }
+    // The cached prefix stays put: two dispatch sessions get the same bytes up to the date line.
+    const s1 = w.store.createSession("global", { approvalPolicy: "auto", mode: "dispatch" });
+    const s2 = w.store.createSession("global", { approvalPolicy: "auto", mode: "dispatch" });
+    const a = winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: sessionTmpDir(s1) });
+    const b = winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: sessionTmpDir(s2) });
+    expect(a.slice(0, a.indexOf("Today's date is"))).toBe(b.slice(0, b.indexOf("Today's date is")));
+  });
+
+  test("an explicit imagePathGuidance overrides the base-slot default both ways", () => {
+    const w = world();
+    expect(w.assembler.assemble({ cwd: w.cwd, basePromptOverride: "BASE", imagePathGuidance: true })).toContain(LINE);
+    expect(w.assembler.assemble({ cwd: w.cwd, imagePathGuidance: false })).not.toContain(LINE);
+    expect(w.assembler.assemble({ cwd: w.cwd, basePromptOverride: "BASE" })).not.toContain(LINE);
+    expect(w.assembler.assemble({ cwd: w.cwd })).toContain(LINE);
   });
 
   test("it is static: nothing per-message or per-session is in it, and a base-replacing output style keeps it", () => {

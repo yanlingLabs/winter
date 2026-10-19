@@ -1,4 +1,5 @@
-// Code-mode image input (2026-09-29; raw image paths 2026-10-10): `session.stageImage`'s file half. An
+// Image input for code (2026-09-29; raw image paths 2026-10-10) and dispatch (2026-10-19) sessions:
+// `session.stageImage`'s file half, and its bounded cleanup (`pruneStagedImages`). An
 // image with no file of its own (clipboard data) is written, AS IT IS, into the session's temp
 // directory — `sessionTmpDir(sessionId)/images/image_<k>.<ext>`; the client names that path beside its
 // `[Image #n]` placeholder on send, and the model reads it. Nothing here downscales or re-encodes: the
@@ -26,7 +27,7 @@ import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node
 import {
   IMAGE_DATA_INVALID, IMAGE_FILE_EXTENSIONS, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_FILE_UNREADABLE, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
-  FILE_REFERENCE_INVALID, FILE_UNREADABLE, USER_MESSAGE_FILES_MAX, USER_MESSAGE_FILES_MAX_MESSAGE, type UserMessageFileRef,
+  FILE_REFERENCE_INVALID, FILE_UNREADABLE, USER_MESSAGE_FILES_MAX, USER_MESSAGE_FILES_MAX_MESSAGE, type UserMessageFileRef, type SessionEvent,
 } from "@yanlinglabs/winter-protocol";
 import { sandboxConfigFor } from "../runtime-sdk/mode-options";
 import { protectedReadDenial } from "../runtime-sdk/protected-paths";
@@ -202,23 +203,123 @@ function nextIndex(dir: string): number {
   return max + 1;
 }
 
+/** How long a staged copy is kept (2026-10-19): `stageSessionImage` lets go of this session's staged copies
+ *  older than this — by the file's own mtime, written once when it was staged — unless a message in the
+ *  session's recent log still names it (`pruneStagedImages`). Nothing else ever removes the session's temp
+ *  folder, and Dispatch is ONE session that lives for months: without this every pasted screenshot would stay
+ *  on disk for as long as it does. Generous on purpose: a staged copy is the model's to read in its turn (or to
+ *  move, to keep — `IMAGE_PATH_GUIDANCE`), and two weeks covers coming back to it. */
+export const STAGED_IMAGE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Every `images` path a `user_message` in `events` names — consumed or still owed, any thread. What
+ *  `pruneStagedImages` keeps: a superset of the staged copies the session's unconsumed messages need (a resume
+ *  re-pushes those with their paths, `unconsumedUserMessages`), with no turn pairing to get wrong. A staged ref is
+ *  stored spelled as its realpath (`validateImageRefs`), the same spelling the prune lists, so the comparison is
+ *  exact. */
+export function stagedPathsNamedBy(events: readonly SessionEvent[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of events) {
+    if (e.type !== "user_message" || e.images === undefined) continue;
+    for (const ref of e.images) out.add(ref.path);
+  }
+  return out;
+}
+
+/** `lstat` says `path` is still the same real directory (not a symlink) as `was`. */
+function sameRealDirectory(path: string, was: { dev: number; ino: number }): boolean {
+  try {
+    const st = lstatSync(path);
+    return !st.isSymbolicLink() && st.isDirectory() && st.dev === was.dev && st.ino === was.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bounded cleanup of a session's staged copies (2026-10-19, for Dispatch's one long-lived session; it runs for
+ * every session that stages). Removes each `image_<k>.<ext>` REGULAR file directly in `imagesDir` whose mtime is
+ * older than `STAGED_IMAGE_RETENTION_MS`, unless `keep()` names it — `keep` is read only when there is a candidate
+ * (a bounded tail of the session's log, `stagedPathsNamedBy`), and a `keep` that throws removes nothing. Answers how
+ * many it removed; NEVER throws (a stage is never refused over its cleanup) and never logs a path.
+ *
+ * `imagesDir` is HOSTILE (the module header): the daemon is unsandboxed and the session's agent can swap
+ * `winter-session-<sid>` or `images/` for a symlink at any moment, which would aim an `unlink` at a same-named file
+ * elsewhere. So, right before EACH unlink: both directories are re-`lstat`ed as the same real directories (dev +
+ * inode) they were when listed, the candidate is re-`lstat`ed as the same regular file (dev + inode), and its
+ * `realpath` is exactly `<imagesDir>/<name>`. A swap landing between those checks and the `unlink` itself — a few
+ * system calls — is the residual (images.md); a symlink planted IN the folder is never followed (`lstat`, and
+ * `unlink` removes a link, not its target).
+ */
+export function pruneStagedImages(
+  root: string,
+  imagesDir: string,
+  keep: () => Iterable<string>,
+  nowMs: number = Date.now(),
+  /** TEST-ONLY: runs right before a candidate's re-checks — the window a swap would use. */
+  hooks: { beforeUnlink?: (path: string) => void } = {},
+): number {
+  try {
+    const rootSt = lstatSync(root);
+    const dirSt = lstatSync(imagesDir);
+    if (rootSt.isSymbolicLink() || !rootSt.isDirectory() || dirSt.isSymbolicLink() || !dirSt.isDirectory()) return 0;
+    const cutoff = nowMs - STAGED_IMAGE_RETENTION_MS;
+    const candidates: { path: string; dev: number; ino: number }[] = [];
+    for (const name of readdirSync(imagesDir)) {
+      if (!NAME_RE.test(name)) continue;
+      const path = join(imagesDir, name);
+      let st;
+      try { st = lstatSync(path); } catch { continue; }
+      if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+      candidates.push({ path, dev: st.dev, ino: st.ino });
+    }
+    if (candidates.length === 0) return 0;
+    let kept: Set<string>;
+    try { kept = new Set(keep()); } catch { return 0; }
+    let removed = 0;
+    for (const c of candidates) {
+      if (kept.has(c.path)) continue;
+      hooks.beforeUnlink?.(c.path);
+      // The folders moved: nothing more is removed this time.
+      if (!sameRealDirectory(root, rootSt) || !sameRealDirectory(imagesDir, dirSt)) return removed;
+      let st;
+      try { st = lstatSync(c.path); } catch { continue; }
+      if (!st.isFile() || st.dev !== c.dev || st.ino !== c.ino) continue;
+      let real: string;
+      try { real = realpathSync(c.path); } catch { continue; }
+      if (real !== c.path) continue;
+      try { unlinkSync(c.path); removed++; } catch { /* gone already, or not ours to remove */ }
+    }
+    return removed;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Stage one image for `sessionId` and return its realpath. Every input check runs first
  * (`validateStagedImage`); then the file is created safely (see the module header). The folder is
  * `sessionTmpDirPath(sessionId)` — `$WINTER_TMPDIR` or the OS temp dir, exactly `sessionTmpDir`'s.
+ * With `keep`, the session's stale staged copies are let go of first (`pruneStagedImages`); the new file's
+ * number is taken before that, so numbers keep climbing and a pruned name is never reused.
  */
 export function stageSessionImage(
   input: { sessionId: string; mediaType: StageImageMediaType; dataBase64: string },
-  /** TEST-ONLY: runs right after the session directory's own check — the window a swap of that
-   *  directory for a symlink would use. */
-  hooks: { afterSessionDirCheck?: () => void } = {},
+  opts: {
+    /** The staged paths the session's recent messages still name — never pruned. Absent: nothing is pruned. */
+    keep?: () => Iterable<string>;
+    /** TEST-ONLY: the prune's clock. */
+    nowMs?: number;
+    /** TEST-ONLY: runs right after the session directory's own check — the window a swap of that
+     *  directory for a symlink would use. */
+    afterSessionDirCheck?: () => void;
+  } = {},
 ): string {
   const { bytes, ext } = validateStagedImage(input.mediaType, input.dataBase64);
   const sessionDir = sessionTmpDirPath(input.sessionId);
   try { mkdirSync(sessionDir, { recursive: true, mode: 0o700 }); } catch { /* lstat below reports it */ }
   const root = sessionRootOf(sessionDir);
   requireRealDirectory(root);
-  hooks.afterSessionDirCheck?.();
+  opts.afterSessionDirCheck?.();
   const imagesDir = join(root, "images");
   try { mkdirSync(imagesDir, { mode: 0o700 }); } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw new StageImageRefusal(IMAGE_STAGE_FAILED, "could not create the session's image folder", true);
@@ -227,6 +328,7 @@ export function stageSessionImage(
 
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
   let k = nextIndex(imagesDir);
+  if (opts.keep !== undefined) pruneStagedImages(root, imagesDir, opts.keep, opts.nowMs);
   for (let attempt = 0; attempt < 1000; attempt++, k++) {
     const path = join(imagesDir, `image_${k}.${ext}`);
     let fd: number;
