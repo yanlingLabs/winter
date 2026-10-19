@@ -128,20 +128,22 @@ export function createCoworkSessionDoor(deps: CoworkSessionDoorDeps): CoworkSess
     const route = deps.route;
     if (route === undefined || deps.native === undefined || deps.offer === undefined || deps.approvals === undefined) throw new CoworkError("provider_unavailable");
     if (!SCOPE.test(input.scope) || !ID.test(input.workspaceId) || !ID.test(input.requestId)) throw new CoworkError("invalid_request");
-    // The outputs location is the D3b slice; until then a binding never names it.
-    if (input.location.kind !== "source") throw new CoworkError("unsupported_topology");
     const principalId = caller === COWORK_SCHEDULE_CALLER ? scheduleAuthority(input) : userAuthority(input, caller);
-    const sourceId = input.location.sourceId, relativeCwd = relativeCoworkPath(input.location.relativeCwd ?? ".");
-    if (!ID.test(sourceId)) throw new CoworkError("invalid_request");
-    const requestDigest = createHash("sha256").update(canonical({ scope: input.scope, workspaceId: input.workspaceId, location: { kind: "source", sourceId, relativeCwd } })).digest("hex");
+    // Either location (D3b): a workspace source plus a relative cwd, or the conversation's OWN outputs folder (O1).
+    const location: { kind: "source"; sourceId: string; relativeCwd: string } | { kind: "outputs" } = input.location.kind === "outputs"
+      ? { kind: "outputs" } : { kind: "source", sourceId: input.location.sourceId, relativeCwd: relativeCoworkPath(input.location.relativeCwd ?? ".") };
+    if (location.kind === "source" && !ID.test(location.sourceId)) throw new CoworkError("invalid_request");
+    const requestDigest = createHash("sha256").update(canonical({ scope: input.scope, workspaceId: input.workspaceId, location })).digest("hex");
 
     // 2. Reserve (or find this request's reservation).
     const reservation = records.reserveConversation({ principalId, workspaceId: input.workspaceId, requestId: input.requestId, scope: input.scope, requestDigest }, sessionId => store.hasSession(sessionId));
     const sessionId = reservation.sessionId;
     const boundHere = (): boolean => {
       if (records.conversationWorkspace(sessionId) === undefined) return false;
-      const binding = records.binding(sessionId);
-      if (binding.workspaceId !== input.workspaceId || binding.sourceId !== sourceId || binding.relativeCwd !== relativeCwd) throw new CoworkError("request_conflict");
+      const found = records.conversation(sessionId);
+      const same = found.location === "outputs" ? location.kind === "outputs"
+        : location.kind === "source" && found.sourceId === location.sourceId && found.relativeCwd === location.relativeCwd;
+      if (found.workspaceId !== input.workspaceId || !same) throw new CoworkError("request_conflict");
       return true;
     };
     if (boundHere()) { records.completeReservation(sessionId); return { sessionId }; }
@@ -151,13 +153,15 @@ export function createCoworkSessionDoor(deps: CoworkSessionDoorDeps): CoworkSess
     const workspace = records.get(input.workspaceId), policy = records.policy(input.workspaceId);
     store.ensureCoworkSession(input.scope, sessionId, {
       approvalPolicy: policy.defaultPolicy as SessionApprovalPolicy, model: route.model,
-      cowork: { workspaceId: input.workspaceId, projectId: workspace.ownership === "project" ? workspace.ownerId : null, location: "source", sourceId, policyRevision: policy.revision },
+      cowork: { workspaceId: input.workspaceId, projectId: workspace.ownership === "project" ? workspace.ownerId : null, location: location.kind, sourceId: location.kind === "source" ? location.sourceId : null, policyRevision: policy.revision },
     }, id => records.isReservedSession(id));
 
     // 4. The binding. Its own idempotency key would carry a revision a landed bind has since advanced, so a landed bind is
     //    found above (`boundHere`), never replayed through it.
     try {
-      records.bindConversation({ principalId, requestId: input.requestId, expectedRevision: workspace.configRevision }, input.workspaceId, { sessionId, sourceId, relativeCwd }, store);
+      const context = { principalId, requestId: input.requestId, expectedRevision: workspace.configRevision };
+      if (location.kind === "outputs") records.bindOutputsConversation(context, input.workspaceId, { sessionId }, store);
+      else records.bindConversation(context, input.workspaceId, { sessionId, sourceId: location.sourceId, relativeCwd: location.relativeCwd }, store);
     } catch (error) {
       let bound: boolean;
       try { bound = boundHere(); } catch { throw error; }

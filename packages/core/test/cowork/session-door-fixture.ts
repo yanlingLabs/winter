@@ -38,7 +38,7 @@ export interface DoorFixture {
   close(): void;
 }
 
-export function doorFixture(opts: { policy?: ApprovalPolicy; toolClasses?: string[]; access?: SourceAccess; relativeCwd?: string; sessions?: readonly string[]; network?: "none" | "internet" } = {}): DoorFixture {
+export function doorFixture(opts: { policy?: ApprovalPolicy; toolClasses?: string[]; access?: SourceAccess; relativeCwd?: string; sessions?: readonly string[]; network?: "none" | "internet"; location?: "source" | "outputs" } = {}): DoorFixture {
   const home = mkdtempSync(join(tmpdir(), "winter-door-d3-"));
   const db = openRuntimeStateDb(home), records = new CoworkRepository(db), access = opts.access ?? "read-write";
   const created = records.create({ principalId: "fixture", requestId: "create" }, { ownership: "project", title: "fixture", defaultPolicy: opts.policy ?? "ask",
@@ -47,20 +47,25 @@ export function doorFixture(opts: { policy?: ApprovalPolicy; toolClasses?: strin
   const workspaceId = created.workspaceId, source = records.sources(workspaceId)[0]!;
   let revoked = false;
   const authority = new CoworkAuthority(records, { folder: () => ({ rootIdentity: "root", writable: access === "read-write", revoked }), repository: () => undefined });
-  // Bind under a first incarnation (the source must be ready), then stop it: the driver finds a stopped workspace.
-  const first = records.beginIncarnation(workspaceId, "setup", records.get(workspaceId).configRevision);
-  records.acknowledgeSource(first, source.sourceId, source.revision, "ready");
-  const sessions = opts.sessions ?? ["conversation"];
-  sessions.forEach((sessionId, index) => records.bindConversation({ principalId: "fixture", requestId: `bind-${index}`, expectedRevision: records.get(workspaceId).configRevision }, workspaceId,
-    { sessionId, sourceId: source.sourceId, ...(opts.relativeCwd === undefined ? {} : { relativeCwd: opts.relativeCwd }) }, authorityFixtureSessions(...sessions)));
+  const sessions = opts.sessions ?? ["conversation"], outputs = opts.location === "outputs";
+  if (outputs) {
+    // D3b (O1): an outputs conversation binds with its workspace's source never acknowledged (N2 has no shares).
+    sessions.forEach((sessionId, index) => records.bindOutputsConversation({ principalId: "fixture", requestId: `bind-${index}`, expectedRevision: records.get(workspaceId).configRevision }, workspaceId, { sessionId }, authorityFixtureSessions(...sessions)));
+  } else {
+    // Bind under a first incarnation (the source must be ready), then stop it: the driver finds a stopped workspace.
+    const first = records.beginIncarnation(workspaceId, "setup", records.get(workspaceId).configRevision);
+    records.acknowledgeSource(first, source.sourceId, source.revision, "ready");
+    sessions.forEach((sessionId, index) => records.bindConversation({ principalId: "fixture", requestId: `bind-${index}`, expectedRevision: records.get(workspaceId).configRevision }, workspaceId,
+      { sessionId, sourceId: source.sourceId, ...(opts.relativeCwd === undefined ? {} : { relativeCwd: opts.relativeCwd }) }, authorityFixtureSessions(...sessions)));
+  }
   const power = (to: string) => { db.db.run("UPDATE cowork_workspaces SET power=? WHERE workspace_id=?", [to, workspaceId]); };
   power("stopped");
   return {
     home, db, records, authority, workspaceId, sourceId: source.sourceId,
     begin(incarnationId = "incarnation") {
       const epoch = records.beginIncarnation(workspaceId, incarnationId, records.get(workspaceId).configRevision);
-      const current = records.source(workspaceId, source.sourceId);
-      records.acknowledgeSource(epoch, source.sourceId, current.revision, "ready");
+      // An outputs fixture never acknowledges its source: nothing in N2 can.
+      if (!outputs) records.acknowledgeSource(epoch, source.sourceId, records.source(workspaceId, source.sourceId).revision, "ready");
       return { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, guestBootId: FIXTURE_BOOT_ID };
     },
     power,

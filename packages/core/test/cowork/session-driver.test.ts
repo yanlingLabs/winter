@@ -6,7 +6,7 @@
 // These doubles prove host composition only. They are never native, Linux or image admission evidence (that is D5's
 // real-host run after S7B lands).
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query as agentQuery, type Options, type ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
@@ -138,11 +138,11 @@ const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[] } = {}) {
+function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs" } = {}) {
   const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness] };
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const sessions = Array.from({ length: opts.conversations ?? 1 }, () => store.createSession("t", { mode: "code" }));
-  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}) });
+  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}), ...(opts.location ? { location: opts.location } : {}) });
   const guests: ScriptedGuest[] = [], launched: Options[] = [], approvals = new ApprovalBroker(), questions = new QuestionBroker();
   const native: CoworkGuestStarter = {
     async start(workspaceId, request) {
@@ -233,6 +233,71 @@ test("a full turn: the guest runs default for ask, its Bash call cards on the co
   expect(guest.frames.filter(frame => frame.type === "control_request").map(frame => frame.subtype)).toEqual([]);
 });
 
+test("D3b: an outputs-located conversation (O1) runs a full turn with its source never acknowledged; its one root is its own outputs folder", async () => {
+  let answers: Record<string, unknown>[] = [];
+  const h = harness({ policy: "ask", location: "outputs", script: (_, guest) => {
+    guest.data(systemInit({ session_id: guest.set.conversations[0]!.authority.sessionId, model: FIXTURE_MODEL, tools: ["Read", "Edit", "Write", "Bash"], permissionMode: "default" }));
+    guest.data(assistantToolUse("tu1", "Write", { file_path: "report.md", content: "x" }));
+    void (async () => {
+      answers.push(await guest.permission("tu1", "Write", { file_path: "report.md", content: "x" }));
+      // Another conversation's outputs folder is outside: denied without a card.
+      answers.push(await guest.permission("tu2", "Write", { file_path: "/workspace/outputs/s_other/x", content: "x" }));
+      guest.data(toolResult("tu1", "written")); guest.data(assistantText("done")); guest.data(result());
+    })();
+  } });
+  expect(h.f.records.source(h.f.workspaceId, h.f.sourceId).state).toBe("preparing");
+  expect(() => h.f.records.binding(h.sid)).toThrow("unsupported_topology"); // every other lane's reader still refuses it
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  const guest = h.guests[0]!, root = `/workspace/outputs/${h.sid}`;
+  expect(guest.set.conversations[0]!.roots).toEqual([{ id: "outputs", guestPath: root, source: root, readOnly: false }]);
+  expect(h.launched[0]!.cwd).toBe(root);
+  const sent = session.send("write the report", "cli");
+  await until(() => h.approvals.list(h.sid).length === 1, "the card");
+  h.approvals.resolve(h.sid, "tu1", true, "fixture-user", "allow");
+  await sent; await until(() => types(h.store.read(h.sid)).includes("turn_completed"), "the turn");
+  expect(answers[0]).toMatchObject({ ok: true, payload: { behavior: "allow" } });
+  expect(answers[1]).toMatchObject({ ok: true, payload: { behavior: "deny" } });
+  expect(h.store.read(h.sid).filter(event => event.type === "approval_requested")).toHaveLength(1);
+  expect(guest.refusals).toEqual([]);
+  // Still never acknowledged: the outputs conversation needed no source.
+  expect(h.f.records.source(h.f.workspaceId, h.f.sourceId).state).toBe("preparing");
+});
+
+test("D3b: a conversation whose location changed between ensure and the set is refused stale, and nothing runs", async () => {
+  const h = harness({ script: reply("never") });
+  const session = await h.drivers.ensure(h.sid);
+  h.f.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id=?", [h.sid]);
+  await expect(session.open()).rejects.toThrow("stale_acknowledgment");
+  expect(h.launched).toEqual([]);
+});
+
+test("D3b: under plan the outputs root is read-only and the runtime runs plan", async () => {
+  const h = harness({ policy: "plan", location: "outputs", script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  expect(h.guests[0]!.set.conversations[0]!.roots[0]).toMatchObject({ id: "outputs", readOnly: true });
+  expect(h.launched[0]!.permissionMode).toBe("plan");
+});
+
+test("plan view: not expressible in host-query-v1 yet. The real validator refuses any .winter root, so planViewMounted is false by construction", async () => {
+  const h = harness({ policy: "plan", script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  const item = h.guests[0]!.set.conversations[0]!, sid = h.sid;
+  for (const guestPath of [`/workspace/.winter/scratch/${sid}`, "/workspace/.winter/memory"]) {
+    // Read-only, so the refusal is the .winter rule itself, not plan's read-only rule.
+    const extra = { ...item, roots: [...item.roots, { id: "plan-view", guestPath, source: guestPath, readOnly: true }] };
+    expect(() => onTheWire({ profile: "host-query-v1", conversations: [extra] }, "incarnation-1")).toThrow();
+  }
+  // The control: the same set with a non-.winter extra root passes, so the throw above is the .winter rule.
+  const control = { ...item, roots: [...item.roots, { id: "other", guestPath: "/workspace/folders/other", source: "/workspace/folders/other", readOnly: true }] };
+  expect(() => onTheWire({ profile: "host-query-v1", conversations: [control] }, "incarnation-1")).not.toThrow();
+  // The driver never asks for the view: the approvals bridge sees planViewInstalled false (a plan scratch write is refused).
+  const text = readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "session-driver.ts"), "utf8");
+  expect(text).not.toMatch(/planViewMounted/);
+});
+
 test("for every policy the host launch's mode equals the mode the guest's own map gives the set's policy: default or plan only", async () => {
   for (const policy of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
     const h = harness({ policy, script: reply("ok") });
@@ -296,12 +361,10 @@ test("a human DENY of a card reaches the guest in the closed shape too", async (
   expect(h.guests[0]!.refusals).toEqual([]);
 });
 
-test("refusals before anything starts: outputs row, recorded backend, uncertain workspace, a running guest, a second live conversation", async () => {
-  const h = harness({ conversations: 3, script: reply("ok") });
-  const [first, second, third] = h.sessions as [string, string, string];
-  // The outputs location (D3b): refused typed, never read with a null source.
-  h.f.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id=?", [third]);
-  await expect(h.drivers.ensure(third)).rejects.toThrow("unsupported_topology");
+test("refusals before anything starts: recorded backend, uncertain workspace, a running guest, a second live conversation", async () => {
+  // (D3 also refused an outputs row here; D3b runs it, see "an outputs-located conversation" below.)
+  const h = harness({ conversations: 2, script: reply("ok") });
+  const [first, second] = h.sessions as [string, string];
   h.f.power("uncertain");
   await expect(h.drivers.ensure(first)).rejects.toThrow("recovery_required");
   h.f.power("running");

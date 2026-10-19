@@ -12,7 +12,7 @@ import type { SessionStore } from "../sessions/store";
 import { turnOriginIndexFor } from "../sessions/turn-origin-index";
 import { coworkApprovalPortsFor, type CoworkHostApprovalPorts } from "./approval-ports";
 import type { CoworkAuthority } from "./authority";
-import { COWORK_GUEST_RUNTIME_MODES, coworkConversationFor, coworkGuestToolsFromClasses } from "./conversation-set";
+import { COWORK_GUEST_RUNTIME_MODES, coworkConversationCeiling, coworkConversationFor, coworkGuestToolsFromClasses } from "./conversation-set";
 import { buildCoworkGuestQueryOptions } from "./guest-query";
 import { CoworkGuestRuntimeSupervisor, coworkGuestOfferedTools } from "./guest-runtime";
 import type { CoworkRepository } from "./repository";
@@ -21,7 +21,7 @@ import type {
   CoworkApprovalPort, CoworkGuestConversation, CoworkGuestConversationContext, CoworkGuestRun, CoworkGuestRuntimeOffer, CoworkGuestStarter,
   CoworkGuestStopOutcome, CoworkLegSession, CoworkProviderRoute, CoworkSessionDrivers,
 } from "./session-ports";
-import { CoworkError, type CapabilityCeiling, type ConversationBinding, type WorkspaceSource } from "./types";
+import { CoworkError, type CapabilityCeiling, type CoworkConversation, type WorkspaceSource } from "./types";
 
 /*
  * Cowork session door D3: the Cowork driver table. One SOURCE-located conversation per guest incarnation (N2), driven by
@@ -92,7 +92,7 @@ function guestText(text: string, images?: readonly unknown[], files?: readonly u
   if (typeof text !== "string" || text.trimStart().startsWith("/") || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0) throw new CoworkError("invalid_request");
 }
 
-interface Admitted { readonly binding: ConversationBinding; readonly source: WorkspaceSource; readonly ceiling: CapabilityCeiling; readonly context: CoworkGuestConversationContext; readonly conversation: CoworkGuestConversation }
+interface Admitted { readonly binding: CoworkConversation; readonly source: WorkspaceSource | undefined; readonly ceiling: CapabilityCeiling; readonly context: CoworkGuestConversationContext; readonly conversation: CoworkGuestConversation }
 
 interface Entry {
   readonly sessionId: string;
@@ -118,7 +118,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
     if (entries.get(entry.sessionId) === entry) entries.delete(entry.sessionId);
   };
 
-  const assemble = (sessionId: string, binding: ConversationBinding, route: CoworkProviderRoute, native: CoworkGuestStarter, offer: CoworkGuestRuntimeOffer, approvals: CoworkApprovalPort): Entry => {
+  const assemble = (sessionId: string, binding: CoworkConversation, route: CoworkProviderRoute, native: CoworkGuestStarter, offer: CoworkGuestRuntimeOffer, approvals: CoworkApprovalPort): Entry => {
     const backendSessionId = (deps.mintBackendSessionId ?? randomUUID)();
     const turnOrigin = () => turnOriginIndexFor(deps.hub, deps.store).origin(sessionId);
     let bridge: (CanUseTool & { withdrawPending(callId: string): boolean }) | undefined;
@@ -150,13 +150,15 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
         try {
           if (admitted !== undefined) throw new CoworkError("recovery_required");
           if (context.workspaceId !== binding.workspaceId) throw new CoworkError("authority_denied");
-          const current = deps.records.binding(sessionId);
-          if (current.workspaceId !== binding.workspaceId || current.sourceId !== binding.sourceId || current.revision !== binding.revision) throw new CoworkError("stale_acknowledgment");
+          // D3b: either location; the source facts are compared only for a source conversation.
+          const current = deps.records.conversation(sessionId);
+          if (current.workspaceId !== binding.workspaceId || current.location !== binding.location || current.revision !== binding.revision
+            || (current.location === "source" && binding.location === "source" && current.sourceId !== binding.sourceId)) throw new CoworkError("stale_acknowledgment");
           const epoch = deps.records.refreshEpoch(context.workspaceId, context.incarnationId, context.leaseEpoch);
-          const source = deps.authority.requireSource(current.workspaceId, current.sourceId);
-          const ceiling = deps.authority.effectiveCapabilities(sessionId);
+          const source = current.location === "source" ? deps.authority.requireSource(current.workspaceId, current.sourceId) : undefined;
+          const ceiling = current.location === "source" ? deps.authority.effectiveCapabilities(sessionId) : coworkConversationCeiling(deps.records, sessionId);
           const set = coworkConversationFor({
-            binding: current, source, context, configRevision: epoch.configRevision, grantRevision: epoch.grantRevision,
+            binding: current, ...(source === undefined ? {} : { source }), context, configRevision: epoch.configRevision, grantRevision: epoch.grantRevision,
             policyRevision: deps.records.policy(current.workspaceId).revision, homeId: deps.records.homeIdentity(), backendSessionId,
             offered: coworkGuestOfferedTools(current.policy, ceiling, offer.readiness), route,
           });
@@ -174,7 +176,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       const refuse = async (code: ConstructorParameters<typeof CoworkError>[0]): Promise<never> => { await stopRun("user"); throw new CoworkError(code); };
       if (admitted === undefined) return refuse("recovery_required");
       if (run.workspaceId !== binding.workspaceId || run.incarnationId !== admitted.context.incarnationId || run.leaseEpoch !== admitted.context.leaseEpoch || run.guestBootId !== admitted.context.guestBootId) return refuse("authority_denied");
-      const ports: CoworkHostApprovalPorts = coworkApprovalPortsFor({ binding: admitted.binding, source: admitted.source, ceiling: admitted.ceiling });
+      const ports: CoworkHostApprovalPorts = coworkApprovalPortsFor({ binding: admitted.binding, ...(admitted.source === undefined ? {} : { source: admitted.source }), ceiling: admitted.ceiling });
       bridge = approvals.canUseToolFor({ sessionId, binding: admitted.binding, policyRevision: deps.records.policy(binding.workspaceId).revision, cowork: ports,
         cwd: admitted.conversation.roots[0]!.guestPath, turnOrigin,
         emit: (event: NewSessionEvent) => { deps.hub.append(sessionId, event); } });
@@ -274,8 +276,8 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
     if (shuttingDown) throw shutdownRefusal();
     const { route, native, offer, approvals } = deps;
     if (route === undefined || native === undefined || offer === undefined || approvals === undefined) throw new CoworkError("provider_unavailable");
-    if (deps.records.conversationLocation(sessionId) !== "source") throw new CoworkError("unsupported_topology");
-    const binding = deps.records.binding(sessionId);
+    // D3b: either location (O1's outputs conversation included). Other lanes' readers keep `binding()`, which refuses outputs.
+    const binding = deps.records.conversation(sessionId);
     if (binding.state !== "active") throw new CoworkError("authority_denied");
     if (deps.records.conversationBackend(sessionId) !== null) throw new CoworkError("cold_resume_unavailable");
     const workspace = deps.records.get(binding.workspaceId);

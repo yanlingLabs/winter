@@ -10,6 +10,7 @@ import {
 import { coworkGuestOfferedTools } from "../../src/cowork/guest-runtime";
 import { parseCoworkNativeMuxFrame, serializeCoworkNativeMuxFrame } from "../../src/cowork/native/protocol";
 import type { CoworkGuestConversation, CoworkGuestConversationSet } from "../../src/cowork/session-ports";
+import type { ConversationBinding } from "../../src/cowork/types";
 import { doorFixture, FIXTURE_MODEL, standinRoute, type DoorFixture } from "./session-door-fixture";
 
 const fixtures: DoorFixture[] = [];
@@ -78,9 +79,9 @@ test("a read-only source is a read-only root, and a relative cwd is the root its
   const f = fixture({ access: "read-only", toolClasses: ["read"], relativeCwd: "repo/sub" }), input = inputFor(f), item = onTheWire(coworkConversationFor(input), "incarnation").conversations[0]!;
   expect(item.roots).toEqual([{ id: f.sourceId, guestPath: "/workspace/folders/grant/repo/sub", source: "/workspace/folders/grant/repo/sub", readOnly: true }]);
   expect(item.runtime!.toolClasses).toEqual(["read"]);
-  expect(coworkGuestCwdFor({ ...input.binding, relativeCwd: "./repo//sub/" }, input.source)).toBe("/workspace/folders/grant/repo/sub");
-  for (const bad of ["../escape", "/abs", "café", "tab\there"]) expect(() => coworkGuestCwdFor({ ...input.binding, relativeCwd: bad }, input.source)).toThrow("invalid_request");
-  expect(() => coworkGuestCwdFor({ ...input.binding, sourceId: "source_other" }, input.source)).toThrow("authority_denied");
+  expect(coworkGuestCwdFor({ ...(input.binding as ConversationBinding), relativeCwd: "./repo//sub/" }, input.source!)).toBe("/workspace/folders/grant/repo/sub");
+  for (const bad of ["../escape", "/abs", "café", "tab\there"]) expect(() => coworkGuestCwdFor({ ...(input.binding as ConversationBinding), relativeCwd: bad }, input.source!)).toThrow("invalid_request");
+  expect(() => coworkGuestCwdFor({ ...(input.binding as ConversationBinding), sourceId: "source_other" }, input.source!)).toThrow("authority_denied");
 });
 
 test("CONDITION (D3 note section 4): no protected path can be a host-query root: the native wire refuses each, and the builder only ever sends the source", () => {
@@ -154,7 +155,7 @@ test("the provider route: none is provider_unavailable; it may describe the sele
 
 test("the set is refused for a binding that is not active, in another workspace, or an offered list that does not match", () => {
   const f = fixture(), input = inputFor(f);
-  expect(() => coworkConversationFor({ ...input, binding: { ...input.binding, state: "archived" } })).toThrow("authority_denied");
+  expect(() => coworkConversationFor({ ...input, binding: { ...(input.binding as ConversationBinding), state: "archived" } })).toThrow("authority_denied");
   expect(() => coworkConversationFor({ ...input, context: { ...input.context, workspaceId: "workspace_other" } })).toThrow("authority_denied");
   expect(() => coworkConversationFor({ ...input, offered: ["Read", "Write"] })).toThrow("invalid_request");
 });

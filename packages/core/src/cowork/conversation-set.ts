@@ -2,7 +2,9 @@ import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import { coworkGuestSourceRoot } from "./guest-paths";
 import { relativeCoworkPath } from "./repository";
 import type { CoworkGuestConversation, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkProviderRoute, CoworkProviderRouteScope, CoworkProviderSelection } from "./session-ports";
-import { CoworkError, type ConversationBinding, type WorkspaceSource } from "./types";
+import { intersectCeilings } from "./authority";
+import type { CoworkRepository } from "./repository";
+import { CoworkError, type CapabilityCeiling, type ConversationBinding, type CoworkConversation, type CoworkOutputsConversation, type WorkspaceSource } from "./types";
 
 /*
  * Cowork session door D3: the ONE builder of a conversation's entry in the incarnation's conversation set (design section
@@ -22,7 +24,8 @@ import { CoworkError, type ConversationBinding, type WorkspaceSource } from "./t
  * `permission`). The guest-recorded policy therefore reads "ask" for a non-plan conversation; the agent SDK lane is asked
  * to map every non-plan policy to `default` so the real policy can be sent after a later repin (option B).
  *
- * Source-located conversations only (D3). The outputs location (O1) is its own slice (D3b).
+ * Both locations (D3b): a source-located conversation's root is its source's guest root plus its relative cwd; an
+ * outputs-located one's (O1) is its OWN `/workspace/outputs/<sessionId>`, the view the guest admits for that conversation.
  */
 
 /** What the guest supervisor's map makes of the policy this builder sends. Mirrors `host_query_config` for the two values sent. */
@@ -86,6 +89,36 @@ export function coworkGuestCwdFor(binding: Readonly<ConversationBinding>, source
   return cwd;
 }
 
+/** A binding as the run path holds it: a source binding (D3's shape, no `location`) or a discriminated conversation (D3b). */
+export type CoworkRunBinding = Readonly<ConversationBinding> | Readonly<CoworkConversation>;
+/** The outputs location, if this binding is one. */
+export function coworkOutputsOf(binding: CoworkRunBinding): Readonly<CoworkOutputsConversation> | undefined {
+  return "location" in binding && binding.location === "outputs" ? binding : undefined;
+}
+const SESSION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/** An outputs-located conversation's single root and cwd: its OWN outputs folder (the guest's `outputs/<sid>` view). */
+export function coworkGuestOutputsRootFor(conversation: Readonly<CoworkOutputsConversation>): string {
+  if (!SESSION_SEGMENT.test(conversation.sessionId)) throw new CoworkError("invalid_request");
+  return `/workspace/outputs/${conversation.sessionId}`;
+}
+/** The root (and cwd) of either location; a source binding needs its admitted source, an outputs one has none. */
+export function coworkGuestRootFor(binding: CoworkRunBinding, source: Readonly<WorkspaceSource> | undefined): string {
+  const outputs = coworkOutputsOf(binding);
+  if (outputs !== undefined) { if (source !== undefined) throw new CoworkError("authority_denied"); return coworkGuestOutputsRootFor(outputs); }
+  if (source === undefined) throw new CoworkError("source_unavailable");
+  return coworkGuestCwdFor(binding as Readonly<ConversationBinding>, source);
+}
+/**
+ * The effective ceiling of a conversation of EITHER location, on the DOOR's run path: its recorded restrictions inside the
+ * workspace's current ceiling, for an active conversation of a retained workspace. The same rule as
+ * `CoworkAuthority.effectiveCapabilities`, which reads `binding()` and so refuses an outputs row for every other lane.
+ */
+export function coworkConversationCeiling(records: Pick<CoworkRepository, "conversation" | "get" | "policy">, sessionId: string): CapabilityCeiling {
+  const conversation = records.conversation(sessionId);
+  if (conversation.state !== "active" || records.get(conversation.workspaceId).state !== "retained") throw new CoworkError("authority_denied");
+  return intersectCeilings(conversation.restrictions, records.policy(conversation.workspaceId).ceiling);
+}
+
 const PRIVATE_WORDS = ["authref", "url", "header", "secret", "token", "credential"];
 function publicOnly(node: unknown, depth: number): void {
   if (depth > 6) throw new CoworkError("invalid_request");
@@ -101,10 +134,10 @@ const sorted = (value: unknown): unknown => Array.isArray(value) ? value.map(sor
   : value !== null && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted((value as Record<string, unknown>)[key])])) : value;
 
 export interface CoworkConversationSetInput {
-  /** A source-located binding (`CoworkRepository.binding` refuses an outputs row). */
-  readonly binding: Readonly<ConversationBinding>;
-  /** Its admitted source, as `CoworkAuthority.requireSource` returned it. */
-  readonly source: Readonly<WorkspaceSource>;
+  /** A source binding (`CoworkRepository.binding`) or a discriminated conversation (`CoworkRepository.conversation`). */
+  readonly binding: CoworkRunBinding;
+  /** A source binding's admitted source, as `CoworkAuthority.requireSource` returned it; absent for the outputs location. */
+  readonly source?: Readonly<WorkspaceSource>;
   /** The incarnation this set is for, as the native host reports it at `mounted`. */
   readonly context: CoworkGuestConversationContext;
   readonly configRevision: number;
@@ -124,11 +157,14 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
   const { binding, source, context, route } = input;
   if (binding.state !== "active" || binding.workspaceId !== context.workspaceId) throw new CoworkError("authority_denied");
   const policy = coworkGuestPolicyFor(binding.policy);
-  const cwd = coworkGuestCwdFor(binding, source);
+  const cwd = coworkGuestRootFor(binding, source);
   // The root's `source` is what the guest opens and mounts at `guestPath`. The guest checks the guest path against its
   // allowed views but only checks `source` against its own supervisor, environment and artifact directories, so the host
   // sends the canonical guest path itself: never a run home, a store or another conversation's directory.
-  const root = Object.freeze({ id: source.sourceId, guestPath: cwd, source: cwd, readOnly: source.access === "read-only" || policy === "plan" });
+  // The outputs location's root is the conversation's own outputs folder: writable except under plan.
+  const root = source === undefined
+    ? Object.freeze({ id: "outputs", guestPath: cwd, source: cwd, readOnly: policy === "plan" })
+    : Object.freeze({ id: source.sourceId, guestPath: cwd, source: cwd, readOnly: source.access === "read-only" || policy === "plan" });
   const toolClasses = coworkGuestToolClassesFor(input.offered);
   const scope: CoworkProviderRouteScope = Object.freeze({
     homeId: input.homeId, workspaceId: context.workspaceId, sessionId: binding.sessionId, backendSessionId: input.backendSessionId,

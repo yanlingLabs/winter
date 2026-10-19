@@ -3,9 +3,9 @@ import type { SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
 import { coworkToolsFor, type CoworkGuestTool } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
-import { coworkGuestCwdFor, coworkGuestPermissionModeFor, type CoworkGuestPermissionMode } from "./conversation-set";
+import { coworkConversationCeiling, coworkGuestPermissionModeFor, coworkGuestRootFor, type CoworkGuestPermissionMode } from "./conversation-set";
 import { intersectCeilings, type CoworkAuthority } from "./authority";
-import { CoworkError, type CapabilityCeiling, type GuestEpoch, type SourceAccess, type ConversationBinding, type WorkspaceSource } from "./types";
+import { CoworkError, type CapabilityCeiling, type GuestEpoch, type SourceAccess, type ConversationBinding, type CoworkConversation, type WorkspaceSource } from "./types";
 import type { CoworkGuestReadinessKey } from "./session-ports";
 
 export const GUEST_RUNTIME_TRANSPORT_LIMITS = Object.freeze({ frameBytes: 1024 * 1024, chunkBytes: 256 * 1024, pendingInputBytes: 2 * 1024 * 1024 });
@@ -18,7 +18,8 @@ export interface GuestRuntimeCapabilities { readonly toolClasses: readonly strin
 export interface GuestRuntimeLaunch {
   readonly protocolVersion: 1; readonly limits: typeof GUEST_RUNTIME_TRANSPORT_LIMITS;
   readonly scope: Readonly<GuestRuntimeScope>; readonly launchId: string;
-  readonly source: Readonly<{ sourceId: string; locationId: string; revision: number; access: SourceAccess }>;
+  /** The admitted source, or null for an outputs-located conversation (D3b), which mounts none. */
+  readonly source: Readonly<{ sourceId: string; locationId: string; revision: number; access: SourceAccess }> | null;
   readonly capabilities: GuestRuntimeCapabilities;
   readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: CoworkGuestPermissionMode; tools: readonly string[]; allowedTools: readonly []; resume?: string }>;
 }
@@ -89,7 +90,7 @@ export function confinedToolVisibility(offered: readonly CoworkGuestTool[]): rea
 export function coworkGuestOfferedTools(policy: ConversationBinding["policy"], capabilities: { readonly toolClasses: readonly string[]; readonly network: CapabilityCeiling["network"] }, readiness: readonly CoworkGuestReadinessKey[]): readonly CoworkGuestTool[] {
   return confinedToolVisibility(coworkToolsFor({ profile: "host-query-v1", approvalPolicy: policy, toolClasses: [...capabilities.toolClasses], network: capabilities.network, readiness }));
 }
-interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: ConversationBinding; source: WorkspaceSource }
+interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: CoworkConversation; source: WorkspaceSource | undefined }
 interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void; cancel?: (force: boolean) => void }
 
 /** Host-side conversation transport executor. No local spawn or generic argv/env fallback.
@@ -100,21 +101,23 @@ export class CoworkGuestRuntimeSupervisor {
   private stopped = false;
   constructor(private readonly deps: GuestRuntimeSupervisorDeps) {}
   private descriptor(sessionId: string): Admission {
-    const binding = this.deps.records.binding(sessionId), workspace = this.deps.records.get(binding.workspaceId);
+    // D3b: either location. An outputs-located conversation mounts no source, and its ceiling comes from the DOOR's own rule
+    // (`coworkConversationCeiling`): `CoworkAuthority.effectiveCapabilities` reads `binding()`, which refuses such a row.
+    const binding = this.deps.records.conversation(sessionId), workspace = this.deps.records.get(binding.workspaceId);
     if (binding.state !== "active" || !workspace.incarnationId) throw new CoworkError("authority_denied");
     const epoch = this.deps.records.refreshEpoch(workspace.workspaceId, workspace.incarnationId, workspace.leaseEpoch);
-    const source = this.deps.authority.requireSource(workspace.workspaceId, binding.sourceId);
-    const capabilities = this.deps.authority.effectiveCapabilities(sessionId), policy = this.deps.records.policy(workspace.workspaceId);
+    const source = binding.location === "source" ? this.deps.authority.requireSource(workspace.workspaceId, binding.sourceId) : undefined;
+    const capabilities = this.ceilingOf(binding), policy = this.deps.records.policy(workspace.workspaceId);
     const identity = this.deps.identity(sessionId), bootId = this.deps.bootId(workspace.workspaceId);
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(bootId) || typeof identity.resume !== "boolean" || typeof identity.model !== "string" || !identity.model || identity.model.length > 200 || /[\0\r\n]/.test(identity.model)) throw new CoworkError("authority_denied");
     const store = `/workspace/.winter/conversations/${safeSegment(sessionId)}`;
     // The conversation set's root and cwd (`conversation-set.ts`), so the host launch and the guest agree.
-    const cwd = coworkGuestCwdFor(binding, source);
+    const cwd = coworkGuestRootFor(binding, source);
     const capturedCapabilities = freezeCeiling(capabilities);
     const offered = coworkGuestOfferedTools(binding.policy, capturedCapabilities, this.deps.readiness ?? []);
     const launch: Readonly<GuestRuntimeLaunch> = Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
       scope: Object.freeze({ ...epoch, homeId: this.deps.records.homeIdentity(), bootId, sessionId, backendSessionId: safeSegment(identity.backendSessionId), bindingRevision: binding.revision, policyRevision: policy.revision, instructionRevision: workspace.instructionRevision }),
-      source: Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: capturedCapabilities,
+      source: source === undefined ? null : Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: capturedCapabilities,
       runtime: Object.freeze({ executionPosture: "confined-guest", sessionId: identity.backendSessionId, model: identity.model, cwd,
         winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true,
         // The mode the guest RUNS (session door D3, encoding A): the guest's own config is built from the conversation
@@ -126,19 +129,27 @@ export class CoworkGuestRuntimeSupervisor {
     return { launch, binding, source };
   }
   private assertCurrent({ launch, binding: admittedBinding, source: admittedSource }: Admission): void {
-    const { scope } = launch, binding = this.deps.records.binding(scope.sessionId);
+    const { scope } = launch, binding = this.deps.records.conversation(scope.sessionId);
     // Recheck ownership and selected authority, not mutable launch configuration. Model/resume,
     // instructions, labels and workspace defaults refresh at the next launch. Current APIs do
     // not edit a bound conversation's approval policy; any such edit remains a stop condition.
-    if (binding.state !== "active" || binding.workspaceId !== scope.workspaceId || binding.sourceId !== admittedBinding.sourceId || binding.revision !== admittedBinding.revision || binding.policy !== admittedBinding.policy || relativeCoworkPath(binding.relativeCwd) !== relativeCoworkPath(admittedBinding.relativeCwd) || this.deps.records.homeIdentity() !== scope.homeId || this.deps.bootId(scope.workspaceId) !== scope.bootId || this.deps.identity(scope.sessionId).backendSessionId !== scope.backendSessionId) throw new CoworkError("stale_acknowledgment");
+    const sameLocation = binding.location === admittedBinding.location && (binding.location !== "source" || admittedBinding.location !== "source"
+      || (binding.sourceId === admittedBinding.sourceId && relativeCoworkPath(binding.relativeCwd) === relativeCoworkPath(admittedBinding.relativeCwd)));
+    if (binding.state !== "active" || binding.workspaceId !== scope.workspaceId || !sameLocation || binding.revision !== admittedBinding.revision || binding.policy !== admittedBinding.policy || this.deps.records.homeIdentity() !== scope.homeId || this.deps.bootId(scope.workspaceId) !== scope.bootId || this.deps.identity(scope.sessionId).backendSessionId !== scope.backendSessionId) throw new CoworkError("stale_acknowledgment");
     this.deps.records.refreshEpoch(scope.workspaceId, scope.incarnationId, scope.leaseEpoch);
-    const source = this.deps.authority.requireSource(scope.workspaceId, admittedSource.sourceId, admittedSource.access === "read-write");
-    if (source.locationId !== admittedSource.locationId || source.kind !== admittedSource.kind || JSON.stringify(source.detail) !== JSON.stringify(admittedSource.detail) || (source.trust === "revoked" && admittedSource.trust !== "revoked")) throw new CoworkError("stale_acknowledgment");
+    if (admittedSource !== undefined) {
+      const source = this.deps.authority.requireSource(scope.workspaceId, admittedSource.sourceId, admittedSource.access === "read-write");
+      if (source.locationId !== admittedSource.locationId || source.kind !== admittedSource.kind || JSON.stringify(source.detail) !== JSON.stringify(admittedSource.detail) || (source.trust === "revoked" && admittedSource.trust !== "revoked")) throw new CoworkError("stale_acknowledgment");
+    } else if (binding.location !== "outputs") throw new CoworkError("stale_acknowledgment");
     const captured: CapabilityCeiling = { ...launch.capabilities, toolClasses: [...launch.capabilities.toolClasses], hostServices: [...launch.capabilities.hostServices], connectors: [...launch.capabilities.connectors] };
-    const current = this.deps.authority.effectiveCapabilities(scope.sessionId);
+    const current = this.ceilingOf(binding);
     // Captured authority must remain a subset of current authority. Narrowing and incomparable
     // replacements fail closed; widening does not widen this already-admitted launch.
     if (JSON.stringify(intersectCeilings(captured, current)) !== JSON.stringify(intersectCeilings(captured, captured))) throw new CoworkError("stale_acknowledgment");
+  }
+  /** A source conversation's ceiling is the authority's (unchanged); an outputs one's is the DOOR rule, the same intersection. */
+  private ceilingOf(binding: CoworkConversation): CapabilityCeiling {
+    return binding.location === "source" ? this.deps.authority.effectiveCapabilities(binding.sessionId) : coworkConversationCeiling(this.deps.records, binding.sessionId);
   }
   private requireTransport(): GuestRuntimeSupervisorPort {
     const { port, runtimeCapability } = this.deps;
