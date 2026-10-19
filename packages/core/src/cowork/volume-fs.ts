@@ -21,6 +21,16 @@ export function openImageAt(dir: number, name: "data.ext4" | "env.ext4"): number
   return fd;
 }
 
+/** The same image, opened READ-ONLY (O_RDONLY, no follow, close-on-exec): what a restore reads while it holds the exclusive restore claim. */
+export function openImageReadOnlyAt(dir: number, name: "data.ext4" | "env.ext4"): number {
+  if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("unsupported_topology");
+  native ??= loadNative();
+  const bytes = Buffer.from(`${name}\0`);
+  const fd = native.symbols.openat!(dir, bytes, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW | 0x01000000) as number;
+  if (fd < 0) { const address = native.symbols.__error!(); const errno = address === null ? 0 : read.i32(address, 0); throw new Error(`image_open_refused:${errno}`); }
+  return fd;
+}
+
 function loadPropertyLists() {
   return dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", {
     CFDataCreate: { args: [FFIType.ptr, FFIType.ptr, FFIType.i64], returns: FFIType.ptr },

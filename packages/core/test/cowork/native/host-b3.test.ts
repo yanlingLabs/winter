@@ -190,7 +190,8 @@ describe("host-backed shares", () => {
     for (const shares of ["fault", "silent", "wrong-nonce"] as const) {
       const root = scratch(), h = harnessWithShares({ shares });
       let called = 0;
-      await expect(h.host.start(h.workspaceId, { shares: () => [folder(root, "notes", "src-1", 1)], sharesMounted: () => { called += 1; } })).rejects.toBeDefined();
+      const rejected = h.host.start(h.workspaceId, { shares: () => [folder(root, "notes", "src-1", 1)], sharesMounted: () => { called += 1; } });
+      await expect(rejected).rejects.toMatchObject(shares === "fault" ? { code: "guest_fault", detail: "share_inventory" } : shares === "silent" ? { code: "timeout" } : { code: "protocol" });
       expect(called).toBe(0);
       expect(h.launcher.last.conversationSets).toHaveLength(0);
     }
@@ -205,7 +206,9 @@ describe("host-backed shares", () => {
     const real = join(root, "real"); mkdirSync(real);
     const link = join(root, "link"); symlinkSync(real, link);
     const file = join(root, "file"); writeFileSync(file, "x");
-    for (const hostPath of [link, file, join(root, "missing")]) {
+    const nested = join(root, "nested"); mkdirSync(nested); mkdirSync(join(nested, "inner"));
+    const viaParent = join(root, "viaparent"); symlinkSync(nested, viaParent);
+    for (const hostPath of [link, file, join(root, "missing"), join(viaParent, "inner")]) { // the last: a symlinked PARENT, which O_NOFOLLOW alone does not see
       const h = harnessWithShares();
       await expect(h.host.start(h.workspaceId, { shares: () => [{ tag: "f-x", kind: "folder", guestPath: "/workspace/folders/x", readOnly: true, hostPath, sourceId: "s", revision: 1 }] })).rejects.toMatchObject({ code: "prepare_failed" });
       expect(h.launcher.last.received.some(item => item.message.t === "begin")).toBe(false);
@@ -231,6 +234,9 @@ describe("the outputs directory and the plan view", () => {
     writeFileSync(join(outputs, "plain"), "x");
     expect(() => prepare.ensure("ws1", "plain")).toThrow(expect.objectContaining({ code: "not_directory" }));
     expect(() => prepare.ensure("ws-none", "conv-0001")).toThrow(expect.objectContaining({ code: "root_unusable" }));
+    const real = join(home, "cowork", "real-workspace", "shared", "outputs"); mkdirSync(real, { recursive: true });
+    symlinkSync(join(home, "cowork", "real-workspace"), join(home, "cowork", "workspaces", "ws3")); // a symlinked PARENT of the outputs root
+    expect(() => prepare.ensure("ws3", "conv-0001")).toThrow(expect.objectContaining({ code: "root_unusable" }));
     const sibling = join(home, "cowork", "workspaces", "ws2", "shared"); mkdirSync(sibling, { recursive: true }); symlinkSync(outputs, join(sibling, "outputs"));
     expect(() => prepare.ensure("ws2", "conv-0001")).toThrow(expect.objectContaining({ code: "root_unusable" })); // a symlinked root
   });
