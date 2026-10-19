@@ -24,6 +24,14 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.basisMark("list"), "")
         XCTAssertEqual(UsagePresentation.basisMark("estimate"), "est.")
         XCTAssertEqual(UsagePresentation.basisMark("unknown"), "unpriced")
+        let fromStats = UsageModelRow(source: .claudeCode, provider: "anthropic", model: "m", costBasis: "estimate", totals: UsageTotals(records: 3, syntheticRecords: 2))
+        XCTAssertEqual(UsagePresentation.basisMark(fromStats), "est.*")
+        XCTAssertEqual(UsagePresentation.basisMark(UsageModelRow(source: .claudeCode, provider: "anthropic", model: "m", costBasis: "estimate", totals: UsageTotals(records: 3))), "est.")
+        // Noon UTC of 2026-10-01.
+        XCTAssertEqual(UsagePresentation.statsHistoryLine(before: 1_790_856_000_000)?.hasPrefix("History before "), true)
+        XCTAssertEqual(UsagePresentation.statsHistoryLine(before: 1_790_856_000_000)?.contains("2026"), true)
+        XCTAssertEqual(UsagePresentation.statsHistoryLine(before: 1_790_856_000_000)?.hasSuffix("from Claude Code’s /stats"), true)
+        XCTAssertNil(UsagePresentation.statsHistoryLine(before: nil))
     }
 
     // MARK: plans
@@ -36,9 +44,9 @@ final class UsageWindowTests: XCTestCase {
         let slot = UsagePresentation.slot(provider: "codex", reading: reading, now: now)
         XCTAssertEqual(slot.title, "Codex")
         XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly"])
-        // The rings show what is LEFT (2 % and 34 % used → 98 % and 66 % left); the colour reads what is used.
-        for (ring, (left, used)) in zip(slot.rings, [(0.98, 0.02), (0.66, 0.34)]) {
-            XCTAssertEqual(ring.fraction, left, accuracy: 1e-9)
+        // The lines show what is USED (user 2026-10-18: back to used).
+        for (ring, used) in zip(slot.rings, [0.02, 0.34]) {
+            XCTAssertEqual(ring.fraction, used, accuracy: 1e-9)
             XCTAssertEqual(ring.used, used, accuracy: 1e-9)
         }
         XCTAssertNil(slot.rings[0].resets, "a passed reset says nothing")
@@ -49,6 +57,166 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(slot.sourceLine, "From Codex’s last session · 3 h ago · stale")
         XCTAssertEqual(slot.planType, "Plus")
         XCTAssertNil(slot.emptyLine)
+    }
+
+    func testAnAppNotOnThisMacGetsNoSlot() {
+        XCTAssertTrue(UsagePresentation.showsSlot(nil))
+        XCTAssertFalse(UsagePresentation.showsSlot(UsagePlanReading(provider: "codex", source: "not-installed", windows: [])))
+        XCTAssertTrue(UsagePresentation.showsSlot(UsagePlanReading(provider: "codex", source: "none", windows: [])))
+        XCTAssertTrue(UsagePresentation.showsSlot(UsagePlanReading(provider: "claude-code", source: "disabled", windows: [])))
+    }
+
+    func testTheAntigravitySlotNamesEachGroupsWindowsInGoogleBlue() {
+        let reading = UsagePlanReading(provider: "antigravity", source: "agy-cli", at: ms(-30), windows: [
+            UsagePlanWindow(id: "gemini-weekly", kind: "weekly", windowMinutes: 10_080, usedPercent: 27, resetsAt: ms(6 * 86_400), scope: "Gemini"),
+            UsagePlanWindow(id: "gemini-5h", kind: "five_hour", windowMinutes: 300, usedPercent: 0, resetsAt: ms(4 * 3600), scope: "Gemini"),
+            UsagePlanWindow(id: "3p-weekly", kind: "weekly", windowMinutes: 10_080, usedPercent: 27, resetsAt: ms(6 * 86_400), scope: "Claude & GPT"),
+            UsagePlanWindow(id: "3p-5h", kind: "five_hour", windowMinutes: 300, usedPercent: 0, resetsAt: ms(4 * 3600), scope: "Claude & GPT"),
+        ])
+        let slot = UsagePresentation.slot(provider: "antigravity", reading: reading, now: now)
+        XCTAssertEqual(slot.title, "Antigravity")
+        // Each group's lines together, in agy's order; the 5-hour window first within a group.
+        XCTAssertEqual(slot.rings.map(\.title), ["5-hour", "Weekly", "Other 5h", "Other W"])
+        XCTAssertEqual(slot.rings.first { $0.id == "gemini-weekly" }?.fraction ?? 0, 0.27, accuracy: 1e-9)
+        XCTAssertEqual(slot.sourceLine, "From Antigravity · just now")
+        XCTAssertNil(slot.planType, "agy names no plan")
+        XCTAssertEqual(UsagePresentation.slot(provider: "antigravity", reading: .init(provider: "antigravity", source: "none"), now: now).emptyLine,
+                       "No plan report from Antigravity")
+        XCTAssertFalse(UsagePresentation.showsSlot(UsagePlanReading(provider: "antigravity", source: "not-installed")))
+        XCTAssertEqual(UsagePresentation.plans(UsageSummary(range: "24h", antigravityPlan: reading)).map(\.provider), ["codex", "claude-code", "antigravity"])
+        XCTAssertEqual(NSColor(UsagePlanColor.of(provider: "antigravity")).usingColorSpace(.sRGB)?.blueComponent ?? 0, 0.957, accuracy: 0.01)
+        // A Claude Code per-model limit is still its model alone.
+        XCTAssertEqual(UsagePresentation.windowTitle(UsagePlanWindow(id: "s", kind: "weekly_scoped", usedPercent: 1, scope: "claude-fable-5-1")), "Fable")
+    }
+
+    func testEveryPlanLineTitleFitsItsColumnAndTheIslandsStaysAt52WithoutAntigravity() {
+        let font = Typography.sansNS(ofSize: Typography.tinySize, .medium)
+        let width = { (s: String) in (s as NSString).size(withAttributes: [.font: font]).width }
+        let titles = ["5-hour", "Weekly", "Fable", "Other 5h", "Other W"]
+        for compact in [true, false] {
+            let column = UsagePresentation.titleColumnWidth(titles, compact: compact)
+            for t in titles {
+                XCTAssertLessThanOrEqual(width(t), column, "\(t) truncates (compact: \(compact))")
+                // Under the pointer: the title grown from its leading edge never reaches the track, which starts a gap
+                // after the column and reaches left by half its growth.
+                let grown = width(t) * UsagePlanLine.titleScale(hovered: true)
+                let trackStart = column + UsagePlanLine.titleGap(compact: compact) - UsagePlanLine.lengthGrowth(hovered: true) / 2
+                XCTAssertLessThan(grown, trackStart, "\(t) touches the track on hover (compact: \(compact))")
+            }
+            XCTAssertLessThanOrEqual(column, 120, "a modest widening")
+        }
+        XCTAssertEqual(UsagePresentation.titleColumnWidth(["5-hour", "Weekly", "Fable", "Opus"], compact: true), 52)
+        XCTAssertEqual(UsagePresentation.titleColumnWidth(["5-hour", "Weekly", "Fable", "Opus"], compact: false), 72)
+        XCTAssertEqual(UsagePresentation.titleColumnWidth([], compact: true), 52)
+    }
+
+    func testOpenCodeIsASourceWithItsOwnCostMarkAndAToggleOnlyWhenInstalled() {
+        XCTAssertEqual(UsagePresentation.sourceTitle(.opencode), "OpenCode")
+        XCTAssertEqual(UsagePresentation.basisMark("reported"), "reported")
+        XCTAssertFalse(UsagePresentation.showsToggle(.opencode, summary: nil))
+        XCTAssertFalse(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h")))
+        XCTAssertTrue(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h", opencodeInstalled: true)))
+        XCTAssertFalse(UsagePresentation.showsToggle(.opencode, summary: UsageSummary(range: "24h", opencodeInstalled: false)))
+        XCTAssertTrue(UsagePresentation.showsToggle(.codex, summary: UsageSummary(range: "24h", opencodeInstalled: false)))
+        XCTAssertTrue(UsagePresentation.coverOptions.contains { $0.id == "opencode" })
+    }
+
+    func testAnOlderDaemonIsNeverAskedForOpenCodeANewerOneAlwaysIs() async {
+        let all = Set(UsageSource.allCases)
+        XCTAssertEqual(UsagePresentation.requestSources(all, summary: nil), [.winter, .codex, .claudeCode])
+        XCTAssertEqual(UsagePresentation.requestSources(all, summary: UsageSummary(range: "24h")), [.winter, .codex, .claudeCode])
+        // Not installed, but known: its stored rows still show.
+        XCTAssertEqual(UsagePresentation.requestSources(all, summary: UsageSummary(range: "24h", opencodeInstalled: false)), all)
+        let model = UsageWindowModel()
+        var seen: [Set<UsageSource>] = []
+        struct Refused: Error {}
+        // An older daemon: refuses `opencode`, and never says it knows it.
+        model.fetchSeries = { r, s in seen.append(s); if s.contains(.opencode) { throw Refused() }; return UsageSeries(range: r.rawValue) }
+        model.fetchSummary = { r, s in if s.contains(.opencode) { throw Refused() }; return UsageSummary(range: r.rawValue) }
+        await model.refresh()
+        await model.refresh()
+        XCTAssertFalse(model.failed)
+        XCTAssertNotNil(model.summary)
+        XCTAssertTrue(seen.allSatisfy { !$0.contains(.opencode) })
+    }
+
+    func testTheWindowModelSendsEachTrackingSwitch() async {
+        let model = UsageWindowModel()
+        var sent: [[Bool?]] = []
+        model.setTracking = { a, b, c, d in sent.append([a, b, c, d]) }
+        await model.setTrack(antigravity: false)
+        await model.setTrack(opencode: true)
+        XCTAssertEqual(sent, [[nil, nil, false, nil], [nil, nil, nil, true]])
+    }
+
+    func testAHiddenOpenCodeToggleNeverLeavesTheOthersAllOff() async {
+        let model = UsageWindowModel()
+        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue, opencodeInstalled: false) }
+        await model.refresh()
+        model.toggle(.codex)
+        model.toggle(.claudeCode)
+        model.toggle(.winter) // the last SHOWN one stays
+        XCTAssertEqual(model.sources, [.winter, .opencode])
+    }
+
+    func testAPlanLineThickensUnderThePointer() {
+        XCTAssertGreaterThan(UsagePlanLine.thickness(compact: true, hovered: true), UsagePlanLine.thickness(compact: true, hovered: false))
+        XCTAssertGreaterThan(UsagePlanLine.thickness(compact: false, hovered: true), UsagePlanLine.thickness(compact: false, hovered: false))
+        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: false), 0)
+        XCTAssertEqual(UsagePlanLine.lengthGrowth(hovered: true), 18.96, accuracy: 0.01)
+        XCTAssertGreaterThan(UsagePlanLine.titleScale(hovered: true), UsagePlanLine.titleScale(hovered: false))
+    }
+
+    func testTheUsedFigureSitsAtTheFillsEndAndTheLeftOneOnlyWhereItFits() {
+        // Half used on a 300 pt track: the used slot ends where the fill ends; the grey after it holds the left one.
+        let half = UsagePlanLine.figureLayout(width: 300, fraction: 0.5, compact: true)
+        XCTAssertEqual(half.usedSlot, 150)
+        XCTAssertTrue(half.showsLeft)
+        // A sliver of fill: the used slot never squeezes below a figure's width.
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.01, compact: true).usedSlot, UsagePlanLine.figureSlot(compact: true))
+        // Nearly full: no room for the left one.
+        XCTAssertFalse(UsagePlanLine.figureLayout(width: 300, fraction: 0.97, compact: true).showsLeft)
+    }
+
+    func testTheResetInsideAHoveredLineSaysTheTimeTodayAndTheDateOtherwise() {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let en = Locale(identifier: "en_US")
+        // now = Fri 2027-01-15 08:00 UTC.
+        XCTAssertEqual(UsagePresentation.hoverResetWords(now.addingTimeInterval(15 * 3600 + 600), now: now, calendar: utc, locale: en), "Resets 11:10pm")
+        XCTAssertEqual(UsagePresentation.hoverResetWords(now.addingTimeInterval(4 * 3600), now: now, calendar: utc, locale: en), "Resets 12pm")
+        XCTAssertEqual(UsagePresentation.hoverResetWords(now.addingTimeInterval(30 * 3600), now: now, calendar: utc, locale: en), "Resets Jan 16 at 2pm")
+    }
+
+    func testTheResetWordsGoInTheGreyElseTheFillElseNowhere() {
+        let words = UsagePlanLine.resetWidth("Resets Oct 19 at 2pm")
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.2, compact: true, resetWidth: words).reset, .grey)
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.9, compact: true, resetWidth: words).reset, .fill)
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 120, fraction: 0.5, compact: true, resetWidth: words).reset, .none)
+        XCTAssertEqual(UsagePlanLine.figureLayout(width: 300, fraction: 0.2, compact: true).reset, .none)
+    }
+
+    func testAPlanBadgeSpellsCodexsNamesAndAClaudePlansSize() {
+        XCTAssertEqual(UsagePresentation.planBadge("max_20x"), "Max 20x")
+        XCTAssertEqual(UsagePresentation.planBadge("max_5x"), "Max 5x")
+        XCTAssertEqual(UsagePresentation.planBadge("max"), "Max")
+        XCTAssertEqual(UsagePresentation.planBadge("prolite"), "Pro Lite")
+        XCTAssertEqual(UsagePresentation.planBadge("promax"), "Pro Max")
+        XCTAssertEqual(UsagePresentation.planBadge("pro"), "Pro")
+        XCTAssertEqual(UsagePresentation.planBadge("self_serve_business"), "Self Serve Business")
+    }
+
+    func testTheHeaderGrowsWithTheLines() {
+        XCTAssertEqual(UsagePlanSlotCard.headerScale(hovered: true), UsagePlanLine.titleScale(hovered: true))
+        XCTAssertEqual(UsagePlanSlotCard.headerScale(hovered: false), 1)
+    }
+
+    func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
+        XCTAssertEqual(UsagePlanLine.percents(0.344).used, 34)
+        XCTAssertEqual(UsagePlanLine.percents(0.344).left, 66)
+        XCTAssertEqual(UsagePlanLine.percents(0.995).used + UsagePlanLine.percents(0.995).left, 100)
+        XCTAssertEqual(UsagePlanLine.percents(-0.2).used, 0)
+        XCTAssertEqual(UsagePlanLine.percents(1.4).left, 0)
     }
 
     func testResetWordsCountDownAShortWindowAndDateALongOne() {
@@ -177,13 +345,16 @@ final class UsageWindowTests: XCTestCase {
         let model = UsageWindowModel()
         var seen: [Set<UsageSource>] = []
         model.fetchSeries = { r, s in seen.append(s); return UsageSeries(range: r.rawValue, totals: UsageTotals(costUsd: Double(s.count))) }
-        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue) }
+        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue, opencodeInstalled: true) }
         model.fetchSubscriptions = { [UsageSubscription(id: "x", name: "P", provider: "openai", price: 1)] }
         await model.refresh()
-        XCTAssertEqual(model.series?.totals.costUsd, 3)
+        // The first ask names no OpenCode (nothing said it exists yet); the daemon's answer does, so it is asked again.
+        XCTAssertEqual(seen.first, [.winter, .codex, .claudeCode])
+        XCTAssertEqual(model.series?.totals.costUsd, 4)
         XCTAssertEqual(model.subscriptions.map(\.id), ["x"])
         model.toggle(.codex)
         model.toggle(.claudeCode)
+        model.toggle(.opencode)
         model.toggle(.winter) // the last one stays
         XCTAssertEqual(model.sources, [.winter])
         await model.refresh()

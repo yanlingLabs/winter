@@ -4,6 +4,9 @@ The only startup program is the pinned `/init` built from apple/Cowork/WinterCow
 path is still refused. Nothing here runs it."""
 import argparse, hashlib, io, json, os, posixpath, re, shutil, stat, struct, subprocess, sys, tarfile, zlib
 from pathlib import Path, PurePosixPath
+# Under `python3 -I` the script's own directory is NOT on sys.path (that is the point of -I), so the sibling modules are found by an explicit insert of this file's directory
+# and nothing else: the interpreter still ignores PYTHON* variables, the user site and the current directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from packages import sha, bounded_file, bounded_read, xz_chunks
 import verify
 HERE=Path(__file__).resolve().parent

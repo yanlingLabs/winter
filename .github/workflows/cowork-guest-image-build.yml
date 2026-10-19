@@ -126,6 +126,16 @@ jobs:
           rm -rf "$kernel_work"
           python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-2"
           rm -rf "$kernel_work"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: guest-kernel-${{ github.run_id }}
+          path: |
+            ${{ env.IMAGE_WORK }}/kernel-1/Image
+            ${{ env.IMAGE_WORK }}/kernel-1/kernel-receipt.json
+            ${{ env.IMAGE_WORK }}/kernel-1/resolved.config
+            ${{ env.IMAGE_WORK }}/kernel-2/kernel-receipt.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Build the production initramfs twice (an exit of 3 means a built digest differs from pins.json, and is published below)
         shell: bash
         run: |

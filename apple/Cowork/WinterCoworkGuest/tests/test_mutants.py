@@ -54,6 +54,7 @@ MUTANTS = [
     ("init/init_linux.c","    sigprocmask(SIG_SETMASK, &none, NULL);","","pid1"),
     ("init/init_linux.c","        setsid();\n        int sources[4]","        int sources[4]","pid1"),
     ("init/init_linux.c","    close(config_fd);\n    close(stdin_pipe[0]);\n    close(stdout_pipe[1]);\n    release","    close(stdin_pipe[0]);\n    close(stdout_pipe[1]);\n    release","pid1"),
+    ("init/trusted_config.c","if (index == count || (seen & (1u << index))) return 0;","if (index == count) return 0;","config"),
     ("init/trusted_config.c","st.st_nlink != 1 ||","0 ||","config"),
     ("init/trusted_config.c","(st.st_mode & 0777) != 0400 ||","0 ||","config"),
     ("init/trusted_config.c","|| (size_t)st.st_size != length)","|| 0)","config"),

@@ -256,10 +256,19 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   const kernelAt = lines.findIndex((l) => l.includes("native_build.py")), imageAt = lines.findIndex((l) => l.includes("/image.py"));
   if (!(kernelAt >= 0 && imageAt > kernelAt)) bad("order must be kernel builds, then image builds");
 
-  // 10. Result: exactly two uploads. The first is the files to publish (no `if`, so only a clean build reaches it), 14 days; the diagnostics upload runs on failure only, bounded, 7 days, last.
+  // 10. Result: exactly three uploads. The kernel is uploaded as soon as both kernel builds agree on being built (no `if`), so a later failure cannot lose it, 14 days; then the files to publish
+  //     (no `if`, so only a clean build reaches it), 14 days; the diagnostics upload runs on failure only, bounded, 7 days, last.
   const uploads = steps.filter((s) => s.uses?.startsWith("actions/upload-artifact@"));
-  if (uploads.length !== 2) bad("exactly two uploads");
-  const [published, diagnostics] = uploads;
+  if (uploads.length !== 3) bad("exactly three uploads");
+  const [kernelUpload, published, diagnostics] = uploads;
+  if (kernelUpload?.if !== undefined) bad("the kernel upload must run on success only (no if:)");
+  if (JSON.stringify(Object.keys(kernelUpload?.with ?? {}).sort()) !== JSON.stringify(["if-no-files-found", "name", "path", "retention-days"])) bad("kernel upload keys");
+  const kernelPaths = String(kernelUpload?.with?.path ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (JSON.stringify(kernelPaths) !== JSON.stringify(["${{ env.IMAGE_WORK }}/kernel-1/Image", "${{ env.IMAGE_WORK }}/kernel-1/kernel-receipt.json", "${{ env.IMAGE_WORK }}/kernel-1/resolved.config", "${{ env.IMAGE_WORK }}/kernel-2/kernel-receipt.json"])) bad("kernel upload must carry only the first kernel, its receipt and config, and the second receipt");
+  if (kernelUpload?.with?.["if-no-files-found"] !== "error") bad("kernel upload must fail when files are missing");
+  if (kernelUpload?.with?.["retention-days"] !== 14) bad("kernel retention must be 14 days");
+  const kernelUploadAt = steps.indexOf(kernelUpload as Step), kernelBuildAt = steps.findIndex((s) => (s.run ?? "").includes("native_build.py")), imageBuildAt = steps.findIndex((s) => (s.run ?? "").includes("/image.py"));
+  if (!(kernelBuildAt >= 0 && kernelBuildAt < kernelUploadAt && kernelUploadAt < imageBuildAt)) bad("the kernel upload must come after the kernel builds and before the image builds");
   if (published?.if !== undefined) bad("the publish upload must run on success only (no if:)");
   if (JSON.stringify(Object.keys(published?.with ?? {}).sort()) !== JSON.stringify(["if-no-files-found", "name", "path", "retention-days"])) bad("publish upload keys");
   if (published?.with?.path !== "${{ env.IMAGE_WORK }}/publish/") bad("publish upload must carry only the collected folder");
@@ -270,7 +279,7 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   if (diagPaths.length === 0 || diagPaths.some((p) => !/^\$\{\{ env\.IMAGE_WORK \}\}\/(kernel-[12]\/(kernel-receipt\.json|build\.log)|artifact\/build-[12]\/(receipt\.json|runtime-build\.log)|host-packages\.txt|digests\.json)$/.test(p))) bad("diagnostics upload must carry only bounded records");
   if (diagnostics?.with?.["if-no-files-found"] !== "ignore") bad("diagnostics upload must tolerate absent files");
   if (diagnostics?.with?.["retention-days"] !== 7) bad("diagnostics retention must be 7 days");
-  if (uploads.length === 2 && steps[steps.length - 1] !== diagnostics) bad("diagnostics upload is the last step");
+  if (uploads.length === 3 && steps[steps.length - 1] !== diagnostics) bad("diagnostics upload is the last step");
   const assertAt = steps.findIndex((s) => (s.run ?? "").includes("image_build_report.py assert"));
   const reportAt = steps.findIndex((s) => (s.run ?? "").includes("image_build_report.py report"));
   const verifyAt = steps.findIndex((s) => (s.run ?? "").includes("verify.py"));
@@ -403,11 +412,17 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["the images are built before the kernel", (t) => { const k = t.match(/      - name: Build the pinned kernel twice[\s\S]*?(?=      - name: Build the production initramfs)/)![0]; return t.replace(k, "").replace("      - name: Read both cpios back", `${k}      - name: Read both cpios back`); }, "order must be kernel builds, then image builds"],
   ["the publish upload runs on failure too", sub("      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: guest-image-${{ github.run_id }}", "      - if: always()\n        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: guest-image-${{ github.run_id }}"), "the publish upload must run on success only (no if:)"],
   ["the publish upload carries the build tree", sub("path: ${{ env.IMAGE_WORK }}/publish/", "path: ${{ env.IMAGE_WORK }}/"), "publish upload must carry only the collected folder"],
-  ["the publish upload tolerates missing files", sub("          if-no-files-found: error", "          if-no-files-found: ignore"), "publish upload must fail when files are missing"],
-  ["publish retention is 90 days", sub("retention-days: 14", "retention-days: 90"), "publish retention must be 14 days"],
+  ["the publish upload tolerates missing files", (t) => t.replace(/(name: guest-image-\$\{\{ github\.run_id \}\}\n          path: \$\{\{ env\.IMAGE_WORK \}\}\/publish\/\n          if-no-files-found: )error/, "$1ignore"), "publish upload must fail when files are missing"],
+  ["publish retention is 90 days", (t) => t.replace(/(name: guest-image-\$\{\{ github\.run_id \}\}[\s\S]*?retention-days: )14/, "$190"), "publish retention must be 14 days"],
   ["diagnostics run always", sub("if: failure() && env.IMAGE_WORK != ''", "if: always()"), "diagnostics upload must run on failure only"],
   ["diagnostics carry the cpio", sub("            ${{ env.IMAGE_WORK }}/digests.json\n", "            ${{ env.IMAGE_WORK }}/digests.json\n            ${{ env.IMAGE_WORK }}/artifact/build-1/immutable-root.cpio\n"), "diagnostics upload must carry only bounded records"],
   ["diagnostics retention is 90 days", sub("retention-days: 7", "retention-days: 90"), "diagnostics retention must be 7 days"],
+  ["the kernel upload is dropped", sub(/      - uses: actions\/upload-artifact@[0-9a-f]{40}\n        with:\n          name: guest-kernel-[\s\S]*?retention-days: 14\n/, ""), "exactly three uploads"],
+  ["the kernel upload runs always", sub("      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: guest-kernel-${{ github.run_id }}", "      - if: always()\n        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: guest-kernel-${{ github.run_id }}"), "the kernel upload must run on success only (no if:)"],
+  ["the kernel upload carries the build tree", sub("            ${{ env.IMAGE_WORK }}/kernel-2/kernel-receipt.json\n          if-no-files-found: error", "            ${{ env.IMAGE_WORK }}/kernel-2/kernel-receipt.json\n            ${{ env.IMAGE_WORK }}/kernel-work/\n          if-no-files-found: error"), "kernel upload must carry only the first kernel"],
+  ["the kernel upload tolerates missing files", sub("          name: guest-kernel-${{ github.run_id }}\n          path: |", "          name: guest-kernel-${{ github.run_id }}\n          x: y\n          path: |"), "kernel upload keys"],
+  ["the kernel upload keeps files 90 days", (t) => t.replace(/(guest-kernel-[\s\S]*?retention-days: )14/, "$190"), "kernel retention must be 14 days"],
+  ["a script runs without dash I", sub("python3 -I -S -B scripts/cowork-guest-artifact/image_build_report.py report", "python3 -S -B scripts/cowork-guest-artifact/image_build_report.py report"), "unreviewed command line"],
   ["the assert step is dropped", sub(/      - name: Turn the run red[\s\S]*?(?=      - name: Retain bounded)/, ""), "order must be verify, report, publish upload, assert, diagnostics upload"],
   ["the assert step runs before the upload", (t) => { const a = t.match(/      - name: Turn the run red[\s\S]*?(?=      - name: Retain bounded)/)![0]; return t.replace(a, "").replace("      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: guest-image-${{ github.run_id }}", `${a}      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: guest-image-\${{ github.run_id }}`); }, "order must be verify, report, publish upload, assert, diagnostics upload"],
 ];
