@@ -28,9 +28,11 @@ import type { CoordinationPathInputs } from "../native/admission-probes";
  */
 
 export const COWORK_LAUNCHER_IDENTIFIER = "com.winter.cowork.launcher";
+/** What `dev:cowork-native` signs the dev launcher as: the launcher reads which daemon it serves from its OWN signing identifier, so a dev daemon expects this one. */
+export const COWORK_LAUNCHER_DEV_IDENTIFIER = "com.winter.cowork.launcher.dev";
 export const COWORK_DEFAULT_TEAM = "37N77U9RSZ";
 /** Identifier + Winter's team under Apple's anchor, the same form as `scripts/embed-cowork-native.sh` states and `embed-computer-helper.sh` uses. */
-export const coworkLauncherRequirement = (team: string = COWORK_DEFAULT_TEAM): string => `identifier "${COWORK_LAUNCHER_IDENTIFIER}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`;
+export const coworkLauncherRequirement = (team: string = COWORK_DEFAULT_TEAM, identifier: string = COWORK_LAUNCHER_IDENTIFIER): string => `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`;
 /** `Winter.app/Contents/Helpers/WinterCowork/{winter-cowork-launcher,winter-cowork-worker}`, next to `Contents/Resources/winter-core`. */
 export function coworkNativeBinaryPaths(executablePath: string): { launcherPath: string; workerPath: string } {
   const base = resolve(dirname(executablePath), "..", "Helpers", "WinterCowork");
@@ -52,6 +54,8 @@ export interface CoworkNativeProductionOptions {
   /** The daemon's own executable (`process.execPath` in production). */
   readonly executablePath: string;
   readonly team?: string;
+  /** The launcher's signing identifier: the dist one by default, the dev one for the dev daemon (`WINTER_PROFILE=dev`, chosen by the activation seam). */
+  readonly launcherIdentifier?: string;
   /** `ioreg`, `sysctl` and the process table. The default is the real ones, created lazily and only here. */
   readonly adapters?: { runCommand: HostCommandRunner; sysctl: SysctlReader; processes: ProcessTable };
   readonly space?: FilesystemSpaceReader;
@@ -135,7 +139,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   const journal = createCoworkLaunchJournal(journalDirectory);
 
   const { launcherPath, workerPath } = coworkNativeBinaryPaths(options.executablePath);
-  const launcher = createCoworkLauncherPort({ launcherPath, workerPath, receiptDirectory, requirement: coworkLauncherRequirement(options.team), processes: adapters.processes, ...options.launcher });
+  const launcher = createCoworkLauncherPort({ launcherPath, workerPath, receiptDirectory, requirement: coworkLauncherRequirement(options.team, options.launcherIdentifier), processes: adapters.processes, ...options.launcher });
 
   const instanceNonce = randomBytes(12).toString("hex"), daemonPid = options.daemonPid ?? process.pid;
   const daemon = (): AdmissionOwner => {

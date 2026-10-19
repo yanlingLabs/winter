@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import type { CoworkRepository } from "./repository";
 import type { RuntimeStateDb } from "../runtime-state/db";
-import { createCoworkNativeProductionEnvironment } from "./host-env/environment";
+import { COWORK_LAUNCHER_DEV_IDENTIFIER, createCoworkNativeProductionEnvironment } from "./host-env/environment";
 import type { CoworkNativeEnvironment } from "./native-wiring";
 
 /*
@@ -23,5 +23,5 @@ export interface CoworkNativeActivationContext {
 export function coworkNativeProductionEnvironment(context: () => CoworkNativeActivationContext): (() => CoworkNativeEnvironment) | undefined {
   if (!COWORK_NATIVE_ENVIRONMENT_ACTIVATED) return undefined;
   const { home, db, records, env } = context();
-  return () => createCoworkNativeProductionEnvironment({ home, db, records, coordination: { env, homeDirectory: homedir() }, executablePath: process.execPath });
+  return () => createCoworkNativeProductionEnvironment({ home, db, records, coordination: { env, homeDirectory: homedir() }, executablePath: process.execPath, ...(env.WINTER_PROFILE === "dev" ? { launcherIdentifier: COWORK_LAUNCHER_DEV_IDENTIFIER } : {}) });
 }

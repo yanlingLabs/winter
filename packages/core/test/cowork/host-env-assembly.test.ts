@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join } from "node:path";
 import { CoworkImagePins } from "../../src/cowork/images";
 import { COWORK_HOME_BINDING_DDL, createCoworkHomeBindingStore } from "../../src/cowork/host-env/stores";
-import { COWORK_DEFAULT_TEAM, COWORK_LAUNCHER_IDENTIFIER, createCoworkNativeProductionEnvironment, hostBootFromProbes, type CoworkNativeProductionOptions } from "../../src/cowork/host-env/environment";
+import { COWORK_DEFAULT_TEAM, COWORK_LAUNCHER_DEV_IDENTIFIER, COWORK_LAUNCHER_IDENTIFIER, coworkLauncherRequirement, createCoworkNativeProductionEnvironment, hostBootFromProbes, type CoworkNativeProductionOptions } from "../../src/cowork/host-env/environment";
 import { COWORK_INSTALLATION_ID_FILE } from "../../src/cowork/host-env/coordination";
 import { createCoworkNativeWiring, type CoworkNativeEnvironment } from "../../src/cowork/native-wiring";
 import { CoworkNativeSimulatedCrash } from "../../src/cowork/native/host";
@@ -129,10 +129,30 @@ describe("construction", () => {
 });
 
 describe("the launcher's identity", () => {
+  test("the dist requirement names the dist identifier and the team; the dev daemon asks for the dev identifier, which is what dev:cowork-native signs", async () => {
+    expect(coworkLauncherRequirement()).toBe('identifier "com.winter.cowork.launcher" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ"');
+    expect(coworkLauncherRequirement(undefined, COWORK_LAUNCHER_DEV_IDENTIFIER)).toBe('identifier "com.winter.cowork.launcher.dev" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ"');
+    // the same strings the scripts state (the signing side)
+    const { coworkNativeIdentifier, coworkRequirement } = await import("../../../../scripts/cowork-native-lib");
+    expect(coworkRequirement(coworkNativeIdentifier("launcher", "dev"))).toBe(coworkLauncherRequirement(undefined, COWORK_LAUNCHER_DEV_IDENTIFIER));
+    expect(coworkRequirement(coworkNativeIdentifier("launcher"))).toBe(coworkLauncherRequirement());
+    // and the seam picks the dev identifier from the profile
+    expect(readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "native-activation.ts"), "utf8")).toContain('env.WINTER_PROFILE === "dev" ? { launcherIdentifier: COWORK_LAUNCHER_DEV_IDENTIFIER }');
+  });
   test("the identifier and team the daemon expects are the ones the launcher package compiles in (read from the Swift source)", () => {
     const swift = readFileSync(join(import.meta.dir, "..", "..", "..", "..", "apple", "Cowork", "WinterCoworkLauncher", "Sources", "LauncherCore", "Identity", "CodeIdentity.swift"), "utf8");
     expect(swift).toContain(`launcherIdentifier = "${COWORK_LAUNCHER_IDENTIFIER}"`);
     expect(swift).toContain(`teamID = "${COWORK_DEFAULT_TEAM}"`);
+  });
+});
+
+describe("an omitted bundle", () => {
+  test("an omitted bundle (no Contents/Helpers/WinterCowork) gives the daemon nothing to spawn: the real launcher port refuses launcher_missing, before any process exists", async () => {
+    const h = createHarness(), w = world(); withBindingTable(h);
+    const env = createCoworkNativeProductionEnvironment(options(h, w)); // executablePath is <root>/Winter.app/Contents/Resources/winter-core; no Helpers directory exists beside it
+    expect(existsSync(join(h.root, "Winter.app", "Contents", "Helpers"))).toBe(false);
+    await expect(env.launcher.spawn({ workspaceId: h.workspaceId, incarnationId: "inc-1", leaseEpoch: 1 })).rejects.toMatchObject({ code: "launcher_missing" });
+    env.close?.();
   });
 });
 
