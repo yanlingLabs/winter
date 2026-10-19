@@ -1,7 +1,7 @@
 import Foundation
 
 // Usage and cost tracking (`docs/claude/usage.md`): `usage.summary`, `usage.series`, `usage.subscriptions.*`,
-// `usage.setTracking` — local harness clients only. Costs are USD; a cost's basis says whether it is the runtime's own
+// `usage.setTracking`, `usage.alarms.*` — local harness clients only. Costs are USD; a cost's basis says whether it is the runtime's own
 // list price, Winter's list-price estimate (a subscription's tokens, another app's usage) or unknown.
 
 public enum UsageRange: String, Sendable, CaseIterable {
@@ -27,11 +27,35 @@ public struct UsagePlanWindow: Sendable, Equatable, Identifiable {
     public let stale: Bool
     /// `older_than_window` or `reset_passed`.
     public let staleReason: String?
+    /// The window's STABLE key (the daemon's `planWindowKey`: its kind and scope) — what an alarm names. Nil from an
+    /// older daemon.
+    public let windowKey: String?
 
     public init(id: String, kind: String, windowMinutes: Double? = nil, usedPercent: Double, resetsAt: Double? = nil,
-                scope: String? = nil, severity: String? = nil, stale: Bool = false, staleReason: String? = nil) {
+                scope: String? = nil, severity: String? = nil, stale: Bool = false, staleReason: String? = nil,
+                windowKey: String? = nil) {
         self.id = id; self.kind = kind; self.windowMinutes = windowMinutes; self.usedPercent = usedPercent
         self.resetsAt = resetsAt; self.scope = scope; self.severity = severity; self.stale = stale; self.staleReason = staleReason
+        self.windowKey = windowKey
+    }
+}
+
+/// A one-shot plan alarm (`usage.alarms.*`): it fires once when its window's used share reaches `thresholdPercent`,
+/// and is then deleted.
+public struct UsageAlarm: Sendable, Equatable, Identifiable {
+    public let id: String
+    /// `codex`, `claude-code`, `antigravity`.
+    public let provider: String
+    /// The window's stable key (`UsagePlanWindow.windowKey`).
+    public let windowKey: String
+    /// 1…100, whole.
+    public let thresholdPercent: Int
+    /// Epoch ms.
+    public let createdAt: Double
+
+    public init(id: String, provider: String, windowKey: String, thresholdPercent: Int, createdAt: Double = 0) {
+        self.id = id; self.provider = provider; self.windowKey = windowKey; self.thresholdPercent = thresholdPercent
+        self.createdAt = createdAt
     }
 }
 
@@ -145,13 +169,16 @@ public struct UsageSummary: Sendable, Equatable {
     public let opencodeInstalled: Bool?
     /// Epoch ms (noon UTC of that day): Claude Code days before it come from its own `/stats` cache. Nil = none imported.
     public let claudeCodeStatsBefore: Double?
+    /// The plan alarms, oldest first. Nil = a daemon with no alarms at all (the lines then take no clicks).
+    public let alarms: [UsageAlarm]?
 
     public init(range: String, from: Double = 0, to: Double = 0, bucketMs: Double = 0, totals: UsageTotals = .init(),
                 bySource: [UsageSource: UsageTotals] = [:], topModels: [UsageModelRow] = [], spark: [Double] = [],
                 sparkTokens: [Double] = [], codexPlan: UsagePlanReading? = nil, claudeCodePlan: UsagePlanReading? = nil,
                 antigravityPlan: UsagePlanReading? = nil, trackCodex: Bool = true, trackClaudeCode: Bool = true,
                 trackAntigravity: Bool? = nil, trackOpencode: Bool? = nil, opencodeInstalled: Bool? = nil,
-                claudeCodeStatsBefore: Double? = nil) {
+                claudeCodeStatsBefore: Double? = nil, alarms: [UsageAlarm]? = nil) {
+        self.alarms = alarms
         self.range = range; self.from = from; self.to = to; self.bucketMs = bucketMs; self.totals = totals; self.bySource = bySource
         self.topModels = topModels; self.spark = spark; self.sparkTokens = sparkTokens; self.codexPlan = codexPlan
         self.claudeCodePlan = claudeCodePlan; self.antigravityPlan = antigravityPlan; self.trackCodex = trackCodex
@@ -248,6 +275,31 @@ extension WinterClient {
         _ = try await request("usage.setTracking", params: .object(p))
     }
 
+    /// The plan alarms, oldest first.
+    public func usageAlarms() async throws -> [UsageAlarm] {
+        Self.decodeUsageAlarms(try await request("usage.alarms.list", params: .object([:]))["alarms"])
+    }
+
+    /// Sets an alarm (a whole percent, 1…100) on one plan window; answers the whole list (one already set for the same
+    /// window and threshold is kept, not doubled).
+    public func usageSetAlarm(provider: String, windowKey: String, thresholdPercent: Int) async throws -> [UsageAlarm] {
+        let p: [String: JSONValue] = ["provider": .string(provider), "windowKey": .string(windowKey),
+                                      "thresholdPercent": .number(Double(thresholdPercent))]
+        return Self.decodeUsageAlarms(try await request("usage.alarms.set", params: .object(p))["alarms"])
+    }
+
+    /// Acknowledges a fired alarm's notice (dismissed, opened, or shown its full time): the daemon forgets it. True when
+    /// this call removed it.
+    @discardableResult
+    public func usageAckAlarm(id: String) async throws -> Bool {
+        try await request("usage.alarms.ack", params: .object(["id": .string(id)]))["acked"]?.boolValue ?? false
+    }
+
+    /// Removes an alarm; answers the whole list.
+    public func usageRemoveAlarm(id: String) async throws -> [UsageAlarm] {
+        Self.decodeUsageAlarms(try await request("usage.alarms.remove", params: .object(["id": .string(id)]))["alarms"])
+    }
+
     // MARK: - PURE decoders
 
     private static func num(_ v: JSONValue?) -> Double? { if case .number(let n)? = v { return n }; return nil }
@@ -282,7 +334,8 @@ extension WinterClient {
             guard let id = w["id"]?.stringValue, let pct = num(w["usedPercent"]) else { return nil }
             return UsagePlanWindow(id: id, kind: w["kind"]?.stringValue ?? "other", windowMinutes: num(w["windowMinutes"]), usedPercent: pct,
                                    resetsAt: num(w["resetsAt"]), scope: w["scope"]?.stringValue, severity: w["severity"]?.stringValue,
-                                   stale: w["stale"]?.boolValue ?? false, staleReason: w["staleReason"]?.stringValue)
+                                   stale: w["stale"]?.boolValue ?? false, staleReason: w["staleReason"]?.stringValue,
+                                   windowKey: w["windowKey"]?.stringValue)
         }
         let status = (v["statusOnly"]?.arrayValue ?? []).compactMap { w -> UsagePlanStatusWindow? in
             guard let s = w["status"]?.stringValue else { return nil }
@@ -302,7 +355,18 @@ extension WinterClient {
                      trackAntigravity: r["tracking"]?["antigravity"]?.boolValue,
                      trackOpencode: r["tracking"]?["opencode"]?.boolValue,
                      opencodeInstalled: r["installed"]?["opencode"]?.boolValue,
-                     claudeCodeStatsBefore: num(r["history"]?["claudeCodeStats"]?["before"]))
+                     claudeCodeStatsBefore: num(r["history"]?["claudeCodeStats"]?["before"]),
+                     alarms: r["alarms"].map { decodeUsageAlarms($0) })
+    }
+
+    /// PURE: a list of alarms; a malformed row is skipped.
+    public static func decodeUsageAlarms(_ v: JSONValue?) -> [UsageAlarm] {
+        (v?.arrayValue ?? []).compactMap { a in
+            guard let id = a["id"]?.stringValue, let provider = a["provider"]?.stringValue, let key = a["windowKey"]?.stringValue,
+                  let threshold = num(a["thresholdPercent"]) else { return nil }
+            return UsageAlarm(id: id, provider: provider, windowKey: key, thresholdPercent: Int(threshold.rounded()),
+                              createdAt: num(a["createdAt"]) ?? 0)
+        }
     }
 
     public static func decodeUsageSeries(_ r: JSONValue) -> UsageSeries {

@@ -26,6 +26,7 @@ import { isDefaultWinterHome } from "../winter-dir";
 import { ConnWriter, LineDecoder, METHODS, PROTOCOL_VERSION, encodeLine, type SessionEvent, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../daemon";
+import { USAGE_INERT } from "../usage/wiring";
 import { isCompiledDaemon } from "./embedded";
 
 export type EmbeddedProbeResult =
@@ -143,7 +144,7 @@ export async function runEmbeddedProbe(input: { home: string | undefined; homedi
   );
   let daemon: RunningDaemon | undefined;
   try {
-    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "probe-secrets")), agentProvider: null });
+    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "probe-secrets")), agentProvider: null, usage: USAGE_INERT });
     const client = await connect(daemon.socketPath);
     try {
       await client.call(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: daemon.tokens.harness, clientName: "embedded-probe" });

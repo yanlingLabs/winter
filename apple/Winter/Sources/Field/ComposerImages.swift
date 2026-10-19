@@ -358,11 +358,13 @@ struct ComposerImagesRefusal: Error, Equatable {
     let message: String
 }
 
-/// Whether a session takes composer images at all: a CODE session only (an absent mode is code), and
-/// FAIL-CLOSED on a row not loaded yet — no row, no intake, AppKit's paste runs.
+/// Whether a session takes composer attachments (images and files) at all: a CODE session (an absent mode is code)
+/// or, since 2026-10-19, DISPATCH — never chat — and FAIL-CLOSED on a row not loaded yet: no row, no intake, AppKit's
+/// paste runs. The daemon's `sessionTakesAttachments` (`packages/core/src/ipc/server.ts`) is the same rule, so a
+/// draft this lets through is never refused for its session's mode.
 func composerImageInputEnabled(row: SessionSummary?) -> Bool {
     guard let row else { return false }
-    return row.mode == nil || row.mode == "code"
+    return row.mode == nil || row.mode == "code" || row.mode == "dispatch"
 }
 
 /// Whether the model in force accepts images, per the synced catalogue. A model the catalogue does

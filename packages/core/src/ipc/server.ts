@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, UsageSummaryParams, UsageSeriesParams, UsageSubscriptionsSetParams, UsageSubscriptionsRemoveParams, UsageSetTrackingParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE, IslandPendingParams, IslandShownParams, IslandHostsParams, IslandUsageParams, UsageSummaryParams, UsageSeriesParams, UsageSubscriptionsSetParams, UsageSubscriptionsRemoveParams, UsageSetTrackingParams, UsageAlarmsListParams, UsageAlarmsSetParams, UsageAlarmsRemoveParams, UsageAlarmsAckParams, CLIENT_CAPABILITY_ISLAND, ISLAND_CHANGED_NOTIFICATION, IslandActivityParams, ISLAND_ACTIVITY_CHANGED_NOTIFICATION,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams, ComputerUseWakesCancelParams,
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, DAEMON_FEATURE_ATTACHMENT_FILES, FILE_REFERENCE_INVALID, USER_MESSAGE_ATTACHMENTS_MAX, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, FILE_SESSION_NOT_CODE, type UserMessageFileRef, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
@@ -102,7 +102,7 @@ import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { imagesAcceptedBy, rowForTag, toolSearchSupportedBy } from "../runtime-sdk/provider-selection";
-import { StageImageRefusal, stageSessionImage, validateFileRefs, validateImageRefs } from "../agent/stage-image";
+import { StageImageRefusal, stageSessionImage, stagedPathsNamedBy, validateFileRefs, validateImageRefs } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -981,6 +981,24 @@ function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
   }
 }
 
+/** Image and file attachments (`session.stageImage`, `session.send`/`steer`'s `images`/`files`): the session
+ *  modes that take them — code (an absent mode, the store-wide convention) and, since 2026-10-19, dispatch, whose
+ *  model has `Read` and `Bash` too. Chat never does: it has no file tools to open a path with. One predicate for
+ *  the three doors, so they can never disagree with each other (or with the Mac's `composerImageInputEnabled`). */
+export function sessionTakesAttachments(mode: string | null | undefined): boolean {
+  const m = mode ?? "code";
+  return m === "code" || m === "dispatch";
+}
+
+/** The refusal sentence for a session that takes no attachments (`image_session_not_code` / `file_session_not_code`
+ *  — the wire codes keep their names). */
+const ATTACHMENTS_SESSION_MESSAGE = (kind: "images" | "files"): string => `${kind} can only be added to code and dispatch sessions`;
+
+/** How much of a session's log `session.stageImage`'s prune reads for the staged copies its messages still name
+ *  (`pruneStagedImages`'s `keep`): the RECENT past, one bounded read — never the whole log of a session that
+ *  lives for months (Dispatch). */
+const STAGED_IMAGE_KEEP_TAIL_BYTES = 4 * 1024 * 1024;
+
 /** WS-21 (spec §4.4): the MCP doors speak claude's three scopes. `local` and `project` name a project,
  *  so they need the caller's `cwd`. The local entry in `sdk/.winter.json` is keyed by `localScopeKeyFor`
  *  (review I5 — exactly the run home's key); the project file lives at the project root the run home reads
@@ -1242,24 +1260,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
 
   /**
-   * Code-mode image input: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
-   * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
-   * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
-   * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
-   * so a remote `images` is never one it could have meant. A non-code session refuses
-   * `image_session_not_code`; every entry is then held to `validateImageRefs` (a file this session
-   * staged, or the user's own image file that the Read tool may itself read; `n` unique and in `text`).
+   * The model-capability BACKSTOP for attached images: the session's CURRENT model, by the precedence
+   * the session's own driver spawns it with (`session-driver.ts`'s `optionsFor`) — its own override,
+   * else, for DISPATCH, the live `pinsFor(settings).dispatch` (`session.setModel` refuses a dispatch
+   * target, so the pin is what it runs), and for code the daemon's live default — for a model switched
+   * after the client attached the image. No catalog row at all refuses too: there is no evidence the
+   * model reads an image. Run by `session.stageImage` and by `session.send`/`session.steer` carrying
+   * `images` (a dragged file is never staged, so the send is the only door its image passes through).
    */
-  /**
-   * The model-capability BACKSTOP for code-mode images: the session's CURRENT model, by the same
-   * precedence `assertEffortSelectable` resolves it (its own override, else the daemon's live
-   * default) — for a model switched after the client attached the image. No catalog row at all
-   * refuses too: there is no evidence the model reads an image. Run by `session.stageImage` and by
-   * `session.send`/`session.steer` carrying `images` (a dragged file is never staged, so the send is
-   * the only door its image passes through).
-   */
-  function assertModelAcceptsImages(meta: { model?: string | null | undefined }): void {
-    const model = meta.model ?? opts.liveModel?.() ?? "";
+  function assertModelAcceptsImages(meta: { model?: string | null | undefined; mode?: string | null | undefined }): void {
+    const model = meta.model ?? (meta.mode === "dispatch" ? pinsFor(liveSettingsFor(opts)).dispatch : opts.liveModel?.()) ?? "";
     // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
     // answer — "this model doesn't support images" would name a model that does not exist.
     if (model === "" || model === UNSTATED_TAG) {
@@ -1270,13 +1280,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
+  /**
+   * Image and file attachments: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
+   * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
+   * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
+   * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
+   * so a remote `images` is never one it could have meant. A session that takes no attachments (chat —
+   * `sessionTakesAttachments`) refuses `image_session_not_code`; every entry is then held to
+   * `validateImageRefs` (a file this session staged, or the user's own image file that the Read tool may
+   * itself read; `n` unique and in `text`).
+   */
   function checkedImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined, role: string | undefined): UserMessageImageRef[] | undefined {
     if (images === undefined || images.length === 0) return undefined;
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be sent by a local client", { code: IMAGE_REFERENCE_INVALID });
     let meta: ReturnType<SessionStore["meta"]>;
     try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-    if ((meta.mode ?? "code") !== "code") {
-      throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+    if (!sessionTakesAttachments(meta.mode)) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, ATTACHMENTS_SESSION_MESSAGE("images"), { code: IMAGE_SESSION_NOT_CODE });
     }
     assertModelAcceptsImages(meta);
     try {
@@ -1288,9 +1308,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
 
   /**
-   * Code-mode file attachments (2026-10-13): `session.send`/`session.steer`'s `files`, checked beside the
+   * File attachments (code 2026-10-13, dispatch 2026-10-19): `session.send`/`session.steer`'s `files`, checked beside the
    * images and BEFORE anything is resumed or appended. Same doors as `checkedImageRefs` — a local client
-   * only, a code session only — but no model-capability check (the model is given a path, as text) and
+   * only, a code or dispatch session only — but no model-capability check (the model is given a path, as text) and
    * every entry held to `validateFileRefs` (any file or folder the Read tool may read). Images and files together
    * are at most `USER_MESSAGE_ATTACHMENTS_MAX` (`imageCount` is the message's images), which keeps a message's
    * paths inside the per-event cap.
@@ -1300,8 +1320,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be sent by a local client", { code: FILE_REFERENCE_INVALID });
     let meta: ReturnType<SessionStore["meta"]>;
     try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-    if ((meta.mode ?? "code") !== "code") {
-      throw new RpcFailure(ERR.INVALID_PARAMS, "files can only be added to code sessions", { code: FILE_SESSION_NOT_CODE });
+    if (!sessionTakesAttachments(meta.mode)) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, ATTACHMENTS_SESSION_MESSAGE("files"), { code: FILE_SESSION_NOT_CODE });
     }
     if (files.length + imageCount > USER_MESSAGE_ATTACHMENTS_MAX) {
       throw new RpcFailure(ERR.INVALID_PARAMS, USER_MESSAGE_ATTACHMENTS_MAX_MESSAGE, { code: FILE_REFERENCE_INVALID });
@@ -3602,7 +3622,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // The Winter island's activity: LOCAL harness clients only, like `island.pending`.
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.activity is available to local clients only");
         parseParams(IslandActivityParams, params);
-        return opts.islandActivity?.list() ?? { computerUse: [], results: [], watches: [] };
+        return opts.islandActivity?.list() ?? { computerUse: [], results: [], watches: [], usageAlarms: [] };
       }
       case METHODS.islandShown: {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "island.shown is available to local clients only");
@@ -3636,9 +3656,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.usageSubscriptionsList:
       case METHODS.usageSubscriptionsSet:
       case METHODS.usageSubscriptionsRemove:
-      case METHODS.usageSetTracking: {
-        // Usage and cost tracking (`docs/claude/usage.md`): the user's own usage across Winter, Codex and Claude Code.
-        // LOCAL harness clients only — never a phone, never a plugin.
+      case METHODS.usageSetTracking:
+      case METHODS.usageAlarmsList:
+      case METHODS.usageAlarmsSet:
+      case METHODS.usageAlarmsRemove:
+      case METHODS.usageAlarmsAck: {
+        // Usage and cost tracking (`docs/claude/usage.md`): the user's own usage across Winter, Codex and Claude Code,
+        // and their plan alarms. LOCAL harness clients only — never a phone, never a plugin.
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to local clients only`);
         if (method === METHODS.usageSetTracking) {
           const p = parseParams(UsageSetTrackingParams, params);
@@ -3668,6 +3692,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const p = parseParams(UsageSeriesParams, params);
           await usage.ingestWithin(1_500);
           return usage.series(p.range, p.sources);
+        }
+        if (method === METHODS.usageAlarmsList) {
+          parseParams(UsageAlarmsListParams, params);
+          return { alarms: usage.alarms() };
+        }
+        if (method === METHODS.usageAlarmsSet) {
+          const p = parseParams(UsageAlarmsSetParams, params);
+          const alarm = usage.setAlarm(p);
+          return { alarm, alarms: usage.alarms() };
+        }
+        if (method === METHODS.usageAlarmsRemove) {
+          const p = parseParams(UsageAlarmsRemoveParams, params);
+          return { removed: usage.removeAlarm(p.id), alarms: usage.alarms() };
+        }
+        if (method === METHODS.usageAlarmsAck) {
+          const p = parseParams(UsageAlarmsAckParams, params);
+          return { acked: usage.ackAlarm(p.id) };
         }
         if (method === METHODS.usageSubscriptionsList) return { subscriptions: usage.subscriptions() };
         if (method === METHODS.usageSubscriptionsSet) {
@@ -3779,16 +3820,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionStageImageParams, params);
         let meta: ReturnType<SessionStore["meta"]>;
         try { meta = opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-        // `mode ?? "code"` — an absent mode IS code, the store-wide convention.
-        if ((meta.mode ?? "code") !== "code") {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+        // Code (an absent mode IS code, the store-wide convention) and dispatch; never chat.
+        if (!sessionTakesAttachments(meta.mode)) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, ATTACHMENTS_SESSION_MESSAGE("images"), { code: IMAGE_SESSION_NOT_CODE });
         }
         // The backstop on the session's CURRENT model (see `assertModelAcceptsImages`).
         assertModelAcceptsImages(meta);
         try {
           // `imagesOnSend`: this daemon takes `images` on `session.send`/`session.steer`, so the
-          // client keeps `[Image #n]` in the text and names the paths beside it.
-          return { path: stageSessionImage({ sessionId: p.sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }), imagesOnSend: true as const };
+          // client keeps `[Image #n]` in the text and names the paths beside it. In DISPATCH only — ONE session that
+          // lives for months — staging first lets go of the session's stale staged copies (`pruneStagedImages`), never
+          // one a recent message still names. A code session's copies are never pruned: it ends, and an old one's
+          // clipboard screenshots may be the only copy its thumbnails and Read have.
+          const sessionId = p.sessionId;
+          const keep = (): Set<string> => stagedPathsNamedBy(opts.store.readTail(sessionId, STAGED_IMAGE_KEEP_TAIL_BYTES));
+          const staging = meta.mode === "dispatch" ? { keep } : {};
+          return { path: stageSessionImage({ sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }, staging), imagesOnSend: true as const };
         } catch (err) {
           if (err instanceof StageImageRefusal) {
             throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });

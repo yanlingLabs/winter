@@ -15,7 +15,8 @@ import { resolveExecutable } from "./spawn-lines";
 //  - the executables: `$WINTER_USAGE_CODEX_EXECUTABLE` / `$WINTER_USAGE_CLAUDE_EXECUTABLE` /
 //    `$WINTER_USAGE_AGY_EXECUTABLE` / `$WINTER_USAGE_OPENCODE_EXECUTABLE` (authoritative: a missing path or "off" means none) → the usual install places
 //    → `$PATH`.
-// Both test preloads point every `WINTER_USAGE_*` at nothing, so no test daemon ever reads or spawns the real ones.
+// Both test preloads point every `WINTER_USAGE_*` at nothing, so no test daemon ever reads or spawns the real ones, and
+// switch the background plan checks off (`WINTER_USAGE_BACKGROUND=off`).
 
 export interface UsageInjection {
   codexHome?: string | null;
@@ -30,25 +31,32 @@ export interface UsageInjection {
   catchUp?: boolean;
   catchUpFirstMs?: number;
   catchUpEveryMs?: number;
+  /** The background plan checks and the alarms' fast beats (`UsageService.startBackground`): false = off; its timings. */
+  background?: boolean;
+  backgroundEveryMs?: number;
+  alarmBeatMs?: { codex?: number; "claude-code"?: number; antigravity?: number };
 }
 
-/** The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle). */
-export const CODEX_INSTALLS = [
-  "/opt/homebrew/bin/codex", "/usr/local/bin/codex", join(homedir(), ".local/bin/codex"), join(homedir(), ".npm-global/bin/codex"),
+// The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle).
+// Functions, never module constants: every process of the `winter-core` binary loads this module — the sandboxed
+// automation worker too, whose environment has no HOME and whose seatbelt refuses the user lookup, so a `homedir()`
+// at load throws there and the worker never starts.
+export const codexInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/codex", "/usr/local/bin/codex", join(home, ".local/bin/codex"), join(home, ".npm-global/bin/codex"),
   "/Applications/Codex.app/Contents/Resources/codex",
 ];
-export const CLAUDE_INSTALLS = [
-  "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(homedir(), ".local/bin/claude"), join(homedir(), ".claude/local/claude"),
-  join(homedir(), ".npm-global/bin/claude"),
+export const claudeInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(home, ".local/bin/claude"), join(home, ".claude/local/claude"),
+  join(home, ".npm-global/bin/claude"),
 ];
 /** Antigravity's CLI (Homebrew installs it as `agy`). */
-export const AGY_INSTALLS = [
-  "/opt/homebrew/bin/agy", "/usr/local/bin/agy", join(homedir(), ".local/bin/agy"), join(homedir(), ".npm-global/bin/agy"),
+export const agyInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/agy", "/usr/local/bin/agy", join(home, ".local/bin/agy"), join(home, ".npm-global/bin/agy"),
 ];
 /** OpenCode (Homebrew, its own install script's `~/.opencode/bin`, npm). */
-export const OPENCODE_INSTALLS = [
-  "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode", join(homedir(), ".opencode/bin/opencode"), join(homedir(), ".local/bin/opencode"),
-  join(homedir(), ".npm-global/bin/opencode"),
+export const opencodeInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode", join(home, ".opencode/bin/opencode"), join(home, ".local/bin/opencode"),
+  join(home, ".npm-global/bin/opencode"),
 ];
 
 /** The JS package managers' global bins (bun, volta, pnpm, every nvm node): a CLI installed through one of them is
@@ -61,8 +69,27 @@ export function packageManagerBins(name: string, home = homedir()): string[] {
   return out;
 }
 
+/**
+ * A daemon that must never read or spawn the user's own apps — every one booted OUTSIDE the tests and the real
+ * daemon (the probes, the verify gates, the live and e2e suites, `check:idle-wakeups`): every root and executable is
+ * none, the background plan beat and the catch-up off. `test/usage/script-daemons.test.ts` pins every such entry.
+ */
+export const USAGE_INERT: UsageInjection = Object.freeze({
+  codexHome: null, claudeHome: null, claudeJsonPath: null, codexExecutable: null, claudeExecutable: null, agyExecutable: null,
+  opencodeExecutable: null, catchUp: false, background: false,
+});
+
+/** The same for a daemon spawned as a process (`winter daemon run`, a compiled `winter-core`): its environment. */
+export const USAGE_INERT_ENV: Readonly<Record<string, string>> = Object.freeze({
+  WINTER_USAGE_CODEX_HOME: "off", WINTER_USAGE_CLAUDE_HOME: "off", WINTER_USAGE_CLAUDE_JSON: "off",
+  WINTER_USAGE_CODEX_EXECUTABLE: "off", WINTER_USAGE_CLAUDE_EXECUTABLE: "off", WINTER_USAGE_AGY_EXECUTABLE: "off",
+  WINTER_USAGE_OPENCODE_EXECUTABLE: "off", WINTER_USAGE_BACKGROUND: "off", WINTER_USAGE_CATCH_UP: "off",
+});
+
 function pick(injected: string | null | undefined, env: string | undefined, fallback: () => string | undefined): string | undefined {
   if (injected !== undefined) return injected ?? undefined;
+  // "off" names no directory (as for the executables): authoritative, never a fall-through.
+  if (env === "off") return undefined;
   if (env !== undefined && env.length > 0) return env;
   return fallback();
 }
@@ -73,6 +100,8 @@ export function createUsageService(opts: {
   islandUsage?: IslandUsageRegistry;
   version?: string;
   injection?: UsageInjection;
+  /** The fired alarms waiting for an acknowledgement changed (the island's notifications). */
+  onAlarmNotices?: () => void;
   log?: { warn?: (msg: string, meta?: Record<string, unknown>) => void; info?: (msg: string, meta?: Record<string, unknown>) => void };
 }): { service: UsageService; close(): void } | undefined {
   const env = process.env;
@@ -98,10 +127,10 @@ export function createUsageService(opts: {
     ...(codexHome === undefined ? {} : { codexHome }),
     ...(claudeHome === undefined ? {} : { claudeHome }),
     ...(claudeJsonPath === undefined ? {} : { claudeJsonPath }),
-    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...CODEX_INSTALLS, ...packageManagerBins("codex")]),
-    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...CLAUDE_INSTALLS, ...packageManagerBins("claude")]),
-    agyExecutable: () => resolveExecutable("agy", explicit(inj.agyExecutable, env.WINTER_USAGE_AGY_EXECUTABLE), [...AGY_INSTALLS, ...packageManagerBins("agy")]),
-    opencodeExecutable: () => resolveExecutable("opencode", explicit(inj.opencodeExecutable, env.WINTER_USAGE_OPENCODE_EXECUTABLE), [...OPENCODE_INSTALLS, ...packageManagerBins("opencode")]),
+    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...codexInstalls(), ...packageManagerBins("codex")]),
+    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...claudeInstalls(), ...packageManagerBins("claude")]),
+    agyExecutable: () => resolveExecutable("agy", explicit(inj.agyExecutable, env.WINTER_USAGE_AGY_EXECUTABLE), [...agyInstalls(), ...packageManagerBins("agy")]),
+    opencodeExecutable: () => resolveExecutable("opencode", explicit(inj.opencodeExecutable, env.WINTER_USAGE_OPENCODE_EXECUTABLE), [...opencodeInstalls(), ...packageManagerBins("opencode")]),
     winterCodexWindows: () => (opts.islandUsage?.windowsFor("codex-oauth") ?? []).map((w) => ({
       ...(w.rateLimitType === undefined ? {} : { rateLimitType: w.rateLimitType }), status: w.status,
       ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: w.at,
@@ -109,6 +138,9 @@ export function createUsageService(opts: {
     probeRoot: () => probeRoot,
     ...(opts.version === undefined ? {} : { version: opts.version }),
     ...(inj.now === undefined ? {} : { now: inj.now }),
+    ...(opts.onAlarmNotices === undefined ? {} : { onAlarmNotices: opts.onAlarmNotices }),
+    ...(inj.backgroundEveryMs === undefined ? {} : { backgroundEveryMs: inj.backgroundEveryMs }),
+    ...(inj.alarmBeatMs === undefined ? {} : { alarmBeatMs: inj.alarmBeatMs }),
     log: opts.log ?? {
       warn: (msg, meta) => console.error(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`),
       info: (msg, meta) => console.error(meta === undefined ? msg : `${msg} ${JSON.stringify(meta)}`),
@@ -126,9 +158,13 @@ export function createUsageService(opts: {
     every.unref?.();
     timers.push(first, every);
   }
+  // The background plan checks (user 2026-10-18): every installed and tracked plan every 30 min, and a plan with an
+  // alarm on its own throttle. Unref'd; off with the env switch (both test preloads) or the injection.
+  if (inj.background !== false && env.WINTER_USAGE_BACKGROUND !== "off") service.startBackground();
   return {
     service,
     close: () => {
+      service.stopBackground();
       for (const t of timers) clearTimeout(t);
       db.close();
     },

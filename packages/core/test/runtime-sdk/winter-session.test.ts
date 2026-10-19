@@ -1537,6 +1537,24 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
     expect((await h.session.send("C", "cli")).queued).toBe(false);
   });
 
+  test("Dispatch (2026-10-19): a steer with an image and a file folded into the running turn reaches the child with the PATHS; the log keeps the placeholders; nothing is owed after", async () => {
+    const h = harness({ mode: "dispatch" });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "orb");
+    const images = [{ n: 1, path: "/tmp/winter-session-s_x/images/image_1.png" }];
+    const files = [{ n: 1, path: "/Users/me/Notes/plan.md" }];
+    expect((await h.session.steer("look at [Image #1] with [File #1]", "orb", images, files)).injected).toBe(true);
+    expect(h.q().pushed).toEqual(["A", "look at /tmp/winter-session-s_x/images/image_1.png with /Users/me/Notes/plan.md"]);
+    fq(h).emitFold(1);
+    await h.settled();
+    const steered = h.events.filter((e) => e.type === "user_message")[1] as Extract<SessionEvent, { type: "user_message" }>;
+    expect(steered).toMatchObject({ text: "look at [Image #1] with [File #1]", clientName: "orb", images, files });
+    h.q().emit(assistant("done")); h.q().emit(result());
+    await h.settled();
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+  });
+
   test("a resume after a fold re-pushes nothing — even when the child died before the running turn's result", async () => {
     const h = harness();
     await h.session.open();

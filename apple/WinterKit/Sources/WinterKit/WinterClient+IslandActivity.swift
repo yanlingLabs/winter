@@ -1,8 +1,8 @@
 import Foundation
 
 // The Winter island's ACTIVITY (phase 2, `docs/claude/island.md`): what the island shows besides the cards that wait for
-// an answer — the sessions driving computer use now, the turns that just ended with their session idle, and the armed
-// computer-use watches. The daemon mirror of `IslandActivityParams`/`IslandActivityResult` and
+// an answer — the sessions driving computer use now, the turns that just ended with their session idle, the armed
+// computer-use watches, and the plan alarms that just fired. The daemon mirror of `IslandActivityParams`/`IslandActivityResult` and
 // `ISLAND_ACTIVITY_CHANGED_NOTIFICATION` (`packages/protocol/src/methods.ts`).
 
 /// A session driving ComputerV2 now: from its turn's first call to the turn's end.
@@ -81,15 +81,52 @@ public struct IslandWatchItem: Sendable, Equatable {
     }
 }
 
+/// A plan alarm that just fired (`docs/claude/usage.md`): the island's notification. No session behind it.
+public struct IslandUsageAlarmItem: Sendable, Equatable {
+    /// The alarm's own id (it fires once).
+    public let id: String
+    /// `codex`, `claude-code`, `antigravity`.
+    public let provider: String
+    public let windowKey: String
+    /// The window's kind, scope and length — named as its plan line is.
+    public let kind: String
+    public let scope: String?
+    public let windowMinutes: Double?
+    public let thresholdPercent: Int
+    public let usedPercent: Double
+    /// Epoch ms.
+    public let resetsAt: Double?
+    /// Epoch ms: when it fired.
+    public let at: Int
+
+    public init(id: String, provider: String, windowKey: String, kind: String, scope: String? = nil, windowMinutes: Double? = nil,
+                thresholdPercent: Int, usedPercent: Double, resetsAt: Double? = nil, at: Int) {
+        self.id = id
+        self.provider = provider
+        self.windowKey = windowKey
+        self.kind = kind
+        self.scope = scope
+        self.windowMinutes = windowMinutes
+        self.thresholdPercent = thresholdPercent
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+        self.at = at
+    }
+}
+
 public struct IslandActivitySnapshot: Sendable, Equatable {
     public let computerUse: [IslandComputerUseItem]
     public let results: [IslandResultItem]
     public let watches: [IslandWatchItem]
+    /// Plan alarms that fired (none from an older daemon).
+    public let usageAlarms: [IslandUsageAlarmItem]
 
-    public init(computerUse: [IslandComputerUseItem] = [], results: [IslandResultItem] = [], watches: [IslandWatchItem] = []) {
+    public init(computerUse: [IslandComputerUseItem] = [], results: [IslandResultItem] = [], watches: [IslandWatchItem] = [],
+                usageAlarms: [IslandUsageAlarmItem] = []) {
         self.computerUse = computerUse
         self.results = results
         self.watches = watches
+        self.usageAlarms = usageAlarms
     }
 
     public static let empty = IslandActivitySnapshot()
@@ -136,6 +173,17 @@ extension WinterClient {
                                    elementLabel: w["elementLabel"]?.stringValue, armedAt: armed, expiresAt: expires,
                                    session: facts(w["session"]))
         }
-        return IslandActivitySnapshot(computerUse: cu, results: results, watches: watches)
+        let alarms = (v["usageAlarms"]?.arrayValue ?? []).compactMap { a -> IslandUsageAlarmItem? in
+            guard let id = a["id"]?.stringValue, let provider = a["provider"]?.stringValue, let key = a["windowKey"]?.stringValue,
+                  let kind = a["kind"]?.stringValue, let threshold = a["thresholdPercent"]?.intValue,
+                  case .number(let used)? = a["usedPercent"], let at = a["at"]?.intValue else { return nil }
+            var minutes: Double?
+            if case .number(let m)? = a["windowMinutes"] { minutes = m }
+            var resets: Double?
+            if case .number(let r)? = a["resetsAt"] { resets = r }
+            return IslandUsageAlarmItem(id: id, provider: provider, windowKey: key, kind: kind, scope: a["scope"]?.stringValue,
+                                        windowMinutes: minutes, thresholdPercent: threshold, usedPercent: used, resetsAt: resets, at: at)
+        }
+        return IslandActivitySnapshot(computerUse: cu, results: results, watches: watches, usageAlarms: alarms)
     }
 }
