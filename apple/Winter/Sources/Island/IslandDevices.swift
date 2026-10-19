@@ -285,10 +285,3 @@ struct IslandPermissionMarks: View {
         .frame(minHeight: 16)
     }
 }
-func islandToneColor(_ tone: IslandDeviceTone) -> Color {
-    switch tone {
-    case .ok: return Color(nsColor: .systemGreen)
-    case .warning: return pillReviewAmber
-    case .off: return Color.white.opacity(0.25)
-    }
-}

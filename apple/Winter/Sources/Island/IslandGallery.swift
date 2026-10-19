@@ -220,6 +220,21 @@ enum IslandGallery {
             out.append(try write(openScene(store: store, models: IslandTabModels(shelf: models.shelf, servers: servers), shape: shape,
                                            tab: IslandTabRegistry.servers.id), directory, "island-tab-servers-\(name)@2x.png"))
         }
+        // A bundle's page (drilled into through the model's own `open`): at rest, with a server under the pointer, and with
+        // its "Stop all" waiting for the second click (set through the seam, nothing signalled).
+        let paged = sampleServers(now: now, withLink: true)
+        if let bundle = paged.bundles.first(where: { $0.isBundle }) {
+            paged.open(bundle)
+            let pageModels = IslandTabModels(shelf: models.shelf, servers: paged)
+            let member = Set(bundle.rows.prefix(1).map { "server:\($0.id)" })
+            for (suffix, ids) in [("", Set<String>()), ("-hovered", member)] {
+                out.append(try write(openScene(store: store, models: pageModels, shape: shape, tab: IslandTabRegistry.servers.id,
+                                               preview: ids), directory, "island-tab-servers-page\(suffix)@2x.png"))
+            }
+            paged.setStopsForTesting([bundle.stopId: .confirming(at: now)])
+            out.append(try write(openScene(store: store, models: pageModels, shape: shape, tab: IslandTabRegistry.servers.id),
+                                 directory, "island-tab-servers-page-confirm@2x.png"))
+        }
         // The empty Shelf, and the Shelf while a drag hovers it.
         let emptyModels = IslandTabModels(shelf: IslandShelfStore(persistence: IslandShelfPersistence(
             fileURL: files.appendingPathComponent("empty-shelf.json"))))
@@ -234,6 +249,12 @@ enum IslandGallery {
         store.tabs.select(IslandTabRegistry.sessions.id)
         out.append(try write(openScene(store: store, models: IslandTabModels(shelf: emptyModels.shelf), shape: shape,
                                        tab: IslandTabRegistry.sessions.id), directory, "island-tab-sessions-empty@2x.png"))
+
+        // The Watches tab with nothing armed.
+        let unwatched = sampleStore()
+        unwatched.tabs.select(IslandTabRegistry.watches.id)
+        out.append(try write(openScene(store: unwatched, models: emptyModels, shape: shape, tab: IslandTabRegistry.watches.id),
+                             directory, "island-tab-watches-empty@2x.png"))
 
         // The Servers tab with nothing listening.
         let noServers = IslandTabModels(shelf: emptyModels.shelf, servers: IslandServersModel())
@@ -377,12 +398,13 @@ enum IslandGallery {
         shelf.resolveAllNow()
         shelf.selectedId = shelf.items.first?.id
         return IslandTabModels(sessions: sessions, shelf: shelf, usage: usage, devices: devices,
-                               servers: sampleServers(now: now))
+                               servers: sampleServers(now: now, withLink: true))
     }
 
     /// Servers: two servers of one npm package (a bundle), a Python module, a Bun app — from a made-up process list (never
     /// a scan, never a probe).
-    /// `withLink`: http.server answers HTTP on loopback (a made-up probe — nothing is asked), so its row has a link.
+    /// `withLink`: http.server and `waifus remote` answer HTTP on loopback (made-up probes — nothing is asked), so they
+    /// have a link.
     static func sampleServers(now: Date, withLink: Bool = false) -> IslandServersModel {
         let start = { (ago: TimeInterval) in UInt64(now.timeIntervalSince1970 - ago) }
         let home = "/Users/sample"
@@ -401,7 +423,7 @@ enum IslandGallery {
         model.apply([
             process(400, group: 400, ago: 3 * 3600 + 12 * 60, path: "/opt/homebrew/bin/node",
                     args: ["node", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs", "remote"],
-                    cwd: "\(home)/Code/Discord Waifus", tcp: [3888]),
+                    cwd: "\(home)/Code/Discord Waifus", tcp: [3888], loopback: withLink ? [3888: .v4] : [:]),
             process(401, group: 401, ago: 3 * 3600, path: "/opt/homebrew/bin/node",
                     args: ["node", "/opt/homebrew/lib/node_modules/@waifucave/discord-waifus/bin/waifus.mjs", "start"],
                     cwd: "\(home)/Code/Discord Waifus", tcp: [61010]),
@@ -410,8 +432,10 @@ enum IslandGallery {
             process(420, group: 420, ago: 2 * 86400, path: "/opt/homebrew/bin/bun", args: ["bun", "run", "src/index.ts"],
                     cwd: "\(home)/Code/dashboard", tcp: [3000, 3001]),
         ])
-        if withLink, let row = model.rows.first(where: { $0.tcpPorts == [8000] }) {
-            model.setProbesForTesting([IslandServers.probeKey(row, 8000): IslandHTTPProbe(isHTTP: true, isHTML: true)])
+        if withLink, let row = model.rows.first(where: { $0.tcpPorts == [8000] }),
+           let waifus = model.rows.first(where: { $0.tcpPorts == [3888] }) {
+            model.setProbesForTesting([IslandServers.probeKey(row, 8000): IslandHTTPProbe(isHTTP: true, isHTML: true),
+                                       IslandServers.probeKey(waifus, 3888): IslandHTTPProbe(isHTTP: true, isHTML: true)])
         }
         return model
     }

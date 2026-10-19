@@ -3,34 +3,31 @@ import XCTest
 import WinterKit
 @testable import Winter
 
-/// The island's tabs in their quiet language (`docs/claude/island.md`, "Island visual language"): what each row's
-/// line measures, what it says inside itself only under the pointer, and the colours it may wear.
+/// The island's tabs in their language (`docs/claude/island.md`, "Island visual language" — shared language, own
+/// shapes): what each row shows at rest and reveals under the pointer, the shape each kind of data takes (a dot, a
+/// mark, a chip; a line only for a real amount), and the colours it may wear.
 @MainActor
 final class IslandQuietTabsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     // MARK: Servers
 
-    func testAServersLineFillsOverItsFirstDayAndSaysItsUptimeAndPortsInside() {
-        XCTAssertEqual(IslandServers.uptimeFraction(since: now, now: now), 0)
-        XCTAssertEqual(IslandServers.uptimeFraction(since: now.addingTimeInterval(-6 * 3600), now: now), 0.25, accuracy: 0.0001)
-        XCTAssertEqual(IslandServers.uptimeFraction(since: now.addingTimeInterval(-3 * 86400), now: now), 1, "full from a day on")
-        XCTAssertEqual(IslandServers.uptimeFraction(since: now.addingTimeInterval(60), now: now), 0, "a clock skew is never negative")
-        XCTAssertEqual(IslandServers.lineWords(status: "up 3 h", ports: ":3000 :3001"),
-                       HoverLineWords(start: nil, atFill: "up 3 h", end: ":3000 :3001"))
-        XCTAssertNil(IslandServers.lineWords(status: "up 3 h", ports: "").end)
+    func testAServersLiveDotWearsStopsPhase() {
+        // No uptime bar: how long a server has run is no amount to fill — its uptime is words under the pointer.
+        let t = now
+        XCTAssertEqual(IslandServers.mark(nil), .dot(Color(nsColor: .systemGreen)))
+        XCTAssertEqual(IslandServers.mark(.confirming(at: t)), .dot(pillReviewAmber), "Stop waiting for its second click")
+        XCTAssertEqual(IslandServers.mark(.stopping(sentAt: t)), .ring(Color.white.opacity(0.45)))
+        XCTAssertEqual(IslandServers.mark(.killing(sentAt: t)), .ring(Color.white.opacity(0.45)))
+        XCTAssertEqual(IslandServers.mark(.forceOffered), .dot(Color(nsColor: .systemRed)))
+        XCTAssertEqual(IslandServers.mark(.confirmingForce(at: t)), .dot(Color(nsColor: .systemRed)))
     }
 
-    func testAServersLineWearsStopsPhaseAndItsWordsReadOnAmber() {
-        let t = now
-        XCTAssertEqual(IslandServers.lineColor(nil), islandToneColor(.ok))
-        XCTAssertEqual(IslandServers.lineColor(.confirming(at: t)), pillReviewAmber)
-        XCTAssertEqual(IslandServers.lineColor(.stopping(sentAt: t)), Color.white.opacity(0.3))
-        XCTAssertEqual(IslandServers.lineColor(.killing(sentAt: t)), Color.white.opacity(0.3))
-        XCTAssertEqual(IslandServers.lineColor(.forceOffered), Color(nsColor: .systemRed))
-        XCTAssertEqual(IslandServers.lineColor(.confirmingForce(at: t)), Color(nsColor: .systemRed))
-        XCTAssertEqual(IslandServers.inkOnFill(.confirming(at: t)), .black)
-        XCTAssertEqual(IslandServers.inkOnFill(nil), .white)
+    func testAServersChipsAreItsLinksThenEveryPortNoLinkCarries() {
+        let link = IslandServerLink(port: 3000, host: .v4, isHTML: true)
+        XCTAssertEqual(IslandServers.plainPorts([3001, 3000, 3001], links: [link]), [3001], "each port once, a linked one as its link")
+        XCTAssertEqual(IslandServers.plainPorts([8080, 3000], links: []), [3000, 8080])
+        XCTAssertEqual(IslandServers.plainPorts([3000], links: [link]), [])
     }
 
     func testStopShowsUnderThePointerAndNeverHidesMidPhase() {
@@ -42,14 +39,15 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertFalse(IslandQuietRow.showsActions(hovered: false, busy: false), "at rest: hidden")
     }
 
-    func testABundleRowSaysItsCountAndFolderAtRestAndTheWholeFolderUnderThePointer() throws {
+    func testABundleRowSaysItsCountAtRestAndItsWholeFolderUnderThePointer() throws {
         let model = IslandGallery.sampleServers(now: now)
         let bundle = try XCTUnwrap(model.bundles.first { $0.isBundle })
-        XCTAssertEqual(IslandServers.bundleWords(bundle, hovered: false), "2 servers · Discord Waifus · @waifucave/discord-waifus")
+        XCTAssertEqual(IslandServers.bundleWords(bundle, hovered: false), "2 servers")
         XCTAssertEqual(IslandServers.bundleWords(bundle, hovered: true),
                        "2 servers · ~/Code/Discord Waifus · @waifucave/discord-waifus")
         let single = try XCTUnwrap(model.bundles.first { !$0.isBundle && $0.rows.first?.name == "http.server" })
-        XCTAssertEqual(IslandServers.bundleWords(single, hovered: false), "portfolio")
+        XCTAssertEqual(IslandServers.bundleWords(single, hovered: false), "portfolio", "one server: its folder")
+        XCTAssertEqual(IslandServers.bundleWords(single, hovered: true), "~/Sites/portfolio")
     }
 
     func testVoiceOverHearsAServersPortsStateAndFolderAtRest() throws {
