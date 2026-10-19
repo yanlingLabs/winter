@@ -401,3 +401,117 @@ import WinterProtocol
         XCTAssertTrue(CoworkWorkspaceModel.validTitle(CoworkComposerModel.workspaceTitle(folder: long, draft: "")))
     }
 }
+
+@MainActor final class CoworkComposerCopyTests: XCTestCase {
+    private func prepared(_ label: String) throws -> CoworkPreparedFolder {
+        try JSONDecoder().decode(CoworkPreparedFolder.self, from: JSONSerialization.data(withJSONObject: [
+            "selectionId": "sel_one", "kind": "folder", "label": label, "access": "read-write", "state": "prepared", "expiresAt": "2099-01-01T00:00:00Z",
+        ]))
+    }
+
+    func testTheFolderChipNeverPromisesAMount() throws {
+        XCTAssertEqual(coworkFolderChipCopy(nil).title, "Choose folder")
+        let chosen = coworkFolderChipCopy(.newWorkspace(try prepared("Notes")))
+        XCTAssertEqual(chosen.title, "Notes")
+        XCTAssertTrue(chosen.help.contains("stays preparing"))
+        XCTAssertTrue(chosen.help.contains("its own outputs folder"))
+        XCTAssertFalse(chosen.help.lowercased().contains("mounted in"), "no claim the folder is mounted")
+        let project = coworkFolderChipCopy(.existingProject(workspaceId: "w_one", title: "Atlas"))
+        XCTAssertEqual(project.title, "Atlas")
+        XCTAssertTrue(project.help.contains("shares the Project's folders and approval mode"))
+        XCTAssertTrue(coworkFolderPickerNote.contains("can't share Mac folders"))
+    }
+
+    func testTheApprovalChipSaysItIsTheWorkspacesDefault() {
+        XCTAssertEqual(coworkApprovalChipCopy(nil).title, "Approval mode")
+        let auto = coworkApprovalChipCopy(.auto)
+        XCTAssertEqual(auto.title, "Auto")
+        XCTAssertTrue(auto.help.contains("every conversation in it"))
+        XCTAssertTrue(coworkApprovalPickerNote.contains("every conversation"))
+        XCTAssertEqual(coworkApprovalChipCopy(.dontAsk).title, "Don't Ask")
+        XCTAssertEqual(coworkApprovalChipCopy(.acceptEdits).title, "Accept Edits")
+    }
+}
+
+@MainActor final class CoworkSessionWindowModelTests: XCTestCase {
+    private final class Daemon {
+        var calls: [String] = []
+        var power = "starting"
+        var executionOn = true
+        var fail = false
+        func call(_ method: String, _ value: SessionEvent.JSONValue) throws -> SessionEvent.JSONValue {
+            calls.append(method)
+            func j(_ any: Any) throws -> SessionEvent.JSONValue {
+                try JSONDecoder().decode(SessionEvent.JSONValue.self, from: JSONSerialization.data(withJSONObject: any))
+            }
+            switch method {
+            case "workspace.capabilities.get":
+                return try j(["folderPreparation": true, "repositoryPreparation": false, "provisioning": true, "execution": executionOn])
+            case "workspace.get":
+                if fail { throw NSError(domain: "down", code: 1) }
+                return try j(["workspaceId": "w_one", "ownership": "standalone", "ownerId": "o", "title": "Notes", "state": "retained",
+                              "configRevision": 3, "grantRevision": 1, "instructionRevision": 1, "leaseEpoch": 0, "power": power,
+                              "createdAt": "t", "updatedAt": "t", "automaticPublication": false, "detailState": "complete",
+                              "policy": ["policyId": "p", "workspaceId": "w_one", "defaultPolicy": "ask", "publication": "manual",
+                                         "ceiling": ["toolClasses": [], "hostServices": [], "connectors": [], "network": "none"] as [String: Any],
+                                         "revision": 1, "defaultRevision": 1, "publicationRevision": 1] as [String: Any],
+                              "sources": []])
+            case "workspace.source.list":
+                return try j(["sources": [["sourceId": "src_one", "workspaceId": "w_one", "locationId": "loc", "kind": "folder", "label": "Notes",
+                                           "access": "read-write", "desired": "present", "state": "preparing", "revision": 1, "ackRevision": NSNull(),
+                                           "reason": "share_unavailable", "restartRequired": false, "trust": "untrusted", "createdAt": "t", "updatedAt": "t"]],
+                              "nextCursor": NSNull()])
+            default: throw RpcError(code: -32601, message: "Method not found")
+            }
+        }
+    }
+
+    func testAClosedGateReadsNothing() async {
+        let daemon = Daemon()
+        let model = CoworkSessionWindowModel(modeAvailable: { false }, call: { try daemon.call($0, $1) })
+        model.bind(workspaceId: "w_one")
+        await model.refresh()
+        XCTAssertEqual(daemon.calls, [])
+        XCTAssertEqual(model.notes(location: "outputs").map(\.kind), [.unavailable])
+    }
+
+    func testAnOpenWindowShowsPowerSourcesAndTheTwoGapsAndPollsFastWhileStarting() async {
+        let daemon = Daemon()
+        let model = CoworkSessionWindowModel(modeAvailable: { true }, call: { try daemon.call($0, $1) })
+        model.bind(workspaceId: "w_one")
+        await model.refresh()
+        XCTAssertEqual(model.power, "starting")
+        XCTAssertEqual(model.pollSeconds, 3)
+        XCTAssertEqual(model.notes(location: "outputs").map(\.kind),
+                       [.starting, .outputsLocation, .sourcePreparing, .outputsNotVisible, .guidanceNotLoaded])
+        daemon.power = "running"
+        await model.refresh()
+        XCTAssertEqual(model.pollSeconds, 15)
+        XCTAssertFalse(model.notes(location: "outputs").contains { $0.kind == .starting })
+    }
+
+    func testADaemonThatCannotRunConversationsClosesTheWindowEvenWithTheConstantOn() async {
+        let daemon = Daemon(); daemon.executionOn = false
+        let model = CoworkSessionWindowModel(modeAvailable: { true }, call: { try daemon.call($0, $1) })
+        model.bind(workspaceId: "w_one")
+        await model.refresh()
+        XCTAssertEqual(daemon.calls, ["workspace.capabilities.get"])
+        XCTAssertEqual(model.notes(location: nil).map(\.kind), [.unavailable])
+    }
+
+    func testAFailedReadKeepsWhatWasShownAndABindingChangeDropsIt() async {
+        let daemon = Daemon()
+        let model = CoworkSessionWindowModel(modeAvailable: { true }, call: { try daemon.call($0, $1) })
+        model.bind(workspaceId: "w_one")
+        await model.refresh()
+        daemon.fail = true
+        await model.refresh()
+        XCTAssertEqual(model.power, "starting", "an outage does not blank a window that was telling the truth")
+        model.bind(workspaceId: "w_two")
+        XCTAssertNil(model.power)
+        XCTAssertTrue(model.sources.isEmpty)
+        model.bind(workspaceId: nil)
+        await model.refresh()
+        XCTAssertEqual(daemon.calls.filter { $0 == "workspace.get" }.count, 2, "no workspace, no read")
+    }
+}
