@@ -352,6 +352,8 @@ test("plan view: not expressible in host-query-v1 yet. The real validator refuse
   // The driver never asks for the view: the approvals bridge sees planViewInstalled false (a plan scratch write is refused).
   const text = readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "session-driver.ts"), "utf8");
   expect(text).not.toMatch(/planViewMounted/);
+  // Nor the plan scratch root (conversation-set.ts builds it only when asked; the native wire refuses it today).
+  expect(text).not.toMatch(/planScratchEpoch/);
 });
 
 test("for every policy the host launch's mode equals the mode the guest's own map gives the set's policy: default or plan only", async () => {

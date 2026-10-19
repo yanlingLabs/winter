@@ -15,7 +15,7 @@ import { CoworkError, type CapabilityCeiling, type WorkspaceSource } from "./typ
  */
 
 /** A path's class for the host policy matrix. Plain strings: this module names no matrix symbol. */
-export type CoworkApprovalPathClass = "admitted" | "shared-instructions" | "outputs" | "scratch" | "protected" | "outside";
+export type CoworkApprovalPathClass = "admitted" | "shared-instructions" | "outputs" | "scratch" | "planScratch" | "protected" | "outside";
 
 const under = (path: string, root: string): boolean => path === root || path.startsWith(`${root}/`);
 
@@ -24,6 +24,9 @@ const under = (path: string, root: string): boolean => path === root || path.sta
  *   - `admitted`: its root (the source's guest root plus its relative cwd) and below, and the memory root;
  *   - `shared-instructions`: the workspace guidance file;
  *   - `outputs` / `scratch`: its OWN outputs and scratch directories (O1, owner decision 2026-10-18);
+ *   - `planScratch`: `/workspace/plan/<sid>/<epoch>` and below, for any segments (APPROVALS #112). The projection narrows it
+ *     to the conversation's own session id at the CURRENT epoch (`planScratchEpoch`); every other plan path is `outside`
+ *     there. `/workspace/plan` itself and a bare `/workspace/plan/<sid>` are `outside`;
  *   - `protected`: everything else under `/workspace/.winter` and `/workspace/outputs` (other conversations' stores,
  *     outputs and scratch, the skeleton), `/run/winter` (run homes, the provider socket) and `/workspace` itself;
  *   - `outside`: anything else, including the rest of the source above the cwd and the workspace's other sources.
@@ -38,6 +41,7 @@ export function coworkClassifyGuestPath(path: string, input: { readonly sessionI
   if (at === "/workspace/.winter/WINTER.md") return "shared-instructions";
   if (under(at, `/workspace/outputs/${input.sessionId}`)) return "outputs";
   if (under(at, `/workspace/.winter/scratch/${input.sessionId}`)) return "scratch";
+  if (at.startsWith("/workspace/plan/") && at.split("/").length >= 5) return "planScratch";
   if (at === "/workspace" || under(at, "/workspace/.winter") || under(at, "/workspace/outputs") || under(at, "/run/winter")) return "protected";
   return "outside";
 }
@@ -48,10 +52,12 @@ export function coworkClassifyGuestPath(path: string, input: { readonly sessionI
  * proves it assignable to theirs at compile time.
  */
 export interface CoworkHostApprovalPorts {
-  identity(): { readonly workspaceId: string; readonly sourceRevision: number };
+  identity(): { readonly workspaceId: string; readonly sourceRevision: number; readonly outputsFolder?: string };
   snapshot(): CoworkTransitionSnapshot;
   classifyPath(absolutePath: string): string;
   planViewInstalled(): boolean;
+  /** The policy machine's CURRENT epoch: the plan scratch is `/workspace/plan/<sid>/<this epoch>`. */
+  planScratchEpoch(): number | undefined;
 }
 
 export interface CoworkHostApprovalInput {
@@ -77,12 +83,15 @@ export function coworkApprovalPortsFor(input: CoworkHostApprovalInput): CoworkHo
   const ceiling: CapabilityCeiling = { toolClasses: [...input.ceiling.toolClasses], hostServices: [...input.ceiling.hostServices], connectors: [...input.ceiling.connectors], network: input.ceiling.network };
   const machine = new CoworkPolicyTransitionMachine({ policy: binding.policy, ceiling }, { closeAdmission: refused, drain: refused, installView: refused });
   const plan = coworkGuestPolicyFor(binding.policy) === "plan" && input.planViewMounted === true;
-  const identity = Object.freeze({ workspaceId: binding.workspaceId, sourceRevision: source?.revision ?? 0 });
+  // An outputs-located conversation's cards name its own outputs folder (APPROVALS #112 wording).
+  const outputs = coworkOutputsOf(binding);
+  const identity = Object.freeze({ workspaceId: binding.workspaceId, sourceRevision: source?.revision ?? 0, ...(outputs === undefined ? {} : { outputsFolder: cwd }) });
   return Object.freeze({
     identity: () => identity,
     snapshot: () => machine.snapshot(),
     classifyPath: (absolutePath: string) => coworkClassifyGuestPath(absolutePath, { sessionId: binding.sessionId, root }),
     // True only under plan AND with the plan view mounted (see `planViewMounted`).
     planViewInstalled: () => plan,
+    planScratchEpoch: () => machine.snapshot().epoch,
   });
 }

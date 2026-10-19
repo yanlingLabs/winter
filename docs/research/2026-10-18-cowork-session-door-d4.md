@@ -239,3 +239,29 @@ D4c is stacked on D4b. This is the coordinator's follow-up to the blocking NEED:
 **Mutations (guards and refusals only): 22/24 killed** (`door/d4fix_mutations.py`). Both survivors are equivalent:
 - dropping `state='pending'` from the sweep: a bound reservation always has a binding, which the sweep excludes;
 - admitting an outputs location for the schedule caller: the source comparison right after it refuses, because an outputs location has no source.
+
+## Plan view, DOOR half (APPROVALS #112 NEEDS), in the same PR
+
+What DOOR built:
+- **`classifyPath`** returns `planScratch` for `/workspace/plan/<sid>/<epoch>` and below. The projection narrows it to the conversation's own sid at the current epoch, and anything else there is `outside`. A bare `/workspace/plan` or `/workspace/plan/<sid>` is `outside`.
+- **`planScratchEpoch()`** is the policy machine's `epoch`.
+- **`identity().outputsFolder`** is the conversation's own `/workspace/outputs/<sid>` for an outputs-located conversation.
+- **`planViewInstalled()`** is unchanged: true only under plan with `planViewMounted`.
+- **`coworkConversationFor`** accepts `planScratchEpoch`. Under plan, it adds the writable root `{id: "plan-scratch", guestPath: /workspace/plan/<sid>/<epoch>}` beside the read-only roots (`coworkPlanScratchPath`). Outside plan, the epoch is ignored.
+
+**Not mounted yet, by design.** The driver passes neither `planScratchEpoch` nor `planViewMounted` (pinned). The native contract refuses such a set on the wire (pinned), for two reasons:
+- `allowedView` (native/protocol.ts) has no `/workspace/plan/<sid>/<epoch>` view;
+- plan's every-root-read-only rule has no exception for the plan scratch.
+
+The supervisor mirrors both rules. Once those land, the driver passes the machine's epoch to the builder and `planViewMounted: true` to the ports in the same incarnation, so the view is installed exactly when it is mounted.
+
+**APPROVALS carry-over.** #112's LOW is covered: a `planScratchEpoch` port answering -1 leaves even the path spelled with `-1` outside, for both Write and Read.
+
+**Mutations (guards): 7/8 killed.** The survivor fixes `planScratchEpoch` at 0. It is equivalent while DOOR's machine has no change path (its change ports refuse, so the epoch is always 0). It becomes live with the policy-change slice.
+
+**NEEDS:**
+- **S7B** (`native/protocol.ts`, contract text) and the **SDK lane** (supervisor):
+  - admit the view `/workspace/plan/<logicalSessionId>/<epoch>` (exactly 5 components, a non-negative decimal epoch) as the conversation's own;
+  - let it be writable under plan, while every other root stays read-only;
+  - keep it outside `.winter`.
+- **APPROVALS** (now DOOR's): the lateral drain on leaving plan must not wait on the in-flight `ExitPlanMode` call that triggers it. This belongs with the policy-change slice, which DOOR now owns; nothing in this PR drains.
