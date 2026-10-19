@@ -8,6 +8,8 @@
  *   1. `compile:core` -> dist/winter-core (all three entrypoints).
  *   2. A copy in a throwaway directory, ad-hoc signed the way the Release app signs winter-core (hardened runtime + scripts/winter-core.entitlements).
  *   3. `<copy> __fd-receiver-probe` from that directory, with a narrow environment and a temp WINTER_HOME: socketpair, one line through the receiver hub, expect the line back.
+ *   3b. `<copy> __host-code-adapter-probe`: the host-code broker's SDK modules resolve INSIDE the built binary (`installedHostCodeAdapter()` does not throw "Cannot find module").
+ *       Same safety: no home, Keychain, daemon or launcher.
  *   4. The negative control: the same probe against a copy of the binary whose Worker entry cannot be found must NOT print ok. (Checked without rebuilding: the probe is run with the
  *      entry string patched in the copy to a name that does not exist.)
  *
@@ -78,6 +80,11 @@ async function main(): Promise<void> {
     const result = parseProbe(run.stdout);
     if (run.code !== 0 || result?.ok !== true) throw new Error(`the compiled daemon's receiver thread did not start (exit ${run.code}): ${JSON.stringify(result)}\n${run.stderr.trim()}`);
     console.log(`ok: the probe line came back through the receiver hub (${JSON.stringify(result)})`);
+
+    const adapter = await runChild(good, ["__host-code-adapter-probe"], env, scratch);
+    const adapterResult = parseProbe(adapter.stdout);
+    if (adapter.code !== 0 || adapterResult?.ok !== true) throw new Error(`the host-code broker's modules do not resolve inside the compiled daemon (exit ${adapter.code}): ${JSON.stringify(adapterResult)}\n${adapter.stderr.trim()}`);
+    console.log(`ok: installedHostCodeAdapter() ran in the compiled daemon (${JSON.stringify(adapterResult)})`);
 
     const broken = withBrokenEntry(readFileSync(DIST_BINARY));
     if (broken === null) throw new Error(`the binary does not contain the entry string ${ENTRY_NAME}: fd-channel.ts does not use the compiled entry`);

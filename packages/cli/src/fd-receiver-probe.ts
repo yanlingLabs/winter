@@ -18,3 +18,15 @@ export async function runChannelReceiverProbe(): Promise<{ ok: boolean; line?: s
     closeDescriptor(far);
   }
 }
+
+/** `winter-core __host-code-adapter-probe`: the compiled-binary proof that the host-code broker's SDK modules resolve inside the built binary. `installedHostCodeAdapter()` is the
+ * function that loads them; a module missing from the bundle throws "Cannot find module" here. Whether the installed SDK offers an adapter at all is not asked (undefined is a
+ * valid answer); only that the call does not throw. It touches no home, Keychain, daemon or launcher. */
+export async function runHostCodeAdapterProbe(): Promise<{ ok: boolean; adapter?: boolean; error?: string }> {
+  try {
+    const { installedHostCodeAdapter } = await import("../../core/src/runtime-sdk/host-code-broker");
+    return { ok: true, adapter: installedHostCodeAdapter() !== undefined };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+}

@@ -23,6 +23,16 @@ describe("verify:fd-receiver helpers", () => {
     expect(broken.includes(Buffer.from(ENTRY_NAME))).toBe(false);
     expect(withBrokenEntry(Buffer.from("nothing here"))).toBeNull();
   });
+  test("the gate also runs the host-code adapter probe on the compiled binary, and main.ts routes it to a probe that only calls installedHostCodeAdapter()", () => {
+    const gate = readFileSync(join(import.meta.dir, "verify-fd-receiver-compiled.ts"), "utf8");
+    expect(gate).toContain('runChild(good, ["__host-code-adapter-probe"]');
+    expect(gate).toContain("do not resolve inside the compiled daemon");
+    const root = join(import.meta.dir, "..", "packages", "cli", "src");
+    expect(readFileSync(join(root, "main.ts"), "utf8")).toContain('process.argv[2] === "__host-code-adapter-probe"');
+    const probe = readFileSync(join(root, "fd-receiver-probe.ts"), "utf8");
+    expect(probe).toContain("installedHostCodeAdapter()");
+    expect(probe).toContain('import("../../core/src/runtime-sdk/host-code-broker")');
+  });
   test("package.json names the gate", () => {
     expect(JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")).scripts["verify:fd-receiver"]).toBe("bun run scripts/verify-fd-receiver-compiled.ts");
   });

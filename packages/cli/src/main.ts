@@ -1549,6 +1549,12 @@ if (import.meta.main) {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }
+  if (process.argv[2] === "__host-code-adapter-probe") {
+    const { runHostCodeAdapterProbe } = await import("./fd-receiver-probe");
+    const result = await runHostCodeAdapterProbe();
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
   if (process.argv[2] === "__embedded-probe") {
     const result = await runEmbeddedProbe({ home: process.env.WINTER_HOME });
     process.stdout.write(`${JSON.stringify(result)}\n`);
