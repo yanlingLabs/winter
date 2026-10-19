@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { authorityFixtureSessions } from "./committed-sessions";
 import { SessionMessaging, type MessagingDriverHandle } from "../../src/agent/session-messaging";
 import { CoworkPeerInbox, type PeerEpoch } from "../../src/cowork/peer-inbox";
+import { CoworkError } from "../../src/cowork/types";
 import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
@@ -44,19 +45,19 @@ function world(existingHome?: string) {
   const epochOf = (id: string): PeerEpoch | undefined => { const workspace = records.get(records.binding(id).workspaceId); return workspace.incarnationId === null ? undefined : { incarnationId: workspace.incarnationId, leaseEpoch: workspace.leaseEpoch }; };
   class FakeDriver implements MessagingDriverHandle {
     turnRunning = false; foldsQueuedInput = false; pendingSends: string[] = []; state: "live" | "resumable" | "ended" = "live";
-    sends: string[] = []; steers: string[] = []; failNext: Error | undefined; epochOverride: PeerEpoch | null | undefined;
+    sends: string[] = []; attempts = 0; failAlways: Error | undefined; steers: string[] = []; failNext: Error | undefined; epochOverride: PeerEpoch | null | undefined;
     constructor(readonly id: string) {}
     get coworkEpoch() { return this.epochOverride === null ? undefined : this.epochOverride ?? epochOf(this.id); }
-    async send(text: string) { if (this.failNext) { const error = this.failNext; this.failNext = undefined; throw error; } this.sends.push(text); return { seq: 1, queued: this.turnRunning }; }
+    async send(text: string) { this.attempts++; if (this.failAlways) throw this.failAlways; if (this.failNext) { const error = this.failNext; this.failNext = undefined; throw error; } this.sends.push(text); return { seq: 1, queued: this.turnRunning }; }
     async steer(text: string) { this.steers.push(text); return { seq: 1, injected: true }; }
   }
   const driverOf = (id: string) => { let d = drivers.get(id); if (!d) { d = new FakeDriver(id); drivers.set(id, d); } return d; };
   const ensured: string[] = [], ensureFault = { on: false };
-  const makeMessaging = (inboxOptions: ConstructorParameters<typeof CoworkPeerInbox>[0]["limits"] | null = {}) => {
+  const makeMessaging = (inboxOptions: ConstructorParameters<typeof CoworkPeerInbox>[0]["limits"] | null = {}, override: Record<string, unknown> = {}) => {
     const store = new SqlitePeerInboxStore(db);
     const peerInbox = inboxOptions === null ? undefined : new CoworkPeerInbox({ records, store, limits: inboxOptions });
     const spy = { accept: 0 };
-    const wrapped = peerInbox && new Proxy(peerInbox, { get(target, prop, receiver) { if (prop === "accept") spy.accept++; const value = Reflect.get(target, prop, receiver); return typeof value === "function" ? value.bind(target) : value; } });
+    const wrapped = peerInbox && new Proxy(peerInbox, { get(target, prop, receiver) { if (typeof prop === "string" && prop in override) return override[prop]; if (prop === "accept") spy.accept++; const value = Reflect.get(target, prop, receiver); return typeof value === "function" ? value.bind(target) : value; } });
     const messaging = new SessionMessaging({
       cowork: records, ...(wrapped ? { peerInbox: wrapped } : {}),
       store: { meta: (id: string) => { const r = rows.get(id); if (!r) throw Error("missing"); return r; }, list: () => [...rows.values()] },
@@ -88,11 +89,14 @@ test("a same-Project send is accepted, delivered to a stopped recipient (resumed
 test("a running turn that folds takes the message by steer; one with its own queue ahead gets it queued behind, in order", async () => {
   const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), c = w.bind(p);
   const folding = w.driverOf(b); folding.turnRunning = true; folding.foldsQueuedInput = true;
-  expect((await w.send(w.messaging, a, b)).status).toBe("delivered");
+  const steered = await w.send(w.messaging, a, b);
+  expect(steered.status).toBe("delivered");
+  expect((steered as { note: string }).note).toContain("after its current tool call, as part of the turn it is running"); // the steered note
   expect(folding.steers).toHaveLength(1); expect(folding.sends).toEqual([]);
   const busy = w.driverOf(c); busy.turnRunning = true; busy.foldsQueuedInput = true; busy.pendingSends = ["the user's queued send"];
   const queued = await w.send(w.messaging, a, c);
   expect(queued.status).toBe("queued");
+  expect((queued as { note: string }).note).toContain("1 message queued ahead of yours");
   expect(busy.sends).toHaveLength(1); expect(busy.steers).toEqual([]);
   expect(w.raw().every(r => r.state === "delivered" && r.nobody === 1)).toBe(true);
 });
@@ -237,4 +241,42 @@ test("a stored body that is not a valid envelope is damage: parked blocked/recov
   await w.messaging.drainCoworkInbox(b);
   expect(w.driverOf(b).sends).toEqual([]); expect(w.driverOf(b).steers).toEqual([]);
   expect(w.raw()).toEqual([expect.objectContaining({ state: "blocked", reason: "recovery", nobody: 0 })]);
+});
+
+test("a runtime that is replaced on every push is retried exactly once under the successor, then the message stays owed (no endless loop)", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p);
+  const d = w.driverOf(b); d.failAlways = Object.assign(new Error("replaced"), { code: "session_replaced" });
+  const answer = await w.send(w.messaging, a, b);
+  expect(d.attempts).toBe(2); // the push and ONE retry
+  expect(answer.status).toBe("queued");
+  expect(w.raw()).toEqual([expect.objectContaining({ state: "accepted", nobody: 0 })]);
+  await w.messaging.drainCoworkInbox(b);
+  expect(d.attempts).toBe(4); // each later drain makes the same bounded two attempts
+});
+
+test.each([
+  ["a different envelope version", JSON.stringify({ v: 2, message: "from the future", notifyWhenIdle: false })],
+  ["a non-boolean notifyWhenIdle", JSON.stringify({ v: 1, message: "damaged", notifyWhenIdle: "yes" })],
+  ["a non-string summary", JSON.stringify({ v: 1, message: "damaged", summary: 7, notifyWhenIdle: false })],
+  ["a blank message", JSON.stringify({ v: 1, message: "  ", notifyWhenIdle: false })],
+])("%s is damage: parked blocked/recovery, nothing delivered, and nothing behind it is delivered past it", async (_name, body) => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), c = w.bind(p);
+  const ledger = new CoworkPeerInbox({ records: w.records, store: new SqlitePeerInboxStore(w.db) });
+  expect(ledger.accept({ senderSessionId: a, senderIncarnation: "inc-1", sendId: "bad", recipientSessionId: b, text: body }).outcome).toBe("accepted");
+  const behind = await w.send(w.messaging, c, b, { message: "a good message behind the damaged head" });
+  expect(behind.status).toBe("queued");
+  const d = w.driverOf(b);
+  expect(d.sends).toEqual([]); expect(d.steers).toEqual([]);
+  expect(w.raw().map(r => [r.state, r.reason, r.nobody])).toEqual([["blocked", "recovery", 0], ["accepted", null, 0]]);
+});
+
+test("an acknowledgement that keeps failing stops the drain: the message is pushed once per drain, never re-pushed in a loop", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p);
+  const failing = w.makeMessaging({}, { ack: () => { throw new CoworkError("stale_acknowledgment"); } });
+  const answer = await w.send(failing.messaging, a, b);
+  expect(answer.status).toBe("queued");
+  expect(w.driverOf(b).sends).toHaveLength(1); // pushed once, ack failed, loop stopped
+  expect(w.raw()).toEqual([expect.objectContaining({ state: "accepted", nobody: 0 })]);
+  await failing.messaging.drainCoworkInbox(b);
+  expect(w.driverOf(b).sends).toHaveLength(2); // one push per drain (at-least-once), never a loop inside one
 });
