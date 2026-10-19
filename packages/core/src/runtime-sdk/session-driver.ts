@@ -110,7 +110,7 @@ import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
 import { SESSION_REPLACED } from "./session-replaced";
-import { COWORK_SESSION_UNSUPPORTED_CODE, isUnrunnableStoredMode, runnableModeOf, unrunnableModeMessage } from "../sessions/session-mode";
+import { COWORK_SESSION_UNSUPPORTED_CODE, isUnrunnableStoredMode, runnableModeOf, unrunnableModeMessage, type DrivableSessionMode } from "../sessions/session-mode";
 import { type HostCodeAuthority } from "./host-code-broker";
 import { buildCoreBrand } from "./brand";
 
@@ -188,7 +188,8 @@ export function sessionCwdRefusal(cwd: string): WinterLegRefusal | undefined {
 export interface LegSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  /** "cowork" only for a Cowork conversation's driver (cowork/session-driver.ts); this table never holds one. */
+  readonly mode: DrivableSessionMode;
   readonly state: "live" | "resumable" | "ended";
   readonly generation: number;
   readonly resumed: boolean;

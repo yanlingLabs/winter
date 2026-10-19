@@ -28,13 +28,16 @@ test("classifier: the policy change matrix is cell-wise, not a rank (plan <-> do
   // e.g. dont-ask -> plan shrinks an explicitly allowed edit (allow -> deny) but grows unauthorized Bash (deny -> read-only-view allow).
   // auto's per-call Bash review is not a cell rung (it revokes nothing a running process holds), so the switch to auto is an ordinary widening.
   const U = "unchanged", W = "widening", N = "narrowing", L = "lateral";
+  // plan <-> anything is lateral: plan alone can write its epoch-scoped plan scratch (the `planScratch` cell), so leaving plan removes
+  // that and entering it adds it, while the other cells move the other way. Lateral takes the full protocol, which is what replacing the
+  // plan view needs (close, drain, install).
   const EXPECTED: Readonly<Record<ApprovalPolicy, readonly CoworkPolicyChangeKind[]>> = {
-    "plan":         [U, L, W, W, W, W],
+    "plan":         [U, L, L, L, L, L],
     "dont-ask":     [L, U, W, W, W, W],
-    "ask":          [N, N, U, W, W, W],
-    "accept-edits": [N, N, N, U, W, W],
-    "auto":         [N, N, N, N, U, W],
-    "bypass":       [N, N, N, N, N, U],
+    "ask":          [L, N, U, W, W, W],
+    "accept-edits": [L, N, N, U, W, W],
+    "auto":         [L, N, N, N, U, W],
+    "bypass":       [L, N, N, N, N, U],
   };
   for (const from of POLICIES) POLICIES.forEach((to, index) => expect({ from, to, kind: kind(state(from), state(to)) }).toEqual({ from, to, kind: EXPECTED[from][index]! }));
   // Not symmetric opposites except where the cells really are: every widening has a narrowing reverse, except the lateral pair.
@@ -66,7 +69,7 @@ test("classifier: switching into plan is never a widening, and the cells cover e
   expect(new Set(COWORK_CLASSIFIER_CELLS.map(([tool]) => tool))).toEqual(new Set(COWORK_GUEST_TOOL_CLASSES));
   // Every classifier cell is a well-formed call: under the full ceiling the matrix gives it a policy-table answer, not a hard denial.
   const full = ceiling(["read", "write", "execute"], "none", ["workspace.instructions.update"]);
-  for (const [tool, path] of COWORK_CLASSIFIER_CELLS) expect(coworkHostDecision({ policy: "bypass", tool, path, ceiling: full }).reason).toBe("policy_table");
+  for (const [tool, path] of COWORK_CLASSIFIER_CELLS) expect(coworkHostDecision({ policy: "plan", tool, path, ceiling: full }).reason).toBe("policy_table");
 });
 
 test("classifier: every cell the matrix can answer with a table verdict has a classifier cell, and every connector cell is listed", () => {
@@ -113,7 +116,7 @@ test("classifier: the capability ceiling is compared set by set", () => {
   expect(kind(state("ask", ceiling([], "none")), state("ask", ceiling([], "internet")))).toBe("widening");
   // A policy widening with a ceiling narrowing is lateral; the same direction in both stays that direction.
   expect(change(ceiling(["read"], "none", ["a"], ["c"]), "bypass")).toBe("lateral");
-  expect(change(ceiling(["read"], "none", ["a"], ["c"]), "plan")).toBe("narrowing");
+  expect(change(ceiling(["read"], "none", ["a"], ["c"]), "plan")).toBe("lateral");
   expect(change(ceiling(["read", "write", "execute"], "none", ["a"], ["c"]), "bypass")).toBe("widening");
   // Fail closed: anything malformed or unknown takes the full narrowing protocol.
   for (const bad of [undefined, null, {}, { policy: "chat", ceiling: WIDE }, { policy: "ask" }, { policy: "ask", ceiling: { toolClasses: "read", hostServices: [], connectors: [], network: "none" } },
@@ -162,7 +165,7 @@ test("narrowing into plan runs closeAdmission, drain, installView in order and r
   h.mode.closeAdmission = "manual"; h.mode.drain = "manual"; h.mode.installView = "manual";
   const started = h.machine.request(state("plan"));
   // Synchronously pending: nothing has resolved yet.
-  expect(h.machine.snapshot()).toMatchObject({ phase: "pending", step: "closing-admission", admission: "unknown", kind: "narrowing", effective: { policy: "auto" }, target: { policy: "plan" }, epoch: 0 });
+  expect(h.machine.snapshot()).toMatchObject({ phase: "pending", step: "closing-admission", admission: "unknown", kind: "lateral", effective: { policy: "auto" }, target: { policy: "plan" }, epoch: 0 });
   expect(h.calls).toEqual(["closeAdmission"]);
   h.release("closeAdmission"); await settle();
   expect(h.machine.snapshot()).toMatchObject({ phase: "pending", step: "draining", admission: "closed", effective: { policy: "auto" } });
@@ -180,7 +183,7 @@ test("narrowing into plan runs closeAdmission, drain, installView in order and r
   expect(h.snapshots.map(snapshot => snapshot.phase === "pending" ? snapshot.step : snapshot.phase)).toEqual(["closing-admission", "draining", "installing-view", "stable"]);
   // The plan handed to the ports.
   expect(h.plans.every(plan => plan === h.plans[0])).toBe(true);
-  expect(h.plans[0]).toMatchObject({ kind: "narrowing", epoch: 1, intoPlan: true, from: { policy: "auto" }, to: { policy: "plan" } });
+  expect(h.plans[0]).toMatchObject({ kind: "lateral", epoch: 1, intoPlan: true, from: { policy: "auto" }, to: { policy: "plan" } });
   expect(Object.isFrozen(h.plans[0])).toBe(true);
 });
 
@@ -202,11 +205,11 @@ test("a lateral change takes the narrowing protocol", async () => {
 });
 
 test("a widening only installs the view, keeps admission open and still reports the OLD state until installView resolves", async () => {
-  const h = harness(state("plan"));
+  const h = harness(state("ask"));
   h.mode.installView = "manual";
   const started = h.machine.request(state("auto"));
-  expect(h.machine.snapshot()).toMatchObject({ phase: "pending", step: "installing-view", admission: "open", kind: "widening", effective: { policy: "plan" }, target: { policy: "auto" } });
-  await settle(); expect(h.machine.snapshot()).toMatchObject({ phase: "pending", effective: { policy: "plan" } });
+  expect(h.machine.snapshot()).toMatchObject({ phase: "pending", step: "installing-view", admission: "open", kind: "widening", effective: { policy: "ask" }, target: { policy: "auto" } });
+  await settle(); expect(h.machine.snapshot()).toMatchObject({ phase: "pending", effective: { policy: "ask" } });
   h.release("installView"); expect((await started).status).toBe("applied");
   expect(h.calls).toEqual(["installView"]);
   expect(h.machine.snapshot()).toMatchObject({ phase: "stable", effective: { policy: "auto" }, epoch: 1 });
@@ -286,10 +289,10 @@ test("installView failure: drained but unreplaced, admission closed, effective S
 });
 
 test("a widening whose installView fails keeps admission open and the narrower old state", async () => {
-  const h = harness(state("plan"));
+  const h = harness(state("ask"));
   h.mode.installView = "reject";
   const failed = await h.machine.request(state("bypass"));
-  expect(failed.snapshot).toMatchObject({ phase: "failed", failure: "install-view-failed", admission: "open", effective: { policy: "plan" }, kind: "widening" });
+  expect(failed.snapshot).toMatchObject({ phase: "failed", failure: "install-view-failed", admission: "open", effective: { policy: "ask" }, kind: "widening" });
   h.mode.installView = "auto";
   expect((await h.machine.retry()).status).toBe("applied");
   expect(h.calls).toEqual(["installView", "installView"]);
@@ -350,7 +353,7 @@ test("re-entrancy: a stable listener that starts another request cannot change t
   expect(nested).toBeDefined(); await nested;
   expect(h.machine.snapshot()).toMatchObject({ phase: "stable", effective: { policy: "bypass" }, epoch: 2 });
   // Every listener saw every phase, in order: the nested request's phases queue behind the delivery in progress.
-  expect(second).toEqual(["pending:plan:closing-admission", "pending:plan:draining", "pending:plan:installing-view", "stable:plan", "pending:bypass:installing-view", "stable:bypass"]);
+  expect(second).toEqual(["pending:plan:closing-admission", "pending:plan:draining", "pending:plan:installing-view", "stable:plan", "pending:bypass:closing-admission", "pending:bypass:draining", "pending:bypass:installing-view", "stable:bypass"]);
 });
 
 test("re-entrancy: a failed listener that retries synchronously cannot change the failure the first request reports", async () => {
@@ -439,8 +442,10 @@ test("wired behind the refusal: only the Cowork approval projection names the tr
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
-  // runtime-sdk/cowork-approval.ts imports the snapshot TYPE so the approval bridge can read the machine's phase and admission; nothing
-  // constructs a machine outside tests (see test/runtime-sdk/cowork-approval.test.ts for the refusal proof).
+  // runtime-sdk/cowork-approval.ts imports the snapshot TYPE so the approval bridge can read the machine's phase and admission. Session door
+  // D3: the DOOR's approval ports (cowork/approval-ports.ts) construct ONE machine per conversation incarnation, stable at the binding's
+  // policy, whose ports refuse every change; only the Cowork driver table builds those ports, and nothing in src constructs that table
+  // (test/cowork/session-door-off.test.ts).
   const offenders = new Set<string>(), constructors = new Set<string>();
   for (const file of sources.filter(candidate => candidate !== module)) {
     const text = readFileSync(file, "utf8");
@@ -448,8 +453,8 @@ test("wired behind the refusal: only the Cowork approval projection names the tr
       if (text.includes(needle)) offenders.add(basename(file));
     if (text.includes("CoworkPolicyTransitionMachine") || text.includes("classifyCoworkPolicyChange")) constructors.add(basename(file));
   }
-  expect([...offenders]).toEqual(["cowork-approval.ts"]);
-  expect([...constructors]).toEqual([]);
+  expect([...offenders].sort()).toEqual(["approval-ports.ts", "cowork-approval.ts"]);
+  expect([...constructors]).toEqual(["approval-ports.ts"]);
   const projection = readFileSync(join(packages, "core", "src", "runtime-sdk", "cowork-approval.ts"), "utf8");
   expect(projection).toMatch(/import type \{ CoworkTransitionSnapshot \} from "\.\.\/cowork\/policy-transition"/);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);

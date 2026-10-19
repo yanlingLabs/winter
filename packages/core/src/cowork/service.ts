@@ -9,7 +9,7 @@ import { CoworkError, type CapabilityCeiling, type MutationContext, type Mutatio
 
 import { CoworkWorkspaceWatches, type CoworkWatchOptions, type CoworkWatchSink } from "./watch";
 import type { CoworkFolderSelections } from "./folder-selections";
-import type { CoworkProvisioningPort } from "./session-ports";
+import type { CoworkGuestStartRequest, CoworkProvisioningPort } from "./session-ports";
 
 export interface CoworkConnection { role: string; connectionId: number }
 /** Host-only injection. Never construct from method parameters or clientName. A gateway token
@@ -26,13 +26,20 @@ export interface CoworkHostPorts {
   /** Optional, host-injected native worker door (N2 S7). Absent (the production default) refuses `startNative` exactly as provisioning
    * refuses today. It is never read from a setting, an RPC or an environment variable, and no RPC method reaches it. */
   native?: CoworkGuestStartPort;
-  /** Session door spine (D1): S7B's provisioning port. TYPE ONLY in D1 — nothing reads it yet and no production host sets it,
-   * so `requireProvisioning` above stays the refusing gate. D4 replaces those calls with `provisioning.admit` and reports
-   * `workspace.capabilities.get`'s `provisioning` from `provisioning.available()`. */
+  /** Session door D4b: S7B's provisioning port. When a host supplies it, `provisioning.admit` is THE admission for creation
+   * and source additions (it refuses `unsupported_topology` while unavailable), and `workspace.capabilities.get` reports
+   * `provisioning` from `provisioning.available()`. No production host sets it, so `requireProvisioning` above stays the
+   * refusing gate there. Its `provision` effect runs after COMMIT (`provisionAfterCommit`) and reports through the operation. */
   provisioning?: CoworkProvisioningPort;
+  /** Session door D4b: whether this daemon has a Cowork session door (`workspace.capabilities.get`'s `execution`). Set only
+   * by the composition that passes a door; absent (every production host) reports false. Never a setting or an RPC. */
+  execution?: () => boolean;
 }
 /** The one thing the service asks of the native host: start a stopped workspace's guest. The daemon owns the stop tail separately. */
-export interface CoworkGuestStartPort { start(workspaceId: string): Promise<unknown> }
+/** The native start, as S7B's `CoworkNativeWiring` implements it. Session door D3: it may carry the conversation set's
+ *  callback (`CoworkGuestStartRequest`, asked once at `mounted`); the Cowork driver takes the narrower `CoworkGuestStarter`
+ *  (session-ports.ts), whose result is the running incarnation. */
+export interface CoworkGuestStartPort { start(workspaceId: string, request?: CoworkGuestStartRequest): Promise<unknown> }
 const NO_GRANTS: CoworkGrantResolver = { folder: () => undefined, repository: () => undefined };
 const RESPONSE_BUDGET = 128 * 1024;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -240,6 +247,43 @@ export class CoworkWorkspaceService {
       throw error;
     }
   }
+  private readonly provisioning = new Map<string, Promise<void>>();
+  /**
+   * Session door D4c: run S7B's `provision(workspaceId, operationId)` for a committed creation, once at a time per operation.
+   * Only with the port (no production host supplies it). Its answer is recorded through the operation:
+   *  - `{status: "applied"}`: nothing to conclude yet; the operation stays `pending` until the guest acknowledges the sources
+   *    (the existing `acknowledgeSource` path concludes it `applied`);
+   *  - `{status: "failed"}`: the operation concludes `failed` (terminal), durably, with a `workspace_operation_changed`;
+   *  - a throw, a rejection or a malformed answer: UNCERTAIN, so nothing is concluded and the operation stays `pending`.
+   *    The port is idempotent per operation, so `resumeProvisioning` (or a replay of the same create) drives it again.
+   * The port's own reason and error text are never kept.
+   */
+  private provisionAfterCommit(workspaceId: string, operationId: string): Promise<void> {
+    const port = this.host.provisioning;
+    if (port === undefined) return Promise.resolve();
+    const running = this.provisioning.get(operationId);
+    if (running !== undefined) return running;
+    if (this.records.operation(workspaceId, operationId).status !== "pending") return Promise.resolve();
+    const run = (async () => {
+      let answer: unknown;
+      try { answer = await port.provision(workspaceId, operationId); } catch { return; }
+      const status = answer !== null && typeof answer === "object" ? (answer as { status?: unknown }).status : undefined;
+      if (status === "failed") { try { this.records.failCreationProvisioning(workspaceId, operationId); } catch { /* left pending: a later resume decides */ } }
+    })().finally(() => { this.provisioning.delete(operationId); });
+    this.provisioning.set(operationId, run);
+    return run;
+  }
+  /** Session door D4c: drive provisioning for every creation still pending (a crash between COMMIT and `provision`). The host
+   *  that supplies the port calls it once at boot. Resolves when every drive it started has settled; never rejects. */
+  async resumeProvisioning(): Promise<void> {
+    if (this.host.provisioning === undefined) return;
+    await Promise.all(this.records.pendingCreations().map(({ workspaceId, operationId }) => this.provisionAfterCommit(workspaceId, operationId)));
+  }
+  /** Session door D4b: S7B's `provisioning.admit` when the host supplies the port, otherwise the host's refusing gate. */
+  private admitProvisioning(principal: CoworkPrincipal): void {
+    if (this.host.provisioning !== undefined) this.host.provisioning.admit(principal);
+    else this.host.requireProvisioning(principal);
+  }
   private checkedResponse(method: CoworkMethod, result: unknown): void {
     COWORK_RPC[method].result.parse(result);
     // Conservative inner budget leaves room for paired JSON escaping/base64 and outer envelope.
@@ -304,10 +348,11 @@ export class CoworkWorkspaceService {
       case "workspace.capabilities.get": {
         COWORK_RPC[method].params.parse(raw);
         if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
+        // Truthful, never a constant: each answer is the port that exists (production supplies neither, so both stay false).
         // A folder can be prepared only where a workspace could then be created: the same provisioning gate as `workspace.create`.
         let provisioningAvailable = true;
         try { this.host.requireProvisioning(principal); } catch { provisioningAvailable = false; }
-        return { folderPreparation: !!this.host.selections && provisioningAvailable, repositoryPreparation: false, provisioning: false, execution: false };
+        return { folderPreparation: !!this.host.selections && provisioningAvailable, repositoryPreparation: false, provisioning: this.host.provisioning?.available() === true, execution: this.host.execution?.() === true };
       }
       case "workspace.selection.prepareFolder": {
         const p = COWORK_RPC[method].params.parse(raw);
@@ -340,9 +385,11 @@ export class CoworkWorkspaceService {
         });
         if (previous) {
           this.requireReplaySources(principal, previous.workspaceId, previous.value.sources);
+          // A replay re-drives a creation whose provisioning never finished (idempotent per operation in the port).
+          this.provisionAfterCommit(previous.workspaceId, previous.operationId);
           return { ...previous, value: WorkspaceDto.parse({ ...projectWorkspace(previous.value.workspace), detailState: "complete", sources: previous.value.sources.map(projectSource), policy: previous.value.policy, automaticPublication: previous.value.automaticPublication }) };
         }
-        this.host.requireProvisioning(principal);
+        this.admitProvisioning(principal);
         // Persisted peer ownership/creation admission is a later gate. Never create an inaccessible
         // workspace and retroactively mutate a connection's grant set after the DB commit.
         if (principal.kind !== "local-user") throw new CoworkError("unsupported_topology");
@@ -352,6 +399,8 @@ export class CoworkWorkspaceService {
         const consumption = this.consumption(principal, connection, p.selections); context.bindSources = consumption.bind;
         const receipt = this.records.create(context, { ownership: p.ownership, title: p.title, sources, ceiling });
         consumption.committed();
+        // After COMMIT, never inside it: S7B's allocation runs on its own and reports through the operation.
+        this.provisionAfterCommit(receipt.workspaceId, receipt.operationId);
         return { ...receipt, value: WorkspaceDto.parse({ ...projectWorkspace(receipt.value.workspace), detailState: "complete", sources: receipt.value.sources.map(projectSource), policy: receipt.value.policy, automaticPublication: receipt.value.automaticPublication }) };
       }
       case "workspace.update": case "project.update": {
@@ -393,7 +442,7 @@ export class CoworkWorkspaceService {
         const context = this.context(principal, method, p); context.requestDigestInput = p;
         const previous = this.records.replaySourceAddition(context, p.workspaceId, () => this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository", connection));
         if (previous) { this.requireReplaySources(principal, p.workspaceId, [previous.value]); return { ...previous, value: projectSource(previous.value) }; }
-        this.host.requireProvisioning(principal);
+        this.admitProvisioning(principal);
         const selected = this.select(principal, p.selectionId, method === "workspace.source.addFolder" ? "folder" : "githubRepository", connection);
         const consumption = this.consumption(principal, connection, [{ selectionId: p.selectionId, kind: selected.kind }]); context.bindSources = consumption.bind;
         const receipt = this.records.addSource(context, p.workspaceId, selected);

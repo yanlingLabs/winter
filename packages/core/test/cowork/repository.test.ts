@@ -80,8 +80,10 @@ test("stale callback cannot resurrect a revoked source or cross workspace owners
 });
 test("standalone reserves one immutable conversation identity; Project bindings share files but preserve policy", () => {
   const { store } = open(), one = create(store, [folder], "standalone"), selected = one.value.sources[0]!;
-  code(() => store.bindConversation(context("early", 1), one.workspaceId, { sessionId: one.value.workspace.ownerId, sourceId: selected.sourceId }, authorityFixtureSessions(one.value.workspace.ownerId)), "source_unavailable");
-  ready(store, one.workspaceId);
+  // Session door D4 (design G7): the standalone conversation's reserved id is in the session store's own shape.
+  expect(one.value.workspace.ownerId).toMatch(/^s_[0-9a-f]{12}$/);
+  // Creation precedes the first boot, so a source no guest has acknowledged yet (`preparing`) binds; `ready` is demanded at mount.
+  expect(store.source(one.workspaceId, selected.sourceId).state).toBe("preparing");
   code(() => store.bindConversation(context("foreign", 1), one.workspaceId, { sessionId: "foreign", sourceId: selected.sourceId }, authorityFixtureSessions("foreign")), "authority_denied");
   store.bindConversation(context("own", 1), one.workspaceId, { sessionId: one.value.workspace.ownerId, sourceId: selected.sourceId }, authorityFixtureSessions(one.value.workspace.ownerId));
   const project = create(store, [repo], "project", "project"); ready(store, project.workspaceId);
@@ -91,6 +93,15 @@ test("standalone reserves one immutable conversation identity; Project bindings 
   store.bindConversation(context("b", 3), project.workspaceId, { sessionId: "session-b", sourceId }, authorityFixtureSessions("session-b"));
   expect(store.binding("session-a").policy).toBe("auto"); expect(store.binding("session-b").policy).toBe("plan");
   expect(store.binding("session-a").workspaceId).toBe(store.binding("session-b").workspaceId);
+});
+test("a binding refuses a source that is removed, revoked or unavailable: only a present source that is ready or preparing binds", () => {
+  const { store } = open(), project = create(store, [folder, repo], "project", "project"), [first, second] = project.value.sources;
+  store.removeSource(context("remove", 1), project.workspaceId, first!.sourceId);
+  expect(store.source(project.workspaceId, first!.sourceId).state).toBe("removing");
+  code(() => store.bindConversation(context("removed", store.get(project.workspaceId).configRevision), project.workspaceId, { sessionId: "session-removed", sourceId: first!.sourceId }, authorityFixtureSessions("session-removed")), "source_unavailable");
+  store.removeSource(context("revoke", store.get(project.workspaceId).configRevision), project.workspaceId, second!.sourceId, true);
+  expect(store.source(project.workspaceId, second!.sourceId).state).toBe("unavailable");
+  code(() => store.bindConversation(context("revoked", store.get(project.workspaceId).configRevision), project.workspaceId, { sessionId: "session-revoked", sourceId: second!.sourceId }, authorityFixtureSessions("session-revoked")), "source_unavailable");
 });
 test("outbox fanout survives reopen; receipt retry neither duplicates change nor alters result", () => {
   const a = open(), made = create(a.store); ready(a.store, made.workspaceId);

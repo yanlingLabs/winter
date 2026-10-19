@@ -193,7 +193,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
         const rec = { session, detached: 0, refreshed: 0 };
         attachments.push(rec);
         return { address: `winter-agent:session:${session.backendSessionId}`, ready: Promise.resolve(), refresh: () => { rec.refreshed++; }, detach: () => { rec.detached++; } };
-      }) as unknown as WinterSessionDeps["messaging"]["attach"],
+      }) as unknown as NonNullable<WinterSessionDeps["messaging"]>["attach"],
     },
     records: {
       bumpGeneration: () => ({ generation: ++h.records.generation }),
@@ -392,6 +392,15 @@ describe("startWinterSession — one incarnation", () => {
     expect(h.attachments[0]!.session).toMatchObject({ sessionId: "s_x", backendSessionId: "be-x", mode: "chat", generation: 1 });
     expect(h.attachments[0]!.session.query).toBe(h.q() as unknown as Query);
     expect(h.attachments[0]!.session.status?.()).toBe("idle");
+  });
+
+  test("a Cowork session given the router's messaging still never attaches it: its system/init records the facts and attaches nothing", async () => {
+    const h = harness({ mode: "cowork" });
+    await h.session.open();
+    h.q().emit(init(h.q().options, ["Read"]));
+    await h.settled();
+    expect(h.session.init).toEqual({ sessionId: "be-x", model: "winter-test/echo", tools: ["Read"] });
+    expect(h.attachments).toHaveLength(0);
   });
 
   test("send: user_message (the client's name), then beginTurn's turn_started, then the push; the result closes the turn", async () => {

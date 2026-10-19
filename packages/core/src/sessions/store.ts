@@ -559,6 +559,49 @@ export class SessionStore {
     return sessionId;
   }
 
+  /**
+   * Session door D4: a Cowork conversation's index row and its seq-1 `session_created` (with the binding's display facts),
+   * under the id the host's reservation holds. Resumable and idempotent, never a second row:
+   *  - no row: admitted only when `reserved(sessionId)` (the runtime-state reservation) says so; then INSERT and append;
+   *  - a row that is NOT a Cowork row of this scope: `authority_denied` (a Code row whose id collides is never adopted);
+   *  - a Cowork row whose `session_created` never landed (a crash between the INSERT and the append; `recoverAll` keeps
+   *    such a row with `last_seq` 0): the append runs now, once; a log that already has lines is `recovery_required`;
+   *  - a committed Cowork row of this scope: nothing to do.
+   * The row stores no cwd and no directories: the binding's location is the conversation's only working directory.
+   * Only `cowork/session-door.ts` calls it (pinned); `createSession` keeps refusing `mode: "cowork"`.
+   */
+  ensureCoworkSession(scope: string, sessionId: string, opts: { approvalPolicy: SessionApprovalPolicy; model: string; cowork: NonNullable<Extract<NewSessionEvent, { type: "session_created" }>["cowork"]> }, reserved: (sessionId: string) => boolean): void {
+    if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
+    if (!/^s_[0-9a-f]{12}$/.test(sessionId)) throw new CoworkError("invalid_request");
+    const row = this.db.query("SELECT scope, mode, last_seq FROM sessions WHERE session_id = ?").get(sessionId) as { scope: string; mode: string | null; last_seq: number } | null;
+    if (row !== null) {
+      if (row.mode !== "cowork" || row.scope !== scope) throw new CoworkError("authority_denied");
+      if (row.last_seq >= 1) return;
+      const path = this.logPath(scope, sessionId);
+      if (existsSync(path) && readFileSync(path, "utf8").length > 0) throw new CoworkError("recovery_required");
+      mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
+    } else {
+      if (reserved(sessionId) !== true) throw new CoworkError("authority_denied");
+      mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
+      this.db.run(
+        "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model, effort, dirs) VALUES (?, ?, ?, 0, NULL, ?, NULL, 'cowork', NULL, ?, NULL, '[]')",
+        [sessionId, scope, Date.now(), opts.approvalPolicy, opts.model],
+      );
+    }
+    this.append(sessionId, { type: "session_created", sessionId, scope, mode: "cowork", cowork: opts.cowork });
+  }
+
+  /** Session door D4: removes a Cowork row whose binding was definitely refused (nothing bound), so its request starts over.
+   *  `bound` is the host's own answer; a bound row is never removed here. Only `cowork/session-door.ts` calls it (pinned). */
+  withdrawCoworkSession(sessionId: string, bound: (sessionId: string) => boolean): void {
+    const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as { scope: string; mode: string | null } | null;
+    if (row === null) return;
+    if (row.mode !== "cowork" || bound(sessionId) !== false) throw new CoworkError("authority_denied");
+    const path = this.logPath(row.scope, sessionId);
+    if (existsSync(path)) unlinkSync(path);
+    this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
+  }
+
   append(sessionId: string, input: EventInput): SessionEvent {
     const row = this.db.query("SELECT scope, last_seq FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string; last_seq: number } | null;
@@ -1052,7 +1095,7 @@ export class SessionStore {
     const cutoff = nowMs - EMPTY_SESSION_GRACE_MS;
     const rows = this.db.query(
       `SELECT session_id FROM sessions
-       WHERE first_message IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')`,
+       WHERE first_message IS NULL AND created_at <= ? AND (mode IS NULL OR mode NOT IN ('dispatch','cowork'))`,
     ).all(cutoff) as { session_id: string }[];
     const candidates: string[] = [];
     for (const { session_id: sessionId } of rows) {
@@ -1092,7 +1135,7 @@ export class SessionStore {
   cleanerCandidateIds(createdBeforeMs: number): string[] {
     return (this.db.query(
       `SELECT session_id FROM sessions
-       WHERE judged IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')
+       WHERE judged IS NULL AND created_at <= ? AND (mode IS NULL OR mode NOT IN ('dispatch','cowork'))
        ORDER BY created_at`,
     ).all(createdBeforeMs) as { session_id: string }[]).map((r) => r.session_id);
   }
@@ -1176,6 +1219,10 @@ export class SessionStore {
       | { scope: string; mode: string | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     if (row.mode === "dispatch") throw new Error(`refusing to delete the dispatch session: ${sessionId}`);
+    // A Cowork conversation's row is half of a binding the host's runtime-state store holds (session door D4): deleting it
+    // here would leave that binding pointing at nothing. Neither the reaper, the cleaner nor a user delete removes one until
+    // the Cowork delete slice owns both halves; the session door alone withdraws an UNBOUND row (`withdrawCoworkSession`).
+    if (row.mode === "cowork") throw new CoworkError("unsupported_topology");
     const path = this.logPath(row.scope, sessionId);
     if (existsSync(path)) unlinkSync(path);
     this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);

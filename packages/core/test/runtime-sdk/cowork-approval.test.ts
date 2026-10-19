@@ -31,6 +31,8 @@ function classifyPath(path: string): string {
   // Roots and every conversation's folder are "outputs"/"scratch" to the host; the projection narrows them to the OWN folder.
   if (path === "/workspace/.winter/scratch" || path.startsWith("/workspace/.winter/scratch/")) return "scratch";
   if (path === "/workspace/outputs" || path.startsWith("/workspace/outputs/")) return "outputs";
+  // The epoch-scoped plan scratch lives OUTSIDE `.winter`; the host calls the root and everything under it planScratch.
+  if (path === "/workspace/plan" || path.startsWith("/workspace/plan/")) return "planScratch";
   if (path.startsWith("/workspace/.winter/") || path === "/workspace/.winter" || path.startsWith("/proc")) return "protected";
   if (path.startsWith("/workspace/repos/")) return "admitted";
   return "outside";
@@ -49,7 +51,7 @@ function build(initial: CoworkPolicyState, over: {
     installView: () => hold.installView ?? Promise.resolve(),
   };
   const machine = new CoworkPolicyTransitionMachine(initial, transitionPorts);
-  const ports: CoworkApprovalPorts = { identity: () => ({ workspaceId: "ws-7", sourceRevision: 12 }), snapshot: () => machine.snapshot(), classifyPath, planViewInstalled: () => true, ...over.ports };
+  const ports: CoworkApprovalPorts = { identity: () => ({ workspaceId: "ws-7", sourceRevision: 12 }), snapshot: () => machine.snapshot(), classifyPath, planViewInstalled: () => true, planScratchEpoch: () => machine.snapshot().epoch, ...over.ports };
   const events: NewSessionEvent[] = [], approvals = new ApprovalBroker(), questions = over.questions ?? new QuestionBroker();
   // The bridge never returns `null` (its header says so); the SDK type allows it, the tests read results directly.
   const canUse = canUseToolFor({
@@ -158,11 +160,11 @@ test("an explicit allow the host resolved lifts dont-ask and ask but never plan;
 });
 
 const OWN_OUT = "/workspace/outputs/cowork-1", OWN_SCRATCH = "/workspace/.winter/scratch/cowork-1";
-test("the conversation's own outputs and scratch: read everywhere, write like an admitted root (plan's scratch only inside the plan view); others' folders and the roots are denied", async () => {
+test("the conversation's own outputs and `.winter` scratch: read everywhere, write like an admitted root (plan denies); others' folders and the roots are denied", async () => {
   for (const policy of POLICIES) {
     for (const [name, own, other, root] of [["outputs", OWN_OUT, "/workspace/outputs/someone-else", "/workspace/outputs"], ["scratch", OWN_SCRATCH, "/workspace/.winter/scratch/someone-else", "/workspace/.winter/scratch"]] as const) {
-      const writeKind: Outcome = name === "scratch" && policy === "plan" ? "allow" : GRID[policy].Write;
-      const editKind: Outcome = name === "scratch" && policy === "plan" ? "allow" : GRID[policy].Edit;
+      const writeKind: Outcome = GRID[policy].Write;   // plan x `.winter` scratch is a plain deny: the plan scratch lives elsewhere
+      const editKind: Outcome = GRID[policy].Edit;
       const row = (dir: string) => ({
         Read: ["Read", { file_path: `${dir}/a.txt` }], Write: ["Write", { file_path: `${dir}/a.txt`, content: "x" }], Edit: ["Edit", { file_path: `${dir}/a.txt`, old_string: "a", new_string: "b" }],
         Glob: ["Glob", { pattern: "*.pdf", path: dir }], Grep: ["Grep", { pattern: "x", path: dir }],
@@ -196,7 +198,7 @@ test("the glob allowlist holds for outputs and scratch patterns: only the own fo
 
 test("hard denials hold under bypass: protected, outside, outputs and scratch paths, a missing ceiling class, unmapped paths", async () => {
   const bypass = () => build(state("bypass"));
-  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/Users/someone/.ssh/id_rsa",
+  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/home/x/.ssh/id_rsa",
     // Another conversation's outputs/scratch, the roots, and look-alike prefixes: never the OWN folder.
     "/workspace/outputs/other-session/report.pdf", "/workspace/outputs", "/workspace/outputs/", "/workspace/outputs/cowork-10/x", "/workspace/outputs/cowork-1/../other/x",
     "/workspace/.winter/scratch/other/tmp.txt", "/workspace/.winter/scratch", "/workspace/.winter/scratch/cowork-12/t"]) {
@@ -243,17 +245,80 @@ test("unknown tool classes are denied under every policy, bypass included; the m
   }
 });
 
-test("plan x own scratch needs the plan view, like plan x Bash: absent or false denies", async () => {
-  const scratch = ["Write", { file_path: `${OWN_SCRATCH}/note.txt`, content: "x" }] as const;
-  expect((await outcome(build(state("plan")), ...scratch)).kind).toBe("allow");
-  for (const ports of [{ planViewInstalled: () => false }, { planViewInstalled: undefined }]) {
-    const r = await outcome(build(state("plan"), { ports }), ...scratch);
-    expect(r.kind).toBe("deny"); expect((r.result as { message: string }).message).toBe(coworkDeniedMessage("Write", "plan_view_missing"));
-    expect((await outcome(build(state("plan"), { ports }), "Edit", { file_path: `${OWN_SCRATCH}/note.txt`, old_string: "a", new_string: "b" })).kind).toBe("deny");
+const PLAN_ROOT = "/workspace/plan";
+const planFile = (sid: string, epoch: number | string, name = "note.txt") => `${PLAN_ROOT}/${sid}/${epoch}/${name}`;
+test("planScratch: the conversation's own id at its CURRENT epoch - read everywhere, write only under plan and only with the plan view, denied under every other policy", async () => {
+  for (const policy of POLICIES) {
+    const own = (tool: string) => tool === "Read" ? ["Read", { file_path: planFile("cowork-1", 0) }] as const
+      : tool === "Write" ? ["Write", { file_path: planFile("cowork-1", 0), content: "x" }] as const
+      : tool === "Edit" ? ["Edit", { file_path: planFile("cowork-1", 0), old_string: "a", new_string: "b" }] as const
+      : tool === "Glob" ? ["Glob", { pattern: "*.txt", path: `${PLAN_ROOT}/cowork-1/0` }] as const
+      : ["Grep", { pattern: "x", path: `${PLAN_ROOT}/cowork-1/0` }] as const;
+    for (const tool of ["Read", "Glob", "Grep"]) expect({ policy, tool, kind: (await outcome(build(state(policy)), ...(own(tool) as unknown as [string, Record<string, unknown>]))).kind }).toEqual({ policy, tool, kind: "allow" });
+    for (const tool of ["Write", "Edit"]) {
+      expect({ policy, tool, kind: (await outcome(build(state(policy)), ...(own(tool) as unknown as [string, Record<string, unknown>]))).kind }).toEqual({ policy, tool, kind: policy === "plan" ? "allow" : "deny" });
+      if (policy === "plan") for (const ports of [{ planViewInstalled: () => false }, { planViewInstalled: undefined }]) {
+        const r = await outcome(build(state(policy), { ports }), ...(own(tool) as unknown as [string, Record<string, unknown>]));
+        expect(r.kind).toBe("deny"); expect((r.result as { message: string }).message).toBe(coworkDeniedMessage(tool, "plan_view_missing"));
+      } else expect(((await outcome(build(state(policy)), ...(own(tool) as unknown as [string, Record<string, unknown>]))).result as { message: string }).message).toBe(coworkDeniedMessage(tool, "plan_scratch_only_in_plan"));
+    }
+    // Everything else under /workspace/plan is outside, for every tool and policy: other sid, other epoch, look-alikes, the roots, `..`.
+    for (const path of [planFile("someone-else", 0), planFile("cowork-1", 1), planFile("cowork-1", 10), planFile("cowork-12", 0), planFile("cowork-1", "00"), planFile("cowork-1", "0x"), planFile("cowork-1", "-1"),
+      planFile("cowork-1", "0e0"), planFile("cowork-1", "0.0"), `${PLAN_ROOT}/cowork-1/note.txt`, `${PLAN_ROOT}/cowork-1`, PLAN_ROOT, `${PLAN_ROOT}/`, `${PLAN_ROOT}/cowork-1/0/../1/x`, `${PLAN_ROOT}/cowork-1/0/../../other/0/x`])
+      for (const [tool, base] of [READ, WRITE, EDIT]) expect({ policy, path, tool, kind: (await outcome(build(state(policy, FULL)), tool, { ...base, file_path: path })).kind }).toEqual({ policy, path, tool, kind: "deny" });
+    for (const dir of [`${PLAN_ROOT}/someone-else/0`, `${PLAN_ROOT}/cowork-1/1`, PLAN_ROOT, `${PLAN_ROOT}/cowork-1`])
+      for (const [tool, input] of [["Glob", { pattern: "*.txt", path: dir }], ["Grep", { pattern: "x", path: dir }]] as const) expect((await outcome(build(state(policy)), tool, { ...input })).kind).toBe("deny");
   }
-  // Reads of scratch need no view; outputs under plan are a plain deny whatever the view says.
-  expect((await outcome(build(state("plan"), { ports: { planViewInstalled: undefined } }), "Read", { file_path: `${OWN_SCRATCH}/note.txt` })).kind).toBe("allow");
-  expect((await outcome(build(state("plan")), "Write", { file_path: `${OWN_OUT}/r.pdf`, content: "" })).kind).toBe("deny");
+});
+
+test("planScratch: the epoch comes from the port, never from the path - it moves with the machine, and a missing or broken port makes no path the plan scratch", async () => {
+  const h = build(state("plan"));
+  const write = (epoch: number) => ["Write", { file_path: planFile("cowork-1", epoch), content: "x" }] as const;
+  expect((await outcome(h, ...write(0))).kind).toBe("allow");
+  expect((await outcome(h, ...write(1))).kind).toBe("deny");
+  // A transition (epoch 0 -> 1) replaces the plan view: the old epoch's scratch is now nobody's, the new epoch's is the conversation's.
+  expect((await h.machine.request(state("plan", { ...FULL, network: "internet" }))).status).toBe("applied");
+  expect(h.machine.snapshot().epoch).toBe(1);
+  expect((await outcome(h, ...write(0))).kind).toBe("deny");
+  expect((await outcome(h, ...write(1))).kind).toBe("allow");
+  // The old epoch's files stay readable only as "outside": no tool reaches them.
+  expect((await outcome(h, "Read", { file_path: planFile("cowork-1", 0) })).kind).toBe("deny");
+  for (const planScratchEpoch of [undefined, () => undefined, () => { throw new Error("boom"); }, () => -1, () => 1.5, () => Number.NaN, () => Number.MAX_SAFE_INTEGER + 2, () => "0" as unknown as number]) {
+    const g = build(state("plan"), { ports: { planScratchEpoch } });
+    expect({ kind: (await outcome(g, ...write(0))).kind }).toEqual({ kind: "deny" });
+    expect((await outcome(g, "Read", { file_path: planFile("cowork-1", 0) })).kind).toBe("deny");
+  }
+  // Unsafe session identity: nobody's plan scratch.
+  const none = (sessionId: string) => projectCoworkCall({ identity: () => ({ workspaceId: "w", sourceRevision: 1 }), snapshot: () => new CoworkPolicyTransitionMachine(state("plan"), { closeAdmission: async () => {}, drain: async () => "drained", installView: async () => {} }).snapshot(), classifyPath, planViewInstalled: () => true, planScratchEpoch: () => 0 },
+    { toolName: "Write", input: { file_path: planFile(sessionId, 0), content: "" }, sessionId }).kind;
+  for (const id of ["", "..", "a/b", "x y", "-x", ".hidden"]) expect({ id, kind: none(id) }).toEqual({ id, kind: "deny" });
+  expect(none("x")).toBe("allow");
+});
+
+test("the glob allowlist holds for plan scratch patterns: only the own sid at the current epoch allows", async () => {
+  const plan = () => build(state("plan"));
+  for (const [tool, input] of [["Glob", { pattern: `${PLAN_ROOT}/cowork-1/0/*.txt` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/0/**` }], ["Grep", { pattern: "x", glob: `${PLAN_ROOT}/cowork-1/0/src/*.md` }]] as const)
+    expect({ tool, input, kind: (await outcome(plan(), tool, { ...input })).kind }).toEqual({ tool, input, kind: "allow" });
+  for (const [tool, input] of [
+    ["Glob", { pattern: `${PLAN_ROOT}/*` }], ["Glob", { pattern: `${PLAN_ROOT}/**` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/*/x` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/[01]/x` }],
+    ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/{0,1}/x` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/0/../1/*` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/?/x` }],
+    ["Grep", { pattern: "x", glob: `${PLAN_ROOT}/other-*/0/x` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/0/*/../../1/*` }], ["Glob", { pattern: `${PLAN_ROOT}/cowork-1/1/*.txt` }],
+  ] as const) expect({ tool, input, kind: (await outcome(plan(), tool, { ...input })).kind }).toEqual({ tool, input, kind: "deny" });
+});
+
+test("the card names an outputs conversation by its outputs folder instead of a source revision", async () => {
+  const ask = async (identity: CoworkApprovalPorts["identity"]) => {
+    const h = build(state("ask"), { ports: { identity }, turnOrigin: () => "mac" });
+    const pending = h.canUse(...WRITE, ctx()); await tick();
+    const summary = (h.events[0] as { summary: string }).summary;
+    h.approvals.resolve(SESSION, "tu1", false, "mac"); await pending;
+    return summary;
+  };
+  const withFolder = await ask(() => ({ workspaceId: "ws-7", sourceRevision: 0, outputsFolder: "/workspace/outputs/cowork-1" }));
+  expect(withFolder).toContain("Cowork workspace ws-7 (outputs folder /workspace/outputs/cowork-1, agent main) — "); expect(withFolder).not.toContain("source revision");
+  const plain = await ask(() => ({ workspaceId: "ws-7", sourceRevision: 12 }));
+  expect(plain).toContain("(source revision 12, agent main)"); expect(plain).not.toContain("outputs folder");
+  for (const outputsFolder of ["", 5 as unknown as string]) expect(await ask(() => ({ workspaceId: "ws-7", sourceRevision: 3, outputsFolder }))).toContain("source revision 3");
 });
 
 test("the call is judged again after the review: a policy that narrowed during a hanging review denies it", async () => {
@@ -454,10 +519,10 @@ test("a narrowing in flight admits nothing new and keeps reporting the old polic
 
   // A widening removes nothing: calls keep being judged under the OLD (narrower) policy until the view is installed.
   let install!: () => void;
-  const w = build(state("plan"), { hold: { installView: new Promise<void>(r => { install = () => r(); }) } });
+  const w = build(state("dont-ask"), { hold: { installView: new Promise<void>(r => { install = () => r(); }) } });
   const widening = w.machine.request(state("bypass"));
   await tick();
-  expect(w.machine.snapshot()).toMatchObject({ phase: "pending", kind: "widening", effective: { policy: "plan" } });
+  expect(w.machine.snapshot()).toMatchObject({ phase: "pending", kind: "widening", effective: { policy: "dont-ask" } });
   expect((await outcome(w, ...WRITE)).kind).toBe("deny");
   install(); await widening;
   expect((await outcome(w, ...WRITE)).kind).toBe("allow");
@@ -599,7 +664,16 @@ test("wired behind the refusal: only the bridge reaches the projection, producti
   const driver = readFileSync(join(packages, "core", "src", "runtime-sdk", "session-driver.ts"), "utf8");
   const construction = driver.slice(driver.indexOf("canUseToolFor({"), driver.indexOf("canUseToolFor({") + 1600);
   expect(construction).not.toMatch(/\bcowork\b/);
-  expect(reaching(["canUseToolFor({"]).filter(name => name !== "approval-bridge.ts")).toEqual(["session-driver.ts"]);
+  // The bridge is constructed (imported from approval-bridge and called) by the Code driver alone. Session door D3: the
+  // Cowork driver (cowork/session-driver.ts) never imports the bridge; it calls the injected `CoworkApprovalPort`, which
+  // production never supplies.
+  const constructing = sources.filter(file => basename(file) !== "approval-bridge.ts" && /from "[^"]*approval-bridge"/.test(readFileSync(file, "utf8")) && readFileSync(file, "utf8").includes("canUseToolFor({"));
+  // Session door D4b: the door's `coworkApprovalPort` adapter (#84's `mode: "cowork"`) is the one other constructor, and only
+  // a door composition calls it; nothing in src constructs a door (session-door.test.ts pins that).
+  expect(constructing.map(file => file.slice(packages.length + 1)).sort()).toEqual([join("core", "src", "cowork", "session-door.ts"), join("core", "src", "runtime-sdk", "session-driver.ts")]);
+  const doorText = readFileSync(join(packages, "core", "src", "cowork", "session-door.ts"), "utf8");
+  expect(doorText.slice(doorText.indexOf("canUseToolFor({"), doorText.indexOf("canUseToolFor({") + 400)).toMatch(/mode: "cowork"/);
+  expect(readFileSync(join(packages, "core", "src", "cowork", "session-driver.ts"), "utf8")).not.toMatch(/approval-bridge|cowork-approval/);
   // The door still refuses.
   expect(isUnrunnableSessionMode("cowork")).toBe(true); expect(runnableModeOf("cowork")).toBeUndefined();
   // The bridge's only cowork seam is the injected dependency.

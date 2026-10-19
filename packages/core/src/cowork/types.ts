@@ -29,6 +29,14 @@ export interface ConversationBinding {
   sessionId: string; workspaceId: string; projectId: string | null; sourceId: string; relativeCwd: string;
   policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
 }
+/** Session door D3b: a conversation bound to its OWN outputs location (O1): no source, cwd `/workspace/outputs/<sessionId>`. */
+export interface CoworkOutputsConversation {
+  location: "outputs"; sessionId: string; workspaceId: string; projectId: string | null;
+  policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
+}
+/** Session door D3b: either location, discriminated. Read only through `CoworkRepository.conversation` on the DOOR's run path;
+ *  every other reader keeps `binding()`, which refuses an outputs row (`unsupported_topology`). */
+export type CoworkConversation = (ConversationBinding & { location: "source" }) | CoworkOutputsConversation;
 export interface MutationContext {
   /** Host-derived RPC name for principal/method idempotency scope. */ method?: string;
   /** Pure host effect admission after content-bound replay and revision checks, before writes.
