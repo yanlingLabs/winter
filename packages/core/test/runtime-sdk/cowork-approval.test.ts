@@ -28,8 +28,9 @@ const state = (policy: ApprovalPolicy, ceiling: CapabilityCeiling = FULL): Cowor
 /** What the host would answer for a guest path (the guest never classifies its own paths). */
 function classifyPath(path: string): string {
   if (path === "/workspace/.winter/WINTER.md") return "shared-instructions";
-  if (path.startsWith("/workspace/.winter/scratch/")) return "scratch";
-  if (path.startsWith("/workspace/outputs/")) return "outputs";
+  // Roots and every conversation's folder are "outputs"/"scratch" to the host; the projection narrows them to the OWN folder.
+  if (path === "/workspace/.winter/scratch" || path.startsWith("/workspace/.winter/scratch/")) return "scratch";
+  if (path === "/workspace/outputs" || path.startsWith("/workspace/outputs/")) return "outputs";
   if (path.startsWith("/workspace/.winter/") || path === "/workspace/.winter" || path.startsWith("/proc")) return "protected";
   if (path.startsWith("/workspace/repos/")) return "admitted";
   return "outside";
@@ -39,7 +40,7 @@ type Bridge = { (...args: Parameters<CanUseTool>): Promise<PermissionResult>; wi
 interface Hold { closeAdmission?: Promise<void>; drain?: Promise<"drained" | "restart-required">; installView?: Promise<void> }
 function build(initial: CoworkPolicyState, over: {
   ports?: Partial<CoworkApprovalPorts>; hold?: Hold; connectors?: ConnectorPermissionSource; turnOrigin?: () => string | undefined;
-  planBridge?: Parameters<typeof canUseToolFor>[0]["planBridge"]; questions?: QuestionBroker;
+  planBridge?: Parameters<typeof canUseToolFor>[0]["planBridge"]; questions?: QuestionBroker; review?: Parameters<typeof canUseToolFor>[0]["coworkBashReview"];
 } = {}) {
   const hold: Hold = over.hold ?? {};
   const transitionPorts: CoworkTransitionPorts = {
@@ -57,6 +58,7 @@ function build(initial: CoworkPolicyState, over: {
     ...(over.connectors === undefined ? {} : { connectors: over.connectors }),
     ...(over.turnOrigin === undefined ? {} : { turnOrigin: over.turnOrigin }),
     ...(over.planBridge === undefined ? {} : { planBridge: over.planBridge }),
+    ...(over.review === undefined ? {} : { coworkBashReview: over.review }),
   }) as unknown as Bridge;
   return { machine, events, approvals, questions, canUse, ports };
 }
@@ -126,6 +128,7 @@ test("Glob, Grep and MultiEdit take the Read and Edit rows; Glob and Grep defaul
     for (const [tool, input] of [
       ["Glob", { pattern: "/workspace/.winter/**" }], ["Glob", { pattern: "../../../etc/*" }], ["Grep", { pattern: "x", glob: "/etc/*" }],
       ["Glob", { pattern: "/workspace/.winter/conversations/*/x.jsonl", path: "/workspace/repos/app" }], ["Grep", { pattern: "x", glob: "src/*/../../../../etc/*" }],
+      ["Glob", { pattern: "?./etc/*" }], ["Glob", { pattern: ".?/x" }], ["Glob", { pattern: "??/x" }], ["Grep", { pattern: "x", glob: "src/?./../*" }],
       ["Glob", { pattern: "/proc/**" }], ["Glob", { pattern: "/workspace/outputs/**" }], ["Glob", { pattern: "../../.winter/*" }],
       // Brace alternatives, escapes, extglob groups, `~`: nothing outside the allowlist is ever classified from the cwd.
       ["Glob", { pattern: "{/etc,x}/passwd" }], ["Grep", { pattern: "x", glob: "{/etc,y}/*" }], ["Glob", { pattern: "{..,x}/etc/*" }],
@@ -137,7 +140,7 @@ test("Glob, Grep and MultiEdit take the Read and Edit rows; Glob and Grep defaul
     // In-workspace patterns, relative or absolute, still take the Read row.
     for (const [tool, input] of [
       ["Glob", { pattern: "**" }], ["Glob", { pattern: "**/*.md" }], ["Glob", { pattern: "" }], ["Grep", { pattern: "x", glob: "" }], ["Glob", { pattern: "src/my file-1_a.b/*.ts" }],
-      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
+      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "*.ts" }], ["Glob", { pattern: "a?.ts" }], ["Glob", { pattern: "src/?/x.ts" }], ["Glob", { pattern: "./*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
       ["Grep", { pattern: "x", glob: "*.ts" }], ["Grep", { pattern: "x", glob: "../other/*.ts" }],
     ] as const) expect({ policy, tool, input, kind: (await outcome(build(state(policy)), tool, { ...input })).kind }).toEqual({ policy, tool, input, kind: "allow" });
   }
@@ -154,10 +157,49 @@ test("an explicit allow the host resolved lifts dont-ask and ask but never plan;
   expect((await outcome(build(state("bypass"), { ports: deny }), ...WRITE)).kind).toBe("deny");
 });
 
+const OWN_OUT = "/workspace/outputs/cowork-1", OWN_SCRATCH = "/workspace/.winter/scratch/cowork-1";
+test("the conversation's own outputs and scratch: read everywhere, write like an admitted root (plan's scratch only inside the plan view); others' folders and the roots are denied", async () => {
+  for (const policy of POLICIES) {
+    for (const [name, own, other, root] of [["outputs", OWN_OUT, "/workspace/outputs/someone-else", "/workspace/outputs"], ["scratch", OWN_SCRATCH, "/workspace/.winter/scratch/someone-else", "/workspace/.winter/scratch"]] as const) {
+      const writeKind: Outcome = name === "scratch" && policy === "plan" ? "allow" : GRID[policy].Write;
+      const editKind: Outcome = name === "scratch" && policy === "plan" ? "allow" : GRID[policy].Edit;
+      const row = (dir: string) => ({
+        Read: ["Read", { file_path: `${dir}/a.txt` }], Write: ["Write", { file_path: `${dir}/a.txt`, content: "x" }], Edit: ["Edit", { file_path: `${dir}/a.txt`, old_string: "a", new_string: "b" }],
+        Glob: ["Glob", { pattern: "*.pdf", path: dir }], Grep: ["Grep", { pattern: "x", path: dir }],
+      } as const);
+      for (const [tool, [wire, input]] of Object.entries(row(own))) {
+        const kind = (await outcome(build(state(policy)), wire, { ...input })).kind;
+        expect({ policy, name, tool, kind }).toEqual({ policy, name, tool, kind: tool === "Write" ? writeKind : tool === "Edit" ? editKind : "allow" });
+      }
+      for (const dir of [other, root]) for (const [tool, [wire, input]] of Object.entries(row(dir)))
+        expect({ policy, name, dir, tool, kind: (await outcome(build(state(policy)), wire, { ...input })).kind }).toEqual({ policy, name, dir, tool, kind: "deny" });
+    }
+  }
+  // A pathless tool never takes these folders; a missing/unsafe session identity makes the folder nobody's.
+  const none = (sessionId: string | undefined) => projectCoworkCall({ identity: () => ({ workspaceId: "w", sourceRevision: 1 }), snapshot: () => new CoworkPolicyTransitionMachine(state("bypass"), { closeAdmission: async () => {}, drain: async () => "drained", installView: async () => {} }).snapshot(), classifyPath },
+    { toolName: "Write", input: { file_path: `/workspace/outputs/${sessionId ?? "x"}/a`, content: "" }, ...(sessionId === undefined ? {} : { sessionId }) }).kind;
+  for (const id of [undefined, "", "..", ".", "a/b", "x".repeat(200), "x y", "-x", ".hidden", "a\nb"]) expect({ id, kind: none(id) }).toEqual({ id, kind: "deny" });
+  expect(none("x")).toBe("allow");
+});
+
+test("the glob allowlist holds for outputs and scratch patterns: only the own folder's literal prefix allows", async () => {
+  const bypass = () => build(state("bypass"));
+  for (const [tool, input] of [
+    ["Glob", { pattern: `${OWN_OUT}/*.pdf` }], ["Glob", { pattern: `${OWN_OUT}/**` }], ["Grep", { pattern: "x", glob: `${OWN_OUT}/reports/*.md` }], ["Glob", { pattern: `${OWN_SCRATCH}/**/*.tmp` }],
+  ] as const) expect({ tool, input, kind: (await outcome(bypass(), tool, { ...input })).kind }).toEqual({ tool, input, kind: "allow" });
+  for (const [tool, input] of [
+    ["Glob", { pattern: "/workspace/outputs/*" }], ["Glob", { pattern: "/workspace/outputs/**" }], ["Glob", { pattern: "/workspace/outputs/other-*/x" }], ["Glob", { pattern: `${OWN_OUT}*/x` }],
+    ["Glob", { pattern: `${OWN_OUT}/../other/*` }], ["Glob", { pattern: `${OWN_OUT}/*/../../other/*` }], ["Grep", { pattern: "x", glob: `${OWN_OUT}/{a,../other}/*` }], ["Glob", { pattern: `${OWN_OUT}/\\.\\./other/*` }],
+    ["Glob", { pattern: `@(${OWN_OUT}|/etc)/*` }], ["Glob", { pattern: "/workspace/.winter/scratch/*/x" }], ["Glob", { pattern: "~/outputs/*" }],
+  ] as const) expect({ tool, input, kind: (await outcome(bypass(), tool, { ...input })).kind }).toEqual({ tool, input, kind: "deny" });
+});
+
 test("hard denials hold under bypass: protected, outside, outputs and scratch paths, a missing ceiling class, unmapped paths", async () => {
   const bypass = () => build(state("bypass"));
   for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/Users/someone/.ssh/id_rsa",
-    "/workspace/outputs/cowork-1/report.pdf", "/workspace/.winter/scratch/cowork-1/tmp.txt"]) {
+    // Another conversation's outputs/scratch, the roots, and look-alike prefixes: never the OWN folder.
+    "/workspace/outputs/other-session/report.pdf", "/workspace/outputs", "/workspace/outputs/", "/workspace/outputs/cowork-10/x", "/workspace/outputs/cowork-1/../other/x",
+    "/workspace/.winter/scratch/other/tmp.txt", "/workspace/.winter/scratch", "/workspace/.winter/scratch/cowork-12/t"]) {
     for (const [tool, base] of [READ, WRITE, EDIT]) expect((await outcome(bypass(), tool, { ...base, file_path: path })).kind).toBe("deny");
   }
   // Relative paths resolve against the conversation's cwd, and `..` cannot climb out of the host's classification.
@@ -199,6 +241,37 @@ test("unknown tool classes are denied under every policy, bypass included; the m
     expect({ policy, tool, kind: r.kind }).toEqual({ policy, tool, kind: "deny" });
     expect((r.result as { message: string }).message).toBe(coworkDeniedMessage(tool, "unknown_tool_class"));
   }
+});
+
+test("plan x own scratch needs the plan view, like plan x Bash: absent or false denies", async () => {
+  const scratch = ["Write", { file_path: `${OWN_SCRATCH}/note.txt`, content: "x" }] as const;
+  expect((await outcome(build(state("plan")), ...scratch)).kind).toBe("allow");
+  for (const ports of [{ planViewInstalled: () => false }, { planViewInstalled: undefined }]) {
+    const r = await outcome(build(state("plan"), { ports }), ...scratch);
+    expect(r.kind).toBe("deny"); expect((r.result as { message: string }).message).toBe(coworkDeniedMessage("Write", "plan_view_missing"));
+    expect((await outcome(build(state("plan"), { ports }), "Edit", { file_path: `${OWN_SCRATCH}/note.txt`, old_string: "a", new_string: "b" })).kind).toBe("deny");
+  }
+  // Reads of scratch need no view; outputs under plan are a plain deny whatever the view says.
+  expect((await outcome(build(state("plan"), { ports: { planViewInstalled: undefined } }), "Read", { file_path: `${OWN_SCRATCH}/note.txt` })).kind).toBe("allow");
+  expect((await outcome(build(state("plan")), "Write", { file_path: `${OWN_OUT}/r.pdf`, content: "" })).kind).toBe("deny");
+});
+
+test("the call is judged again after the review: a policy that narrowed during a hanging review denies it", async () => {
+  let answer!: (v: { verdict: "safe" | "unsafe"; reason: string }) => void;
+  const reviewer = fakeReviewer(() => new Promise(resolve => { answer = resolve; }));
+  const h = build(state("auto"), { review: reviewer.review });
+  const pending = h.canUse("Bash", { ...RISKY }, ctx()); await tick();
+  expect(reviewer.calls).toHaveLength(1);
+  expect((await h.machine.request(state("plan"))).status).toBe("applied");
+  answer({ verdict: "safe", reason: "" });
+  // Plan's view is installed in this fixture, so only a policy that denies Bash outright would stop it: use dont-ask below.
+  expect(["allow", "deny"]).toContain((await pending)!.behavior);
+  const g = build(state("auto"), { review: fakeReviewer(() => new Promise(resolve => { answer = resolve; })).review });
+  const run = g.canUse("Bash", { ...RISKY }, ctx()); await tick();
+  expect((await g.machine.request(state("dont-ask"))).status).toBe("applied");
+  answer({ verdict: "safe", reason: "" });
+  expect(await run).toMatchObject({ behavior: "deny", message: coworkDeniedMessage("Bash", "policy_changed") });
+  expect(g.events).toEqual([]);
 });
 
 test("a sandbox escape and a network request beyond the ceiling are denied in every policy", async () => {
@@ -399,6 +472,99 @@ test("a failed narrowing keeps admission closed: restart-required says so, and n
   const g = build(state("auto"), { hold: { closeAdmission: Promise.reject(new Error("x")) } });
   expect((await g.machine.request(state("plan"))).status).toBe("failed");
   expect((await outcome(g, ...READ)).kind).toBe("deny");   // admission unknown
+});
+
+// ── the bash safety review, inside the Cowork route (the guest registers no hooks) ───────────────────────────────────────────
+type Verdict = { verdict: "safe" | "unsafe"; reason: string };
+function fakeReviewer(answer: (command: string, signal?: AbortSignal) => Promise<Verdict>) {
+  const calls: Array<{ command: string; signal?: AbortSignal }> = [];
+  return { calls, review: { reviewer: { review: async (request: { class: "bash"; command: string }, signal?: AbortSignal) => { calls.push({ command: request.command, ...(signal === undefined ? {} : { signal }) }); return answer(request.command, signal); } } } };
+}
+const RISKY = { command: "make deploy --force" };
+
+test("auto x Bash runs the existing safety reviewer in the bridge: safe allows, unsafe denies with the reviewer's reason, no card either way", async () => {
+  const safe = fakeReviewer(async () => ({ verdict: "safe", reason: "" }));
+  const a = build(state("auto"), { review: safe.review });
+  expect((await outcome(a, "Bash", { ...RISKY })).kind).toBe("allow");
+  expect(safe.calls.map(c => c.command)).toEqual([RISKY.command]); expect(a.events).toEqual([]);
+  const unsafe = fakeReviewer(async () => ({ verdict: "unsafe", reason: "it force-deploys to production" }));
+  const b = build(state("auto"), { review: unsafe.review });
+  const denied = await outcome(b, "Bash", { ...RISKY });
+  expect(denied.kind).toBe("deny"); expect((denied.result as { message: string }).message).toBe("Bash was not run — it force-deploys to production");
+  expect(b.events).toEqual([]);
+  const blank = build(state("auto"), { review: fakeReviewer(async () => ({ verdict: "unsafe", reason: "" })).review });
+  expect(((await outcome(blank, "Bash", { ...RISKY })).result as { message: string }).message).toContain("judged this command unsafe");
+});
+
+test("the review is skipped where the table says it is not owed: a read-only command, other policies, other tools, no reviewer, a disabled reviewer, an empty command", async () => {
+  const never = fakeReviewer(async () => ({ verdict: "unsafe", reason: "no" }));
+  expect((await outcome(build(state("auto"), { review: never.review }), "Bash", { command: "ls -la" })).kind).toBe("allow");      // bashLooksSafe
+  expect((await outcome(build(state("auto"), { review: { ...never.review, allow: () => ["make"] } }), "Bash", { command: "make test" })).kind).toBe("allow");   // the user's allow list
+  for (const policy of ["bypass", "accept-edits", "ask"] as const) {
+    const h = build(state(policy), { review: never.review }); const r = await outcome(h, "Bash", { ...RISKY });
+    expect(r.kind).toBe(policy === "bypass" ? "allow" : "card");
+  }
+  expect((await outcome(build(state("auto"), { review: never.review }), "Write", { file_path: "/workspace/repos/app/a.ts", content: "" })).kind).toBe("allow");
+  expect((await outcome(build(state("auto")), "Bash", { ...RISKY })).kind).toBe("allow");                                              // no reviewer wired: as Code
+  expect((await outcome(build(state("auto"), { review: { ...never.review, enabled: () => false } }), "Bash", { ...RISKY })).kind).toBe("allow");
+  expect((await outcome(build(state("auto"), { review: never.review }), "Bash", { command: "" })).kind).toBe("allow");
+  expect(never.calls).toEqual([]);
+});
+
+test("a reviewer that cannot reach a verdict asks (a card, never an allow); no runnable model allows as Code does", async () => {
+  const { ReviewerNoRunnableModel } = await import("../../src/agent/reviewer");
+  for (const failure of [async () => { throw new Error("provider 500"); }, async () => ({ verdict: "maybe", reason: "" }) as unknown as Verdict, async () => undefined as unknown as Verdict]) {
+    const h = build(state("auto"), { review: fakeReviewer(failure).review, turnOrigin: () => "mac" });
+    const pending = h.canUse("Bash", { ...RISKY }, ctx()); await tick();
+    const requested = h.events.find(e => e.type === "approval_requested") as { summary: string } | undefined;
+    expect(requested?.summary).toContain("bash make deploy --force");
+    h.approvals.resolve(SESSION, "tu1", true, "mac");
+    expect(await pending).toMatchObject({ behavior: "allow", decisionClassification: "user_temporary" });
+  }
+  const noModel = build(state("auto"), { review: fakeReviewer(async () => { throw new ReviewerNoRunnableModel("none", "x"); }).review });
+  expect((await outcome(noModel, "Bash", { ...RISKY })).kind).toBe("allow");
+  // And a refusal of that card is a refusal.
+  const h = build(state("auto"), { review: fakeReviewer(async () => { throw new Error("down"); }).review, turnOrigin: () => "mac" });
+  const pending = h.canUse("Bash", { ...RISKY }, ctx()); await tick(); h.approvals.resolve(SESSION, "tu1", false, "mac");
+  expect(await pending).toMatchObject({ behavior: "deny", interrupt: true });
+});
+
+test("the review is bounded: a reviewer that never answers is aborted at the timeout and the call asks", async () => {
+  let seen: AbortSignal | undefined;
+  const hang = fakeReviewer((_c, signal) => { seen = signal; return new Promise<Verdict>(() => {}); });
+  const h = build(state("auto"), { review: { ...hang.review, timeoutMs: 20 }, turnOrigin: () => "mac" });
+  const pending = h.canUse("Bash", { ...RISKY }, ctx());
+  await new Promise(r => setTimeout(r, 80));
+  expect(seen?.aborted).toBe(true);
+  expect(h.events.find(e => e.type === "approval_requested")).toBeDefined();
+  h.approvals.resolve(SESSION, "tu1", false, "mac"); await pending;
+  // A turn aborted during the review is a deny with no card.
+  const controller = new AbortController();
+  const g = build(state("auto"), { review: fakeReviewer(async (_c, signal) => { await new Promise(r => signal?.addEventListener("abort", r)); throw new Error("aborted"); }).review });
+  const run = g.canUse("Bash", { ...RISKY }, ctx({ controller })); await tick(); controller.abort();
+  expect(await run).toMatchObject({ behavior: "deny" }); expect(g.events).toEqual([]);
+});
+
+test('mode "cowork" is accepted by the bridge type, routes to the projection, and without its ports denies everything', async () => {
+  const events: NewSessionEvent[] = [];
+  const machine = new CoworkPolicyTransitionMachine(state("ask"), { closeAdmission: async () => {}, drain: async () => "drained", installView: async () => {} });
+  const ports: CoworkApprovalPorts = { identity: () => ({ workspaceId: "ws-7", sourceRevision: 12 }), snapshot: () => machine.snapshot(), classifyPath, planViewInstalled: () => true };
+  const approvals = new ApprovalBroker();
+  const make = (withPorts: boolean) => canUseToolFor({
+    sessionId: SESSION, mode: "cowork", policy: "auto", approvals, questions: new QuestionBroker(), gate: new PermissionGate(), cwd: "/workspace/repos/app",
+    emit: e => { events.push(e); }, log: silent, now: () => NOW, ...(withPorts ? { cowork: ports } : {}),
+  }) as unknown as Bridge;
+  const routed = make(true);
+  // The Cowork matrix, not the gate, decided: an unknown class is denied with Cowork's own words, and ask raises a Cowork-worded card.
+  expect(await routed("TaskCreate", {}, ctx())).toMatchObject({ behavior: "deny", message: coworkDeniedMessage("TaskCreate", "unknown_tool_class") });
+  const pending = routed("Write", { file_path: "/workspace/repos/app/a.ts", content: "" }, ctx()); await tick();
+  expect((events[0] as { summary: string }).summary).toContain("Cowork workspace ws-7");
+  approvals.resolve(SESSION, "tu1", true, "mac"); expect((await pending)!.behavior).toBe("allow");
+  // A cowork bridge with no ports is closed, whatever the tool or the stored policy.
+  events.length = 0;
+  const closed = make(false);
+  for (const [tool, input] of [READ, WRITE, BASH, ["TaskCreate", {}]] as const) expect(await closed(tool, { ...input }, ctx())).toMatchObject({ behavior: "deny" });
+  expect(events).toEqual([]);
 });
 
 test("an aborted turn is denied with no event and no broker entry", async () => {
