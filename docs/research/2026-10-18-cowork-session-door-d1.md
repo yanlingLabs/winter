@@ -42,7 +42,9 @@ A `cowork` binding beside any other mode is `invalid_request`, never ignored.
 - a `source` row has a source;
 - an `outputs` row has no source and its cwd is `.`.
 
-The migration is idempotent: a table that already has `location_kind` is left alone. Both downgrade helpers accept 18. The repository's bind insert now names its columns. Nothing reads either new column yet. `ConversationBinding.sourceId` stays a string, because no door can write an outputs row yet. The type change comes with D3's bind.
+Migration 18 also creates S7B's `cowork_home_binding` (needed by #87). It is the singleton record of which prepared Mac home this Cowork home is bound to, and its text is identical to `COWORK_HOME_BINDING_DDL` in `cowork/host-env/stores.ts`. It is written once and never updated. It is listed in `COWORK_TABLES` ahead of the `cowork_home_identity` table it references, so a populated binding refuses both downgrades.
+
+The migration is idempotent: the binding table is `IF NOT EXISTS`, and a conversations table that already has `location_kind` is left alone. Both downgrade helpers accept 18. The repository's bind insert now names its columns. Nothing reads either new column yet. `ConversationBinding.sourceId` stays a string, because no door can write an outputs row yet. The type change comes with D3's bind.
 
 ## Tests
 
@@ -64,7 +66,7 @@ The migration is idempotent: a table that already has `location_kind` is left al
 - `packages/protocol/test/cowork-session-door.test.ts` covers the wire schemas.
 - The literal schema pins in the peer-inbox, lifecycle, outputs and instructions tests move to 18. The positional insert in the retention test now names its columns.
 
-Mutations: 51 mutants in one catalogue run. They cover the guards, the protocol refinements, migration 18, the downgrade helpers, the bind insert, the source pins and the port copies (the type-level ones under `tsc`). 50 were killed. The one survivor is equivalent: widening `location_kind`'s column CHECK is still refused by the table CHECK, which already admits only the two shapes.
+Mutations: 51 mutants in one catalogue run, plus 6 for the home binding fold (all 6 killed: the table missing, not authority, wrong drop order, singleton, reference, a required column). They cover the guards, the protocol refinements, migration 18, the downgrade helpers, the bind insert, the source pins and the port copies (the type-level ones under `tsc`). 50 were killed. The one survivor is equivalent: widening `location_kind`'s column CHECK is still refused by the table CHECK, which already admits only the two shapes.
 
 ### Where the off test differs from design section 6
 
