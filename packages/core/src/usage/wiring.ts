@@ -37,23 +37,26 @@ export interface UsageInjection {
   alarmBeatMs?: { codex?: number; "claude-code"?: number; antigravity?: number };
 }
 
-/** The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle). */
-export const CODEX_INSTALLS = [
-  "/opt/homebrew/bin/codex", "/usr/local/bin/codex", join(homedir(), ".local/bin/codex"), join(homedir(), ".npm-global/bin/codex"),
+// The usual absolute install places, tried before `$PATH` (Homebrew, /usr/local, ~/.local, npm-global, the app bundle).
+// Functions, never module constants: every process of the `winter-core` binary loads this module — the sandboxed
+// automation worker too, whose environment has no HOME and whose seatbelt refuses the user lookup, so a `homedir()`
+// at load throws there and the worker never starts.
+export const codexInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/codex", "/usr/local/bin/codex", join(home, ".local/bin/codex"), join(home, ".npm-global/bin/codex"),
   "/Applications/Codex.app/Contents/Resources/codex",
 ];
-export const CLAUDE_INSTALLS = [
-  "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(homedir(), ".local/bin/claude"), join(homedir(), ".claude/local/claude"),
-  join(homedir(), ".npm-global/bin/claude"),
+export const claudeInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/claude", "/usr/local/bin/claude", join(home, ".local/bin/claude"), join(home, ".claude/local/claude"),
+  join(home, ".npm-global/bin/claude"),
 ];
 /** Antigravity's CLI (Homebrew installs it as `agy`). */
-export const AGY_INSTALLS = [
-  "/opt/homebrew/bin/agy", "/usr/local/bin/agy", join(homedir(), ".local/bin/agy"), join(homedir(), ".npm-global/bin/agy"),
+export const agyInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/agy", "/usr/local/bin/agy", join(home, ".local/bin/agy"), join(home, ".npm-global/bin/agy"),
 ];
 /** OpenCode (Homebrew, its own install script's `~/.opencode/bin`, npm). */
-export const OPENCODE_INSTALLS = [
-  "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode", join(homedir(), ".opencode/bin/opencode"), join(homedir(), ".local/bin/opencode"),
-  join(homedir(), ".npm-global/bin/opencode"),
+export const opencodeInstalls = (home = homedir()): string[] => [
+  "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode", join(home, ".opencode/bin/opencode"), join(home, ".local/bin/opencode"),
+  join(home, ".npm-global/bin/opencode"),
 ];
 
 /** The JS package managers' global bins (bun, volta, pnpm, every nvm node): a CLI installed through one of them is
@@ -124,10 +127,10 @@ export function createUsageService(opts: {
     ...(codexHome === undefined ? {} : { codexHome }),
     ...(claudeHome === undefined ? {} : { claudeHome }),
     ...(claudeJsonPath === undefined ? {} : { claudeJsonPath }),
-    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...CODEX_INSTALLS, ...packageManagerBins("codex")]),
-    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...CLAUDE_INSTALLS, ...packageManagerBins("claude")]),
-    agyExecutable: () => resolveExecutable("agy", explicit(inj.agyExecutable, env.WINTER_USAGE_AGY_EXECUTABLE), [...AGY_INSTALLS, ...packageManagerBins("agy")]),
-    opencodeExecutable: () => resolveExecutable("opencode", explicit(inj.opencodeExecutable, env.WINTER_USAGE_OPENCODE_EXECUTABLE), [...OPENCODE_INSTALLS, ...packageManagerBins("opencode")]),
+    codexExecutable: () => resolveExecutable("codex", explicit(inj.codexExecutable, env.WINTER_USAGE_CODEX_EXECUTABLE), [...codexInstalls(), ...packageManagerBins("codex")]),
+    claudeExecutable: () => resolveExecutable("claude", explicit(inj.claudeExecutable, env.WINTER_USAGE_CLAUDE_EXECUTABLE), [...claudeInstalls(), ...packageManagerBins("claude")]),
+    agyExecutable: () => resolveExecutable("agy", explicit(inj.agyExecutable, env.WINTER_USAGE_AGY_EXECUTABLE), [...agyInstalls(), ...packageManagerBins("agy")]),
+    opencodeExecutable: () => resolveExecutable("opencode", explicit(inj.opencodeExecutable, env.WINTER_USAGE_OPENCODE_EXECUTABLE), [...opencodeInstalls(), ...packageManagerBins("opencode")]),
     winterCodexWindows: () => (opts.islandUsage?.windowsFor("codex-oauth") ?? []).map((w) => ({
       ...(w.rateLimitType === undefined ? {} : { rateLimitType: w.rateLimitType }), status: w.status,
       ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }), at: w.at,
