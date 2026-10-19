@@ -745,7 +745,7 @@ function heldQuery(calls: unknown[]) {
   });
 }
 
-const heldGate = (reconcile: (inputs: readonly unknown[], epoch: { incarnationId: string; leaseEpoch: number }) => void | Promise<void> = () => {}) => ({ enabled: true as const, reconcile: reconcile as never });
+const heldGate = (reconcile: (context: { sessionId: string; inputs: readonly unknown[]; epoch: { incarnationId: string; leaseEpoch: number }; verbs: unknown }) => void | Promise<void> = () => {}) => ({ enabled: true as const, reconcile: reconcile as never });
 const HELD_CAPS = ["confined-guest-posture-v1", "held-input-v1"];
 /** A guest turn that also emits `system/held_inputs` (once, after init), carrying `inputs`. */
 const heldReply = (inputs: unknown, times = 1) => (_: string, guest: ScriptedGuest) => {
@@ -767,17 +767,18 @@ test("N4 gate: heldInput exists only with the host's gate AND a runtime offering
 
 test("N4: the verbs reach the live query bound to the running incarnation, only after system/held_inputs was reconciled", async () => {
   const calls: unknown[] = [], reconciled: unknown[] = [];
-  const h = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: heldGate((inputs, epoch) => { reconciled.push([inputs, epoch]); }) }, wrapQuery: heldQuery(calls) });
+  const h = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(({ inputs, epoch }) => { reconciled.push([inputs, epoch]); }) }, wrapQuery: heldQuery(calls) });
   const session = await h.drivers.ensure(h.sid);
   await expect(holdOne(session)).rejects.toThrow("cold_resume_unavailable");
   await session.open();
   // The run exists but the runtime has not reported its held inputs: no verb may bind yet.
-  expect(session.coworkEpoch).toBeDefined();
+  expect(session.coworkEpoch).toBeUndefined(); // rule 1: the epoch is not published before the reconcile
   await expect(holdOne(session)).rejects.toThrow("cold_resume_unavailable");
   await session.send("hi", "cli"); await session.idle();
   await until(() => reconciled.length === 1, "the reconcile");
   const context = h.guests[0]!.context;
   expect(reconciled).toEqual([[[], { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }]]);
+  expect(session.coworkEpoch).toEqual({ incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch });
   expect(await holdOne(session)).toEqual({ held: true });
   expect(await session.heldInput!.commit("r1", HOLD_HEX)).toEqual({ outcome: "queued" });
   expect(calls).toEqual([["hold", { inputId: "r1", holdToken: HOLD_HEX, epoch: { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }, text: "hello", clientName: "peer" }], ["commit", "r1", HOLD_HEX]]);
@@ -815,4 +816,20 @@ test("N4 rule 1: the epoch is published only when the reconcile RESOLVES; a thro
   const d = await bare.drivers.ensure(bare.sid);
   await d.open(); await d.send("hi", "cli"); await d.idle(); await Bun.sleep(30);
   await expect(holdOne(d)).rejects.toThrow("cold_resume_unavailable");
+});
+
+test("N4 rule 1: the reconcile's verbs work BEFORE the epoch is published, and `published` fires only after it is", async () => {
+  const calls: unknown[] = [], order: string[] = [];
+  const h = harness({
+    script: heldReply([{ inputId: "r9", digest: "a".repeat(64), holdToken: HOLD_HEX, state: "held" }]), capabilities: HELD_CAPS, wrapQuery: heldQuery(calls),
+    deps: { heldInput: { enabled: true, reconcile: (async ({ sessionId, inputs, verbs }: { sessionId: string; inputs: readonly { inputId: string; holdToken: string }[]; verbs: { discard(id: string, token: string): Promise<unknown> } }) => {
+      order.push(`reconcile:${sessionId === h.sid}`);
+      expect(h.drivers.get(h.sid)!.coworkEpoch).toBeUndefined(); // not yet published ...
+      await verbs.discard(inputs[0]!.inputId, inputs[0]!.holdToken); // ... but the reconcile can decide the held input
+    }) as never, published: sessionId => { order.push(`published:${sessionId === h.sid}:${h.drivers.get(h.sid)!.coworkEpoch !== undefined}`); } } },
+  });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle();
+  await until(() => order.length === 2, "the reconcile and the publication");
+  expect(order).toEqual(["reconcile:true", "published:true:true"]);
 });

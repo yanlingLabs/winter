@@ -12,7 +12,7 @@ import type { SessionStore } from "../sessions/store";
 import { turnOriginIndexFor } from "../sessions/turn-origin-index";
 import { coworkApprovalPortsFor, type CoworkHostApprovalPorts } from "./approval-ports";
 import { coworkContinuationFor, coworkResumePlan, type CoworkResumePlan } from "./cold-resume";
-import { coworkHeldInputsFrom, coworkHeldInputVerbs, coworkOffersHeldInput, coworkTapHeldInputs, type CoworkHeldInputRecord } from "./held-input";
+import { coworkHeldInputsFrom, coworkHeldInputVerbs, type CoworkHeldInputVerbs, coworkOffersHeldInput, coworkTapHeldInputs, type CoworkHeldInputRecord } from "./held-input";
 import type { CoworkAuthority } from "./authority";
 import { COWORK_GUEST_IDENTITIES, COWORK_GUEST_RUNTIME_MODES, coworkConversationCeiling, coworkConversationFor, coworkGuestToolsFromClasses } from "./conversation-set";
 import { buildCoworkGuestQueryOptions } from "./guest-query";
@@ -84,8 +84,19 @@ export interface CoworkSessionDriverDeps {
      *  reconciled with the host's ledger. The driver calls this once with that list and the live epoch; the verbs stay
      *  refused until it resolves, and a throw (or a malformed list) leaves them refused for the incarnation. A gate without
      *  it is not a gate: PEER-INBOX supplies the ledger side. */
-    readonly reconcile: (inputs: readonly CoworkHeldInputRecord[], epoch: { readonly incarnationId: string; readonly leaseEpoch: number }) => void | Promise<void>;
+    readonly reconcile: (context: CoworkHeldInputReconcileContext) => void | Promise<void>;
+    /** Called once the epoch IS published (after a successful reconcile): the owed messages may now be offered. */
+    readonly published?: (sessionId: string) => void;
   };
+}
+
+/** What the reconcile gets: the runtime's reported held inputs, the epoch it runs under, and verbs bound to that epoch EVEN
+ *  BEFORE it is published (the reconcile is what decides each held input; nothing else may use them). */
+export interface CoworkHeldInputReconcileContext {
+  readonly sessionId: string;
+  readonly inputs: readonly CoworkHeldInputRecord[];
+  readonly epoch: { readonly incarnationId: string; readonly leaseEpoch: number };
+  readonly verbs: CoworkHeldInputVerbs;
 }
 
 /**
@@ -275,6 +286,11 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       now: () => new Date().toISOString(),
       log: { warn: (message, fields) => log(`${message} ${fields === undefined ? "" : JSON.stringify(fields)}`.trim()) },
     });
+    const liveEpoch = (): { incarnationId: string; leaseEpoch: number } | undefined => { const run = entry.run; return run === undefined || entry.closed ? undefined : { incarnationId: run.incarnationId, leaseEpoch: run.leaseEpoch }; };
+    const heldGated = deps.heldInput?.enabled === true && coworkOffersHeldInput(offer.runtimeCapability);
+    const queryNow = () => (entry.closed || session.state !== "live" ? undefined : liveQuery);
+    // Bound to the live epoch before it is published: for the reconcile alone.
+    const reconcileVerbs = coworkHeldInputVerbs(queryNow, liveEpoch);
     const reconcileHeldInputs = (message: unknown): void => {
       const gate = deps.heldInput;
       if (gate === undefined || heldReconciling || heldReconciled) return; // emitted once; a repeat changes nothing
@@ -282,10 +298,11 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       void (async () => {
         try {
           const inputs = coworkHeldInputsFrom(message);
-          const epoch = handle.coworkEpoch;
+          const epoch = liveEpoch();
           if (inputs === undefined || epoch === undefined) throw new CoworkError("recovery_required");
-          await gate.reconcile(inputs, epoch);
-          if (handle.coworkEpoch?.incarnationId === epoch.incarnationId && handle.coworkEpoch.leaseEpoch === epoch.leaseEpoch) heldReconciled = true;
+          await gate.reconcile({ sessionId, inputs, epoch, verbs: reconcileVerbs });
+          const now = liveEpoch();
+          if (now?.incarnationId === epoch.incarnationId && now.leaseEpoch === epoch.leaseEpoch) { heldReconciled = true; try { gate.published?.(sessionId); } catch { /* the next drain finds it */ } }
         } catch (error) { log(`cowork ${sessionId}: held inputs not reconciled (${error instanceof Error ? error.name : "unknown"})`); }
       })();
     };
@@ -319,7 +336,9 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
     };
     const handle: CoworkLegSession = {
       sessionId, backendSessionId, mode: "cowork",
-      get coworkEpoch() { const run = entry.run; return run === undefined || entry.closed ? undefined : { incarnationId: run.incarnationId, leaseEpoch: run.leaseEpoch }; },
+      // Design rule 1 (4.5): with held-input messaging the epoch is published only AFTER the runtime's held inputs were
+      // reconciled, so no offer or hold can overtake a verdict (the peer inbox treats an absent epoch as "stays owed").
+      get coworkEpoch() { return heldGated && !heldReconciled ? undefined : liveEpoch(); },
       get state() { return entry.closed ? "ended" : session.state; },
       get generation() { return session.generation; },
       get resumed() { return resume !== undefined; },
@@ -343,8 +362,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       async open() { if (entry.closed) throw new CoworkError("cold_resume_unavailable"); await session.open(); },
       idle: () => session.idle(),
       // N4: only with the host's gate AND a runtime that offered `held-input-v1`; bound to the incarnation that is live.
-      ...(deps.heldInput?.enabled === true && coworkOffersHeldInput(offer.runtimeCapability)
-        ? { heldInput: coworkHeldInputVerbs(() => (entry.closed || session.state !== "live" ? undefined : liveQuery), () => (heldReconciled ? handle.coworkEpoch : undefined)) } : {}),
+      ...(heldGated ? { heldInput: coworkHeldInputVerbs(queryNow, () => handle.coworkEpoch) } : {}),
     };
     const entry: Entry = {
       sessionId, workspaceId: binding.workspaceId, session, handle, run: undefined, closed: false, consumed: false,

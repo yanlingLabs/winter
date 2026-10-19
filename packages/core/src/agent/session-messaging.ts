@@ -74,6 +74,8 @@ import { isSessionReplaced } from "../runtime-sdk/session-replaced";
 import { mayContactCoworkPeer, type CoworkMessagingRecords, type CoworkPeerOperation } from "../cowork/messaging-authority";
 import { CoworkError } from "../cowork/types";
 import type { CoworkPeerInbox, PeerEpoch } from "../cowork/peer-inbox";
+import { coworkHoldToken, coworkHostMessageListAnswer, coworkHostMessageSendAnswer, type CoworkHeldInputVerbs } from "../cowork/held-input";
+import { commitAndConfirm } from "../cowork/held-input-reconcile";
 
 /** The `clientName` a SendMessage delivery lands under in the target (`DispatchChildren`'s observer reads it). */
 export const MESSAGING_CLIENT_NAME = "messaging";
@@ -110,10 +112,14 @@ export interface MessagingDriverHandle {
    *  The peer inbox fences every offer and ack on it. Absent (a Code/Dispatch driver, or a Cowork driver that has no
    *  epoch yet): nothing is offered and the message stays owed. */
   readonly coworkEpoch?: PeerEpoch;
+  /** A COWORK driver only (#92 N4): the held-input verbs, present only behind the host's gate and for a runtime that offered
+   *  `held-input-v1`. With them a message is HELD in the guest, acknowledged in the ledger, then committed (4.5); without
+   *  them the driver takes `deliverInto` as before. */
+  readonly heldInput?: CoworkHeldInputVerbs;
 }
 
 /** The slice of the receipt ledger this file uses. Not supplied by production while Cowork is refused. */
-export type SessionMessagingPeerInbox = Pick<CoworkPeerInbox, "accept" | "lookup" | "owed" | "settle" | "offer" | "ack" | "block">;
+export type SessionMessagingPeerInbox = Pick<CoworkPeerInbox, "accept" | "lookup" | "owed" | "settle" | "offer" | "ack" | "block"> & Partial<Pick<CoworkPeerInbox, "verdict" | "confirmCommitted" | "deliveredUnconfirmed">>;
 
 export interface SessionMessagingDeps {
   /** Canonical host DB bindings, never runtime-supplied workspace/project fields. */
@@ -197,9 +203,21 @@ export class SessionMessaging {
    * previous incarnation's.
    */
   handlerFor(callerSessionId: string, incarnation = ""): HostMessagingHandler {
+    // A Cowork caller's answers leave through the DOOR validators (the guest's runtime refuses a malformed answer, and the call
+    // would hang to its timeout): a send that cannot be shaped is `delivery_uncertain`, a list is empty.
+    const cowork = (): boolean => { try { return this.deps.store.meta(callerSessionId).mode === "cowork"; } catch { return false; } };
     return {
-      send: (request, opts) => this.send(callerSessionId, request, opts?.signal, incarnation),
-      list: async () => this.list(callerSessionId),
+      send: async (request, opts) => {
+        const answer = await this.send(callerSessionId, request, opts?.signal, incarnation);
+        if (!cowork()) return answer;
+        try { return coworkHostMessageSendAnswer(answer) as SendAnswer; }
+        catch { return { status: "delivery_uncertain", reason: "the host could not form a valid answer", retryable: false }; }
+      },
+      list: async () => {
+        const answer = this.list(callerSessionId);
+        if (!cowork()) return answer;
+        try { return coworkHostMessageListAnswer(answer) as HostMessageListAnswer; } catch { return { sessions: [] }; }
+      },
       stop: (request, opts) => this.stop(callerSessionId, request, opts?.signal),
     };
   }
@@ -463,6 +481,8 @@ export class SessionMessaging {
     const inbox = this.deps.peerInbox;
     if (inbox === undefined) return;
     let replacedOnce = false;
+    // Rule 3 (#92 4.5): finish what is already delivered before offering anything new.
+    if (!(await this.repairHeldCommits(recipientId))) return;
     for (let delivered = 0; delivered < COWORK_DRAIN_MAX; delivered++) {
       if (this.draining) return;
       // Park or end what authority no longer allows, then: nothing runnable owed (empty, archived recipient, revoked pair) wakes nothing.
@@ -498,6 +518,11 @@ export class SessionMessaging {
         hopCount: 0,
         senderPermissionClass: senderClassOf(policy),
       }, { winterSessionId: recipientId });
+      if (driver.heldInput !== undefined) {
+        // Two-phase delivery into a held-input guest: hold, ack (the commit point), then commit. Never `deliverInto`.
+        if (!(await this.deliverHeld(recipientId, driver, driver.heldInput, epoch, offer, text, resumed))) return;
+        continue;
+      }
       let sent: { queued: boolean; steered: boolean; behind: number };
       try { sent = await deliverInto(driver, text); }
       catch (err) {
@@ -512,6 +537,64 @@ export class SessionMessaging {
       this.coworkOutcomes.set(offer.receipt.receiptId, { ...sent, resumed });
       while (this.coworkOutcomes.size > DELIVERY_DEDUPE_MAX) this.coworkOutcomes.delete(this.coworkOutcomes.keys().next().value as string);
     }
+  }
+
+  /** Rule 3: re-send `commit` for this recipient's delivered-but-unconfirmed held inputs, oldest first. False: stop the drain. */
+  private async repairHeldCommits(recipientId: string): Promise<boolean> {
+    const inbox = this.deps.peerInbox;
+    const held = this.deps.sessions.get(recipientId)?.heldInput;
+    if (inbox?.deliveredUnconfirmed === undefined || inbox.confirmCommitted === undefined || held === undefined) return true;
+    try {
+      for (const entry of inbox.deliveredUnconfirmed(recipientId)) {
+        if (this.draining) return false;
+        if ((await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, entry.receiptId, entry.ackedHoldToken)) === "lost") {
+          this.log(`a Cowork peer message ${entry.receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`);
+        }
+      }
+      return true;
+    } catch (err) {
+      this.log(`confirming held Cowork peer messages to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); nothing newer is offered`);
+      return false;
+    }
+  }
+
+  /** One offered message into a held-input guest (#92 4.5). True: it was committed (or ended as lost) and the drain goes on. */
+  private async deliverHeld(recipientId: string, driver: MessagingDriverHandle, held: CoworkHeldInputVerbs, epoch: PeerEpoch, offer: NonNullable<ReturnType<SessionMessagingPeerInbox["offer"]>>, text: string, resumed: boolean): Promise<boolean> {
+    const inbox = this.deps.peerInbox;
+    if (inbox?.verdict === undefined || inbox.confirmCommitted === undefined) return false; // a ledger without the held-input methods cannot do this
+    const receiptId = offer.receipt.receiptId;
+    let token: string, answer: Awaited<ReturnType<CoworkHeldInputVerbs["hold"]>>;
+    try {
+      token = coworkHoldToken(receiptId, epoch.incarnationId, epoch.leaseEpoch, offer.offerCount);
+      answer = await held.hold({ inputId: receiptId, holdToken: token, text, clientName: MESSAGING_CLIENT_NAME });
+    } catch (err) {
+      const code = err instanceof CoworkError ? err.code : undefined;
+      // A message the guest can never hold (too large for its frame) must not wedge the queue behind it: parked for recovery.
+      if (code === "invalid_request") { try { inbox.block(receiptId, epoch, "recovery"); } catch { /* stays owed */ } }
+      this.log(`holding a Cowork peer message for ${recipientId} failed (${code ?? (err instanceof Error ? err.name : "error")}); it stays owed`);
+      return false;
+    }
+    const discard = async (): Promise<void> => {
+      // Never discard what the guest already holds as committed or in its transcript.
+      if (answer.held === true) { try { await held.discard(receiptId, token); } catch { /* best effort: reconciliation decides it later */ } }
+    };
+    let ackedToken = token;
+    try { inbox.ack({ receiptId, recipientSessionId: recipientId, epoch, holdToken: token }); }
+    catch (err) {
+      if (err instanceof CoworkError && err.code === "authority_denied") { await discard(); return false; }
+      // Any other throw: the ledger says whether the ack landed. If that cannot be read either, decide nothing.
+      let verdict: ReturnType<NonNullable<SessionMessagingPeerInbox["verdict"]>>;
+      try { verdict = inbox.verdict(receiptId, recipientId); } catch { return false; }
+      if (verdict.action !== "commit") { await discard(); return false; }
+      ackedToken = verdict.ackedHoldToken;
+    }
+    let result: Awaited<ReturnType<typeof commitAndConfirm>>;
+    try { result = await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, receiptId, ackedToken); }
+    catch (err) { this.log(`committing a Cowork peer message to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); the next drain repeats it`); return false; }
+    if (result === "lost") { this.log(`a Cowork peer message ${receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`); return true; }
+    this.coworkOutcomes.set(receiptId, { queued: result === "queued", steered: result === "folded", behind: 0, resumed });
+    while (this.coworkOutcomes.size > DELIVERY_DEDUPE_MAX) this.coworkOutcomes.delete(this.coworkOutcomes.keys().next().value as string);
+    return true;
   }
 
   /** `TaskStop` on a session id: interrupt its running turn and clear what was queued behind it. Never throws. */

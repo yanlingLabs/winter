@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { authorityFixtureSessions } from "./committed-sessions";
 import { SessionMessaging, type MessagingDriverHandle } from "../../src/agent/session-messaging";
 import { CoworkPeerInbox, type PeerEpoch } from "../../src/cowork/peer-inbox";
+import { coworkHoldToken, CoworkHeldInputRefusal, type CoworkHeldInputVerbs } from "../../src/cowork/held-input";
+import { coworkHeldInputReconciler } from "../../src/cowork/held-input-reconcile";
 import { CoworkError } from "../../src/cowork/types";
 import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
 import { CoworkRepository } from "../../src/cowork/repository";
@@ -45,7 +47,7 @@ function world(existingHome?: string) {
   const epochOf = (id: string): PeerEpoch | undefined => { const workspace = records.get(records.binding(id).workspaceId); return workspace.incarnationId === null ? undefined : { incarnationId: workspace.incarnationId, leaseEpoch: workspace.leaseEpoch }; };
   class FakeDriver implements MessagingDriverHandle {
     turnRunning = false; foldsQueuedInput = false; pendingSends: string[] = []; state: "live" | "resumable" | "ended" = "live";
-    sends: string[] = []; attempts = 0; failAlways: Error | undefined; steers: string[] = []; failNext: Error | undefined; epochOverride: PeerEpoch | null | undefined;
+    heldInput: CoworkHeldInputVerbs | undefined; sends: string[] = []; attempts = 0; failAlways: Error | undefined; steers: string[] = []; failNext: Error | undefined; epochOverride: PeerEpoch | null | undefined;
     constructor(readonly id: string) {}
     get coworkEpoch() { return this.epochOverride === null ? undefined : this.epochOverride ?? epochOf(this.id); }
     async send(text: string) { this.attempts++; if (this.failAlways) throw this.failAlways; if (this.failNext) { const error = this.failNext; this.failNext = undefined; throw error; } this.sends.push(text); return { seq: 1, queued: this.turnRunning }; }
@@ -279,4 +281,201 @@ test("an acknowledgement that keeps failing stops the drain: the message is push
   expect(w.raw()).toEqual([expect.objectContaining({ state: "accepted", nobody: 0 })]);
   await failing.messaging.drainCoworkInbox(b);
   expect(w.driverOf(b).sends).toHaveLength(2); // one push per drain (at-least-once), never a loop inside one
+});
+
+
+// ------------------------------------------------------------------------------------------------ #92 4.5: held-input delivery
+type Call = [verb: string, ...args: unknown[]];
+/** A held-input guest, scripted: every verb is recorded, and each can be made to fail or answer otherwise. */
+function heldGuest(calls: Call[], script: { hold?: () => unknown; commit?: (inputId: string) => unknown; discard?: () => unknown } = {}): CoworkHeldInputVerbs {
+  return {
+    async hold(input) { calls.push(["hold", input.inputId, input.holdToken, input.text]); return (script.hold?.() ?? { held: true }) as never; },
+    async commit(inputId, token) { calls.push(["commit", inputId, token]); const r = script.commit?.(inputId); if (r instanceof Error) throw r; return (r ?? { outcome: "queued" }) as never; },
+    async discard(inputId, token) { calls.push(["discard", inputId, token]); const r = script.discard?.(); if (r instanceof Error) throw r; return { discarded: true }; },
+    async forget(inputId, token) { calls.push(["forget", inputId, token]); return { forgotten: true }; },
+  };
+}
+const held = (w: ReturnType<typeof world>, id: string, calls: Call[], script?: Parameters<typeof heldGuest>[1]) => { const d = w.driverOf(id); d.heldInput = heldGuest(calls, script); return d; };
+const row = (w: ReturnType<typeof world>, receiptId?: string) => w.db.db.query<Record<string, unknown>, []>(`SELECT receipt_id, state, reason, offer_count, acked_hold_token, commit_confirmed_at, commit_outcome, body IS NULL AS nobody FROM cowork_peer_inbox ${receiptId ? `WHERE receipt_id='${receiptId}'` : ""} ORDER BY sequence`).all();
+
+test("held delivery: hold, then ack (stores the token), then commit (confirms the outcome); deliverInto is never used", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  const d = held(w, b, calls);
+  const answer = await w.send(w.messaging, a, b);
+  expect(calls.map(c => c[0])).toEqual(["hold", "commit", "forget"]);
+  const [record] = row(w) as Array<Record<string, any>>;
+  const epoch = d.coworkEpoch!;
+  const token = coworkHoldToken(record!.receipt_id, epoch.incarnationId, epoch.leaseEpoch, 1);
+  expect(calls[0]).toEqual(["hold", record!.receipt_id, token, expect.stringContaining("<agent-message")]);
+  expect(record).toMatchObject({ state: "delivered", offer_count: 1, acked_hold_token: token, commit_outcome: "queued", nobody: 1 });
+  expect(record!.commit_confirmed_at).not.toBeNull();
+  expect(d.sends).toEqual([]); expect(d.steers).toEqual([]);
+  expect(answer.status).toBe("queued");
+});
+
+test("held delivery: a lost commit answer leaves the receipt delivered-unconfirmed; the next drain re-commits it FIRST, under the stored token, before anything newer is offered", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  let failures = 1;
+  held(w, b, calls, { commit: () => (failures-- > 0 ? new Error("transport lost") : undefined) });
+  await w.send(w.messaging, a, b, { messageId: "m1" });
+  const [first] = row(w) as Array<Record<string, any>>;
+  expect(first).toMatchObject({ state: "delivered", commit_outcome: null, commit_confirmed_at: null });
+  expect(w.records).toBeDefined();
+  // A second message arrives: the drain repairs the first commit before it offers the second.
+  calls.length = 0;
+  await w.send(w.messaging, a, b, { messageId: "m2" });
+  expect(calls.map(c => `${c[0]}:${c[1] === first!.receipt_id ? "first" : "second"}`)).toEqual(["commit:first", "forget:first", "hold:second", "commit:second", "forget:second"]);
+  expect(calls[0]![2]).toBe(first!.acked_hold_token);
+  expect((row(w) as Array<Record<string, any>>).map(r => r.commit_outcome)).toEqual(["queued", "queued"]);
+});
+
+test("held delivery: while a commit stays unconfirmed nothing newer is offered", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  let down = true;
+  held(w, b, calls, { commit: () => (down ? new Error("transport lost") : undefined) });
+  await w.send(w.messaging, a, b, { messageId: "m1" });
+  calls.length = 0;
+  await w.send(w.messaging, a, b, { messageId: "m2" });
+  expect(calls.map(c => c[0])).toEqual(["commit"]); // the repair failed, so no hold of the second
+  expect((row(w) as Array<Record<string, any>>).map(r => r.state)).toEqual(["delivered", "accepted"]);
+  down = false;
+  await w.messaging.drainCoworkInbox(b);
+  expect((row(w) as Array<Record<string, any>>).map(r => [r.state, r.commit_outcome])).toEqual([["delivered", "queued"], ["delivered", "queued"]]);
+});
+
+test("held delivery: unknown_input is terminal (lost, never retried) and later messages still flow", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  let first = true;
+  held(w, b, calls, { commit: () => { if (first) { first = false; return new CoworkHeldInputRefusal("unknown_input"); } return undefined; } });
+  await w.send(w.messaging, a, b, { messageId: "m1" });
+  await w.send(w.messaging, a, b, { messageId: "m2" });
+  const rows = row(w) as Array<Record<string, any>>;
+  expect(rows.map(r => [r.state, r.commit_outcome])).toEqual([["delivered", "lost"], ["delivered", "queued"]]);
+  expect(calls.filter(c => c[0] === "commit")).toHaveLength(2); // the lost one was committed once, never again
+});
+
+test("held delivery: authority_denied at the ack discards the hold and delivers nothing; a re-grant would re-offer", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  held(w, b, calls);
+  const { messaging } = w.makeMessaging({}, { ack: () => { throw new CoworkError("authority_denied"); } });
+  await w.send(messaging, a, b);
+  expect(calls.map(c => c[0])).toEqual(["hold", "discard"]);
+  expect(calls[1]![2]).toBe(calls[0]![2]); // the token of THAT hold
+  expect(row(w)[0]).toMatchObject({ state: "accepted", acked_hold_token: null, commit_outcome: null, nobody: 0 });
+});
+
+test("held delivery: any other ack throw reads the verdict: not landed discards; landed commits under the stored token; an unreadable verdict decides nothing", async () => {
+  // Not landed.
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  held(w, b, calls);
+  await w.send(w.makeMessaging({}, { ack: () => { throw new Error("disk full"); } }).messaging, a, b);
+  expect(calls.map(c => c[0])).toEqual(["hold", "discard"]);
+  expect(row(w)[0]).toMatchObject({ state: "accepted", acked_hold_token: null });
+  // Landed, but the answer was lost.
+  const l = world(), lp = l.project(), la = l.bind(lp), lb = l.bind(lp), landed: Call[] = [];
+  held(l, lb, landed);
+  const real = new CoworkPeerInbox({ records: l.records, store: new SqlitePeerInboxStore(l.db) });
+  await l.send(l.makeMessaging({}, { ack: (request: Parameters<CoworkPeerInbox["ack"]>[0]) => { real.ack(request); throw new Error("answer lost"); } }).messaging, la, lb);
+  expect(landed.map(c => c[0])).toEqual(["hold", "commit", "forget"]);
+  const [r] = row(l) as Array<Record<string, any>>;
+  expect(landed[1]![2]).toBe(r!.acked_hold_token);
+  expect(r).toMatchObject({ state: "delivered", commit_outcome: "queued" });
+  // The verdict is unreadable too: nothing is decided (no commit, no discard).
+  const u = world(), up = u.project(), ua = u.bind(up), ub = u.bind(up), undecided: Call[] = [];
+  held(u, ub, undecided);
+  await u.send(u.makeMessaging({}, { ack: () => { throw new Error("disk full"); }, verdict: () => { throw new Error("unreadable"); } }).messaging, ua, ub);
+  expect(undecided.map(c => c[0])).toEqual(["hold"]);
+});
+
+test("held delivery: a hold answered {held: false} is acked and committed, and never discarded even when the ack fails", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  held(w, b, calls, { hold: () => ({ held: false, state: "committed" }) });
+  await w.send(w.makeMessaging({}, { ack: () => { throw new CoworkError("authority_denied"); } }).messaging, a, b);
+  expect(calls.map(c => c[0])).toEqual(["hold"]); // no discard of an input the guest already owns
+  const ok = world(), op = ok.project(), oa = ok.bind(op), ob = ok.bind(op), okCalls: Call[] = [];
+  held(ok, ob, okCalls, { hold: () => ({ held: false, state: "in_transcript" }), commit: () => ({ outcome: "already" }) });
+  await ok.send(ok.messaging, oa, ob);
+  expect(okCalls.map(c => c[0])).toEqual(["hold", "commit", "forget"]);
+  expect(row(ok)[0]).toMatchObject({ state: "delivered", commit_outcome: "already" });
+});
+
+test("the ledger: verdict, confirmCommitted and the prune guard", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), c = w.bind(w.project()), calls: Call[] = [];
+  let now = Date.now();
+  const inbox = new CoworkPeerInbox({ records: w.records, store: new SqlitePeerInboxStore(w.db), now: () => now });
+  held(w, b, calls, { commit: () => new Error("down") });
+  const { messaging } = w.makeMessaging({}, {});
+  await w.send(messaging, a, b);
+  const [delivered] = row(w) as Array<Record<string, any>>;
+  expect(inbox.verdict(delivered!.receipt_id, b)).toEqual({ action: "commit", ackedHoldToken: delivered!.acked_hold_token });
+  expect(inbox.verdict(delivered!.receipt_id, c)).toEqual({ action: "discard" }); // another recipient's id
+  expect(inbox.verdict("pr_unknown", b)).toEqual({ action: "discard" });
+  expect(inbox.deliveredUnconfirmed(b)).toEqual([{ receiptId: delivered!.receipt_id, ackedHoldToken: delivered!.acked_hold_token }]);
+  // Far past the retention: an unconfirmed delivered record is never pruned.
+  now += 10 * 24 * 3_600_000;
+  expect(inbox.prune(b)).toBe(0);
+  expect(row(w)).toHaveLength(1);
+  inbox.confirmCommitted(delivered!.receipt_id, "folded");
+  inbox.confirmCommitted(delivered!.receipt_id, "queued"); // idempotent: the first outcome stays
+  expect(row(w)[0]).toMatchObject({ commit_outcome: "folded" });
+  expect(inbox.deliveredUnconfirmed(b)).toEqual([]);
+  expect(inbox.prune(b)).toBe(1);
+  expect(() => inbox.confirmCommitted("pr_unknown", "folded")).toThrow("not_found");
+  expect(() => inbox.confirmCommitted(delivered!.receipt_id, "bogus" as never)).toThrow("invalid_request");
+  // A delivery that recorded no hold token (the non-held path) is not a held input.
+  const plain = world(), pp = plain.project(), pa = plain.bind(pp), pb = plain.bind(pp);
+  await plain.send(plain.messaging, pa, pb);
+  const ledger = new CoworkPeerInbox({ records: plain.records, store: new SqlitePeerInboxStore(plain.db) });
+  const [done] = row(plain) as Array<Record<string, any>>;
+  expect(() => ledger.confirmCommitted(done!.receipt_id, "folded")).toThrow("invalid_request");
+  expect(ledger.verdict(done!.receipt_id, pb)).toEqual({ action: "discard" });
+  expect(ledger.deliveredUnconfirmed(pb)).toEqual([]);
+});
+
+test("reconciliation before the epoch: held entries get the ledger's verdict, committed ones are only confirmed, a verdict that cannot be read throws", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  held(w, b, calls, { commit: () => new Error("down") });
+  await w.send(w.messaging, a, b);                       // delivered, unconfirmed (the commit never answered)
+  const [delivered] = row(w) as Array<Record<string, any>>;
+  const accepted = w.makeMessaging({}, { ack: () => { throw new Error("no ack") } });
+  await w.send(accepted.messaging, a, b, { messageId: "m2" }); // accepted only: its hold was discarded, a stale one is reported
+  const [, pending] = row(w) as Array<Record<string, any>>;
+  const inbox = new CoworkPeerInbox({ records: w.records, store: new SqlitePeerInboxStore(w.db) });
+  const guest: Call[] = [];
+  const verbs = heldGuest(guest);
+  const reconcile = coworkHeldInputReconciler(inbox);
+  const entry = (inputId: string, holdToken: string, state: "held" | "committed" | "in_transcript") => ({ inputId, digest: "a".repeat(64), holdToken, state });
+  await reconcile({ sessionId: b, epoch: { incarnationId: "i", leaseEpoch: 1 }, verbs, inputs: [entry(delivered!.receipt_id, "c".repeat(64), "held"), entry(pending!.receipt_id, "d".repeat(64), "held"), entry("pr_stranger", "e".repeat(64), "held")] });
+  expect(guest).toEqual([
+    ["commit", delivered!.receipt_id, delivered!.acked_hold_token], ["forget", delivered!.receipt_id, delivered!.acked_hold_token],
+    ["discard", pending!.receipt_id, "d".repeat(64)], ["discard", "pr_stranger", "e".repeat(64)],
+  ]);
+  expect((row(w, delivered!.receipt_id)[0] as Record<string, unknown>).commit_outcome).toBe("queued");
+  // A committed/in_transcript entry for a receipt the ledger lists unconfirmed is only confirmed.
+  const again = world(), ap = again.project(), aa = again.bind(ap), ab = again.bind(ap);
+  held(again, ab, [], { commit: () => new Error("down") });
+  await again.send(again.messaging, aa, ab);
+  const [d2] = row(again) as Array<Record<string, any>>;
+  const inbox2 = new CoworkPeerInbox({ records: again.records, store: new SqlitePeerInboxStore(again.db) });
+  const guest2: Call[] = [];
+  await coworkHeldInputReconciler(inbox2)({ sessionId: ab, epoch: { incarnationId: "i", leaseEpoch: 1 }, verbs: heldGuest(guest2), inputs: [entry(d2!.receipt_id, d2!.acked_hold_token, "in_transcript")] });
+  expect(guest2.map(c => c[0])).toEqual(["forget"]);
+  expect(row(again)[0]).toMatchObject({ commit_outcome: "already" });
+  // An unreadable verdict throws, so the driver never publishes the epoch.
+  const broken = { deliveredUnconfirmed: () => [], confirmCommitted: () => undefined, verdict: () => { throw new Error("unreadable"); } };
+  await expect(coworkHeldInputReconciler(broken as never)({ sessionId: b, epoch: { incarnationId: "i", leaseEpoch: 1 }, verbs, inputs: [entry("pr_x", "f".repeat(64), "held")] })).rejects.toThrow("unreadable");
+});
+
+test("a Cowork caller's host-messaging answers go through the DOOR validators; a malformed one is delivery_uncertain, a malformed list is empty", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), host = w.code();
+  const messaging = w.messaging as unknown as { send: unknown; list: unknown };
+  const realSend = messaging.send, realList = messaging.list;
+  messaging.send = async () => ({ status: "bogus" });
+  messaging.list = () => ({ sessions: [{ address: "", status: "idle", mode: "cowork" }] });
+  expect(await w.messaging.handlerFor(a, "inc-1").send({ to: `session:${b}`, message: "x", messageId: "m" } as never, {} as never)).toMatchObject({ status: "delivery_uncertain", retryable: false });
+  expect(await w.messaging.handlerFor(a, "inc-1").list({} as never, {} as never)).toEqual({ sessions: [] });
+  // A Code caller's answers are passed through untouched.
+  expect(await w.messaging.handlerFor(host, "inc-1").send({ to: `session:${b}`, message: "x", messageId: "m" } as never, {} as never)).toEqual({ status: "bogus" } as never);
+  messaging.send = realSend; messaging.list = realList;
+  expect((await w.messaging.handlerFor(a, "inc-1").list({} as never, {} as never)).sessions.length).toBeGreaterThanOrEqual(0);
 });
