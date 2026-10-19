@@ -1,0 +1,31 @@
+{
+  "formatVersion": 1,
+  "decision": "D6-native (recommended, owner to confirm): build the pinned kernel recipe on a GitHub-hosted Linux ARM64 runner with the pinned LLVM, instead of in the saved Docker builder image, which nothing CI can fetch. The pins in pins.json (source, signatures, keys, base config, fragment, required symbols, make commands) are used unchanged; this file adds only what that recipe left open.",
+  "status": "unrun",
+  "runner": "ubuntu-24.04-arm",
+  "sourceDateEpoch": "1792281600",
+  "kbuildBuildTimestamp": "Sun Oct 18 00:00:00 UTC 2026",
+  "jobs": 4,
+  "hostPackages": [
+    "flex",
+    "bison",
+    "bc",
+    "libelf-dev",
+    "libssl-dev"
+  ],
+  "hostPackagesNote": "Host build tools only (parser generators, the host-side certificate and ELF helpers). None of them contributes bytes to Image. The exact versions installed are recorded in the receipt; they are not pinned.",
+  "signatureUrls": {
+    "kernel": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.35.tar.sign",
+    "toolchain": "https://cdn.kernel.org/pub/tools/llvm/files/llvm-20.1.8-aarch64.tar.sign"
+  },
+  "signatureOver": {
+    "kernel": "the decompressed tar (unxz first)",
+    "toolchain": "the .tar.xz as downloaded"
+  },
+  "installedKernel": {
+    "buildOutput": "arch/arm64/boot/Image",
+    "installedAs": "cowork-guest/kernel",
+    "format": "raw arm64 Image (the worker passes KRUN_KERNEL_FORMAT_RAW)"
+  },
+  "reproducibilityCheck": "build twice at the same absolute paths from fresh trees; Image, vmlinux and the resolved .config must be byte-identical. Path independence is NOT claimed: vmlinux carries DWARF paths."
+}

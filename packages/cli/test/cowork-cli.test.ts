@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COWORK_RPC, type CoworkMethod } from "@yanlinglabs/winter-protocol";
@@ -18,6 +18,14 @@ function route(surface: "workspace" | "project", args: string[]): CoworkCliRoute
   const parsed = parseCoworkArgs(surface, args); if ("help" in parsed) throw new Error("expected command"); return parsed;
 }
 const mutate = ["--revision", "3", "--request-id", "request-fixture"];
+
+describe("Cowork CLI stays out of the top-level help while Cowork is unavailable", () => {
+  test("`winter --help` does not advertise workspace|project; the commands themselves are still routed (and refuse)", () => {
+    const main = readFileSync(join(import.meta.dir, "..", "src", "main.ts"), "utf8");
+    expect(main).not.toContain("Cowork workspace metadata administration");
+    expect(main).toMatch(/case "workspace":/);
+  });
+});
 
 describe("Cowork CLI pre-connection parser", () => {
   test("defaults to a bounded list and has socket-free help", () => {

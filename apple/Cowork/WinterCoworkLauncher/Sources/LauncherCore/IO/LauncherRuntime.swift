@@ -60,7 +60,9 @@ public final class LauncherRuntime: SessionPorts, @unchecked Sendable {
     private var relayStallMs = 30_000
     /// The most one CONTINUOUS pause of L1 may last, progress or not: a worker that accepts a trickle forever must not hold `stop` and the daemon's EOF
     /// behind the bulk indefinitely. 120 s moves a 2 MiB drain (soft limit down to its resume point) at 17 KB/s.
-    private var relayPauseCapMs = 120_000
+    private(set) var relayPauseCapMs = LauncherRuntime.defaultRelayPauseCapMs
+    /// The shipped default of the total-pause cap (a constant so a test can pin it): 120 s.
+    static let defaultRelayPauseCapMs = 120_000
     private var pauseStartedNs: UInt64 = 0
     private var l1ReadSuspended = false
     /// How many times L1 was paused for the relay's sake (diagnostics and tests).

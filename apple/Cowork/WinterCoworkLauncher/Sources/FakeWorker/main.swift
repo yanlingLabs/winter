@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import LauncherCore
 import LauncherNative
+import Security
 
 /*
  * FakeWorker: a plain, NON-HVF child that speaks the worker side of L2 and L3, so the launcher's spawn, suspend/resume, drain, kill,
@@ -157,6 +158,21 @@ var sunkBytes = 0, sunkFrames = 0
     }
 }
 
+/// `--identity <flagfile>`: print the signing identifier as the KERNEL holds it (what the launcher's profile reads) and, for contrast, as `SecCodeCopySelf` +
+/// `SecCodeCopyStaticCode` derive it from the file at the path; wait for the flag file; print both again. A test swaps the file at this path in between.
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--identity" {
+    func viaPath() -> String {
+        var me: SecCode?, staticCode: SecStaticCode?, information: CFDictionary?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me, SecCodeCopyStaticCode(me, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess else { return "?" }
+        return ((information as? [String: Any])?[kSecCodeInfoIdentifier as String] as? String) ?? "?"
+    }
+    func report() { print("kernel:\(LauncherProfile.runningSigningIdentifier() ?? "?")"); print("path:\(viaPath())") }
+    report()
+    while !FileManager.default.fileExists(atPath: CommandLine.arguments[2]) { usleep(20_000) }
+    report()
+    exit(0)
+}
 if let first = CommandLine.arguments.dropFirst().first, first == "--fds" { print(openDescriptors().map(String.init).joined(separator: ",")); exit(0) }
 
 while true {

@@ -56,6 +56,8 @@ export type CoworkSourceFinding =
 
 const errno = (error: unknown): string => (error as NodeJS.ErrnoException | undefined)?.code ?? (error as Error | undefined)?.name ?? "error";
 
+const isOsLitter = (name: string): boolean => name === ".DS_Store" || name === ".localized" || name.startsWith("._");
+
 /** Any entry at all beneath `cowork/` (even an empty directory) counts: a workspace directory is the
  * first thing storage creates, and this check must not depend on recognising what is inside it. */
 function inspectTree(home: string): CoworkSourceFinding {
@@ -67,7 +69,9 @@ function inspectTree(home: string): CoworkSourceFinding {
   }
   if (!stat.isDirectory()) return { present: true, kind: "storage-tree", detail: `${COWORK_HOME_ROOT} is not a plain directory` };
   try {
-    const first = readdirSync(root).sort()[0];
+    // OS litter (Finder and AppleDouble files) is written by the system into any folder the user has looked at; it carries no
+    // workspace data, so a `cowork/` holding only litter is not Cowork storage. Anything else, however small, still counts.
+    const first = readdirSync(root).filter(name => !isOsLitter(name)).sort()[0];
     return first === undefined ? { present: false } : { present: true, kind: "storage-tree", detail: `${COWORK_HOME_ROOT}/${first}` };
   } catch (error) { return { present: true, kind: "uninspectable", detail: `${COWORK_HOME_ROOT}/ (${errno(error)})` }; }
 }

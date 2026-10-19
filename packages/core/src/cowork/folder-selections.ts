@@ -43,13 +43,14 @@ export class CoworkFolderSelections {
   private readonly grantIds = new Map<string, string>();
   private readonly now: () => number;
   private readonly ttl: number;
-  private readonly timer: ReturnType<typeof setInterval>;
+  private timer: ReturnType<typeof setInterval> | undefined;
   constructor(private readonly options: FolderSelectionOptions) {
     this.now = options.now ?? (() => performance.now());
     this.ttl = options.ttlMs ?? 5 * 60_000;
     if (!Number.isFinite(this.ttl) || this.ttl < 1 || this.ttl > 5 * 60_000) throw new CoworkError("invalid_request");
-    this.timer = setInterval(() => this.sweep(), Math.min(this.ttl, 10_000)); this.timer.unref();
+    // No timer until a selection exists (a production daemon never creates one): armed by `arm()` on the first entry, cleared when the map empties.
   }
+  private arm() { if (this.timer || this.closed) return; this.timer = setInterval(() => this.sweep(), Math.min(this.ttl, 10_000)); this.timer.unref(); }
   private owner(principal: CoworkPrincipal) { if (principal.kind !== "local-user") return denied(); return principal.id; }
   private checkPolicy(canonical: string): void {
     const target = canonical.toLowerCase();
@@ -92,7 +93,7 @@ export class CoworkFolderSelections {
       const entry: Entry = { owner, connectionId, bookmark, scoped, fd, path, identity: observed, expires, expiresAt,
         selection: { kind: "folder", label, access, detail: { grantRef, rootIdentity: randomUUID() } } };
       this.validate(entry); // Re-resolve/reopen after all intake work, before publishing the grant.
-      this.entries.set(selectionId, entry); this.grantIds.set(grantRef, selectionId);
+      this.entries.set(selectionId, entry); this.grantIds.set(grantRef, selectionId); this.arm();
       this.requests.set(key, { digest, selectionId, owner, connectionId });
       return { selectionId, kind: "folder", label, access, state: "prepared", expiresAt };
     } catch { if (fd !== undefined) closeSync(fd); scoped?.close(); return denied(); }
@@ -179,7 +180,10 @@ export class CoworkFolderSelections {
     this.entries.delete(id); this.grantIds.delete(entry.selection.detail.grantRef);
     try { closeSync(entry.fd); } finally { entry.scoped.close(); entry.bookmark.fill(0); }
   }
-  private sweep() { for (const [id, e] of this.entries) if (this.now() >= e.expires) this.drop(id); }
+  private sweep() {
+    for (const [id, e] of this.entries) if (this.now() >= e.expires) this.drop(id);
+    if (this.entries.size === 0 && this.timer) { clearInterval(this.timer); this.timer = undefined; }
+  }
   closeConnection(connectionId: number) { for (const [id, e] of this.entries) if (e.connectionId === connectionId) this.drop(id); for (const [key, r] of this.requests) if (r.connectionId === connectionId) this.requests.delete(key); }
-  close() { this.closed = true; clearInterval(this.timer); for (const id of [...this.entries.keys()]) this.drop(id); this.requests.clear(); }
+  close() { this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; for (const id of [...this.entries.keys()]) this.drop(id); this.requests.clear(); }
 }

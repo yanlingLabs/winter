@@ -440,6 +440,9 @@ struct WinterComposerCard: View {
     var stripEdge: WinterComposerStripEdge = .below
     /// The live session's working folder, for the permissions row's folder chip (2026-09-17).
     var workingDirectory: String? = nil
+    /// The Cowork composer's wiring (session door, design 7.9). Set only by the new-chat page; `nil` everywhere
+    /// else, which leaves Cowork's chrome exactly as it was.
+    var cowork: CoworkComposerWiring? = nil
     var placeholder: String = newChatComposerPlaceholder
     /// A trailing line for a mode whose chrome shows one — today only cowork's strip. Empty renders
     /// that strip's controls with nothing after them.
@@ -498,7 +501,8 @@ struct WinterComposerCard: View {
                                        modeIsSelectable: modeIsSelectable,
                                        policy: policy,
                                        announcement: announcement,
-                                       workingDirectory: workingDirectory))
+                                       workingDirectory: workingDirectory,
+                                       cowork: cowork))
     }
 
     /// What the model/effort chip shows, for THIS card's control and THIS mode's tier answer.

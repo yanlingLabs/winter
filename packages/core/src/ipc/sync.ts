@@ -435,6 +435,12 @@ function parseBatch(buf: Buffer): SyncedEntry[] {
       );
     }
     if (HOST_WORKSPACE_EVENT_TYPES.has(parsed.data.type)) throw new SyncRpcError(ERR.INVALID_PARAMS, "sync.push cannot author host workspace events");
+    // A Cowork binding on `session_created` (session door D1) is written only by the daemon's own create, from its
+    // `cowork_conversations` row. A pushed one, at ANY seq, would claim host workspace authority in a log: refused. (A
+    // `cowork` key that is not a valid binding already failed the schema just above.)
+    if (parsed.data.type === "session_created" && parsed.data.cowork !== undefined) {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push line ${i + 1} is a session_created carrying a Cowork binding, which only the daemon writes; nothing was appended`);
+    }
     entries.push({ raw, event: parsed.data });
   }
   return entries;

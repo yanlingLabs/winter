@@ -9,6 +9,7 @@ import { CoworkError, type CapabilityCeiling, type MutationContext, type Mutatio
 
 import { CoworkWorkspaceWatches, type CoworkWatchOptions, type CoworkWatchSink } from "./watch";
 import type { CoworkFolderSelections } from "./folder-selections";
+import type { CoworkProvisioningPort } from "./session-ports";
 
 export interface CoworkConnection { role: string; connectionId: number }
 /** Host-only injection. Never construct from method parameters or clientName. A gateway token
@@ -25,6 +26,10 @@ export interface CoworkHostPorts {
   /** Optional, host-injected native worker door (N2 S7). Absent (the production default) refuses `startNative` exactly as provisioning
    * refuses today. It is never read from a setting, an RPC or an environment variable, and no RPC method reaches it. */
   native?: CoworkGuestStartPort;
+  /** Session door spine (D1): S7B's provisioning port. TYPE ONLY in D1 — nothing reads it yet and no production host sets it,
+   * so `requireProvisioning` above stays the refusing gate. D4 replaces those calls with `provisioning.admit` and reports
+   * `workspace.capabilities.get`'s `provisioning` from `provisioning.available()`. */
+  provisioning?: CoworkProvisioningPort;
 }
 /** The one thing the service asks of the native host: start a stopped workspace's guest. The daemon owns the stop tail separately. */
 export interface CoworkGuestStartPort { start(workspaceId: string): Promise<unknown> }

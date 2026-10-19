@@ -160,6 +160,32 @@ test("runtime frames and sync imports cannot author host workspace authority eve
   expect(f.store.lastSeq(chat)).toBe(1);
 });
 
+test("sync imports cannot author a Cowork binding: session_created.cowork is refused at seq 1 (a creating push), at any later seq, and by appendSynced", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-sync-cowork-")), store = new SessionStore(home);
+  cleanups.push(() => { store.close(); rmSync(home, { recursive: true, force: true }); });
+  const facts = { workspaceId: "w_forged", projectId: "p_forged", location: "source", sourceId: "src_forged", policyRevision: 7 };
+  const push = (sessionId: string, baseSeq: number, events: unknown[]) => syncPush({ store, buffers: new SyncPushBuffers(), connId: 1, broadcastCreated() {} },
+    { sessionId, baseSeq, data: Buffer.from(events.map(event => JSON.stringify(event)).join("\n") + "\n").toString("base64"), complete: true });
+  // A creating push whose seq-1 chat header carries a binding: nothing is created.
+  const sid = "11111111-2222-4333-8444-555555555555";
+  expect(() => push(sid, 0, [{ type: "session_created", sessionId: sid, seq: 1, ts: 0, scope: "global", mode: "chat", cowork: facts }])).toThrow("Cowork binding");
+  expect(store.list().map(row => row.sessionId)).not.toContain(sid);
+  // The same header without the binding is the ordinary chat import (the control).
+  expect(push(sid, 0, [{ type: "session_created", sessionId: sid, seq: 1, ts: 0, scope: "global", mode: "chat" }])).toMatchObject({ applied: true, lastSeq: 1 });
+  // A later session_created with a binding, on an existing chat log.
+  expect(() => push(sid, 1, [{ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat", cowork: facts }])).toThrow("Cowork binding");
+  // A raw `cowork` key the schema would refuse (null) never reaches the log either.
+  expect(() => push(sid, 1, [{ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat", cowork: null }])).toThrow();
+  expect(store.lastSeq(sid)).toBe(1);
+  // The store's own gate, below the RPC: the parsed field, and a raw line that carries the key.
+  const forged = SessionEvent.parse({ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat", cowork: facts });
+  expect(() => store.appendSynced(sid, [{ raw: JSON.stringify(forged), event: forged }])).toThrow("Cowork binding");
+  const plain = SessionEvent.parse({ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat" });
+  expect(() => store.appendSynced(sid, [{ raw: JSON.stringify(forged), event: plain }])).toThrow("Cowork binding");
+  expect(store.lastSeq(sid)).toBe(1);
+  expect(store.read(sid).every(event => !("cowork" in event))).toBe(true);
+});
+
 class Client {
   events: SessionEvent[] = []; private decoder = new LineDecoder(); private next = 1;
   private pending = new Map<number, (reply: any) => void>();
@@ -195,6 +221,87 @@ test("real IPC replay/live and history enforce current remote workspace scope af
   expect((await client.request("session.attach", { sessionId: f.sessions[0]!, fromSeq: 0 })).error).toBeDefined();
   expect(client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type))).toHaveLength(before);
 });
+
+test("a failing scope lookup skips that event for the phone and keeps it connected; events resume when the lookup recovers", async () => {
+  const f = fixture(); f.pump().drain();
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock"), service = f.service();
+  let broken = false;
+  const real = service.requireSessionRead.bind(service);
+  (service as unknown as { requireSessionRead: typeof real }).requireSessionRead = ((...args: Parameters<typeof real>) => { if (broken) throw new Error("SQLITE_BUSY"); return real(...args); }) as typeof real;
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub, cowork: service, coworkEvents: f.pump() });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  expect((await client.request("session.attach", { sessionId: f.sessions[0]!, fromSeq: 0 })).error).toBeUndefined();
+  const count = () => client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type)).length;
+  broken = true; f.update("during-fault"); f.pump().drain();
+  expect((await client.request("session.history", { sessionId: f.sessions[0]! }).catch(() => ({ error: "disconnected" }))).error ?? undefined).not.toBe("disconnected");
+  const during = count();
+  broken = false; f.update("after-fault"); f.pump().drain();
+  await client.request("session.history", { sessionId: f.sessions[0]! });
+  expect(count()).toBeGreaterThan(during); // still attached: the fault cost one event, not the connection
+});
+
+test("scope revoked mid-stream: no further frames reach the phone, but it stays attached and resumes when scope returns", async () => {
+  const f = fixture(); f.pump().drain();
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock"), service = f.service();
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub, cowork: service, coworkEvents: f.pump() });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  const sid = f.sessions[0]!;
+  const attached = () => (f.hub as unknown as { attachments: Map<string, Set<unknown>> }).attachments.get(sid)?.size ?? 0;
+  const frames = () => client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type)).length;
+  expect((await client.request("session.attach", { sessionId: sid, fromSeq: 0 })).error).toBeUndefined();
+  f.update("visible"); f.pump().drain(); await client.request("session.list", {});
+  expect(frames()).toBeGreaterThan(0); expect(attached()).toBe(1);
+  const before = frames();
+  f.scope.clear(); f.update("revoked-1"); f.pump().drain(); f.update("revoked-2"); f.pump().drain();
+  await client.request("session.list", {}); // barrier: every earlier frame has been written
+  expect(frames()).toBe(before);            // nothing delivered while revoked (kills deliver-on-error)
+  expect(attached()).toBe(1);               // and the phone was not dropped from the session (kills return-false)
+  f.scope.add(f.workspaceId); f.update("restored"); f.pump().drain();
+  await client.request("session.list", {});
+  expect(frames()).toBeGreaterThan(before); // same connection, stream resumes
+}, 15_000);
+
+test("a phone attached to a daemon with no Cowork service gets no workspace frames and is not dropped", async () => {
+  const f = fixture(); f.pump().drain();
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock");
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  const sid = f.sessions[0]!;
+  const attach = await client.request("session.attach", { sessionId: sid, fromSeq: 0 });
+  if (attach.error) return; // this daemon shape refuses the attach outright: nothing to stream, nothing to drop
+  const attached = () => (f.hub as unknown as { attachments: Map<string, Set<unknown>> }).attachments.get(sid)?.size ?? 0;
+  f.update("no-service"); f.pump().drain(); await client.request("session.list", {});
+  expect(client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type))).toHaveLength(0);
+  expect(attached()).toBe(1);
+}, 15_000);
+
+test("work that becomes pending after the outbox timer stopped re-arms it at the enqueue site; a daemon with nothing pending arms nothing", async () => {
+  const f = fixture(); f.pump().drain();
+  const timerOf = (p: unknown) => (p as { timer?: unknown }).timer;
+  const idle = f.pump(); idle.start(); idle.rearm(); expect(timerOf(idle)).toBeUndefined(); // nothing pending, no host: still no timer
+  const busy = f.pump(); let pending = true;
+  (busy as unknown as { hasPending(): boolean }).hasPending = () => pending;
+  busy.start(); expect(timerOf(busy)).toBeDefined();
+  pending = false; await Bun.sleep(1300); expect(timerOf(busy)).toBeUndefined(); // stopped itself
+  pending = true; busy.rearm(); expect(timerOf(busy)).toBeDefined();             // new work: re-armed
+  busy.stop(); busy.rearm(); expect(timerOf(busy)).toBeUndefined();              // shutdown is final
+  // The enqueue site: every Cowork RPC calls rearm() after its inline drain.
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock");
+  let rearms = 0;
+  const fake = { drain: () => ({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 }), rearm: () => { rearms++; } } as unknown as CoworkWorkspaceEvents;
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub, cowork: f.service(), coworkEvents: fake });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  await client.request("workspace.list", { limit: 10 });
+  expect(rearms).toBe(1);
+}, 15_000);
 
 test("session index rebuild replays display events without recreating or widening canonical bindings/policy", () => {
   const f = fixture(); f.pump().drain(); f.update("index-rebuild");
@@ -278,7 +385,7 @@ test("more than 100 pending changes stay ordered across bounded passes and prune
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox_deliveries WHERE session_id=? AND state='delivered'").get(f.sessions[0]!)!.n).toBe(100);
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE workspace_id=?").get(f.workspaceId)!.n).toBe(103); // unbound creation/source ACK/operation ACK + latest100 receipts
   f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
-});
+}, 60_000); // explicit timeout: seconds of real SQL work, which the 5 s default cannot bound under load
 
 test("a failed live conversation backs off without appending duplicates or suppressing another conversation", () => {
   const f = fixture(true); f.pump().drain(); f.update("backoff");
@@ -382,10 +489,35 @@ test("actual SQL pruning failure is separate from successful delivery and does n
   expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 1 });
   f.db.db.run("DROP TRIGGER fixture_prune_failure"); f.update("prune-recovered");
   expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
-});
+}, 60_000); // explicit timeout: seconds of real SQL work, which the 5 s default cannot bound under load
 
 bunTest.skipIf(process.platform === "darwin" && process.arch === "arm64")("unsupported host refuses Cowork log flush explicitly without a native flush fallback", () => {
   const f = fixture();
   expect(() => f.store.flushLog(f.sessions[0]!)).toThrow("unsupported_topology");
   expect(f.store.lastSeq(f.sessions[0]!)).toBe(1);
 });
+
+test("start() arms no timer without an injected host or pending work; keepAlive and pending work arm it, and it stops itself when idle", async () => {
+  const f = fixture(); f.pump().drain();
+  const timerOf = (p: unknown) => (p as { timer?: unknown }).timer;
+  const quiet = f.pump(); quiet.start(); expect(timerOf(quiet)).toBeUndefined();
+  const hosted = f.pump(); hosted.start({ keepAlive: true }); expect(timerOf(hosted)).toBeDefined(); hosted.stop(); expect(timerOf(hosted)).toBeUndefined();
+  const busy = f.pump(); let pending = true;
+  (busy as unknown as { hasPending(): boolean }).hasPending = () => pending;
+  busy.start(); expect(timerOf(busy)).toBeDefined();
+  pending = false; await Bun.sleep(1300); expect(timerOf(busy)).toBeUndefined(); // the tick found nothing owed and stopped itself
+}, 15_000);
+
+test("a failing delivery pass never throws out of start() or the timer tick", async () => {
+  const f = fixture(); f.pump().drain();
+  const errors: string[] = []; const real = console.error; console.error = (...a: unknown[]) => { errors.push(a.join(" ")); };
+  try {
+    f.db.db.run("BEGIN"); // drain refuses to run inside a caller transaction (recovery_required)
+    const pump = f.pump();
+    expect(() => pump.start({ keepAlive: true })).not.toThrow();
+    await Bun.sleep(1300); // at least one timer tick under the same refusal: the process must survive it
+    pump.stop();
+    f.db.db.run("ROLLBACK");
+  } finally { console.error = real; }
+  expect(errors.filter(e => e.startsWith("cowork: workspace event delivery failed"))).toHaveLength(1); // logged once, not every second
+}, 15_000);

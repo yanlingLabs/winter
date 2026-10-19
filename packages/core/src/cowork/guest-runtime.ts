@@ -1,11 +1,12 @@
 import { coworkGuestSourceRoot } from "./guest-paths";
 import { randomUUID } from "node:crypto";
 import type { PermissionMode, SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
-import { permissionModeFor } from "../runtime-sdk/mode-options";
+import { coworkToolsFor, permissionModeFor, type CoworkGuestTool } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
 import { intersectCeilings, type CoworkAuthority } from "./authority";
 import { CoworkError, type CapabilityCeiling, type GuestEpoch, type SourceAccess, type ConversationBinding, type WorkspaceSource } from "./types";
+import type { CoworkGuestReadinessKey } from "./session-ports";
 
 export const GUEST_RUNTIME_TRANSPORT_LIMITS = Object.freeze({ frameBytes: 1024 * 1024, chunkBytes: 256 * 1024, pendingInputBytes: 2 * 1024 * 1024 });
 export interface GuestRuntimeScope extends GuestEpoch {
@@ -46,6 +47,9 @@ export interface GuestRuntimeSupervisorDeps {
   /** Authenticated guest boot identity, never supplied by an RPC, tool or guest snapshot. */
   bootId(workspaceId: string): string;
   runtimeCapability?: { protocolVersion: number; capabilities: readonly string[]; supportsConfinedGuestExecution: boolean };
+  /** The readiness keys the native environment declares from the verified image pin (`CoworkGuestRuntimeOffer.readiness`),
+   *  never DOOR code. ABSENT reads as NONE, and then no tool is offered: fail closed. */
+  readiness?: readonly CoworkGuestReadinessKey[];
   port?: GuestRuntimeSupervisorPort;
 }
 /** Canonical query snapshot with a one-use spawn closure. This is host composition,
@@ -63,14 +67,19 @@ const sameScope = (a: Readonly<GuestRuntimeScope>, b: Readonly<GuestRuntimeScope
 function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
-export function confinedToolVisibility(toolClasses: readonly string[]): readonly string[] {
-  // Visibility is derived once from captured host authority. No pre-approval is
-  // inferred from it, and unimplemented guest tool families remain unavailable.
-  const classes = new Set(toolClasses), tools: string[] = [];
-  if (classes.has("read")) tools.push("Read");
-  if (classes.has("write")) { if (classes.has("read")) tools.push("Edit"); tools.push("Write"); }
-  if (classes.has("execute")) tools.push("Bash");
-  return Object.freeze(tools);
+/** The host-query guest's tools, in the order a launch lists them. */
+const GUEST_TOOL_ORDER: readonly CoworkGuestTool[] = Object.freeze(["Read", "Edit", "Write", "Bash"] as const);
+/**
+ * The launch's tool list: the OFFERED list (`coworkToolsFor`, the same list the prompt names), in the guest's order.
+ * It derives nothing from the ceiling itself (session door D2). No pre-approval is inferred from it. Fails closed with
+ * `invalid_request` on anything the host-query guest cannot carry: an unknown or repeated name, a ceiling class passed
+ * by a stale caller, or Edit without both Read and Write (the guest refuses that whole configuration).
+ */
+export function confinedToolVisibility(offered: readonly CoworkGuestTool[]): readonly CoworkGuestTool[] {
+  if (!Array.isArray(offered) || new Set(offered).size !== offered.length || offered.some(name => typeof name !== "string" || !(GUEST_TOOL_ORDER as readonly string[]).includes(name))) throw new CoworkError("invalid_request");
+  const has = new Set(offered);
+  if (has.has("Edit") && !(has.has("Read") && has.has("Write"))) throw new CoworkError("invalid_request");
+  return Object.freeze(GUEST_TOOL_ORDER.filter(name => has.has(name)));
 }
 interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: ConversationBinding; source: WorkspaceSource }
 interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void; cancel?: (force: boolean) => void }
@@ -95,12 +104,13 @@ export class CoworkGuestRuntimeSupervisor {
     const sourceRoot = coworkGuestSourceRoot(source);
     const cwd = `${sourceRoot}${relativeCwd === "." ? "" : `/${relativeCwd}`}`;
     const capturedCapabilities = freezeCeiling(capabilities);
+    const offered = coworkToolsFor({ profile: "host-query-v1", approvalPolicy: binding.policy, toolClasses: capturedCapabilities.toolClasses, network: capturedCapabilities.network, readiness: this.deps.readiness ?? [] });
     const launch: Readonly<GuestRuntimeLaunch> = Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
       scope: Object.freeze({ ...epoch, homeId: this.deps.records.homeIdentity(), bootId, sessionId, backendSessionId: safeSegment(identity.backendSessionId), bindingRevision: binding.revision, policyRevision: policy.revision, instructionRevision: workspace.instructionRevision }),
       source: Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: capturedCapabilities,
       runtime: Object.freeze({ executionPosture: "confined-guest", sessionId: identity.backendSessionId, model: identity.model, cwd,
         winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true, permissionMode: permissionModeFor(binding.policy),
-        tools: confinedToolVisibility(capturedCapabilities.toolClasses), allowedTools: Object.freeze([] as const), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
+        tools: confinedToolVisibility(offered), allowedTools: Object.freeze([] as const), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
     });
     return { launch, binding, source };
   }

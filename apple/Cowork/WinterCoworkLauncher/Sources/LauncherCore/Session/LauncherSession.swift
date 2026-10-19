@@ -67,6 +67,10 @@ public final class LauncherSession {
     private var scopeDigest: String?
     private var beginId: String?
     private var homeId: String?
+    /// The installation's receipt key (in memory only; zeroed when the verdict is final, and never printed).
+    private var receiptKey: ReceiptKey?
+    /// For tests: the key object the session holds (nil before `begin` and after the verdict).
+    var heldReceiptKey: ReceiptKey? { receiptKey }
     private var exitProbeAttempts = 0
     private var beginAnswered = false
     private var process: WorkerProcess?
@@ -101,7 +105,7 @@ public final class LauncherSession {
         let message: LineToLauncher
         do { message = try LauncherLineCodec.parseToLauncher(line.bytes, rights: line.rights.count) } catch { channelViolation(); return }
         switch message {
-        case .begin(let id, let homeId, let scope): handleBegin(id: id, homeId: homeId, scope: scope)
+        case .begin(let id, let homeId, let scope, let receiptKey): handleBegin(id: id, homeId: homeId, scope: scope, receiptKey: receiptKey)
         case .volumes(let id, let digest, let volumes): handleVolumes(id: id, scopeDigest: digest, volumes: volumes, descriptors: line.rights)
         case .muxDown(let frame): handleMuxDown(frame)
         case .stop(let id, let nonce, _, let budget): handleStop(id: id, nonce: nonce, budgetMs: budget)
@@ -160,7 +164,7 @@ public final class LauncherSession {
 
     // ---------------------------------------------------------------------------------------------- begin
 
-    private func handleBegin(id: String, homeId: String, scope: Scope) {
+    private func handleBegin(id: String, homeId: String, scope: Scope, receiptKey: ReceiptKey) {
         guard phase == .awaitingBegin else { refuse(id, .busy); return }
         // NEW SECURITY LOGIC: the launcher recomputes `runtimeImageDigest` from the guest boot artifacts next to the worker and refuses a
         // scope that names another image, BEFORE it reserves, spawns or sends anything. (See GuestArtifacts.swift for what this does not close.)
@@ -174,7 +178,7 @@ public final class LauncherSession {
             return
         }
         reservation.markConstructed()
-        self.process = worker; self.scope = scope; self.scopeDigest = digest; self.beginId = id; self.homeId = homeId
+        self.process = worker; self.scope = scope; self.scopeDigest = digest; self.beginId = id; self.homeId = homeId; self.receiptKey = receiptKey
         phase = .starting
         // 1. The executed image, while it is still SUSPENDED: nothing of it has run and nothing has been sent to it.
         do { try worker.validateExecutedImage() } catch { killAndCommit(reason: .workerKilled, refusal: .code_identity_mismatch); return }
@@ -462,10 +466,10 @@ public final class LauncherSession {
     }
 
     private func commit(exit: WorkerExit, killSent: Bool, killReason: UncertainReason?, refusal: RefusalCode?, stopId: String?) {
-        guard phase != .finished, let worker = process, let scope else { return }
+        guard phase != .finished, let worker = process, let scope, let receiptKey else { return }
         [SessionTimer.ready, .volumes, .drain, .faultGrace, .exitProbe, .backstop].forEach(ports.disarm)
         relayGate.close()
-        let context = StopContext(scope: scope, homeId: homeId ?? "", launcherInstanceId: config.launcherInstanceId, hostBootId: config.hostBootId, workerPid: worker.pid, workerStartToken: worker.startToken)
+        let context = StopContext(scope: scope, homeId: homeId ?? "", launcherInstanceId: config.launcherInstanceId, hostBootId: config.hostBootId, workerPid: worker.pid, workerStartToken: worker.startToken, receiptKey: receiptKey)
         let key = ReceiptScope(scope)
         func decide(demote: UncertainReason?) -> StopReceipt {
             OrderlyStopAuthority.decide(context: context, exit: exit, evidence: evidence, killSent: killSent, killReason: killReason, issuedAtMs: deps.clock.nowMs,
@@ -479,6 +483,8 @@ public final class LauncherSession {
         }
         verdict = receipt
         phase = .finished
+        // The verdict is signed, durable and recorded: the key has done its work.
+        receiptKey.zeroize(); self.receiptKey = nil
         if let refusal, !beginAnswered, let beginId { beginAnswered = true; refuse(beginId, refusal) }
         ports.sendToDaemon(.workerState(.exited))
         switch receipt {

@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { mayContactCoworkPeer } from "../../src/cowork/messaging-authority";
 import { SessionMessaging, type MessagingDriverHandle } from "../../src/agent/session-messaging";
+import { CoworkPeerInbox } from "../../src/cowork/peer-inbox";
+import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
 import { downgradeCoworkRuntimeStateToV7, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
 import type { SessionRow } from "../../src/sessions/store";
 
@@ -37,19 +39,22 @@ function fixture(legacyHome = false) {
   const bind = (workspace: ReturnType<typeof project>, id = session()) => {
     records.bindConversation({ ...context(), expectedRevision: records.get(workspace.workspaceId).configRevision }, workspace.workspaceId, { sessionId: id, sourceId: workspace.sourceId }, authorityFixtureSessions(id)); return id;
   };
-  const driver = (id: string): MessagingDriverHandle => ({ turnRunning: true,
+  // Host-side seam: a Cowork driver carries the recipient workspace's epoch (the real one comes from the Cowork session driver).
+  const epochOf = (id: string) => { const workspace = records.get(records.binding(id).workspaceId); return workspace.incarnationId === null ? undefined : { incarnationId: workspace.incarnationId, leaseEpoch: workspace.leaseEpoch }; };
+  const driver = (id: string): MessagingDriverHandle => ({ turnRunning: true, get coworkEpoch() { return epochOf(id); },
     send: async text => { sent.push({ id, text }); return { seq: 1, queued: false }; },
     interrupt: async () => { stopped.push(id); return { wasRunning: true }; },
   });
   const deps = {
     cowork: records,
     store: { meta: (id: string) => { const row = rows.get(id); if (!row) throw Error("missing"); return row; }, list: () => [...rows.values()] },
+    peerInbox: new CoworkPeerInbox({ records, store: new SqlitePeerInboxStore(db) }),
     derive: () => "active" as const, working: () => true,
     sessions: { get: (id: string) => drivers.get(id), ensure: async (id: string) => { ensured.push(id); if (ensureGate) await ensureGate; const value = driver(id); drivers.set(id, value); return value; } },
     log: () => {},
   };
   const messaging = new SessionMessaging(deps);
-  return { db, records, rows, sent, ensured, stopped, messaging, deps, drivers, driver, session, project, bind,
+  return { epochOf, db, records, rows, sent, ensured, stopped, messaging, deps, drivers, driver, session, project, bind,
     send: (from: string, to: string) => messaging.handlerFor(from, "trusted-incarnation").send({ to, message: "coordinate changes", messageId: `message-${++sequence}` }, { signal: new AbortController().signal }),
     holdEnsure: () => { let release!: () => void; ensureGate = new Promise<void>(resolve => { release = resolve; }); return release; },
   };
@@ -89,6 +94,7 @@ test("host-to-Cowork, standalone/unbound and sibling stop refuse without effects
 test("canonical binding/project state is rechecked after asynchronous resume", async () => {
   const f = fixture(), p = f.project(), a = f.bind(p), b = f.bind(p), release = f.holdEnsure();
   const pending = f.send(a, b);
+  await Bun.sleep(0); // the message is ACCEPTED (persisted) first; the drain then resumes the recipient
   expect(f.ensured).toEqual([b]);
   f.db.db.run("UPDATE cowork_conversations SET state='archived' WHERE session_id=?", [a]);
   release(); expect((await pending).status).toBe("not_found"); expect(f.sent).toEqual([]);
@@ -124,12 +130,14 @@ test.each([false, true])("host-only home (legacy=%s) has the canonical schema an
 test("a replacement retry rechecks membership and does not send into the successor", async () => {
   const f = fixture(), p = f.project(), a = f.bind(p), b = f.bind(p);
   const successor = f.driver(b);
-  f.drivers.set(b, { turnRunning: false, send: async () => {
+  f.drivers.set(b, { turnRunning: false, get coworkEpoch() { return f.epochOf(b); }, send: async () => {
     f.db.db.run("UPDATE cowork_conversations SET state='archived' WHERE session_id=?", [a]);
     f.drivers.set(b, successor);
     throw Object.assign(new Error("replaced"), { code: "session_replaced" });
   } });
-  expect((await f.send(a, b)).status).toBe("unavailable");
+  // Through the inbox the replaced push is offered once more under the successor, whose offer re-checks authority: the sender
+  // was archived meanwhile, so the message is parked (blocked: authority) and the sender gets the uniform answer.
+  expect((await f.send(a, b)).status).toBe("not_found");
   expect(f.sent).toEqual([]); expect(f.ensured).toEqual([]);
 });
 
@@ -145,18 +153,23 @@ test("session-index mode cannot downgrade a canonical guest binding to host auth
   expect(f.sent).toEqual([]); expect(f.ensured).toEqual([]);
 });
 
-test("canonical record failures never fall back to broad host authority", async () => {
-  const f = fixture(), host = f.session("code"), target = f.session("code");
+test("a fault reading the Cowork tables degrades only Cowork rows: Code sessions stay listed and reachable", async () => {
+  const f = fixture(), host = f.session("code"), target = f.session("code"), guest = f.session("cowork");
   const logs: string[] = [];
   const unavailable = new SessionMessaging({ ...f.deps, log: line => logs.push(line), cowork: {
     binding: () => { throw new Error("canonical store unavailable"); },
     project: (id) => f.records.project(id), get: (id) => f.records.get(id),
   } });
-  expect((await unavailable.handlerFor(host).send({ to: target, message: "hello", messageId: "record-error" }, { signal: new AbortController().signal })).status).toBe("not_found");
-  expect(unavailable.list(host).sessions).toEqual([]);
-  expect(unavailable.mayList(host, target)).toBe(false);
-  expect(unavailable.mayList(host, host)).toBe(false);
-  expect((await unavailable.stop(host, { id: target })).status).toBe("not_found");
-  expect(f.sent).toEqual([]); expect(f.ensured).toEqual([]); expect(f.stopped).toEqual([]);
+  // Ordinary messaging does not depend on the Cowork tables.
+  expect((await unavailable.handlerFor(host).send({ to: target, message: "hello", messageId: "record-ok" }, { signal: new AbortController().signal })).status).not.toBe("not_found");
+  expect(f.sent.map(m => m.id)).toEqual([target]);
+  expect(unavailable.list(host).sessions.map(row => row.address)).toEqual([`session:${target}`]);
+  expect(unavailable.mayList(host, target)).toBe(true);
+  expect(unavailable.mayList(host, host)).toBe(true);
+  // A row that claims to be Cowork is hidden and never contacted, in both directions, and never gains host authority.
+  expect((await unavailable.handlerFor(host).send({ to: guest, message: "hello", messageId: "record-error" }, { signal: new AbortController().signal })).status).toBe("not_found");
+  expect(unavailable.mayList(host, guest)).toBe(false);
+  expect((await unavailable.stop(host, { id: guest })).status).toBe("not_found");
+  expect(f.stopped).toEqual([]);
   expect(logs).toHaveLength(1); expect(logs[0]).toContain("session_authority_unavailable");
 });

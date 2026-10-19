@@ -105,7 +105,7 @@ final class LauncherMainTests: XCTestCase {
         let hello = try XCTUnwrap(p.daemon.next { if case .hello(let instance, let boot) = $0 { (instance, boot) } else { nil } })
         XCTAssertTrue(hello.0.hasPrefix("launcher-")); XCTAssertEqual(hello.1.count, 36, "kern.bootsessionuuid, verbatim")
         let scope = guest.scope(mode: "ok")
-        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope, receiptKey: Fixture.receiptKey))
         let pid = try XCTUnwrap(p.daemon.next { if case .begun(_, _, let pid, _) = $0 { pid } else { nil } })
         let disks = try DiskPair()
         p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))
@@ -123,11 +123,11 @@ final class LauncherMainTests: XCTestCase {
         let p = try LauncherProcess(arguments: try pinned())
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
         var scope = guest.scope(mode: "ok"); scope.runtimeImageDigest = String(repeating: "cd", count: 32)
-        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(p.daemon.refusal("req-begin"), .code_identity_mismatch)
         XCTAssertFalse(p.daemon.sees(timeout: 0.3) { if case .begun = $0 { true } else { false } })
         XCTAssertFalse(p.daemon.sees(timeout: 0.1) { if case .uncertain = $0 { true } else { false } }, "no worker was ever made, so there is no verdict")
-        p.daemon.send(.begin(id: "req-again", homeId: Fixture.homeId, scope: guest.scope(mode: "ok")))
+        p.daemon.send(.begin(id: "req-again", homeId: Fixture.homeId, scope: guest.scope(mode: "ok"), receiptKey: Fixture.receiptKey))
         XCTAssertNotNil(p.daemon.next { if case .begun = $0 { true } else { nil } }, "the right digest still starts: nothing was consumed by the refusal")
         p.daemon.end.close()
         XCTAssertEqual(p.exitCode(), 0)
@@ -140,7 +140,7 @@ final class LauncherMainTests: XCTestCase {
     func testAWorkerThatDoesNotMatchItsPinIsNeverResumed() throws {
         let p = try LauncherProcess(arguments: try pinned(worker: String(repeating: "11", count: 20)))
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
-        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: guest.scope(mode: "ok")))
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: guest.scope(mode: "ok"), receiptKey: Fixture.receiptKey))
         XCTAssertEqual(p.daemon.refusal("req-begin"), .code_identity_mismatch)
         XCTAssertNotNil(p.daemon.next { if case .uncertain = $0 { true } else { nil } })
         p.daemon.end.close()
@@ -150,7 +150,7 @@ final class LauncherMainTests: XCTestCase {
         let p = try LauncherProcess(arguments: try pinned())
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
         let scope = guest.scope(mode: "ok")
-        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope, receiptKey: Fixture.receiptKey))
         let pid = try XCTUnwrap(p.daemon.next { if case .begun(_, _, let pid, _) = $0 { pid } else { nil } })
         let disks = try DiskPair()
         p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))
@@ -161,13 +161,13 @@ final class LauncherMainTests: XCTestCase {
         XCTAssertEqual(p.exitCode(), 0)
         XCTAssertEqual(kill(Int32(pid), 0), -1, "the worker did not outlive the launcher")
         let store = try DirectoryReceiptStore(directory: BuiltProducts.canonical(receipts.path))
-        XCTAssertNotNil(try store.load(ReceiptScope(scope)))
+        XCTAssertNotNil(try store.load(ReceiptScope(scope), key: Fixture.receiptKey))
     }
     func testLosingTheDaemonMakesTheRealBinaryDrainLeaveAReceiptAndExit() throws {
         let p = try LauncherProcess(arguments: try pinned())
         XCTAssertNotNil(p.daemon.next { if case .hello = $0 { true } else { nil } })
         let scope = guest.scope(mode: "ok")
-        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope))
+        p.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: scope, receiptKey: Fixture.receiptKey))
         XCTAssertNotNil(p.daemon.next { if case .begun = $0 { true } else { nil } })
         let disks = try DiskPair()
         p.daemon.send(.volumes(id: "req-volumes", scopeDigest: try EnvelopeFormat.scopeDigest(scope), volumes: disks.identities), rights: disks.descriptors.map(\.raw))
@@ -175,7 +175,7 @@ final class LauncherMainTests: XCTestCase {
         p.daemon.end.close()
         XCTAssertEqual(p.exitCode(), 0)
         let store = try DirectoryReceiptStore(directory: BuiltProducts.canonical(receipts.path))
-        guard case .orderly(let r)? = try store.load(ReceiptScope(scope)) else { return XCTFail("a durable Class A") }
+        guard case .orderly(let r)? = try store.load(ReceiptScope(scope), key: Fixture.receiptKey) else { return XCTFail("a durable Class A") }
         XCTAssertEqual(r.origin, .ownerLossDrain)
     }
     #endif

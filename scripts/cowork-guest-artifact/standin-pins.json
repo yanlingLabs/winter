@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "testOnly": true,
+  "status": "stopped-not-built",
+  "reason": "The scripted stand-in provider cannot be made real in this slice: see docs/research/2026-10-18-n2-real-image-build-and-pin.md section 6. This file only reserves where its digests will live, so that the checks which keep them out of every production pin are live from the first day.",
+  "kernelSharedWithProduction": true,
+  "initramfsSha256": null,
+  "runtimeImageDigest": null,
+  "note": "Never copy a value from this file into pins.json, kernel/pins.json, a worker fixture or any packages/core source. test_runtime_image_digest.py fails if one appears there."
+}

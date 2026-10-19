@@ -124,7 +124,7 @@ test("a standalone workspace that is not stopped, or is already past retained, k
 
 test("only the standalone owner's retirement archives: another binding row on that workspace leaves it retained", () => {
   const f = fixture(), life = lifecycle(f);
-  f.db.db.run("INSERT INTO cowork_conversations VALUES('s_other',?,NULL,?,'.','auto','{}',1,'active','t')", [f.workspaceId, f.sourceId]);
+  f.db.db.run("INSERT INTO cowork_conversations(session_id,workspace_id,project_id,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at) VALUES('s_other',?,NULL,?,'.','auto','{}',1,'active','t')", [f.workspaceId, f.sourceId]);
   f.repo.abandonConversation("s_other");
   expect(f.repo.binding("s_other").state).toBe("deleted");
   expect(lifecycle(f)).toEqual(life);

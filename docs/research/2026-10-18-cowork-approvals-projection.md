@@ -1,0 +1,65 @@
+# Cowork approvals projected into the approval bridge (behind the refusal)
+
+Date: 2026-10-18. Status: source and tests; reachable only through an injected port that production never supplies.
+
+Inputs: the Cowork host policy matrix and transition machine (`docs/research/2026-10-16-cowork-host-policy.md`), `docs/cowork-execution-contracts.md` "Approval policies", `docs/cowork-spec.md` (approval cards, occupancy, unattended work), `docs/claude/tool-surface.md`, `docs/claude/island.md`.
+
+## What was built
+
+- `packages/core/src/runtime-sdk/cowork-approval.ts` (new, pure): `projectCoworkCall(ports, call)` turns one `canUseTool` request into allow, ask or deny from `coworkHostDecision`, `coworkConnectorVerdict` and the transition machine's snapshot. `CoworkApprovalPorts` is what the host supplies per conversation: `identity()`, `snapshot()`, `classifyPath()`, optional `explicit()` and `planViewInstalled()`.
+- `packages/core/src/runtime-sdk/approval-bridge.ts`: a new optional `deps.cowork`. When present, every request except `AskUserQuestion` takes the Cowork route; when absent the file behaves exactly as before (the existing approval tests are unchanged and green). `raiseCard` gained three optional, Cowork-only knobs: a summary prefix, an explicit park bound and a revalidation hook.
+- `packages/core/src/cowork/instructions.ts`: `agentScope()` now asks the matrix for the shared-guidance edit column instead of carrying its own `plan`/`dont-ask` literal, closing the "two sources of truth" note from the host policy doc. Behaviour is identical (Deny under plan and dont-ask, Ask otherwise).
+
+## Order of decisions
+
+1. A narrowing in flight (pending, or failed with admission not `open`): deny. The old, broader state is never used to admit new work while its replacement is installed (`transition_pending`, `restart_required`).
+2. `dangerouslyDisableSandbox: true` on Bash: deny in every policy. Bash `allowNetwork: true` under a `none` network ceiling: deny.
+3. Connector action: the Cowork connector row, inside the ceiling's `connectors` grant (not listed: deny). An explicit ask stays a card under bypass.
+4. Read/Glob/Grep, Write, Edit/MultiEdit, Bash, Workflow: the policy matrix. Glob and Grep also classify the literal prefix of `pattern` / `glob` (an ALLOWLIST: a segment made only of dots and question marks, `?.` `.?` `??`, is refused too as it can match `..`; only `[A-Za-z0-9._ -]`, `*`, `?` and `/` are accepted, anywhere; braces, extglob groups, brackets, `|`, `\`, `~` and `!` name the filesystem root and are denied, whether the guest tools expand them or not; otherwise the prefix is resolved against the cwd, and a `..` after the first wildcard also names the root), and every reached path must pass. The host classifies the target path; relative paths resolve against the conversation's cwd. A file tool with no resolvable target is `none`, which the matrix denies.
+5. Anything else is an unknown class: deny under every policy, bypass included.
+
+## How decisions reach the clients (no new event, no protocol field)
+
+- deny: a typed `PermissionResult` deny, no event, no broker entry. Plan and dont-ask use the bridge's existing wording; the other reasons have their own text in `coworkDeniedMessage` (no paths, no secrets).
+- allow: silent.
+- ask: the existing `approval_requested` / `approval_resolved`, answered by `approval.respond`. The summary leads with `Cowork workspace <id> (source revision <n>, agent <id|main>) — `, which is how the card identifies workspace, source revision and requesting agent. Cards are plain Allow/Deny: a saved rule is never host authority in Cowork. The card sits in the same broker, so `approval.list`, the island registry and `island.pending` show it with no change (tested with a real `IslandRegistry`).
+- unattended turn (any origin that is not a person's, or unknown): the card is raised and bounded at the dispatch family's 10 minutes and times out to a typed deny. It is never turned into an allow.
+- revalidation: when a yes arrives, the call is projected again; if the policy narrowed meanwhile the answer becomes a deny (`approval_resolved{approved:false, by:"policy-changed"}`, no `interrupt`).
+- `AskUserQuestion` and `ExitPlanMode` keep the question bridge and the plan bridge.
+
+## Why the Mac fences and the gate are skipped
+
+The control-plane fence, the home fence and the protected-write checks judge Mac paths against Mac settings; a guest path is judged by the matrix and by the mount views. The gate classifies host tool names. The spec says the Cowork check must not be replaced by the SDK's or the gate's blanket behaviour.
+
+## Behind the refusal
+
+`session.create {mode:"cowork"}` and the driver still refuse (`unsupported_topology`). The one production constructor of the bridge (`session-driver.ts`) never passes `cowork`. `test/runtime-sdk/cowork-approval.test.ts` proves it by scanning the source, and that the projection module is imported only by the bridge. The two older anti-wiring pins moved from "no importer" to a named allow-list: the matrix is reached by `policy-transition.ts`, `instructions.ts` and `cowork-approval.ts`; the transition module by `cowork-approval.ts` (a type) only.
+
+## NEEDS FROM OTHER LANE (DOOR: `session-driver.ts`, `mode-options.ts`, hooks)
+
+1. When Cowork is activated, the driver builds `CoworkApprovalPorts` for the conversation and passes `cowork` to `canUseToolFor`. Required members: `identity()` from the binding and workspace revision, `snapshot()` from a per-conversation `CoworkPolicyTransitionMachine`, `classifyPath()` from the admitted roots (it must return `admitted`, `shared-instructions`, `outputs`, `scratch`, `protected` or `outside`), and `planViewInstalled()` from the plan execution view. It must also pass `turnOrigin` (an unknown origin is bounded to 10 minutes).
+2. (Revised 2026-10-18.) The guest's host-query-v1 profile accepts no `initialize`, so no hook can be registered and the PreToolUse hook originally listed here is impossible. DOOR launches every policy except plan as permission mode `default` and plan as `plan`, so every non-read-only call reaches `canUseTool` and `projectCoworkCall` applies the policy itself (bypass and auto allow silently there). Consequences: (a) pass `coworkBashReview: { reviewer, allow, enabled }` to `canUseToolFor` (the daemon's existing `BashReviewer`); the bridge runs it for `auto` x Bash (below); (b) calls the child treats as read-only (Read, Glob, Grep) never reach `canUseTool` in `default` mode, so the matrix's path decisions for reads are enforced by the mount views alone unless DOOR routes them through the bridge; (c) the Cowork connector row is applied in the bridge, with no separate floor hook.
+3. A tool-surface decision for the tools the matrix leaves unknown (see below).
+3b. DOOR/mount: plan gets a separate or epoch-scoped scratch view. Plan x own scratch Write/Edit is `allow-in-plan-view` on the same `/workspace/.winter/scratch/<id>` every other policy uses, and the contract wants scratch "by conversation and policy epoch" so files planted under plan cannot be run by a later auto. `planViewInstalled` must be true only when that view is mounted (the bridge denies the cell with `plan_view_missing` otherwise; tested).
+4. Path classes are lexical (the projection resolves `.`/`..` against the cwd and classifies the string). Symlinks are the host classifier's and the mount view's to own; a symlink inside an admitted root that points at protected state must be refused by them.
+5. `bashReview` on an allow is advisory here: under `auto` the review itself depends on the PreToolUse reviewer hook DOOR owes (item 2); the bridge ignores the flag on an allow.
+
+No `cowork/types.ts` code, no protocol field and no `SessionEvent` is needed.
+
+## The bash safety review, inside the bridge
+
+When the projection allows a Bash call and says `bashReview` (only `auto`), `coworkBashReview` runs the existing `BashReviewer` before the allow is returned, with the semantics of `hooks.ts`'s `bashReviewerHook`: a `bashLooksSafe` command or an entry of the user's reviewer allow list skips it; `unsafe` denies with the reviewer's reason; no runnable model, a disabled reviewer or no reviewer wired allows (as Code does, and as the spec says: "an absent/disabled reviewer ... permits an otherwise admitted confined command"); a reviewer that throws, times out (60 s, the reviewer's signal is aborted) or answers anything but a definite verdict asks, i.e. raises the usual plain card; an aborted turn denies. After the review the call is projected again under the policy then in force; a policy that narrowed meanwhile denies it (`policy_changed`). No `open` exemption: those are Mac actions.
+
+## Outputs and scratch (owner decision 2026-10-18)
+
+`/workspace/outputs/<session-id>` and `/workspace/.winter/scratch/<session-id>` are the path classes `outputs` and `scratch`, and mean the conversation's OWN folder: the projection narrows whatever the host classified, using the bridge's own session id, so another conversation's folder, a look-alike prefix and the `/workspace/outputs` root are `outside`. Read is Allow in every policy; Write and Edit follow an admitted root's row (plan Deny, ask Ask, accept-edits/auto/bypass Allow, dont-ask only if authorized). Scratch is named writable per conversation by the spec ("Persistent conversation TMPDIR", "Memory and scratch are separately writable subtrees"), so it gets the same rule, with one difference taken from the plan paragraph ("separately scoped disposable/planning scratch"): plan x scratch Write/Edit is `allow-in-plan-view`, which needs the plan view like plan Bash. Bash and Workflow are pathless and never take these classes. Glob and Grep patterns go through the same allowlist.
+
+## Owner decisions
+
+1. Tools with no matrix class are denied: web tools, `Agent`, `Task*`, `Skill`, `ToolSearch`, `NotebookEdit`, `LSP`, `SendMessage` and Winter's own default tools (`advisor`, `ReadNotifications`). That is what the spec says ("Unknown tool classes are not silently admitted"), but it will make a Cowork conversation very quiet. Recommendation: give the read-only orchestration tools (`ToolSearch`, `Skill`, `Task*`) a read-only class once the table has a cell for them, and keep the rest denied.
+2. `outputs` and a non-plan `scratch` remain denied until the policy table gets explicit cells (the host policy doc's decision 6).
+3. Unattended cards time out after 10 minutes; an unknown turn origin counts as unattended. Recommendation: keep.
+
+## Docs owed
+
+`docs/claude/cowork.md` and the ledgers should say: the approval bridge has a Cowork route behind an injected `cowork` port, production never supplies it; the decision table lives in `cowork/host-policy.ts` and `cowork/policy-transition.ts`; `CoworkInstructions.agentScope` asks the matrix; the PreToolUse hook, the port construction and the tool mapping remain for the DOOR lane.
