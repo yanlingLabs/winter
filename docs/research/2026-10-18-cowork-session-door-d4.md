@@ -131,13 +131,19 @@ cowork_session_reservations(principal_id, workspace_id → cowork_workspaces, re
 
 1. **Schedule lane (#90):** a direct reader `occurrence(workspaceId, occurrenceId)` returning `{state, scheduleId}`, so the dispatch view need not scan `list`/`status`. Not blocking.
 2. **Schedule lane (#90):** note that the door's idempotency holds within the dispatch window (above).
-3. **S7B:** the D6 composition passes `COWORK_SCHEDULE_CALLER` to `createCoworkScheduleDoorPort` and `coworkScheduleDispatchView(schedules)` to the door. That is the flip line, which needs the owner's word.
+3. **S7B, D6 composition (the flip, owner's word).** It must:
+   - pass `COWORK_SCHEDULE_CALLER` to `createCoworkScheduleDoorPort` and `coworkScheduleDispatchView(schedules)` to the door;
+   - build the door's approval port with `coworkApprovalPort({approvals, questions, gate, ...})`;
+   - set `CoworkHostPorts.execution` beside the door it passes.
+4. **S7B, BLOCKING before any production host supplies `provisioning`.** The service now admits creation through `provisioning.admit`, but it does not yet call `provision(workspaceId, operationId)` after commit. A host that supplies an available port would commit workspaces whose images are never allocated. Do not supply the port on a production host until the service calls `provision()` after COMMIT and reports it through the operation. That call is owed jointly with S7B's operation reporting, and a pin keeps both ports unsupplied in `src`.
 
 ## Owner decisions
 
 - **O-D4-1:** bind admits a `preparing` source (above). Recommendation: accept.
 - **O-D4-2:** a definite bind refusal withdraws the row and the reservation (the request starts over) instead of keeping a refused-with-code reservation. Recommendation: accept. It keeps a standalone workspace from being stuck, and a retry is refused the same way while the cause lasts.
 - **O-D4-3:** the schedule caller's idempotency is window-scoped. Recommendation: accept, since the port only creates inside `beginDispatch`.
+- **O-D4-4:** the CLI lives under `winter workspace session create|list` instead of the design's `winter cowork session …`. Recommendation: accept. `workspace` and `project` are the existing Cowork CLI surface, there is no `cowork` verb, and adding one would split the Cowork commands across two roots.
+- **O-D4-5:** a Cowork `session.steer` reaches only a live driver and never boots a guest, so `send` stays the one boot door. Recommendation: accept.
 
 ## Owed (listed, not done)
 
@@ -151,16 +157,17 @@ D4b is stacked on D4a. Nothing in it is reachable in production: each piece is r
 | Piece | What it does |
 |---|---|
 | `ipc/server.ts` `coworkDriversOf` | Returns the door's driver table for a stored `cowork` row, and only when a door was passed. Without a door it returns undefined, and every Cowork answer stays exactly as before. The stored mode only routes: the drivers re-read the host binding, which is the authority, so a row with no binding is refused there. |
-| `session.send` / `session.steer` | Run on `drivers.get ?? drivers.ensure`, after the same attachment check `hub.send` makes. Images and files were already refused as Code-only before any driver call. A driver refusal is the typed Cowork code. |
+| `session.send` | Runs on `drivers.get ?? drivers.ensure`, after the same attachment check `hub.send` makes. Images and files were already refused as Code-only before any driver call. A driver refusal is the typed Cowork code. `send` is the ONE door that may start a guest. |
+| `session.steer` | Reaches only a LIVE driver. With nothing live it answers `injected: false` and starts nothing, so a steer never boots a guest. It is in neither the remote nor the plugin method set. |
 | `session.interrupt` | Asks only a live driver. Its typed `unsupported_topology` (D3 decision 2) reaches the client. With nothing live it answers `wasRunning: false` and starts nothing. |
 | `session.compact` | Refuses `unsupported_topology` when a door exists (the host-query guest refuses slash text). |
-| `session.list` | A Cowork row carries `cowork: {workspaceId, projectId}` from `cowork_conversations` (`CoworkRepository.conversationRef`), never from the log's display fact. Remote still never sees the row or reaches it. |
+| `session.list` | A Cowork row carries `cowork: {workspaceId, projectId}` from `cowork_conversations` (`CoworkRepository.conversationRef`), never from the log's display fact. If a row's reference cannot be read, that row lists without it, and the list itself still answers. Remote still never sees the row or reaches it (send, steer and interrupt are each refused). `sync.push` cannot create a Cowork row: a log it starts must begin with `session_created` `mode: "chat"`. |
 | CLI | `winter workspace session create <workspaceId> --source ID [--cwd RELATIVE] --request-id ID [--json]` and `winter workspace session list <workspaceId> [--json]`. Parsing is strict, with no default request id. The create goes through `session.create {mode: "cowork"}` (scope `global`), which every production daemon refuses with `unsupported_topology`. List filters `session.list` by the row's workspace reference. The commands live under `workspace` (the existing Cowork surface) rather than a new `cowork` verb. |
 | `cowork/service.ts` | When a host supplies S7B's `provisioning` port, `provisioning.admit` is the admission for creation and source additions, and it refuses while the port is unavailable. Otherwise the host's refusing `requireProvisioning` stays. `workspace.capabilities.get` reports `provisioning: provisioning.available()` and `execution: host.execution?.()`. Both are false on every production host. `provision()` is not called yet: it is owed with S7B's operation reporting. |
 | Protocol | `CoworkCapabilities.provisioning` and `.execution` widen from `z.literal(false)` to `z.boolean()`. The Swift mirror already decodes `Bool`, and the Mac's `CoworkGate` already follows them. `protocol:generate` does not cover method results. |
 | `coworkApprovalPort` (session-door.ts) | #84's 6-line adapter: `canUseToolFor({mode: "cowork", cowork: input.cowork, ...})`. The D3 driver suite now runs through it. The APPROVALS pin in `cowork-approval.test.ts` names it as the one other bridge constructor (pin edit for acceptance). |
 
-D4b mutations: 22/23 killed (`door/d4b_mutations.py`). The one survivor, a fixed policy in the adapter, is equivalent: with `cowork` present the bridge returns from the Cowork matrix (step 1c) before `policyNow()` is ever read.
+D4b mutations: 24/25 killed (`door/d4b_mutations.py`). The one survivor, a fixed policy in the adapter, is equivalent: with `cowork` present the bridge returns from the Cowork matrix (step 1c) before `policyNow()` is ever read.
 
 ## Docs owed
 

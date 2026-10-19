@@ -2366,7 +2366,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // ComputerV2 wake triggers (2026-10-12): the "waiting for you" mark — how many triggers the session has armed.
           const wakesArmed = opts.computerUse?.wakesArmed?.(s.sessionId) ?? 0;
           // Session door D4b: a Cowork row's safe workspace reference, from the host binding (never the log's display fact).
-          const cowork = s.mode === "cowork" ? opts.cowork?.records.conversationRef(s.sessionId) : undefined;
+          // A row whose reference cannot be read lists without it: one bad row never fails the whole list.
+          let cowork: { workspaceId: string; projectId: string | null } | undefined;
+          if (s.mode === "cowork") { try { cowork = opts.cowork?.records.conversationRef(s.sessionId); } catch { cowork = undefined; } }
           const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}), ...(cowork === undefined ? {} : { cowork }) };
           if (!participatesInActivity(s.mode)) return { ...s, signals, ...rowFields };
           const dirs = opts.store.dirs(s.sessionId);
@@ -2596,12 +2598,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionSteerParams, params);
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
         const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole, images?.length ?? 0);
+        // A Cowork steer reaches only a LIVE driver: `send` is the one door that may start a guest, so a steer never boots one.
         const coworkSteer = coworkDriversOf(p.sessionId);
         if (coworkSteer !== undefined) {
-          try {
-            const session = coworkSteer.get(p.sessionId) ?? await coworkSteer.ensure(p.sessionId);
-            return { ok: true, injected: (await session.steer(p.text)).injected };
-          } catch (err) { rpcFromWinterRefusal(err); }
+          const live = coworkSteer.get(p.sessionId);
+          if (live === undefined) return { ok: true, injected: false };
+          try { return { ok: true, injected: (await live.steer(p.text)).injected }; } catch (err) { rpcFromWinterRefusal(err); }
         }
         {
           const winterSession = await ensureWinterSession(p.sessionId);

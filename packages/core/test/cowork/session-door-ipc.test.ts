@@ -84,12 +84,16 @@ async function boot(door: CoworkSessionDoor | undefined) {
 }
 const door = (drivers: CoworkSessionDrivers): CoworkSessionDoor => ({ drivers, create: async () => { throw new Error("unused"); } });
 
-test("with a door, a Cowork row's send and steer run on the door's drivers; a Code row never touches them", async () => {
+test("with a door, a Cowork row's send runs on the door's drivers and a steer reaches only a live one; a Code row never touches them", async () => {
   const { drivers, calls } = recordingDrivers(), b = await boot(door(drivers));
   expect((await b.harness.request(METHODS.sessionAttach, { sessionId: b.coworkId })).error).toBeUndefined();
   expect((await b.harness.request(METHODS.sessionSend, { sessionId: b.coworkId, text: "hello" })).result).toEqual({ seq: 7 });
-  expect((await b.harness.request(METHODS.sessionSteer, { sessionId: b.coworkId, text: "more" })).result).toEqual({ ok: true, injected: true });
-  expect(calls).toEqual([`get:${b.coworkId}`, `ensure:${b.coworkId}`, "send:hello:fixture-harness", `get:${b.coworkId}`, `ensure:${b.coworkId}`, "steer:more"]);
+  // Nothing live: a steer starts nothing (send is the one door that boots a guest).
+  expect((await b.harness.request(METHODS.sessionSteer, { sessionId: b.coworkId, text: "more" })).result).toEqual({ ok: true, injected: false });
+  expect(calls).toEqual([`get:${b.coworkId}`, `ensure:${b.coworkId}`, "send:hello:fixture-harness", `get:${b.coworkId}`]);
+  const live = recordingDrivers({ live: true }), l = await boot(door(live.drivers));
+  expect((await l.harness.request(METHODS.sessionSteer, { sessionId: l.coworkId, text: "more" })).result).toEqual({ ok: true, injected: true });
+  expect(live.calls).toEqual([`get:${l.coworkId}`, "steer:more"]);
   calls.length = 0;
   expect((await b.harness.request(METHODS.sessionAttach, { sessionId: b.codeId })).error).toBeUndefined();
   await b.harness.request(METHODS.sessionSend, { sessionId: b.codeId, text: "code" });
@@ -141,6 +145,7 @@ test("session.list carries a Cowork row's workspace reference from the binding; 
   expect(((await b.remote.request(METHODS.sessionList)).result.sessions as { sessionId: string }[]).map(row => row.sessionId)).not.toContain(b.coworkId);
   expect((await b.remote.request(METHODS.sessionSend, { sessionId: b.coworkId, text: "x" })).error).toBeDefined();
   expect((await b.remote.request(METHODS.sessionInterrupt, { sessionId: b.coworkId })).error).toBeDefined();
+  expect((await b.remote.request(METHODS.sessionSteer, { sessionId: b.coworkId, text: "x" })).error).toBeDefined();
   expect(calls).toEqual([]);
 });
 
@@ -179,4 +184,29 @@ test("provisioning: with S7B's port, its admit is the gate (refusing while unava
   expect(admitted).toBe(2);
   const production = service();
   expect(() => create(production.svc, "refused")).toThrow("unsupported_topology");
+});
+
+test("a Cowork row whose reference cannot be read lists without it, and the list still answers", async () => {
+  const { drivers } = recordingDrivers(), b = await boot(door(drivers));
+  const original = CoworkRepository.prototype.conversationRef;
+  CoworkRepository.prototype.conversationRef = () => { throw new CoworkError("invalid_request"); };
+  try {
+    const rows = (await b.harness.request(METHODS.sessionList)).result.sessions as { sessionId: string; cowork?: unknown }[];
+    expect(rows.map(row => row.sessionId).sort()).toEqual([b.codeId, b.coworkId].sort());
+    expect(rows.find(row => row.sessionId === b.coworkId)!.cowork).toBeUndefined();
+  } finally { CoworkRepository.prototype.conversationRef = original; }
+});
+
+test("pins: no src module supplies a host's provisioning or execution port (the composition that does is the D6 flip)", () => {
+  const { readdirSync, readFileSync, statSync } = require("node:fs") as typeof import("node:fs");
+  const packages = join(import.meta.dir, "..", "..", "..");
+  const files = readdirSync(packages).flatMap(name => { const src = join(packages, name, "src"); try { return statSync(src).isDirectory() ? readdirSync(src, { recursive: true }).map(String).map(file => join(src, file)).filter(file => /\.(ts|tsx|js|mjs)$/.test(file)) : []; } catch { return []; } });
+  expect(files.length).toBeGreaterThan(100);
+  const code = (file: string) => readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const naming = (pattern: RegExp) => files.filter(file => pattern.test(code(file))).map(file => file.slice(packages.length + 1)).sort();
+  // Declared and read in service.ts; the protocol names the wire field. Nothing else writes either port.
+  expect(naming(/\bprovisioning\s*\??:/)).toEqual([join("core", "src", "cowork", "service.ts"), join("protocol", "src", "cowork.ts")]);
+  expect(naming(/\bexecution\s*\??:\s*\(/)).toEqual([join("core", "src", "cowork", "service.ts")]);
+  // The approvals adapter is defined in the door module and called by no src module (only a door composition will).
+  expect(naming(/(?<!function )\bcoworkApprovalPort\(/)).toEqual([]);
 });
