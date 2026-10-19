@@ -16,7 +16,7 @@ import { CoworkNativeReceiptKey, computeCoworkNativeReceiptMac, isCanonicalBase6
  * socketpair and spawned the launcher; no field in any frame below can say so on its own behalf.
  *
  *   L1  daemon <-> launcher   AF_UNIX SOCK_STREAM socketpair. NDJSON, one canonical JSON object per line.
- *                             SCM_RIGHTS rides on exactly one line type (`volumes`, exactly two descriptors).
+ *                             SCM_RIGHTS rides on exactly two line types (`volumes`, exactly two descriptors; `shares`, one per share).
  *   L2  launcher <-> worker   unnamed AF_UNIX SOCK_DGRAM socketpair. Fixed-layout little-endian ENVELOPES.
  *   L3  launcher <-> worker   unnamed AF_UNIX SOCK_STREAM socketpair. MUX FRAMES of the bootstrap and runtime classes.
  *   L4  worker <-> guest      the libkrun generic virtio-console port. MUX FRAMES of every class.
@@ -32,6 +32,11 @@ export const COWORK_NATIVE_PROTOCOL_VERSION = 1;
  * `mac` key and the `begin` line a final `receiptKey` key (owner ruling 2026-10-18). The binary headers (L2 envelope, L3/L4 mux) and the bootstrap/runtime
  * JSON that rides inside mux frames stay at version 1: nothing in them changed. */
 export const COWORK_NATIVE_TEXT_VERSION = 2;
+/** The `v` of the bootstrap-class JSON inside mux frames. 2 = contract revision 3 (2026-10-19): the conversation set gained `browseUid` and, per runtime,
+ * `continuation` and `endedGuestBoots`; `runtime_ready` gained `continuations`; `shares` and `shares_mounted` are new. A revision-2 guest refuses a
+ * version-2 payload as `version`, never half-parses it. Control-class JSON did not change and stays at 1 (`COWORK_NATIVE_CONTROL_VERSION`). */
+export const COWORK_NATIVE_BOOTSTRAP_VERSION = 2;
+export const COWORK_NATIVE_CONTROL_VERSION = 1;
 
 /** Every refusal the parsers raise. `reserved_class` is the provider class; there is no implementation behind it. */
 export const COWORK_NATIVE_PROTOCOL_FAILURES = Object.freeze(["malformed", "oversize", "version", "unknown_type", "bad_field", "bad_direction", "bad_rights", "reserved_class", "bad_sequence"] as const);
@@ -72,6 +77,19 @@ export const COWORK_NATIVE_LIMITS = Object.freeze({
   runtimePrefixBytes: 4, runtimeConversations: 16,
   /** Host-side bound on runtime IN bytes sent with no OUT or ERR byte received since: the guest relay's IN ring is 4 MiB and an overflow stops the whole guest, so the host stays at a quarter of it. */
   runtimeInFlightBytes: 1_048_576,
+  /** The guest file channel (streams FILE_IN and FILE_OUT, conversation 0 only) has its OWN bound, never the runtime IN count: at most this many
+   * request lines outstanding (a request is answered when its response line's newline arrives on FILE_OUT), each request line and each response
+   * line at most these many bytes, the newline included. Equal to the guest file channel's own request and response frame bounds (protocol.test.ts pins the equality; this module imports nothing from the channel). */
+  fileInFlightRequests: 4, fileRequestBytes: 16_384, fileResponseBytes: 393_216,
+  /** Host-backed shares: at most this many per incarnation (nine folder sources and the three Winter shares), tags `[a-z0-9-]{1,32}`, one fixed
+   * L2 record per share slot. */
+  shares: 12, folderShares: 9, shareTagChars: 32, shareRecordBytes: 308,
+  /** Cold resume: at most this many host-attested ended guest boots per conversation. */
+  endedGuestBoots: 4,
+  /** A runtime's `timeoutMs` ceiling, for the host-query profiles only (the fixture `fresh` profile is never carried here and keeps its 600 s
+   * ceiling). The guest backstop for host-query runtimes is 24 h (owner O7, 2026-10-19); the agent SDK supervisor admits
+   * more than 600000 only from its CR2 release on, so a set above 600000 is refused by an older pinned supervisor (fail closed). */
+  runtimeTimeoutCeilingMs: 86_400_000,
 });
 /** Launcher kill deadline for a drain with this budget: the guest may spend all of `budgetMs`, the VMM exit path needs up to
  * `libkrunExitWatchdogMs` after that, and the launcher must not kill before that watchdog can have fired. */
@@ -170,11 +188,12 @@ const sortedObject: Validator<Record<string, unknown>> = value => isPlain(value)
 
 // ------------------------------------------------------------------------------------------------ vocabularies
 
-export const COWORK_NATIVE_REFUSAL_CODES = Object.freeze(["bad_request", "busy", "not_begun", "worker_spawn_failed", "code_identity_mismatch", "sandbox_failed", "volumes_rejected", "internal"] as const);
+export const COWORK_NATIVE_REFUSAL_CODES = Object.freeze(["bad_request", "busy", "not_begun", "worker_spawn_failed", "code_identity_mismatch", "sandbox_failed", "volumes_rejected", "internal", "shares_rejected"] as const);
 export const COWORK_NATIVE_CHANNEL_FAULTS = Object.freeze(["parent_unverified", "protocol_violation", "worker_channel_lost", "internal"] as const);
 export const COWORK_NATIVE_WORKER_STATES = Object.freeze(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "exited", "halting", "guest_fault"] as const);
 export const COWORK_NATIVE_STOP_REASONS = Object.freeze(["user", "shutdown", "restart", "update", "failed-start"] as const);
-export const COWORK_NATIVE_BOOTSTRAP_FAULTS = Object.freeze(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations"] as const);
+export const COWORK_NATIVE_BOOTSTRAP_FAULTS = Object.freeze(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations",
+  "share_inventory", "share_mount_failed", "resume_store_missing", "fresh_store_not_empty"] as const);
 /** Control-up `fault` codes (guest to worker): the guest says it is failing. The worker reflects it as the L2 status `guest_fault`; after one, no Class A can exist. */
 export const COWORK_NATIVE_GUEST_FAULTS = Object.freeze(["unmount_failed", "supervisor_lost", "protocol_violation", "internal"] as const);
 /** Class B reasons. None of them can ever release anything. */
@@ -182,6 +201,50 @@ export const COWORK_NATIVE_UNCERTAIN_REASONS = Object.freeze(["daemon-lost", "dr
 export const COWORK_NATIVE_STOP_ORIGINS = Object.freeze(["host-stop", "owner-loss-drain"] as const);
 export const COWORK_NATIVE_VOLUME_PURPOSES = Object.freeze(["data", "environment"] as const);
 export type CoworkNativeVolumePurpose = typeof COWORK_NATIVE_VOLUME_PURPOSES[number];
+
+// ------------------------------------------------------------------------------------------------ host-backed shares (contract revision 3)
+
+/** What a share is (design 2026-10-18 n2-extensions section 2.1). A folder source is the user's granted folder; the three Winter shares are
+ * host-made records under the workspace's `shared/` directory. */
+export const COWORK_NATIVE_SHARE_KINDS = Object.freeze(["folder", "guidance", "memory", "outputs"] as const);
+export type CoworkNativeShareKind = typeof COWORK_NATIVE_SHARE_KINDS[number];
+/** `share_notice` kinds: an allowed write to a watched auto-run name, or an R15 refusal (`git_protected`). Appended, never renumbered (L2 `share_event` numbers them from 1). */
+export const COWORK_NATIVE_SHARE_NOTICE_KINDS = Object.freeze(["envrc", "vscode_tasks", "vscode_settings", "code_workspace", "idea_project", "git_protected"] as const);
+export type CoworkNativeShareNoticeKind = typeof COWORK_NATIVE_SHARE_NOTICE_KINDS[number];
+/** The fixed guest mount point of each Winter share; a folder source mounts at `/workspace/folders/<name>`. */
+export const COWORK_NATIVE_SHARE_MOUNTS = Object.freeze({ guidance: "/run/winter/shared-instructions", memory: "/workspace/.winter/memory", outputs: "/workspace/outputs" } as const);
+const SHARE_TAG = /^[a-z0-9-]{1,32}$/;
+const FOLDER_MOUNT = /^\/workspace\/folders\/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const shareTag: Validator<string> = value => typeof value === "string" && SHARE_TAG.test(value) ? value : fail();
+// eslint-disable-next-line no-control-regex
+const HOST_PATH_CONTROL = /[\u0000-\u001f\u007f]/;
+/** A canonical absolute HOST path (a share root, a worker argv path): absolute, no `.`, `..` or empty component, not `/` itself, well-formed UTF-8 of at
+ * most 1024 bytes, no control character. It names a directory the daemon already opened; the receiver compares it with `F_GETPATH` of that descriptor. */
+const hostPath: Validator<string> = value => {
+  if (typeof value !== "string" || value.length < 2 || !value.startsWith("/") || !value.isWellFormed() || HOST_PATH_CONTROL.test(value) || Buffer.byteLength(value, "utf8") > 1024) return fail();
+  return value.slice(1).split("/").some(part => part === "" || part === "." || part === "..") ? fail() : value;
+};
+const nestedOrEqual = (a: string, b: string): boolean => a === b || b.startsWith(`${a}/`) || a.startsWith(`${b}/`);
+/** The guest mount point a share of this kind must use. */
+function shareMountOk(kind: CoworkNativeShareKind, guestPath: string): boolean {
+  return kind === "folder" ? FOLDER_MOUNT.test(guestPath) : guestPath === COWORK_NATIVE_SHARE_MOUNTS[kind];
+}
+/** Read-only is fixed for the Winter shares (guidance read-only; memory and outputs read-write) and the grant's for a folder source. */
+const shareModeOk = (kind: CoworkNativeShareKind, readOnly: boolean): boolean => kind === "folder" || readOnly === (kind === "guidance");
+/** The rules across a share list, the same on L1 and in the bootstrap message: 1 to 12 shares, at most 9 folders and one of each Winter kind,
+ * distinct tags, distinct guest paths, every guest path the right one for its kind, and every mode the right one for its kind. */
+function checkShareSet(items: readonly { tag: string; kind: CoworkNativeShareKind; guestPath: string; readOnly: boolean }[]): void {
+  if (items.length < 1 || items.length > COWORK_NATIVE_LIMITS.shares) return fail();
+  if (new Set(items.map(item => item.tag)).size !== items.length || new Set(items.map(item => item.guestPath)).size !== items.length) return fail();
+  if (items.filter(item => item.kind === "folder").length > COWORK_NATIVE_LIMITS.folderShares) return fail();
+  for (const kind of ["guidance", "memory", "outputs"] as const) if (items.filter(item => item.kind === kind).length > 1) return fail();
+  if (items.some(item => !shareMountOk(item.kind, item.guestPath) || !shareModeOk(item.kind, item.readOnly))) return fail();
+}
+export interface CoworkNativeShareRecord {
+  readonly tag: string; readonly kind: CoworkNativeShareKind; readonly mode: "ro" | "rw";
+  readonly device: string; readonly inode: string; readonly path: string; readonly guestPath: string;
+}
+export interface CoworkNativeGuestShare { readonly tag: string; readonly guestPath: string; readonly readOnly: boolean; readonly kind: CoworkNativeShareKind }
 
 // ------------------------------------------------------------------------------------------------ owner scope
 
@@ -333,10 +396,16 @@ export type CoworkNativeBootstrapMessage =
   | { readonly t: "fault"; readonly operationId: string; readonly nonce: string; readonly code: typeof COWORK_NATIVE_BOOTSTRAP_FAULTS[number] }
   | { readonly t: "ready"; readonly operationId: string; readonly nonce: string }
   | { readonly t: "mounted"; readonly operationId: string; readonly nonce: string }
-  | { readonly t: "conversations"; readonly operationId: string; readonly nonce: string; readonly incarnationId: string; readonly profile: CoworkNativeRuntimeProfile | null; readonly conversations: readonly CoworkNativeConversation[] }
-  | { readonly t: "runtime_ready"; readonly operationId: string; readonly nonce: string; readonly conversations: number };
-/** The three byte streams of one conversation's `RuntimeDuplexPorts`: `in` = IN (host to guest), `out` = OUT and `err` = ERR (guest to host). */
-export const COWORK_NATIVE_RUNTIME_STREAMS = Object.freeze(["in", "out", "err"] as const);
+  | { readonly t: "shares"; readonly operationId: string; readonly nonce: string; readonly shares: readonly CoworkNativeGuestShare[] }
+  | { readonly t: "shares_mounted"; readonly operationId: string; readonly nonce: string }
+  | { readonly t: "conversations"; readonly operationId: string; readonly nonce: string; readonly incarnationId: string; readonly profile: CoworkNativeRuntimeProfile | null; readonly browseUid: number | null; readonly conversations: readonly CoworkNativeConversation[] }
+  | { readonly t: "runtime_ready"; readonly operationId: string; readonly nonce: string; readonly conversations: number; readonly continuations: readonly ("fresh" | "resume")[] };
+/** The byte streams of the runtime class. `in`, `out` and `err` are one conversation's `RuntimeDuplexPorts` (IN host to guest, OUT and ERR guest to host).
+ * `file_in` (host to guest) and `file_out` (guest to host) are the guest file channel (contract revision 3): legal on conversation 0 only, offered only to an
+ * image that declares the `file-channel-v1` runtime capability, and counted apart from IN (`CoworkNativeRuntimeStreams`). */
+export const COWORK_NATIVE_RUNTIME_STREAMS = Object.freeze(["in", "out", "err", "file_in", "file_out"] as const);
+/** The runtime capability an image declares before the host may open the file channel. */
+export const COWORK_NATIVE_FILE_CHANNEL_CAPABILITY = "file-channel-v1";
 export type CoworkNativeRuntimeStream = typeof COWORK_NATIVE_RUNTIME_STREAMS[number];
 export type CoworkNativeMuxFrame =
   | { readonly class: "control"; readonly seq: number; readonly message: CoworkNativeControlMessage }
@@ -374,6 +443,13 @@ export interface CoworkNativeConversationRuntime {
   readonly provider: Readonly<Record<string, unknown>>;
   /** Present exactly when the profile is `host-query-guided-v1`: the SDK's `requiredRuntimeContext.bindingId` and the backend generation. */
   readonly guided: Readonly<{ bindingId: string; generation: number }> | null;
+  /** Cold resume (contract revision 3): `fresh` (the store must be empty), `resume` (it must hold this conversation's store) or `either` (the host started the
+   * conversation before but recorded no completed turn: the supervisor runs it fresh on an empty store and resumes a non-empty one). `either` is never sent once the host's
+   * `store_state` is `created` (a completed turn): from then on only `resume`, so a lost store faults instead of starting fresh. */
+  readonly continuation: "fresh" | "resume" | "either";
+  /** Guest boot ids the HOST attests have ended (recorded at that boot's `hello`, released by real proof): the only previous-boot evidence the owner
+   * library may mint. 0 to 4, distinct, never the live boot; empty for `fresh`. */
+  readonly endedGuestBoots: readonly string[];
 }
 export interface CoworkNativeConversation {
   readonly logicalSessionId: string; readonly authority: CoworkNativeConversationAuthority;
@@ -452,8 +528,14 @@ const toolClassesOf: Validator<readonly typeof COWORK_NATIVE_TOOL_CLASSES[number
   return Object.freeze([...value]) as never;
 };
 const GUIDED_SPEC: Spec = [["bindingId", value => typeof value === "string" && UUID4.test(value) ? value : fail()], ["generation", uint(1, Number.MAX_SAFE_INTEGER)]];
-const RUNTIME_SPEC: Spec = [["model", value => typeof value === "string" && value.length >= 1 && value.length <= 256 && ASCII_TEXT.test(value) ? value : fail()], ["timeoutMs", uint(1, 600_000)],
-  ["toolClasses", toolClassesOf], ["provider", providerOf], ["guided", nullable(recordOf(GUIDED_SPEC))]];
+const endedBootsOf: Validator<readonly string[]> = value => {
+  if (!Array.isArray(value) || value.length > COWORK_NATIVE_LIMITS.endedGuestBoots) return fail();
+  const boots = value.map(guestBoot);
+  return new Set(boots).size === boots.length ? Object.freeze(boots) : fail();
+};
+const RUNTIME_SPEC: Spec = [["model", value => typeof value === "string" && value.length >= 1 && value.length <= 256 && ASCII_TEXT.test(value) ? value : fail()], ["timeoutMs", uint(1, COWORK_NATIVE_LIMITS.runtimeTimeoutCeilingMs)],
+  ["toolClasses", toolClassesOf], ["provider", providerOf], ["guided", nullable(recordOf(GUIDED_SPEC))],
+  ["continuation", oneOf(["fresh", "resume", "either"] as const)], ["endedGuestBoots", endedBootsOf]];
 const CONVERSATION_SPEC: Spec = [["logicalSessionId", sdkId], ["authority", recordOf(AUTHORITY_SPEC)], ["runtimeUid", unixId], ["toolUid", unixId], ["workspaceGid", unixId],
   ["policy", oneOf(COWORK_NATIVE_POLICIES)], ["roots", rootsOf], ["runtime", nullable(recordOf(RUNTIME_SPEC))]];
 /** One conversation: the field rules plus the rules that tie its fields to each other (the supervisor's own checks, mirrored). */
@@ -470,6 +552,8 @@ const conversationOf: Validator<CoworkNativeConversation> = value => {
     // `_configure_runtime`: the provider scope must be this conversation's own, and the selected model the one that runs.
     if (scope.workspaceId !== item.authority.workspaceId || scope.sessionId !== item.logicalSessionId || scope.backendSessionId !== item.authority.sessionId
       || scope.incarnationId !== item.authority.incarnationId || scope.leaseEpoch !== item.authority.leaseEpoch || scope.grantRevision !== item.authority.grantRevision || selection.modelKey !== runtime.model) return fail();
+    // Cold resume: a fresh store has no earlier boot to vouch for, and the live boot can never be attested as ended.
+    if ((runtime.continuation === "fresh" && runtime.endedGuestBoots.length > 0) || runtime.endedGuestBoots.includes(scope.bootId as string)) return fail();
   }
   return Object.freeze(item);
 };
@@ -490,6 +574,9 @@ function checkConversationsMessage(message: Record<string, unknown>): void {
   if (new Set(items.map(item => item.logicalSessionId)).size !== items.length || new Set(items.map(item => item.authority.sessionId)).size !== items.length) return fail();
   const uids = items.flatMap(item => [item.runtimeUid, item.toolUid]);
   if (new Set(uids).size !== uids.length || items.some(item => items.some(other => other.runtimeUid === item.workspaceGid || other.toolUid === item.workspaceGid))) return fail();
+  // The file channel's browse uid (one per workspace, contract revision 3) is no member's runtime or tool uid and no group id.
+  const browseUid = message.browseUid as number | null;
+  if (browseUid !== null && (uids.includes(browseUid) || items.some(item => item.workspaceGid === browseUid))) return fail();
   if (new Set(items.filter(item => item.runtime).map(item => (item.runtime!.provider.scope as Record<string, unknown>).bootId)).size > 1) return fail();
 }
 /** What a sender fixes before it sends, and a receiver compares against the plan and `hello` it holds. A set that does not match is never sent and never started. */
@@ -500,7 +587,22 @@ export function coworkNativeConversationsAreBound(message: Extract<CoworkNativeB
       && (item.runtime === null || (item.runtime.provider.scope as Record<string, unknown>).bootId === expected.guestBootId));
 }
 
-const MESSAGE_BASE: Spec = [["v", literal(1)]];
+const CONTROL_BASE: Spec = [["v", literal(COWORK_NATIVE_CONTROL_VERSION)]];
+const BOOTSTRAP_BASE: Spec = [["v", literal(COWORK_NATIVE_BOOTSTRAP_VERSION)]];
+const GUEST_SHARE_SPEC: Spec = [["tag", shareTag], ["guestPath", value => guestPath(value)], ["readOnly", bool], ["kind", oneOf(COWORK_NATIVE_SHARE_KINDS)]];
+const guestSharesOf: Validator<readonly CoworkNativeGuestShare[]> = value => {
+  if (!Array.isArray(value)) return fail();
+  const items = value.map(item => Object.freeze(record(item, GUEST_SHARE_SPEC) as unknown as CoworkNativeGuestShare));
+  checkShareSet(items);
+  return Object.freeze(items);
+};
+const continuationsOf: Validator<readonly ("fresh" | "resume")[]> = value => {
+  if (!Array.isArray(value) || value.length > COWORK_NATIVE_LIMITS.conversationItems) return fail();
+  return Object.freeze(value.map(oneOf(["fresh", "resume"] as const)));
+};
+function checkRuntimeReady(message: Record<string, unknown>): void {
+  if ((message.continuations as readonly string[]).length > (message.conversations as number)) return fail();
+}
 const operation: Spec = [["operationId", token], ["nonce", nonce]];
 const planBody: Validator<Record<string, unknown>> = value => {
   const plan = sortedObject(value);
@@ -523,21 +625,23 @@ const BOOTSTRAP_SPECS: Record<CoworkNativeMuxDirection, Record<string, Spec>> = 
   down: {
     plan: [["t", literal("plan")], ...operation, ["plan", planBody]],
     ready: [["t", literal("ready")], ...operation],
-    conversations: [["t", literal("conversations")], ...operation, ["incarnationId", token], ["profile", nullable(oneOf(COWORK_NATIVE_RUNTIME_PROFILES))], ["conversations", conversationsOf]],
+    shares: [["t", literal("shares")], ...operation, ["shares", guestSharesOf]],
+    conversations: [["t", literal("conversations")], ...operation, ["incarnationId", token], ["profile", nullable(oneOf(COWORK_NATIVE_RUNTIME_PROFILES))], ["browseUid", nullable(unixId)], ["conversations", conversationsOf]],
   },
   up: {
     hello: [["t", literal("hello")], ["guestBootId", guestBoot], ["dataSerial", literal(COWORK_NATIVE_DATA_SERIAL)], ["environmentSerial", literal(COWORK_NATIVE_ENVIRONMENT_SERIAL)]],
     receipt: [["t", literal("receipt")], ...operation, ["receipt", sortedObject]],
     fault: [["t", literal("fault")], ...operation, ["code", oneOf(COWORK_NATIVE_BOOTSTRAP_FAULTS)]],
     mounted: [["t", literal("mounted")], ...operation],
-    runtime_ready: [["t", literal("runtime_ready")], ...operation, ["conversations", uint(1, COWORK_NATIVE_LIMITS.conversationItems)]],
+    shares_mounted: [["t", literal("shares_mounted")], ...operation],
+    runtime_ready: [["t", literal("runtime_ready")], ...operation, ["conversations", uint(1, COWORK_NATIVE_LIMITS.conversationItems)], ["continuations", continuationsOf]],
   },
 };
 /** Cross-field rules of one message type, run after its fields validated; and a tighter size cap than the class ceiling. */
-const MESSAGE_CHECKS: Record<string, (message: Record<string, unknown>) => void> = { conversations: checkConversationsMessage };
+const MESSAGE_CHECKS: Record<string, (message: Record<string, unknown>) => void> = { conversations: checkConversationsMessage, runtime_ready: checkRuntimeReady };
 /** The guest's relay refuses a bootstrap-DOWN payload above 20,480 bytes (guest-local; the class ceiling stays 262,144 for the guest's own receipts). A plan is about 1.7 KiB and its own schema caps it at 16 KiB, so only the conversation set needs a cap of its own. */
-const MESSAGE_CAPS: Record<string, number> = { conversations: COWORK_NATIVE_LIMITS.conversationsBytes };
-function jsonPayload(bytes: Uint8Array, specs: Record<string, Spec>, maxBytes: number, depth: number): Record<string, unknown> {
+const MESSAGE_CAPS: Record<string, number> = { conversations: COWORK_NATIVE_LIMITS.conversationsBytes, shares: COWORK_NATIVE_LIMITS.conversationsBytes };
+function jsonPayload(bytes: Uint8Array, specs: Record<string, Spec>, maxBytes: number, depth: number, base: Spec): Record<string, unknown> {
   if (bytes.length > maxBytes) return fail("oversize");
   let text: string;
   // ignoreBOM keeps a leading U+FEFF in the text (the default silently strips it), so a byte order mark is a malformed payload, never accepted.
@@ -549,7 +653,9 @@ function jsonPayload(bytes: Uint8Array, specs: Record<string, Spec>, maxBytes: n
   const spec = typeof type === "string" && Object.hasOwn(specs, type) ? specs[type]! : undefined;
   if (!spec) return fail("unknown_type");
   if (bytes.length > (MESSAGE_CAPS[type as string] ?? maxBytes)) return fail("oversize");
-  const typed = record(parsed, [...MESSAGE_BASE, ...spec]);
+  // The version is judged before the schema, so a peer one revision behind is told `version`, never `bad_field`.
+  if (parsed.v !== (base === BOOTSTRAP_BASE ? COWORK_NATIVE_BOOTSTRAP_VERSION : COWORK_NATIVE_CONTROL_VERSION)) return fail("version");
+  const typed = record(parsed, [...base, ...spec]);
   MESSAGE_CHECKS[type as string]?.(typed);
   if (JSON.stringify(typed) !== text) return fail("malformed");
   delete typed.v;
@@ -560,15 +666,19 @@ const writeAscii = (view: Uint8Array, offset: number, text: string, width: numbe
 /** A runtime payload is a 4 byte stream prefix and then the stream's bytes (section 6.2). The prefix lives in the payload, not the header, so every relay
  * that forwards frames without reading them (launcher, worker) needs no change and the header's flags stay zero.
  *   0  1  conversation   index into the delivered `conversations` list, 0 to 15
- *   1  1  stream         1 = IN (host to guest), 2 = OUT (guest to host), 3 = ERR (guest to host); 0 is never valid
+ *   1  1  stream         1 = IN (host to guest), 2 = OUT (guest to host), 3 = ERR (guest to host), 4 = FILE_IN (host to guest), 5 = FILE_OUT (guest to host);
+ *                        0 and 6 or more are never valid, and 4 and 5 are valid on conversation 0 only
  *   2  1  flags          bit 0 = end of this stream after these bytes; every other bit zero
  *   3  1  reserved       zero
  * An empty data section is valid only with the end flag. */
+const isDownStream = (stream: CoworkNativeRuntimeStream): boolean => stream === "in" || stream === "file_in";
+const isFileStream = (stream: CoworkNativeRuntimeStream): boolean => stream === "file_in" || stream === "file_out";
 function runtimeFrame(seq: number, payload: Uint8Array, direction: CoworkNativeMuxDirection): CoworkNativeMuxFrame {
   if (payload.length < COWORK_NATIVE_LIMITS.runtimePrefixBytes) return fail("malformed");
   const conversation = payload[0]!, stream = COWORK_NATIVE_RUNTIME_STREAMS[payload[1]! - 1], flags = payload[2]!;
   if (conversation >= COWORK_NATIVE_LIMITS.runtimeConversations || stream === undefined || flags > 1 || payload[3] !== 0) return fail("bad_field");
-  if ((stream === "in") !== (direction === "down")) return fail("bad_direction");
+  if (isFileStream(stream) && conversation !== 0) return fail("bad_field");
+  if (isDownStream(stream) !== (direction === "down")) return fail("bad_direction");
   const data = payload.slice(COWORK_NATIVE_LIMITS.runtimePrefixBytes), end = flags === 1;
   if (data.length === 0 && !end) return fail("bad_field");
   return Object.freeze({ class: "runtime" as const, seq, conversation, stream, end, payload: data });
@@ -576,7 +686,8 @@ function runtimeFrame(seq: number, payload: Uint8Array, direction: CoworkNativeM
 function runtimePayload(frame: Extract<CoworkNativeMuxFrame, { class: "runtime" }>, direction: CoworkNativeMuxDirection): Uint8Array {
   const stream = COWORK_NATIVE_RUNTIME_STREAMS.indexOf(frame.stream) + 1;
   if (!Number.isInteger(frame.conversation) || frame.conversation < 0 || frame.conversation >= COWORK_NATIVE_LIMITS.runtimeConversations || stream < 1 || typeof frame.end !== "boolean" || !(frame.payload instanceof Uint8Array)) return fail("bad_field");
-  if ((frame.stream === "in") !== (direction === "down")) return fail("bad_direction");
+  if (isFileStream(frame.stream) && frame.conversation !== 0) return fail("bad_field");
+  if (isDownStream(frame.stream) !== (direction === "down")) return fail("bad_direction");
   if (frame.payload.length === 0 && !frame.end) return fail("bad_field");
   const out = new Uint8Array(COWORK_NATIVE_LIMITS.runtimePrefixBytes + frame.payload.length);
   out[0] = frame.conversation; out[1] = stream; out[2] = frame.end ? 1 : 0;
@@ -602,7 +713,7 @@ export function parseCoworkNativeMuxFrame(bytes: Uint8Array, direction: CoworkNa
   const payload = bytes.slice(COWORK_NATIVE_LIMITS.headerBytes);
   if (cls === "runtime") return runtimeFrame(seq, payload, direction);
   const specs = cls === "control" ? CONTROL_SPECS[direction] : BOOTSTRAP_SPECS[direction], max = COWORK_NATIVE_LIMITS.muxPayloadBytes[cls];
-  const message = Object.freeze(jsonPayload(payload, specs, max, cls === "control" ? COWORK_NATIVE_LIMITS.depth.control : COWORK_NATIVE_LIMITS.depth.bootstrap)) as unknown;
+  const message = Object.freeze(jsonPayload(payload, specs, max, cls === "control" ? COWORK_NATIVE_LIMITS.depth.control : COWORK_NATIVE_LIMITS.depth.bootstrap, cls === "control" ? CONTROL_BASE : BOOTSTRAP_BASE)) as unknown;
   return Object.freeze(cls === "control" ? { class: "control", seq, message: message as CoworkNativeControlMessage } : { class: "bootstrap", seq, message: message as CoworkNativeBootstrapMessage });
 }
 export function serializeCoworkNativeMuxFrame(frame: CoworkNativeMuxFrame, direction: CoworkNativeMuxDirection): Uint8Array {
@@ -615,7 +726,8 @@ export function serializeCoworkNativeMuxFrame(frame: CoworkNativeMuxFrame, direc
     const specs = frame.class === "control" ? CONTROL_SPECS[direction] : BOOTSTRAP_SPECS[direction], type = (frame.message as { t: string }).t;
     const spec = Object.hasOwn(specs, type) ? specs[type]! : undefined;
     if (!spec) return fail("unknown_type");
-    const typed = record({ v: 1, ...frame.message }, [...MESSAGE_BASE, ...spec]);
+    const base = frame.class === "control" ? CONTROL_BASE : BOOTSTRAP_BASE;
+    const typed = record({ v: frame.class === "control" ? COWORK_NATIVE_CONTROL_VERSION : COWORK_NATIVE_BOOTSTRAP_VERSION, ...frame.message }, [...base, ...spec]);
     MESSAGE_CHECKS[type]?.(typed);
     const text = JSON.stringify(typed);
     if (!ASCII_TEXT.test(text)) return fail("malformed");
@@ -646,6 +758,11 @@ export class CoworkNativeMuxSequence {
 export class CoworkNativeRuntimeStreams {
   private readonly ended = new Set<string>();
   private inFlight = 0;
+  /** File channel (its own count, never the runtime IN count): request lines sent and not yet answered, and the byte length of the request and response
+   * lines in progress. FILE_IN bytes never add to `inFlight`, and FILE_OUT bytes never clear it: each stream's own reader is the only proof of its progress. */
+  private fileOutstanding = 0;
+  private fileRequestLine = 0;
+  private fileResponseLine = 0;
   constructor(private readonly conversations: number) {
     // N2 (D10): the runtime class serves exactly one host-query conversation, index 0.
     if (conversations !== 1) fail("bad_field");
@@ -655,11 +772,36 @@ export class CoworkNativeRuntimeStreams {
     const key = `${frame.conversation}:${frame.stream}`;
     if (frame.conversation >= this.conversations || this.ended.has(key)) return fail("bad_field");
     // Flow control (host side, normative): IN bytes the guest has not answered stay at or below runtimeInFlightBytes. Any OUT or ERR frame that carries payload bytes shows the guest is reading and clears the count; an empty one (the end flag alone) does not.
-    if (frame.stream === "in") { if (this.inFlight + frame.payload.length > COWORK_NATIVE_LIMITS.runtimeInFlightBytes) return fail("oversize"); this.inFlight += frame.payload.length; } else if (frame.payload.length > 0) this.inFlight = 0; // only payload BYTES prove the guest is reading: an empty frame (the end flag alone) clears nothing
+    if (frame.stream === "file_in" || frame.stream === "file_out") this.acceptFile(frame.stream, frame.payload);
+    else if (frame.stream === "in") { if (this.inFlight + frame.payload.length > COWORK_NATIVE_LIMITS.runtimeInFlightBytes) return fail("oversize"); this.inFlight += frame.payload.length; } else if (frame.payload.length > 0) this.inFlight = 0; // only payload BYTES prove the guest is reading: an empty frame (the end flag alone) clears nothing
     if (frame.end) this.ended.add(key);
   }
   /** What a sender may still put on IN before it must wait for the guest to answer. */
   get inFlightBudget(): number { return COWORK_NATIVE_LIMITS.runtimeInFlightBytes - this.inFlight; }
+  /** How many more file request lines the host may complete before it must wait for a response line. */
+  get fileRequestBudget(): number { return COWORK_NATIVE_LIMITS.fileInFlightRequests - this.fileOutstanding; }
+  /** All-or-nothing: the state moves only when the whole frame is legal. A request line above 16 KiB or a fifth outstanding request is `oversize`; a
+   * response line above 384 KiB is `oversize`; a response byte with no request outstanding cannot be attributed and is `bad_field`. */
+  private acceptFile(stream: "file_in" | "file_out", bytes: Uint8Array): void {
+    let outstanding = this.fileOutstanding;
+    if (stream === "file_in") {
+      let line = this.fileRequestLine;
+      for (const byte of bytes) {
+        if (++line > COWORK_NATIVE_LIMITS.fileRequestBytes) return fail("oversize");
+        if (byte === 0x0a) { if (++outstanding > COWORK_NATIVE_LIMITS.fileInFlightRequests) return fail("oversize"); line = 0; }
+      }
+      this.fileRequestLine = line;
+    } else {
+      let line = this.fileResponseLine;
+      for (const byte of bytes) {
+        if (outstanding === 0) return fail("bad_field");
+        if (++line > COWORK_NATIVE_LIMITS.fileResponseBytes) return fail("oversize");
+        if (byte === 0x0a) { outstanding -= 1; line = 0; }
+      }
+      this.fileResponseLine = line;
+    }
+    this.fileOutstanding = outstanding;
+  }
 }
 
 // ------------------------------------------------------------------------------------------------ launcher envelopes (L2)
@@ -670,10 +812,13 @@ export class CoworkNativeRuntimeStreams {
  *   kind 3 DRAIN   to worker    28 bytes   no descriptors
  *   kind 4 STATUS  to launcher  40 bytes   no descriptors
  *   kind 5 FAULT   to launcher   8 bytes   no descriptors
+ *   kind 6 SHARES       to worker   3,704 bytes   exactly one descriptor per share (1 to 12)          (contract revision 3)
+ *   kind 7 SHARE_REVOKE to worker      32 bytes   no descriptors
+ *   kind 8 SHARE_EVENT  to launcher    40 bytes   no descriptors (`share_revoked`, `share_notice`)
  * Every reserved byte is zero; a datagram with any other length, magic, version, flag, rights count or non-zero reserved byte is refused. */
 export const COWORK_NATIVE_ENVELOPE_MAGIC = "WEV1";
-export const COWORK_NATIVE_ENVELOPE_KINDS = Object.freeze(["scope", "volumes", "drain", "status", "fault"] as const);
-export const COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES = Object.freeze({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
+export const COWORK_NATIVE_ENVELOPE_KINDS = Object.freeze(["scope", "volumes", "drain", "status", "fault", "shares", "share_revoke", "share_event"] as const);
+export const COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES = Object.freeze({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8, shares: 3704, share_revoke: 32, share_event: 40 });
 // ------------------------------------------------------------------------------------------------ bootstrap order
 
 /** One bootstrap-class message as a transcript records it: `down` is host to guest, `up` guest to host. */
@@ -681,11 +826,12 @@ export interface CoworkNativeBootstrapEvent { readonly dir: "down" | "up"; reado
 export type CoworkNativeBootstrapOrder = { readonly ok: true } | { readonly ok: false; readonly index: number; readonly reason: "out_of_order" | "second_conversations" | "duplicate_runtime_ready" };
 const BOOTSTRAP_STEPS: Readonly<Record<string, { dir: "down" | "up"; after: string | null }>> = Object.freeze({
   hello: { dir: "up", after: null }, plan: { dir: "down", after: "hello" }, receipt: { dir: "up", after: "plan" }, ready: { dir: "down", after: "receipt" },
-  mounted: { dir: "up", after: "ready" }, conversations: { dir: "down", after: "mounted" }, runtime_ready: { dir: "up", after: "conversations" },
+  mounted: { dir: "up", after: "ready" }, shares: { dir: "down", after: "mounted" }, shares_mounted: { dir: "up", after: "shares" },
+  conversations: { dir: "down", after: "mounted" }, runtime_ready: { dir: "up", after: "conversations" },
 });
 /**
- * The order of one incarnation's bootstrap messages (the single-pass, stateless statement of the rules; section 6.1): hello, plan, receipt, ready, mounted, conversations,
- * runtime_ready, each only after the one before it and each at most once. `protocol.ts` parses one frame at a time, so "once per incarnation" is ENFORCED by the two ends:
+ * The order of one incarnation's bootstrap messages (the single-pass, stateless statement of the rules; section 6.1): hello, plan, receipt, ready, mounted, then
+ * optionally shares and shares_mounted, then conversations, runtime_ready, each only after the one before it and each at most once. `protocol.ts` parses one frame at a time, so "once per incarnation" is ENFORCED by the two ends:
  * the host sender (it sends one set per start) and the guest (a second set is answered with the bootstrap fault `second_conversations` and ignored). A bootstrap `fault` is valid after `hello`.
  * This function is the shared test oracle for both: it names the first message that breaks the order.
  */
@@ -697,6 +843,9 @@ export function coworkNativeBootstrapOrder(events: readonly CoworkNativeBootstra
     if (!step || step.dir !== event.dir) return { ok: false, index, reason: "out_of_order" };
     if (seen.has(event.t)) return { ok: false, index, reason: event.t === "conversations" ? "second_conversations" : event.t === "runtime_ready" ? "duplicate_runtime_ready" : "out_of_order" };
     if (step.after !== null && !seen.has(step.after)) return { ok: false, index, reason: "out_of_order" };
+    // Shares (contract revision 3) are optional, but when they are sent they come before the set, and the set waits for `shares_mounted`.
+    if (event.t === "shares" && seen.has("conversations")) return { ok: false, index, reason: "out_of_order" };
+    if (event.t === "conversations" && seen.has("shares") && !seen.has("shares_mounted")) return { ok: false, index, reason: "out_of_order" };
     seen.add(event.t);
   }
   return { ok: true };
@@ -710,9 +859,16 @@ export type CoworkNativeEnvelope =
   | { readonly kind: "volumes"; readonly seq: number; readonly scopeDigest: string; readonly volumes: readonly [CoworkNativeVolumeIdentity, CoworkNativeVolumeIdentity] }
   | { readonly kind: "drain"; readonly seq: number; readonly stopNonce: string; readonly budgetMs: number; readonly origin: "host-stop" | "owner-loss" }
   | { readonly kind: "status"; readonly seq: number; readonly state: typeof COWORK_NATIVE_WORKER_STATUS[number]; readonly flush: readonly [CoworkNativeFlushCounters, CoworkNativeFlushCounters] }
-  | { readonly kind: "fault"; readonly seq: number; readonly code: typeof COWORK_NATIVE_WORKER_FAULTS[number] };
+  | { readonly kind: "fault"; readonly seq: number; readonly code: typeof COWORK_NATIVE_WORKER_FAULTS[number] }
+  | { readonly kind: "shares"; readonly seq: number; readonly shares: readonly CoworkNativeEnvelopeShare[] }
+  | { readonly kind: "share_revoke"; readonly seq: number; readonly tag: string }
+  | { readonly kind: "share_event"; readonly seq: number; readonly tag: string; readonly event: "revoked" } 
+  | { readonly kind: "share_event"; readonly seq: number; readonly tag: string; readonly event: "notice"; readonly notice: CoworkNativeShareNoticeKind };
+/** One SHARES record (308 bytes): tag[32] NUL-padded, u64 device, u64 inode, u32 flags, guest_path[256] NUL-padded. `flags` are the libkrun ABI's:
+ * bit 0 read-only, bit 1 Winter share (O_UNIQUE, R5), bit 2 folder rules (R15); exactly one of bits 1 and 2; nothing else. */
+export interface CoworkNativeEnvelopeShare { readonly tag: string; readonly device: string; readonly inode: string; readonly readOnly: boolean; readonly winterShare: boolean; readonly guestPath: string }
 /** Which way each kind travels on L2. */
-export const COWORK_NATIVE_ENVELOPE_DIRECTION = Object.freeze({ scope: "to-worker", volumes: "to-worker", drain: "to-worker", status: "to-launcher", fault: "to-launcher" } as const);
+export const COWORK_NATIVE_ENVELOPE_DIRECTION = Object.freeze({ scope: "to-worker", volumes: "to-worker", drain: "to-worker", status: "to-launcher", fault: "to-launcher", shares: "to-worker", share_revoke: "to-worker", share_event: "to-launcher" } as const);
 const SCOPE_TEXT_FIELDS = ["workspaceId", "incarnationId", "controllerInstanceId", "workerInstanceId", "admissionId"] as const;
 const hexBytes = (text: string): Uint8Array => Uint8Array.from(Buffer.from(text, "hex"));
 const hexOf = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
@@ -739,6 +895,33 @@ const flushOf = (view: DataView, offset: number): CoworkNativeFlushCounters => {
   return { requested: Number(requested), completed: Number(completed) };
 };
 const allZero = (bytes: Uint8Array): boolean => bytes.every(byte => byte === 0);
+/** A NUL-padded fixed field: at least one byte of text, then NULs only. */
+function readPadded(view: Uint8Array, offset: number, width: number, check: Validator<string>): string {
+  const field = view.subarray(offset, offset + width), end = field.indexOf(0);
+  if (end < 1 || field.subarray(end).some(byte => byte !== 0)) return fail();
+  return check(Buffer.from(field.subarray(0, end)).toString("latin1")) as string;
+}
+const SHARE_FLAG_READ_ONLY = 1, SHARE_FLAG_WINTER = 2, SHARE_FLAG_FOLDER = 4;
+/** The guest path in a SHARES record: one of the share mount points (ASCII, below 256 bytes). */
+const envelopeGuestPath: Validator<string> = value => typeof value === "string" && value.length < 256 && ((Object.values(COWORK_NATIVE_SHARE_MOUNTS) as string[]).includes(value) || FOLDER_MOUNT.test(value)) ? value : fail();
+function writeShareRecord(b: DataView, body: Uint8Array, offset: number, share: CoworkNativeEnvelopeShare): void {
+  if (!isPlain(share) || typeof share.readOnly !== "boolean" || typeof share.winterShare !== "boolean") return fail();
+  writeAscii(body, offset, shareTag(share.tag) as string, 32);
+  b.setBigUint64(offset + 32, BigInt(decimal64(share.device) as string), true); b.setBigUint64(offset + 40, BigInt(decimal64(share.inode) as string), true);
+  b.setUint32(offset + 48, (share.readOnly ? SHARE_FLAG_READ_ONLY : 0) | (share.winterShare ? SHARE_FLAG_WINTER : SHARE_FLAG_FOLDER), true);
+  writeAscii(body, offset + 52, envelopeGuestPath(share.guestPath) as string, 256);
+  readShareRecord(b, body, offset);
+}
+function readShareRecord(view: DataView, body: Uint8Array, offset: number): CoworkNativeEnvelopeShare {
+  const flags = view.getUint32(offset + 48, true);
+  if ((flags & ~7) !== 0 || ((flags & SHARE_FLAG_WINTER) !== 0) === ((flags & SHARE_FLAG_FOLDER) !== 0)) return fail();
+  const share = { tag: readPadded(body, offset, 32, shareTag), device: view.getBigUint64(offset + 32, true).toString(), inode: view.getBigUint64(offset + 40, true).toString(),
+    readOnly: (flags & SHARE_FLAG_READ_ONLY) !== 0, winterShare: (flags & SHARE_FLAG_WINTER) !== 0, guestPath: readPadded(body, offset + 52, 256, envelopeGuestPath) };
+  // A Winter share's mount and mode are fixed by its path; a folder source mounts under /workspace/folders/.
+  const kind = share.winterShare ? (Object.entries(COWORK_NATIVE_SHARE_MOUNTS).find(([, path]) => path === share.guestPath)?.[0] as CoworkNativeShareKind | undefined) : "folder";
+  if (kind === undefined || !shareMountOk(kind, share.guestPath) || !shareModeOk(kind, share.readOnly)) return fail();
+  return Object.freeze(share);
+}
 
 /** SHA-256 of the 512 byte SCOPE payload: how a `volumes` line and a VOLUMES envelope name the scope they belong to. */
 export function coworkNativeScopeDigest(scope: CoworkNativeScope): string {
@@ -779,10 +962,22 @@ export function serializeCoworkNativeEnvelope(envelope: CoworkNativeEnvelope): U
   } else if (envelope.kind === "status") {
     b.setUint32(0, COWORK_NATIVE_WORKER_STATUS.indexOf(oneOf(COWORK_NATIVE_WORKER_STATUS)(envelope.state) as never) + 1, true);
     envelope.flush.forEach((counter, index) => { b.setBigUint64(8 + index * 16, BigInt(uint()(counter.requested) as number), true); b.setBigUint64(16 + index * 16, BigInt(uint()(counter.completed) as number), true); });
-  } else b.setUint32(0, COWORK_NATIVE_WORKER_FAULTS.indexOf(oneOf(COWORK_NATIVE_WORKER_FAULTS)(envelope.code) as never) + 1, true);
+  } else if (envelope.kind === "fault") b.setUint32(0, COWORK_NATIVE_WORKER_FAULTS.indexOf(oneOf(COWORK_NATIVE_WORKER_FAULTS)(envelope.code) as never) + 1, true);
+  else if (envelope.kind === "shares") {
+    const shares = envelope.shares;
+    if (!Array.isArray(shares) || shares.length < 1 || shares.length > COWORK_NATIVE_LIMITS.shares) return fail();
+    b.setUint32(0, 1, true); b.setUint32(4, shares.length, true);
+    shares.forEach((share, index) => writeShareRecord(b, body, 8 + index * COWORK_NATIVE_LIMITS.shareRecordBytes, share));
+    if (new Set(shares.map(share => share.tag)).size !== shares.length || new Set(shares.map(share => share.guestPath)).size !== shares.length) return fail();
+  } else if (envelope.kind === "share_revoke") writeAscii(body, 0, shareTag(envelope.tag) as string, 32);
+  else {
+    writeAscii(body, 0, shareTag(envelope.tag) as string, 32);
+    if (envelope.event === "revoked") b.setUint32(32, 1, true);
+    else { b.setUint32(32, 2, true); b.setUint32(36, COWORK_NATIVE_SHARE_NOTICE_KINDS.indexOf(oneOf(COWORK_NATIVE_SHARE_NOTICE_KINDS)(envelope.notice) as never) + 1, true); }
+  }
   return out;
 }
-/** `rights` is how many descriptors arrived WITH the datagram. VOLUMES needs exactly 2; everything else exactly 0; the
+/** `rights` is how many descriptors arrived WITH the datagram. VOLUMES needs exactly 2, SHARES exactly its share count; everything else exactly 0; the
  * caller must close any it was handed when this throws. A truncated control buffer is a worker-level `_exit`, not a parse. */
 export function parseCoworkNativeEnvelope(bytes: Uint8Array, rights: number, direction: "to-worker" | "to-launcher"): CoworkNativeEnvelope {
   if (!(bytes instanceof Uint8Array) || bytes.length < COWORK_NATIVE_LIMITS.headerBytes) return fail("malformed");
@@ -792,11 +987,15 @@ export function parseCoworkNativeEnvelope(bytes: Uint8Array, rights: number, dir
   const kind = COWORK_NATIVE_ENVELOPE_KINDS[header.getUint8(5) - 1];
   if (kind === undefined || header.getUint16(6, true) !== 0) return fail("unknown_type");
   if (COWORK_NATIVE_ENVELOPE_DIRECTION[kind] !== direction) return fail("bad_direction");
-  const seq = header.getUint32(8, true), length = header.getUint32(12, true), wantedRights = kind === "volumes" ? COWORK_NATIVE_LIMITS.volumeRights : 0;
+  const seq = header.getUint32(8, true), length = header.getUint32(12, true);
   if (seq < 1) return fail("bad_sequence");
   if (length !== COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES[kind] || bytes.length !== COWORK_NATIVE_LIMITS.headerBytes + length) return fail("malformed");
-  if (rights !== wantedRights) return fail("bad_rights");
   const payload = bytes.subarray(COWORK_NATIVE_LIMITS.headerBytes), view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  // SHARES carries one descriptor per share; its count is the record's own (checked against the slots below).
+  const shareCount = kind === "shares" ? view.getUint32(4, true) : 0;
+  const wantedRights = kind === "volumes" ? COWORK_NATIVE_LIMITS.volumeRights : kind === "shares" ? shareCount : 0;
+  if (kind === "shares" && (shareCount < 1 || shareCount > COWORK_NATIVE_LIMITS.shares)) return fail();
+  if (rights !== wantedRights) return fail("bad_rights");
   const parsed = ((): CoworkNativeEnvelope => {
     if (kind === "scope") return { kind, seq, scope: decodeScopePayload(payload) };
     if (kind === "volumes") {
@@ -813,9 +1012,25 @@ export function parseCoworkNativeEnvelope(bytes: Uint8Array, rights: number, dir
       if (state === undefined || view.getUint32(4, true) !== 0) return fail();
       return { kind, seq, state, flush: Object.freeze([flushOf(view, 8), flushOf(view, 24)]) as unknown as readonly [CoworkNativeFlushCounters, CoworkNativeFlushCounters] };
     }
-    const code = COWORK_NATIVE_WORKER_FAULTS[view.getUint32(0, true) - 1];
-    if (code === undefined || view.getUint32(4, true) !== 0) return fail();
-    return { kind, seq, code };
+    if (kind === "fault") {
+      const code = COWORK_NATIVE_WORKER_FAULTS[view.getUint32(0, true) - 1];
+      if (code === undefined || view.getUint32(4, true) !== 0) return fail();
+      return { kind, seq, code };
+    }
+    if (kind === "shares") {
+      if (view.getUint32(0, true) !== 1) return fail();
+      const records = COWORK_NATIVE_LIMITS.shareRecordBytes, used = 8 + shareCount * records;
+      if (!allZero(payload.subarray(used))) return fail();
+      const shares = Array.from({ length: shareCount }, (_, index) => readShareRecord(view, payload, 8 + index * records));
+      if (new Set(shares.map(share => share.tag)).size !== shares.length || new Set(shares.map(share => share.guestPath)).size !== shares.length) return fail();
+      return { kind, seq, shares: Object.freeze(shares) };
+    }
+    if (kind === "share_revoke") return { kind, seq, tag: readPadded(payload, 0, 32, shareTag) };
+    const tag = readPadded(payload, 0, 32, shareTag), event = view.getUint32(32, true), noticeIndex = view.getUint32(36, true);
+    if (event === 1 && noticeIndex === 0) return { kind, seq, tag, event: "revoked" };
+    const notice = COWORK_NATIVE_SHARE_NOTICE_KINDS[noticeIndex - 1];
+    if (event !== 2 || notice === undefined) return fail();
+    return { kind, seq, tag, event: "notice", notice };
   })();
   // Exact re-serialization, as for every other format here.
   if (hexOf(serializeCoworkNativeEnvelope(parsed)) !== hexOf(bytes)) return fail("malformed");
@@ -835,14 +1050,21 @@ export type CoworkNativeToDaemon =
   | { readonly t: "stopped"; readonly id: string | null; readonly receipt: CoworkNativeOrderlyReceipt }
   | { readonly t: "uncertain"; readonly receipt: CoworkNativeUncertainReceipt }
   | { readonly t: "pong"; readonly id: string }
-  | { readonly t: "fault"; readonly code: typeof COWORK_NATIVE_CHANNEL_FAULTS[number] };
+  | { readonly t: "fault"; readonly code: typeof COWORK_NATIVE_CHANNEL_FAULTS[number] }
+  /** Contract revision 3: the worker's device thread for this share has closed every descriptor it held (R11); the cutoff is complete. */
+  | { readonly t: "share_revoked"; readonly tag: string }
+  /** Contract revision 3: an allowed write to a watched auto-run name, or an R15 refusal; at most one per tag and kind per incarnation. */
+  | { readonly t: "share_notice"; readonly tag: string; readonly kind: CoworkNativeShareNoticeKind };
 export type CoworkNativeToLauncher =
   | ({ readonly t: "begin"; readonly id: string; readonly homeId: string } & CoworkNativeScope & { readonly receiptKey: CoworkNativeReceiptKey })
   | { readonly t: "volumes"; readonly id: string; readonly scopeDigest: string; readonly volumes: readonly [CoworkNativeVolumeIdentity, CoworkNativeVolumeIdentity] }
   | { readonly t: "mux_down"; readonly frame: CoworkNativeMuxFrame }
   | { readonly t: "stop"; readonly id: string; readonly stopNonce: string; readonly reason: typeof COWORK_NATIVE_STOP_REASONS[number]; readonly budgetMs: number }
   | { readonly t: "receipt_retire"; readonly confirmationId: string }
-  | { readonly t: "ping"; readonly id: string };
+  | { readonly t: "ping"; readonly id: string }
+  /** Contract revision 3, ONE descriptor per record (an open directory), sent at most once, after `hello` and before `begin`. */
+  | { readonly t: "shares"; readonly id: string; readonly shares: readonly CoworkNativeShareRecord[] }
+  | { readonly t: "share_revoke"; readonly id: string; readonly tag: string };
 export type CoworkNativeLauncherMessage = CoworkNativeToDaemon | CoworkNativeToLauncher;
 
 /** A mux carrier decodes and re-serializes its frame, so the base64 must be canonical and the frame itself exact. The
@@ -857,6 +1079,16 @@ const muxField = (direction: CoworkNativeMuxDirection): Validator<CoworkNativeMu
   return frame;
 };
 const LINE_BASE: Spec = [["v", literal(COWORK_NATIVE_TEXT_VERSION)]];
+const SHARE_RECORD_SPEC: Spec = [["tag", shareTag], ["kind", oneOf(COWORK_NATIVE_SHARE_KINDS)], ["mode", oneOf(["ro", "rw"] as const)], ["device", decimal64], ["inode", decimal64], ["path", hostPath], ["guestPath", value => guestPath(value)]];
+/** The L1 `shares` records: the bootstrap share rules (kinds, mounts, modes, distinct tags and guest paths), plus host paths that are pairwise neither equal
+ * nor nested (a share may never contain another) and distinct (device, inode) pairs. */
+const shareRecordsOf: Validator<readonly CoworkNativeShareRecord[]> = value => {
+  if (!Array.isArray(value)) return fail();
+  const items = value.map(item => Object.freeze(record(item, SHARE_RECORD_SPEC) as unknown as CoworkNativeShareRecord));
+  checkShareSet(items.map(item => ({ tag: item.tag, kind: item.kind, guestPath: item.guestPath, readOnly: item.mode === "ro" })));
+  if (items.some((a, i) => items.some((b, j) => i < j && (nestedOrEqual(a.path, b.path) || (a.device === b.device && a.inode === b.inode))))) return fail();
+  return Object.freeze(items);
+};
 const LAUNCHER_SPECS: Record<CoworkNativeLauncherDirection, Record<string, Spec>> = {
   "to-daemon": {
     hello: [["t", literal("hello")], ["launcherInstanceId", label], ["hostBootId", label], ["parentVerified", literal(true)]],
@@ -869,6 +1101,8 @@ const LAUNCHER_SPECS: Record<CoworkNativeLauncherDirection, Record<string, Spec>
     uncertain: [["t", literal("uncertain")], ["receipt", uncertain]],
     pong: [["t", literal("pong")], ["id", token]],
     fault: [["t", literal("fault")], ["code", oneOf(COWORK_NATIVE_CHANNEL_FAULTS)]],
+    share_revoked: [["t", literal("share_revoked")], ["tag", shareTag]],
+    share_notice: [["t", literal("share_notice")], ["tag", shareTag], ["kind", oneOf(COWORK_NATIVE_SHARE_NOTICE_KINDS)]],
   },
   "to-launcher": {
     begin: [["t", literal("begin")], ["id", token], ["homeId", token], ...SCOPE_SPEC, ["receiptKey", value => isCanonicalBase64Of32Bytes(value) ? value : fail()]],
@@ -877,13 +1111,15 @@ const LAUNCHER_SPECS: Record<CoworkNativeLauncherDirection, Record<string, Spec>
     stop: [["t", literal("stop")], ["id", token], ["stopNonce", nonce], ["reason", oneOf(COWORK_NATIVE_STOP_REASONS)], ["budgetMs", uint(0, COWORK_NATIVE_LIMITS.drainBudgetCeilingMs)]],
     receipt_retire: [["t", literal("receipt_retire")], ["confirmationId", token]],
     ping: [["t", literal("ping")], ["id", token]],
+    shares: [["t", literal("shares")], ["id", token], ["shares", shareRecordsOf]],
+    share_revoke: [["t", literal("share_revoke")], ["id", token], ["tag", shareTag]],
   },
 };
 /** Message types that may only travel on L1 as a mux carrier. */
 const MUX_CARRIERS = new Set(["mux_up", "mux_down"]);
 
 /** Strict parse of ONE L1 line. `rights` is the number of descriptors that arrived with the line: `volumes` needs exactly
- * two, nothing else may carry any. A launcher may NEVER send descriptors to the daemon (`to-daemon` lines need 0). */
+ * two, `shares` exactly one per record, nothing else may carry any. A launcher may NEVER send descriptors to the daemon (`to-daemon` lines need 0). */
 export function parseCoworkNativeLauncherLine(raw: unknown, direction: CoworkNativeLauncherDirection, rights = 0): CoworkNativeLauncherMessage {
   const specs = LAUNCHER_SPECS[direction];
   if (specs === undefined) return fail("bad_direction");
@@ -893,7 +1129,8 @@ export function parseCoworkNativeLauncherLine(raw: unknown, direction: CoworkNat
   const spec = Object.hasOwn(specs, type) ? specs[type]! : undefined;
   if (!spec) return Object.hasOwn(LAUNCHER_SPECS[direction === "to-daemon" ? "to-launcher" : "to-daemon"], type) ? fail("bad_direction") : fail("unknown_type");
   if (Buffer.byteLength(raw as string, "utf8") > (MUX_CARRIERS.has(type) ? COWORK_NATIVE_LIMITS.muxLineBytes : COWORK_NATIVE_LIMITS.controlLineBytes)) return fail("oversize");
-  if (rights !== (type === "volumes" ? COWORK_NATIVE_LIMITS.volumeRights : 0)) return fail("bad_rights");
+  const wantedRights = type === "volumes" ? COWORK_NATIVE_LIMITS.volumeRights : type === "shares" ? (Array.isArray(parsed.shares) ? parsed.shares.length : -1) : 0;
+  if (rights !== wantedRights) return fail("bad_rights");
   if (parsed.v !== COWORK_NATIVE_TEXT_VERSION) return fail("version");
   const typed = record(parsed, [...LINE_BASE, ...spec]);
   delete typed.v;
@@ -928,6 +1165,29 @@ export const COWORK_NATIVE_WORKER_LAYOUT = Object.freeze({
   /** Guest boot artifacts: `<directory of the worker executable>/cowork-guest/kernel` and `.../cowork-guest/initramfs.cpio`. */
   guestDirectory: "cowork-guest" as const, kernelFile: "kernel" as const, initramfsFile: "initramfs.cpio" as const,
 });
+/** Worker argv with host-backed shares (contract revision 3): `[path, "--shares-v1", "<N>", ("ro"|"rw", "<path>") x N]`, N a canonical decimal from 1 to 12;
+ * with no shares it stays exactly `[path]`. The worker parses it strictly BEFORE its sandbox (it is the one input read before the sandbox, and it comes from the
+ * signed launcher that spawned it suspended, never from the guest or an envelope) and turns each pair into the sandbox parameter `SHARE_RO_<n>` or
+ * `SHARE_RW_<n>`. Paths follow the L1 `shares` rules: canonical, distinct, never nested. Any deviation is the worker's exit 2 (usage). */
+export const COWORK_NATIVE_WORKER_SHARES_FLAG = "--shares-v1";
+export interface CoworkNativeWorkerArgv { readonly path: string; readonly shares: readonly { readonly mode: "ro" | "rw"; readonly path: string }[] }
+const CANONICAL_COUNT = /^(?:[1-9]|1[0-2])$/;
+export function parseCoworkNativeWorkerArgv(argv: readonly string[]): CoworkNativeWorkerArgv {
+  if (!Array.isArray(argv) || argv.length < 1 || argv.some(arg => typeof arg !== "string")) return fail();
+  const path = hostPath(argv[0]) as string;
+  if (argv.length === 1) return Object.freeze({ path, shares: Object.freeze([]) });
+  if (argv[1] !== COWORK_NATIVE_WORKER_SHARES_FLAG || !CANONICAL_COUNT.test(argv[2] ?? "")) return fail();
+  const count = Number(argv[2]);
+  if (argv.length !== 3 + 2 * count) return fail();
+  const shares = Array.from({ length: count }, (_, index) => Object.freeze({ mode: oneOf(["ro", "rw"] as const)(argv[3 + 2 * index]) as "ro" | "rw", path: hostPath(argv[4 + 2 * index]) as string }));
+  if (shares.some((a, i) => shares.some((b, j) => i < j && nestedOrEqual(a.path, b.path)))) return fail();
+  return Object.freeze({ path, shares: Object.freeze(shares) });
+}
+export function serializeCoworkNativeWorkerArgv(argv: CoworkNativeWorkerArgv): readonly string[] {
+  const out = argv.shares.length === 0 ? [argv.path] : [argv.path, COWORK_NATIVE_WORKER_SHARES_FLAG, String(argv.shares.length), ...argv.shares.flatMap(share => [share.mode, share.path])];
+  parseCoworkNativeWorkerArgv(out);
+  return Object.freeze(out);
+}
 /** The worker's process exit codes (S3's WorkerCommon.h). 77 belongs to libkrun's own fatal stops and is never used by the worker.
  * Only 0 can accompany a Class A receipt; every other code is Class B at best. */
 export const COWORK_NATIVE_WORKER_EXIT_CODES = Object.freeze({ ok: 0, usage: 2, sandbox: 70, bad_scope: 71, bad_volumes: 72, vm_failed: 73, mux_quarantine: 74, drain_timeout: 75, intake_timeout: 76, libkrun_reserved: 77, internal: 78, rights: 79 } as const);

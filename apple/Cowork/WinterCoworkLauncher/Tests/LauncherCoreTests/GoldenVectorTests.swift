@@ -118,7 +118,7 @@ final class GoldenVectorTests: XCTestCase {
     func testMuxFrameVectorsHeaderLevel() throws {
         let document = try loadVector("mux-frames.json")
         let positives = try XCTUnwrap(document["positive"] as? [[String: Any]])
-        XCTAssertEqual(positives.count, 36)
+        XCTAssertEqual(positives.count, 51)
         for vector in positives {
             let name = vector["name"] as! String, raw = bytes(fromHex: vector["hex"] as! String)
             let header = try MuxFormat.parseFrame(raw)
@@ -127,14 +127,14 @@ final class GoldenVectorTests: XCTestCase {
             XCTAssertEqual(MuxFormat.frame(header.muxClass, seq: header.seq, payload: Array(raw[WireLimits.headerBytes...])), raw, "\(name): frame encoder and decoder must agree byte for byte")
         }
         let negatives = try XCTUnwrap(document["negative"] as? [[String: Any]])
-        XCTAssertEqual(negatives.count, 109)
+        XCTAssertEqual(negatives.count, 149)
         var headerLevel = 0, payloadLevel: [String] = []
         for vector in negatives {
             let name = vector["name"] as! String
             let got = failure { _ = try MuxFormat.parseFrame(bytes(fromHex: vector["hex"] as! String)) }
             if let got { XCTAssertEqual(got, vector["error"] as? String, name); headerLevel += 1 } else { payloadLevel.append(name) }
         }
-        XCTAssertEqual(headerLevel + payloadLevel.count, 109)
+        XCTAssertEqual(headerLevel + payloadLevel.count, 149)
         // The split is part of the contract between the relay and its endpoints: pin it so a drift in either direction is visible.
         XCTAssertEqual(payloadLevel.sorted(), Self.expectedPayloadLevelMux.sorted(), "these are refused by the endpoints, not by the relay")
     }
@@ -154,7 +154,7 @@ final class GoldenVectorTests: XCTestCase {
     "conversations-provider-url-key", "conversations-root-dotdot", "conversations-root-empty-component", "conversations-root-folders-without-name",
     "conversations-root-ids-repeat", "conversations-root-outputs-of-another-session", "conversations-root-relative", "conversations-root-source-outside-workspace",
     "conversations-root-view-not-allowed", "conversations-root-views-nested", "conversations-runtime-uid-equals-tool-uid", "conversations-seventeen-items",
-    "conversations-timeout-fraction", "conversations-timeout-over-ten-minutes", "conversations-timeout-zero", "conversations-tool-class-unknown",
+    "conversations-timeout-fraction", "conversations-timeout-over-a-day", "conversations-timeout-zero", "conversations-tool-class-unknown",
     "conversations-tool-classes-repeat", "conversations-tool-classes-unordered", "conversations-travelling-up", "conversations-two-host-query-conversations",
     "conversations-uid-65535", "conversations-uid-above-65535", "conversations-uid-and-gid-as-strings", "conversations-uid-below-1000", "conversations-uid-nobody-65534",
     "conversations-uid-reused-across-items", "conversations-unknown-profile", "conversations-wrong-incarnation-in-item", "conversations-wrong-incarnation-in-message",
@@ -162,6 +162,17 @@ final class GoldenVectorTests: XCTestCase {
     "runtime-empty-without-end", "runtime-flags-two", "runtime-prefix-too-short", "runtime-ready-seventeen-conversations", "runtime-ready-travelling-down",
     "runtime-ready-zero-conversations", "runtime-reserved-nonzero", "runtime-stderr-travelling-down", "runtime-stdin-travelling-up", "runtime-stdout-travelling-down",
     "runtime-stream-four", "runtime-stream-zero",
+    // Contract revision 3: shares, cold resume, the browse uid, the bootstrap version and the file streams. All payload-level.
+    "bootstrap-version-one", "bootstrap-version-three", "runtime-file-in-travelling-up", "runtime-file-out-travelling-down",
+    "runtime-stream-six", "runtime-file-in-on-conversation-one", "runtime-file-out-on-conversation-one", "runtime-file-out-empty-without-end",
+    "shares-travelling-up", "shares-mounted-travelling-down", "shares-empty-list", "shares-thirteen",
+    "shares-ten-folders", "shares-duplicate-tag", "shares-duplicate-guest-path", "shares-tag-uppercase",
+    "shares-tag-thirty-three", "shares-guidance-writable", "shares-memory-read-only", "shares-outputs-wrong-mount",
+    "shares-folder-nested-mount", "shares-folder-outside-folders", "shares-two-memory", "shares-unknown-kind",
+    "shares-extra-key", "conversations-browse-uid-equals-runtime-uid", "conversations-browse-uid-equals-tool-uid", "conversations-browse-uid-equals-gid",
+    "conversations-browse-uid-nobody", "conversations-browse-uid-missing", "conversations-continuation-unknown", "conversations-continuation-missing",
+    "conversations-fresh-with-ended-boots", "conversations-ended-boots-include-the-live-boot", "conversations-ended-boots-repeated", "conversations-ended-boots-five",
+    "conversations-ended-boot-uppercase", "runtime-ready-continuations-longer-than-the-set", "runtime-ready-continuation-either", "runtime-ready-continuations-missing",
     ]
 
     // MARK: the runtime image digest (the launcher recomputes it)
@@ -278,7 +289,7 @@ final class GoldenVectorTests: XCTestCase {
     /// started to judge order or flow (a second, divergent oracle) would fail here.
     func testTheRelayCarriesEveryBootstrapTranscriptAndEveryRuntimeFlowStepWithoutJudgingThem() throws {
         let order = try XCTUnwrap(try loadVector("bootstrap-order.json")["cases"] as? [[String: Any]])
-        XCTAssertEqual(order.count, 16)
+        XCTAssertEqual(order.count, 25)
         var misordered = 0
         for transcript in order {
             if ((transcript["result"] as! [String: Any])["ok"] as? Bool) == false { misordered += 1 }
@@ -306,6 +317,17 @@ final class GoldenVectorTests: XCTestCase {
             }
         }
         XCTAssertGreaterThanOrEqual(refused, 4)
+        // Contract revision 3: the file channel's streams 4 (down) and 5 (up) are runtime frames too, and their own in-flight bound is the endpoints' business.
+        let fileCases = try XCTUnwrap(flow["fileCases"] as? [[String: Any]])
+        XCTAssertEqual(fileCases.count, 15)
+        for c in fileCases {
+            for (index, step) in (c["steps"] as! [[String: Any]]).enumerated() {
+                let stream: UInt8 = ["in": 1, "out": 2, "err": 3, "file_in": 4, "file_out": 5][step["stream"] as! String]!
+                let payload = [0, stream, 0, 0] + [UInt8](repeating: 0x61, count: step["bytes"] as! Int)
+                let frame = MuxFormat.frame(.runtime, seq: UInt32(index + 1), payload: payload)
+                if payload.count <= MuxClass.runtime.payloadCeiling { XCTAssertEqual(try MuxFormat.parseRelayable(frame).muxClass, .runtime, c["name"] as! String) }
+            }
+        }
     }
 
     // MARK: the retained-receipt MAC (stop-receipts.json, macVectors)

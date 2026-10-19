@@ -404,7 +404,8 @@ export class CoworkNativeHost {
     const source = run.request?.conversations ?? this.deps.conversations;
     const set = source?.(context) ?? null;
     if (set === null) return;
-    const message = { t: "conversations" as const, operationId, nonce, incarnationId: context.incarnationId, profile: set.profile, conversations: set.conversations };
+    // `browseUid` is null until the file channel is routed (FC5); contract revision 3.
+    const message = { t: "conversations" as const, operationId, nonce, incarnationId: context.incarnationId, profile: set.profile, browseUid: null, conversations: set.conversations };
     if (set.profile !== null && set.conversations.length !== 1) throw new CoworkNativeHostError("protocol", "a host-query profile carries exactly one conversation");
     if (!coworkNativeConversationsAreBound(message, { operationId, nonce, workspaceId: context.workspaceId, incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch, guestBootId: context.guestBootId })) throw new CoworkNativeHostError("protocol", "conversation set is not bound to this incarnation");
     run.downSeq += 1;
