@@ -5,6 +5,7 @@
 //
 // These doubles prove host composition only. They are never native, Linux or image admission evidence (that is D5's
 // real-host run after S7B lands).
+import { coworkHeldInputVerbs } from "../../src/cowork/held-input";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -832,4 +833,20 @@ test("N4 rule 1: the reconcile's verbs work BEFORE the epoch is published, and `
   await session.open(); await session.send("hi", "cli"); await session.idle();
   await until(() => order.length === 2, "the reconcile and the publication");
   expect(order).toEqual(["reconcile:true", "published:true:true"]);
+});
+
+test("N4 (rule 1): a gate-on runtime WITHOUT held-input-v1 that forges system/held_inputs gets no reconcile, no verbs and no tap effect", async () => {
+  let reconciled = 0;
+  const h = harness({ script: heldReply([{ inputId: "r9", digest: "a".repeat(64), holdToken: HOLD_HEX, state: "held" }]), deps: { heldInput: heldGate(() => { reconciled++; }) } });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle(); await Bun.sleep(30);
+  expect(reconciled).toBe(0);
+  expect(session.heldInput).toBeUndefined();
+  expect(session.coworkEpoch).toBeDefined(); // not held back: this runtime is not a held-input runtime
+});
+
+test("N4: the hold verb refuses text whose trimStart starts with `/` (a slash command ends the host-query guest)", async () => {
+  const verbs = coworkHeldInputVerbs(() => ({ holdInput: async () => ({ held: true }), commitInput: async () => ({}), discardInput: async () => ({}), forgetInput: async () => ({}) }), () => ({ incarnationId: "i", leaseEpoch: 1 }));
+  for (const text of ["/clear", "  \n/x", "\t/compact now"]) await expect(verbs.hold({ inputId: "r1", holdToken: HOLD_HEX, text, clientName: "peer" })).rejects.toThrow("invalid_request");
+  expect(await verbs.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "a/b", clientName: "peer" })).toEqual({ held: true });
 });

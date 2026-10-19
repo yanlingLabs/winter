@@ -388,7 +388,7 @@ test("held delivery: any other ack throw reads the verdict: not landed discards;
   expect(undecided.map(c => c[0])).toEqual(["hold"]);
 });
 
-test("held delivery: a hold answered {held: false} is acked and committed, and never discarded even when the ack fails", async () => {
+test("held delivery: a hold answered {held: false} is acked and confirmed already (no commit), and never discarded even when the ack fails", async () => {
   const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
   held(w, b, calls, { hold: () => ({ held: false, state: "committed" }) });
   await w.send(w.makeMessaging({}, { ack: () => { throw new CoworkError("authority_denied"); } }).messaging, a, b);
@@ -396,8 +396,9 @@ test("held delivery: a hold answered {held: false} is acked and committed, and n
   const ok = world(), op = ok.project(), oa = ok.bind(op), ob = ok.bind(op), okCalls: Call[] = [];
   held(ok, ob, okCalls, { hold: () => ({ held: false, state: "in_transcript" }), commit: () => ({ outcome: "already" }) });
   await ok.send(ok.messaging, oa, ob);
-  expect(okCalls.map(c => c[0])).toEqual(["hold", "commit", "forget"]);
-  expect(row(ok)[0]).toMatchObject({ state: "delivered", commit_outcome: "already" });
+  expect(okCalls.map(c => c[0])).toEqual(["hold"]); // acked and confirmed `already`: NO commit under the new token
+  expect(row(ok)[0]).toMatchObject({ state: "delivered", commit_outcome: "already", nobody: 1 });
+  expect((row(ok)[0] as Record<string, any>).acked_hold_token).not.toBeNull();
 });
 
 test("the ledger: verdict, confirmCommitted and the prune guard", async () => {
@@ -479,4 +480,47 @@ test("a Cowork caller's host-messaging answers go through the DOOR validators; a
   expect(await w.messaging.handlerFor(host, "inc-1").send({ to: `session:${b}`, message: "x", messageId: "m" } as never, {} as never)).toEqual({ status: "bogus" } as never);
   messaging.send = realSend; messaging.list = realList;
   expect((await w.messaging.handlerFor(a, "inc-1").list({} as never, {} as never)).sessions.length).toBeGreaterThanOrEqual(0);
+});
+
+test("held delivery: a commit the guest keeps refusing (superseded) ends as lost after a bounded count, is surfaced once, and the queue flows", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), calls: Call[] = [];
+  let refuse = true;
+  held(w, b, calls, { commit: id => (refuse && calls.filter(c => c[0] === "commit" && c[1] === id).length <= 3 ? new CoworkHeldInputRefusal("superseded") : undefined) });
+  await w.send(w.messaging, a, b, { messageId: "m1" });
+  const [first] = row(w) as Array<Record<string, any>>;
+  expect(first).toMatchObject({ state: "delivered", commit_outcome: null });
+  await w.messaging.drainCoworkInbox(b);
+  expect((row(w)[0] as Record<string, any>).commit_outcome).toBeNull();
+  await w.messaging.drainCoworkInbox(b);     // the third refusal
+  expect(row(w)[0]).toMatchObject({ commit_outcome: "lost" });
+  expect(w.lostNotes).toEqual([`${b}:${first!.receipt_id}`]);
+  const commitsBefore = calls.filter(c => c[0] === "commit").length;
+  refuse = false;
+  await w.send(w.messaging, a, b, { messageId: "m2" });
+  expect((row(w) as Array<Record<string, any>>).map(r => r.commit_outcome)).toEqual(["lost", "queued"]);
+  expect(calls.filter(c => c[0] === "commit" && c[1] === first!.receipt_id)).toHaveLength(commitsBefore); // never retried
+  // A transport error is not a refusal: it retries without ever ending the receipt.
+  const t = world(), tp = t.project(), ta = t.bind(tp), tb = t.bind(tp);
+  held(t, tb, [], { commit: () => new Error("down") });
+  await t.send(t.messaging, ta, tb);
+  for (let i = 0; i < 6; i++) await t.messaging.drainCoworkInbox(tb);
+  expect(row(t)[0]).toMatchObject({ commit_outcome: null });
+  expect(t.lostNotes).toEqual([]);
+});
+
+test("the reconcile confirms only entries the ledger lists as unconfirmed", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p), c = w.bind(p);
+  held(w, b, [], { commit: () => new Error("down") });
+  await w.send(w.messaging, a, b, { messageId: "m1" });             // delivered, unconfirmed
+  held(w, c, []);
+  await w.send(w.messaging, a, c, { messageId: "m2" });             // delivered AND confirmed (another recipient)
+  const inbox = new CoworkPeerInbox({ records: w.records, store: new SqlitePeerInboxStore(w.db) });
+  const [unconfirmed, confirmed] = row(w) as Array<Record<string, any>>;
+  const guest: Call[] = [];
+  const entry = (inputId: string, holdToken: string, state: "committed" | "in_transcript") => ({ inputId, digest: "a".repeat(64), holdToken, state });
+  await coworkHeldInputReconciler(inbox)({ sessionId: b, epoch: { incarnationId: "i", leaseEpoch: 1 }, verbs: heldGuest(guest),
+    inputs: [entry(confirmed!.receipt_id, "c".repeat(64), "in_transcript"), entry("pr_stranger", "d".repeat(64), "in_transcript"), entry(unconfirmed!.receipt_id, unconfirmed!.acked_hold_token, "committed")] });
+  expect(guest).toEqual([]);                                         // nothing forgotten: only the unconfirmed one was confirmed
+  expect(row(w, unconfirmed!.receipt_id)[0]).toMatchObject({ commit_outcome: "already" });
+  expect(row(w, confirmed!.receipt_id)[0]).toMatchObject({ commit_outcome: "queued" }); // untouched
 });

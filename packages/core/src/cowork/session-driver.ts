@@ -293,7 +293,8 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
     const reconcileVerbs = coworkHeldInputVerbs(queryNow, liveEpoch);
     const reconcileHeldInputs = (message: unknown): void => {
       const gate = deps.heldInput;
-      if (gate === undefined || heldReconciling || heldReconciled) return; // emitted once; a repeat changes nothing
+      // Only a runtime that OFFERED held-input-v1 may be reconciled or sent verbs: a runtime that did not could forge the report.
+      if (gate === undefined || !heldGated || heldReconciling || heldReconciled) return; // emitted once; a repeat changes nothing
       heldReconciling = true;
       void (async () => {
         try {
@@ -307,7 +308,7 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       })();
     };
     // Only the agent SDK's own `query` (the runtime process is the guest's); no router selection, run home or messaging.
-    const runtime = { sdk: { query: (input: Parameters<typeof agentQuery>[0]) => { const q = sdkQuery(input); liveQuery = q; return deps.heldInput?.enabled === true ? coworkTapHeldInputs(q, reconcileHeldInputs) : q; } }, trackQuery: () => {}, untrack: () => {} } as unknown as WinterRuntimeSdk;
+    const runtime = { sdk: { query: (input: Parameters<typeof agentQuery>[0]) => { const q = sdkQuery(input); liveQuery = q; return heldGated ? coworkTapHeldInputs(q, reconcileHeldInputs) : q; } }, trackQuery: () => {}, untrack: () => {} } as unknown as WinterRuntimeSdk;
     const sessionDeps: WinterSessionDeps = {
       sessionId, backendSessionId, mode: "cowork", runtime,
       options: ({ abort }) => start(abort),

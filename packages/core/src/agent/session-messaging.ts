@@ -74,7 +74,7 @@ import { isSessionReplaced } from "../runtime-sdk/session-replaced";
 import { mayContactCoworkPeer, type CoworkMessagingRecords, type CoworkPeerOperation } from "../cowork/messaging-authority";
 import { CoworkError } from "../cowork/types";
 import type { CoworkPeerInbox, PeerEpoch } from "../cowork/peer-inbox";
-import { coworkHoldToken, coworkHostMessageListAnswer, coworkHostMessageSendAnswer, type CoworkHeldInputVerbs } from "../cowork/held-input";
+import { CoworkHeldInputRefusal, coworkHoldToken, coworkHostMessageListAnswer, coworkHostMessageSendAnswer, type CoworkHeldInputVerbs } from "../cowork/held-input";
 import { commitAndConfirm } from "../cowork/held-input-reconcile";
 
 /** The `clientName` a SendMessage delivery lands under in the target (`DispatchChildren`'s observer reads it). */
@@ -187,6 +187,7 @@ export class SessionMessaging {
   /** Cowork: the tail of each recipient's drain chain (one drain at a time per recipient). */
   private readonly drains = new Map<string, Promise<unknown>>();
   /** Cowork: how a receipt was delivered by a drain of this process (for the sender's answer), bounded. */
+  private readonly commitRefusals = new Map<string, number>();
   private readonly coworkOutcomes = new Map<string, { queued: boolean; steered: boolean; behind: number; resumed: boolean }>();
 
   constructor(private readonly deps: SessionMessagingDeps) {
@@ -542,6 +543,21 @@ export class SessionMessaging {
     }
   }
 
+  /** A typed refusal of a commit the ledger says was delivered (superseded, conflict, ...) cannot succeed by repetition. After
+   *  COMMIT_REFUSAL_LIMIT of them the receipt is ended `lost` (surfaced, never retried) so the queue behind it is not stalled
+   *  forever. A transport error is not a refusal and retries as before. True: it was ended. */
+  private endRefusedCommit(recipientId: string, receiptId: string, err: unknown): boolean {
+    if (!(err instanceof CoworkHeldInputRefusal)) return false;
+    const count = (this.commitRefusals.get(receiptId) ?? 0) + 1;
+    this.commitRefusals.set(receiptId, count);
+    if (count < COMMIT_REFUSAL_LIMIT) return false;
+    try { this.deps.peerInbox?.confirmCommitted?.(receiptId, "lost"); } catch { return false; }
+    this.commitRefusals.delete(receiptId);
+    this.log(`a Cowork peer message ${receiptId} to ${recipientId} was refused ${err.code} ${count} times and is ended as lost`);
+    this.noteLost(recipientId, receiptId);
+    return true;
+  }
+
   private noteLost(recipientId: string, receiptId: string): void {
     try { this.deps.noteLostPeerMessage?.(recipientId, receiptId); } catch { /* the note is best effort; the ledger already says lost */ }
   }
@@ -554,10 +570,12 @@ export class SessionMessaging {
     try {
       for (const entry of inbox.deliveredUnconfirmed(recipientId)) {
         if (this.draining) return false;
-        if ((await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, entry.receiptId, entry.ackedHoldToken)) === "lost") {
-          this.log(`a Cowork peer message ${entry.receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`);
-          this.noteLost(recipientId, entry.receiptId);
-        }
+        try {
+          if ((await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, entry.receiptId, entry.ackedHoldToken)) === "lost") {
+            this.log(`a Cowork peer message ${entry.receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`);
+            this.noteLost(recipientId, entry.receiptId);
+          }
+        } catch (err) { if (!this.endRefusedCommit(recipientId, entry.receiptId, err)) throw err; }
       }
       return true;
     } catch (err) {
@@ -596,9 +614,17 @@ export class SessionMessaging {
       if (verdict.action !== "commit") { await discard(); return false; }
       ackedToken = verdict.ackedHoldToken;
     }
+    // The guest already owns it (committed or in its transcript): the ack landed, so it is confirmed `already` WITHOUT a commit
+    // (a commit under the new token would be refused `superseded` forever). Never discarded.
+    if (answer.held === false) {
+      try { inbox.confirmCommitted(receiptId, "already"); } catch (err) { this.log(`confirming a Cowork peer message to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); the next drain repeats it`); return false; }
+      this.coworkOutcomes.set(receiptId, { queued: false, steered: false, behind: 0, resumed });
+      return true;
+    }
     let result: Awaited<ReturnType<typeof commitAndConfirm>>;
     try { result = await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, receiptId, ackedToken); }
-    catch (err) { this.log(`committing a Cowork peer message to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); the next drain repeats it`); return false; }
+    catch (err) {
+      if (this.endRefusedCommit(recipientId, receiptId, err)) return true; this.log(`committing a Cowork peer message to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); the next drain repeats it`); return false; }
     if (result === "lost") { this.log(`a Cowork peer message ${receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`); this.noteLost(recipientId, receiptId); return true; }
     this.coworkOutcomes.set(receiptId, { queued: result === "queued", steered: result === "folded", behind: 0, resumed });
     while (this.coworkOutcomes.size > DELIVERY_DEDUPE_MAX) this.coworkOutcomes.delete(this.coworkOutcomes.keys().next().value as string);
@@ -705,6 +731,8 @@ function refusalText(err: unknown): string {
 
 /** At most this many owed messages are delivered by one drain (a runaway guard; the rest stay owed for the next). */
 const COWORK_DRAIN_MAX = 1_024;
+/** How many typed refusals of one delivered commit end its receipt as lost. */
+const COMMIT_REFUSAL_LIMIT = 3;
 
 /** What the peer inbox stores for one Cowork message: the text AND the fields the model later sees, versioned. The
  *  rendered frame is never stored (it carries timestamps), so a retry digests to the same bytes and a restart loses

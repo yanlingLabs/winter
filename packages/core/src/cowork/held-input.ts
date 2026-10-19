@@ -158,7 +158,8 @@ export function coworkHeldInputVerbs(query: () => unknown, epoch: () => { readon
   const verbs: CoworkHeldInputVerbs = {
     async hold(input) {
       checkRef(input?.inputId, input?.holdToken);
-      if (typeof input.text !== "string" || input.text.length === 0 || Buffer.byteLength(input.text, "utf8") > TEXT_MAX_BYTES) throw new CoworkError("invalid_request");
+      // A leading `/` is a slash command to the host-query guest, which ends its runtime: refused here, like `guestText` does.
+      if (typeof input.text !== "string" || input.text.length === 0 || input.text.trimStart().startsWith("/") || Buffer.byteLength(input.text, "utf8") > TEXT_MAX_BYTES) throw new CoworkError("invalid_request");
       if (typeof input.clientName !== "string" || input.clientName.length === 0 || input.clientName.length > CLIENT_MAX) throw new CoworkError("invalid_request");
       const now = epoch();
       if (now === undefined) throw new CoworkError("cold_resume_unavailable");
