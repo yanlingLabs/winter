@@ -110,7 +110,7 @@
     },
     "scripts": {
       "guest_bootstrap.py": {
-        "sha256": "dc004ff4ad24276f683cf7dca5fe3640f9d383a6253ac9854ac2a8c6bb84a0a5"
+        "sha256": "0b10d0ed50eb49a90fbdb3609baa6d5cd3c8140304b7f82194b725ca07596c56"
       }
     },
     "scriptPaths": {

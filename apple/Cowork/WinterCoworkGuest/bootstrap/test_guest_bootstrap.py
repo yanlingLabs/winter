@@ -1729,7 +1729,14 @@ class ConversationSetTests(unittest.TestCase):
                             ("a control character", "/workspace/folders/\u0001x"), ("over 1024 bytes", "/workspace/folders/" + "a" * 1100), ("outside the workspace", "/etc/x"), ("relative", "workspace/folders/x")):
             with self.subTest(label):
                 self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
-        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * 1000))
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * (255 - len("/workspace/folders/"))))
+
+    def test_a_root_source_pid_1_would_refuse_is_refused_here_and_answered_bad_conversations(self):
+        item = lambda m: m["conversations"][0]
+        too_long = "/workspace/repos/" + "a" * (256 - len("/workspace/repos/"))
+        for label, path in (("256 bytes", too_long), ("a space", "/workspace/repos/a b"), ("a colon", "/workspace/repos/a:b"), ("no component", "/workspace/")):
+            with self.subTest(label):
+                self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
 
     def test_the_supervisors_view_rules(self):
         tools = "bootstrap-down-conversations-tools-only"
@@ -1943,6 +1950,13 @@ class ConversationSessionTests(unittest.TestCase):
         self.assertEqual([k for k in self.kinds(channel) if k == "C"], ["C"])
         status, channel = self.run_session([down("bootstrap-down-conversations-guided"), down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
         self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:second_conversations"])   # one that arrived while PID 1 was busy
+
+    def test_a_root_source_pid_1_would_refuse_is_answered_bad_conversations_without_bothering_pid_1(self):
+        body = conversations_vector()
+        body["conversations"][0]["roots"][0]["source"] = "/workspace/repos/" + "a" * 240
+        status, channel = self.run_session([(gb.TAG_DOWN, conversations_body(body))])
+        self.assertEqual((status, self.kinds(channel)[-1]), (0, "fault:bad_conversations"))
+        self.assertNotIn("C", self.kinds(channel))
 
     def test_an_unbound_or_invalid_set_is_refused_without_bothering_pid_1(self):
         wrong_nonce = conversations_vector()

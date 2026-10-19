@@ -304,6 +304,16 @@ def _workspace_path(value):
     return _guest_path(value) and value.startswith("/workspace/")
 
 
+ROOT_SOURCE_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _root_source(value):
+    """A root `source` as PID 1 will walk it (boot.c root_source_ok): /workspace/ then components of [A-Za-z0-9._-], at most 255 bytes in all. The helper answers bad_conversations for anything else."""
+    if not _workspace_path(value) or len(value) > 255 or not value.isascii():
+        return False
+    return all(ROOT_SOURCE_COMPONENT.fullmatch(part) for part in value[len("/workspace/"):].split("/"))
+
+
 def _allowed_view(path, session_id):
     parts = path[1:].split("/")
     if parts[0] != "workspace":
@@ -385,7 +395,7 @@ def _roots(value, session_id):
         return False
     for root in value:
         if not _exact(root, ("id", "guestPath", "source", "readOnly")) or not _sdk_id(root["id"]) or not _workspace_path(root["guestPath"]) \
-                or not _workspace_path(root["source"]) or type(root["readOnly"]) is not bool:
+                or not _root_source(root["source"]) or type(root["readOnly"]) is not bool:
             return False
     views = [root["guestPath"] for root in value]
     if len({root["id"] for root in value}) != len(value) or len(set(views)) != len(views):

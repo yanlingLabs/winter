@@ -120,15 +120,15 @@ class DataRootTests(unittest.TestCase):
         return stat.S_IMODE((self.dir / relative).stat().st_mode)
 
     def test_a_root_is_created_owned_in_the_workspace_group_with_the_setgid_bit(self):
-        self.assertEqual(self.run_tool(self.gid, "/workspace/repos/r1", "/workspace/folders/docs", "/workspace/.winter/scratch/s1"), "0")
-        for relative in ("repos/r1", "folders/docs", ".winter/scratch/s1"):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/repos/r1", "/workspace/repos/docs", "/workspace/.winter/scratch/s1"), "0")
+        for relative in ("repos/r1", "repos/docs", ".winter/scratch/s1"):
             st = (self.dir / relative).stat()
             self.assertEqual((self.mode_of(relative), st.st_uid, st.st_gid), (0o2770, os.getuid(), self.gid), relative)
         self.assertEqual(self.mode_of("repos"), 0o711)                              # the directories above a root are not touched
 
     def test_intermediate_directories_are_created_traversable_and_not_listable(self):
-        self.assertEqual(self.run_tool(self.gid, "/workspace/folders/a/b/c"), "0")
-        self.assertEqual((self.mode_of("folders/a"), self.mode_of("folders/a/b"), self.mode_of("folders/a/b/c")), (0o711, 0o711, 0o2770))
+        self.assertEqual(self.run_tool(self.gid, "/workspace/repos/a/b/c"), "0")
+        self.assertEqual((self.mode_of("repos/a"), self.mode_of("repos/a/b"), self.mode_of("repos/a/b/c")), (0o711, 0o711, 0o2770))
 
     def test_running_it_again_changes_nothing_and_repairs_a_wrong_mode(self):
         self.assertEqual(self.run_tool(self.gid, "/workspace/repos/r1"), "0")
@@ -145,6 +145,21 @@ class DataRootTests(unittest.TestCase):
         # a sibling whose name merely starts the same way is a data root
         self.assertEqual(self.run_tool(self.gid, "/workspace/outputs-extra", "/workspace/.winter/memory2"), "0")
         self.assertEqual((self.mode_of("outputs-extra"), self.mode_of(".winter/memory2")), (0o2770, 0o2770))
+
+    def test_intermediate_directories_are_0711_even_under_the_umask_pid_1_runs_with(self):
+        result = subprocess.run(["/bin/sh", "-c", 'umask 077; exec "$0" dataroots "$1" "$2" /workspace/repos/u/v/w', str(self.tool), str(self.dir), str(self.gid)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
+        self.assertEqual((self.mode_of("repos/u"), self.mode_of("repos/u/v"), self.mode_of("repos/u/v/w")), (0o711, 0o711, 0o2770))
+        os.chmod(self.dir / "repos/u", 0o700)                                    # a parent a past boot left 0700 is repaired, not trusted
+        result = subprocess.run(["/bin/sh", "-c", 'umask 077; exec "$0" dataroots "$1" "$2" /workspace/repos/u/v/w', str(self.tool), str(self.dir), str(self.gid)], capture_output=True, text=True, timeout=60)
+        self.assertEqual((result.stdout.strip(), self.mode_of("repos/u")), ("0", 0o711))
+
+    def test_nothing_under_workspace_folders_is_a_data_root_so_a_host_share_mount_is_never_chowned_or_chmodded(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/folders", "/workspace/folders/docs", "/workspace/folders/a/b"), "0")
+        self.assertEqual(self.mode_of("folders"), 0o711)
+        self.assertFalse((self.dir / "folders/docs").exists() or (self.dir / "folders/a").exists())
+        self.assertEqual(self.run_tool(self.gid, "/workspace/folders-x"), "0")             # a sibling that merely starts the same way is a root
+        self.assertEqual(self.mode_of("folders-x"), 0o2770)
 
     def test_a_symlink_anywhere_on_the_path_is_refused_and_nothing_is_followed(self):
         outside = Path(tempfile.mkdtemp(prefix="guest-outside-"))

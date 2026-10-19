@@ -18,7 +18,7 @@ static int under(const char *source, const char *directory) {
 }
 
 int wg_data_root_is_share_mount(const char *source) {
-    return under(source, "/workspace/outputs") || under(source, "/workspace/.winter/memory");
+    return under(source, "/workspace/outputs") || under(source, "/workspace/.winter/memory") || under(source, "/workspace/folders");
 }
 
 static int real_fchown(int fd, uid_t uid, gid_t gid, void *ctx) {
@@ -54,6 +54,8 @@ static int make_one(int workspace, const char *source, gid_t gid, const struct w
         if (fstat(current, &st) != 0) { close(current); return -1; }
         if (!last) {
             if (st.st_uid != parent_owner) { close(current); return -1; }   /* a directory above a root is root's, whoever else might have made it */
+            /* mkdirat's mode is filtered by PID 1's umask(077), which would leave every parent 0700 and unreachable for the browse and tool uids: set it on the descriptor, then read it back. */
+            if (fchmod(current, PARENT_MODE) != 0 || fstat(current, &st) != 0 || (st.st_mode & 07777) != PARENT_MODE) { close(current); return -1; }
             path = slash + 1;
             continue;
         }
