@@ -20,7 +20,7 @@ export function parseCoworkPlanView(guestPath: string): { readonly logicalSessio
 }
 
 /** An epoch is never mounted again once a later one was seen for the same workspace and conversation (a stale plan scratch must not come back). The same epoch is
- *  fine (a restart of the same plan). In memory: the DOOR policy machine holds the durable epoch and always passes the current one; this is the host's own refusal. */
+ *  fine (a restart of the same plan). In memory, so this is defence in depth only: the DOOR policy machine holds the durable epoch and always passes the current one; after a daemon restart this guard starts empty and DOOR's record is the authority. */
 export class CoworkPlanEpochGuard {
   private readonly seen = new Map<string, number>();
   admit(workspaceId: string, logicalSessionId: string, epoch: number): void {

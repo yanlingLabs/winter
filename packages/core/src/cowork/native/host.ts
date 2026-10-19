@@ -541,6 +541,8 @@ export class CoworkNativeHost {
     if (answer.t === "fault") {
       // The guest's own store is gone (a `resume` it could not find): the conversation can neither resume nor start fresh under its identity. The other cold-resume
       // fault, `fresh_store_not_empty`, is a refusal only: a store exists, so nothing is lost.
+      // Only a `resume` we sent can find a store missing; for any other continuation the fault is a contract violation, not a lost store.
+      if (answer.code === "resume_store_missing" && !set.conversations.some(item => item.runtime?.continuation === "resume")) throw new CoworkNativeHostError("protocol", "resume_store_missing without a resume");
       if (answer.code === "resume_store_missing") { try { run.request?.storeLost?.("resume_store_missing"); } catch { /* the failed start stands either way */ } }
       throw new CoworkNativeHostError("guest_fault", answer.code);
     }

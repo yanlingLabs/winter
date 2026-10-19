@@ -550,10 +550,12 @@ const conversationOf: Validator<CoworkNativeConversation> = value => {
   // The plan view exists only under the plan policy, at most once, and is the ONE writable root there (it is read-write by definition, never read-only).
   const planViews = item.roots.filter(root => isPlanView(root.guestPath));
   if (planViews.length > 1 || planViews.some(root => item.policy !== "plan" || root.readOnly)) return fail();
+  // Contract 12.3a: under the plan policy the plan view is the ONLY writable root, for every conversation (host-query or tools-only).
+  if (item.policy === "plan" && item.roots.some(root => !root.readOnly && !isPlanView(root.guestPath))) return fail();
   const runtime = item.runtime;
   if (runtime !== null) {
-    // `host_query_config`: a host-query conversation sees folders, repos and outputs only (never the `.winter` tree), and plan is read-only (the plan view aside).
-    if (item.roots.some(root => root.guestPath === "/workspace/.winter" || root.guestPath.startsWith("/workspace/.winter/") || (item.policy === "plan" && !root.readOnly && !isPlanView(root.guestPath)))) return fail();
+    // `host_query_config`: a host-query conversation sees folders, repos and outputs only (never the `.winter` tree).
+    if (item.roots.some(root => root.guestPath === "/workspace/.winter" || root.guestPath.startsWith("/workspace/.winter/"))) return fail();
     const scope = runtime.provider.scope as Record<string, unknown>, selection = runtime.provider.selection as Record<string, unknown>;
     // `_configure_runtime`: the provider scope must be this conversation's own, and the selected model the one that runs.
     if (scope.workspaceId !== item.authority.workspaceId || scope.sessionId !== item.logicalSessionId || scope.backendSessionId !== item.authority.sessionId

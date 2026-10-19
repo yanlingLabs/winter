@@ -119,6 +119,16 @@ describe("the fault to lost mapping", () => {
     await expect(g.host.start(g.workspaceId, { storeLost: reason => other.push(reason) })).rejects.toMatchObject({ code: "guest_fault" });
     expect(other).toEqual([]);
   });
+  test("resume_store_missing for a start that did not send a resume is a protocol error and marks nothing lost", async () => {
+    for (const continuation of [undefined, { continuation: "either" as const, endedGuestBoots: [] as string[] }]) {
+      const lost: string[] = [];
+      const h = createHarness();
+      await formatted(h);
+      h.setBehavior({ conversations: "store-missing" });
+      await expect(h.host.start(h.workspaceId, { ...(continuation ? { resume: continuation } : {}), storeLost: reason => lost.push(reason) })).rejects.toMatchObject({ code: "protocol" });
+      expect(lost).toEqual([]);
+    }
+  });
   test("a storeLost that throws does not hide the failed start", async () => {
     const h = createHarness();
     await formatted(h);
@@ -243,6 +253,13 @@ describe("the outputs directory and the plan view", () => {
     const sibling = join(home, "cowork", "workspaces", "ws2", "shared"); mkdirSync(sibling, { recursive: true }); symlinkSync(outputs, join(sibling, "outputs"));
     expect(() => prepare.ensure("ws2", "conv-0001")).toThrow(expect.objectContaining({ code: "not_directory" })); // a symlinked outputs root
   });
+  test("a symlinked <home>/cowork/workspaces refuses: the outputs root must be its own realpath", () => {
+    const home = scratch(), real = join(home, "real-workspaces", "ws1", "shared", "outputs");
+    mkdirSync(real, { recursive: true }); mkdirSync(join(home, "cowork"), { recursive: true });
+    symlinkSync(join(home, "real-workspaces"), join(home, "cowork", "workspaces"));
+    expect(() => createCoworkOutputsPreparer(home).ensure("ws1", "conv-0001")).toThrow(expect.objectContaining({ code: "root_unusable" }));
+    expect(lstatSync(join(real, "conv-0001"), { throwIfNoEntry: false })).toBeUndefined();
+  });
   test("the host asks the preparer for each outputs root the set names, before it sends; a failure refuses the start", async () => {
     const asked: string[] = [];
     const h = createHarness({ outputs: { ensure: (workspaceId, session) => { asked.push(`${workspaceId}:${session}`); } } });
@@ -283,6 +300,16 @@ describe("the coordinate tool class and the plan view on the wire", () => {
       const g = createHarness({ conversations: withClasses(bad) });
       await expect(g.host.start(g.workspaceId)).rejects.toMatchObject({ code: "protocol" });
     }
+  });
+  test("the plan rule holds for a tools-only conversation too (contract 12.3a): a writable folder beside the plan view is refused", async () => {
+    const toolsOnlyPlan = (other: boolean) => (context: CoworkNativeConversationContext): CoworkNativeConversationSet => {
+      const base = guidedConversation(context, "conv-0001", "backend-0001", 20000);
+      return { profile: null, conversations: [{ ...base, runtime: null, policy: "plan", roots: [{ id: "root-notes", guestPath: "/workspace/folders/notes", source: "/workspace/folders/notes", readOnly: other }, { id: "scratch", guestPath: "/workspace/plan/conv-0001/1", source: "/workspace/plan/conv-0001/1", readOnly: false }] }] };
+    };
+    const ok = createHarness({ conversations: toolsOnlyPlan(true) });
+    await ok.host.start(ok.workspaceId);
+    const bad = createHarness({ conversations: toolsOnlyPlan(false) });
+    await expect(bad.host.start(bad.workspaceId)).rejects.toMatchObject({ code: "protocol" });
   });
   test("under plan only the own plan view may be writable; any other writable root, a read-only plan view or a plan view outside plan is refused", async () => {
     const roots = (policy: "plan" | "ask", other: { readOnly: boolean }, view: { readOnly: boolean; path?: string }) => (context: CoworkNativeConversationContext): CoworkNativeConversationSet => {
