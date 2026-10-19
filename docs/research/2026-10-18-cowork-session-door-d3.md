@@ -210,3 +210,8 @@ The one survivor is equivalent: the driver's outputs-row check (owner decision 4
   - the port adapter (`mode: "cowork"`, in D4, after #84 widens `CanUseToolDeps.mode`);
   - cutting answers to the closed shape;
   - the interrupt refusal, which stays typed until the agent SDK lane accepts `{scope: "turn"}`.
+
+## Owed (from the #88/#89 delta review, LOW)
+
+1. **Sync lines must refuse duplicate JSON keys.** Today a line such as `{"type":"session_created",…,"cowork":…,"type":"user_message"}` is stored byte-for-byte, while every daemon reader sees the `user_message`. This predates D1. Close it in `sync.push`'s and `appendSynced`'s raw-line checks.
+2. **`coworkToolsFor` narrows with an unchecked `as CoworkGuestTool[]`.** It is safe today, because the normalisation withholds every non-profile tool. When the function is next touched, replace the cast with a checked filter.
