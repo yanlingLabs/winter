@@ -114,4 +114,13 @@ test("a destination ACL that lets another principal add files or delete children
   const other = temp(); expect(spawnSync("/bin/chmod", ["+a", "everyone allow delete_child", other]).status).toBe(0);
   expect(hasWritableAcl(other)).toBe(true);
   expect(hasWritableAcl(join(dir, "does-not-exist"))).toBe(false); // no path, no ACL: the caller's own existence check judges it
+  // A DENY entry grants nothing.
+  const denying = temp(); expect(spawnSync("/bin/chmod", ["+a", "everyone deny delete_child,add_file", denying]).status).toBe(0);
+  expect(hasWritableAcl(denying)).toBe(false);
+});
+
+test("a path whose ACL cannot be read is not reported safe", () => {
+  const parent = temp(), child = join(parent, "child"); mkdirSync(child);
+  require("node:fs").chmodSync(parent, 0o000);
+  try { expect(hasWritableAcl(child)).toBe(true); } finally { require("node:fs").chmodSync(parent, 0o700); }
 });

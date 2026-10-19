@@ -2,7 +2,7 @@
 
 Status: source only, behind ports production does not supply. Cowork stays unavailable: `session.create {mode: "cowork"}` still answers `unsupported_topology`, no RPC, setting or door is added, and every verb below refuses `integration_unavailable` or has no caller until the owner approves the flip.
 
-Stacked on the session-door spine (PR #88, which defines `cowork/session-ports.ts`).
+Stacked on the session-door spine (PR #88, which defines `cowork/session-ports.ts`). Revised after review of ddf0234d: the fixes are listed in section 6.
 
 ## 1. Publishing a feature branch
 
@@ -17,7 +17,7 @@ Stacked on the session-door spine (PR #88, which defines `cowork/session-ports.t
 N2 has no virtio-fs, no vsock and no guest network (design note G1/G11, `docs/cowork-native-worker.md` section 8). The one channel is the guest file channel, and it is **host-initiated**: the host asks, the guest answers bounded bytes. So:
 
 1. The guest-side publish step writes a **full** git bundle (no prerequisite lines, one ref) to `/…/.winter-publish/<requestId>.bundle` in the session's location. The host, not the guest, chooses that path: it is derived from the request id alone (`publishBundlePath`).
-2. The host pulls it with `stat` and sequential `readRange` calls (256 KiB chunks), bound to the workspace and session from the session's binding, the incarnation the host believes is running, and the **current** canonical source revision. The size budget (8 MiB, the broker's own) is judged from `stat` before a byte is read. Reads pin the generation token; offsets must be contiguous; EOF must fall exactly at the stat'ed size; a closing `stat` must show the same generation. Any change is `bundle_stale`.
+2. The host pulls it with `stat` and sequential `readRange` calls (256 KiB chunks), bound to the workspace and session from the session's binding, the incarnation the host believes is running, and the **current** canonical source revision. The size budget (8 MiB, the broker's own) is judged from `stat` before a byte is read. Reads pin the generation token; offsets must be contiguous; every reply is exactly as long as asked (so the number of calls is fixed by the size and a one-byte-at-a-time guest is refused at the first short reply); EOF must fall exactly at the stat'ed size; a closing `stat` must show the same generation. Any change is `bundle_stale`.
 3. The bytes go to the broker, which re-verifies everything (header equals the named ref and new OID, pack budget, `unbundle`, object budget, strict `fsck`, commit type, ancestry for an update, an exact lease).
 4. The push is the injected `PublicationTransport`, on the host, with host-held credentials. The guest never sees a remote, a URL or a token. Nothing in the new modules opens a socket or spawns a process (a pin test checks it).
 
@@ -105,3 +105,24 @@ It detects corruption and truncation. It does not detect a deliberate rewrite of
 5. **Cross-home transfer** needs its own authorized operation (explicit relocation versus clone).
 6. **Rate budget is in memory.** A durable window needs a table (DOOR).
 7. **Receive-pack gateway** replaces the bundle path once a network endpoint exists.
+
+## 6. Review fixes (after ddf0234d was rejected)
+
+- **Restore holds the workspace.** `validateImport` and the live-image inspection are repeated synchronously right before the first exchange, and the exchanges and identity records run with no `await` between them. The lock is a module-level set keyed by home and workspace, so two restorer instances cannot both run (a reviewer probe had both succeed). Volume owner NEED: an exclusive restore claim, so that `claim()` refuses from the first exchange until the identity is re-recorded (today the window is closed only inside this process).
+- **A rewritten bundle is refused.** Restore requires the digest of `integrity.json` to equal the one the database bound to that generation (`CoworkExportContentBinding`). Until DOOR adds the columns nothing can supply it, so `createCoworkWorkspaceRestorer(undefined)`, the only shape production can build, refuses every restore (`integration_unavailable`), and a ports object without the binding cannot be built.
+- **Authority and sizes before hashing.** `inspectBundle` reads structure only; `validateImport`, the binding and the manifest's capacities are judged before `hashBundleFiles` reads a byte of an image.
+- **No phantom `complete` generation.** The writer renames the bundle into place first and calls `complete()` after; a refusal there takes the bundle back and marks the generation failed. A named target that already exists is refused before a generation is prepared.
+- **Descriptor-relative walks.** The shared tree, the bundle root and every file under them are walked and opened with `openat` on held directory descriptors and no-follow, so a swapped intermediate directory cannot redirect them. Listing re-opens `.` of the held descriptor (a `dup` shares the read offset and would list nothing the second time).
+- **Destination ACL.** A destination whose ACL allows writes, adding files or deleting children is refused (`acl_get_file`/`acl_to_text`), whatever its mode bits.
+- **Raw xattr names.** Names are passed back to `fremovexattr` as the raw bytes `flistxattr` returned, and `hasExtendedAttributes` is re-checked after the strip. APFS refuses to create a non-UTF-8 name, so the splitter is tested directly.
+- **Opaque output ids (gap 3, decided).** The bundle names each session folder `s<n>` and each file directly under `outputs/` `f/<name>`; the reverse table is kept in the `cowork_exports` row. Restore maps back and refuses an id the record does not hold.
+- **Pins.** Imports are resolved to files (extensionless, `.js`, dynamic, `require`, re-export, multi-line); the exact `dlopen` symbol table of `export-io.ts` is pinned; the `cowork/git/` exemption is replaced by the exact internal edge list.
+
+### NEEDS FROM DOOR (migration), definitions
+
+```sql
+ALTER TABLE cowork_exports ADD COLUMN content_digest TEXT CHECK(content_digest IS NULL OR length(content_digest)=64);
+ALTER TABLE cowork_exports ADD COLUMN output_map_json TEXT CHECK(output_map_json IS NULL OR json_valid(output_map_json));
+```
+
+`CoworkExportContentBinding.record(exportId, { contentDigest, outputIds })` writes both columns on the prepared row (before `complete()`), and `read(exportId)` returns them (null while NULL). `output_map_json` is `{ "s1": "<sessionId>", ... }`.

@@ -270,6 +270,23 @@ test("the workspace is held from the last check to the identity record: a claim 
   expect(readFileSync(h.image("environment"), "utf8")).toBe("replaced at the last moment");
 });
 
+test("the process-wide lock, not the leftover check, stops a second restorer that was already past its checks", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  let reachedSecond!: () => void; const secondReached = new Promise<void>(resolve => { reachedSecond = resolve; });
+  let finishedFirst: Promise<unknown> = Promise.resolve(), calls = 0;
+  // The first restorer waits at its card until the second has reached ITS card (or 300 ms pass); the second then waits for the
+  // first to finish before it answers. Without the lock both pass every check and the second replaces the images again.
+  f.setAnswer(async () => {
+    if (++calls === 1) { await Promise.race([secondReached, new Promise(resolve => setTimeout(resolve, 300))]); return true; }
+    reachedSecond(); await finishedFirst; return true;
+  });
+  const first = f.restorer().restore(restoreInput(exported.path)); finishedFirst = first.catch(() => undefined);
+  const second = f.restorer().restore(restoreInput(exported.path)).then(() => "restored", (error: any) => error.code);
+  await first;
+  expect(await second).toBe("restore_conflict");
+  expect(f.identityCalls()).toBe(2); // one restore's two records, not four
+});
+
 test("two instances restoring the same workspace cannot both succeed", async () => {
   const f = await fixture(); const exported = await f.exportOnce("backup");
   const results = await Promise.allSettled([f.restorer().restore(restoreInput(exported.path)), f.restorer().restore(restoreInput(exported.path))]);
@@ -323,6 +340,13 @@ test("a staging folder created by someone else in the moment before ours is neve
   f.setAnswer(() => { mkdirSync(theirs); writeFileSync(join(theirs, "keep.txt"), "theirs"); return true; });
   await expect(f.restorer().restore(restoreInput(exported.path))).rejects.toThrow();
   expect(readFileSync(join(theirs, "keep.txt"), "utf8")).toBe("theirs");
+});
+
+test("the workspace folder is judged again inside the held section", async () => {
+  const f = await fixture(); const exported = await f.exportOnce("backup");
+  f.checkpoints.push(phase => { if (phase === "staged") require("node:fs").chmodSync(f.dir, 0o755); });
+  await failsWith(f.restorer().restore(restoreInput(exported.path)), "recovery_required");
+  expect(f.identityCalls()).toBe(0);
 });
 
 test("a restore is not an un-archive and not an import: an archived workspace restores in place, and an exported-then-deleted record cannot be resurrected", async () => {
