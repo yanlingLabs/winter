@@ -23,7 +23,8 @@ TESTS = PACKAGE / "Tests"
 
 # Only these paths may mention the package or the binary. S2 (launcher) and S7 (integration) will each have to extend this
 # list in the commit that first wires the worker; until then nothing outside the package refers to it.
-ANTI_WIRING_ALLOWED = ("apple/Cowork/WinterCoworkHVFWorker/", "docs/research/2026-10-17-cowork-n2-worker.md")
+# The contract document (S1) names the worker by definition; the research notes are this slice's own.
+ANTI_WIRING_ALLOWED = ("apple/Cowork/WinterCoworkHVFWorker/", "docs/research/2026-10-17-cowork-n2-worker.md", "docs/research/2026-10-18-cowork-n2-worker-v2-vectors.md", "docs/cowork-native-worker.md")
 ANTI_WIRING_NEEDLES = ("WinterCoworkHVFWorker", "winter-cowork-worker", "WorkerNative", "com.winter.cowork.worker")
 
 ALLOWED_KRUN = {
@@ -304,10 +305,10 @@ class Package(unittest.TestCase):
     def test_the_fixtures_are_the_pinned_s1_vectors(self):
         pins = json.loads((TESTS / "fixtures" / "PINS.json").read_text())
         self.assertEqual(sorted(pins["files"]), ["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-flow.json", "runtime-image.json", "stop-receipts.json"])
-        self.assertEqual(pins["source"]["head"], "6c1f04e807df3a10579d6f14a15e39652bd1c7a6")
+        self.assertEqual(pins["source"]["head"], "8b52ef83d1ba721a4dd80cdbb205c617f8656555")
         for name, expected in pins["files"].items():
             self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
-        self.assertEqual(pins["source"]["lastCommitTouchingTheseFiles"], pins["source"]["head"])
+        self.assertEqual(pins["source"]["lastCommitTouchingTheseFiles"], "324eb08da1612516feef1df3b0ed2b96c7adc6bd")
         self.assertEqual(len(pins["relayBlind"]["vectors"]), len(set(pins["relayBlind"]["vectors"])))
         self.assertEqual(len(pins["relayBlind"]["vectors"]), 84)
         self.assertFalse([name for name in pins["relayBlind"]["vectors"] if name.startswith("control-")], "control frames are the worker's own: none of them is passed through")
@@ -336,6 +337,41 @@ class Package(unittest.TestCase):
         for needle in ("/usr/bin/security", "stapler", "notarytool", "altool", "Developer ID Application", "find-identity"):
             self.assertNotIn(needle, build, needle)
         self.assertIn('sys.executable, "-I"', build, "child Python runs isolated")
+
+    # The vector files that ARE the worker's layers (L2 envelopes, the L3/L4 mux, the guest-stop verdict inputs, the image digest). `bootstrap-order.json` is the HOST's sequencing, not a worker layer (the worker is blind to bootstrap payloads), so it is only pinned, not frozen.
+    # Text version 2 (the receipt MAC, 2026-10-18) and the empty-OUT/ERR rule changed none of them: these hashes are frozen from the 6c1f04e8 copies, so a
+    # change to any of them is a change to the worker's contract and must be a decision, not a refresh.
+    WORKER_LAYER_VECTORS = {
+        "envelopes.json": "115be96ae7021cecfb6e1bb72260e21d3cce6e230133e54da6b3a5f915ac9ffb",
+        "mux-frames.json": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
+        "guest-stop.json": "beba7550e5b6dfdaee71345f723a4b17329f39d89533e9860baddb4fc3628a72",
+        "runtime-image.json": "2929af10fe5593a748b4f9d8c1506f2a1393c62b6e4fe4ffc0dba429f4496858",
+    }
+
+    def test_the_worker_layer_vectors_did_not_move_with_text_version_2(self):
+        self.assertEqual(sorted(self.WORKER_LAYER_VECTORS), ["envelopes.json", "guest-stop.json", "mux-frames.json", "runtime-image.json"], "the frozen set itself is pinned")
+        for name, expected in self.WORKER_LAYER_VECTORS.items():
+            self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
+        # and the host-side files DID move to version 2: begin carries receiptKey last, a receipt carries mac last
+        lines = json.loads((TESTS / "fixtures" / "launcher-lines.json").read_text())
+        begins = [v for v in lines["positive"] if v.get("name", "").startswith("begin")]
+        self.assertTrue(begins and all("receiptKey" in json.dumps(v) for v in begins))
+        receipts = json.loads((TESTS / "fixtures" / "stop-receipts.json").read_text())
+        self.assertEqual(receipts["version"], 2)
+        self.assertTrue(receipts["positive"] and all('\\"v\\":2' in json.dumps(v).replace(" ", "") for v in receipts["positive"]))
+        # the mux control JSON the worker parses stays text version 1
+        mux = json.loads((TESTS / "fixtures" / "mux-frames.json").read_text())
+        controls = [bytes.fromhex(v["hex"])[16:] for v in mux["positive"] if v["class"] == "control"]
+        self.assertTrue(controls)
+        for payload in controls:
+            self.assertTrue(payload.startswith(b'{"v":1,'), payload[:20])
+
+    def test_the_worker_never_handles_the_receipt_key_or_a_mac(self):
+        # The receipt key goes daemon -> launcher in L1 `begin`; the launcher alone signs receipts. The worker has no L1, no receipt and no key.
+        for path in source_files():
+            text = code(path)
+            for needle in ("receiptKey", "receipt_key", "receiptkey", "CCHmac", "CCHMAC", "kCCHmac", "hmac", "HMAC", "SecKey", "Keychain"):
+                self.assertNotIn(needle, text, f"{path.name}: {needle}")
 
     def test_the_package_never_spells_the_libkrun_queue_directory(self):
         # The libkrun patch queue package (PR #62) pins that nothing else in the repository names its directory; provenance here is by PR number.
