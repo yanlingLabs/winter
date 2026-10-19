@@ -1280,6 +1280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessions.refreshDirectory = { [weak model] in await model?.directory.refresh() }
         sessions.fetchHosts = { try await client.islandHosts() }
         sessions.waiting = { [weak island] in Set(island?.store.cards.map(\.answerSessionId) ?? []) }
+        sessions.waits = { [weak island] in IslandSessionsBuilder.waits(island?.store.cards ?? []) }
         sessions.childStatuses = { [weak model] in
             Dictionary((model?.session.state.children ?? []).map { ($0.sessionId, $0.status) }, uniquingKeysWith: { a, _ in a })
         }

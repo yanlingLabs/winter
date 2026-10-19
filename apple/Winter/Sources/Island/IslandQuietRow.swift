@@ -1,25 +1,217 @@
 import SwiftUI
 
-// The island's quiet rows (`docs/claude/island.md`, "Island visual language"): no card behind a row — its mark, its
-// main line and its muted words, over a thin line (`HoverLine`, `Sources/Usage/HoverLine.swift`) that thickens and
-// speaks under the pointer. Every tab but Needs you draws its rows with these measures, so their lines start and end
-// at one x and every row keeps its hovered height at rest (nothing below moves).
+// The island's tab rows (`docs/claude/island.md`, "Island visual language" — user 2026-10-19: SHARED LANGUAGE, OWN
+// SHAPES). Every tab speaks the usage plan block's language — no box behind anything, typography carrying the hierarchy
+// (a clear white title over muted words, figures in the light tiny digits), one accent per source used sparingly, quiet
+// at rest and LIFTING under the pointer (the title grows 12 % from its leading edge and the details and actions appear,
+// on the Dispatch pill's spring, so what is below glides) — but each kind of data keeps the shape that fits it: a status
+// dot, a glyph, a logo, a small label, a chip. A line only where there is a real amount (a watch's time left; the cost
+// split by model in the Usage tab), never a decorative bar.
 
 enum IslandQuietRow {
-    /// From the island's edge to a row: the header's own inset, so a row's mark sits under the tab's title.
+    /// From the island's edge to a row: the header's own inset — the usage block's left edge too.
     static let inset: CGFloat = IslandLayout.headerInset
-    /// The main line's band: the 14 pt typed text grown 12 % (`HoverLift.labelScale`) still fits.
-    static let titleHeight: CGFloat = 22
-    /// Between the main line and its line.
-    static let lineGap: CGFloat = 4
-    /// The leading mark's column (a state's symbol); the line starts after it.
-    static let markWidth: CGFloat = 14
+    /// The mark's column (a status dot, a glyph, a logo) and the gap after it: every tab's titles start at one x.
+    static let markWidth: CGFloat = 18
+    static let markGap: CGFloat = 8
+    /// Where a row's words start, from its leading edge.
+    static var textLeading: CGFloat { markWidth + markGap }
+    /// The title line's band: the title grown 12 % (`HoverLift.labelScale`) still fits.
+    static let titleHeight: CGFloat = 20
+    /// Between the title line and a line under it.
+    static let lineGap: CGFloat = 1
+    /// Between rows.
+    static let rowGap: CGFloat = 6
+    /// A row's lift: the room the grown title takes above and below it (the row grows on the spring, what is below
+    /// glides).
+    static func liftPadding(hovered: Bool) -> CGFloat { hovered ? 2 : 0 }
+    /// After the grown title, so it never runs into the words beside it.
+    static func titleTrailing(hovered: Bool) -> CGFloat { hovered ? 14 : 0 }
+    /// A status dot, and a hollow one.
+    static let dotSize: CGFloat = 7
 
-    /// PURE: a quiet row's height — the same at rest and under the pointer (the line's hovered thickness is reserved).
-    static var height: CGFloat { titleHeight + lineGap + HoverLift.hoverThickness }
+    /// The title: a clear medium face, the usage block's scale (its plan names are the caption step, its lines the tiny
+    /// one; a row's title sits one step above both).
+    static var titleFont: Font { Typography.label(.medium) }
+    /// Muted words: beside the title, and the lines under it.
+    static var wordsFont: Font { Typography.tiny() }
+
+    /// PURE: a title's ink — white, a touch brighter under the pointer; quieter for something that is over.
+    static func titleOpacity(hovered: Bool, quiet: Bool = false) -> Double {
+        hovered ? 1 : (quiet ? 0.65 : 0.92)
+    }
 
     /// PURE: whether a row's actions show — under the pointer, or while one of them is in the middle of something (a
     /// Stop waiting for its second click, stopping, offering a force quit) or has failed: those never hide when the
     /// pointer drifts off.
     static func showsActions(hovered: Bool, busy: Bool) -> Bool { hovered || busy }
+}
+
+/// A tab's row: its mark, its title (lifting under the pointer) with muted words beside it, what trails the title line
+/// (a status, a chevron), and the lines under it — a note worth scanning at rest, the details and actions the pointer
+/// reveals. No surface: the row floats on the island's black.
+struct IslandLiftRow<Mark: View, Trailing: View, Below: View>: View {
+    let title: String
+    /// Muted words right after the title (a folder, "2 servers"), cut at their head when the row is short of room.
+    var side: String? = nil
+    var titleLines = 1
+    /// Something that is over (a finished session): its title is quieter.
+    var quiet = false
+    let hovered: Bool
+    @ViewBuilder let mark: () -> Mark
+    @ViewBuilder let trailing: () -> Trailing
+    @ViewBuilder let below: () -> Below
+
+    var body: some View {
+        HStack(alignment: .top, spacing: IslandQuietRow.markGap) {
+            mark()
+                .frame(width: IslandQuietRow.markWidth, height: IslandQuietRow.titleHeight)
+            VStack(alignment: .leading, spacing: IslandQuietRow.lineGap) {
+                HStack(alignment: titleLines > 1 ? .firstTextBaseline : .center, spacing: 8) {
+                    Text(title)
+                        .font(IslandQuietRow.titleFont)
+                        .foregroundStyle(Color.white.opacity(IslandQuietRow.titleOpacity(hovered: hovered, quiet: quiet)))
+                        .lineLimit(titleLines)
+                        .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: titleLines > 1)
+                        .hoverLiftLabel(hovered, anchor: titleLines > 1 ? .topLeading : .leading)
+                        .padding(.trailing, IslandQuietRow.titleTrailing(hovered: hovered))
+                        .layoutPriority(1)
+                    if let side {
+                        Text(side)
+                            .font(IslandQuietRow.wordsFont)
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    }
+                    Spacer(minLength: 8)
+                    trailing()
+                }
+                .frame(minHeight: IslandQuietRow.titleHeight)
+                below()
+            }
+        }
+        .padding(.vertical, IslandQuietRow.liftPadding(hovered: hovered))
+        .contentShape(Rectangle())
+    }
+}
+
+/// A line of muted words under a row's title (its details, or a note), with what trails it (an action, ↗).
+struct IslandRowWords<Trailing: View>: View {
+    let text: String
+    var color: Color = Theme.textMuted
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(text)
+                .font(IslandQuietRow.wordsFont)
+                .foregroundStyle(color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .frame(minHeight: 16)
+    }
+}
+
+extension IslandRowWords where Trailing == EmptyView {
+    init(text: String, color: Color = Theme.textMuted) {
+        self.init(text: text, color: color) { EmptyView() }
+    }
+}
+
+// MARK: - Marks
+
+/// A row's status mark: a dot in its source's (or state's) colour, a hollow ring for something at rest, or a small glyph.
+enum IslandStatusMark: Equatable {
+    case dot(Color)
+    case ring(Color)
+    case glyph(String, Color)
+}
+
+struct IslandStatusMarkView: View {
+    let mark: IslandStatusMark
+
+    var body: some View {
+        switch mark {
+        case .dot(let color):
+            Circle().fill(color).frame(width: IslandQuietRow.dotSize, height: IslandQuietRow.dotSize)
+        case .ring(let color):
+            Circle().stroke(color, lineWidth: 1.4)
+                .frame(width: IslandQuietRow.dotSize - 0.5, height: IslandQuietRow.dotSize - 0.5)
+        case .glyph(let symbol, let color):
+            Image(systemName: symbol).font(Typography.tiny(.bold)).foregroundStyle(color)
+        }
+    }
+}
+
+/// A status as a small dot and a word ("● Connected", "● Running · 1.4.0") — what trails a device's or a server's title.
+struct IslandStatusWord: View {
+    let mark: IslandStatusMark
+    var word: String? = nil
+
+    var body: some View {
+        HStack(spacing: 5) {
+            IslandStatusMarkView(mark: mark)
+            if let word, !word.isEmpty {
+                Text(word)
+                    .font(Typography.tinyDigits())
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
+// MARK: - Chips
+
+/// A small label in a capsule — the plan block's own chip ("Pro"): a port, a link, a mode.
+struct IslandChip: View {
+    let text: String
+    /// A link's ↗ after the words.
+    var arrow = false
+    /// A link reads brighter than a plain label.
+    var bright = false
+
+    static let height: CGFloat = 18
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(text).font(Typography.tinyDigits(.medium))
+            if arrow { Image(systemName: "arrow.up.right").font(Typography.micro(.bold)) }
+        }
+        .foregroundStyle(bright ? Color.white.opacity(0.92) : Theme.textMuted)
+        .lineLimit(1)
+        .padding(.horizontal, 6)
+        .frame(height: Self.height)
+        .background(Capsule().fill(Color.white.opacity(bright ? 0.1 : 0.06)))
+    }
+}
+
+/// A row's small action in the chips' size — Stop and its phases, a watch's Stop: its words on a capsule of its colour.
+struct IslandRowActionButton: View {
+    let title: String
+    var fill: Color = Color.white
+    var ink: Color = Color.black
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(Typography.tiny(.semibold))
+                .foregroundStyle(ink)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .frame(height: IslandChip.height)
+                .background(Capsule().fill(fill))
+                .contentShape(Capsule())
+                .pillHoverGlow(fill)
+        }
+        .buttonStyle(IslandPressStyle())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.6)
+    }
 }

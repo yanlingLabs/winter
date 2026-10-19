@@ -19,10 +19,18 @@ final class HoverLineTests: XCTestCase {
         XCTAssertEqual(HoverLift.wordsWidth("ab"), 2 * 5.4 + 12, accuracy: 0.001)
     }
 
-    func testAQuietRowKeepsItsHoveredHeightAtRest() {
-        XCTAssertEqual(IslandQuietRow.height, IslandQuietRow.titleHeight + IslandQuietRow.lineGap + HoverLift.hoverThickness)
-        // The 14 pt main line grown 12 % fits its band.
-        XCTAssertLessThanOrEqual(Typography.bodySize * HoverLift.labelScale(hovered: true) * 1.25, IslandQuietRow.titleHeight)
+    func testARowLiftsItsTitleWithinItsBandAndEveryTabsTitlesStartAtOneX() {
+        // The 12 pt title grown 12 % fits its band; a lifted row takes the grown title's room (the row grows on the
+        // spring and what is below glides), a row at rest takes none.
+        XCTAssertLessThanOrEqual(Typography.labelSize * HoverLift.labelScale(hovered: true) * 1.25, IslandQuietRow.titleHeight)
+        XCTAssertEqual(IslandQuietRow.liftPadding(hovered: false), 0)
+        XCTAssertGreaterThan(IslandQuietRow.liftPadding(hovered: true), 0)
+        XCTAssertEqual(IslandQuietRow.titleTrailing(hovered: false), 0)
+        // The usage block's left edge, the header's; every tab's words after one mark column.
+        XCTAssertEqual(IslandQuietRow.inset, IslandLayout.headerInset)
+        XCTAssertEqual(IslandQuietRow.textLeading, IslandQuietRow.markWidth + IslandQuietRow.markGap)
+        XCTAssertEqual(IslandQuietRow.titleOpacity(hovered: true), 1)
+        XCTAssertLessThan(IslandQuietRow.titleOpacity(hovered: false, quiet: true), IslandQuietRow.titleOpacity(hovered: false))
     }
 
     func testRowActionsShowUnderThePointerOrWhileBusy() {

@@ -196,7 +196,8 @@ enum IslandGallery {
         }
         // Usage and Devices cut taller (they scroll live), at rest and hovered: the cost block; the helper and a browser
         // that is not connected (its reason on the grey track).
-        for (tab, name, hovered) in [(IslandTabRegistry.usage, "usage", ["cost"]),
+        for (tab, name, hovered) in [(IslandTabRegistry.sessions, "sessions", ["session:s1"]),
+                                     (IslandTabRegistry.usage, "usage", ["cost"]),
                                      (IslandTabRegistry.devices, "devices", ["device:cu", "device:browser-chrome"])] {
             store.tabs.select(tab.id)
             for (suffix, ids) in [("", Set<String>()), ("-hovered", Set(hovered))] {
@@ -204,6 +205,9 @@ enum IslandGallery {
                                      directory, "island-tab-\(name)-tall\(suffix)@2x.png"))
             }
         }
+        // The reference the tabs are read against: the Usage tab with its plan block under the pointer.
+        out.append(try renderUsageReference(to: directory, shape: shape, store: store, models: models))
+
         // A server's Stop waiting for its second click, and offering (then asking) a force quit beside its link — set
         // through the seam, never clicked (nothing is signalled): Stop stays on screen with the pointer elsewhere, in the
         // row's flow, so its wider capsule never covers the link.
@@ -226,6 +230,11 @@ enum IslandGallery {
         out.append(try write(openScene(store: store, models: emptyModels, shape: shape, tab: IslandTabRegistry.shelf.id),
                              directory, "island-tab-shelf-drop@2x.png"))
 
+        // The Sessions tab with nothing running.
+        store.tabs.select(IslandTabRegistry.sessions.id)
+        out.append(try write(openScene(store: store, models: IslandTabModels(shelf: emptyModels.shelf), shape: shape,
+                                       tab: IslandTabRegistry.sessions.id), directory, "island-tab-sessions-empty@2x.png"))
+
         // The Servers tab with nothing listening.
         let noServers = IslandTabModels(shelf: emptyModels.shelf, servers: IslandServersModel())
         noServers.servers.apply([])
@@ -242,6 +251,31 @@ enum IslandGallery {
             }, directory, "island-\(name)@2x.png"))
         }
         return out
+    }
+
+    /// The Usage tab with its Codex plan under the island's pointer (`usage-reference`), cut tall. A plan hovers through
+    /// its own pointer reader and `onChange`, which a one-shot render never fires: this renderer is kept alive — a first
+    /// render lays the tab out, the pointer moves onto the plan's header, and a later render draws it hovered (no
+    /// animation in between).
+    static func renderUsageReference(to directory: URL, shape: IslandScreenShape, store: IslandStore,
+                                     models: IslandTabModels) throws -> URL {
+        store.tabs.select(IslandTabRegistry.usage.id)
+        let pointer = DispatchPillPointer()
+        let view = openScene(store: store, models: models, shape: shape, tab: IslandTabRegistry.usage.id, height: 440)
+            .coordinateSpace(name: DispatchPillView.canvasSpace)
+            .environment(\.dispatchPillPointer, pointer)
+            .transaction { $0.animation = nil }
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        _ = renderer.cgImage
+        // Over the Codex plan's header: the scene's island starts 60 pt in, its first plan ~40 pt down.
+        pointer.set(CGPoint(x: 160, y: 40))
+        for _ in 0..<3 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            _ = renderer.cgImage
+        }
+        guard let image = renderer.cgImage else { throw GalleryError.cannotRender }
+        return try write(image, directory, "usage-reference@2x.png")
     }
 
     /// The units drawn hovered in the tabs' hovered pictures, by tab: one row (or tile) each.
@@ -288,11 +322,14 @@ enum IslandGallery {
             SessionSummary(sessionId: "s5", title: "Inbox triage", createdAt: created(4 * 86400), scope: "global",
                            cwd: "/Users/sample/Mail", model: "anthropic/claude-sonnet-4.5", activity: "background",
                            signals: SessionSignals(attachedElsewhere: true, working: true)),
+            SessionSummary(sessionId: "s6", title: "Book the venue", createdAt: created(31 * 3600), scope: "global", mode: "code",
+                           parentSessionId: "d1", signals: SessionSignals(attachedElsewhere: false, working: false)),
         ]
         let sessions = IslandSessionsModel()
         sessions.directory = { rows }
         sessions.waiting = { ["s1"] }
-        sessions.childStatuses = { ["s4": "completed"] }
+        sessions.waits = { ["s1": IslandSessionWait(kind: .approval, since: now.addingTimeInterval(-2 * 60))] }
+        sessions.childStatuses = { ["s4": "completed", "s6": "error"] }
         sessions.windows = { IslandWindowFacts(appWindowSessionId: "s1", detachedSessionIds: ["s3"]) }
         sessions.setHostsForTesting(["s2": [IslandHost(clientName: "cli-chat", role: "harness", tty: "/dev/ttys004")],
                                      "s5": [IslandHost(clientName: "iphone-gateway", role: "remote")]])
