@@ -14,7 +14,7 @@ import {
   OPENCODE_ALL_ARGS, OPENCODE_SETTLE_AFTER_DAY_MS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
   opencodeDifference, opencodeFingerprint, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
-import { planWindowKey, staleness, type PlanReading, type PlanStatusWindow } from "./plan";
+import { planWindowKey, staleness, type PlanReading, type PlanStatusWindow, type PlanWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
 
 // The usage service (`docs/claude/usage.md`): records Winter's own turns as they end, ingests the user's Codex and
@@ -205,6 +205,72 @@ export function addGap(gaps: ReadonlyArray<readonly [string, string]>, a: string
   return out;
 }
 
+/** Where each plan's last good reading from its own probe is kept (`sourceState`, filed under "winter" so no Claude Code
+ *  or Codex file query ever counts it): shown, its staleness judged afresh, until a fresh read lands (user 2026-10-19:
+ *  "show the cached usage limits until the fresh re-fetch arrives") — through a failed probe and across a restart. */
+export const PLAN_READINGS_KEY = "plans:last-readings";
+/** The rungs whose reading is kept: each plan's own probe (a fallback rung is re-read on its own). */
+const KEPT_SOURCES: Record<PlanReading["provider"], PlanReading["source"]> = {
+  codex: "codex-app-server", "claude-code": "claude-cli", antigravity: "agy-cli",
+};
+const WINDOW_KINDS = new Set(["five_hour", "weekly", "weekly_scoped", "other"]);
+
+/** PURE: the kept readings, validated — anything malformed is dropped, never trusted (a stored `stale` or `windowKey` is
+ *  ignored: both are judged afresh on every answer). */
+export function parseKeptReadings(state: Record<string, unknown> | undefined): Map<PlanReading["provider"], PlanReading> {
+  const out = new Map<PlanReading["provider"], PlanReading>();
+  const str = (v: unknown, max = 200): string | undefined => (typeof v === "string" && v.length > 0 && v.length <= max ? v : undefined);
+  for (const provider of Object.keys(KEPT_SOURCES) as Array<PlanReading["provider"]>) {
+    const r = state?.[provider];
+    if (typeof r !== "object" || r === null || Array.isArray(r)) continue;
+    const o = r as Record<string, unknown>;
+    const at = finiteNum(o.at);
+    if (o.provider !== provider || o.source !== KEPT_SOURCES[provider] || at === undefined || !Array.isArray(o.windows)) continue;
+    const windows: PlanWindow[] = [];
+    for (const w of o.windows) {
+      if (typeof w !== "object" || w === null) continue;
+      const x = w as Record<string, unknown>;
+      const id = str(x.id, 120);
+      const used = finiteNum(x.usedPercent);
+      if (id === undefined || typeof x.kind !== "string" || !WINDOW_KINDS.has(x.kind) || used === undefined || used < 0 || used > 100) continue;
+      const windowMinutes = finiteNum(x.windowMinutes);
+      const resetsAt = finiteNum(x.resetsAt);
+      const scope = str(x.scope, 120);
+      const severity = str(x.severity, 40);
+      windows.push({
+        id, kind: x.kind as PlanWindow["kind"], usedPercent: used, stale: false,
+        ...(windowMinutes === undefined ? {} : { windowMinutes }), ...(resetsAt === undefined ? {} : { resetsAt }),
+        ...(scope === undefined ? {} : { scope }), ...(severity === undefined ? {} : { severity }),
+      });
+    }
+    if (windows.length === 0) continue;
+    const planType = str(o.planType, 40);
+    const limitReached = str(o.limitReached, 200);
+    const c = o.credits;
+    const credits = typeof c === "object" && c !== null && !Array.isArray(c) ? (() => {
+      const k = c as Record<string, unknown>;
+      const balance = str(k.balance, 40);
+      return {
+        ...(typeof k.hasCredits === "boolean" ? { hasCredits: k.hasCredits } : {}), ...(typeof k.unlimited === "boolean" ? { unlimited: k.unlimited } : {}),
+        ...(balance === undefined ? {} : { balance }),
+      };
+    })() : undefined;
+    out.set(provider, {
+      provider, source: KEPT_SOURCES[provider], at, windows,
+      ...(planType === undefined ? {} : { planType }), ...(limitReached === undefined ? {} : { limitReached }),
+      ...(credits === undefined ? {} : { credits }),
+    });
+  }
+  return out;
+}
+
+/** PURE: the newer of two readings by when they were measured (one with no time loses). */
+export function newerReading(a: PlanReading | undefined, b: PlanReading | undefined): PlanReading | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return (b.at ?? -Infinity) > (a.at ?? -Infinity) ? b : a;
+}
+
 /** Wait for `p`, at most `ms`. */
 async function within(p: Promise<unknown>, ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -318,6 +384,8 @@ export class UsageService {
   private ingestMore = false;
   private lastTracking: UsageTracking | undefined;
   private codexCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
+  /** Each plan's last good probe reading (`PLAN_READINGS_KEY`), loaded once. */
+  private keptReadings: Map<PlanReading["provider"], PlanReading> | undefined;
   private codexRun: Promise<void> | undefined;
   private claudeCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
   private claudeRun: Promise<void> | undefined;
@@ -749,6 +817,27 @@ export class UsageService {
 
   // ── plans ───────────────────────────────────────────────────────────────────────────────────────
 
+  /** A plan's last good probe reading — kept through a failed probe and across a restart; undefined before the first. */
+  private kept(provider: PlanReading["provider"]): PlanReading | undefined {
+    this.keptReadings ??= parseKeptReadings(this.deps.db.sourceState(PLAN_READINGS_KEY));
+    return this.keptReadings.get(provider);
+  }
+
+  /** A probe gave a reading: keep it (memory and usage.db — a failed write keeps it in memory). */
+  private keep(reading: PlanReading): void {
+    if (reading.source !== KEPT_SOURCES[reading.provider] || reading.at === undefined) return;
+    this.kept(reading.provider);
+    this.keptReadings!.set(reading.provider, reading);
+    try {
+      this.deps.db.setSourceState(PLAN_READINGS_KEY, "winter", Object.fromEntries(this.keptReadings!), this.now());
+    } catch { /* kept in memory; the next reading tries again */ }
+  }
+
+  /** A reading as of now: each window's staleness judged afresh from when it was measured. */
+  private judged(r: PlanReading): PlanReading {
+    return { ...r, windows: r.windows.map((w) => ({ ...w, ...staleness(r.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+  }
+
   /** The Codex plan: Codex's app-server → the newest rollout's `rate_limits` → Winter's own codex-oauth report. Every
    *  answer judges the plan's alarms. `minAgeMs`: a fast beat's own floor for a fresh spawn (below the throttle). */
   async codexPlan(minAgeMs?: number): Promise<PlanReading> {
@@ -772,21 +861,27 @@ export class UsageService {
           ...(this.deps.appServerTimeoutMs === undefined ? {} : { timeoutMs: this.deps.appServerTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as string, reading: undefined }));
         this.codexCache = { at: this.now(), ...r };
+        if (r.reading !== undefined) this.keep(r.reading);
         // Judged as it lands: a read that stopped waiting (`planWaitMs` — a background beat's) answered the cache before.
         this.judgeAlarms(r.reading);
         if (r.failure !== undefined) this.deps.log?.info?.("[usage] codex app-server gave no plan reading", { reason: r.failure });
       })().finally(() => { this.codexRun = undefined; });
       await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
     }
-    if (this.codexCache?.reading !== undefined) return this.codexCache.reading;
+    // The latest probe's own reading; else the last good one (a failed probe, a restart) against the passive rung — the
+    // newer of the two.
+    if (this.codexCache?.reading !== undefined) return this.judged(this.codexCache.reading);
+    const kept = this.kept("codex");
+    let fromRollout: PlanReading | undefined;
     if (this.deps.codexHome !== undefined) {
       // The passive rung, cached like the spawn (a tree walk + tail reads every 5 s would not be cheap).
       if (this.rolloutCache === undefined || this.now() - this.rolloutCache.at >= (this.deps.fallbackEveryMs ?? 60_000)) {
         this.rolloutCache = { at: this.now(), reading: await codexPlanFromRollouts(await codexRollouts(this.deps.codexHome), this.now()) };
       }
-      const fromRollout = this.rolloutCache.reading;
-      if (fromRollout !== undefined) return { ...fromRollout, windows: fromRollout.windows.map((w) => ({ ...w, ...staleness(fromRollout.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+      fromRollout = this.rolloutCache.reading;
     }
+    const best = newerReading(kept, fromRollout);
+    if (best !== undefined) return this.judged(best);
     const winter = this.deps.winterCodexWindows();
     if (winter.length > 0) return { provider: "codex", source: "winter-codex-oauth", windows: [], statusOnly: winter, at: Math.max(...winter.map((w) => w.at)) };
     return { provider: "codex", source: "none", windows: [] };
@@ -821,6 +916,9 @@ export class UsageService {
           cwd, now: this.now,
           ...(this.deps.claudeCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.claudeCliTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
+        // Kept with the plan's name (a restart forgets `auth status` until its next run).
+        const name = this.claudePlanName?.value;
+        if (r.reading !== undefined) this.keep(name === undefined || r.reading.planType !== undefined ? r.reading : { ...r.reading, planType: name });
         this.claudeCache = { at: this.now(), ...r };
         this.judgeAlarms(r.reading);
         if (r.failure === "guard" || r.failure === "guard-model-turn") {
@@ -834,12 +932,16 @@ export class UsageService {
     }
     // The plan's name from `auth status` ("max"), its size from `~/.claude.json` ("20x" → "max_20x", shown "Max 20x").
     const file = this.deps.claudeJsonPath === undefined ? undefined : await this.claudeJsonFile(this.deps.claudeJsonPath);
-    const name = this.claudePlanName?.value;
-    const plan = name === undefined ? undefined : file?.multiple === undefined ? name : `${name}_${file.multiple}`;
-    const named = (r: PlanReading): PlanReading => (plan === undefined || r.planType !== undefined ? r : { ...r, planType: plan });
-    if (this.claudeCache?.reading !== undefined) return named(this.claudeCache.reading);
-    const cached = file?.reading;
-    if (cached !== undefined) return named({ ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) });
+    // A kept reading carries the name it was read with (a restart forgets `auth status` until its next run).
+    const named = (r: PlanReading): PlanReading => {
+      const base = r.planType ?? this.claudePlanName?.value;
+      if (base === undefined) return r;
+      return { ...r, planType: file?.multiple === undefined || /_\d{1,3}x$/.test(base) ? base : `${base}_${file.multiple}` };
+    };
+    if (this.claudeCache?.reading !== undefined) return named(this.judged(this.claudeCache.reading));
+    // The last good `/usage` (a failed probe, a restart) against `~/.claude.json`'s cache — the newer of the two.
+    const best = newerReading(this.kept("claude-code"), file?.reading);
+    if (best !== undefined) return named(this.judged(best));
     return { provider: "claude-code", source: "none", windows: [] };
   }
 
@@ -877,6 +979,7 @@ export class UsageService {
           ...(this.deps.agyCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.agyCliTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
         this.agyCache = { at: this.now(), ...r };
+        if (r.reading !== undefined) this.keep(r.reading);
         this.judgeAlarms(r.reading);
         if (r.failure === "guard") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
@@ -890,8 +993,9 @@ export class UsageService {
       })().finally(() => { this.agyRun = undefined; });
       await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
     }
-    const cached = this.agyCache?.reading;
-    if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+    // The latest probe's reading, else the last good one (a failed or backed-off probe, a restart).
+    const cached = this.agyCache?.reading ?? this.kept("antigravity");
+    if (cached !== undefined) return this.judged(cached);
     return { provider: "antigravity", source: "none", windows: [] };
   }
 

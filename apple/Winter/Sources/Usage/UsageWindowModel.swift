@@ -12,6 +12,11 @@ final class UsageWindowModel: ObservableObject {
     @Published var metric: UsageMetric = .cost
     @Published private(set) var series: UsageSeries?
     @Published private(set) var summary: UsageSummary?
+    /// The last summary the app already had (the island's), shown for the PLANS only until this window's own answer
+    /// lands (user 2026-10-19: the cached limits until the fresh read arrives) — plans do not depend on the range.
+    var seed: UsageSummary?
+    /// What the plan lines read: this window's own answer, else the seed.
+    var plansSummary: UsageSummary? { summary ?? seed }
     @Published private(set) var subscriptions: [UsageSubscription] = []
     @Published private(set) var failed = false
     @Published private(set) var subscriptionError: String?

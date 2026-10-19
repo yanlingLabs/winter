@@ -161,7 +161,7 @@ struct UsageWindowContent: View {
 
     private func plans(now: Date) -> some View {
         // Codex, Claude Code, Antigravity — only the apps on this Mac; one title column for every line.
-        let slots = UsagePresentation.plans(model.summary).filter { UsagePresentation.showsSlot($0.reading) }
+        let slots = UsagePresentation.plans(model.plansSummary).filter { UsagePresentation.showsSlot($0.reading) }
             .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
         let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) }, compact: false)
         return VStack(alignment: .leading, spacing: 18) {
