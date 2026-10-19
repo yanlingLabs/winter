@@ -13,6 +13,11 @@ final class SessionDirectory: ObservableObject {
     @Published private(set) var rows: [SessionSummary] = []
 
     private let lister: () async throws -> [SessionSummary]
+    /// Cowork session door: the `cowork` reference of the list's rows. Asked for only when a row's mode is
+    /// `"cowork"`, which no production daemon can produce yet, so a normal refresh costs nothing extra.
+    private let coworkLister: (() async throws -> [String: CoworkRowFacts])?
+    /// `session_created.cowork` for conversations created while this directory listened.
+    private var createdCowork: [String: SessionEvent.CoworkSessionCreatedFacts] = [:]
     /// app-shell Task 2: the poll's tick, injectable so a test drives it deterministically instead
     /// of waiting on a real 5s sleep — the same seam shape as `PairingSheetModel`'s `sleepTick`
     /// (WinterKit), just defaulted to a real `Task.sleep` here since this type has no `now()` clock
@@ -22,9 +27,11 @@ final class SessionDirectory: ObservableObject {
 
     init(
         lister: @escaping () async throws -> [SessionSummary],
+        coworkLister: (() async throws -> [String: CoworkRowFacts])? = nil,
         sleepTick: @escaping @Sendable () async -> Void = { try? await Task.sleep(for: .seconds(5)) }
     ) {
         self.lister = lister
+        self.coworkLister = coworkLister
         self.sleepTick = sleepTick
     }
 
@@ -44,9 +51,32 @@ final class SessionDirectory: ObservableObject {
     /// `refresh()`, saying whether the list was fetched (false: the rows are as they were).
     @discardableResult
     func refreshReportingSuccess() async -> Bool {
-        guard let fetched = try? await lister() else { return false }
+        guard var fetched = try? await lister() else { return false }
+        if let coworkLister, fetched.contains(where: { $0.mode == "cowork" }) {
+            // A failed read of the references leaves the rows as listed, without a binding: never a blank list.
+            let listed = (try? await coworkLister()) ?? [:]
+            fetched = SessionDirectory.mergingCowork(into: fetched, listed: listed, created: createdCowork)
+        }
         rows = fetched.sorted { $0.createdAt > $1.createdAt }
         return true
+    }
+
+    /// PURE: attaches each Cowork row's binding. A reference from the list wins over the created event's (it is
+    /// the daemon's current answer); the location comes only from the created event. Rows of any other mode are
+    /// returned untouched, so a stray `cowork` key on a code row is never read as a binding.
+    static func mergingCowork(into rows: [SessionSummary], listed: [String: CoworkRowFacts],
+                              created: [String: SessionEvent.CoworkSessionCreatedFacts]) -> [SessionSummary] {
+        rows.map { row in
+            guard row.mode == "cowork" else { return row }
+            var merged = row
+            if let facts = listed[row.sessionId] {
+                merged.cowork = facts
+            } else if let event = created[row.sessionId] {
+                merged.cowork = CoworkRowFacts(workspaceId: event.workspaceId, projectId: event.projectId)
+            }
+            merged.coworkLocation = created[row.sessionId]?.location
+            return merged
+        }
     }
 
     /// FINAL-REVIEW FIX (M1): the wirers' (`AppModel.init` / `DetachedWindowController.init`) own
@@ -104,7 +134,8 @@ final class SessionDirectory: ObservableObject {
                 rows[idx].title = v.title
             }
             Task { await refresh() }
-        case .sessionCreated:
+        case .sessionCreated(let created):
+            if let cowork = created.cowork { createdCowork[created.sessionId] = cowork }
             Task { await refresh() }
         case .wakeArmed(let v):
             // ComputerV2 wake triggers: the "waiting for you" mark appears at once, then the list confirms it.
@@ -254,5 +285,12 @@ struct SessionSummary: Equatable, Identifiable {
     /// there; the row shows a small "waiting for you" mark. Threaded through from `listSessions()` and kept live by
     /// `handle`'s `.wakeArmed`/`.wakeEnded` (every harness receives them). `nil` = none (or an older daemon).
     var wakesArmed: Int? = nil
+    /// Cowork session door (design 7.9): the workspace (and Project) a Cowork conversation belongs to, from
+    /// `session.list`'s `cowork` reference. `nil` for every other mode, and for a Cowork row whose binding the
+    /// daemon did not report; never inferred from the mode.
+    var cowork: CoworkRowFacts? = nil
+    /// Where that conversation works (`"source"` or `"outputs"`), from `session_created.cowork`, which the
+    /// list row does not carry. `nil` when this directory never saw the created event.
+    var coworkLocation: String? = nil
     var id: String { sessionId }
 }

@@ -173,9 +173,13 @@ let winterCapabilityKeysKnownToday: [String] = [
 ]
 
 /// The mode display order — the order a session's life makes sense in, and the same order
-/// `SessionMode` itself lists. A mode outside the three (a daemon that grows a fourth) sorts after
+/// `SessionMode` itself lists. A mode outside these (a daemon that grows another) sorts after
 /// them alphabetically rather than being dropped.
-let winterCapabilityModeOrder: [String] = ["code", "dispatch", "chat"]
+///
+/// `cowork` is named so it reads last and in a fixed place. The daemon sends a `cowork` exposure key only with
+/// the flip (design 7.9, D6), because a `false` for a mode that cannot run would read as "withheld in cowork"
+/// on every row; until then no row has the key and nothing about Cowork is said.
+let winterCapabilityModeOrder: [String] = ["code", "dispatch", "chat", "cowork"]
 
 /// PURE: order a set of mode names for display.
 func winterCapabilityModesSorted(_ modes: [String]) -> [String] {
