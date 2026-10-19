@@ -15,8 +15,8 @@ import { dirname } from "node:path";
 //  - `subscriptions`: the plans the user entered (Settings-like data the user owns, edited over RPC).
 //  - `probe_latches` (v2): a plan probe switched off for one exact binary (its realpath, mtime and size) — Claude Code's
 //    `/usage` that reached the model loop. Survives restarts; an updated binary is a new key, so it is tried again.
-//  - `synthetic` (v3): a row DERIVED from Claude Code's own `/stats` cache (`usage/claude-stats.ts`) for a day its
-//    transcripts no longer cover — one per model per day, `dedupe` = `ccstats:<model>:<YYYY-MM-DD>`. They are the
+//  - `synthetic` (v3): a row DERIVED from Claude Code's own `/stats` cache (`usage/claude-stats.ts`) for what a day's
+//    surviving transcripts lack — one per model per day, `dedupe` = `ccstats:<model>:<YYYY-MM-DD>`. They are the
 //    only Claude Code rows ever replaced or removed (`reconcileSynthetic`), and the hourly rollup counts them
 //    (`synthetic_records`).
 //  - `reported` (v4): a cost the other app itself recorded (OpenCode's own per-model cost) — `cost_basis` "reported",
@@ -369,11 +369,11 @@ export class UsageDb {
     return r?.first === null || r?.first === undefined || r.last === null ? undefined : { first: r.first, last: r.last };
   }
 
-  /** Non-synthetic token totals of `source` per model per UTC day (`YYYY-MM-DD`) since `fromMs`: `all` = the four
-   *  kinds, `io` = input + output only. */
-  dailyRealTotals(source: UsageSource, fromMs: number): Array<{ model: string; day: string; all: number; io: number }> {
+  /** Non-synthetic token totals of `source` per model per UTC day (`YYYY-MM-DD`) with `at` in [fromMs, toMs): `all` = the
+   *  four kinds, `io` = input + output only. */
+  dailyRealTotals(source: UsageSource, fromMs: number, toMs = Number.MAX_SAFE_INTEGER): Array<{ model: string; day: string; all: number; io: number }> {
     const rows = this.db.query(`SELECT model, (at / 86400000) AS d, SUM(input + output + cache_read + cache_write) AS a, SUM(input + output) AS io
-      FROM usage_records WHERE source = ? AND synthetic = 0 AND at >= ? GROUP BY model, d`).all(source, fromMs) as Array<Record<string, unknown>>;
+      FROM usage_records WHERE source = ? AND synthetic = 0 AND at >= ? AND at < ? GROUP BY model, d`).all(source, fromMs, toMs) as Array<Record<string, unknown>>;
     return rows.map((r) => ({ model: String(r.model), day: new Date(n(r.d) * 86_400_000).toISOString().slice(0, 10), all: n(r.a), io: n(r.io) }));
   }
 
@@ -534,6 +534,13 @@ export class UsageDb {
         .run(file.key, file.source, file.inode, file.offset, JSON.stringify(file.state), now);
     })();
     return added;
+  }
+
+  /** The oldest read-state write of `source`'s FILES (`exceptKey`: its own progress record), epoch ms — a file read once
+   *  and never grown since keeps the time of its first read. */
+  firstFileReadAt(source: UsageSource, exceptKey: string): number | undefined {
+    const r = this.db.query("SELECT MIN(updated_at) AS at FROM ingest_files WHERE source = ? AND key <> ?").get(source, exceptKey) as { at: number | null } | null;
+    return r?.at ?? undefined;
   }
 
   /** A source's own progress record (JSON), kept in `ingest_files` under `key` (no file behind it). */
