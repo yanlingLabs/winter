@@ -71,7 +71,8 @@ enum IslandLayout {
     static let waitingGap: CGFloat = 8
 
     // Inside the open island and on the cards: ONE corner for the rows and inner cards (a Needs-you link or view
-    // request, a Watches row, a Sessions row, a Usage or Devices row, a Shelf tile), one list gap, one side inset.
+    // request, a Watches row, a Sessions row, a Usage, Devices or Servers row, a Shelf tile), one list gap, one side
+    // inset.
     static let rowCorner: CGFloat = 16
     static let rowGap: CGFloat = 8
     static let listInset: CGFloat = 14

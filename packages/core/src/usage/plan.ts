@@ -1,5 +1,5 @@
-// Plan readings for the Usage tab (`docs/claude/usage.md`): how full the user's own Codex and Claude Code plan
-// windows are, from whichever rung of a source ladder answered, with its age and a staleness verdict.
+// Plan readings for the Usage tab (`docs/claude/usage.md`): how full the user's own Codex, Claude Code and Antigravity
+// plan windows are, from whichever rung of a source ladder answered, with its age and a staleness verdict.
 
 export type PlanWindowKind = "five_hour" | "weekly" | "weekly_scoped" | "other";
 
@@ -12,7 +12,8 @@ export interface PlanWindow {
   usedPercent: number;
   /** Epoch ms. */
   resetsAt?: number;
-  /** A per-model window's model (Claude Code's weekly scoped limits). */
+  /** A per-model window's model (Claude Code's weekly scoped limits), or the model group a window belongs to
+   *  (Antigravity's "Gemini", "Claude & GPT"). */
   scope?: string;
   /** The source's own severity word, when it gave one. */
   severity?: string;
@@ -31,10 +32,13 @@ export interface PlanStatusWindow {
 export type PlanSource =
   | "codex-app-server" | "codex-rollout" | "winter-codex-oauth"
   | "claude-cli" | "claude-cache"
-  | "none" | "disabled";
+  | "agy-cli"
+  | "none" | "disabled"
+  /** The app is not on this Mac (no executable found): the surfaces hide its slot. */
+  | "not-installed";
 
 export interface PlanReading {
-  provider: "codex" | "claude-code";
+  provider: "codex" | "claude-code" | "antigravity";
   source: PlanSource;
   /** When the numbers were measured (epoch ms) — a fetch's time, or the record's own time. */
   at?: number;

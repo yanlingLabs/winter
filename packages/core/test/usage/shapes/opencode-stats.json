@@ -1,0 +1,111 @@
+{
+ "range": {
+  "from": 1769701662707,
+  "to": 1792347325437
+ },
+ "sessions": 34,
+ "subagents": 47,
+ "prompts": 164,
+ "steps": 2794,
+ "tokens": {
+  "input": 6000,
+  "output": 1200,
+  "reasoning": 150,
+  "cache": {
+   "read": 30000,
+   "write": 0
+  }
+ },
+ "cost": 0.36941418,
+ "tools": {
+  "mode": "detail",
+  "totals": {
+   "calls": 3446,
+   "succeeded": 3295,
+   "failed": 151,
+   "unfinished": 0
+  },
+  "usage": [
+   {
+    "name": "bash",
+    "calls": 1143,
+    "succeeded": 1143,
+    "failed": 0,
+    "unfinished": 0,
+    "durationP50": 9
+   }
+  ]
+ },
+ "activeDays": 26,
+ "streak": 4,
+ "activity": [
+  {
+   "date": "2026-01-29",
+   "steps": 1
+  },
+  {
+   "date": "2026-01-30",
+   "steps": 140
+  },
+  {
+   "date": "2026-01-31",
+   "steps": 41
+  }
+ ],
+ "models": [
+  {
+   "model": {
+    "id": "muse-spark-1.3-contributor-free",
+    "providerID": "opencode",
+    "variant": "default"
+   },
+   "steps": 10,
+   "tokens": {
+    "input": 1000,
+    "output": 200,
+    "reasoning": 50,
+    "cache": {
+     "read": 5000,
+     "write": 0
+    }
+   },
+   "cost": 0
+  },
+  {
+   "model": {
+    "id": "deepseek-ai/deepseek-v4-pro",
+    "providerID": "nvidia",
+    "variant": "default"
+   },
+   "steps": 11,
+   "tokens": {
+    "input": 2000,
+    "output": 400,
+    "reasoning": 50,
+    "cache": {
+     "read": 10000,
+     "write": 0
+    }
+   },
+   "cost": 0.36941418
+  },
+  {
+   "model": {
+    "id": "space-bunny-free",
+    "providerID": "opencode",
+    "variant": "max"
+   },
+   "steps": 12,
+   "tokens": {
+    "input": 3000,
+    "output": 600,
+    "reasoning": 50,
+    "cache": {
+     "read": 15000,
+     "write": 0
+    }
+   },
+   "cost": 0
+  }
+ ]
+}

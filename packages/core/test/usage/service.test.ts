@@ -16,7 +16,7 @@ function service(now: () => number) {
   const home = tempDir("home");
   const db = new UsageDb(join(home, "usage", "usage.db"));
   const svc = new UsageService({
-    db, pricer, tracking: () => ({ codex: false, claudeCode: false }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
+    db, pricer, tracking: () => ({ codex: false, claudeCode: false, antigravity: false, opencode: false }), codexExecutable: () => undefined, claudeExecutable: () => undefined,
     winterCodexWindows: () => [], probeRoot: () => probeRootIn(home), now,
   });
   return { db, svc };

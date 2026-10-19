@@ -21,7 +21,11 @@
 #define WG_CONFIG_MAX_BYTES 60000u      /* the supervisor refuses more than 65536 */
 #define WG_CONFIG_BASE_MAX 8192u
 #define WG_CONFIG_CONVERSATIONS_MAX 49152u
-#define WG_CONFIG_RUNTIME_ARTIFACTS_MAX 4096u
+#define WG_CONFIG_RUNTIME_MAX 16384u            /* the object under hostQueryRuntime / hostQueryGuidedRuntime; the guided one carries `reader` with up to WG_READER_DEPENDENCIES_MAX dependencies */
+#define WG_READER_DEPENDENCIES_MAX 32u
+/* Root-side path of the guided conversation's guidance directory (the supervisor's `guidanceDirectory`): the directory the skeleton makes for the tool
+ * view's `/run/winter/shared-instructions`. Empty in the first session (no host-backed shares, decision D10). */
+#define WG_GUIDANCE_DIRECTORY "/run/winter/shared-instructions"
 
 enum wg_config_result {
     WG_CONFIG_OK = 0,
@@ -39,6 +43,19 @@ enum wg_config_result {
 enum wg_config_result wg_build_trusted_config(const char *boot_id, const char *base, size_t base_length, const char *conversations,
                                               size_t conversations_length, const char *runtime_key, const char *runtime_artifacts,
                                               size_t runtime_artifacts_length, char *out, size_t capacity, size_t *out_length);
+
+/* The object that goes under `hostQueryRuntime` (profile 1) or `hostQueryGuidedRuntime` (profile 2), checked against exactly what the supervisor reads
+ * (agent-sdk 68e57c64, vectors/sdk-guided-config.json): compact JSON without escapes, no duplicate or unknown key, every digest 64 lowercase hex.
+ *   profile 1: {"artifacts":{"executable":P,"launcher":P,"ownerLibrary":P}}
+ *   profile 2: the same plus "reader":{"artifacts":{"executable":P,"launcher":P},"dependencies":[{"guestPath","path","sha256"},...],"uid":N}
+ * where P = {"path":<absolute path>,"sha256":<digest>}, `dependencies` is PRESENT and may be empty (at most WG_READER_DEPENDENCIES_MAX, guest paths under
+ * /lib/ /lib64/ /usr/lib/ with no empty, "." or ".." component and none equal to or inside another) and `uid` is outside the range the host can assign
+ * (65534 or 65535), so no runtime uid, tool uid or workspace gid can ever equal it. `reader` is absent for profile 1. Returns 1 when valid. */
+int wg_runtime_block_valid(unsigned profile, const char *text, size_t length);
+
+/* The per-conversation `guidanceDirectory` the supervisor requires of a guided conversation and refuses on any other (`runtime_config`): for profile 2 the
+ * conversations text names exactly `count` of them, each WG_GUIDANCE_DIRECTORY; for any other profile it names none. Returns 1 when that holds. */
+int wg_guidance_members_ok(unsigned profile, unsigned count, const char *conversations, size_t length);
 
 /* A single balanced printable-ASCII JSON text of the given kind ('{' or '['), string-aware. */
 int wg_json_text_shape(const char *text, size_t length, char opening, size_t maximum);

@@ -4,6 +4,9 @@ The only startup program is the pinned `/init` built from apple/Cowork/WinterCow
 path is still refused. Nothing here runs it."""
 import argparse, hashlib, io, json, os, posixpath, re, shutil, stat, struct, subprocess, sys, tarfile, zlib
 from pathlib import Path, PurePosixPath
+# Under `python3 -I` the script's own directory is NOT on sys.path (that is the point of -I), so the sibling modules are found by an explicit insert of this file's directory
+# and nothing else: the interpreter still ignores PYTHON* variables, the user site and the current directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from packages import sha, bounded_file, bounded_read, xz_chunks
 import verify
 HERE=Path(__file__).resolve().parent
@@ -394,6 +397,10 @@ def source_snapshot(sdk,commit,destination):
         if (sdk/relative).is_dir(): subprocess.run(['rsync','-a',str(sdk/relative)+'/',str(destination/relative)+'/'],check=True)
     return actual
 
+def zig_archive_ok(data,pins):
+    """The pinned official archive for either host: the macOS one the local pins were made with, or the Linux one the one-run image build uses."""
+    return sha(data) in (pins['zig']['archiveSha256'],pins['zig']['linuxArchiveSha256'])
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--out',type=Path,required=True);parser.add_argument('--sdk',type=Path,required=True);parser.add_argument('--builder',type=Path,required=True);parser.add_argument('--zig-archive',type=Path,required=True);parser.add_argument('--bun-base',type=Path,required=True);args=parser.parse_args()
     pins=json.loads((HERE/'pins.json').read_text());out=args.out.resolve();out.mkdir(parents=True,exist_ok=True)
@@ -403,7 +410,7 @@ def main():
     subprocess.run(['git','-C',str(builder),'diff','--quiet','HEAD','--','scripts/build-runtime.ts','scripts/linux-runtime-base.json'],check=True)
     sdkcopy=out/'sdk-source';source_snapshot(sdk,pins['sdkCommit'],sdkcopy)
     zig_bytes=args.zig_archive.read_bytes()
-    if sha(zig_bytes)!=pins['zig']['archiveSha256']: raise ValueError('Zig archive')
+    if not zig_archive_ok(zig_bytes,pins): raise ValueError('Zig archive')
     tools=out/'tools';tools.mkdir()
     with tarfile.open(fileobj=io.BytesIO(zig_bytes),mode='r:xz') as archive: archive.extractall(tools,filter='data')
     zig=next(tools.glob('*/zig'))
