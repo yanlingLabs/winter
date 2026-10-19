@@ -96,6 +96,22 @@ class ProductionStaysClean(unittest.TestCase):
         self.assertIn('if args.profile == "standin" and args.update_pins:', text)
         self.assertIn("the stand-in build never writes the production pins", text)
 
+    def strip(self, text):
+        return re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.S)
+
+    def test_the_stand_in_sources_use_one_unix_socket_and_no_other_network_and_no_shell(self):
+        needles = ("AF_INET", "AF_VSOCK", "AF_NETLINK", "AF_PACKET", "SIOCSIF", "SIOCGIF", "netlink", "<netinet", "<linux/if", "<net/if", "IFF_UP", "dhcp", "resolv", "connect(")
+        shell = ("system(", "popen(", "execvp(", "execlp(", "execv(", "execl(", "/bin/sh", "/bin/bash", "getenv(", "setenv(", "putenv(")
+        for name in sorted(STANDIN_SOURCES):
+            code = self.strip((ROOT / name).read_text())
+            for needle in needles + shell:
+                self.assertNotIn(needle, code, f"{name}: {needle}")
+        linux = self.strip((ROOT / "init/standin_linux.c").read_text())
+        self.assertEqual(sorted(set(re.findall(r"\bAF_[A-Z]+\b", linux))), ["AF_UNIX"])
+        self.assertEqual(linux.count("socket("), 1)            # the one listener; the admission channel is the one socketpair(
+        self.assertEqual(linux.count("socketpair("), 1)
+        self.assertEqual(sorted(set(re.findall(r"\b(?:execve|fork|setuid|setresuid|setresgid|setgroups|prctl)\(", linux))), ["execve(", "fork(", "prctl(", "setgroups(", "setresgid(", "setresuid(", "setuid("])
+
     def test_the_guided_profile_gate_is_the_same_source_in_the_stand_in(self):
         # init-standin compiles the same init_linux.c, so the profile gate that keeps guided off is the production one
         self.assertIn("if (profile != 1) return -1;", (ROOT / "init/init_linux.c").read_text())

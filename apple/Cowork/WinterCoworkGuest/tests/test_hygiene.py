@@ -5,7 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = ROOT.parents[2]
-C_FILES = sorted(p for d in ("common", "init", "relay") for p in (ROOT / d).glob("*.[ch]"))
+# The four sources of the separate stand-in PID 1 are held to their own rules in test_standin_hygiene.py (they use an AF_UNIX socket by design and nothing else of the network).
+STANDIN_C = {"standin.c", "standin.h", "standin_linux.c", "standin_linux.h"}
+C_FILES = sorted(p for d in ("common", "init", "relay") for p in (ROOT / d).glob("*.[ch]") if p.name not in STANDIN_C)
 ALL_TEXT = [p for p in ROOT.rglob("*") if p.is_file() and p.suffix in {".c", ".h", ".py", ".json", ".md"}] + \
            [p for p in (REPO / "scripts/cowork-guest-artifact").rglob("*") if p.is_file() and p.suffix in {".py", ".json", ".md", ".config"} and "debian-" not in p.name]
 
