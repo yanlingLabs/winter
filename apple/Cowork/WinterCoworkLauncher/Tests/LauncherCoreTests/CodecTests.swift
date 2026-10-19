@@ -20,53 +20,53 @@ final class CodecTests: XCTestCase {
         XCTAssertEqual(String(decoding: w.bytes, as: UTF8.self), "{\"n\":-5,\"l\":[1,true,null,{}],\"s\":\"\"}")
     }
     func testParserRefusesWhatNoCanonicalTextContains() {
-        let good = "{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n"
+        let good = "{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}\n"
         XCTAssertNil(parse(good))
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}"), .malformed, "no newline")
-        XCTAssertEqual(parse("{\"v\":1, \"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "whitespace")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n{\"v\":1}\n"), .malformed, "two lines")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\",\"id\":\"req-2\"}\n"), .malformed, "duplicate key")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"req\\u002d1\"}\n"), .malformed, "an escape where none is canonical")
-        XCTAssertEqual(parse("{\"v\":1.0,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "float spelling")
-        XCTAssertEqual(parse("{\"v\":1e0,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "exponent")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}"), .malformed, "no newline")
+        XCTAssertEqual(parse("{\"v\":2, \"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "whitespace")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}\n{\"v\":2}\n"), .malformed, "two lines")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\",\"id\":\"req-2\"}\n"), .malformed, "duplicate key")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"req\\u002d1\"}\n"), .malformed, "an escape where none is canonical")
+        XCTAssertEqual(parse("{\"v\":2.0,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "float spelling")
+        XCTAssertEqual(parse("{\"v\":2e0,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "exponent")
         XCTAssertEqual(parse("{\"v\":-0,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "negative zero")
         XCTAssertEqual(parse("{\"v\":01,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "leading zero")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"\\ud800\"}\n"), .malformed, "lone surrogate")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"a\tb\"}\n"), .malformed, "raw control character in a string")
-        XCTAssertEqual(parse("{\"v\":1,\"__proto__\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "prototype key")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"\\ud800\"}\n"), .malformed, "lone surrogate")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"a\tb\"}\n"), .malformed, "raw control character in a string")
+        XCTAssertEqual(parse("{\"v\":2,\"__proto__\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .malformed, "prototype key")
         XCTAssertEqual(parse("[1]\n"), .malformed, "not an object")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":[[[[[1]]]]]}\n"), .malformed, "nesting deeper than a launcher line allows")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":[[[[[1]]]]]}\n"), .malformed, "nesting deeper than a launcher line allows")
         XCTAssertEqual(Array(repeating: UInt8(ascii: "x"), count: WireLimits.muxLineBytes + 1).count, WireLimits.muxLineBytes + 1)
         XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array(repeating: UInt8(ascii: "x"), count: WireLimits.muxLineBytes + 1)) }, .oversize)
         XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher([0xff, 0xfe, 0x0a]) }, .malformed, "not UTF-8")
     }
     func testOrderOfRefusalsFollowsTheContract() {
-        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .version)
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"nope\"}\n"), .unknown_type)
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"hello\",\"launcherInstanceId\":\"l\",\"hostBootId\":\"b\",\"parentVerified\":true}\n"), .bad_direction, "a launcher-only type from the daemon")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\"}\n"), .bad_field, "missing key")
-        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\",\"x\":1}\n"), .bad_field, "extra key")
-        XCTAssertEqual(parse("{\"t\":\"ping\",\"v\":1,\"id\":\"req-1\"}\n"), .malformed, "keys out of the schema's order fail the re-serialization compare")
-        XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n".utf8), rights: 1) }, .bad_rights)
+        XCTAssertEqual(parse("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n"), .version)
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"nope\"}\n"), .unknown_type)
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"hello\",\"launcherInstanceId\":\"l\",\"hostBootId\":\"b\",\"parentVerified\":true}\n"), .bad_direction, "a launcher-only type from the daemon")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\"}\n"), .bad_field, "missing key")
+        XCTAssertEqual(parse("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\",\"x\":1}\n"), .bad_field, "extra key")
+        XCTAssertEqual(parse("{\"t\":\"ping\",\"v\":2,\"id\":\"req-1\"}\n"), .malformed, "keys out of the schema's order fail the re-serialization compare")
+        XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}\n".utf8), rights: 1) }, .bad_rights)
     }
 
     func testBeginCarriesTheHomeIdAfterIdAndNothingElseDoes() throws {
-        let line = try LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "home_x", scope: Fixture.scope))
-        XCTAssertTrue(String(decoding: line, as: UTF8.self).hasPrefix(#"{"v":1,"t":"begin","id":"req-1","homeId":"home_x","workspaceId":"#))
-        guard case .begin(_, let homeId, let scope) = try LauncherLineCodec.parseToLauncher(line) else { return XCTFail() }
+        let line = try LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "home_x", scope: Fixture.scope, receiptKey: Fixture.receiptKey))
+        XCTAssertTrue(String(decoding: line, as: UTF8.self).hasPrefix(#"{"v":2,"t":"begin","id":"req-1","homeId":"home_x","workspaceId":"#))
+        guard case .begin(_, let homeId, let scope, _) = try LauncherLineCodec.parseToLauncher(line) else { return XCTFail() }
         XCTAssertEqual(homeId, "home_x"); XCTAssertEqual(scope, Fixture.scope)
         // The old shape (no homeId) and a begin with homeId out of order are not begins.
         let old = String(decoding: line, as: UTF8.self).replacingOccurrences(of: #","homeId":"home_x""#, with: "")
         XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array(old.utf8)) }, .bad_field)
         let reordered = String(decoding: line, as: UTF8.self).replacingOccurrences(of: #""id":"req-1","homeId":"home_x""#, with: #""homeId":"home_x","id":"req-1""#)
         XCTAssertEqual(failure { _ = try LauncherLineCodec.parseToLauncher(Array(reordered.utf8)) }, .malformed)
-        XCTAssertThrowsError(try LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "has space", scope: Fixture.scope)))
+        XCTAssertThrowsError(try LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "has space", scope: Fixture.scope, receiptKey: Fixture.receiptKey)))
     }
     func testTheMemoryFloorIs768() throws {
         var scope = Fixture.scope
         for (memory, ok) in [(767, false), (768, true), (1024, true), (1025, false), (256, false)] {
             scope.memoryMiB = memory
-            XCTAssertEqual((try? LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "home_x", scope: scope))) != nil, ok, "\(memory) MiB")
+            XCTAssertEqual((try? LauncherLineCodec.serialize(LineToLauncher.begin(id: "req-1", homeId: "home_x", scope: scope, receiptKey: Fixture.receiptKey))) != nil, ok, "\(memory) MiB")
             XCTAssertEqual((try? EnvelopeFormat.encodeScopePayload(scope)) != nil, ok, "\(memory) MiB in the envelope")
         }
     }

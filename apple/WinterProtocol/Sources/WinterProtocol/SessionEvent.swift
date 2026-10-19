@@ -89,6 +89,32 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let runtimeKind: String?
         public let providerId: String?
         public let modelRef: String?
+        // Cowork session door (D1 spine): the binding a Cowork conversation was created with
+        // (`CoworkSessionCreatedFacts`, packages/protocol/src/cowork.ts). Additive/optional like `mode`, so pure
+        // Codable synthesis again; nothing produces it yet because no Winter creates a Cowork session.
+        public let cowork: CoworkSessionCreatedFacts?
+    }
+
+    /// `session_created.cowork`: workspace, Project (nil for a standalone workspace), location kind
+    /// (`"source"` or `"outputs"`, a `String` like every enum-ish field here), source (nil for outputs) and the
+    /// policy revision. Ids only: no host path, label or grant.
+    public struct CoworkSessionCreatedFacts: Codable, Equatable, Sendable {
+        public let workspaceId: String
+        public let projectId: String?
+        public let location: String
+        public let sourceId: String?
+        public let policyRevision: Int
+
+        /// Explicit `null`s: the TS schema has `projectId`/`sourceId` nullable, NOT optional, so a re-encode
+        /// must keep the keys (synthesized encoding would omit them for nil).
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(workspaceId, forKey: .workspaceId)
+            try c.encode(projectId, forKey: .projectId)
+            try c.encode(location, forKey: .location)
+            try c.encode(sourceId, forKey: .sourceId)
+            try c.encode(policyRevision, forKey: .policyRevision)
+        }
     }
 
     public struct HarnessAttached: Codable, Equatable, Sendable {

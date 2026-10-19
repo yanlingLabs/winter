@@ -231,7 +231,7 @@ final class SessionTests: XCTestCase {
     }
     func testTheProviderClassIsRefusedAtTheHeaderInBothDirections() throws {
         let h = harness(); try h.bringUp()
-        var line = Array("{\"v\":1,\"t\":\"mux_down\",\"frame\":\"".utf8)
+        var line = Array("{\"v\":2,\"t\":\"mux_down\",\"frame\":\"".utf8)
         line += Array(Data(MuxFormat.frame(.provider, seq: 1, payload: [])).base64EncodedString().utf8) + Array("\"}\n".utf8)
         XCTAssertThrowsError(try LauncherLineCodec.parseToLauncher(line)) { XCTAssertEqual($0 as? WireFailure, .reserved_class) }
         h.session.receiveLine(FramedLine(bytes: line, rights: []))
@@ -276,11 +276,11 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(id, "req-stop")
         let persisted = try XCTUnwrap(h.log.index(of: "persist:A")), sent = try XCTUnwrap(h.log.index(of: "send:stopped"))
         XCTAssertLessThan(persisted, sent, "fsync (persist) precedes send")
-        XCTAssertEqual(try h.store.load(ReceiptScope(Fixture.scope)), .orderly(receipt))
+        XCTAssertEqual(try h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey), .orderly(receipt))
         XCTAssertFalse(h.ports.finished, "the receipt stays until the daemon says it is done with it")
         h.send(.receiptRetire(confirmationId: "confirm-not-this-one")); XCTAssertTrue(h.store.retired.isEmpty); XCTAssertFalse(h.ports.finished)
         h.send(.receiptRetire(confirmationId: receipt.confirmationId))
-        XCTAssertEqual(h.store.retired, [ReceiptScope(Fixture.scope)]); XCTAssertTrue(h.ports.finished); XCTAssertNil(try h.store.load(ReceiptScope(Fixture.scope)))
+        XCTAssertEqual(h.store.retired, [ReceiptScope(Fixture.scope)]); XCTAssertTrue(h.ports.finished); XCTAssertNil(try h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey))
     }
     func testAClassAThatCannotBeMadeDurableIsNeverSent() throws {
         let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt(); h.store.failPersist = true
@@ -291,7 +291,7 @@ final class SessionTests: XCTestCase {
     func testAnExitNobodyAskedForIsClassBEvenWithStatusZero() throws {
         let h = harness(); try h.bringUp(); h.workerExits(.code(0))
         XCTAssertTrue(h.ports.stopped.isEmpty); XCTAssertEqual(h.ports.uncertain.map(\.reason), [.workerCrashed])
-        XCTAssertEqual(try h.store.load(ReceiptScope(Fixture.scope)).map { if case .uncertain = $0 { "B" } else { "A" } }, "B", "Class B is durable too")
+        XCTAssertEqual(try h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey).map { if case .uncertain = $0 { "B" } else { "A" } }, "B", "Class B is durable too")
     }
     func testAFlushShortfallIsClassB() throws {
         let h = harness(); try h.bringUp(); h.stop(); h.cleanHalt(flushed: FlushCounters(requested: 2, completed: 1)); h.workerExits(.code(0))
@@ -342,7 +342,7 @@ final class SessionTests: XCTestCase {
     }
     func testAnOwnerLossDrainThatCompletesLeavesADurableClassAWithItsOwnOriginAndSendsNothingToAnyone() throws {
         let h = harness(); try h.bringUp(); h.session.daemonChannelClosed(); h.cleanHalt(); h.workerExits(.code(0))
-        guard case .orderly(let r)? = try h.store.load(ReceiptScope(Fixture.scope)) else { return XCTFail("a durable Class A") }
+        guard case .orderly(let r)? = try h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey) else { return XCTFail("a durable Class A") }
         XCTAssertEqual(r.origin, .ownerLossDrain); XCTAssertTrue(r.invariantsHold)
         XCTAssertTrue(h.ports.finished, "nobody is waiting: the next daemon decides what the receipt means")
         XCTAssertEqual(h.store.retired, [], "owner loss never retires or releases anything")
@@ -350,13 +350,13 @@ final class SessionTests: XCTestCase {
     func testAnOwnerLossDrainThatRunsOutKillsTheOwnedHandleAndLeavesDurableClassBNotA() throws {
         let h = harness(); try h.bringUp(); h.session.daemonChannelClosed(); h.session.timerFired(.drain)
         XCTAssertEqual(h.ports.process.killCalls, 1)
-        guard case .uncertain(let b)? = try h.store.load(ReceiptScope(Fixture.scope)) else { return XCTFail("a durable Class B") }
+        guard case .uncertain(let b)? = try h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey) else { return XCTFail("a durable Class B") }
         XCTAssertEqual(b.reason, .drainTimeout); XCTAssertTrue(h.ports.finished)
     }
     func testOwnerLossWhileStartingTakesTheWorkerDownAtOnce() {
         let h = harness(); h.begin(); h.session.daemonChannelClosed()
         XCTAssertEqual(h.ports.process.killCalls, 1); XCTAssertTrue(h.ports.finished)
-        guard case .uncertain(let b)? = try? h.store.load(ReceiptScope(Fixture.scope)) else { return XCTFail() }
+        guard case .uncertain(let b)? = try? h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey) else { return XCTFail() }
         XCTAssertEqual(b.reason, .daemonLost)
     }
     func testOwnerLossWhileTheDisksAreBeingTransferredLetsTheDrainBudgetJudgeIt() throws {
@@ -387,7 +387,7 @@ final class SessionTests: XCTestCase {
         guard case .stopped(let id, let receipt)? = h.ports.lines.last else { return XCTFail("a daemon that is still there is told") }
         XCTAssertNil(id); XCTAssertEqual(receipt.origin, .ownerLossDrain)
         XCTAssertTrue(h.ports.finished, "and the process ends without waiting to be retired")
-        XCTAssertNotNil(try h.store.load(ReceiptScope(Fixture.scope)))
+        XCTAssertNotNil(try h.store.load(ReceiptScope(Fixture.scope), key: Fixture.receiptKey))
     }
     func testATerminationSignalBeforeAnyWorkerJustEndsAndOneAfterTheVerdictToo() throws {
         let a = harness(); a.session.terminationRequested(); XCTAssertTrue(a.ports.finished)
@@ -407,7 +407,7 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(h.ports.lines.filter { $0 == .fault(.protocol_violation) }.count, 1); XCTAssertTrue(h.ports.daemonChannelClosed)
         guard case .drain(_, _, _, let origin)? = h.ports.datagrams.last else { return XCTFail("the worker is drained, not abandoned") }
         XCTAssertEqual(origin, .ownerLoss)
-        h.sendRaw("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n")
+        h.sendRaw("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}\n")
         XCTAssertFalse(h.ports.lines.contains(.pong(id: "req-1")), "a faulted channel reads nothing more")
     }
 

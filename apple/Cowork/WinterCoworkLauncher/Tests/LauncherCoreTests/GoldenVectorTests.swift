@@ -100,7 +100,7 @@ final class GoldenVectorTests: XCTestCase {
     func testLauncherLineNegativeVectorsFailWithTheContractsCodes() throws {
         let rawFile = try Data(contentsOf: vectorURL("launcher-lines.json"))
         let negatives = try XCTUnwrap(try loadVector("launcher-lines.json")["negative"] as? [[String: Any]])
-        XCTAssertEqual(negatives.count, 54)
+        XCTAssertEqual(negatives.count, 63)
         var blind = 0
         for vector in negatives {
             let name = vector["name"] as! String, line = lineBytes(vector, rawFile: rawFile), rights = vector["rights"] as! Int
@@ -306,5 +306,43 @@ final class GoldenVectorTests: XCTestCase {
             }
         }
         XCTAssertGreaterThanOrEqual(refused, 4)
+    }
+
+    // MARK: the retained-receipt MAC (stop-receipts.json, macVectors)
+
+    func testReceiptMacVectorsAgreeByteForByte() throws {
+        let mac = try XCTUnwrap(try loadVector("stop-receipts.json")["macVectors"] as? [String: Any])
+        let keyUtf8 = Array((mac["keyUtf8"] as! String).utf8)
+        XCTAssertEqual(keyUtf8.count, 32)
+        XCTAssertEqual(bytes(fromHex: mac["keyHex"] as! String), keyUtf8)
+        XCTAssertEqual(Data(keyUtf8).base64EncodedString(), mac["keyBase64"] as? String)
+        XCTAssertEqual(mac["keyBase64"] as? String, Fixture.receiptKeyBase64, "the fixtures use S1's synthetic key")
+        let key = try XCTUnwrap(ReceiptKey(base64: mac["keyBase64"] as! String))
+        XCTAssertEqual(key, ReceiptKey(bytes: keyUtf8))
+        let positives = try XCTUnwrap(mac["positive"] as? [[String: Any]])
+        XCTAssertEqual(positives.count, 4)
+        for vector in positives {
+            let name = vector["name"] as! String, text = Array((vector["receipt"] as! String).utf8)
+            guard case .orderly(let receipt) = try StopReceipt.parse(text) else { return XCTFail("\(name) is Class A") }
+            XCTAssertEqual(String(decoding: receipt.macInput(), as: UTF8.self), vector["macInput"] as? String, "\(name): the exact bytes the MAC covers")
+            XCTAssertEqual(receipt.mac, vector["macBase64"] as? String, name)
+            let tag = try XCTUnwrap(key.mac(receipt.macInput()))
+            XCTAssertEqual(Data(tag).base64EncodedString(), vector["macBase64"] as? String, "\(name): HMAC-SHA256, base64")
+            XCTAssertEqual(tag.map { String(format: "%02x", $0) }.joined(), vector["macHex"] as? String, name)
+            XCTAssertTrue(receipt.macVerifies(under: key), name)
+            var unsigned = receipt; unsigned.mac = ""
+            XCTAssertEqual(unsigned.signed(with: key), receipt, "\(name): signing the unsigned receipt reproduces the vector")
+        }
+        let negatives = try XCTUnwrap(mac["negative"] as? [[String: Any]])
+        XCTAssertEqual(negatives.count, 11)
+        for vector in negatives {
+            let name = vector["name"] as! String, expect = vector["expect"] as! String, text = Array((vector["text"] as! String).utf8)
+            if expect.hasPrefix("parse:") {
+                XCTAssertEqual(failure { _ = try StopReceipt.parse(text) }, String(expect.dropFirst(6)), name)
+            } else {
+                guard case .orderly(let receipt) = try StopReceipt.parse(text) else { return XCTFail("\(name) is Class A") }
+                XCTAssertEqual(receipt.macVerifies(under: key), expect == "mac-valid", name)
+            }
+        }
     }
 }

@@ -113,6 +113,26 @@ describe("planMigrationB refuses a source that holds Cowork storage, before anyt
     expect(plan.entries.some(entry => entry.status === "copied")).toBe(true);
   });
 
+  test("OS litter alone under cowork/ (Finder, Spotlight, AppleDouble) is not Cowork storage, but any other entry still is", async () => {
+    const source = tempDir(), home = tempDir();
+    seedSource(source);
+    for (const litter of [".DS_Store", ".localized", "._cowork-note"]) write(join(source, "cowork", litter), "x");
+    expect(inspectCoworkSource(source)).toEqual({ present: false });
+    const plan = await planMigrationB({ legacyHome: source, home, profile: "dev" });
+    expect(plan.entries.some(entry => entry.status === "copied")).toBe(true);
+    write(join(source, "cowork", "workspaces"), "a real entry");
+    expect(inspectCoworkSource(source)).toMatchObject({ present: true, kind: "storage-tree" });
+    expect((await refusalOf(() => planMigrationB({ legacyHome: source, home: tempDir(), profile: "dev" }))).code).toBe("cowork_storage_present");
+  });
+
+  test("a zero-byte runtime-state file (no tables) is not Cowork storage; a file that is not a database still fails closed (corruption could hide records)", () => {
+    const source = tempDir();
+    write(join(source, "runtimes", "runtime-state.db"), "");
+    expect(inspectCoworkSource(source)).toEqual({ present: false });
+    write(join(source, "runtimes", "runtime-state.db"), "not sqlite");
+    expect(inspectCoworkSource(source)).toMatchObject({ present: true, kind: "uninspectable" });
+  });
+
   test("a symlink named cowork is refused, never followed", async () => {
     const source = tempDir(), home = tempDir(), elsewhere = tempDir();
     seedSource(source); symlinkSync(elsewhere, join(source, "cowork"));

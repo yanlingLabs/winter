@@ -1255,7 +1255,12 @@ export class SessionStore {
     const expectedFirst = row.last_seq + 1;
     for (let i = 0; i < entries.length; i++) {
       const { raw, event } = entries[i]!;
-      if (HOST_WORKSPACE_EVENT_TYPES.has(event.type) || HOST_WORKSPACE_EVENT_TYPES.has(JSON.parse(raw).type)) throw new Error("appendSynced: host workspace events are not importable");
+      const line = JSON.parse(raw) as Record<string, unknown>;
+      if (HOST_WORKSPACE_EVENT_TYPES.has(event.type) || HOST_WORKSPACE_EVENT_TYPES.has(line?.type as string)) throw new Error("appendSynced: host workspace events are not importable");
+      // A Cowork binding (`session_created.cowork`) is host workspace authority too: only the daemon's own create writes it.
+      if ((event.type === "session_created" && event.cowork !== undefined) || (line?.type === "session_created" && line !== null && Object.hasOwn(line, "cowork"))) {
+        throw new Error("appendSynced: a session_created carrying a Cowork binding (host workspace authority) is not importable");
+      }
       if (event.sessionId !== sessionId) throw new Error(`event ${i} belongs to session ${event.sessionId}, not ${sessionId}`);
       if (event.seq !== expectedFirst + i) throw new Error(`event ${i} has seq ${event.seq}, expected ${expectedFirst + i}`);
       if (raw.includes("\n")) throw new Error(`event ${i} raw line contains a newline`); // would forge extra log lines

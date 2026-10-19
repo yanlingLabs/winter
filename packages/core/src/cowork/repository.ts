@@ -258,7 +258,7 @@ export class CoworkRepository {
       if (current.ownership === "standalone" && current.ownerId !== normalized.sessionId) throw new CoworkError("authority_denied");
       if (selected.state !== "ready" || selected.desired !== "present") throw new CoworkError("source_unavailable");
       if (this.one("SELECT session_id FROM cowork_conversations WHERE session_id=?", normalized.sessionId)) throw new CoworkError("authority_denied");
-      this.run("INSERT INTO cowork_conversations VALUES(?,?,?,?,?,?,?,1,'active',?)", normalized.sessionId, workspaceId, current.ownership === "project" ? current.ownerId : null, normalized.sourceId, normalized.relativeCwd, policy.defaultPolicy, canonical(policy.ceiling), this.now());
+      this.run("INSERT INTO cowork_conversations(session_id,workspace_id,project_id,location_kind,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at) VALUES(?,?,?,'source',?,?,?,?,1,'active',?)", normalized.sessionId, workspaceId, current.ownership === "project" ? current.ownerId : null, normalized.sourceId, normalized.relativeCwd, policy.defaultPolicy, canonical(policy.ceiling), this.now());
       this.advance(workspaceId);
       return { workspaceId, value: this.binding(normalized.sessionId), kind: "conversation_bound", payload: { sessionId: normalized.sessionId } };
     });

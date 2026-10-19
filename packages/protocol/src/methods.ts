@@ -1,4 +1,4 @@
-import { COWORK_METHODS } from "./cowork";
+import { COWORK_METHODS, CoworkSessionCreate, CoworkSessionRef } from "./cowork";
 import { z } from "zod";
 // `SessionActivity` is defined in ./events (not here, where its first consumer `SessionListResult`
 // lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
@@ -199,6 +199,13 @@ export const SessionCreateParams = z.object({
   // `model` — it does not ride `session_created` and resets to absent on a full index rebuild.
   // Bounded — see SESSION_EFFORT_MAX_CHARS.
   effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
+  // Cowork session door (D1 spine): the conversation's workspace binding — present exactly when `mode` is "cowork".
+  // NOT a schema refinement on purpose: while no session door exists the daemon answers a `mode: "cowork"` request
+  // with its typed `unsupported_topology` refusal whether or not a binding is present (every client today sends
+  // none), so the presence rule and the host-derived-fields rule (no cwd/approvalPolicy/model/effort/origin beside it
+  // — `approvalPolicy` carries a `.default("ask")`, so that one is checked on the RAW params) live in ipc/server.ts,
+  // AFTER that refusal. A binding that is present but malformed fails this schema first, like an unknown mode.
+  cowork: CoworkSessionCreate.optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -239,6 +246,10 @@ export const SessionListResult = z.object({
     // every session created before this field existed, or created without one.
     origin: z.string().optional(),
     mode: z.string().optional(),            // "dispatch" for the singleton; absent = code
+    // Cowork session door (D1 spine): a Cowork row's workspace reference (`workspaceId`, `projectId` or null for a
+    // standalone workspace). Declared ahead of its producer, which lands with the creation door; absent on every row
+    // today, since no Cowork session can be created. Never a host path, label or grant.
+    cowork: CoworkSessionRef.optional(),
     parentSessionId: z.string().optional(), // set on dispatch children
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.

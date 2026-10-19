@@ -140,11 +140,10 @@ daemon with mode 0700 and passed as `--receipt-dir`.
 Class A without both is not proof. That is NOT what the code at the integration head does today: `mintOrderlyStopProof` takes `{kind: "retained"}` with no probes, and `recovery.ts` mints from
 a port that returns `attested: true` which nothing implements yet. S7 (the production ports) must implement that port with both probes, and solve retire (below). This launcher only writes the file.
 
-**Authenticity.** A file the same user can write is not authentic: any same-user process can forge a retained Class A, and the probes above
-are what stands between a forgery and a release. A MAC over the line, with a key held in the Keychain under an access list naming the launcher,
-would raise the bar, but Keychain use is forbidden in this slice, so it is an OPEN ITEM that needs an owner ruling. Option (c), asking a freshly
-spawned, SecCode-verified launcher to read its own store, needs new L1 lines (a contract change). Recommendation: the probes now, (c) at the next
-contract revision.
+**Authenticity.** A file the same user can write is not authentic by itself. Owner ruling 2026-10-18 (contract section 7.1, text version 2) settles it: the daemon holds a per-installation
+32-byte key in its Keychain and hands it to the launcher once, in `begin.receiptKey`; the launcher keeps it in memory only, MINTS the MAC (HMAC-SHA256 over the Class A text, last key `mac`) and VERIFIES
+it on the retained-receipt read path (`DurableReceiptStore.load(_:key:)`). A forged, edited or other-key file is refused. The launcher itself still uses no Keychain. The two guard probes above remain the
+second check; see `docs/research/2026-10-18-cowork-n2-launcher-receipt-mac.md` for the design. Option (c), asking a freshly spawned, SecCode-verified launcher to read its own store, is no longer needed.
 
 **Retire gap.** After an owner-loss exit nothing can retire the file over L1 (the socket is gone), and Class B files are never retired. Proposal
 (S7, daemon side, no contract line needed): the next daemon, after it has accepted a retained receipt AND the two probes pass AND the disks are

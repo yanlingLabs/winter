@@ -145,4 +145,29 @@ final class IdentityTests: XCTestCase {
         let requirement = try requirementForFakeWorker()
         XCTAssertThrowsError(try WorkerImage(path: "/nonexistent/winter-worker", requirement: requirement))
     }
+
+    /// The profile reads the identifier the KERNEL holds for the running process. A launcher whose executable file is replaced while it runs must not change profile:
+    /// `SecCodeCopySelf` + `SecCodeCopyStaticCode` would re-read the path and report the NEW file's identifier. Run a harmless copy of FakeWorker (no privilege, no VM),
+    /// swap the file at its path for another ad-hoc identity, and compare the two readings.
+    func testTheProfileIdentifierIsTheRunningProcessesNotTheFileAtItsPath() throws {
+        let directory = makeTemporaryDirectory("profile-swap"); defer { try? FileManager.default.removeItem(at: directory) }
+        let root = BuiltProducts.canonical(directory.path), running = root + "/FakeWorker", replacement = root + "/replacement", flag = root + "/flag"
+        func signedCopy(_ path: String, identifier: String) throws {
+            try FileManager.default.copyItem(atPath: BuiltProducts.fakeWorker, toPath: path)
+            let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign"); sign.arguments = ["--force", "--sign", "-", "--identifier", identifier, path]
+            sign.standardError = FileHandle.nullDevice; try sign.run(); sign.waitUntilExit(); XCTAssertEqual(sign.terminationStatus, 0)
+        }
+        try signedCopy(running, identifier: "com.example.profile.running"); try signedCopy(replacement, identifier: "com.example.profile.replacement")
+        let child = Process(); child.executableURL = URL(fileURLWithPath: running); child.arguments = ["--identity", flag]
+        let pipe = Pipe(); child.standardOutput = pipe; child.standardError = FileHandle.nullDevice
+        try child.run(); defer { if child.isRunning { child.terminate() }; child.waitUntilExit() }
+        let reader = pipe.fileHandleForReading
+        func line() -> String { var bytes: [UInt8] = []; while let b = try? reader.read(upToCount: 1)?.first, b != 0x0a { bytes.append(b) }; return String(decoding: bytes, as: UTF8.self) }
+        XCTAssertEqual([line(), line()], ["kernel:com.example.profile.running", "path:com.example.profile.running"])
+        XCTAssertEqual(rename(replacement, running), 0, "the file at the path is now another program (a new inode; the running process keeps the old one)")
+        FileManager.default.createFile(atPath: flag, contents: Data())
+        let kernel = line(), viaPath = line()
+        XCTAssertEqual(viaPath, "path:com.example.profile.replacement", "the path-based reading follows the swapped file: this is the weakness the kernel reading avoids")
+        XCTAssertEqual(kernel, "kernel:com.example.profile.running", "the kernel's reading does not move")
+    }
 }

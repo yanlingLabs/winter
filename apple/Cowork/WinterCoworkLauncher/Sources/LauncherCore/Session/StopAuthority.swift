@@ -49,8 +49,11 @@ public struct StopContext: Sendable {
     public let hostBootId: String
     public let workerPid: Int32
     public let workerStartToken: String
-    public init(scope: Scope, homeId: String, launcherInstanceId: String, hostBootId: String, workerPid: Int32, workerStartToken: String) {
+    /// The installation's receipt MAC key, from `begin`. A Class A receipt is signed with it; without a usable key (zeroed) there is no Class A.
+    public let receiptKey: ReceiptKey
+    public init(scope: Scope, homeId: String, launcherInstanceId: String, hostBootId: String, workerPid: Int32, workerStartToken: String, receiptKey: ReceiptKey) {
         self.scope = scope; self.homeId = homeId; self.launcherInstanceId = launcherInstanceId; self.hostBootId = hostBootId; self.workerPid = workerPid; self.workerStartToken = workerStartToken
+        self.receiptKey = receiptKey
     }
 }
 
@@ -136,6 +139,9 @@ public enum OrderlyStopAuthority {
             guestDrain: booted ? .acked : .notBooted, guestHalting: booted ? .observed : .notBooted, guestPowerOff: booted ? .observed : .notBooted, workerPid: Int(c.workerPid), workerStartToken: c.workerStartToken,
             volumes: volumes, issuedAtMs: issuedAtMs)
         // Defence in depth: a receipt that does not satisfy the contract's own invariants is not orderly evidence, whatever built it.
-        return receipt.invariantsHold ? .orderly(receipt) : uncertain(.flushUncertain)
+        guard receipt.invariantsHold else { return uncertain(.flushUncertain) }
+        // SIGNED last, over everything above: the retained-receipt MAC. No key, no Class A.
+        guard let signed = receipt.signed(with: c.receiptKey) else { return uncertain(.launcherFault) }
+        return .orderly(signed)
     }
 }
