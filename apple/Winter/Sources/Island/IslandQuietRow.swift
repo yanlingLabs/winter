@@ -100,6 +100,8 @@ struct IslandLiftRow<Mark: View, Trailing: View, Below: View>: View {
 struct IslandRowWords<Trailing: View>: View {
     let text: String
     var color: Color = Theme.textMuted
+    /// Content that must not vanish (a device's reason) may take a second line; it is cut at its tail past that.
+    var lines = 1
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -107,8 +109,9 @@ struct IslandRowWords<Trailing: View>: View {
             Text(text)
                 .font(IslandQuietRow.wordsFont)
                 .foregroundStyle(color)
-                .lineLimit(1)
+                .lineLimit(lines)
                 .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: lines > 1)
             Spacer(minLength: 8)
             trailing()
         }
@@ -117,8 +120,8 @@ struct IslandRowWords<Trailing: View>: View {
 }
 
 extension IslandRowWords where Trailing == EmptyView {
-    init(text: String, color: Color = Theme.textMuted) {
-        self.init(text: text, color: color) { EmptyView() }
+    init(text: String, color: Color = Theme.textMuted, lines: Int = 1) {
+        self.init(text: text, color: color, lines: lines) { EmptyView() }
     }
 }
 

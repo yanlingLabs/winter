@@ -118,23 +118,30 @@ final class IslandQuietTabsTests: XCTestCase {
 
     // MARK: Devices
 
-    func testADevicesLineIsAllOrNothingAndTheHelpersIsItsTwoPermissions() {
-        XCTAssertEqual(IslandDevicesPresentation.lineFraction(.ok), 1)
-        XCTAssertEqual(IslandDevicesPresentation.lineFraction(.warning), 1)
-        XCTAssertEqual(IslandDevicesPresentation.lineFraction(.off), 0, "nothing estimated: off is the grey track")
+    func testADevicesStatusIsADotAndAWordAndTheHelpersPermissionsAreMarks() {
+        // No line: nothing a phone or a helper reports is an amount.
+        XCTAssertEqual(IslandDevicesPresentation.mark(.ok), .dot(Color(nsColor: .systemGreen)))
+        XCTAssertEqual(IslandDevicesPresentation.mark(.warning), .dot(pillReviewAmber))
+        XCTAssertEqual(IslandDevicesPresentation.mark(.off), .ring(Color.white.opacity(0.35)), "off: a hollow dot")
         let granted = IslandDevicesPresentation.chip("Accessibility", true)
         let denied = IslandDevicesPresentation.chip("Screen Recording", false)
         let unknown = IslandDevicesPresentation.chip("Accessibility", nil)
-        XCTAssertEqual(IslandDevicesPresentation.chipWords(granted), "✓ Accessibility")
-        XCTAssertEqual(IslandDevicesPresentation.chipWords(denied), "✕ Screen Recording")
-        XCTAssertEqual(IslandDevicesPresentation.chipWords(unknown), "? Accessibility")
-        XCTAssertEqual(IslandDevicesPresentation.chipColor(.granted), islandToneColor(.ok))
-        XCTAssertEqual(IslandDevicesPresentation.chipColor(.denied), pillReviewAmber)
-        let row = IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper", detail: "Running · 1.4.0",
+        XCTAssertEqual(IslandDevicesPresentation.permissionMark(granted).symbol, "checkmark")
+        XCTAssertEqual(IslandDevicesPresentation.permissionMark(granted).color, Theme.textMuted, "granted is quiet")
+        XCTAssertEqual(IslandDevicesPresentation.permissionMark(denied).symbol, "xmark")
+        XCTAssertEqual(IslandDevicesPresentation.permissionMark(denied).color, pillReviewAmber, "missing needs you: amber")
+        XCTAssertEqual(IslandDevicesPresentation.permissionMark(unknown).symbol, "questionmark")
+        let row = IslandDeviceRow(id: "cu", symbol: "cursorarrow.rays", title: "Computer Use helper", status: "Running · 1.4.0",
                                   tone: .warning, chips: [granted, denied])
         XCTAssertEqual(IslandDevicesPresentation.accessibilityLabel(row),
                        "Computer Use helper, Running · 1.4.0, Accessibility: granted, Screen Recording: not granted",
-                       "VoiceOver still hears what the row showed at rest before")
+                       "VoiceOver hears everything at rest")
+        XCTAssertFalse(IslandDevicesPresentation.showsDetail(row, hovered: true), "no detail: no line under it")
+        let chrome = IslandDeviceRow(id: "b", symbol: "puzzlepiece.extension", title: "Winter for Chrome · Chrome",
+                                     status: "Not connected", detail: "Not installed in Chrome", tone: .off)
+        XCTAssertFalse(IslandDevicesPresentation.showsDetail(chrome, hovered: false), "quiet at rest")
+        XCTAssertTrue(IslandDevicesPresentation.showsDetail(chrome, hovered: true), "revealed under the pointer")
+        XCTAssertEqual(IslandDevicesPresentation.accessibilityLabel(chrome), "Winter for Chrome · Chrome, Not connected, Not installed in Chrome")
     }
 
     // MARK: Shelf
