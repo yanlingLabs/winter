@@ -86,7 +86,8 @@ export const COWORK_NATIVE_LIMITS = Object.freeze({
   shares: 12, folderShares: 9, shareTagChars: 32, shareRecordBytes: 308,
   /** Cold resume: at most this many host-attested ended guest boots per conversation. */
   endedGuestBoots: 4,
-  /** A runtime's `timeoutMs` ceiling. The guest backstop for host-query runtimes is 24 h (owner O7, 2026-10-19); the agent SDK supervisor admits
+  /** A runtime's `timeoutMs` ceiling, for the host-query profiles only (the fixture `fresh` profile is never carried here and keeps its 600 s
+   * ceiling). The guest backstop for host-query runtimes is 24 h (owner O7, 2026-10-19); the agent SDK supervisor admits
    * more than 600000 only from its CR2 release on, so a set above 600000 is refused by an older pinned supervisor (fail closed). */
   runtimeTimeoutCeilingMs: 86_400_000,
 });
@@ -443,7 +444,8 @@ export interface CoworkNativeConversationRuntime {
   /** Present exactly when the profile is `host-query-guided-v1`: the SDK's `requiredRuntimeContext.bindingId` and the backend generation. */
   readonly guided: Readonly<{ bindingId: string; generation: number }> | null;
   /** Cold resume (contract revision 3): `fresh` (the store must be empty), `resume` (it must hold this conversation's store) or `either` (the host started the
-   * conversation before but recorded no completed turn: the supervisor runs it fresh on an empty store and resumes a non-empty one). */
+   * conversation before but recorded no completed turn: the supervisor runs it fresh on an empty store and resumes a non-empty one). `either` is never sent once the host's
+   * `store_state` is `created` (a completed turn): from then on only `resume`, so a lost store faults instead of starting fresh. */
   readonly continuation: "fresh" | "resume" | "either";
   /** Guest boot ids the HOST attests have ended (recorded at that boot's `hello`, released by real proof): the only previous-boot evidence the owner
    * library may mint. 0 to 4, distinct, never the live boot; empty for `fresh`. */
