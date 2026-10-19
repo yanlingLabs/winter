@@ -7,7 +7,9 @@ import type { ProcessInspection } from "../../src/cowork/native/admission-probes
 // The launcher port over an in-process socketpair: no child process, nothing named launcher is ever executed.
 const supported = fdChannelSupported();
 const cleanups: (() => void)[] = [];
-afterEach(() => { cleanups.splice(0).reverse().forEach(run => { try { run(); } catch { /* closed */ } }); });
+// Closing a descriptor makes the shared receiver hub post a late `end` for it. Wait for those to land INSIDE the test that caused them: the descriptor-count test of
+// fd-channel.test.ts counts the whole process, and a late close landing in a later file reads as a leak (or a vanished descriptor) there.
+afterEach(async () => { cleanups.splice(0).reverse().forEach(run => { try { run(); } catch { /* closed */ } }); await new Promise<void>(resolve => setTimeout(resolve, 100)); });
 
 const HELLO: CoworkNativeToDaemon = { t: "hello", launcherInstanceId: "launcher-synthetic1", hostBootId: "boot-synthetic", parentVerified: true };
 const line = (message: CoworkNativeToDaemon): Uint8Array => Buffer.from(serializeCoworkNativeLauncherLine(message, "to-daemon"), "utf8");
