@@ -12,6 +12,7 @@ Sources, read at these revisions:
 | DOOR | `docs/research/2026-10-18-cowork-session-door-design.md` on `cowork/session-door-2` (PR #79) |
 | #83 | `cowork/peer-inbox-wiring` at `a0ac4d5a` (draft): `drainCoworkInbox` |
 | #84 | `cowork/approvals-projection` at `6cd6591e` (draft): the Cowork approval route |
+| #91 | `cowork/file-channel-port` at `dc6d4565` (draft): the guest file channel's host transport port, streams 4 and 5 (section 4b) |
 | L | `cowork/n2-launcher-receipt-mac` (PR #85, stacked on #57): the Swift launcher |
 
 The N2 contract is `docs/cowork-native-worker.md` plus `packages/core/src/cowork/native/protocol.ts` and its vectors. Every wire change below is a proposed change to that contract, to be made by its owner (section 8).
@@ -78,8 +79,19 @@ The N2 contract is `docs/cowork-native-worker.md` plus `packages/core/src/cowork
     | Shares | SH1–SH6 | XL in total (SH2, the libkrun server, is the long pole) |
     | Cold resume | CR1–CR6 | L |
     | Messaging | GM1–GM4 | L |
+    | Guest file channel (section 4b, coordinator addition) | FC1–FC5 | M–L |
 
-    The contract slices and the three agent-SDK slices can start now in parallel.
+    The contract slices and the agent-SDK slices can start now in parallel.
+
+    **The file channel and the shares divide the work by location, one reader per location.**
+    - Shares: folders, guidance, memory and outputs, read on the host, even while the VM is stopped.
+    - The channel (#91's streams 4 and 5): repos and scratch on `data.ext4`, while the VM runs.
+
+    The guest file service resolves with `RESOLVE_NO_XDEV`, so it can never answer for a share.
+
+    **Two corrections to #91's note.**
+    - FILE_IN must NOT share the runtime IN counter. A busy file service would otherwise "prove" a stalled runtime is reading, and the guest's 4 MiB runtime ring could overflow.
+    - The worker and launcher change no source, but their vendored vector copies must be re-pinned: `runtime-stream-four` becomes `bad_direction`, and the counts and hashes change.
 19. **New gates.**
     - Amendments: G0-S, G1-S/R, G2-S/M and G4-S.
     - Three new live gates: G7 (share confinement in a VM), G8 (cold resume) and G9 (guest messaging).
@@ -688,16 +700,177 @@ That is a separate contract slice. GM1–GM3 can be built and tested with fakes 
 | GM4 | Prompt and tool-surface text for the newly offered tools (DOOR's generated blocks) | S | GM3 |
 | (MC) | Lift the one-conversation limit (separate contract slice; O12) | L | CR4 |
 
+## 4b. The guest file channel: Mac readers see guest-only files (coordinator addition)
+
+The host half is draft PR #91 (`cowork/file-channel-port`, at `dc6d4565`; note `docs/research/2026-10-18-cowork-guest-file-channel-transport.md`).
+
+- It carries the merged channel grammar (`cowork/guest-file-channel.ts`: `stat`, `read` and `readRange`, with closed request and response keys, and six error codes).
+- It uses two new streams in the existing RUNTIME mux class, on conversation 0:
+  - `FILE_IN = 4`, host to guest, request lines of at most 16 KiB;
+  - `FILE_OUT = 5`, guest to host, response lines of at most 384 KiB.
+- There is no NIC, vsock or network, and no class 3. The coordinator accepted this choice (O-F1).
+- The host port (`guest-file-port.ts`) is built and unwired. It allows four requests outstanding and fails closed on any unattributable line.
+
+What is missing is (a) the N2 contract extension and (b) the guest-side file service. This section designs both.
+
+### 4b.1 How the file channel and the shares divide the work
+
+The spec wants both:
+- **Shares** for guidance, memory and outputs: "readable through the artifact bridge while the VM is stopped".
+- **The channel** for guest-only browsing: "guest-only repos/scratch require file channel and visible wake when necessary".
+
+The rule is **one reader per location, never both**:
+
+| Location | Lives on | Mac reader | VM must run |
+| --- | --- | --- | --- |
+| Folder source (`/workspace/folders/<id>`) | the user's Mac folder (share, piece 1) | the host reads the host path directly (the user's own files; the Mac app or a host Code session) | no |
+| Shared guidance, memory, outputs | `<home>/cowork/workspaces/<id>/shared/…` (shares) | the existing host readers (`workspace.output.list`, `workspace.file.read`, `instruction-fs.ts`, `output-fs.ts`), descriptor-relative with `O_NOFOLLOW` | no |
+| Cloned repositories (`/workspace/repos/<id>`), conversation scratch, anything else on `data.ext4` | the guest data volume | **the file channel** (streams 4 and 5) | yes (a visible wake, per the spec) |
+
+This rule is enforced structurally:
+- The guest file service resolves with `RESOLVE_NO_XDEV` (4b.3). It can never read through a virtio-fs mount, so it can never answer for a share.
+- The host's authority composition (#91's NEEDS for DOOR) maps a share-backed `locationId` to the host reader and never to the channel.
+- The two paths never give two views of the same bytes.
+
+**Interim.** Until SH6 lands, outputs live on `data.ext4` (DOOR G11). The channel could serve them while the VM runs, as a stopgap.
+- Recommendation: do not build that stopgap. Ship the outputs share before activation instead. No production Cowork data exists yet, so no migration of outputs from `data.ext4` to the share is needed.
+- If the order changes and activation comes first, PID 1 must refuse to mount the outputs share over a non-empty `/workspace/outputs`. A migration step is then owed.
+
+### 4b.2 (a) The N2 contract extension
+
+| Contract item | Change |
+| --- | --- |
+| `docs/cowork-native-worker.md` section 6.2, the stream byte | `1` IN (down), `2` OUT (up), `3` ERR (up), **`4` FILE_IN (down), `5` FILE_OUT (up)**; `0` and `6` or more stay `bad_field` |
+| Direction rule | `(stream ∈ {IN, FILE_IN}) == (direction == down)`, else `bad_direction` |
+| Conversation index | streams 4 and 5 are legal on conversation **0 only**, in N2 and after MC. A request names its own `sessionId`; the guest resolves it against that conversation's delivered roots. The index is transport, not authority. Streams 4 and 5 on any other index are `bad_field` |
+| End state | as for the other streams: an empty data section only with the end flag; nothing after an end. `FILE_IN` end = the host closed its port (the channel is over, never "this reply is done", as #91 says); `FILE_OUT` end = the guest file service exited (drain, or a fault). After either end the channel stays closed for the incarnation; #91's port fails closed and the next incarnation builds a new one |
+| Ordering | file frames only after `runtime_ready`, like every runtime frame |
+| Capability gate | the host sends streams 4 and 5 only when the pinned image declares `file-channel-v1` in `CoworkGuestRuntimeOffer.runtimeCapability.capabilities`. An older guest relay refuses stream 4 as `bad_field`, which would end its stream. That makes this an additive capability, not a mux version bump |
+| **IN accounting (a correction to #91's recommendation)** | **Two counters, not one.** The runtime IN rule (at most 1 MiB with no OUT or ERR payload byte since) stays exactly as it is: only OUT and ERR bytes clear it, and FILE_IN bytes do not join it. FILE_IN gets its own bound: at most 4 outstanding requests of at most 16 KiB (64 KiB), cleared request by request when the response line's newline arrives on FILE_OUT. FILE_OUT bytes never clear the runtime counter |
+| Vectors | `mux-frames.json`: positives for stream 4 down and stream 5 up (bytes and end); negatives for stream 4 up and stream 5 down (`bad_direction`), stream 6 (`bad_field`) and streams 4 and 5 on conversation 1 (`bad_field`). **`runtime-stream-four` changes its expected error from `bad_field` to `bad_direction`** (it travels up), so every copy must be re-pinned. `runtime-flow.json`: cases showing that FILE_OUT bytes do not clear the runtime IN counter, and that the fifth outstanding file request is refused |
+| `native/protocol.ts` | `COWORK_NATIVE_RUNTIME_STREAMS` gains `file_in` and `file_out`; the direction rule; the conversation-0 rule; `CoworkNativeRuntimeStreams` tracks the two end states and the separate file counter; `COWORK_NATIVE_LIMITS` gains `fileInFlightRequests: 4` and `fileRequestBytes: 16384` (the channel's own literals, pinned equal by a test) |
+| `native/host.ts` (S7B) | route `file_out` to the incarnation's `CoworkGuestFileStreamLink`; send `file_in` from it; end both on stop or fault |
+
+**Why two counters.** The guest relay gives FILE_IN its own small ring (4b.3) and keeps its 4 MiB ring for runtime IN.
+
+Suppose one counter served both, and any FILE_OUT byte cleared it. Then a busy file service would "prove" the runtime was reading while the runtime's 4 MiB ring was in fact filling. Four such cycles would overflow it, and an overflow stops the whole guest (contract section 6.2).
+
+With separate counters, each stream's own reader is the only proof of its own progress.
+
+**Does the worker or the launcher change? Source no; pinned test fixtures yes.**
+- **The worker** never reads a runtime payload (`Mux.c`: "bootstrap and runtime: blind by design"). But its test carries a byte-for-byte copy of `mux-frames.json`:
+  - pinned by SHA-256 in `Tests/fixtures/PINS.json`;
+  - `MUX_VECTOR_COUNT == 145` in `Tests/test_mux.c`;
+  - a `relayBlind` name list whose members must pass the header check.
+
+  The re-pin (FC2) updates the copy, the hash, the count and the `relayBlind` list: every new stream vector is payload-level, so the worker passes it through. `gen_vectors.py` regenerates `vectors.h`. No `Sources/` change.
+- **The launcher** reads only the 16-byte header (`Wire/Mux.swift`: "The launcher RELAYS BLIND"). Its `Tests/LauncherCoreTests/Vectors/` copy, `PINS.json` and the counts in `GoldenVectorTests.swift` are re-pinned the same way. No `Sources/` change.
+- **The guest relay DOES parse the stream byte** (`common/wmx.c` `wmx_parse_runtime_payload` refuses `stream > ERR`), so it changes in code (FC3).
+
+### 4b.3 (b) The guest-side file service
+
+**Where it runs.**
+- The relay is winter's (`apple/Cowork/WinterCoworkGuest/relay/relay.c`), not the SDK's. It owns the port and routes the streams.
+- The service is the SDK supervisor's (`linux-supervisor.py`), which owns roots, identities and compartments.
+- The path walk runs in a compartmented helper: the SDK's `file-worker.c`, gaining two operations.
+
+**Relay (winter, FC3).**
+- Stream 4 frames (conversation 0, after `G`) go into a separate FILE_IN ring of 256 KiB. That is four times the 64 KiB bound, the same safety factor as the runtime ring, and is held by a `_Static_assert`.
+- The ring drains to a FILE_IN FIFO. A frame that would overflow it is `oversize`, which ends the stream, exactly as for the runtime ring.
+- A FILE_OUT FIFO is read into stream 5 frames, in chunks of at most 64 KiB.
+- It is read only under the same upstream reserve gate (`RUNTIME_GATE`) as OUT and ERR, so `drain_ack`, `halting` and `fault` always fit.
+- It is serviced round-robin with OUT, so a large read cannot starve a turn's output.
+- PID 1 creates the two FIFOs (anonymous pipes, root-owned, one link) and passes them as `--file-channel-fds IN,OUT` beside `--runtime-ports-fds`. The supervisor checks them like `RuntimeDuplexPorts` (`S_ISFIFO`, owner, access mode, distinct inodes).
+
+**Service (SDK supervisor, FC4).**
+- A thread started after the supervisor's ready line. It handles at most 4 requests at once and stops reading FILE_IN while 4 are unanswered.
+- Each request line (at most 16 KiB) is parsed by a strict Python port of `parseCoworkGuestFileRequest`. That means the same key tables, bounds, ID grammar, path rules (4096 bytes, 32 components, 255 per component; no absolute path, no `.` or `..` or empty component, no control characters) and canonical spelling. A drift test compares its literals with winter's (copied JSON tables, hash-pinned, as the native vectors are).
+- Binding checks against the trusted config (#91 section 4):
+  - `workspaceId` and `sessionId` must name a delivered conversation;
+  - `incarnationId` must equal the set's, else `stale_file`;
+  - `locationId` must equal one of that conversation's root `id`s exactly;
+  - `sourceRevision` is echoed, never checked (it is a host fence).
+- For each request the supervisor launches the file worker in a **browse compartment**:
+  - a dedicated per-workspace **browse uid**, distinct from every runtime and tool uid, never the tool uid (#91);
+  - a private mount view of only that conversation's admitted roots, every one bound **read-only** whatever the policy, with no `.winter` tree, no run homes, no sockets and no provider socket;
+  - `no_new_privs`, seccomp;
+  - **exactly one capability, `CAP_DAC_READ_SEARCH`**, so it reads files written by any Project member's tool uid. The read-only view bounds it, and the hard-link refusal below keeps it from becoming a confused deputy.
+  - The existing compartment launcher gains a `browse` mode, and the worker's capability self-check (which today demands an empty set) gains an exact-set variant for it (O14).
+- The service writes exactly one canonical response line per request:
+  - the echo of every binding field, `requestId` and `op`;
+  - `kind: "file"`;
+  - `bytes`;
+  - the `generation`;
+  - for reads: `offset`, `nextOffset`, `eof` (true exactly at the end), `contentBase64` and `encoding: "base64"`.
+
+  Its lines never interleave, are at most 384 KiB, and are written to FILE_OUT in pieces of at most 256 KiB.
+
+**The path walk (file worker, new `stat` and `browse-read` operations).**
+
+1. `root = openat2(AT_FDCWD, guestPath, {O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS})`.
+2. `file = openat2(root, relativePath, {O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV})`. This is the kernel-enforced form of a component-by-component `O_NOFOLLOW` walk: any symlink in any component, any `..` escape, any mount crossing and any magic link is refused.
+3. `fstat`:
+   - it must be `S_ISREG`;
+   - `st_nlink == 1` (no hard-link alias, since the reader has `CAP_DAC_READ_SEARCH`);
+   - `st_dev` must equal the root's.
+
+   PID 1 also sets `fs.protected_hardlinks=1`, so a tool cannot even create a link to a file it cannot write.
+4. `generation` = lowercase hex SHA-256 of `"v1|" incarnationId "|" dev "|" ino "|" size "|" mtime_ns "|" ctime_ns "|" mode "|" nlink "|" uid`. It is opaque to the host (64 hex, the channel's grammar), and bound to the incarnation, so a token never carries across a boot.
+5. A read compares the request's `expectedGeneration` first (mismatch → `stale_file`), then `pread(offset, min(maxBytes, size − offset))`, then `fstat` again:
+   - changed generation → `stale_file`;
+   - size now below the bytes promised → `file_incomplete`.
+6. The worker never returns a guest path; the reply echoes the relative path only.
+
+**Error codes (the channel's six, and nothing else).**
+
+| Condition | Code |
+| --- | --- |
+| A well-formed line whose values are out of range (`maxBytes` outside 1 to 262,144, `offset` beyond the file) | `invalid_request` |
+| A line too broken to echo (not JSON, no `requestId`, over 16 KiB) | no reply: the service ends FILE_OUT. #91's port then fails closed (`file_unavailable` for every call), so a slot can never leak. The host port parses every line before sending, so this needs a host bug |
+| `ENOENT`, `ENOTDIR` on a component | `file_missing` |
+| A symlink anywhere (`ELOOP`), a mount crossing (`EXDEV`), not a regular file, `st_nlink > 1`, `EACCES`, an unknown `locationId`, a `workspaceId`/`sessionId` that is not delivered, the browse compartment unavailable | `file_unavailable` |
+| `incarnationId` differs, `expectedGeneration` differs, the file changed during the read | `stale_file` |
+| The file shrank under the read | `file_incomplete` |
+| A response line that would pass 384 KiB (unreachable with `maxBytes` at most 256 KiB, kept as a guard) | `response_too_large` |
+
+Never `authority_denied`: revocation is a host fact (channel note).
+
+**Drain.** On `drain` PID 1 closes the service's FILE_IN first. The service finishes the line in progress, writes nothing more, closes FILE_OUT and exits. The relay frames FILE_OUT's end flag before `halting`, and nothing is answered after `drain_ack`.
+
+### 4b.4 Threat analysis (file channel)
+
+| # | Threat | Mitigation |
+| --- | --- | --- |
+| F1 | A tool plants a symlink or hard link so the privileged browser reads a protected file (another conversation's store, a run home, the trusted config) | the mount view holds only the conversation's admitted roots, read-only; `RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`, `RESOLVE_NO_XDEV`; `nlink == 1`; `fs.protected_hardlinks=1`; the browse uid owns nothing |
+| F2 | The browser writes or executes | read-only view, `O_RDONLY`, seccomp without write or exec syscalls on files, no capability but `CAP_DAC_READ_SEARCH` |
+| F3 | A tool tampers with the browser (ptrace, signals) | a separate uid and its own PID namespace per launch |
+| F4 | A flood of requests or huge reads starves turns or overflows a ring | 4 outstanding requests; separate FILE_IN ring and counter; FILE_OUT under the reserve gate, round-robin with OUT |
+| F5 | The guest forges replies (wrong scope, generation or length) | #91's port and the channel parser judge every reply; any unattributable line closes the port |
+| F6 | A guest path reaches a Mac filesystem API | never: the host maps `locationId` to a share or to the channel, and a guest path never leaves the guest (#91 section 4) |
+| F7 | The same bytes are read through two paths with different views | 4b.1's one-reader rule, held by `RESOLVE_NO_XDEV` and the host's location mapping |
+
+### 4b.5 Files and slices (file channel)
+
+| Slice | What | Repo and files | Size | Depends on | Owner lane |
+| --- | --- | --- | --- | --- | --- |
+| FC1 | Contract: streams 4 and 5, the direction, conversation-0 and end rules, two IN counters, the capability gate, vectors (`mux-frames.json`, `runtime-flow.json`) | winter: `docs/cowork-native-worker.md` section 6.2, `native/protocol.ts`, `test/cowork/native/vectors/*`, `test/cowork/native/protocol.test.ts` | S–M | none (joins the SH1 + CR1 contract PR) | contract owner (S7B) |
+| FC2 | Re-pin the vector copies (no source change) | winter: `apple/Cowork/WinterCoworkHVFWorker/Tests/{fixtures/mux-frames.json,fixtures/runtime-flow.json,fixtures/PINS.json,test_mux.c,gen_vectors.py output}`; `apple/Cowork/WinterCoworkLauncher/Tests/LauncherCoreTests/{Vectors/*,GoldenVectorTests.swift}` | S | FC1 | worker, launcher lanes |
+| FC3 | Guest relay: stream routing, FILE_IN ring, FILE_OUT gate and fairness, PID 1 FIFOs and `--file-channel-fds`, the drain order, `protected_hardlinks` | winter: `apple/Cowork/WinterCoworkGuest/{relay/relay.c,common/wmx.c,common/wmx.h,init/boot.c,init/init_linux.c,vectors/*,tests/test_relay.py}` | M | FC1 | N2 guest lane |
+| FC4 | SDK file service and browse compartment: request parser with a drift test, binding checks, the `browse` mode, file worker `stat` and `browse-read`, canonical responses, drain | agent SDK: `packages/runtime/src/guest/{linux-supervisor.py,file-worker.c,linux-tool-compartment.c,linux-compartment.h}` and tests | M–L | none to start (the grammar is merged); final wire after FC1 | SDK lane |
+| FC5 | Host routing and composition | winter: `native/host.ts` (S7B); `cowork/session-ports.ts` `files` link and the authority composition (DOOR); #91 merges | S–M | FC1, #91 | S7B, DOOR |
+
 ## 5. Combined order
 
 | Wave | Slices (in parallel inside a wave) | Why this order |
 | --- | --- | --- |
-| A, now | SH1 + CR1 (one contract PR); SH2 (long pole, independent review); CR2, GM1, GM2 (agent SDK, separate draft PRs into SDK main) | no dependencies; the SDK and libkrun work is the longest |
-| B | SH3, SH4, SH5, SH6 | they all code against SH1 |
+| A, now | SH1 + CR1 + FC1 (one contract PR, text version 3); SH2 (long pole, independent review); CR2, GM1, GM2, FC4 (agent SDK, separate draft PRs into SDK main) | no dependencies; the SDK and libkrun work is the longest |
+| B | SH3, SH4, SH5, SH6; FC2 (re-pin the vector copies), FC3 (guest relay), FC5 (host routing, once #91 merges) | they all code against the contract PR |
 | C | CR3, CR4 (with DOOR D3/D4), CR5 | needs CR1 and CR2; CR4 waits for the instructions share (SH6) and the guided profile before activation (O8) |
 | D | GM3, GM4 | needs GM2 released and pinned, #83 and #84 merged, DOOR D3 |
 | E | MC; CR6 if chosen | after CR4 |
-| Gates | G0-S after SH3; G4-S and G7 after SH2–SH6; G8 after wave C; G9 after D and MC | each needs a review of the exact commit and the owner's approval |
+| Gates | G0-S after SH3; G1-F after FC2–FC5; G4-S and G7 after SH2–SH6; G8 after wave C; G9 after D and MC | each needs a review of the exact commit and the owner's approval |
+
+The SDK image re-pin happens once, after CR2, GM1, GM2 and FC4. It collects every SDK change, so the guest image is rebuilt one time (an image build is an owner-approved run).
 
 ## 6. Gates added to G0–G6
 
@@ -707,6 +880,7 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | --- | --- | --- |
 | **G0-S** (amends G0) | `--sandbox-check` of the production worker with two share parameters (one `ro`, one `rw`) on disposable fixture folders, plus a protected fixture | reads inside both shares; writes inside `rw` only; denial outside, of `/.vol/...` spellings, of xattr and setugid writes, and in a protected subtree; firmlink spelling behaviour; whether the operation names in 2.4 suffice; no VM starts |
 | **G1-S** (amends G1) | G1's sequence with the three Winter shares and one folder fixture | inventory check, mounts, `shares_mounted`, alias, the drain unmounts the shares before `halting` |
+| **G1-F** (amends G1) | G1's sequence plus file-channel reads of a cloned-repo fixture: `stat`, whole `read` and `readRange` across chunk sizes; a tool-planted symlink, hard link, FIFO and an out-of-root `..`; a read of a share path (must be refused by `RESOLVE_NO_XDEV`); a file changed mid-read; four outstanding plus a fifth; a drain mid-read | the guest service's walk and codes in a real kernel; that FILE_OUT never clears the runtime counter (a stalled runtime with an active browser keeps its ring bounded); the drain order (FILE_OUT end before `halting`) |
 | **G2-S/M** (amends G2) | forged L1 `shares` lines (wrong identity, nested paths, too many fds, a fd that is not a directory), a forged argv, a second revoke; forged `host_input_*` frames and answers | the launcher and the worker refuse; nothing is mounted; the guest refuses foreign ids |
 | **G4-S** (amends G4) | the three-cycle reclaim on ext4 PLUS sustained share I/O on every device at the production profile | reclaim holds with fs devices registered; the pin high-water stays under the re-sized budget; no exit 77 |
 | **G7** (new) | a hostile-guest share suite: a test-only guest tool image issues raw FUSE requests (`..`, `/`, absolute and dangling links, mknod, `setupmapping`, cross-share link and rename, handle exhaustion); a Mac-side mutator renames and swaps directories during resolution; host-read-only exports re-mounted writable in the guest; the revoke switch mid-read; TCC on Documents and Desktop, an iCloud Drive folder and a removable volume; case-insensitivity and many-small-file timing | confinement against a hostile guest; three-layer RO ("a denial behind a guest RO bind proves only guest enforcement"); immediate cutoff; the TCC attribution |
@@ -732,6 +906,9 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | X13 | Host path disclosure: existing links in user folders show the user's home path and name to the guest and the model. | Document as a residual; do not rewrite link text. |
 | X14 | DAX is not mentioned anywhere. | Off in v1 at four points (R6). |
 | X15 | Previous-boot termination evidence for the SDK store lease has no producer (the guest cannot know). | The host-attested `endedGuestBoots` (3.2, L6). |
+| X16 | The spec wants both host-backed shares and a guest file channel, but does not say which serves which location. | One reader per location (4b.1): shares for folders, guidance, memory and outputs; the channel for `data.ext4`-only locations. This is enforced by `RESOLVE_NO_XDEV` and the host's location mapping. |
+| X17 | #91 recommends one IN counter for runtime and file streams. That can let a busy file service mask a stalled runtime and overflow the guest's runtime ring. | Two counters (4b.2). |
+| X18 | The file channel refuses hard-linked files (`nlink > 1`), so files that package managers hard-link (for example a pnpm store) are not browsable. | Accept it in v1; the refusal is what keeps the privileged browser from being a confused deputy. Revisit only with a non-privileged browser. |
 
 ## 8. NEEDS FROM OTHER LANE
 
@@ -743,8 +920,12 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | DOOR (`repository.ts`, driver) | Call `acknowledgeSource(epoch, sourceId, revision, "ready")` at `shares_mounted`. The resume branch of `ensure` (3.2). `hostMessaging` bound to `handlerFor(binding.sessionId, incarnation)`. `holdInput`, `commitInput(id, epoch)` and `discardInput(id, epoch)` on the Cowork `MessagingDriverHandle`. `coworkEpoch` published only after the runtime-start reconciliation has finished (4.5, rule 1). The projector consumes `system/host_input_committed`. `COWORK_GUEST_PROFILE_TOOLS` grows to GM1's set once the pinned image carries it. |
 | PEER-INBOX (`agent/session-messaging.ts`, `cowork/peer-inbox.ts`) | `drainOnce` for a Cowork recipient (4.5): first re-commit `deliveredUnconfirmed` oldest first; then `offer`, `holdInput`, `ack`, then `commitInput(receiptId, epoch)`, or `discardInput(receiptId, epoch)` on any ack throw. Never `deliverInto` for a Cowork driver. Ledger `verdict`, `confirmCommitted`, `deliveredUnconfirmed`, and `prune` skipping delivered records without the mark. Reconciliation at runtime start runs in the same per-recipient chain, before the driver publishes `coworkEpoch` (rule 1). |
 | APPROVALS (`runtime-sdk/cowork-approval.ts`, `approval-bridge.ts`) | Class rows: ListAgents and Task\* read-only (allow everywhere); SendMessage as `coordination` (allow everywhere). The AskUserQuestion bridge on the Cowork route with `mode: "cowork"` cards. |
-| N2 guest lane | SH6, CR3, CR5; an image re-pin to the SDK commit carrying CR2, GM1 and GM2; the optional `CONFIG_FUSE_DAX=n` fragment at the next kernel pin. |
+| N2 guest lane | SH6, CR3, CR5, FC3 (relay streams 4 and 5, PID 1 FIFOs, `protected_hardlinks`); an image re-pin to the SDK commit carrying CR2, GM1, GM2 and FC4; the optional `CONFIG_FUSE_DAX=n` fragment at the next kernel pin. |
 | libkrun lane | SH2 as patches 0024 onward in the vendored queue, with the independent review the README requires. |
+| Contract owner (S7B), file channel | FC1: streams 4 and 5 in section 6.2 and `native/protocol.ts`, the direction, conversation-0 and end rules, a SEPARATE file IN counter (not #91's shared one), the `file-channel-v1` capability gate, and vectors (with `runtime-stream-four` now `bad_direction`). |
+| Worker and launcher lanes | FC2: re-pin their vector copies (hashes, counts, the worker's `relayBlind` list, the launcher's `GoldenVectorTests`). No source change. |
+| S7B and DOOR, file channel | FC5: `native/host.ts` routes `file_out` to and `file_in` from the incarnation's `CoworkGuestFileStreamLink`; DOOR's spine and the authority composition, as #91 lists. The composition maps a share-backed `locationId` to the host reader and never to the channel (4b.1). |
+| SDK lane, file channel | FC4: the supervisor file service, the `browse` compartment mode with exactly `CAP_DAC_READ_SEARCH`, file worker `stat` and `browse-read`, and a drift test against winter's channel literals. |
 
 ## 9. Owner decisions (each with my recommendation)
 
@@ -763,6 +944,9 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | O11 | Peer delivery into a guest | Two-phase hold, ack, then commit or discard, plus the prune guard (4.5). This is the coordinator's requirement; it changes #83's order. |
 | O12 | More than one host-query conversation per guest | Yes, as a separate contract slice after CR4. Same-Project messaging between live guest conversations and concurrent Project conversations need it. |
 | O13 | The gate stand-in for model-driven tool calls (G8, G9) | Extend the runtime-sdk stub to emit tool calls, under the same reserved stand-in selection as DOOR's O2. Otherwise those parts of G8 and G9 wait for the held provider bridge. |
+| O14 | The identity of the guest file browser | A dedicated per-workspace browse uid with exactly `CAP_DAC_READ_SEARCH`, in a read-only view of the requesting conversation's roots, per request. This follows #91's "never as the tool uid", and reads files any Project member wrote. The alternative is the conversation's own tool uid in a read-only view, with no capability: simpler, but it misses files another member wrote 0600. |
+| O15 | The IN accounting for the file streams | Separate counters (4b.2), correcting #91's single-counter recommendation. |
+| O16 | Outputs before the outputs share | Do not route outputs through the file channel as a stopgap; ship the outputs share (SH6) before activation, so no migration is ever needed. |
 
 ## 10. Provider path: where I stopped
 
@@ -787,4 +971,5 @@ I did not design or analyse the bridge. The rest of G8 and G9 (stop and resume c
   - shares (SH1–SH6), cold resume (CR1–CR6) and guest messaging (GM1–GM4) are designed and not built;
   - the 600 s supervisor cap (X6) and the one-conversation limit (X10) are blockers for long and concurrent conversations.
 - `docs/cowork-spec.md` and `docs/cowork-execution-contracts.md` (a later spec pass, not this lane): X1, X2, X4, X5, X12 and X14.
-- `docs/cowork-native-worker.md`: text version 3, after SH1 and CR1 land, by its owner.
+- `docs/cowork-native-worker.md`: text version 3, after SH1, CR1 and FC1 land, by its owner. Section 6.2 gains streams 4 and 5 and the separate file IN counter.
+- `docs/claude/cowork.md`, the file channel: one reader per location (shares versus channel); streams 4 and 5 are runtime-class streams on conversation 0; the guest browser is a read-only compartment that refuses symlinks, hard links and mount crossings.
