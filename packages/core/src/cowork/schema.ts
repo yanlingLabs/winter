@@ -279,7 +279,9 @@ export function migrateCoworkPeerInboxSchema(db: Database): void {
 }
 
 /** S7B's home binding table, byte for byte its `COWORK_HOME_BINDING_DDL` (cowork/host-env/stores.ts). */
-const COWORK_HOME_BINDING_TABLE = `CREATE TABLE IF NOT EXISTS cowork_home_binding (
+/** S7B's `COWORK_HOME_BINDING_DDL` (cowork/host-env/stores.ts) must equal this text; the twin pin lands with whichever
+ *  of the two merges second. */
+export const COWORK_HOME_BINDING_TABLE = `CREATE TABLE IF NOT EXISTS cowork_home_binding (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   home_id TEXT NOT NULL UNIQUE REFERENCES cowork_home_identity(home_id),
   canonical_path TEXT NOT NULL,
@@ -289,6 +291,12 @@ const COWORK_HOME_BINDING_TABLE = `CREATE TABLE IF NOT EXISTS cowork_home_bindin
   origin_installation_id TEXT NOT NULL,
   created_at TEXT NOT NULL
 )`;
+/** Written once, enforced by the schema: an UPDATE, a DELETE or a second INSERT (an `OR REPLACE` included) aborts. Dropping the table (a downgrade of an
+ *  EMPTY store) drops these with it. */
+const COWORK_HOME_BINDING_WRITE_ONCE = `
+CREATE TRIGGER IF NOT EXISTS cowork_home_binding_no_update BEFORE UPDATE ON cowork_home_binding BEGIN SELECT RAISE(ABORT, 'cowork_home_binding is written once'); END;
+CREATE TRIGGER IF NOT EXISTS cowork_home_binding_no_delete BEFORE DELETE ON cowork_home_binding BEGIN SELECT RAISE(ABORT, 'cowork_home_binding is written once'); END;
+CREATE TRIGGER IF NOT EXISTS cowork_home_binding_no_replace BEFORE INSERT ON cowork_home_binding WHEN EXISTS (SELECT 1 FROM cowork_home_binding) BEGIN SELECT RAISE(ABORT, 'cowork_home_binding is written once'); END;`;
 
 /** v18, session door spine (D1; docs/research/2026-10-18-cowork-session-door-design.md, gaps G1 and G9). Rebuilds
  * `cowork_conversations` (SQLite's generalized ALTER TABLE: the registration sets `rebuildsParentTable`, so foreign keys are
@@ -301,13 +309,14 @@ const COWORK_HOME_BINDING_TABLE = `CREATE TABLE IF NOT EXISTS cowork_home_bindin
  * It also creates `cowork_home_binding` for S7B (N2 integration; its store is `createCoworkHomeBindingStore` in
  * cowork/host-env/stores.ts, which exports the same text as `COWORK_HOME_BINDING_DDL`): the singleton record of which
  * prepared Mac home this Cowork home is bound to (canonical path, volume and directory ids, the machine and installation
- * it was first prepared on). Written once and never updated; it is Cowork authority (COWORK_TABLES), so a populated
- * binding refuses both downgrades.
+ * it was first prepared on). Written once: triggers abort any UPDATE, DELETE or replacing INSERT of it. It is Cowork authority
+ * (COWORK_TABLES), so a populated binding refuses both downgrades.
  * Records only: nothing reads the new conversation columns yet, and no row can be created through any door.
  * Idempotent: the binding table is `IF NOT EXISTS`, and a conversations table that already has `location_kind` is left
  * alone (fixtures that rewind only `user_version` replay this). */
 export function migrateCoworkSessionBindingSchema(db: Database): void {
   db.exec(COWORK_HOME_BINDING_TABLE);
+  db.exec(COWORK_HOME_BINDING_WRITE_ONCE);
   const columns = db.query<{ name: string }, []>("PRAGMA table_info(cowork_conversations)").all().map(column => column.name);
   if (columns.includes("location_kind")) return;
   db.exec(`

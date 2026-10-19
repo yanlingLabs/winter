@@ -130,6 +130,45 @@ test("a v17 store upgrades in place: rows, their dependents and the index surviv
   expect(new CoworkRepository(second).binding("s_bound")).toMatchObject({ sessionId: "s_bound", workspaceId, sourceId, relativeCwd: "repo/sub" });
 });
 
+/** What SQLite itself reports about a table's foreign keys (independent of how the DDL is spelled). */
+const foreignKeys = (db: Database) => db.query<{ id: number; seq: number; table: string; from: string; to: string }, []>("SELECT id, seq, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('cowork_conversations') ORDER BY \"table\", seq").all()
+  .map(({ table, from, to, seq }) => ({ table, from, to, seq }));
+/** Each `CHECK(...)` clause of a DDL text, whitespace-normalised. */
+const checksOf = (sql: string) => [...sql.matchAll(/CHECK\((?:[^()]|\([^()]*\))*\)/g)].map(match => match[0].replace(/\s+/g, " "));
+
+test("the rebuild keeps EVERY v17 constraint, judged against the v17 text itself: its foreign keys and CHECKs exist and refuse, fresh and upgraded", () => {
+  const v17 = new Database(":memory:"); v17.exec(V17_TABLE);
+  const v17Keys = foreignKeys(v17), v17Checks = checksOf(V17_TABLE); v17.close();
+  expect(v17Keys).toEqual([
+    { table: "cowork_projects", from: "project_id", to: "project_id", seq: 0 },
+    { table: "cowork_sources", from: "workspace_id", to: "workspace_id", seq: 0 },
+    { table: "cowork_sources", from: "source_id", to: "source_id", seq: 1 },
+    { table: "cowork_workspaces", from: "workspace_id", to: "workspace_id", seq: 0 },
+  ]);
+  expect(v17Checks).toHaveLength(3); // policy, revision, state
+
+  const fresh = openDb(tempHome()), freshFixture = bound(fresh, "s_fresh");
+  const upgradedHome = tempHome(), first = openDb(upgradedHome), upgradedFixture = bound(first, "s_upgraded");
+  rewindToV17(first); first.close();
+  const upgraded = openDb(upgradedHome);
+  expect(upgraded.schemaVersion()).toBe(18);
+  for (const [label, db, { workspaceId, sourceId }] of [["fresh", fresh, freshFixture], ["upgraded", upgraded, upgradedFixture]] as const) {
+    expect([label, foreignKeys(db.db)]).toEqual([label, v17Keys]);
+    const sql = tableSql(db.db).replace(/\s+/g, " ");
+    for (const check of v17Checks) expect([label, check, sql.includes(check)]).toEqual([label, check, true]);
+    const insert = (sessionId: string, over: Partial<Record<"workspace" | "source" | "policy" | "state" | "revision", unknown>> = {}) => db.db.run(
+      "INSERT INTO cowork_conversations(session_id,workspace_id,project_id,location_kind,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at) VALUES(?,?,NULL,'source',?,'.',?,'{}',?,?,'t')",
+      [sessionId, (over.workspace ?? workspaceId) as string, (over.source ?? sourceId) as string, (over.policy ?? "ask") as string, (over.revision ?? 1) as number, (over.state ?? "active") as string]);
+    const outcome = (run: () => unknown) => { try { run(); return "accepted"; } catch (error) { return /constraint/i.test(String(error)) ? "refused" : String(error); } };
+    expect([label, outcome(() => insert(`s_ok_${label}`))]).toEqual([label, "accepted"]);
+    for (const [name, over] of [
+      ["a bad policy", { policy: "yolo" }], ["a bad state", { state: "gone" }], ["a zero revision", { revision: 0 }],
+      ["a dangling source", { source: "source_missing" }], ["a dangling workspace", { workspace: "workspace_missing" }],
+    ] as const) expect([label, name, outcome(() => insert(`s_${name.replace(/\W/g, "_")}_${label}`, over))]).toEqual([label, name, "refused"]);
+    expect(db.db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  }
+});
+
 test("idempotent: rewinding user_version to 17 and reopening, or calling the migration again, changes nothing", () => {
   const home = tempHome(), first = openDb(home);
   bound(first);
@@ -180,6 +219,12 @@ test("migration 18 creates S7B's cowork_home_binding: a singleton, every column 
   expect(() => insertBinding(db.db, homeId, 2)).toThrow(); // only the singleton row
   insertBinding(db.db, homeId);
   expect(() => insertBinding(db.db, homeId)).toThrow(); // written once
+  // ...and never rewritten or removed: the schema's own triggers abort both.
+  expect(() => db.db.run("UPDATE cowork_home_binding SET canonical_path='/elsewhere'")).toThrow("written once");
+  expect(() => db.db.run("UPDATE cowork_home_binding SET created_at=created_at")).toThrow("written once");
+  expect(() => db.db.run("DELETE FROM cowork_home_binding")).toThrow("written once");
+  expect(() => db.db.run("INSERT OR REPLACE INTO cowork_home_binding(singleton,home_id,canonical_path,volume_id,directory_id,origin_machine_id,origin_installation_id,created_at) VALUES(1,?,'/x','v','d','m','i','t')", [homeId])).toThrow();
+  expect(db.db.query("SELECT canonical_path FROM cowork_home_binding").get()).toEqual({ canonical_path: "/fixture/home" });
   expect(db.db.query("SELECT count(*) AS n FROM cowork_home_binding").get()).toEqual({ n: 1 });
   expect(db.db.query("PRAGMA foreign_key_check").all()).toEqual([]);
 });
