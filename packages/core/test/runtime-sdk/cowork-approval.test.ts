@@ -128,6 +128,7 @@ test("Glob, Grep and MultiEdit take the Read and Edit rows; Glob and Grep defaul
     for (const [tool, input] of [
       ["Glob", { pattern: "/workspace/.winter/**" }], ["Glob", { pattern: "../../../etc/*" }], ["Grep", { pattern: "x", glob: "/etc/*" }],
       ["Glob", { pattern: "/workspace/.winter/conversations/*/x.jsonl", path: "/workspace/repos/app" }], ["Grep", { pattern: "x", glob: "src/*/../../../../etc/*" }],
+      ["Glob", { pattern: "?./etc/*" }], ["Glob", { pattern: ".?/x" }], ["Glob", { pattern: "??/x" }], ["Grep", { pattern: "x", glob: "src/?./../*" }],
       ["Glob", { pattern: "/proc/**" }], ["Glob", { pattern: "/workspace/outputs/**" }], ["Glob", { pattern: "../../.winter/*" }],
       // Brace alternatives, escapes, extglob groups, `~`: nothing outside the allowlist is ever classified from the cwd.
       ["Glob", { pattern: "{/etc,x}/passwd" }], ["Grep", { pattern: "x", glob: "{/etc,y}/*" }], ["Glob", { pattern: "{..,x}/etc/*" }],
@@ -139,7 +140,7 @@ test("Glob, Grep and MultiEdit take the Read and Edit rows; Glob and Grep defaul
     // In-workspace patterns, relative or absolute, still take the Read row.
     for (const [tool, input] of [
       ["Glob", { pattern: "**" }], ["Glob", { pattern: "**/*.md" }], ["Glob", { pattern: "" }], ["Grep", { pattern: "x", glob: "" }], ["Glob", { pattern: "src/my file-1_a.b/*.ts" }],
-      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
+      ["Glob", { pattern: "src/**/*.ts" }], ["Glob", { pattern: "**/*.ts" }], ["Glob", { pattern: "*.ts" }], ["Glob", { pattern: "a?.ts" }], ["Glob", { pattern: "src/?/x.ts" }], ["Glob", { pattern: "./*.ts" }], ["Glob", { pattern: "/workspace/repos/app/src/*.ts" }],
       ["Grep", { pattern: "x", glob: "*.ts" }], ["Grep", { pattern: "x", glob: "../other/*.ts" }],
     ] as const) expect({ policy, tool, input, kind: (await outcome(build(state(policy)), tool, { ...input })).kind }).toEqual({ policy, tool, input, kind: "allow" });
   }
@@ -240,6 +241,37 @@ test("unknown tool classes are denied under every policy, bypass included; the m
     expect({ policy, tool, kind: r.kind }).toEqual({ policy, tool, kind: "deny" });
     expect((r.result as { message: string }).message).toBe(coworkDeniedMessage(tool, "unknown_tool_class"));
   }
+});
+
+test("plan x own scratch needs the plan view, like plan x Bash: absent or false denies", async () => {
+  const scratch = ["Write", { file_path: `${OWN_SCRATCH}/note.txt`, content: "x" }] as const;
+  expect((await outcome(build(state("plan")), ...scratch)).kind).toBe("allow");
+  for (const ports of [{ planViewInstalled: () => false }, { planViewInstalled: undefined }]) {
+    const r = await outcome(build(state("plan"), { ports }), ...scratch);
+    expect(r.kind).toBe("deny"); expect((r.result as { message: string }).message).toBe(coworkDeniedMessage("Write", "plan_view_missing"));
+    expect((await outcome(build(state("plan"), { ports }), "Edit", { file_path: `${OWN_SCRATCH}/note.txt`, old_string: "a", new_string: "b" })).kind).toBe("deny");
+  }
+  // Reads of scratch need no view; outputs under plan are a plain deny whatever the view says.
+  expect((await outcome(build(state("plan"), { ports: { planViewInstalled: undefined } }), "Read", { file_path: `${OWN_SCRATCH}/note.txt` })).kind).toBe("allow");
+  expect((await outcome(build(state("plan")), "Write", { file_path: `${OWN_OUT}/r.pdf`, content: "" })).kind).toBe("deny");
+});
+
+test("the call is judged again after the review: a policy that narrowed during a hanging review denies it", async () => {
+  let answer!: (v: { verdict: "safe" | "unsafe"; reason: string }) => void;
+  const reviewer = fakeReviewer(() => new Promise(resolve => { answer = resolve; }));
+  const h = build(state("auto"), { review: reviewer.review });
+  const pending = h.canUse("Bash", { ...RISKY }, ctx()); await tick();
+  expect(reviewer.calls).toHaveLength(1);
+  expect((await h.machine.request(state("plan"))).status).toBe("applied");
+  answer({ verdict: "safe", reason: "" });
+  // Plan's view is installed in this fixture, so only a policy that denies Bash outright would stop it: use dont-ask below.
+  expect(["allow", "deny"]).toContain((await pending)!.behavior);
+  const g = build(state("auto"), { review: fakeReviewer(() => new Promise(resolve => { answer = resolve; })).review });
+  const run = g.canUse("Bash", { ...RISKY }, ctx()); await tick();
+  expect((await g.machine.request(state("dont-ask"))).status).toBe("applied");
+  answer({ verdict: "safe", reason: "" });
+  expect(await run).toMatchObject({ behavior: "deny", message: coworkDeniedMessage("Bash", "policy_changed") });
+  expect(g.events).toEqual([]);
 });
 
 test("a sandbox escape and a network request beyond the ceiling are denied in every policy", async () => {

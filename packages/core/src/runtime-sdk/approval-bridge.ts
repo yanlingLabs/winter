@@ -541,6 +541,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
         log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=cowork-reviewer-no-verdict`);
         projection = { kind: "ask", policy: "auto", connector: false };
       }
+      // The review may have taken a while: judge the call again under the policy now in force (a narrowing meanwhile denies it).
+      if (project().kind === "deny") return { behavior: "deny", message: coworkDeniedMessage(toolName, "policy_changed") };
     }
     if (projection.kind === "deny") {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${projection.policy} reason=cowork-${projection.reason}`);

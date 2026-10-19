@@ -68,6 +68,8 @@ const FILE_READ = new Set(["Read", "Glob", "Grep"]);
 function globReach(value: unknown, cwd: string): string | undefined {
   if (typeof value !== "string" || value === "") return undefined;
   if (!/^[A-Za-z0-9._ \-*?/]+$/.test(value)) return "/";
+  // A segment of only dots and question marks (`?.`, `.?`, `??`, `...`) can match `..`: not resolvable lexically. (A literal `..` is resolved below.)
+  if (value.split("/").some(segment => /^[.?]{2,}$/.test(segment) && segment !== "..")) return "/";
   const meta = value.search(/[*?]/);
   if (meta >= 0 && value.slice(meta).split("/").includes("..")) return "/";
   const slash = meta < 0 ? -1 : value.lastIndexOf("/", meta);
