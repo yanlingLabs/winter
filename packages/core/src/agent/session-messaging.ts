@@ -127,6 +127,9 @@ export interface SessionMessagingDeps {
   /** The durable same-Project peer inbox (receipt ledger over its SQLite store). Absent: a Cowork-to-Cowork send is
    *  refused as unavailable and nothing is delivered. */
   peerInbox?: SessionMessagingPeerInbox;
+  /** #92 4.5: a held peer message the guest turned out to have no record of (`unknown_input`, terminal). The composition shows
+   *  it on the recipient's conversation (`coworkLostInputNotice` is the event's content). Absent: logged only. */
+  noteLostPeerMessage?: (recipientSessionId: string, receiptId: string) => void;
   store: {
     /** Throws for an unknown session. */
     meta(sessionId: string): { mode?: string; archived?: boolean; origin?: string; parentSessionId?: string; approvalPolicy?: string };
@@ -539,6 +542,10 @@ export class SessionMessaging {
     }
   }
 
+  private noteLost(recipientId: string, receiptId: string): void {
+    try { this.deps.noteLostPeerMessage?.(recipientId, receiptId); } catch { /* the note is best effort; the ledger already says lost */ }
+  }
+
   /** Rule 3: re-send `commit` for this recipient's delivered-but-unconfirmed held inputs, oldest first. False: stop the drain. */
   private async repairHeldCommits(recipientId: string): Promise<boolean> {
     const inbox = this.deps.peerInbox;
@@ -549,6 +556,7 @@ export class SessionMessaging {
         if (this.draining) return false;
         if ((await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, entry.receiptId, entry.ackedHoldToken)) === "lost") {
           this.log(`a Cowork peer message ${entry.receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`);
+          this.noteLost(recipientId, entry.receiptId);
         }
       }
       return true;
@@ -591,7 +599,7 @@ export class SessionMessaging {
     let result: Awaited<ReturnType<typeof commitAndConfirm>>;
     try { result = await commitAndConfirm(inbox as Required<Pick<SessionMessagingPeerInbox, "confirmCommitted">>, held, receiptId, ackedToken); }
     catch (err) { this.log(`committing a Cowork peer message to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); the next drain repeats it`); return false; }
-    if (result === "lost") { this.log(`a Cowork peer message ${receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`); return true; }
+    if (result === "lost") { this.log(`a Cowork peer message ${receiptId} to ${recipientId} was accepted but the guest had no record of it; it is not retried`); this.noteLost(recipientId, receiptId); return true; }
     this.coworkOutcomes.set(receiptId, { queued: result === "queued", steered: result === "folded", behind: 0, resumed });
     while (this.coworkOutcomes.size > DELIVERY_DEDUPE_MAX) this.coworkOutcomes.delete(this.coworkOutcomes.keys().next().value as string);
     return true;

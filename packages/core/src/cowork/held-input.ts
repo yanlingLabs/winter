@@ -206,3 +206,10 @@ export function coworkHostMessageListAnswer(value: unknown): CoworkHostMessageLi
   });
   return Object.freeze({ sessions: Object.freeze(sessions), ...(value.omitted === undefined ? {} : { omitted: value.omitted as number }) });
 }
+
+/** The content of the note a recipient's conversation shows for a peer message that was accepted but lost (`unknown_input`,
+ *  4.5): a `continuity_warning` event's `warning` and `text`. The composition appends it; the sender is not named, because
+ *  the guest never saw the message. */
+export function coworkLostInputNotice(): { readonly warning: "peer_message_lost"; readonly text: string } {
+  return Object.freeze({ warning: "peer_message_lost", text: "A message from another session in this project was accepted but could not be delivered to this conversation." } as const);
+}

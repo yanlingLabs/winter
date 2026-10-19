@@ -28,7 +28,7 @@ function world(existingHome?: string) {
   const db: RuntimeStateDb = openRuntimeStateDb(home), records = new CoworkRepository(db);
   cleanups.push(() => { db.close(); if (existingHome === undefined) rmSync(home, { recursive: true, force: true }); });
   const rows = new Map<string, SessionRow>(), drivers = new Map<string, FakeDriver>();
-  const log: string[] = [];
+  const log: string[] = [], lostNotes: string[] = [];
   let sequence = 0;
   const context = () => ({ principalId: "fixture-user", requestId: `request-${++sequence}` });
   const row = (sessionId: string, mode: string) => rows.set(sessionId, { sessionId, mode, approvalPolicy: "auto", scope: "test", createdAt: 1, lastSeq: 0, title: sessionId });
@@ -65,7 +65,7 @@ function world(existingHome?: string) {
       store: { meta: (id: string) => { const r = rows.get(id); if (!r) throw Error("missing"); return r; }, list: () => [...rows.values()] },
       derive: () => "active" as const, working: () => true,
       sessions: { get: (id: string) => { const d = drivers.get(id); return d && d.state === "live" ? d : d; }, ensure: async (id: string) => { ensured.push(id); if (ensureFault.on) throw new Error("cannot resume"); const d = driverOf(id); d.state = "live"; return d; } },
-      log: (line) => log.push(line),
+      log: (line) => log.push(line), noteLostPeerMessage: (recipient, receiptId) => { lostNotes.push(`${recipient}:${receiptId}`); },
     });
     return { messaging, store, spy };
   };
@@ -73,7 +73,7 @@ function world(existingHome?: string) {
   const send = (messaging: SessionMessaging, from: string, to: string, over: { message?: string; messageId?: string; incarnation?: string; summary?: string; notifyWhenIdle?: boolean } = {}) =>
     messaging.handlerFor(from, over.incarnation ?? "inc-1").send({ to: `session:${to}`, message: over.message ?? `${MARKER} please coordinate`, messageId: over.messageId ?? `m-${++sequence}`, ...(over.summary !== undefined ? { summary: over.summary } : {}), ...(over.notifyWhenIdle !== undefined ? { notifyWhenIdle: over.notifyWhenIdle } : {}) }, { signal: new AbortController().signal });
   const raw = () => db.db.query<{ receipt_id: string; state: string; reason: string | null; nobody: number }, []>("SELECT receipt_id, state, reason, body IS NULL AS nobody FROM cowork_peer_inbox ORDER BY accepted_at, sequence").all();
-  return { home, db, records, rows, drivers, driverOf, ensured, ensureFault, log, project, bind, code, send, raw, makeMessaging, ...first };
+  return { home, db, records, rows, drivers, driverOf, ensured, ensureFault, log, lostNotes, project, bind, code, send, raw, makeMessaging, ...first };
 }
 
 test("a same-Project send is accepted, delivered to a stopped recipient (resumed), acknowledged, and the body is deleted", async () => {
@@ -352,6 +352,7 @@ test("held delivery: unknown_input is terminal (lost, never retried) and later m
   const rows = row(w) as Array<Record<string, any>>;
   expect(rows.map(r => [r.state, r.commit_outcome])).toEqual([["delivered", "lost"], ["delivered", "queued"]]);
   expect(calls.filter(c => c[0] === "commit")).toHaveLength(2); // the lost one was committed once, never again
+  expect(w.lostNotes).toEqual([`${b}:${rows[0]!.receipt_id}`]); // surfaced once, through the composition's note port
 });
 
 test("held delivery: authority_denied at the ack discards the hold and delivers nothing; a re-grant would re-offer", async () => {
