@@ -36,6 +36,16 @@
 #define WG_SESSION_ID_MAX 128u
 #define WG_UNIX_ID_MIN 1000u   /* the contract's unixId range: 65534 is `nobody` and 65535 the invalid id */
 #define WG_UNIX_ID_MAX 65533u
+#ifdef WG_FILE_CHANNEL_V1
+/* Image with the runtime capability `file-channel-v1` only. The helper (started with --file-channel-v1) sends the payload below with the profile byte's bit 7 set:
+ *   u8 profile | 0x80, u8 count, per conversation {u32 runtimeUid, u8 id length, id}, then
+ *   u32 LE browseUid (0 = the workspace has none; otherwise 1000 to 65533, never a runtime uid or a workspace gid of the set),
+ *   per conversation {u32 LE workspaceGid (1000 to 65533, never a runtime uid of the set), u8 root count (1 to 16), per root {u8 length (11 to 255), the root's `source` path}},
+ *   then the items JSON. A payload without bit 7 is the plain one and means "no file channel". */
+#define WG_PAYLOAD_EXTENDED 0x80u
+#define WG_ROOTS_MAX 16u
+#define WG_ROOT_SOURCE_MAX 255u
+#endif
 struct wg_conversation_set {
     unsigned profile;
     unsigned count;
@@ -43,6 +53,12 @@ struct wg_conversation_set {
     char session_id[WG_CONVERSATIONS_MAX][WG_SESSION_ID_MAX + 1];
     const char *json;
     size_t json_length;
+#ifdef WG_FILE_CHANNEL_V1
+    uint32_t browse_uid;                                              /* 0 = no file channel for this set */
+    uint32_t workspace_gid[WG_CONVERSATIONS_MAX];
+    unsigned root_count[WG_CONVERSATIONS_MAX];
+    char root_source[WG_CONVERSATIONS_MAX][WG_ROOTS_MAX][WG_ROOT_SOURCE_MAX + 1];
+#endif
 };
 /* 0 when the payload is well formed. The JSON text itself is only shape-checked later, by the config builder. */
 int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct wg_conversation_set *out);
@@ -73,8 +89,13 @@ struct wg_boot_ops {
     int (*read_runtime_artifacts)(void *ctx, unsigned profile, char *out, size_t capacity, size_t *length);
     int (*read_base_config)(void *ctx, char *out, size_t capacity, size_t *length);
     int (*read_boot_id)(void *ctx, char out[37]);
-    /* with_ports: pass --runtime-ports-fds 4,5,6 (one host-query conversation) */
+    /* with_ports: pass --runtime-ports-fds 4,5,6 (one host-query conversation). With WG_FILE_CHANNEL_V1 the value is a set of bits: WG_START_PORTS, and
+     * WG_START_FILE_CHANNEL for `--file-channel-fds IN,OUT` as the last two arguments (the config then names `fileChannel`). */
     int (*start_supervisor)(void *ctx, const char *config, size_t length, int with_ports);
+#ifdef WG_FILE_CHANNEL_V1
+    /* st_dev of the mounted data volume (/workspace): the supervisor's `fileChannel.dataDevice`. 0 = read, non-zero = refused */
+    int (*read_data_device)(void *ctx, uint64_t *device);
+#endif
     /* teardown */
     void (*stop_helper)(void *ctx, long long deadline_ms);
     void (*stop_supervisor)(void *ctx, long long deadline_ms);
@@ -85,6 +106,10 @@ struct wg_boot_ops {
     void (*power_off)(void *ctx);
 };
 
+#define WG_START_PORTS 1
+#ifdef WG_FILE_CHANNEL_V1
+#define WG_START_FILE_CHANNEL 2
+#endif
 enum wg_conv_state { WG_CONV_NONE = 0, WG_CONV_STARTING, WG_CONV_RUNNING, WG_CONV_FAILED };
 enum wg_phase { WG_PHASE_BOOTSTRAP = 0, WG_PHASE_MOUNTED, WG_PHASE_RUNNING, WG_PHASE_DRAINING, WG_PHASE_DEAD };
 
@@ -101,6 +126,9 @@ struct wg_boot {
     int supervisor_started, supervisor_alive;
     int conv_state;                    /* WG_CONV_* */
     unsigned conv_count, conv_profile;
+#ifdef WG_FILE_CHANNEL_V1
+    int conv_file_channel;             /* the supervisor was started with a file service */
+#endif
     int fault_sent, relay_gone;
     int draining;
     char nonce[33];

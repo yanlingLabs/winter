@@ -98,7 +98,11 @@ class GuidedConfigAgreementTests(InitModuleCase):
 
     def test_the_helpers_per_conversation_members_are_exactly_the_keys_the_supervisor_accepts(self):
         vectors = json.loads((ROOT / "vectors/mux-frames.json").read_text())["positive"]
-        guided_message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == "bootstrap-down-conversations-guided"), "down")
+        gb.set_revision_three(True)   # the vectors are revision 3; the per-conversation members the helper writes for the supervisor are the same in both revisions
+        try:
+            guided_message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == "bootstrap-down-conversations-guided"), "down")
+        finally:
+            gb.set_revision_three(False)
         guided_keys = sorted(gb.supervisor_items(guided_message)[0]["hostQueryGuidedRuntime"])
         plain = json.loads(json.dumps(guided_message))
         plain["profile"] = "host-query-v1"
@@ -131,7 +135,11 @@ class GuidedConfigAgreementTests(InitModuleCase):
         """The helper's items and the image's object through the real config builder: the guided key holds the object unchanged, and every conversation member carries
         the guidance directory; the same pieces for host-query carry neither the reader nor the member."""
         vectors = json.loads((ROOT / "vectors/mux-frames.json").read_text())["positive"]
-        message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == "bootstrap-down-conversations-guided"), "down")
+        gb.set_revision_three(True)   # the vectors are revision 3
+        try:
+            message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == "bootstrap-down-conversations-guided"), "down")
+        finally:
+            gb.set_revision_three(False)
         items = gb.canonical_text(gb.supervisor_items(message))
         base = json.dumps({"artifacts": {"launcher": {"path": "/opt/winter/helpers/linux-tool-compartment", "sha256": "1" * 64}}, "controlDirectory": "/run/winter/control"}, separators=(",", ":"), sort_keys=True)
         for key, block in (("hostQueryGuidedRuntime", rb.guided_block()),):

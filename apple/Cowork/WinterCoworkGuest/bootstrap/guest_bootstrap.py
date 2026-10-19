@@ -62,6 +62,10 @@ UUID = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}
 NONCE = re.compile(r"[a-f0-9]{32}\Z")
 MESSAGE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}\Z")
 FAULT_CODES = ("bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations")
+# Contract revision 3 (bootstrap `v` 2) adds four: the share inventory, a share that would not mount, a resume with no store, a fresh start on a store that has content.
+FAULT_CODES_V3 = FAULT_CODES + ("share_inventory", "share_mount_failed", "resume_store_missing", "fresh_store_not_empty")
+MAX_ENDED_BOOTS = 4
+MAX_RUNTIME_TIMEOUT_MS_V3 = 86_400_000
 DANGEROUS_KEYS = ("__proto__", "constructor", "prototype")
 
 # ext4 superblock feature bits that the pinned contract allows (compat, incompat, ro_compat) and the one transient bit.
@@ -239,8 +243,30 @@ def _plain_object(value):
 # Port of protocol.ts (round 3) conversationsOf / checkConversationsMessage. The helper is the judge of this message: PID 1 only
 # receives the finished result (boot.h wg_conversation_set).
 
+# ---- the revision of the bootstrap-class JSON this helper speaks.
+# Revision 2 (`v` 1) is the production guest. Revision 3 (`v` 2: browseUid, cold-resume fields, shares, `continuations`) is spoken only by an image that declares the runtime
+# capability `file-channel-v1`: PID 1 starts the helper with `--file-channel-v1` there and nowhere else. The mode is process-wide on purpose (one helper, one host).
+REVISION_THREE = False
+BOOTSTRAP_VERSION = 1
+
+
+def set_revision_three(on):
+    """Switches the helper's bootstrap vocabulary; returns the previous setting (the tests restore it)."""
+    global REVISION_THREE, BOOTSTRAP_VERSION
+    previous = REVISION_THREE
+    REVISION_THREE = bool(on)
+    BOOTSTRAP_VERSION = 2 if on else 1
+    return previous
+
+
 SDK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+CONTINUATIONS = ("fresh", "resume", "either")
+SHARE_KINDS = ("folder", "guidance", "memory", "outputs")
+SHARE_MOUNTS = {"guidance": "/run/winter/shared-instructions", "memory": "/workspace/.winter/memory", "outputs": "/workspace/outputs"}
+SHARE_TAG = re.compile(r"[a-z0-9-]{1,32}\Z")
+FOLDER_MOUNT = re.compile(r"/workspace/folders/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+MAX_SHARES, MAX_FOLDER_SHARES = 12, 9
 POLICIES = ("auto", "plan", "ask", "accept-edits", "dont-ask", "bypass")
 RUNTIME_PROFILES = ("host-query-v1", "host-query-guided-v1")
 RUNTIME_KEYS = {"host-query-v1": "hostQueryRuntime", "host-query-guided-v1": "hostQueryGuidedRuntime"}
@@ -330,19 +356,28 @@ def _tool_classes(value):
     return all(indexes[i] > indexes[i - 1] for i in range(1, len(indexes)))
 
 
+def _ended_boots(value):
+    return type(value) is list and len(value) <= MAX_ENDED_BOOTS and all(_boot_id(v) for v in value) and len(set(value)) == len(value)
+
+
 def _runtime(value):
     if value is None:
         return True
-    if not _exact(value, ("model", "timeoutMs", "toolClasses", "provider", "guided")):
+    keys = ("model", "timeoutMs", "toolClasses", "provider", "guided", "continuation", "endedGuestBoots") if REVISION_THREE else ("model", "timeoutMs", "toolClasses", "provider", "guided")
+    if not _exact(value, keys):
         return False
     model = value["model"]
-    if type(model) is not str or not 1 <= len(model) <= 256 or not _printable(model) or not _uint(value["timeoutMs"], 1, 600_000):
+    if type(model) is not str or not 1 <= len(model) <= 256 or not _printable(model) or not _uint(value["timeoutMs"], 1, MAX_RUNTIME_TIMEOUT_MS_V3 if REVISION_THREE else 600_000):
         return False
     if not _tool_classes(value["toolClasses"]) or not _provider(value["provider"]):
         return False
     guided = value["guided"]
-    return guided is None or (_exact(guided, ("bindingId", "generation")) and type(guided["bindingId"]) is str and bool(UUID4.match(guided["bindingId"]))
-                              and _uint(guided["generation"], 1))
+    if not (guided is None or (_exact(guided, ("bindingId", "generation")) and type(guided["bindingId"]) is str and bool(UUID4.match(guided["bindingId"]))
+                               and _uint(guided["generation"], 1))):
+        return False
+    if REVISION_THREE and (type(value["continuation"]) is not str or value["continuation"] not in CONTINUATIONS or not _ended_boots(value["endedGuestBoots"])):
+        return False
+    return True
 
 
 def _roots(value, session_id):
@@ -384,6 +419,9 @@ def _conversation(item):
                 or scope["incarnationId"] != authority["incarnationId"] or scope["leaseEpoch"] != authority["leaseEpoch"]
                 or scope["grantRevision"] != authority["grantRevision"] or selection["modelKey"] != runtime["model"]):
             return False
+        # Cold resume (revision 3): a fresh store has no earlier boot to vouch for, and the live boot can never be attested as ended.
+        if REVISION_THREE and ((runtime["continuation"] == "fresh" and runtime["endedGuestBoots"]) or scope["bootId"] in runtime["endedGuestBoots"]):
+            return False
     return True
 
 
@@ -413,6 +451,9 @@ def _check_conversations_message(message):
     uids = [uid for i in items for uid in (i["runtimeUid"], i["toolUid"])]
     if len(set(uids)) != len(uids) or any(a["workspaceGid"] in (b["runtimeUid"], b["toolUid"]) for a in items for b in items):
         return False
+    # The file channel's browse uid (one per workspace) is no member's runtime or tool uid and no group id.
+    if REVISION_THREE and message["browseUid"] is not None and (message["browseUid"] in uids or any(i["workspaceGid"] == message["browseUid"] for i in items)):
+        return False
     return len({i["runtime"]["provider"]["scope"]["bootId"] for i in items if i["runtime"]}) <= 1
 
 
@@ -425,11 +466,15 @@ def _normalize_conversations(items):
     out = []
     for item in items:
         runtime = item["runtime"]
+        full = runtime
         if runtime is not None:
             guided = runtime["guided"]
             runtime = {"model": runtime["model"], "timeoutMs": runtime["timeoutMs"], "toolClasses": runtime["toolClasses"],
                        "provider": sorted_canonical(runtime["provider"]),
                        "guided": None if guided is None else _ordered(guided, ("bindingId", "generation"))}
+            if REVISION_THREE:
+                runtime["continuation"] = full["continuation"]
+                runtime["endedGuestBoots"] = full["endedGuestBoots"]
         out.append({"logicalSessionId": item["logicalSessionId"], "authority": _ordered(item["authority"], AUTHORITY_KEYS),
                     "runtimeUid": item["runtimeUid"], "toolUid": item["toolUid"], "workspaceGid": item["workspaceGid"], "policy": item["policy"],
                     "roots": [_ordered(root, ("id", "guestPath", "source", "readOnly")) for root in item["roots"]], "runtime": runtime})
@@ -438,6 +483,42 @@ def _normalize_conversations(items):
 
 def _runtime_ready_count(value):
     return _uint(value, 1, MAX_CONVERSATIONS)
+
+
+def _unix_id_or_null(value):
+    return value is None or _uint(value, UNIX_ID_MIN, UNIX_ID_MAX)
+
+
+def _continuations(value):
+    return type(value) is list and len(value) <= MAX_CONVERSATIONS and all(type(v) is str and v in ("fresh", "resume") for v in value)
+
+
+def _guest_shares(value):
+    """protocol.ts guestSharesOf + checkShareSet: 1 to 12 shares, at most 9 folders and one of each Winter kind, distinct tags and guest paths, the right mount and mode for each kind."""
+    if type(value) is not list or not 1 <= len(value) <= MAX_SHARES:
+        return False
+    for share in value:
+        if not _exact(share, ("tag", "guestPath", "readOnly", "kind")) or type(share["tag"]) is not str or not SHARE_TAG.match(share["tag"]) \
+                or not _guest_path(share["guestPath"]) or type(share["readOnly"]) is not bool or type(share["kind"]) is not str or share["kind"] not in SHARE_KINDS:
+            return False
+    if len({s["tag"] for s in value}) != len(value) or len({s["guestPath"] for s in value}) != len(value):
+        return False
+    if sum(1 for s in value if s["kind"] == "folder") > MAX_FOLDER_SHARES or any(sum(1 for s in value if s["kind"] == kind) > 1 for kind in ("guidance", "memory", "outputs")):
+        return False
+    for share in value:
+        mount_ok = bool(FOLDER_MOUNT.match(share["guestPath"])) if share["kind"] == "folder" else share["guestPath"] == SHARE_MOUNTS[share["kind"]]
+        mode_ok = share["kind"] == "folder" or share["readOnly"] == (share["kind"] == "guidance")
+        if not mount_ok or not mode_ok:
+            return False
+    return True
+
+
+def _normalize_shares(items):
+    return [_ordered(item, ("tag", "guestPath", "readOnly", "kind")) for item in items]
+
+
+def _runtime_ready_continuations_ok(message):
+    return len(message["continuations"]) <= message["conversations"]
 
 
 # message type -> ordered (key, validator). Insertion order IS the wire order, exactly as in protocol.ts BOOTSTRAP_SPECS.
@@ -450,7 +531,7 @@ BOOTSTRAP_SPECS = {
     "up": {
         "hello": (("guestBootId", _boot_id), ("dataSerial", lambda v: v == DATA_SERIAL), ("environmentSerial", lambda v: v == ENVIRONMENT_SERIAL)),
         "receipt": (("operationId", _token), ("nonce", _nonce), ("receipt", _plain_object)),
-        "fault": (("operationId", _token), ("nonce", _nonce), ("code", lambda v: v in FAULT_CODES)),
+        "fault": (("operationId", _token), ("nonce", _nonce), ("code", lambda v: v in (FAULT_CODES_V3 if REVISION_THREE else FAULT_CODES))),
         "mounted": (("operationId", _token), ("nonce", _nonce)),
         "runtime_ready": (("operationId", _token), ("nonce", _nonce), ("conversations", _runtime_ready_count)),
     },
@@ -460,6 +541,30 @@ MESSAGE_CHECKS = {("down", "conversations"): _check_conversations_message}
 MESSAGE_CAPS = {("down", "conversations"): MAX_CONVERSATIONS_BYTES}
 NORMALIZERS = {("down", "conversations", "conversations"): _normalize_conversations}
 
+# Revision 3 (`v` 2): the same tables with what changed. Selected by set_revision_three(); nothing else about parsing differs.
+BOOTSTRAP_SPECS_V3 = {
+    "down": {
+        "plan": BOOTSTRAP_SPECS["down"]["plan"],
+        "ready": BOOTSTRAP_SPECS["down"]["ready"],
+        "shares": (("operationId", _token), ("nonce", _nonce), ("shares", _guest_shares)),
+        "conversations": (("operationId", _token), ("nonce", _nonce), ("incarnationId", _token), ("profile", _profile), ("browseUid", _unix_id_or_null), ("conversations", _conversations)),
+    },
+    "up": {
+        **{name: spec for name, spec in BOOTSTRAP_SPECS["up"].items() if name != "runtime_ready"},
+        "shares_mounted": (("operationId", _token), ("nonce", _nonce)),
+        "runtime_ready": (("operationId", _token), ("nonce", _nonce), ("conversations", _runtime_ready_count), ("continuations", _continuations)),
+    },
+}
+MESSAGE_CHECKS_V3 = {**MESSAGE_CHECKS, ("up", "runtime_ready"): _runtime_ready_continuations_ok}
+MESSAGE_CAPS_V3 = {**MESSAGE_CAPS, ("down", "shares"): MAX_CONVERSATIONS_BYTES}
+NORMALIZERS_V3 = {**NORMALIZERS, ("down", "shares", "shares"): _normalize_shares}
+
+
+def _tables():
+    if REVISION_THREE:
+        return BOOTSTRAP_SPECS_V3, MESSAGE_CHECKS_V3, MESSAGE_CAPS_V3, NORMALIZERS_V3
+    return BOOTSTRAP_SPECS, MESSAGE_CHECKS, MESSAGE_CAPS, NORMALIZERS
+
 
 def parse_bootstrap_message(payload, direction):
     """One bootstrap-class payload (bytes, no newline) -> a dict {t, fields...} or ProtocolError.
@@ -468,23 +573,26 @@ def parse_bootstrap_message(payload, direction):
     """
     parsed, text = strict_object(payload)
     kind = parsed.get("t") if "t" in parsed else None
-    specs = BOOTSTRAP_SPECS[direction]
+    all_specs, checks, caps, normalizers = _tables()
+    specs = all_specs[direction]
     if not isinstance(kind, str) or kind not in specs:
         raise ProtocolError("unknown_type")
     spec = specs[kind]
-    if len(payload) > MESSAGE_CAPS.get((direction, kind), MAX_BOOTSTRAP_PAYLOAD):
+    if len(payload) > caps.get((direction, kind), MAX_BOOTSTRAP_PAYLOAD):
         raise ProtocolError("oversize")
+    if REVISION_THREE and (type(parsed.get("v")) is not int or parsed["v"] != BOOTSTRAP_VERSION):
+        raise ProtocolError("version")   # judged before the schema: a peer one revision behind is told `version`, never `bad_field`
     if set(parsed) != {"v", "t"} | {key for key, _ in spec}:
         raise ProtocolError("bad_field")
-    if type(parsed["v"]) is not int or parsed["v"] != 1:
+    if type(parsed["v"]) is not int or parsed["v"] != BOOTSTRAP_VERSION:
         raise ProtocolError("bad_field")
-    typed = {"v": 1, "t": kind}
+    typed = {"v": BOOTSTRAP_VERSION, "t": kind}
     for key, check in spec:
         if not check(parsed[key]):
             raise ProtocolError("bad_field")
-        normalize = NORMALIZERS.get((direction, kind, key))
+        normalize = normalizers.get((direction, kind, key))
         typed[key] = normalize(parsed[key]) if normalize else sorted_canonical(parsed[key]) if isinstance(parsed[key], dict) else parsed[key]
-    rule = MESSAGE_CHECKS.get((direction, kind))
+    rule = checks.get((direction, kind))
     if rule is not None and not rule(typed):
         raise ProtocolError("bad_field")
     if canonical_text(typed) != text:
@@ -495,10 +603,11 @@ def parse_bootstrap_message(payload, direction):
 def encode_bootstrap_message(message):
     """The canonical payload (bytes) of an up message; the schema check is the one a received message would pass."""
     kind = message["t"]
-    if kind not in BOOTSTRAP_SPECS["up"]:
+    up_specs = _tables()[0]["up"]
+    if kind not in up_specs:
         raise ValueError("not an up message")
-    typed = {"v": 1, "t": kind}
-    for key, check in BOOTSTRAP_SPECS["up"][kind]:
+    typed = {"v": BOOTSTRAP_VERSION, "t": kind}
+    for key, check in up_specs[kind]:
         value = message[key]
         if not check(value):
             raise ValueError("bad field " + key)
@@ -1116,13 +1225,25 @@ def supervisor_items(message):
     return items
 
 
+EXTENDED_PAYLOAD = 0x80
+
+
 def conversations_payload(message):
     """The 'C' message to PID 1 (boot.h wg_conversation_set): profile, count, per conversation uid and id, then the items as JSON."""
     profile = {None: 0, "host-query-v1": 1, "host-query-guided-v1": 2}[message["profile"]]
-    out = bytearray([profile, len(message["conversations"])])
+    out = bytearray([profile | (EXTENDED_PAYLOAD if REVISION_THREE else 0), len(message["conversations"])])
     for item in message["conversations"]:
         sid = item["logicalSessionId"].encode("ascii")
         out += struct.pack("<IB", item["runtimeUid"], len(sid)) + sid
+    if REVISION_THREE:
+        # The file channel's part (boot.h wg_conversation_set under WG_FILE_CHANNEL_V1): the workspace's browse uid (0 = none), then per conversation its workspace gid and the
+        # `source` of every root, which PID 1 makes as root:workspaceGid 02770 directories on the data volume.
+        out += struct.pack("<I", message["browseUid"] or 0)
+        for item in message["conversations"]:
+            out += struct.pack("<IB", item["workspaceGid"], len(item["roots"]))
+            for root in item["roots"]:
+                source = root["source"].encode("ascii")
+                out += struct.pack("<B", len(source)) + source
     out += canonical_text(supervisor_items(message)).encode("ascii")
     return bytes(out)
 
@@ -1247,6 +1368,10 @@ class Session:
                     self._fault(operation, nonce, "second_conversations" if seen else "bad_conversations")
                     seen = True
                 continue
+            if message["t"] == "shares":
+                # Host-backed shares are not implemented in this guest: it says so with the share inventory fault and mounts nothing.
+                self._fault(operation, nonce, "share_inventory")
+                continue
             if message["t"] != "conversations":
                 continue
             if seen:
@@ -1256,13 +1381,20 @@ class Session:
             if not conversations_bound(message, plan_message, self.boot_id):
                 self._fault(operation, nonce, "bad_conversations")
                 continue
+            if REVISION_THREE and any(item["runtime"] is not None and item["runtime"]["continuation"] == "resume" for item in message["conversations"]):
+                # This guest starts fresh conversations only (the supervisor refuses a store that is not empty): a resume has no store to find. `either` means fresh here.
+                self._fault(operation, nonce, "resume_store_missing")
+                continue
             self.channel.send(TAG_CONVERSATIONS, conversations_payload(message))
             result = self._await_conversations_result()
             if result is None:
                 return 2
             status, count = result
             if status == RESULT_READY and count == len(message["conversations"]):
-                self._send_up({"t": "runtime_ready", "operationId": operation, "nonce": nonce, "conversations": count})
+                ready = {"t": "runtime_ready", "operationId": operation, "nonce": nonce, "conversations": count}
+                if REVISION_THREE:
+                    ready["continuations"] = ["fresh" for item in message["conversations"] if item["runtime"] is not None]
+                self._send_up(ready)
             else:
                 self._fault(operation, nonce, "supervisor_failed" if status == RESULT_SUPERVISOR_FAILED else "bad_conversations")
 
@@ -1285,15 +1417,22 @@ class Session:
 
 # ---------------------------------------------------------------------------------------------------- entry point
 
-def parse_arguments(argv):
-    """--channel-fds IN,OUT --data NODE:MAJOR:MINOR --environment NODE:MAJOR:MINOR (all produced by PID 1)."""
+def parse_arguments(argv, flags=None):
+    """--channel-fds IN,OUT --data NODE:MAJOR:MINOR --environment NODE:MAJOR:MINOR (all produced by PID 1), and for an image that declares `file-channel-v1` the flag
+    `--file-channel-v1` (no value): the helper then speaks bootstrap revision 3. `flags`, when given, receives {"file_channel_v1": bool}."""
     values = {}
     items = list(argv)
+    file_channel = False
     while items:
         name = items.pop(0)
+        if name == "--file-channel-v1" and not file_channel:
+            file_channel = True
+            continue
         if name not in ("--channel-fds", "--data", "--environment") or not items or name in values:
             raise Refused("arguments")
         values[name] = items.pop(0)
+    if flags is not None:
+        flags["file_channel_v1"] = file_channel
     if set(values) != {"--channel-fds", "--data", "--environment"}:
         raise Refused("arguments")
     fds = values["--channel-fds"].split(",")
@@ -1315,9 +1454,17 @@ def read_boot_id(path="/proc/sys/kernel/random/boot_id"):
     return value
 
 
+def configure(argv):
+    """The arguments PID 1 passed, and the bootstrap vocabulary they select: revision 3 only with `--file-channel-v1`. Raises Refused on a bad command line."""
+    flags = {}
+    read_fd, write_fd, devices = parse_arguments(argv, flags)
+    set_revision_three(flags["file_channel_v1"])
+    return read_fd, write_fd, devices
+
+
 def main(argv):
     try:
-        read_fd, write_fd, devices = parse_arguments(argv)
+        read_fd, write_fd, devices = configure(argv)
     except Refused:
         return 64
     channel = PipeChannel(read_fd, write_fd)
