@@ -343,7 +343,7 @@ export class HostCodeExecutionService {
   ) { this.adapterInput = adapterInput; }
   private readonly adapterInput: HostCodeSdkAdapter | undefined | null | typeof LAZY_ADAPTER;
   private resolvedAdapter: { value: HostCodeSdkAdapter | undefined | null } | undefined;
-  /** The SDK adapter, probed on first use (see `installedHostCodeAdapter`). An explicit `null`/`undefined`-by-caller is honoured. */
+  /** The SDK adapter, probed on first use (see `installedHostCodeAdapter`). An explicit `null` (no adapter) or an adapter object is honoured; an explicit `undefined` falls through the default parameter and becomes `LAZY_ADAPTER`, i.e. probed on first use. */
   private get adapter(): HostCodeSdkAdapter | undefined | null {
     if (this.adapterInput !== LAZY_ADAPTER) return this.adapterInput;
     return (this.resolvedAdapter ??= { value: installedHostCodeAdapter() }).value;

@@ -134,7 +134,7 @@ export class CoworkWorkspaceEvents {
   /** Boot: one guarded drain, then the 1 s timer ONLY when a Cowork host was injected (`keepAlive`) or work is still pending. A production
    *  daemon has no Cowork host, so it creates no timer. Neither the first drain nor a tick can throw into the caller or the process. */
   start(opts: { keepAlive?: boolean } = {}): void {
-    if (this.timer) return;
+    if (this.timer || this.closed) return;
     this.keepAlive = opts.keepAlive === true;
     this.safeDrain();
     if (this.keepAlive || this.hasPending()) this.arm();
@@ -151,9 +151,15 @@ export class CoworkWorkspaceEvents {
     if (this.timer) return;
     this.timer = setInterval(() => {
       this.safeDrain();
-      if (!this.keepAlive && !this.hasPending()) this.stop();
+      if (!this.keepAlive && !this.hasPending()) this.halt();
     }, 1000);
     this.timer.unref();
   }
-  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  /** Called at the enqueue site (after a Cowork RPC committed a change and its inline drain ran): if delivery left work owed and the
+   *  timer had stopped itself, arm it again. A daemon with no pending work (every production daemon) still arms nothing. */
+  rearm(): void { if (!this.timer && !this.closed && this.hasPending()) this.arm(); }
+  private closed = false;
+  /** Shutdown: the timer is cleared and never re-armed. */
+  stop(): void { this.closed = true; this.halt(); }
+  private halt(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
 }
