@@ -124,7 +124,7 @@ import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/vers
 import { buildWinter } from "./build-winter";
 import { resolveInstalledWinterPackage } from "./stage-runtimes";
 import { buildCoworkNative } from "./build-cowork-native";
-import { COWORK_NATIVE, COWORK_NATIVE_EMBED_RELATIVE, checkCoworkNativeBundle, checkSignedNative, coworkRequirement, readCoworkBundleFacts } from "./cowork-native-lib";
+import { COWORK_NATIVE, COWORK_NATIVE_EMBED_RELATIVE, checkCoworkNativeBundle, checkCoworkNativeOmitted, checkSignedNative, coworkNativeReleasePlan, coworkRequirement, readCoworkBundleFacts } from "./cowork-native-lib";
 import { createHash } from "node:crypto";
 
 const TEAM_ID = "37N77U9RSZ";
@@ -468,14 +468,17 @@ mkdirSync(OUT, { recursive: true });
 const dd = join(OUT, "dd");
 
 // N2 (Cowork native worker): the launcher and the VM worker are built UNSIGNED into dist/cowork-native, where project.yml's "Embed Cowork native" phase
-// (scripts/embed-cowork-native.sh) reads them. The worker links S4's stripped libkrun archive, which this repository does not build or download: the
-// release names it (COWORK_LIBKRUN_INCLUDE = the directory holding libkrun.h, COWORK_LIBKRUN_ARCHIVE = the archive) and build.py refuses unless both hash to
-// apple/Cowork/WinterCoworkHVFWorker/pins.json. Shipping the pair activates nothing (the daemon still refuses Cowork sessions).
-{
-  const include = process.env.COWORK_LIBKRUN_INCLUDE, archive = process.env.COWORK_LIBKRUN_ARCHIVE;
-  if (!include || !archive) fail("COWORK_LIBKRUN_INCLUDE and COWORK_LIBKRUN_ARCHIVE must name S4's libkrun header directory and stripped production archive (the Cowork worker links it; build.py checks both against pins.json)");
+// (scripts/embed-cowork-native.sh) reads them. The worker links S4's stripped libkrun archive, which this repository does not build or download, so the release makes an
+// EXPLICIT choice (coworkNativeReleasePlan): the inputs (COWORK_LIBKRUN_INCLUDE = the directory holding libkrun.h, COWORK_LIBKRUN_ARCHIVE = the archive; build.py refuses unless both hash to
+// apple/Cowork/WinterCoworkHVFWorker/pins.json) or COWORK_NATIVE=omit, which ships no WinterCowork helpers and no pins file. Neither fails closed here, before anything is built.
+// Shipping the pair activates nothing (the daemon still refuses Cowork sessions).
+const nativePlan = coworkNativeReleasePlan(process.env);
+if (nativePlan.mode === "refuse") fail(nativePlan.message);
+if (nativePlan.mode === "build") {
   console.log("Building the Cowork native pair (launcher: swift build; worker: build.py against the pinned libkrun archive)...");
-  buildCoworkNative({ out: join(ROOT, "dist", "cowork-native"), include, archive });
+  buildCoworkNative({ out: join(ROOT, "dist", "cowork-native"), include: nativePlan.include, archive: nativePlan.archive });
+} else {
+  console.log("Cowork native pair: OMITTED by COWORK_NATIVE=omit (no WinterCowork helpers, no pins file in this release).");
 }
 
 console.log("Generating Xcode project (xcodegen)...");
@@ -912,7 +915,15 @@ assertSigned(browserHostPath, "winter-browser-host");
 // platform dylibs only; no test hook; and, through the pin manifest, that the directory holds exactly the two binaries, that their CDHashes are the manifest's, and
 // that the libkrun archive/header and the worker and guest artifact pin files they were built against are the ones in THIS checkout.
 // `checkSignedNative` and `checkCoworkNativeBundle` are the same checks `dev:cowork-native` and `verify:cowork-native` run.
-{
+if (nativePlan.mode === "omit") {
+  // An omitted release carries neither the helpers nor the pins file; a leftover from an earlier build is a failure, not a convenience.
+  const omitted = checkCoworkNativeOmitted({
+    helpersDirectoryExists: existsSync(join(app, COWORK_NATIVE_EMBED_RELATIVE)),
+    manifestText: existsSync(join(app, "Contents", "Resources", "cowork-native-pins.json")) ? readFileSync(join(app, "Contents", "Resources", "cowork-native-pins.json"), "utf8") : null,
+  });
+  if (omitted.length > 0) fail(`the release omits the Cowork native pair but the bundle carries it:\n  ${omitted.join("\n  ")}`);
+  console.log("Cowork native pair omitted as asked: no WinterCowork helpers and no pins file in the bundle.");
+} else {
   const contents = join(app, "Contents");
   const pairDir = join(app, COWORK_NATIVE_EMBED_RELATIVE);
   const failures: string[] = [];
@@ -1029,8 +1040,10 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
   { path: browserHostPath, label: "winter-browser-host", expect: [] },
   // N2 — the Cowork native pair: no cs.* relaxation on either (the worker's one entitlement is the hypervisor key, not in the cs.* family; checkSignedNative above pins both exactly).
-  { path: join(app, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE.launcher.name), label: "winter-cowork-launcher", expect: [] },
-  { path: join(app, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE.worker.name), label: "winter-cowork-worker", expect: [] },
+  ...(nativePlan.mode === "omit" ? [] : [
+    { path: join(app, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE.launcher.name), label: "winter-cowork-launcher", expect: [] as string[] },
+    { path: join(app, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE.worker.name), label: "winter-cowork-worker", expect: [] as string[] },
+  ]),
   // ComputerV2 Phase 4 — Winter Headless: no entitlements at all (checkSignedHeadless above pins that whole).
   { path: headlessApp, label: "Winter Headless", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity

@@ -146,6 +146,16 @@ describe("the launcher's identity", () => {
   });
 });
 
+describe("an omitted bundle", () => {
+  test("an omitted bundle (no Contents/Helpers/WinterCowork) gives the daemon nothing to spawn: the real launcher port refuses launcher_missing, before any process exists", async () => {
+    const h = createHarness(), w = world(); withBindingTable(h);
+    const env = createCoworkNativeProductionEnvironment(options(h, w)); // executablePath is <root>/Winter.app/Contents/Resources/winter-core; no Helpers directory exists beside it
+    expect(existsSync(join(h.root, "Winter.app", "Contents", "Helpers"))).toBe(false);
+    await expect(env.launcher.spawn({ workspaceId: h.workspaceId, incarnationId: "inc-1", leaseEpoch: 1 })).rejects.toMatchObject({ code: "launcher_missing" });
+    env.close?.();
+  });
+});
+
 describe("through the wiring", () => {
   function envWith(h: Harness, prod: ReturnType<typeof createCoworkNativeProductionEnvironment>, launcher: FakeLauncher): CoworkNativeEnvironment {
     const { timers, timeouts, unsafeTestTimeouts, now, conversations, mint, checkpoint } = h.deps;

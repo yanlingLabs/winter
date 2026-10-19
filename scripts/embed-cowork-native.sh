@@ -38,6 +38,21 @@ if [ "${CONFIGURATION:-}" != "Release" ]; then
   exit 0
 fi
 
+# Three cases besides a normal embed (the order matters):
+#   COWORK_NATIVE=omit  an explicit release without the pair: nothing is embedded, and anything a previous build left in the bundle is removed (no helpers, no pins file).
+#   an unrelated value  refused (a typo must not ship or omit by accident).
+#   no input at all     a build that has no dist/cowork-native (a developer's Release build, CI): nothing is embedded and the build still succeeds. release.ts does not rely on this:
+#                       it either builds the inputs first or sets omit, and its gate then requires the pair (or its absence) to match that choice.
+# Exactly one of the two inputs is an error in every case.
+case "${COWORK_NATIVE:-}" in
+  "") ;;
+  omit)
+    rm -rf "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/WinterCowork" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/cowork-native-pins.json"
+    echo "skip Cowork native embed (COWORK_NATIVE=omit): no WinterCowork helpers, no pins file"
+    exit 0 ;;
+  *) echo "error: COWORK_NATIVE=${COWORK_NATIVE} is not a choice (the only value is omit)" >&2; exit 1 ;;
+esac
+
 TEAM="${DEVELOPMENT_TEAM:-37N77U9RSZ}"
 LAUNCHER_NAME="winter-cowork-launcher"
 LAUNCHER_ID="com.winter.cowork.launcher"
@@ -72,6 +87,11 @@ check_input() { # $1 = path, $2 = name
     fail "${name} embeds the builder's repository or home path — build with scripts/cowork-native-lib.ts's launcherBuildArgs (-Xswiftc -gnone -Xlinker -S -Xlinker -x)"
   fi
 }
+if [ ! -e "${LAUNCHER_SRC}" ] && [ ! -e "${WORKER_SRC}" ]; then
+  rm -rf "${DEST_DIR}" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/cowork-native-pins.json"
+  echo "skip Cowork native embed (no inputs under dist/cowork-native): the bundle carries no WinterCowork helpers and no pins file"
+  exit 0
+fi
 check_input "${LAUNCHER_SRC}" "${LAUNCHER_NAME}"
 check_input "${WORKER_SRC}" "${WORKER_NAME}"
 

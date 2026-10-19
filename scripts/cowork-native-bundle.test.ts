@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  COWORK_NATIVE, COWORK_NATIVE_MANIFEST_RELATIVE, checkCoworkNativeBundle, coworkNativeIdentifier, coworkSignArgs, parseCdHash, parseCoworkNativeManifest, readCoworkRepoPins, sha256Hex, type CoworkNativeBundleFacts,
+  COWORK_NATIVE, checkCoworkNativeOmitted, coworkNativeReleasePlan, COWORK_NATIVE_MANIFEST_RELATIVE, checkCoworkNativeBundle, coworkNativeIdentifier, coworkSignArgs, parseCdHash, parseCoworkNativeManifest, readCoworkRepoPins, sha256Hex, type CoworkNativeBundleFacts,
 } from "./cowork-native-lib";
 import { workerBuildArgs } from "./build-cowork-native";
 import { stageDevPair } from "./dev-cowork-native";
@@ -84,7 +84,9 @@ describe("the embed phase writes the manifest the gate reads", () => {
   test("a Release embed over stand-ins yields a bundle the gate accepts, with the manifest at the stated place", () => {
     const result = verifyCoworkNative(standIns());
     expect(result.failures).toEqual([]);
-    expect(result.lines.filter((l) => l.startsWith("refused:")).length).toBe(7);
+    expect(result.lines.filter((l) => l.startsWith("refused:")).length).toBe(10); // seven bundle mutants, three omit/input refusals
+    expect(result.lines.some((l) => l.startsWith("omit: the stale pair"))).toBe(true);
+    expect(result.lines.some((l) => l.startsWith("no inputs: the build succeeded"))).toBe(true);
     expect(COWORK_NATIVE_MANIFEST_RELATIVE).toBe("Contents/Resources/cowork-native-pins.json");
   });
 });
@@ -118,5 +120,92 @@ describe("the build script", () => {
     const scripts = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).scripts;
     expect(scripts["dev:cowork-native"]).toBe("bun run scripts/dev-cowork-native.ts");
     expect(scripts["verify:cowork-native"]).toBe("bun run scripts/verify-cowork-native.ts");
+  });
+});
+
+describe("the release choice: inputs or an explicit omit", () => {
+  const INC = "/libkrun/include", ARC = "/libkrun/libkrun.a";
+  test("every branch of coworkNativeReleasePlan", () => {
+    const plan = coworkNativeReleasePlan;
+    expect(plan({ COWORK_LIBKRUN_INCLUDE: INC, COWORK_LIBKRUN_ARCHIVE: ARC })).toEqual({ mode: "build", include: INC, archive: ARC });
+    expect(plan({ COWORK_NATIVE: "omit" })).toEqual({ mode: "omit" });
+    expect(plan({ COWORK_NATIVE: " omit " })).toEqual({ mode: "omit" });
+    const refusals: [string, Record<string, string>, RegExp][] = [
+      ["neither", {}, /neither its inputs nor an explicit omit.*COWORK_NATIVE=omit/],
+      ["empty strings", { COWORK_LIBKRUN_INCLUDE: "", COWORK_LIBKRUN_ARCHIVE: "  ", COWORK_NATIVE: "" }, /neither its inputs nor an explicit omit/],
+      ["include alone", { COWORK_LIBKRUN_INCLUDE: INC }, /only one of/],
+      ["archive alone", { COWORK_LIBKRUN_ARCHIVE: ARC }, /only one of/],
+      ["omit and inputs", { COWORK_NATIVE: "omit", COWORK_LIBKRUN_INCLUDE: INC, COWORK_LIBKRUN_ARCHIVE: ARC }, /contradicts/],
+      ["omit and one input", { COWORK_NATIVE: "omit", COWORK_LIBKRUN_ARCHIVE: ARC }, /contradicts/],
+      ["a typo", { COWORK_NATIVE: "skip" }, /not a choice/],
+      ["a typo beside the inputs", { COWORK_NATIVE: "build", COWORK_LIBKRUN_INCLUDE: INC, COWORK_LIBKRUN_ARCHIVE: ARC }, /not a choice/],
+    ];
+    for (const [name, env, expected] of refusals) {
+      const result = plan(env);
+      expect(`${name}: ${result.mode}: ${result.mode === "refuse" ? result.message : ""}`).toMatch(new RegExp(`^${name}: refuse: .*${expected.source}`));
+    }
+  });
+  test("the omit gate: no helpers directory and no pins file, nothing else is accepted", () => {
+    expect(checkCoworkNativeOmitted({ helpersDirectoryExists: false, manifestText: null })).toEqual([]);
+    expect(checkCoworkNativeOmitted({ helpersDirectoryExists: true, manifestText: null }).join()).toContain("Helpers/WinterCowork exists");
+    expect(checkCoworkNativeOmitted({ helpersDirectoryExists: false, manifestText: "{}" }).join()).toContain("cowork-native-pins.json exists");
+    expect(checkCoworkNativeOmitted({ helpersDirectoryExists: true, manifestText: "{}" }).length).toBe(2);
+  });
+  describe("the embed phase under each choice (ad hoc, scratch)", () => {
+    const run = (env: Record<string, string>, built: string, inputs = standIns()) => spawnSync("bash", [join(REPO, "scripts", "embed-cowork-native.sh")], {
+      encoding: "utf8", timeout: 120_000,
+      env: { ...process.env, CONFIGURATION: "Release", BUILT_PRODUCTS_DIR: built, CONTENTS_FOLDER_PATH: "Winter.app/Contents", EXPANDED_CODE_SIGN_IDENTITY: "-", DEVELOPMENT_TEAM: "37N77U9RSZ",
+        COWORK_LAUNCHER_BINARY: inputs.launcher, COWORK_WORKER_BINARY: inputs.worker, ...env },
+    });
+    const contents = (built: string) => join(built, "Winter.app", "Contents");
+    test("omit removes a stale pair and pins file and succeeds; with nothing stale it is a no-op", () => {
+      const built = scratch();
+      expect(run({}, built).status).toBe(0);
+      expect(existsSync(join(contents(built), "Helpers", "WinterCowork"))).toBe(true);
+      const omitted = run({ COWORK_NATIVE: "omit" }, built);
+      expect(omitted.status).toBe(0);
+      expect(omitted.stdout).toContain("COWORK_NATIVE=omit");
+      expect(existsSync(join(contents(built), "Helpers", "WinterCowork"))).toBe(false);
+      expect(existsSync(join(contents(built), "Resources", "cowork-native-pins.json"))).toBe(false);
+      expect(run({ COWORK_NATIVE: "omit" }, scratch()).status).toBe(0);
+    });
+    test("omit wins even when valid inputs are present (the plan refuses the combination before the build; here nothing is embedded)", () => {
+      const built = scratch();
+      expect(run({ COWORK_NATIVE: "omit" }, built).status).toBe(0);
+      expect(existsSync(join(contents(built), "Helpers"))).toBe(false);
+    });
+    test("an unknown COWORK_NATIVE value fails and embeds nothing", () => {
+      const built = scratch();
+      const result = run({ COWORK_NATIVE: "skip" }, built);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("is not a choice");
+      expect(existsSync(contents(built))).toBe(false);
+    });
+    test("no input at all (a developer's Release build, CI): succeeds, embeds nothing, removes a stale pair", () => {
+      const built = scratch();
+      expect(run({}, built).status).toBe(0);
+      const none = run({ COWORK_LAUNCHER_BINARY: join(built, "absent-l"), COWORK_WORKER_BINARY: join(built, "absent-w") }, built);
+      expect(none.status).toBe(0);
+      expect(none.stdout).toContain("no inputs");
+      expect(existsSync(join(contents(built), "Helpers", "WinterCowork"))).toBe(false);
+      expect(existsSync(join(contents(built), "Resources", "cowork-native-pins.json"))).toBe(false);
+    });
+    test("exactly one input is an error, whichever it is", () => {
+      for (const missing of ["COWORK_LAUNCHER_BINARY", "COWORK_WORKER_BINARY"]) {
+        const built = scratch();
+        const result = run({ [missing]: join(built, "absent") }, built);
+        expect(`${missing}: ${result.status !== 0}`).toBe(`${missing}: true`);
+        expect(result.stderr).toContain("is not at");
+      }
+    });
+    test("a Debug build embeds nothing whatever the inputs", () => {
+      const built = scratch();
+      const result = run({ CONFIGURATION: "Debug" }, built);
+      expect(result.status).toBe(0);
+      expect(existsSync(contents(built))).toBe(false);
+    });
+  });
+  test("an omitted bundle gives the daemon nothing to spawn: the default launcher port refuses launcher_missing before spawning anything (core test)", () => {
+    expect(readFileSync(join(REPO, "packages", "core", "test", "cowork", "host-env-assembly.test.ts"), "utf8")).toContain("an omitted bundle");
   });
 });

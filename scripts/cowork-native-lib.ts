@@ -234,3 +234,46 @@ export function readCoworkBundleFacts(input: { appContents: string; repo: string
     repoPins: readCoworkRepoPins(input.repo),
   };
 }
+
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The release choice: ship the pair (with the libkrun inputs) or omit it, explicitly. Never an accident.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+export type CoworkNativeReleasePlan =
+  | { mode: "build"; include: string; archive: string }
+  | { mode: "omit" }
+  | { mode: "refuse"; message: string };
+
+/**
+ * `COWORK_LIBKRUN_INCLUDE` + `COWORK_LIBKRUN_ARCHIVE` (both) build and ship the pair; `COWORK_NATIVE=omit` ships none; anything else refuses, with a message that names both ways out.
+ * Giving the inputs AND omit is contradictory, one input alone is half a build, and any other value of COWORK_NATIVE is a typo: all refuse. Winter releases must not block on an archive
+ * that does not exist yet, which is what `omit` is for; it is never the default.
+ */
+export function coworkNativeReleasePlan(env: Readonly<Record<string, string | undefined>>): CoworkNativeReleasePlan {
+  const include = env.COWORK_LIBKRUN_INCLUDE?.trim() || undefined, archive = env.COWORK_LIBKRUN_ARCHIVE?.trim() || undefined, choice = env.COWORK_NATIVE?.trim();
+  const way = "set COWORK_LIBKRUN_INCLUDE and COWORK_LIBKRUN_ARCHIVE (S4's header directory and stripped production archive) to ship the Cowork native pair, or COWORK_NATIVE=omit to release without it";
+  if (choice !== undefined && choice !== "" && choice !== "omit") return { mode: "refuse", message: `COWORK_NATIVE=${choice} is not a choice (the only value is "omit"); ${way}` };
+  if (choice === "omit") {
+    return include !== undefined || archive !== undefined
+      ? { mode: "refuse", message: "COWORK_NATIVE=omit contradicts the libkrun inputs that are also set; give one or the other" }
+      : { mode: "omit" };
+  }
+  if (include === undefined && archive === undefined) return { mode: "refuse", message: `the Cowork native pair has neither its inputs nor an explicit omit: ${way}` };
+  if (include === undefined || archive === undefined) return { mode: "refuse", message: `only one of COWORK_LIBKRUN_INCLUDE and COWORK_LIBKRUN_ARCHIVE is set; ${way}` };
+  return { mode: "build", include, archive };
+}
+
+export interface CoworkNativeOmittedFacts {
+  /** Whether Contents/Helpers/WinterCowork exists at all (even empty). */
+  helpersDirectoryExists: boolean;
+  /** Contents/Resources/cowork-native-pins.json, or null when absent. */
+  manifestText: string | null;
+}
+/** An omitted bundle carries no WinterCowork helpers and no pins file. Failure lines; empty = good. */
+export function checkCoworkNativeOmitted(facts: CoworkNativeOmittedFacts): string[] {
+  const failures: string[] = [];
+  if (facts.helpersDirectoryExists) failures.push("Contents/Helpers/WinterCowork exists, but the release omits the Cowork native pair");
+  if (facts.manifestText !== null) failures.push("Contents/Resources/cowork-native-pins.json exists, but the release omits the Cowork native pair");
+  return failures;
+}

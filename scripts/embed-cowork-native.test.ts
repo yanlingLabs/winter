@@ -304,7 +304,14 @@ describe("the pair is wired only where S7B says, and agrees with the Swift launc
     // The phase runs the script, and the release gate runs the same checks the verify gate does.
     expect(read("apple", "Winter", "project.yml")).toContain('"${SRCROOT}/../../scripts/embed-cowork-native.sh"');
     const release = read("scripts", "release.ts");
-    for (const call of ["checkCoworkNativeBundle(readCoworkBundleFacts(", "checkSignedNative(role, TEAM_ID,", "buildCoworkNative({ out: join(ROOT", "process.env.COWORK_LIBKRUN_ARCHIVE"]) expect(release).toContain(call);
+    for (const call of ["checkCoworkNativeBundle(readCoworkBundleFacts(", "checkSignedNative(role, TEAM_ID,", "buildCoworkNative({ out: join(ROOT", "coworkNativeReleasePlan(process.env)", "if (nativePlan.mode === \"refuse\") fail(nativePlan.message)", "checkCoworkNativeOmitted({", "if (omitted.length > 0) fail(`the release omits the Cowork native pair but the bundle carries it", "nativePlan.mode === \"omit\""]) expect(release).toContain(call);
+    // Every other script that runs a Release xcodebuild says what it does about the pair (the sparkle feed rig omits it explicitly).
+    expect(read("scripts", "sparkle-feed-gate.ts")).toContain("COWORK_NATIVE=omit xcodebuild");
+    // The opt-out is loud, total and asserted in release.ts: it prints, builds and gates nothing, skips both hardening pins, and requires the helpers and the pins file to be ABSENT.
+    expect(release).toContain("Cowork native pair: OMITTED by COWORK_NATIVE=omit");
+    expect(release).toContain('if (nativePlan.mode === "build") {');
+    expect(release).toContain('...(nativePlan.mode === "omit" ? [] : [');
+    expect(release).toContain('helpersDirectoryExists: existsSync(join(app, COWORK_NATIVE_EMBED_RELATIVE))');
     // The daemon's reading of the pair is behind the activation seam, which is off.
     expect(read("packages", "core", "src", "cowork", "native-activation.ts")).toContain("COWORK_NATIVE_ENVIRONMENT_ACTIVATED: boolean = false");
   });
