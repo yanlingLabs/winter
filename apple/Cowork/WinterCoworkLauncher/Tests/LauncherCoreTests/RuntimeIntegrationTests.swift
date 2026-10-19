@@ -356,6 +356,11 @@ final class RuntimeIntegrationTests: XCTestCase {
         XCTAssertEqual(sent.wait(timeout: .now() + 60), .success)
         XCTAssertFalse(rig.runtime.queue.sync { rig.runtime.session.daemonGone })
     }
+    func testTheShippedTotalPauseCapIsTwoMinutes() throws {
+        XCTAssertEqual(LauncherRuntime.defaultRelayPauseCapMs, 120_000)
+        let rig = try RuntimeRig(mode: "ok")
+        XCTAssertEqual(rig.runtime.queue.sync { rig.runtime.relayPauseCapMs }, 120_000, "a runtime built the way production builds it carries the shipped cap")
+    }
     func testAWorkerTricklingForeverIsStillCutOffByTheTotalPauseCap() throws {
         // One CONTINUOUS pause: a 1 MiB frame lands in a backlog whose soft limit is 512 KiB, and the worker takes 64 KiB per 50 ms, so L1 stays paused for about 0.6 s while the
         // worker ALWAYS progresses (the 100 ms stall window never trips). The total cap (300 ms) ends it. Without the cap this worker is simply slow and survives.
