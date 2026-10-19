@@ -138,11 +138,11 @@ const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void } = {}) {
+function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[] } = {}) {
   const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness] };
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const sessions = Array.from({ length: opts.conversations ?? 1 }, () => store.createSession("t", { mode: "code" }));
-  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions });
+  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}) });
   const guests: ScriptedGuest[] = [], launched: Options[] = [], approvals = new ApprovalBroker(), questions = new QuestionBroker();
   const native: CoworkGuestStarter = {
     async start(workspaceId, request) {
@@ -400,6 +400,16 @@ test("the host launch must agree with the set the guest received, or the incarna
   // The guest received the set, so the conversation never starts fresh.
   await until(() => h!.drivers.get(h!.sid) === undefined, "the close");
   await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+});
+
+test("the launch's permission mode must agree with the one the set's policy gives the guest, even when the tools agree", async () => {
+  // A read-only ceiling offers the same tools under ask and plan, so only the mode diverges: the binding turns plan after the set.
+  let h: ReturnType<typeof harness> | undefined;
+  h = harness({ script: reply("never"), toolClasses: ["read"], afterSet: () => { h!.f.db.db.run("UPDATE cowork_conversations SET policy='plan' WHERE session_id=?", [h!.sid]); } });
+  const session = await h.drivers.ensure(h.sid);
+  await expect(session.open()).rejects.toThrow("stale_acknowledgment");
+  expect(h.guests[0]!.stops).toEqual(["user"]);
+  expect(h.launched).toEqual([]);
 });
 
 test("the router's messaging attach is required for every runnable mode; only a Cowork driver goes without it", () => {

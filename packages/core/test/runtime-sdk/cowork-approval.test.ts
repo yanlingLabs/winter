@@ -156,7 +156,7 @@ test("an explicit allow the host resolved lifts dont-ask and ask but never plan;
 
 test("hard denials hold under bypass: protected, outside, outputs and scratch paths, a missing ceiling class, unmapped paths", async () => {
   const bypass = () => build(state("bypass"));
-  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/Users/someone/.ssh/id_rsa",
+  for (const path of ["/workspace/.winter/conversations/other/store.jsonl", "/workspace/.winter", "/proc/1/environ", "/etc/passwd", "/home/x/.ssh/id_rsa",
     "/workspace/outputs/cowork-1/report.pdf", "/workspace/.winter/scratch/cowork-1/tmp.txt"]) {
     for (const [tool, base] of [READ, WRITE, EDIT]) expect((await outcome(bypass(), tool, { ...base, file_path: path })).kind).toBe("deny");
   }
