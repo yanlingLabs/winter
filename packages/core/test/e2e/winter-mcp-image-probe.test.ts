@@ -78,6 +78,7 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
       log: () => {},
     });
     cleanups.push(async () => {
+      drivers.beginShutdown?.(); // unregisters the host-storage policy consumer: left registered over a closed store it fails every later refresh in this process
       await drivers.endAll();
       await runtime.dispose();
       store.close(); rs.close();
