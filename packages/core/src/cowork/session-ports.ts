@@ -3,6 +3,8 @@ import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { LegSession } from "../runtime-sdk/session-driver";
 import type { CoworkHostApprovalPorts } from "./approval-ports";
 import type { CoworkPrincipal } from "./authority";
+import type { CoworkResumePlan } from "./cold-resume";
+import type { CoworkHeldInputVerbs } from "./held-input";
 import type { CoworkConnection } from "./service";
 import type { CoworkConversation } from "./types";
 
@@ -45,6 +47,9 @@ export interface CoworkSessionCreateInput {
 export type CoworkLegSession = Omit<LegSession, "mode"> & {
   readonly mode: "cowork";
   readonly coworkEpoch: { readonly incarnationId: string; readonly leaseEpoch: number } | undefined;
+  /** #92 N4: the held-input verbs (PEER-INBOX's `drainOnce` drives them). Present only with the host's gate and a runtime
+   *  that offered `held-input-v1`; absent everywhere in production. */
+  readonly heldInput?: CoworkHeldInputVerbs;
 };
 
 /** The Cowork driver table, beside the Code one, keyed by stored mode. Same verbs ipc/server.ts and SessionMessaging call. */
@@ -173,6 +178,9 @@ export interface CoworkGuestStartRequest {
    *  becomes honestly `ready` for THIS incarnation (`acknowledgeSource`). Throws typed to fault the boot. No native host
    *  calls it before the v3 contract exists (S7B), so today it is never invoked. */
   sharesMounted?(context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]): void;
+  /** #92 N3: present only on a gated cold resume. S7B's v3 host puts it on the conversation's runtime record
+   *  (`runtime.continuation`, `runtime.endedGuestBoots`) and checks the guest's `continuation` echo. */
+  readonly resume?: CoworkResumePlan;
 }
 /** The runtime class (2) for one conversation. Today the native host drops runtime frames ("no consumer in this slice");
  *  S7B adds this link. */
