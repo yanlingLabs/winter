@@ -7,7 +7,7 @@
 The split lets the workflow upload the artifacts and the digests BEFORE the run turns red, so a mismatch against the local pins costs nothing but the colour:
 digests.json is then the input of the re-pin. Nothing here changes a pin file.
 """
-import argparse, hashlib, json, shutil, sys
+import argparse, hashlib, json, os, shutil, sys
 from pathlib import Path
 
 # Under `python3 -I` the script's own directory is NOT on sys.path (that is the point of -I), so the sibling modules are found by an explicit insert of this file's directory
@@ -67,6 +67,62 @@ def problems(digests):
     return out
 
 
+# Exit codes of `assert`. 0 is green and means ONE thing: both builds of each artifact are identical and every digest matches pins.json. Anything else is red, and the code says why.
+EXIT_OK, EXIT_PINS_STALE, EXIT_NOT_REPRODUCIBLE, EXIT_UNEXPECTED_STATUS = 0, 10, 20, 30
+LABELS = {EXIT_OK: "OK", EXIT_PINS_STALE: "PINS_STALE", EXIT_NOT_REPRODUCIBLE: "NOT_REPRODUCIBLE", EXIT_UNEXPECTED_STATUS: "UNEXPECTED_STATUS"}
+MEANINGS = {
+    EXIT_OK: "Both builds of each artifact are identical and every digest matches pins.json.",
+    EXIT_PINS_STALE: "Both builds of each artifact are identical, but pins.json no longer matches them. This is the EXPECTED result after an sdkCommit bump (or a Zig or dependency change): digests.json is the input of the re-pin pull request.",
+    EXIT_NOT_REPRODUCIBLE: "The two builds of the kernel or of the image differ from each other. The build is NOT reproducible: do not pin anything from this run.",
+    EXIT_UNEXPECTED_STATUS: "image.py ended with a status other than 0 (pins hold) or 3 (a digest differs from pins.json).",
+}
+
+
+PINS_HOLD_KEYS = ("cpioSha256", "rootManifestSha256", "runtimeSha256")
+
+
+def classify(digests):
+    """(exit code, details). Most severe first: a non-reproducible build outranks everything, then an unexpected image.py status, then stale pins.
+    Defensive on purpose: OK needs `reproducible is True` for both artifacts, an image status that is exactly two ints from {0, 3} that are both 0, `pinsHold` with EXACTLY the three
+    expected keys each `is True` (a missing key, an extra key or a non-True value is never green), and, when kernel/pins.json pins the kernel Image (non-null), the built Image equal to it.
+    A null kernel pin still means 'new', as before."""
+    kernel, image_ = digests["kernel"], digests["image"]
+    if kernel.get("reproducible") is not True or image_.get("reproducible") is not True:
+        return EXIT_NOT_REPRODUCIBLE, [f"the two {name} builds differ" for name, part in (("kernel", kernel), ("image", image_)) if part.get("reproducible") is not True]
+    status = image_.get("imageExitStatus")
+    if not (isinstance(status, list) and len(status) == 2 and all(type(s) is int and s in (0, 3) for s in status)):
+        return EXIT_UNEXPECTED_STATUS, [f"image.py exited {status}"]
+    stale = []
+    hold = image_.get("pinsHold")
+    if not isinstance(hold, dict) or set(hold) != set(PINS_HOLD_KEYS):
+        stale.append(f"pinsHold has keys {sorted(hold) if isinstance(hold, dict) else hold!r}, expected {sorted(PINS_HOLD_KEYS)}")
+    else:
+        stale += [f"pins.json {name} does not hold" for name in PINS_HOLD_KEYS if hold[name] is not True]
+    pinned = kernel.get("pinnedBefore")
+    if pinned is not None and pinned != kernel.get("ImageSha256"):
+        stale.append("kernel/pins.json expectedOutputs.Image does not hold")
+    if stale or status != [0, 0]:
+        return EXIT_PINS_STALE, stale or [f"image.py exited {status}"]
+    return EXIT_OK, []
+
+
+def summary(digests, code, details):
+    kernel, image_ = digests["kernel"], digests["image"]
+    lines = [f"## Guest image build: {LABELS[code]}", "", MEANINGS[code], ""]
+    lines += [f"* {detail}" for detail in details] + ([""] if details else [])
+    lines += ["| artifact | sha256 | reproducible |", "| --- | --- | --- |",
+              f"| kernel `Image` | `{kernel['ImageSha256']}` | {kernel['reproducible']} |", f"| kernel `vmlinux` | `{kernel['vmlinuxSha256']}` | {kernel['reproducible']} |",
+              f"| `initramfs.cpio` | `{image_['cpioSha256']}` | {image_['reproducible']} |", f"| root manifest | `{image_['rootManifestSha256']}` | {image_['reproducible']} |",
+              f"| host-query runtime | `{image_['runtimeSha256']}` | {image_['reproducible']} |", f"| **runtimeImageDigest** | `{digests['runtimeImageDigest']}` | |", ""]
+    hold = image_.get("pinsHold")
+    held = ", ".join(f"{name}: {'holds' if ok is True else 'DIFFERS'}" for name, ok in hold.items()) if isinstance(hold, dict) else "malformed"
+    pinned = kernel.get("pinnedBefore")
+    kernel_note = ("are new (kernel/pins.json expectedOutputs was unpinned)" if pinned is None
+                   else "match kernel/pins.json expectedOutputs.Image" if pinned == kernel["ImageSha256"] else "DIFFER from kernel/pins.json expectedOutputs.Image")
+    lines += [f"pins.json: {held}", "", f"The kernel digests {kernel_note}. Nothing here has booted: gate G1 is the first boot.", ""]
+    return "\n".join(lines)
+
+
 PUBLISH = [("kernel", "Image", "kernel"), ("kernel", "resolved.config", "resolved.config"), ("kernel", "kernel-receipt.json", "kernel-receipt.json"),
            ("image", "immutable-root.cpio", "initramfs.cpio"), ("image", "receipt.json", "receipt.json"), ("image", "root.manifest.json", "root.manifest.json"),
            ("image", "elf-dependencies.json", "elf-dependencies.json"), ("image", "size-breakdown.json", "size-breakdown.json"), ("image", "cpio-verification.json", "cpio-verification.json")]
@@ -103,10 +159,16 @@ def main(argv):
     if args.command == "collect":
         collect(args.kernel, args.image, args.out)
         return 0
-    found = problems(read_json(args.digests))
-    for line in found:
+    digests = read_json(args.digests)
+    code, details = classify(digests)
+    print(f"RESULT: {LABELS[code]} (exit {code}): {MEANINGS[code]}")
+    for line in details:
         print("PROBLEM: " + line)
-    return 1 if found else 0
+    target = os.environ.get("GITHUB_STEP_SUMMARY")
+    if target:
+        with open(target, "a") as handle:
+            handle.write(summary(digests, code, details))
+    return code
 
 
 if __name__ == "__main__":
