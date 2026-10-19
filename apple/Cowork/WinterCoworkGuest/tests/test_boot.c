@@ -7,6 +7,7 @@
 #include "../common/ctl.h"
 #include "../common/wmx.h"
 #include "../init/boot.h"
+#include "../init/trusted_config.h"
 #include "../init/ext4sb.h"
 #include "../init/mounts.h"
 
@@ -35,6 +36,10 @@ static void fail(const char *fmt, ...) {
 
 /* ------------------------------------------------------------------------------------------------ the recording fake */
 
+/* Valid runtime objects, as the image would carry them (canonical, digests are placeholders). */
+#define V1_BLOCK "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}"
+#define GUIDED_BLOCK "{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/runtime/winter-host-query\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-runtime-compartment\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"ownerLibrary\":{\"path\":\"/opt/winter/helpers/linux-session-owner.so\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/opt/winter/reader/instruction-reader\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"launcher\":{\"path\":\"/opt/winter/helpers/linux-instruction-reader-compartment\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"dependencies\":[],\"uid\":65534}}"
+
 struct fake {
     char events[256][96];
     int count;
@@ -44,7 +49,7 @@ struct fake {
     int last_with_ports;
     unsigned dirs_count;
     char dirs_ids[4][130];
-    const char *artifacts;
+    const char *artifacts, *guided_artifacts;
     const char *base;
     int base_rc, boot_id_rc, supervisor_rc, wait_flushed_rc, flush_rc;
     char last_config[70000];
@@ -126,7 +131,7 @@ static int f_read_artifacts(void *c, unsigned profile, char *out, size_t cap, si
     struct fake *f = c;
     ev(c, "read-artifacts:%u", profile);
     if (f->artifacts_rc || (profile == 2 && f->no_guided_artifacts)) return f->artifacts_rc ? f->artifacts_rc : -1;
-    snprintf(out, cap, "%s", f->artifacts);
+    snprintf(out, cap, "%s", profile == 2 ? f->guided_artifacts : f->artifacts);
     *len = strlen(out);
     return 0;
 }
@@ -163,7 +168,8 @@ static struct wg_boot_ops ops_for(struct fake *f) {
 }
 static void fresh(struct fake *f) {
     memset(f, 0, sizeof *f);
-    f->artifacts = "{\"artifacts\":{\"launcher\":{}}}";
+    f->artifacts = V1_BLOCK;
+    f->guided_artifacts = GUIDED_BLOCK;
     f->base = "{\"artifacts\":{}}";
     f->wait_flushed_rc = 1;
 }
@@ -182,6 +188,7 @@ static void host_ready(struct wg_boot *boot) {
 }
 
 #define ITEM_JSON "[{\"logicalSessionId\":\"s1\"}]"
+#define ITEM_GUIDED_JSON "[{\"hostQueryGuidedRuntime\":{\"guidanceDirectory\":\"/run/winter/shared-instructions\"},\"logicalSessionId\":\"s1\"}]"
 /* The helper's 'C' message: profile, count, per conversation uid + id, then the items array. */
 static size_t conversations_payload(uint8_t *out, unsigned profile, const char *const *ids, unsigned count, const char *json) {
     size_t at = 0;
@@ -199,7 +206,7 @@ static size_t conversations_payload(uint8_t *out, unsigned profile, const char *
 static void send_conversations(struct wg_boot *boot, unsigned profile) {
     static const char *const ids[] = { "s1" };
     uint8_t payload[512];
-    size_t n = conversations_payload(payload, profile, ids, 1, ITEM_JSON);
+    size_t n = conversations_payload(payload, profile, ids, 1, profile == 2 ? ITEM_GUIDED_JSON : ITEM_JSON);
     wg_boot_helper_message(boot, CTL_HELPER_CONVERSATIONS, payload, n);
 }
 
@@ -357,7 +364,7 @@ static void test_a_host_query_set_starts_the_supervisor_with_ports_and_the_live_
     CHECK(strstr(f.last_config, "\"guestBootId\":\"66666666-6666-4666-8666-666666666666\"") != NULL);
     CHECK(strstr(f.last_config, "\"conversations\":" ITEM_JSON) != NULL);
     CHECK(strstr(f.last_config, "\"artifacts\":{}") != NULL);
-    CHECK(strstr(f.last_config, ",\"hostQueryRuntime\":{\"artifacts\":{\"launcher\":{}}}}") != NULL);
+    CHECK(strstr(f.last_config, ",\"hostQueryRuntime\":" V1_BLOCK "}") != NULL);
     CHECK(f.dirs_count == 1 && strcmp(f.dirs_ids[0], "s1:20001") == 0);
     CHECK(index_of(&f, "mount-volumes") < index_of(&f, "prepare-dirs:1") && index_of(&f, "prepare-dirs:1") < index_of(&f, "start-supervisor"));
     CHECK(!has(&f, "relay:G:1") && !starts(&f, "helper:r"));   /* nothing is promised before the ready line */
@@ -377,6 +384,77 @@ static void test_the_guided_profile_uses_its_own_key_and_a_tools_only_set_has_no
     to_running(&boot, 0);
     CHECK(!f.last_with_ports && strstr(f.last_config, "hostQuery") == NULL && !has(&f, "read-artifacts:0") && !has(&f, "read-artifacts:1") && !has(&f, "read-artifacts:2"));
     CHECK(has(&f, "relay:G:0") && has(&f, "helper:r:0:1"));   /* no runtime streams exist */
+}
+
+static void send_conversations_json(struct wg_boot *boot, unsigned profile, const char *json) {
+    static const char *const ids[] = { "s1" };
+    uint8_t payload[1024];
+    size_t n = conversations_payload(payload, profile, ids, 1, json);
+    wg_boot_helper_message(boot, CTL_HELPER_CONVERSATIONS, payload, n);
+}
+
+static void test_a_guided_object_larger_than_the_host_query_one_is_read_whole(void) {
+    /* 20 dependencies: about 5 KiB, more than the host-query object ever needs, within the one bound both use */
+    static char big[WG_CONFIG_RUNTIME_MAX + 1];
+    size_t at = (size_t)snprintf(big, sizeof big, "{\"artifacts\":{\"executable\":{\"path\":\"/a/e\",\"sha256\":\"%064d\"},\"launcher\":{\"path\":\"/a/l\",\"sha256\":\"%064d\"},"
+                                 "\"ownerLibrary\":{\"path\":\"/a/o\",\"sha256\":\"%064d\"}},\"reader\":{\"artifacts\":{\"executable\":{\"path\":\"/r/e\",\"sha256\":\"%064d\"},"
+                                 "\"launcher\":{\"path\":\"/r/l\",\"sha256\":\"%064d\"}},\"dependencies\":[", 0, 0, 0, 0, 0);
+    for (int k = 0; k < 20; k++)
+        at += (size_t)snprintf(big + at, sizeof big - at, "%s{\"guestPath\":\"/lib/d%02d\",\"path\":\"/opt/winter/reader/%0200d\",\"sha256\":\"%064d\"}", k ? "," : "", k, k, 0);
+    at += (size_t)snprintf(big + at, sizeof big - at, "],\"uid\":65534}}");
+    CHECK(at > 4096 && at < WG_CONFIG_RUNTIME_MAX);
+    struct fake f; fresh(&f);
+    f.guided_artifacts = big;
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 2);
+    CHECK(has(&f, "start-supervisor") && strstr(f.last_config, big) != NULL && boot.conv_state == WG_CONV_STARTING);
+}
+
+static void test_a_guided_set_gets_its_reader_block_and_guidance_directory_or_does_not_start(void) {
+    struct fake f; fresh(&f);
+    struct wg_boot_ops ops = ops_for(&f);
+    struct wg_boot boot; wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 2);
+    /* the image's object goes under the guided key exactly as it is (with `reader`), and the conversation carries its guidanceDirectory */
+    CHECK(has(&f, "start-supervisor") && f.last_with_ports && boot.conv_state == WG_CONV_STARTING);
+    CHECK(strstr(f.last_config, ",\"hostQueryGuidedRuntime\":" GUIDED_BLOCK "}") != NULL);
+    CHECK(strstr(f.last_config, "\"reader\":{\"artifacts\":") != NULL && strstr(f.last_config, "\"dependencies\":[]") != NULL);
+    CHECK(strstr(f.last_config, "\"guidanceDirectory\":\"/run/winter/shared-instructions\"") != NULL);
+    /* guided without its guidanceDirectory, or with another one: the helper's set is refused (bad_conversations) and nothing starts */
+    const char *without = "[{\"hostQueryGuidedRuntime\":{},\"logicalSessionId\":\"s1\"}]";
+    const char *elsewhere = "[{\"hostQueryGuidedRuntime\":{\"guidanceDirectory\":\"/run/winter/other\"},\"logicalSessionId\":\"s1\"}]";
+    const char *twice = "[{\"hostQueryGuidedRuntime\":{\"guidanceDirectory\":\"/run/winter/shared-instructions\",\"x\":{\"guidanceDirectory\":\"/run/winter/shared-instructions\"}},\"logicalSessionId\":\"s1\"}]";
+    const char *bad_cases[3] = { without, elsewhere, twice };
+    for (int k = 0; k < 3; k++) {
+        fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+        to_mounted(&boot);
+        send_conversations_json(&boot, 2, bad_cases[k]);
+        CHECK(has(&f, "log:config-refused") && has(&f, "helper:r:1:0") && !has(&f, "start-supervisor") && !has(&f, "prepare-dirs:1") && !has(&f, "power-off"));
+    }
+    /* a host-query (v1) conversation must not carry one: the supervisor refuses a guided-only key for any other profile */
+    fresh(&f); ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations_json(&boot, 1, ITEM_GUIDED_JSON);
+    CHECK(has(&f, "log:config-refused") && has(&f, "helper:r:1:0") && !has(&f, "start-supervisor"));
+    /* an image object that is not what the supervisor reads is the image's defect: supervisor_failed, nothing started */
+    const char *broken_blocks[3] = {
+        V1_BLOCK,   /* the guided key without `reader` */
+        "{\"artifacts\":{},\"reader\":{}}",
+        GUIDED_BLOCK "x" };
+    for (int k = 0; k < 3; k++) {
+        fresh(&f); f.guided_artifacts = broken_blocks[k]; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+        to_mounted(&boot);
+        send_conversations(&boot, 2);
+        CHECK(has(&f, "log:runtime-artifacts-invalid") && has(&f, "helper:r:2:0") && !has(&f, "start-supervisor") && !has(&f, "prepare-dirs:1") && !has(&f, "power-off"));
+    }
+    /* and the v1 object may not carry a reader */
+    fresh(&f); f.artifacts = GUIDED_BLOCK; ops = ops_for(&f); wg_boot_init(&boot, &ops);
+    to_mounted(&boot);
+    send_conversations(&boot, 1);
+    CHECK(has(&f, "log:runtime-artifacts-invalid") && has(&f, "helper:r:2:0") && !has(&f, "start-supervisor"));
 }
 
 static void test_a_second_or_early_conversation_set_is_a_helper_bug_and_stops_the_guest(void) {
@@ -1115,7 +1193,7 @@ int main(void) {
         T(test_a_failed_mount_is_reported_and_leaves_nothing_mounted), T(test_a_malformed_mount_payload_stops_the_guest_without_mounting),
         T(test_done_without_a_mount_stops_the_guest), T(test_unknown_helper_and_relay_messages_stop_the_guest),
         T(test_a_relay_fatal_stops_the_guest_without_any_frame), T(test_the_supervisor_does_not_start_without_a_conversation_set),
-        T(test_a_host_query_set_starts_the_supervisor_with_ports_and_the_live_boot_id), T(test_the_guided_profile_uses_its_own_key_and_a_tools_only_set_has_no_ports_or_runtime_key), T(test_a_second_or_early_conversation_set_is_a_helper_bug_and_stops_the_guest), T(test_malformed_conversation_payloads_are_refused_without_starting_anything), T(test_a_set_that_cannot_start_leaves_the_guest_up_and_tells_the_helper), T(test_a_supervisor_that_is_not_ready_fails_the_set_but_not_the_guest), T(test_a_failed_attempt_still_counts_as_the_one_attempt), T(test_fail_stop_faults_name_what_failed), T(test_a_fault_is_flushed_before_anything_else_happens_and_an_unconfirmed_one_is_logged), T(test_a_late_not_ready_event_changes_nothing), T(test_the_helper_gets_the_hosts_messages_in_every_live_phase_and_not_while_draining), T(test_a_helper_that_dies_after_the_mount_without_saying_done_stops_the_guest), T(test_a_helper_that_finishes_normally_and_exits_changes_nothing), T(test_a_helper_that_ends_before_any_mount_leaves_the_guest_up_for_the_host), T(test_the_supervisor_never_starts_before_the_mount_is_confirmed),
+        T(test_a_host_query_set_starts_the_supervisor_with_ports_and_the_live_boot_id), T(test_the_guided_profile_uses_its_own_key_and_a_tools_only_set_has_no_ports_or_runtime_key), T(test_a_guided_set_gets_its_reader_block_and_guidance_directory_or_does_not_start), T(test_a_guided_object_larger_than_the_host_query_one_is_read_whole), T(test_a_second_or_early_conversation_set_is_a_helper_bug_and_stops_the_guest), T(test_malformed_conversation_payloads_are_refused_without_starting_anything), T(test_a_set_that_cannot_start_leaves_the_guest_up_and_tells_the_helper), T(test_a_supervisor_that_is_not_ready_fails_the_set_but_not_the_guest), T(test_a_failed_attempt_still_counts_as_the_one_attempt), T(test_fail_stop_faults_name_what_failed), T(test_a_fault_is_flushed_before_anything_else_happens_and_an_unconfirmed_one_is_logged), T(test_a_late_not_ready_event_changes_nothing), T(test_the_helper_gets_the_hosts_messages_in_every_live_phase_and_not_while_draining), T(test_a_helper_that_dies_after_the_mount_without_saying_done_stops_the_guest), T(test_a_helper_that_finishes_normally_and_exits_changes_nothing), T(test_a_helper_that_ends_before_any_mount_leaves_the_guest_up_for_the_host), T(test_the_supervisor_never_starts_before_the_mount_is_confirmed),
         T(test_the_supervisor_exiting_after_ready_stops_the_guest_with_a_supervisor_lost_fault),
         T(test_the_relay_exiting_stops_the_guest_without_frames), T(test_a_full_drain_runs_in_the_documented_order),
         T(test_halting_is_withheld_when_a_unmount_fails_and_the_guest_still_powers_off), T(test_a_busy_unmount_is_retried_after_killing_the_holders),

@@ -1,0 +1,189 @@
+name: cowork-guest-image-build
+# ONE-RUN image build: the guest kernel (decision D6) and the production initramfs, each built twice and compared, with the digests published for a reviewed pin PR.
+# It is authored and NEVER triggered by its author. The owner approves the single run; then the branch below is created ONCE, from the exact reviewed commit, and frozen.
+# Nothing here boots anything (gate G1 is the first boot), reaches a provider, or gives the guest a network device. It changes no pin file: digests go in a pull request.
+# The pins below are mirrored from scripts/cowork-guest-artifact/pins.json and kernel/pins.json, kernel/ci-build.json; the gate test
+# (packages/core/test/cowork/guest-image-build-gates.test.ts) fails if any of them drifts from those files.
+# REVIEWED_HEAD is all zeros until the owner-approved arming step sets it to the reviewed commit.
+# The first steps refuse unless REVIEWED_HEAD is an ancestor of the pushed commit and the whole diff is that one line.
+on:
+  push:
+    branches: [cowork/guest-image-build]
+permissions:
+  contents: read
+env:
+  REVIEWED_HEAD: '0000000000000000000000000000000000000000'
+  AGENT_SDK_HEAD: '7e71929d0231be2d77645bfa47ee2b550f3add22'
+  BUILDER_HEAD: '180d3effd7ddbb9406aeea0912f76c78ef20cf75'
+  BUN_ARCHIVE_URL: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip'
+  BUN_ARCHIVE_SHA256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b'
+  ZIG_ARCHIVE_URL: 'https://ziglang.org/download/0.14.1/zig-aarch64-linux-0.14.1.tar.xz'
+  ZIG_ARCHIVE_SHA256: 'f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b'
+  PNPM_URL: 'https://github.com/pnpm/pnpm/releases/download/v10.34.6/pnpm-linux-arm64'
+  PNPM_SHA256: '5e18e460aec11c0d39b345a732fbbdee0811354f6f384e2da230c6438ae2137c'
+  KERNEL_URL: 'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.35.tar.xz'
+  KERNEL_SHA256: 'f78602932219125e211c5f5bfd84edcfd4ec5ce88fc944f8248413f665bef236'
+  KERNEL_SIGN_URL: 'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.35.tar.sign'
+  KERNEL_SIGN_SHA256: '3ab523660ccff4ee386a36aab368fc5d64bb7611afc21591a970a8bbeb9e5ca0'
+  KERNEL_KEY_URL: 'https://kernel.org/.well-known/openpgpkey/hu/e3n9xnm94c5apezqnj1pmrfuaoyfm8cf?l=gregkh'
+  KERNEL_KEY_SHA256: '61b758f0d4a386fc83565b92cfd6c05879573df0e96d44b71a5a3e19e1a8581a'
+  LLVM_URL: 'https://cdn.kernel.org/pub/tools/llvm/files/llvm-20.1.8-aarch64.tar.xz'
+  LLVM_SHA256: '945d22282d4bc623fd828fad50e14698fe7be070855f68f3d351a26305615ba7'
+  LLVM_SIGN_URL: 'https://cdn.kernel.org/pub/tools/llvm/files/llvm-20.1.8-aarch64.tar.sign'
+  LLVM_SIGN_SHA256: '9e1bc425061af1b7512a70b9e5335fe4fb2373b59068e6a69429b80bd8c1ec0d'
+  LLVM_KEY_URL: 'https://kernel.org/.well-known/openpgpkey/hu/f4fk1gdgyoeakzdpeuk5smpgq6iygc1i?l=nathan'
+  LLVM_KEY_SHA256: 'dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8'
+jobs:
+  build:
+    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build' && github.event.created == true && github.run_attempt == '1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse any arming commit that is not the one reviewed line, then check out the reviewed head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$REVIEWED_HEAD" != "0000000000000000000000000000000000000000"
+          git merge-base --is-ancestor "$REVIEWED_HEAD" "$GITHUB_SHA"
+          test "$(git diff --name-only "$REVIEWED_HEAD" "$GITHUB_SHA")" = ".github/workflows/cowork-guest-image-build.yml"
+          test "$(git diff --numstat "$REVIEWED_HEAD" "$GITHUB_SHA")" = "$(printf '1\t1\t%s' .github/workflows/cowork-guest-image-build.yml)"
+          armed_diff=$(git diff -U0 --no-color "$REVIEWED_HEAD" "$GITHUB_SHA" | grep -E '^[-+][^-+]' || true)
+          test "$armed_diff" = "$(printf '%s\n%s' "-  REVIEWED_HEAD: '0000000000000000000000000000000000000000'" "+  REVIEWED_HEAD: '$REVIEWED_HEAD'")"
+          git checkout --detach --quiet "$REVIEWED_HEAD"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.AGENT_SDK_HEAD }}
+          path: origins/sdk
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.BUILDER_HEAD }}
+          path: origins/builder
+          persist-credentials: false
+      - name: Fetch the pinned inputs as bounded data
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_work=$(mktemp -d "$RUNNER_TEMP/winter-image.XXXXXXXX")
+          printf 'IMAGE_WORK=%s\n' "$image_work" >> "$GITHUB_ENV"
+          mkdir -m 700 "$image_work/downloads" "$image_work/tools" "$image_work/kernel-downloads"
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 67108864 "$BUN_ARCHIVE_URL" --output "$image_work/downloads/bun.zip"
+          printf '%s  %s\n' "$BUN_ARCHIVE_SHA256" "$image_work/downloads/bun.zip" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 104857600 "$ZIG_ARCHIVE_URL" --output "$image_work/downloads/zig.tar.xz"
+          printf '%s  %s\n' "$ZIG_ARCHIVE_SHA256" "$image_work/downloads/zig.tar.xz" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 104857600 "$PNPM_URL" --output "$image_work/downloads/pnpm"
+          printf '%s  %s\n' "$PNPM_SHA256" "$image_work/downloads/pnpm" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 268435456 "$KERNEL_URL" --output "$image_work/kernel-downloads/linux-6.18.35.tar.xz"
+          printf '%s  %s\n' "$KERNEL_SHA256" "$image_work/kernel-downloads/linux-6.18.35.tar.xz" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 1048576 "$KERNEL_SIGN_URL" --output "$image_work/kernel-downloads/linux-6.18.35.tar.sign"
+          printf '%s  %s\n' "$KERNEL_SIGN_SHA256" "$image_work/kernel-downloads/linux-6.18.35.tar.sign" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 1048576 "$KERNEL_KEY_URL" --output "$image_work/kernel-downloads/gregkh.key"
+          printf '%s  %s\n' "$KERNEL_KEY_SHA256" "$image_work/kernel-downloads/gregkh.key" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 268435456 "$LLVM_URL" --output "$image_work/kernel-downloads/llvm-20.1.8-aarch64.tar.xz"
+          printf '%s  %s\n' "$LLVM_SHA256" "$image_work/kernel-downloads/llvm-20.1.8-aarch64.tar.xz" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 1048576 "$LLVM_SIGN_URL" --output "$image_work/kernel-downloads/llvm-20.1.8-aarch64.tar.sign"
+          printf '%s  %s\n' "$LLVM_SIGN_SHA256" "$image_work/kernel-downloads/llvm-20.1.8-aarch64.tar.sign" | sha256sum --check --strict -
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 900 --max-filesize 1048576 "$LLVM_KEY_URL" --output "$image_work/kernel-downloads/nathan.key"
+          printf '%s  %s\n' "$LLVM_KEY_SHA256" "$image_work/kernel-downloads/nathan.key" | sha256sum --check --strict -
+          python3 -I -S -B scripts/cowork-guest-artifact/unpack_bun.py "$image_work/downloads/bun.zip" "$image_work/tools/bun"
+          install -m 0755 "$image_work/downloads/pnpm" "$image_work/tools/pnpm"
+          printf '%s\n' "$image_work/tools" >> "$GITHUB_PATH"
+      - name: Require an ordinary native Linux ARM64 builder with the tools the scripts read
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = aarch64
+          for tool in git rsync xz tar gpg gpgv python3 cc make; do command -v "$tool"; done
+          test "$(bun --version)" = "1.3.14"
+      - name: Install the host build tools for the kernel (build tools only, versions recorded)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends flex bison bc libelf-dev libssl-dev
+          dpkg-query -W flex bison bc libelf-dev libssl-dev > "$IMAGE_WORK/host-packages.txt"
+      - name: Provision the SDK's locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: origins/sdk
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build the pinned kernel twice at the same paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          kernel_work="$IMAGE_WORK/kernel-work"
+          python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-1"
+          rm -rf "$kernel_work"
+          python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-2"
+          rm -rf "$kernel_work"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: guest-kernel-${{ github.run_id }}
+          path: |
+            ${{ env.IMAGE_WORK }}/kernel-1/Image
+            ${{ env.IMAGE_WORK }}/kernel-1/kernel-receipt.json
+            ${{ env.IMAGE_WORK }}/kernel-1/resolved.config
+            ${{ env.IMAGE_WORK }}/kernel-2/kernel-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build the production initramfs twice (an exit of 3 means a built digest differs from pins.json, and is published below)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S -B scripts/cowork-guest-artifact/packages.py --out "$IMAGE_WORK/artifact"
+          image_status_1=0
+          python3 -I -S -B scripts/cowork-guest-artifact/image.py --out "$IMAGE_WORK/artifact/build-1" --sdk origins/sdk --builder origins/builder --zig-archive "$IMAGE_WORK/downloads/zig.tar.xz" --bun-base "$IMAGE_WORK/tools/bun" || image_status_1=$?
+          test "$image_status_1" = 0 || test "$image_status_1" = 3
+          image_status_2=0
+          python3 -I -S -B scripts/cowork-guest-artifact/image.py --out "$IMAGE_WORK/artifact/build-2" --sdk origins/sdk --builder origins/builder --zig-archive "$IMAGE_WORK/downloads/zig.tar.xz" --bun-base "$IMAGE_WORK/tools/bun" || image_status_2=$?
+          test "$image_status_2" = 0 || test "$image_status_2" = 3
+          printf 'IMAGE_STATUS_1=%s\nIMAGE_STATUS_2=%s\n' "$image_status_1" "$image_status_2" >> "$GITHUB_ENV"
+      - name: Read both cpios back independently of the encoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S -B scripts/cowork-guest-artifact/verify.py "$IMAGE_WORK/artifact/build-1" --allow-unpinned > "$IMAGE_WORK/artifact/build-1/cpio-verification.json"
+          python3 -I -S -B scripts/cowork-guest-artifact/verify.py "$IMAGE_WORK/artifact/build-2" --allow-unpinned > "$IMAGE_WORK/artifact/build-2/cpio-verification.json"
+      - name: Compute both builds' digests and the runtimeImageDigest, then collect the files to publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S -B scripts/cowork-guest-artifact/image_build_report.py report --kernel-1 "$IMAGE_WORK/kernel-1" --kernel-2 "$IMAGE_WORK/kernel-2" --image-1 "$IMAGE_WORK/artifact/build-1" --image-2 "$IMAGE_WORK/artifact/build-2" --status-1 "$IMAGE_STATUS_1" --status-2 "$IMAGE_STATUS_2" --out "$IMAGE_WORK/digests.json"
+          python3 -I -S -B scripts/cowork-guest-artifact/image_build_report.py collect --kernel "$IMAGE_WORK/kernel-1" --image "$IMAGE_WORK/artifact/build-1" --out "$IMAGE_WORK/publish"
+          cp "$IMAGE_WORK/digests.json" "$IMAGE_WORK/host-packages.txt" "$IMAGE_WORK/publish/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: guest-image-${{ github.run_id }}
+          path: ${{ env.IMAGE_WORK }}/publish/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Turn the run red unless both builds agree and every pin holds
+        shell: bash
+        run: python3 -I -S -B scripts/cowork-guest-artifact/image_build_report.py assert "$IMAGE_WORK/digests.json"
+      - name: Retain bounded refusal diagnostics
+        if: failure() && env.IMAGE_WORK != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: guest-image-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ env.IMAGE_WORK }}/kernel-1/kernel-receipt.json
+            ${{ env.IMAGE_WORK }}/kernel-2/kernel-receipt.json
+            ${{ env.IMAGE_WORK }}/kernel-1/build.log
+            ${{ env.IMAGE_WORK }}/kernel-2/build.log
+            ${{ env.IMAGE_WORK }}/artifact/build-1/receipt.json
+            ${{ env.IMAGE_WORK }}/artifact/build-2/receipt.json
+            ${{ env.IMAGE_WORK }}/artifact/build-1/runtime-build.log
+            ${{ env.IMAGE_WORK }}/host-packages.txt
+            ${{ env.IMAGE_WORK }}/digests.json
+          if-no-files-found: ignore
+          retention-days: 7

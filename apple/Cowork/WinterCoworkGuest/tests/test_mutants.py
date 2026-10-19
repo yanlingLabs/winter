@@ -19,6 +19,8 @@ from test_native import CC, ROOT
 
 LINUX = sys.platform.startswith("linux")
 
+T = "init/trusted_config.c"
+
 # (file, old text, new text, suite) -- suite: a key of SUITES
 MUTANTS = [
     ("init/init_linux.c","    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);","    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);","pid1"),
@@ -52,6 +54,7 @@ MUTANTS = [
     ("init/init_linux.c","    sigprocmask(SIG_SETMASK, &none, NULL);","","pid1"),
     ("init/init_linux.c","        setsid();\n        int sources[4]","        int sources[4]","pid1"),
     ("init/init_linux.c","    close(config_fd);\n    close(stdin_pipe[0]);\n    close(stdout_pipe[1]);\n    release","    close(stdin_pipe[0]);\n    close(stdout_pipe[1]);\n    release","pid1"),
+    ("init/trusted_config.c","if (index == count || (seen & (1u << index))) return 0;","if (index == count) return 0;","config"),
     ("init/trusted_config.c","st.st_nlink != 1 ||","0 ||","config"),
     ("init/trusted_config.c","(st.st_mode & 0777) != 0400 ||","0 ||","config"),
     ("init/trusted_config.c","|| (size_t)st.st_size != length)","|| 0)","config"),
@@ -77,6 +80,55 @@ MUTANTS = [
     ("init/boot.c", "ops->read_runtime_artifacts(ops->ctx, set.profile, runtime_buffer,", "ops->read_runtime_artifacts(ops->ctx, 1, runtime_buffer,", "cboot"),
     ("init/init_linux.c", "    if (profile != 1) return -1;", "    if (profile == 0) return -1;", "hygiene"),
     ("relay/relay.c", "static uint8_t rt_in_storage[4u * 1024u * 1024u];", "static uint8_t rt_in_storage[512u * 1024u];", "flow"),
+    # the guided reader block, guidanceDirectory and the exact shape of the runtime object (agent-sdk 68e57c64)
+    (T, r'jp_object(&p, profile == 2 ? GUIDED : V1, profile == 2 ? 2 : 1, block_member, NULL)', r'jp_object(&p, profile == 2 ? GUIDED : V1, 1, block_member, NULL)', "config"),
+    (T, r'jp_object(&p, profile == 2 ? GUIDED : V1, profile == 2 ? 2 : 1, block_member, NULL)', r'jp_object(&p, GUIDED, 2, block_member, NULL)', "config"),
+    
+    (T, r'if (profile != 1 && profile != 2) return 0;', r'if (profile > 2) return 0;', "config"),
+    (T, r"if (jp_char(p, ']')) return 1;", r"if (jp_char(p, ']')) return 0;", "config"),
+    (T, r'if (d.count >= WG_READER_DEPENDENCIES_MAX) return 0;', r'if (d.count > WG_READER_DEPENDENCIES_MAX) return 0;', "config"),
+    (T, r'jp_uint(p, 65535ul, &uid) && uid >= 65534ul', r'jp_uint(p, 65535ul, &uid) && uid >= 1000ul', "config"),
+    (T, r'jp_uint(p, 65535ul, &uid) && uid >= 65534ul', r'jp_uint(p, 65536ul, &uid) && uid >= 65534ul', "config"),
+    (T, r'jp_uint(p, 65535ul, &uid) && uid >= 65534ul', r'jp_uint(p, 65535ul, &uid) && uid >= 65533ul', "config"),
+    (T, r'has_prefix(s, n, "/lib/") || has_prefix(s, n, "/lib64/") || has_prefix(s, n, "/usr/lib/")', r'has_prefix(s, n, "/lib64/") || has_prefix(s, n, "/usr/lib/")', "config"),
+    (T, r'has_prefix(s, n, "/lib/") || has_prefix(s, n, "/lib64/") || has_prefix(s, n, "/usr/lib/")', r'has_prefix(s, n, "/lib/") || has_prefix(s, n, "/usr/lib/")', "config"),
+    (T, r'has_prefix(s, n, "/lib/") || has_prefix(s, n, "/lib64/") || has_prefix(s, n, "/usr/lib/")', r'has_prefix(s, n, "/lib/") || has_prefix(s, n, "/lib64/")', "config"),
+    (T, r'if (n > 1024 || !(has_prefix', r'if (!(has_prefix', "config"),
+    (T, r"(d->length[k] == n || (d->length[k] < n ? s[m] == '/' : d->guest[k][m] == '/'))", r"(d->length[k] == n)", "config"),
+    (T, r"(d->length[k] == n || (d->length[k] < n ? s[m] == '/' : d->guest[k][m] == '/'))", r"(d->length[k] == n || (d->length[k] < n && s[m] == '/'))", "config"),
+    (T, r"(d->length[k] == n || (d->length[k] < n ? s[m] == '/' : d->guest[k][m] == '/'))", r"(d->length[k] == n || (d->length[k] > n && d->guest[k][m] == '/'))", "config"),
+    (T, r"(d->length[k] == n || (d->length[k] < n ? s[m] == '/' : d->guest[k][m] == '/'))", r"(d->length[k] == n || s[m] == '/')", "config"),
+    (T, r"if (length == 0 || (length == 1 && s[start] == '.') || (length == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;", r"if ((length == 1 && s[start] == '.') || (length == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;", "config"),
+    (T, r"if (length == 0 || (length == 1 && s[start] == '.') || (length == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;", r"if (length == 0 || (length == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;", "config"),
+    (T, r"if (length == 0 || (length == 1 && s[start] == '.') || (length == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;", r"if (length == 0 || (length == 1 && s[start] == '.')) return 0;", "config"),
+    (T, r'if (n != 64) return 0;', r'if (n < 64) return 0;', "config"),
+    (T, r'if (n != 64) return 0;', r'if (n > 64) return 0;', "config"),
+    (T, r"(s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')", r"(s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'g')", "config"),
+    (T, r"(s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')", r"(s[i] >= '0' && s[i] <= '9') || (s[i] >= 'A' && s[i] <= 'f')", "config"),
+    (T, r"if (index == 0) return n <= 1024 && s[0] == '/' && path_parts_ok(s, n);", r"if (index == 0) return n <= 1024 && path_parts_ok(s, n);", "config"),
+    (T, r"if (index == 0) return n <= 1024 && s[0] == '/' && path_parts_ok(s, n);", r"if (index == 0) return n <= 1025 && s[0] == '/' && path_parts_ok(s, n);", "config"),
+    (T, r"if (index == 0) return n <= 1024 && s[0] == '/' && path_parts_ok(s, n);", r"if (index == 0) return s[0] == '/' && path_parts_ok(s, n);", "config"),
+    (T, r"if (index == 1) return n <= 1024 && s[0] == '/' && path_parts_ok(s, n);", r"if (index == 1) return n <= 1024 && s[0] == '/';", "config"),
+    (T, r"if (index == 1) return n <= 1024 && s[0] == '/' && path_parts_ok(s, n);", r"if (index == 1) return s[0] == '/' && path_parts_ok(s, n);", "config"),
+    (T, r'if (index == count || (seen & (1u << index))) return 0;', r'if (index == count) return 0;', "config"),
+    (T, r'if (index == count || (seen & (1u << index))) return 0;', r'if ((seen & (1u << index))) return 0;', "config"),
+    (T, r"if (k > 0 && !jp_char(p, ',')) return 0;", r"if (k > 0) jp_char(p, ',');", "config"),
+    (T, r"if (c < 0x21 || c == '\\') return 0;", r"if (c < 0x20 || c == '\\') return 0;", "config"),
+    (T, r"if (c < 0x21 || c == '\\') return 0;", r"if (c < 0x21) return 0;", "config"),
+    (T, r"p->s[p->i] < '1' || p->s[p->i] > '9') return 0;", r"p->s[p->i] < '0' || p->s[p->i] > '9') return 0;", "config"),
+    (T, r"if (p->i >= p->n || p->s[p->i] < '1' || p->s[p->i] > '9') return 0;", r"if (p->i >= p->n) return 0;", "config"),
+    (T, r'if (v > maximum) return 0;', r'if (v > maximum + 1) return 0;', "config"),
+    (T, r'if (profile != 2) return named == 0;', r'if (profile != 2) return 1;', "config"),
+    (T, r'if (named != count) return 0;', r'if (named < count) return 0;', "config"),
+    (T, r'if (named != count) return 0;', r'if (named > count) return 0;', "config"),
+    (T, r'return !(exact < named);', r'return !(exact <= named);', "config"),
+    (T, r'return !(exact < named);', r'return !(exact > named);', "config"),
+    ("init/boot.c", r'if (!wg_guidance_members_ok(set.profile, set.count, set.json, set.json_length)) { conversations_failed(boot, 1, "config-refused"); return; }', r'', "cboot"),
+    ("init/boot.c", r'if (built == WG_CONFIG_RUNTIME_SHAPE) { conversations_failed(boot, 2, "runtime-artifacts-invalid"); return; }', r'', "cboot"),
+    ("init/boot.c", r'if (built == WG_CONFIG_RUNTIME_SHAPE) { conversations_failed(boot, 2,', r'if (built == WG_CONFIG_RUNTIME_SHAPE) { conversations_failed(boot, 1,', "cboot"),
+    ("init/boot.c", r'static char runtime_buffer[WG_CONFIG_RUNTIME_MAX + 1];', r'static char runtime_buffer[4096u + 1];', "cboot"),
+    ("bootstrap/guest_bootstrap.py", r'                config["guidanceDirectory"] = GUIDANCE_DIRECTORY', r'                pass', "bootstrap"),
+    ("bootstrap/guest_bootstrap.py", r'GUIDANCE_DIRECTORY = "/run/winter/shared-instructions"', r'GUIDANCE_DIRECTORY = "/run/winter/shared"', "bootstrap"),
 ]
 
 SUITES = {
@@ -87,6 +139,7 @@ SUITES = {
     "cboot": ("tests", "test_init_modules.py", ["-k", "BootStateMachine"]),
     "hygiene": ("tests", "test_hygiene.py", []),
     "bootstrap": ("bootstrap", "test_guest_bootstrap.py", []),
+    "guided": ("tests", "test_guided_config.py", []),
 }
 
 
