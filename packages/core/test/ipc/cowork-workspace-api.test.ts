@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COWORK_REMOTE_METHODS, COWORK_RPC, ConnWriter, LineDecoder, PROTOCOL_VERSION, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { SessionStore } from "../../src/sessions/store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CoworkFolderSelections } from "../../src/cowork/folder-selections";
@@ -12,13 +13,13 @@ import { CoworkWorkspaceService, type CoworkHostPorts } from "../../src/cowork/s
 import { CoworkError, type SourceSelection } from "../../src/cowork/types";
 
 class Client {
-  private decoder = new LineDecoder(); private next = 1;
+  events: any[] = []; private decoder = new LineDecoder(); private next = 1;
   private pending = new Map<number, { resolve(value: any): void; timer: ReturnType<typeof setTimeout> }>();
   private socket!: Awaited<ReturnType<typeof Bun.connect>>; private writer!: ConnWriter;
   static async connect(path: string, token: string, role = "harness") {
     const client = new Client();
     client.socket = await Bun.connect({ unix: path, socket: {
-      data(_socket, bytes) { for (const line of client.decoder.push(bytes)) { const reply = JSON.parse(line), pending = client.pending.get(reply.id); if (pending) { clearTimeout(pending.timer); client.pending.delete(reply.id); pending.resolve(reply); } } },
+      data(_socket, bytes) { for (const line of client.decoder.push(bytes)) { const reply = JSON.parse(line); if (reply.method === "event") { client.events.push(reply.params); continue; } const pending = client.pending.get(reply.id); if (pending) { clearTimeout(pending.timer); client.pending.delete(reply.id); pending.resolve(reply); } } },
       drain() { client.writer.onDrain(); },
     } });
     client.writer = new ConnWriter(client.socket as unknown as WritableSocket);
@@ -39,8 +40,9 @@ const folder: Extract<SourceSelection, { kind: "folder" }> = { kind: "folder", l
 const repo: Extract<SourceSelection, { kind: "githubRepository" }> = { kind: "githubRepository", label: "Fixture Repository", access: "read-write", detail: { repositoryId: "repo-fixture", authorityRef: "private-account-reference", initialRef: "main" } };
 let daemon: RunningDaemon | undefined; const homes: string[] = [], clients: Client[] = [];
 afterEach(async () => { clients.splice(0).forEach(client => client.close()); if (daemon) { await daemon.stop(); daemon = undefined; } homes.splice(0).forEach(home => rmSync(home, { recursive: true, force: true })); });
-async function boot(fixture = true, selections?: CoworkFolderSelections) {
+async function boot(fixture = true, selections?: CoworkFolderSelections, seed?: (home: string) => void) {
   const home = mkdtempSync(join(tmpdir(), "winter-cowork-api-")); homes.push(home);
+  seed?.(home);
   const scopes = new Set<string>(), repos = new Set([repo.detail.authorityRef]); let revoked = false, admit = fixture;
   const ports: CoworkHostPorts = {
     selections,
@@ -443,4 +445,34 @@ test("Mac selection RPCs enforce local authenticated roles, protected roots and 
   b.local.close();
   for (let tries = 0; tries < 20 && scopes !== 0; tries++) await Bun.sleep(5);
   expect(scopes).toBe(0);
+});
+
+
+test("a phone (remote) caller is refused every one of the 15 workspace/project methods with authority_denied when no Cowork host is wired", async () => {
+  expect(COWORK_REMOTE_METHODS).toHaveLength(15);
+  const f = await boot(false);
+  for (const method of COWORK_REMOTE_METHODS) {
+    const reply = await f.remote.request(method, {});
+    expect([method, reply.error?.data?.code, reply.result]).toEqual([method, "authority_denied", undefined]);
+  }
+});
+
+test("a phone attaches to, lists and reads the history of a PLAIN session with Cowork wired, unaffected", async () => {
+  let sessionId = "";
+  const f = await boot(true, undefined, home => {
+    const store = new SessionStore(home);
+    sessionId = store.createSession("global", { mode: "code" });
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "plain hello", clientName: "orb" } as never);
+    store.close();
+  });
+  const listed = await f.remote.request("session.list", {});
+  expect(listed.error).toBeUndefined();
+  expect(listed.result.sessions.map((row: any) => row.sessionId)).toContain(sessionId);
+  const attached = await f.remote.request("session.attach", { sessionId, fromSeq: 0 });
+  expect(attached.error).toBeUndefined();
+  await f.remote.request("session.list", {}); // barrier: replayed frames are written before this reply
+  expect(f.remote.events.some((event: any) => event.type === "user_message" && event.sessionId === sessionId && event.text === "plain hello")).toBe(true);
+  const history = await f.remote.request("session.history", { sessionId });
+  expect(history.error).toBeUndefined();
+  expect(JSON.stringify(history.result)).toContain("plain hello");
 });
