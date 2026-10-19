@@ -1,7 +1,7 @@
 import { coworkGuestSourceRoot } from "./guest-paths";
 import { randomUUID } from "node:crypto";
 import type { PermissionMode, SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
-import { coworkToolsFor, permissionModeFor } from "../runtime-sdk/mode-options";
+import { coworkToolsFor, permissionModeFor, type CoworkGuestTool } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
 import { intersectCeilings, type CoworkAuthority } from "./authority";
@@ -68,15 +68,15 @@ function freezeCeiling(value: CapabilityCeiling): GuestRuntimeCapabilities {
   return Object.freeze({ ...value, toolClasses: Object.freeze([...value.toolClasses]), hostServices: Object.freeze([...value.hostServices]), connectors: Object.freeze([...value.connectors]) });
 }
 /** The host-query guest's tools, in the order a launch lists them. */
-const GUEST_TOOL_ORDER: readonly string[] = Object.freeze(["Read", "Edit", "Write", "Bash"]);
+const GUEST_TOOL_ORDER: readonly CoworkGuestTool[] = Object.freeze(["Read", "Edit", "Write", "Bash"] as const);
 /**
  * The launch's tool list: the OFFERED list (`coworkToolsFor`, the same list the prompt names), in the guest's order.
  * It derives nothing from the ceiling itself (session door D2). No pre-approval is inferred from it. Fails closed with
  * `invalid_request` on anything the host-query guest cannot carry: an unknown or repeated name, a ceiling class passed
  * by a stale caller, or Edit without both Read and Write (the guest refuses that whole configuration).
  */
-export function confinedToolVisibility(offered: readonly string[]): readonly string[] {
-  if (!Array.isArray(offered) || new Set(offered).size !== offered.length || offered.some(name => typeof name !== "string" || !GUEST_TOOL_ORDER.includes(name))) throw new CoworkError("invalid_request");
+export function confinedToolVisibility(offered: readonly CoworkGuestTool[]): readonly CoworkGuestTool[] {
+  if (!Array.isArray(offered) || new Set(offered).size !== offered.length || offered.some(name => typeof name !== "string" || !(GUEST_TOOL_ORDER as readonly string[]).includes(name))) throw new CoworkError("invalid_request");
   const has = new Set(offered);
   if (has.has("Edit") && !(has.has("Read") && has.has("Write"))) throw new CoworkError("invalid_request");
   return Object.freeze(GUEST_TOOL_ORDER.filter(name => has.has(name)));
