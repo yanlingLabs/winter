@@ -172,7 +172,7 @@ test("repository clone cwd uses canonical repository identity and durable conver
   const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { launched = launch; return channel(launch).port; } } });
   host.spawn("conversation");
   expect(launched.runtime.cwd).toBe("/workspace/repos/repo-id/repo/subdir"); expect(launched.runtime.storeHome).toBe("/workspace/.winter/conversations/conversation");
-  expect(JSON.stringify(launched)).not.toContain("arbitrary-label"); expect(launched.source.sourceId).toBe(f.source.sourceId); host.stop();
+  expect(JSON.stringify(launched)).not.toContain("arbitrary-label"); expect(launched.source!.sourceId).toBe(f.source.sourceId); host.stop();
 });
 test("canonical resume identity change blocks input without rewriting held admission identity", () => {
   const f = fixture(); let wire!: ReturnType<typeof channel>;
@@ -371,4 +371,39 @@ for (const axis of ["hostServices", "connectors", "network"] as const) test(`mid
   const narrower = { ...initial, [axis]: axis === "network" ? "none" : [] };
   f.records.updatePolicy({ principalId: "fixture", requestId: "axis-narrow", expectedRevision: f.records.get(f.workspaceId).configRevision }, f.workspaceId, { ceiling: narrower });
   wire.stdout.write("denied\n"); await expect(stream.next()).rejects.toThrow("stale_acknowledgment"); expect(wire.stops).toContain(true);
+});
+
+test("D3b: a launch admitted for one location never spawns as the other; an outputs launch carries no source", () => {
+  // A source conversation turned into an outputs row between admission and spawn: stale.
+  const f = fixture();
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { return channel(launch).port; } } });
+  const prepared = host.prepareQuery("conversation");
+  expect(prepared.launch.source).not.toBeNull();
+  f.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id='conversation'");
+  expect(() => prepared.spawn()).toThrow("stale_acknowledgment");
+  // An outputs conversation's launch: no source, cwd its own outputs folder; turned into a source row before spawn: stale.
+  const g = fixture();
+  g.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id='conversation'");
+  const outputsHost = new CoworkGuestRuntimeSupervisor({ ...g.deps, runtimeCapability: capability, port: { open(launch) { return channel(launch).port; } } });
+  const outputs = outputsHost.prepareQuery("conversation");
+  expect(outputs.launch.source).toBeNull();
+  expect(outputs.launch.runtime.cwd).toBe("/workspace/outputs/conversation");
+  g.db.db.run("UPDATE cowork_conversations SET location_kind='source', source_id=?, relative_cwd='.' WHERE session_id='conversation'", [g.source.sourceId]);
+  expect(() => outputs.spawn()).toThrow("stale_acknowledgment");
+});
+
+test("D3b: a running lifetime whose conversation changes location is stale at its next input, either way", async () => {
+  const f = fixture(); let wire!: ReturnType<typeof channel>;
+  const host = new CoworkGuestRuntimeSupervisor({ ...f.deps, runtimeCapability: capability, port: { open(launch) { wire = channel(launch); return wire.port; } } });
+  const proc = host.spawn("conversation");
+  f.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id='conversation'");
+  expect(() => proc.stdin.write("x\n")).toThrow("stale_acknowledgment"); expect(wire.inputs).toEqual([]);
+  const g = fixture(); let outputsWire!: ReturnType<typeof channel>;
+  g.db.db.run("UPDATE cowork_conversations SET location_kind='outputs', source_id=NULL, relative_cwd='.' WHERE session_id='conversation'");
+  const outputsHost = new CoworkGuestRuntimeSupervisor({ ...g.deps, runtimeCapability: capability, port: { open(launch) { outputsWire = channel(launch); return outputsWire.port; } } });
+  const outputs = outputsHost.spawn("conversation");
+  outputs.stdin.write("ok\n"); await Bun.sleep(0);
+  expect(outputsWire.inputs).toEqual(["ok\n"]);
+  g.db.db.run("UPDATE cowork_conversations SET location_kind='source', source_id=?, relative_cwd='.' WHERE session_id='conversation'", [g.source.sourceId]);
+  expect(() => outputs.stdin.write("x\n")).toThrow("stale_acknowledgment");
 });

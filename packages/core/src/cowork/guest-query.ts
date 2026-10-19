@@ -46,8 +46,9 @@ export function buildCoworkGuestQueryOptions(
     // supplied bridge instead of deriving pre-approval from the visibility ceiling.
     allowedTools: fixedList([...runtime.allowedTools]), plugins: fixedList([]), skills: fixedList([]),
     mcpServers: Object.freeze({}), strictMcpConfig: true,
-    permissions: Object.freeze({ disableBypassPermissionsMode: runtime.permissionMode !== "bypassPermissions" }),
-    allowDangerouslySkipPermissions: runtime.permissionMode === "bypassPermissions",
+    // Literals, never derived (session door D3): a Cowork guest runs default or plan only (`conversation-set.ts`).
+    permissions: Object.freeze({ disableBypassPermissionsMode: true }),
+    allowDangerouslySkipPermissions: false,
     includePartialMessages: true, maxBufferSize: limits.frameBytes,
     canUseTool, abortController, ...(stderr === undefined ? {} : { stderr }),
   });

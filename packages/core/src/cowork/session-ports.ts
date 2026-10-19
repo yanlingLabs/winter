@@ -1,9 +1,10 @@
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { LegSession } from "../runtime-sdk/session-driver";
+import type { CoworkHostApprovalPorts } from "./approval-ports";
 import type { CoworkPrincipal } from "./authority";
 import type { CoworkConnection } from "./service";
-import type { ConversationBinding } from "./types";
+import type { CoworkConversation } from "./types";
 
 /*
  * Cowork session door: the SPINE (D1). TYPES ONLY. Nothing here runs, and nothing in production constructs any of it:
@@ -38,8 +39,13 @@ export interface CoworkSessionCreateInput {
   readonly location: { readonly kind: "source"; readonly sourceId: string; readonly relativeCwd?: string } | { readonly kind: "outputs" };
 }
 
-/** A Cowork conversation's live driver: the Code `LegSession` surface, with the one mode a Cowork driver can hold. */
-export type CoworkLegSession = Omit<LegSession, "mode"> & { readonly mode: "cowork" };
+/** A Cowork conversation's live driver: the Code `LegSession` surface, with the one mode a Cowork driver can hold, and the
+ *  incarnation it runs in (`PeerEpoch` for the peer inbox; undefined until its guest has started). Verbs the host-query
+ *  guest cannot carry (model, policy, compaction, an interrupt) refuse typed on the host and never reach the guest. */
+export type CoworkLegSession = Omit<LegSession, "mode"> & {
+  readonly mode: "cowork";
+  readonly coworkEpoch: { readonly incarnationId: string; readonly leaseEpoch: number } | undefined;
+};
 
 /** The Cowork driver table, beside the Code one, keyed by stored mode. Same verbs ipc/server.ts and SessionMessaging call. */
 export interface CoworkSessionDrivers {
@@ -90,10 +96,16 @@ export interface CoworkProviderRoute {
 
 // ---------------------------------------------------------------------------------------------------- approvals (APPROVALS lane)
 
-/** One bridge per incarnation. Cards land on the conversation's own log, keyed by `callId`; it is never a `mode: "code"` bridge. */
+/** One bridge per incarnation. Cards land on the conversation's own log, keyed by `callId`; it is never a `mode: "code"` bridge.
+ *  `cowork` is the conversation's host ports (the approval bridge's injected `cowork` dependency, `approval-ports.ts`), and
+ *  `turnOrigin` says who started the running turn (an unattended turn's card is bounded and times out to a deny). */
 export interface CoworkApprovalPort {
   canUseToolFor(input: {
-    readonly sessionId: string; readonly binding: Readonly<ConversationBinding>; readonly policyRevision: number;
+    readonly sessionId: string; /** Either location (D3b). */ readonly binding: Readonly<CoworkConversation>; readonly policyRevision: number;
+    readonly cowork: CoworkHostApprovalPorts;
+    /** The guest cwd (the conversation's root) a relative tool path resolves against. */
+    readonly cwd: string;
+    turnOrigin(): string | undefined;
     emit(event: NewSessionEvent): void;
   }): CanUseTool & { withdrawPending(callId: string): boolean };
 }
@@ -175,4 +187,14 @@ export interface CoworkGuestRun {
   /** Conversation index 0 only (N2), available after `runtime_ready`. */
   runtime(conversation: 0): CoworkGuestRuntimeLink;
   stop(reason: "user" | "shutdown" | "restart" | "update"): Promise<CoworkGuestStopOutcome>;
+  /** Settles once with the incarnation's stop outcome, whoever stopped it. */
+  readonly ended: Promise<CoworkGuestStopOutcome>;
+}
+/** The native start the Cowork driver needs: the service's `CoworkGuestStartPort` (cowork/service.ts), narrowed to resolve the
+ *  running incarnation. S7B's `CoworkNativeWiring.start(workspaceId, request?)` (#87) is this shape; the twin pin lands with
+ *  whichever of #87 and the session door merges second. Injected only by code; production supplies none while
+ *  `COWORK_NATIVE_ENVIRONMENT_ACTIVATED` is false. It begins the incarnation in the repository, asks `conversations` once at
+ *  `mounted`, and resolves after `runtime_ready`. */
+export interface CoworkGuestStarter {
+  start(workspaceId: string, request?: CoworkGuestStartRequest): Promise<CoworkGuestRun>;
 }
