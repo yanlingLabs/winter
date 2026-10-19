@@ -15,6 +15,11 @@ enum CoworkRpcCode: String, Equatable, Sendable {
     case invalidRequest = "invalid_request"
     case recoveryRequired = "recovery_required"
     case scheduleBudgetExhausted = "schedule_budget_exhausted"
+    // The session door's refusals (`CoworkErrorCode`, packages/core/src/cowork/types.ts). A daemon that never
+    // sends them degrades nothing; a build that predates these cases reads them as `nil`, the generic copy.
+    case providerUnavailable = "provider_unavailable"
+    case conversationLimit = "conversation_limit"
+    case coldResumeUnavailable = "cold_resume_unavailable"
 
     /// The daemon refused BEFORE changing anything, so the exact revision a request carried can never
     /// have been applied. `recovery_required` is deliberately absent: Core also answers it for an
@@ -22,7 +27,10 @@ enum CoworkRpcCode: String, Equatable, Sendable {
     var refusedWithoutEffect: Bool {
         switch self {
         case .revisionConflict, .notFound, .authorityDenied, .invalidRequest: return true
-        case .unsupportedTopology, .recoveryRequired, .scheduleBudgetExhausted: return false
+        // The door's three do not carry a revision, so "refused before any effect" is not a claim this enum can
+        // make about a request's revision: they stay on the conservative side.
+        case .unsupportedTopology, .recoveryRequired, .scheduleBudgetExhausted,
+             .providerUnavailable, .conversationLimit, .coldResumeUnavailable: return false
         }
     }
 }
@@ -52,6 +60,9 @@ func coworkScheduleErrorText(_ error: Error) -> String {
     case .invalidRequest: return "Winter sent a schedule request the daemon could not accept. Refresh and try again."
     case .recoveryRequired: return "Winter could not complete this request and may need to recover its schedule records. Try again later."
     case .scheduleBudgetExhausted: return "Planning this schedule's next time exceeded its limit. Simplify the schedule or try again later."
+    // Session-door codes never answer a schedule request; if one ever does, say so plainly rather than guess.
+    case .providerUnavailable, .conversationLimit, .coldResumeUnavailable:
+        return "The Winter daemon could not complete this schedule request (error \(rpc.code))."
     }
 }
 
