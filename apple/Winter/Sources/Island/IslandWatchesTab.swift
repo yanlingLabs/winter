@@ -102,7 +102,7 @@ struct IslandQuietWatchRow: View {
                 }
                 if actions {
                     IslandRowWords(text: IslandWatchesPresentation.details(watch, nowMs: nowMs)) {
-                        IslandRowActionButton(title: stopping ? "Stopping…" : "Stop", enabled: !stopping, action: onStop)
+                        IslandRowActionButton(title: stopping ? "Stopping…" : "Stop", tone: stopping ? .busy : .plain, enabled: !stopping, action: onStop)
                             .accessibilityLabel("Stop waiting")
                     }
                     .transition(.opacity)

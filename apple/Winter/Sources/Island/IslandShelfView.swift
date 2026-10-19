@@ -162,7 +162,8 @@ struct IslandShelfTile: View {
     }
 }
 
-/// A file's small round action (copy, remove).
+/// A file's small round action (copy, remove): quiet — a white glyph on the island's own black (so it reads over a
+/// thumbnail), brightening under the pointer; never a white disc.
 struct IslandShelfMiniButton: View {
     let symbol: String
     let label: String
@@ -170,12 +171,15 @@ struct IslandShelfMiniButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(Typography.micro(.bold))
-                .foregroundStyle(Color.black)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(Color.white))
-                .pillHoverGlow(Color.white)
+            IslandPointerReader { hovered in
+                Image(systemName: symbol)
+                    .font(Typography.micro(.bold))
+                    .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.75))
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(Color.black.opacity(0.78)))
+                    .overlay(Circle().stroke(Color.white.opacity(hovered ? 0.35 : 0.16), lineWidth: 0.75))
+                    .contentShape(Circle())
+            }
         }
         .buttonStyle(IslandPressStyle())
         .accessibilityLabel(label)

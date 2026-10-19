@@ -86,6 +86,49 @@ enum IslandUsagePresentation {
         }
     }
 
+    /// PURE: a window's name on a plan line, short like the plans' own ("5-hour", "Weekly", a per-model weekly window by its
+    /// model alone).
+    static func lineTitle(_ gaugeTitle: String) -> String {
+        let t = gaugeTitle.replacingOccurrences(of: " · background jobs", with: "")
+        switch t {
+        case "Background jobs' plan": return "Jobs"
+        case "Weekly window · with extra usage": return "Weekly+"
+        case "Plan window": return "Plan"
+        case "Extra usage": return "Extra"
+        default:
+            if t.hasPrefix("Weekly window · ") { return String(t.dropFirst("Weekly window · ".count)) }
+            return t.replacingOccurrences(of: " window", with: "")
+        }
+    }
+
+    /// PURE: the windows Winter's own sessions report (the Codex ones sit in the Codex slot) as a plan of its own, on the
+    /// plan block's lines in Winter's colour (user 2026-10-19, the third pass: they ARE plan windows, so they take the
+    /// plan line — no ring tiles). A window the runtime gave no figure for is not a line; with none at all, the plan says
+    /// its status in words. Nil without windows.
+    static func winterSlot(_ gauges: [IslandUsageGauge]) -> UsagePlanSlot? {
+        guard let first = gauges.first else { return nil }
+        let rings = gauges.compactMap { g -> UsagePlanRing? in
+            guard let f = g.fraction ?? (g.refused ? 1 : nil) else { return nil }
+            return UsagePlanRing(id: g.id, title: lineTitle(g.title), fraction: f, resets: g.resets, stale: false,
+                                 resetsHover: g.resets.map { $0.prefix(1).uppercased() + $0.dropFirst() })
+        }
+        let reported = first.reported.hasPrefix("reported ") ? String(first.reported.dropFirst("reported ".count)) : first.reported
+        let empty = rings.isEmpty
+            ? gauges.map { "\(lineTitle($0.title)): \($0.status.lowercased())" }.joined(separator: " · ")
+            : nil
+        return UsagePlanSlot(id: "winter", title: "Winter", rings: rings, sourceLine: "From Winter · \(reported)",
+                             emptyLine: empty, planType: nil)
+    }
+
+    /// PURE: a session's context as a plan line ("Context", how full; its model on the right) — nil without a measured
+    /// fill (then only its words show).
+    static func contextSlot(_ c: IslandUsageContext) -> UsagePlanSlot? {
+        guard let f = c.fraction else { return nil }
+        return UsagePlanSlot(id: "winter-context", title: c.title,
+                             rings: [UsagePlanRing(id: "context", title: "Context", fraction: f, resets: nil, stale: false)],
+                             sourceLine: c.model ?? "", emptyLine: nil, planType: nil)
+    }
+
     /// PURE: a runtime window's gauge id — its provider AND kind (two providers' five-hour windows are two gauges).
     static func windowId(_ w: IslandUsageWindow) -> String {
         "window-\(w.provider ?? "unknown")-\(w.rateLimitType ?? "plan")"
@@ -266,146 +309,65 @@ struct IslandUsageTab: View {
         let context = IslandUsagePresentation.context(snapshot.session, title: model.sessionTitle)
         let background = IslandUsagePresentation.background(snapshot.background, now: now)
         let notes = IslandUsagePresentation.notes(model.roles, now: now)
-        VStack(alignment: .leading, spacing: 12) {
-            // Usage and cost (`docs/claude/usage.md`), compact: the plans, the range's cost, the top models, the window.
-            IslandUsageCompact(model: model, now: now)
-            // Other providers' runtime-reported windows (the Codex ones are in the Codex slot above).
-            let codexIds = Set(snapshot.windows.filter { $0.provider == "codex-oauth" }.map(IslandUsagePresentation.windowId))
-            let others = gauges.filter { !codexIds.contains($0.id) }
-            if !others.isEmpty {
-                section("Other plan windows")
-                VStack(spacing: 8) {
-                    ForEach(Array(stride(from: 0, to: others.count, by: 2)), id: \.self) { i in
-                        HStack(spacing: 8) {
-                            IslandUsageGaugeTile(gauge: others[i])
-                            if i + 1 < others.count { IslandUsageGaugeTile(gauge: others[i + 1]) } else { Color.clear.frame(maxWidth: .infinity) }
-                        }
-                    }
+        // Other providers' runtime-reported windows (the Codex ones are in the Codex slot): Winter's own plan.
+        let codexIds = Set(snapshot.windows.filter { $0.provider == "codex-oauth" }.map(IslandUsagePresentation.windowId))
+        let winter = IslandUsagePresentation.winterSlot(gauges.filter { !codexIds.contains($0.id) })
+        let contextSlot = context.flatMap(IslandUsagePresentation.contextSlot)
+        VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
+            // Usage and cost (`docs/claude/usage.md`), compact: the plans (Winter's own last), the range's cost, the
+            // session's context — every line on one title column.
+            IslandUsageCompact(model: model, now: now, winter: winter, context: contextSlot) {
+                if let context {
+                    if contextSlot == nil { IslandGroupTitle(title: context.title, meta: context.model) }
+                    Text([context.contextLine, context.tokensLine].compactMap { $0 }.joined(separator: " · "))
+                        .font(Typography.tiny())
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if let context {
-                section("This session")
-                IslandUsageContextRow(context: context)
+            // Winter's background jobs: words, amber only while they wait out a limit.
+            VStack(alignment: .leading, spacing: 3) {
+                IslandGroupTitle(title: "Background jobs", meta: background.line,
+                                 metaColor: background.limited ? pillReviewAmber : nil)
+                Text(background.tokensLine).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
             }
-            section("Background jobs")
-            IslandHoverSurface { _ in
-                HStack(spacing: 10) {
-                    Image(systemName: background.limited ? "hourglass" : "checkmark.circle")
-                        .font(Typography.label(.semibold))
-                        .foregroundStyle(background.limited ? pillReviewAmber : Theme.textMuted)
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(background.line).font(Typography.label(.medium)).foregroundStyle(Color.white)
-                        Text(background.tokensLine).font(Typography.caption()).foregroundStyle(Theme.textMuted)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 46)
-            }
+            .padding(.horizontal, 6)
             if !notes.isEmpty {
-                section("Notes")
                 VStack(alignment: .leading, spacing: 6) {
+                    IslandGroupTitle(title: "Notes")
                     ForEach(notes) { note in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(note.role).font(Typography.label(.medium)).foregroundStyle(Color.white)
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 8) {
+                                Text(note.role).font(Typography.tiny(.semibold)).foregroundStyle(Color.white.opacity(0.92))
                                 Spacer(minLength: 6)
                                 if let m = note.model {
-                                    Text(m).font(Typography.captionMono()).foregroundStyle(Theme.textMuted).lineLimit(1).truncationMode(.middle)
+                                    Text(m).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1).truncationMode(.middle)
                                 }
                             }
-                            Text(note.text).font(Typography.caption()).foregroundStyle(Theme.textMuted)
+                            Text(note.text).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous).fill(Color.white.opacity(0.06)))
                     }
                 }
+                .padding(.horizontal, 6)
             }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 14)
     }
-
-    private func section(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(Typography.tiny(.semibold))
-            .tracking(0.6)
-            .foregroundStyle(Theme.textMuted)
-            .padding(.horizontal, 6)
-            .padding(.top, 2)
-    }
-}
-
-struct IslandUsageGaugeTile: View {
-    let gauge: IslandUsageGauge
-
-    var body: some View {
-        IslandHoverSurface { _ in
-            HStack(spacing: 10) {
-                if let f = gauge.fraction {
-                    IslandRing(fraction: f, color: islandFillColor(f, refused: gauge.refused))
-                } else {
-                    Image(systemName: gauge.refused ? "xmark.octagon.fill" : "checkmark.seal.fill")
-                        .font(Typography.heading(.regular))
-                        .foregroundStyle(gauge.refused ? Color(nsColor: .systemRed) : Theme.accent)
-                        .frame(width: 44, height: 44)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(gauge.title).font(Typography.label(.medium)).foregroundStyle(Color.white).lineLimit(1)
-                    Text(gauge.status).font(Typography.caption())
-                        .foregroundStyle(gauge.refused ? Color(nsColor: .systemRed) : Theme.textMuted).lineLimit(1)
-                    Text(gauge.resets ?? gauge.reported).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-        }
-    }
-}
-
-struct IslandUsageContextRow: View {
-    let context: IslandUsageContext
-
-    var body: some View {
-        IslandHoverSurface { _ in
-            HStack(spacing: 12) {
-                if let f = context.fraction {
-                    IslandRing(fraction: f, color: islandFillColor(f))
-                } else {
-                    Image(systemName: "text.bubble")
-                        .font(Typography.heading(.regular))
-                        .foregroundStyle(Theme.textMuted)
-                        .frame(width: 44, height: 44)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(context.title).font(Typography.label(.medium)).foregroundStyle(Color.white).lineLimit(1)
-                    if let line = context.contextLine {
-                        Text(line).font(Typography.caption()).foregroundStyle(Theme.textMuted)
-                    }
-                    Text(context.tokensLine).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                    if let f = context.fraction {
-                        IslandBar(fraction: f, color: islandFillColor(f)).padding(.top, 2)
-                    }
-                }
-                Spacer(minLength: 0)
-                if let model = context.model {
-                    Text(model).font(Typography.captionMono()).foregroundStyle(Theme.textMuted).lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 140, alignment: .trailing)
-                }
-            }
-            .padding(10)
-        }
-    }
 }
 
 /// The Usage tab's compact top (`docs/claude/usage.md`): Codex's, Claude Code's and Antigravity's plan lines, the
 /// selected range's cost with a tiny sparkline, the top models, and "Open usage" for the full window.
-struct IslandUsageCompact: View {
+struct IslandUsageCompact<Below: View>: View {
     @ObservedObject var model: IslandUsageModel
     let now: Date
+    /// Winter's own plan windows (after the apps' plans) and the session's context line (after the cost) — on the same
+    /// title column; what is said under the context.
+    var winter: UsagePlanSlot? = nil
+    var context: UsagePlanSlot? = nil
+    @ViewBuilder var below: () -> Below
 
     var body: some View {
         let summary = model.summary
@@ -415,9 +377,9 @@ struct IslandUsageCompact: View {
             // one title column for every line (wider than 52 pt only when a title needs it) — the cost block's lines
             // included, so every track starts at one x.
             let slots = UsagePresentation.plans(summary).filter { UsagePresentation.showsSlot($0.reading) }
-                .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
-            let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) } + IslandCostBlock.lineTitles,
-                                                                compact: true)
+                .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) } + (winter.map { [$0] } ?? [])
+            let titleWidth = UsagePresentation.titleColumnWidth(
+                (slots + (context.map { [$0] } ?? [])).flatMap { $0.rings.map(\.title) } + IslandCostBlock.lineTitles, compact: true)
             VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
                 ForEach(slots) { slot in
                     UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth, alarms: model.alarms ?? [],
@@ -425,8 +387,18 @@ struct IslandUsageCompact: View {
                 }
             }
             IslandCostBlock(model: model, titleWidth: titleWidth)
+            VStack(alignment: .leading, spacing: 3) {
+                if let context { UsagePlanSlotCard(slot: context, compact: true, titleWidth: titleWidth) }
+                below()
+            }
         }
         .padding(.horizontal, 6)
+    }
+}
+
+extension IslandUsageCompact where Below == EmptyView {
+    init(model: IslandUsageModel, now: Date, winter: UsagePlanSlot? = nil, context: UsagePlanSlot? = nil) {
+        self.init(model: model, now: now, winter: winter, context: context) { EmptyView() }
     }
 }
 
