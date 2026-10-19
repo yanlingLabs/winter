@@ -96,6 +96,19 @@ function classFor(toolName: string, input: Record<string, unknown>, cwd: string)
   return undefined;
 }
 
+const SAFE_SESSION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/**
+ * `outputs` and `scratch` mean the conversation's OWN folder only: `/workspace/outputs/<its session id>` and
+ * `/workspace/.winter/scratch/<its session id>`. Whatever the host classified, a path in ANOTHER conversation's folder, or the
+ * `/workspace/outputs` root itself, is `outside` (denied for every tool). The identity is the bridge's own session id, never the guest's.
+ */
+function ownFolderOnly(hostClass: string, absolute: string, sessionId: string | undefined): string {
+  if (hostClass !== "outputs" && hostClass !== "scratch") return hostClass;
+  if (sessionId === undefined || !SAFE_SESSION_SEGMENT.test(sessionId)) return "outside";
+  const own = hostClass === "outputs" ? `/workspace/outputs/${sessionId}` : `/workspace/.winter/scratch/${sessionId}`;
+  return absolute === own || absolute.startsWith(`${own}/`) ? hostClass : "outside";
+}
+
 function deny(policy: ApprovalPolicy, reason: CoworkDenyReason, connector?: { server: string; tool: string; setting: "allow" | "ask" | "deny" | undefined }): CoworkProjection {
   return Object.freeze({ kind: "deny", policy, reason, ...(connector === undefined ? {} : { connector }) });
 }
@@ -106,7 +119,7 @@ function deny(policy: ApprovalPolicy, reason: CoworkDenyReason, connector?: { se
  */
 export function projectCoworkCall(
   ports: CoworkApprovalPorts,
-  call: { toolName: string; input: Record<string, unknown>; cwd?: string; ctx?: unknown; connectors?: ConnectorPermissionSource; liveKeys?: ReadonlySet<string> },
+  call: { toolName: string; input: Record<string, unknown>; cwd?: string; sessionId?: string; ctx?: unknown; connectors?: ConnectorPermissionSource; liveKeys?: ReadonlySet<string> },
 ): CoworkProjection {
   let snapshot: CoworkTransitionSnapshot;
   try { snapshot = ports.snapshot(); } catch { return deny("plan", "bad_state"); }
@@ -139,14 +152,15 @@ export function projectCoworkCall(
     const klass = classFor(call.toolName, input, cwd);
     const explicit = ports.explicit?.({ toolName: call.toolName, input });
     // A file tool with no resolvable target, and Bash/Workflow, carry the path class `none` (the matrix denies the former).
-    const path = klass?.path === undefined ? "none" : ports.classifyPath(klass.path);
+    const classify = (absolute: string): string => ownFolderOnly(ports.classifyPath(absolute), absolute, call.sessionId);
+    const path = klass?.path === undefined ? "none" : classify(klass.path);
     const decide = (pathClass: string) => coworkHostDecision({
       // An unmapped wire name can never spell a known class by accident: it is prefixed.
       policy, tool: klass?.tool ?? `unmapped:${call.toolName}`, path: pathClass,
       ceiling: state.ceiling, alreadyAuthorized: explicit === "allow", explicitDeny: explicit === "deny",
     });
     // Every path the call can reach must pass: a pattern aimed outside the roots is a denial even when the search directory is admitted.
-    const reached = (klass?.extra ?? []).map(extra => decide(ports.classifyPath(extra))).find(d => d.verdict === "deny");
+    const reached = (klass?.extra ?? []).map(extra => decide(classify(extra))).find(d => d.verdict === "deny");
     const decision = reached ?? decide(path);
     if (decision.verdict === "deny") return deny(policy, decision.reason);
     if (decision.verdict === "ask") return Object.freeze({ kind: "ask", policy, connector: false });
