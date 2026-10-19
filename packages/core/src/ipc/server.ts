@@ -2,6 +2,7 @@ import type { CoworkWorkspaceEvents } from "../cowork/workspace-events";
 import { COWORK_RPC, COWORK_REMOTE_METHODS, type CoworkMethod } from "@yanlinglabs/winter-protocol";
 import { CoworkWorkspaceService } from "../cowork/service";
 import { CoworkError } from "../cowork/types";
+import type { CoworkSessionDoor } from "../cowork/session-ports";
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
 import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
@@ -237,6 +238,10 @@ export type InternalSessionCreator = (input: InternalSessionCreateInput) => Prom
 export interface IpcServerOptions {
   cowork?: CoworkWorkspaceService;
   coworkEvents?: CoworkWorkspaceEvents;
+  /** Cowork session door (D1 spine): THE single activation switch for Cowork sessions. Absent — every production daemon
+   *  today, since nothing in `daemon.ts` constructs one — `session.create {mode: "cowork"}` keeps answering
+   *  `unsupported_topology` for every role, before anything else. Only code can pass it (tests; the flip, D6). */
+  coworkSessions?: CoworkSessionDoor;
   socketPath: string;
   serverVersion: string;
   tokens: TokenAuthority;
@@ -634,6 +639,10 @@ export function deferMintSweep(run: () => void): () => void {
 }
 
 class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
+
+/** Session door (D1): what a Cowork `session.create` may NOT carry beside its binding — the daemon derives the cwd, the
+ *  policy (the workspace default) and the model (the provider route) itself, and `origin` is not a Cowork concept yet. */
+const COWORK_HOST_DERIVED_CREATE_FIELDS = ["cwd", "approvalPolicy", "model", "effort", "origin"] as const;
 
 /** The refusal a door gives the recognised-but-unrunnable `cowork` session mode: INVALID_PARAMS with
  *  `{ code: "unsupported_topology" }`, the shape of the `Cowork unavailable` answer `COWORK_RPC` methods give
@@ -2208,7 +2217,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `InternalSessionCreateInput.mode` ("code" | "chat") below. Adding Cowork to the remote-eligible
         // modes is a separate step that waits for its per-record and parameter gates
         // (docs/cowork-host-protocol.md, "Producer/consumer and release checklist").
-        if (isUnrunnableSessionMode(p.mode)) throw coworkSessionUnsupported();
+        if (isUnrunnableSessionMode(p.mode)) {
+          // Session door (D1 spine): with NO door — every production daemon — this is still the first and only answer, for
+          // every role and whatever else the request carries, exactly as before (a binding that is present but malformed fails the
+          // schema above first, like an unknown mode). With a door (tests only until the flip):
+          // a paired caller stays refused (cowork is outside REMOTE_ELIGIBLE_SESSION_MODES until its per-record gates
+          // exist), the binding must be present, and nothing the daemon derives itself may ride beside it. `approvalPolicy`
+          // carries a zod `.default("ask")`, so it is judged on the RAW params, as the remote rule below does.
+          const door = opts.coworkSessions;
+          if (!door || socket.data.authedRole === "remote") throw coworkSessionUnsupported();
+          const raw = params !== null && typeof params === "object" ? params as Record<string, unknown> : {};
+          if (!p.cowork || COWORK_HOST_DERIVED_CREATE_FIELDS.some((key) => raw[key] !== undefined)) {
+            throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
+          }
+          const binding = p.cowork;
+          try {
+            const created = await door.create({ scope: p.scope, workspaceId: binding.workspaceId, requestId: binding.requestId,
+              location: binding.location.kind === "outputs" ? { kind: "outputs" }
+                : { kind: "source", sourceId: binding.location.sourceId, ...(binding.location.relativeCwd === undefined ? {} : { relativeCwd: binding.location.relativeCwd }) } },
+            { role: socket.data.authedRole ?? "unknown", connectionId: socket.data.connId });
+            // A Cowork conversation has no host project to trust: its cwd is a guest location, never a Mac directory.
+            return { sessionId: created.sessionId, trusted: false };
+          } catch (err) { rpcFromWinterRefusal(err); }
+        }
+        // A Cowork binding beside any other mode is a malformed request, never ignored.
+        if (p.cowork !== undefined) throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
         // Dispatch (Phase 7): the singleton dispatch session is minted ONLY by session.dispatch's
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).

@@ -160,6 +160,32 @@ test("runtime frames and sync imports cannot author host workspace authority eve
   expect(f.store.lastSeq(chat)).toBe(1);
 });
 
+test("sync imports cannot author a Cowork binding: session_created.cowork is refused at seq 1 (a creating push), at any later seq, and by appendSynced", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-sync-cowork-")), store = new SessionStore(home);
+  cleanups.push(() => { store.close(); rmSync(home, { recursive: true, force: true }); });
+  const facts = { workspaceId: "w_forged", projectId: "p_forged", location: "source", sourceId: "src_forged", policyRevision: 7 };
+  const push = (sessionId: string, baseSeq: number, events: unknown[]) => syncPush({ store, buffers: new SyncPushBuffers(), connId: 1, broadcastCreated() {} },
+    { sessionId, baseSeq, data: Buffer.from(events.map(event => JSON.stringify(event)).join("\n") + "\n").toString("base64"), complete: true });
+  // A creating push whose seq-1 chat header carries a binding: nothing is created.
+  const sid = "11111111-2222-4333-8444-555555555555";
+  expect(() => push(sid, 0, [{ type: "session_created", sessionId: sid, seq: 1, ts: 0, scope: "global", mode: "chat", cowork: facts }])).toThrow("Cowork binding");
+  expect(store.list().map(row => row.sessionId)).not.toContain(sid);
+  // The same header without the binding is the ordinary chat import (the control).
+  expect(push(sid, 0, [{ type: "session_created", sessionId: sid, seq: 1, ts: 0, scope: "global", mode: "chat" }])).toMatchObject({ applied: true, lastSeq: 1 });
+  // A later session_created with a binding, on an existing chat log.
+  expect(() => push(sid, 1, [{ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat", cowork: facts }])).toThrow("Cowork binding");
+  // A raw `cowork` key the schema would refuse (null) never reaches the log either.
+  expect(() => push(sid, 1, [{ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat", cowork: null }])).toThrow();
+  expect(store.lastSeq(sid)).toBe(1);
+  // The store's own gate, below the RPC: the parsed field, and a raw line that carries the key.
+  const forged = SessionEvent.parse({ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat", cowork: facts });
+  expect(() => store.appendSynced(sid, [{ raw: JSON.stringify(forged), event: forged }])).toThrow("Cowork binding");
+  const plain = SessionEvent.parse({ type: "session_created", sessionId: sid, seq: 2, ts: 0, scope: "global", mode: "chat" });
+  expect(() => store.appendSynced(sid, [{ raw: JSON.stringify(forged), event: plain }])).toThrow("Cowork binding");
+  expect(store.lastSeq(sid)).toBe(1);
+  expect(store.read(sid).every(event => !("cowork" in event))).toBe(true);
+});
+
 class Client {
   events: SessionEvent[] = []; private decoder = new LineDecoder(); private next = 1;
   private pending = new Map<number, (reply: any) => void>();

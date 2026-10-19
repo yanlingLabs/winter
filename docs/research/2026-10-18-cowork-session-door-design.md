@@ -470,7 +470,7 @@ Users:
 
 - **Mac UI:** composer send (two calls, `workspace.create` then `session.create`), session windows and the sidebar's Cowork list.
 - **CLI:** `winter cowork session create|list`.
-- **APPROVALS and PEER-INBOX:** use `session_created.cowork` to know a log belongs to a Cowork conversation.
+- **APPROVALS and PEER-INBOX:** use the host's `cowork_conversations` row to know a session is a Cowork conversation. `session_created.cowork` is a display fact, never authority: only the daemon's own create writes it, `sync.push` and `appendSynced` refuse it at any seq, and no consumer trusts the log field alone.
 
 No new event variant is needed for the first session. VM power already reaches the Mac through `workspace.watch` snapshots (the `power` field of `CoworkWorkspaceRecord`). Field changes trip no compile-time trap, so D1 sweeps their producers in both languages, per `docs/claude/protocol-and-remote.md`.
 
