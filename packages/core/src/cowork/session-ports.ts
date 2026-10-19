@@ -103,6 +103,8 @@ export interface CoworkApprovalPort {
   canUseToolFor(input: {
     readonly sessionId: string; readonly binding: Readonly<ConversationBinding>; readonly policyRevision: number;
     readonly cowork: CoworkHostApprovalPorts;
+    /** The guest cwd (the conversation's root) a relative tool path resolves against. */
+    readonly cwd: string;
     turnOrigin(): string | undefined;
     emit(event: NewSessionEvent): void;
   }): CanUseTool & { withdrawPending(callId: string): boolean };

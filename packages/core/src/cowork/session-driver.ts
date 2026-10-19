@@ -130,7 +130,18 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       return stopping;
     };
 
+    /** A start that failed before the guest received the set leaves the conversation startable: this driver closes, so a
+     *  new `ensure` builds a fresh one. After the set was received (the backend identity is recorded) it never starts again. */
     const start = async (abort: AbortController): Promise<Options> => {
+      try { return await startOnce(abort); }
+      catch (error) {
+        let assigned = true;
+        try { assigned = deps.records.conversationBackend(sessionId) !== null; } catch { /* unreadable: keep it consumed */ }
+        if (!assigned) close(entry);
+        throw error;
+      }
+    };
+    const startOnce = async (abort: AbortController): Promise<Options> => {
       if (entry.consumed || entry.closed) throw new CoworkError("cold_resume_unavailable");
       entry.consumed = true;
       if (shuttingDown) throw shutdownRefusal();
@@ -164,7 +175,8 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       if (admitted === undefined) return refuse("recovery_required");
       if (run.workspaceId !== binding.workspaceId || run.incarnationId !== admitted.context.incarnationId || run.leaseEpoch !== admitted.context.leaseEpoch || run.guestBootId !== admitted.context.guestBootId) return refuse("authority_denied");
       const ports: CoworkHostApprovalPorts = coworkApprovalPortsFor({ binding: admitted.binding, source: admitted.source, ceiling: admitted.ceiling });
-      bridge = approvals.canUseToolFor({ sessionId, binding: admitted.binding, policyRevision: deps.records.policy(binding.workspaceId).revision, cowork: ports, turnOrigin,
+      bridge = approvals.canUseToolFor({ sessionId, binding: admitted.binding, policyRevision: deps.records.policy(binding.workspaceId).revision, cowork: ports,
+        cwd: admitted.conversation.roots[0]!.guestPath, turnOrigin,
         emit: (event: NewSessionEvent) => { deps.hub.append(sessionId, event); } });
       const answer = bridge;
       const canUseTool: CanUseTool = async (toolName, input, ctx) => coworkGuestPermissionAnswer(await answer(toolName, input, ctx), input);
