@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { authorityFixtureSessions } from "./committed-sessions";
 import { SessionMessaging, type MessagingDriverHandle } from "../../src/agent/session-messaging";
 import { CoworkPeerInbox, type PeerEpoch } from "../../src/cowork/peer-inbox";
-import { coworkHoldToken, CoworkHeldInputRefusal, type CoworkHeldInputVerbs } from "../../src/cowork/held-input";
+import { coworkHoldToken, coworkStalledInboxNotice, CoworkHeldInputRefusal, type CoworkHeldInputVerbs } from "../../src/cowork/held-input";
 import { coworkHeldInputReconciler } from "../../src/cowork/held-input-reconcile";
 import { CoworkError } from "../../src/cowork/types";
 import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
@@ -28,7 +28,7 @@ function world(existingHome?: string) {
   const db: RuntimeStateDb = openRuntimeStateDb(home), records = new CoworkRepository(db);
   cleanups.push(() => { db.close(); if (existingHome === undefined) rmSync(home, { recursive: true, force: true }); });
   const rows = new Map<string, SessionRow>(), drivers = new Map<string, FakeDriver>();
-  const log: string[] = [], lostNotes: string[] = [];
+  const log: string[] = [], lostNotes: string[] = [], stallNotes: string[] = [];
   let sequence = 0;
   const context = () => ({ principalId: "fixture-user", requestId: `request-${++sequence}` });
   const row = (sessionId: string, mode: string) => rows.set(sessionId, { sessionId, mode, approvalPolicy: "auto", scope: "test", createdAt: 1, lastSeq: 0, title: sessionId });
@@ -65,7 +65,7 @@ function world(existingHome?: string) {
       store: { meta: (id: string) => { const r = rows.get(id); if (!r) throw Error("missing"); return r; }, list: () => [...rows.values()] },
       derive: () => "active" as const, working: () => true,
       sessions: { get: (id: string) => { const d = drivers.get(id); return d && d.state === "live" ? d : d; }, ensure: async (id: string) => { ensured.push(id); if (ensureFault.on) throw new Error("cannot resume"); const d = driverOf(id); d.state = "live"; return d; } },
-      log: (line) => log.push(line), noteLostPeerMessage: (recipient, receiptId) => { lostNotes.push(`${recipient}:${receiptId}`); },
+      log: (line) => log.push(line), noteStalledPeerInbox: recipient => { stallNotes.push(recipient); }, noteLostPeerMessage: (recipient, receiptId) => { lostNotes.push(`${recipient}:${receiptId}`); },
     });
     return { messaging, store, spy };
   };
@@ -73,7 +73,7 @@ function world(existingHome?: string) {
   const send = (messaging: SessionMessaging, from: string, to: string, over: { message?: string; messageId?: string; incarnation?: string; summary?: string; notifyWhenIdle?: boolean } = {}) =>
     messaging.handlerFor(from, over.incarnation ?? "inc-1").send({ to: `session:${to}`, message: over.message ?? `${MARKER} please coordinate`, messageId: over.messageId ?? `m-${++sequence}`, ...(over.summary !== undefined ? { summary: over.summary } : {}), ...(over.notifyWhenIdle !== undefined ? { notifyWhenIdle: over.notifyWhenIdle } : {}) }, { signal: new AbortController().signal });
   const raw = () => db.db.query<{ receipt_id: string; state: string; reason: string | null; nobody: number }, []>("SELECT receipt_id, state, reason, body IS NULL AS nobody FROM cowork_peer_inbox ORDER BY accepted_at, sequence").all();
-  return { home, db, records, rows, drivers, driverOf, ensured, ensureFault, log, lostNotes, project, bind, code, send, raw, makeMessaging, ...first };
+  return { home, db, records, rows, drivers, driverOf, ensured, ensureFault, log, lostNotes, stallNotes, project, bind, code, send, raw, makeMessaging, ...first };
 }
 
 test("a same-Project send is accepted, delivered to a stopped recipient (resumed), acknowledged, and the body is deleted", async () => {
@@ -523,4 +523,43 @@ test("the reconcile confirms only entries the ledger lists as unconfirmed", asyn
   expect(guest).toEqual([]);                                         // nothing forgotten: only the unconfirmed one was confirmed
   expect(row(w, unconfirmed!.receipt_id)[0]).toMatchObject({ commit_outcome: "already" });
   expect(row(w, confirmed!.receipt_id)[0]).toMatchObject({ commit_outcome: "queued" }); // untouched
+});
+
+test("held delivery: transient commit refusals (journal_full, journal_failed, epoch) never end a receipt as lost, however often they repeat", async () => {
+  for (const code of ["journal_full", "journal_failed", "epoch"] as const) {
+    const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p);
+    held(w, b, [], { commit: () => new CoworkHeldInputRefusal(code) });
+    await w.send(w.messaging, a, b);
+    for (let i = 0; i < 8; i++) await w.messaging.drainCoworkInbox(b);
+    expect(row(w)[0]).toMatchObject({ state: "delivered", commit_outcome: null });
+    expect(w.lostNotes).toEqual([]);
+  }
+  // The permanent ones do end it (superseded is covered above; the others by the same counter).
+  for (const code of ["conflict", "committed", "invalid"] as const) {
+    const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p);
+    held(w, b, [], { commit: () => new CoworkHeldInputRefusal(code as never) });
+    await w.send(w.messaging, a, b);
+    for (let i = 0; i < 3; i++) await w.messaging.drainCoworkInbox(b);
+    expect(row(w)[0]).toMatchObject({ commit_outcome: "lost" });
+  }
+});
+
+test("held delivery: one stall note per stall after 3 failed drains in a row; a success re-arms it", async () => {
+  const w = world(), p = w.project(), a = w.bind(p), b = w.bind(p);
+  let down = true;
+  held(w, b, [], { commit: () => (down ? new Error("transport lost") : undefined) });
+  await w.send(w.messaging, a, b, { messageId: "m1" });          // failure 1 (the commit)
+  await w.messaging.drainCoworkInbox(b);                          // failure 2
+  expect(w.stallNotes).toEqual([]);
+  await w.messaging.drainCoworkInbox(b);                          // failure 3
+  expect(w.stallNotes).toEqual([b]);
+  for (let i = 0; i < 4; i++) await w.messaging.drainCoworkInbox(b);
+  expect(w.stallNotes).toEqual([b]);                              // deduped per stall
+  down = false;
+  await w.messaging.drainCoworkInbox(b);                          // the repair succeeds: re-armed
+  down = true;
+  await w.send(w.messaging, a, b, { messageId: "m2" });
+  for (let i = 0; i < 3; i++) await w.messaging.drainCoworkInbox(b);
+  expect(w.stallNotes).toEqual([b, b]);
+  expect(coworkStalledInboxNotice().text).not.toMatch(/s_\d|pr_/);
 });

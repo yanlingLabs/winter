@@ -208,6 +208,12 @@ export function coworkHostMessageListAnswer(value: unknown): CoworkHostMessageLi
   return Object.freeze({ sessions: Object.freeze(sessions), ...(value.omitted === undefined ? {} : { omitted: value.omitted as number }) });
 }
 
+/** The content of the note shown once per stall of a recipient's held-input queue (3 failed drains in a row on transport or
+ *  malformed answers): fixed text, no sender, no message detail. */
+export function coworkStalledInboxNotice(): { readonly warning: "peer_inbox_stalled"; readonly text: string } {
+  return Object.freeze({ warning: "peer_inbox_stalled", text: "Messages from other sessions in this project are waiting to be delivered to this conversation; delivery is being retried." } as const);
+}
+
 /** The content of the note a recipient's conversation shows for a peer message that was accepted but lost (`unknown_input`,
  *  4.5): a `continuity_warning` event's `warning` and `text`. The composition appends it; the sender is not named, because
  *  the guest never saw the message. */
