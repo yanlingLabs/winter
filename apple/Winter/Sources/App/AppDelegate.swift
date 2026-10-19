@@ -514,6 +514,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if ok { Haptics.messageSent() }
             return ok
         }
+        // Image and file attachments (2026-10-19): the bound session's row (its mode turns the paste/drop intake on —
+        // code or dispatch — and its model is what an image is checked against), the catalogue for that check, and the
+        // doors a draft with chips is sent through — the code windows' own, on this client. The send THROWS the
+        // daemon's refusal, so its sentence reaches the pill and an unreadable image file is restaged.
+        pill.currentSessionRow = { [weak model] in
+            guard let model, let sid = model.focusedSessionId else { return nil }
+            return model.directory.rows.first { $0.sessionId == sid }
+        }
+        pill.refreshSessionRows = { [weak model] in await model?.directory.refresh() }
+        pill.fetchModelCatalogue = { [weak model] in await model?.fetchModelCatalogue() }
+        pill.attachmentSender = DispatchPillAttachmentSender(
+            session: { [weak model] in await model?.ensureFocusedSession() },
+            features: { [weak model] in
+                guard let client = model?.client else { return (originalPaths: false, attachmentFiles: false) }
+                return (originalPaths: await client.supportsOriginalImagePaths,
+                        attachmentFiles: await client.supportsAttachmentFiles)
+            },
+            stage: { [weak model] sessionId, image in
+                guard let client = model?.client else { throw CancellationError() }
+                return try await client.stageImage(sessionId: sessionId, mediaType: image.mediaType, data: image.data)
+            },
+            send: { [weak model] sessionId, outgoing, steer in
+                guard let client = model?.client else { throw CancellationError() }
+                if steer {
+                    _ = try await client.steer(sessionId: sessionId, text: outgoing.text, images: outgoing.images, files: outgoing.files)
+                } else {
+                    _ = try await client.send(sessionId: sessionId, text: outgoing.text, images: outgoing.images, files: outgoing.files)
+                }
+                Haptics.messageSent()
+            }
+        )
         pill.onEsc = { [weak self] in
             guard let self, self.appModel?.session.state.turnRunning == true else { return false }
             Task { await self.appModel?.interruptTurn() }
