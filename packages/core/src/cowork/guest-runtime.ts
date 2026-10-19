@@ -1,9 +1,9 @@
-import { coworkGuestSourceRoot } from "./guest-paths";
 import { randomUUID } from "node:crypto";
-import type { PermissionMode, SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
-import { coworkToolsFor, permissionModeFor } from "../runtime-sdk/mode-options";
+import type { SpawnedRuntimeProcess } from "@yanlinglabs/winter-agent-sdk";
+import { coworkToolsFor } from "../runtime-sdk/mode-options";
 import type { CoworkRepository } from "./repository";
 import { relativeCoworkPath } from "./repository";
+import { coworkGuestCwdFor, coworkGuestPermissionModeFor, type CoworkGuestPermissionMode } from "./conversation-set";
 import { intersectCeilings, type CoworkAuthority } from "./authority";
 import { CoworkError, type CapabilityCeiling, type GuestEpoch, type SourceAccess, type ConversationBinding, type WorkspaceSource } from "./types";
 import type { CoworkGuestReadinessKey } from "./session-ports";
@@ -20,7 +20,7 @@ export interface GuestRuntimeLaunch {
   readonly scope: Readonly<GuestRuntimeScope>; readonly launchId: string;
   readonly source: Readonly<{ sourceId: string; locationId: string; revision: number; access: SourceAccess }>;
   readonly capabilities: GuestRuntimeCapabilities;
-  readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: PermissionMode; tools: readonly string[]; allowedTools: readonly []; resume?: string }>;
+  readonly runtime: Readonly<{ executionPosture: "confined-guest"; sessionId: string; model: string; cwd: string; winterHome: string; storeHome: string; persistSession: true; permissionMode: CoworkGuestPermissionMode; tools: readonly string[]; allowedTools: readonly []; resume?: string }>;
 }
 export interface GuestRuntimeTermination {
   scope: Readonly<GuestRuntimeScope>; launchId: string; outcome: "confirmed-stopped" | "uncertain";
@@ -81,6 +81,14 @@ export function confinedToolVisibility(offered: readonly string[]): readonly str
   if (has.has("Edit") && !(has.has("Read") && has.has("Write"))) throw new CoworkError("invalid_request");
   return Object.freeze(GUEST_TOOL_ORDER.filter(name => has.has(name)));
 }
+/**
+ * The tools a conversation's guest incarnation is offered: `coworkToolsFor` over its binding's policy and its CURRENT
+ * effective ceiling, in the guest's order. The launch and the conversation set (`conversation-set.ts`) both take it from
+ * here, so the host query's Options and the guest's own config can never name different tools.
+ */
+export function coworkGuestOfferedTools(policy: ConversationBinding["policy"], capabilities: { readonly toolClasses: readonly string[]; readonly network: CapabilityCeiling["network"] }, readiness: readonly CoworkGuestReadinessKey[]): readonly string[] {
+  return confinedToolVisibility(coworkToolsFor({ profile: "host-query-v1", approvalPolicy: policy, toolClasses: [...capabilities.toolClasses], network: capabilities.network, readiness }));
+}
 interface Admission { launch: Readonly<GuestRuntimeLaunch>; binding: ConversationBinding; source: WorkspaceSource }
 interface Lifetime { launch: Readonly<GuestRuntimeLaunch>; phase: "opening" | "running" | "retained"; stop?: (force: boolean) => void; cancel?: (force: boolean) => void }
 
@@ -100,17 +108,20 @@ export class CoworkGuestRuntimeSupervisor {
     const identity = this.deps.identity(sessionId), bootId = this.deps.bootId(workspace.workspaceId);
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(bootId) || typeof identity.resume !== "boolean" || typeof identity.model !== "string" || !identity.model || identity.model.length > 200 || /[\0\r\n]/.test(identity.model)) throw new CoworkError("authority_denied");
     const store = `/workspace/.winter/conversations/${safeSegment(sessionId)}`;
-    const relativeCwd = relativeCoworkPath(binding.relativeCwd);
-    const sourceRoot = coworkGuestSourceRoot(source);
-    const cwd = `${sourceRoot}${relativeCwd === "." ? "" : `/${relativeCwd}`}`;
+    // The conversation set's root and cwd (`conversation-set.ts`), so the host launch and the guest agree.
+    const cwd = coworkGuestCwdFor(binding, source);
     const capturedCapabilities = freezeCeiling(capabilities);
-    const offered = coworkToolsFor({ profile: "host-query-v1", approvalPolicy: binding.policy, toolClasses: capturedCapabilities.toolClasses, network: capturedCapabilities.network, readiness: this.deps.readiness ?? [] });
+    const offered = coworkGuestOfferedTools(binding.policy, capturedCapabilities, this.deps.readiness ?? []);
     const launch: Readonly<GuestRuntimeLaunch> = Object.freeze({ protocolVersion: 1, limits: GUEST_RUNTIME_TRANSPORT_LIMITS, launchId: randomUUID(),
       scope: Object.freeze({ ...epoch, homeId: this.deps.records.homeIdentity(), bootId, sessionId, backendSessionId: safeSegment(identity.backendSessionId), bindingRevision: binding.revision, policyRevision: policy.revision, instructionRevision: workspace.instructionRevision }),
       source: Object.freeze({ sourceId: source.sourceId, locationId: source.locationId, revision: source.revision, access: source.access }), capabilities: capturedCapabilities,
       runtime: Object.freeze({ executionPosture: "confined-guest", sessionId: identity.backendSessionId, model: identity.model, cwd,
-        winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true, permissionMode: permissionModeFor(binding.policy),
-        tools: confinedToolVisibility(offered), allowedTools: Object.freeze([] as const), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
+        winterHome: `/run/winter/conversations/${safeSegment(sessionId)}`, storeHome: store, persistSession: true,
+        // The mode the guest RUNS (session door D3, encoding A): the guest's own config is built from the conversation
+        // set, which carries plan or ask, so its runtime is plan or default whatever the binding's policy. The host
+        // query states the same mode; the binding's real policy is applied by the host approval projection.
+        permissionMode: coworkGuestPermissionModeFor(binding.policy),
+        tools: offered, allowedTools: Object.freeze([] as const), ...(identity.resume ? { resume: identity.backendSessionId } : {}) }),
     });
     return { launch, binding, source };
   }

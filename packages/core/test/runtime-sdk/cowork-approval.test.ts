@@ -433,7 +433,12 @@ test("wired behind the refusal: only the bridge reaches the projection, producti
   const driver = readFileSync(join(packages, "core", "src", "runtime-sdk", "session-driver.ts"), "utf8");
   const construction = driver.slice(driver.indexOf("canUseToolFor({"), driver.indexOf("canUseToolFor({") + 1600);
   expect(construction).not.toMatch(/\bcowork\b/);
-  expect(reaching(["canUseToolFor({"]).filter(name => name !== "approval-bridge.ts")).toEqual(["session-driver.ts"]);
+  // The bridge is constructed (imported from approval-bridge and called) by the Code driver alone. Session door D3: the
+  // Cowork driver (cowork/session-driver.ts) never imports the bridge; it calls the injected `CoworkApprovalPort`, which
+  // production never supplies.
+  const constructing = sources.filter(file => basename(file) !== "approval-bridge.ts" && /from "[^"]*approval-bridge"/.test(readFileSync(file, "utf8")) && readFileSync(file, "utf8").includes("canUseToolFor({"));
+  expect(constructing.map(file => file.slice(packages.length + 1))).toEqual([join("core", "src", "runtime-sdk", "session-driver.ts")]);
+  expect(readFileSync(join(packages, "core", "src", "cowork", "session-driver.ts"), "utf8")).not.toMatch(/approval-bridge|cowork-approval/);
   // The door still refuses.
   expect(isUnrunnableSessionMode("cowork")).toBe(true); expect(runnableModeOf("cowork")).toBeUndefined();
   // The bridge's only cowork seam is the injected dependency.
