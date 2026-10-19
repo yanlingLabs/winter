@@ -125,6 +125,8 @@ interface Run {
   conversationsSent: boolean; earlyReady: boolean;
   /** A second `runtime_ready` is ignored for power, admission and ownership but still passes the up-sequence check, so a later bootstrap-up consumer sees no gap. */
   readySeen: boolean; readyAccepted: boolean; duplicateSeqAnomaly: boolean; pendingDuplicates: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>[];
+  /** Set when a runtime violation must end the incarnation but the start has not finished yet (a stop needs a running guest): the start stops it as soon as it is running. */
+  overflowStop?: boolean;
   request: CoworkNativeStartRequest | undefined; guestBootId: string;
   /** The runtime class, created when the conversation set goes out. */
   runtime: RuntimeEnd | null;
@@ -142,7 +144,7 @@ class RuntimeEnd {
   readonly waiters: { resolve: () => void; reject: (error: unknown) => void }[] = [];
   downSeq = 0; closed = false; violations = 0;
   /** Frames that arrived before any subscriber ever attached, in order; the first subscriber receives them, then this stays empty. */
-  readonly held: { stream: "out" | "err"; bytes: Uint8Array; end: boolean }[] = []; heldBytes = 0; everSubscribed = false;
+  readonly held: { stream: "out" | "err"; bytes: Uint8Array; end: boolean }[] = []; heldBytes = 0; everSubscribed = false; overflowed = false;
   constructor(conversations: number) { this.streams = new CoworkNativeRuntimeStreams(conversations); }
   wake(): void { for (const waiter of this.waiters.splice(0)) waiter.resolve(); }
   close(): void {
@@ -273,6 +275,7 @@ export class CoworkNativeHost {
     run.inbox!.seal();
     this.hook("power-running");
     this.watch(run);
+    if (run.overflowStop) void this.stop(workspaceId, "shutdown").catch(() => {});
     return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, guestBootId: run.guestBootId, ended: run.ended, runtime: (conversation: 0) => this.runtimeLink(run, conversation), stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
   }
 
@@ -438,8 +441,15 @@ export class CoworkNativeHost {
       end.streams.accept(frame);
     } catch (error) { if (isCrash(error)) throw error; end.violations += 1; return; }
     if (!end.everSubscribed) {
-      if (end.heldBytes + frame.payload.length > RUNTIME_PRESUBSCRIBE_BYTES) end.violations += 1;
-      else { end.held.push({ stream: frame.stream as "out" | "err", bytes: frame.payload, end: frame.end }); end.heldBytes += frame.payload.length; }
+      if (end.overflowed) return;
+      if (end.heldBytes + frame.payload.length > RUNTIME_PRESUBSCRIBE_BYTES) {
+        // A gap is never silent. Dropping this frame while a later, smaller one is still held would hand the first subscriber bytes with a hole in the middle, so the
+        // overflow ends the incarnation instead: nothing more is held or delivered, what is held is discarded, and the run is stopped as a contract violation.
+        end.overflowed = true; end.violations += 1; end.held.length = 0; end.heldBytes = 0;
+        if (run.phase === "running") void this.stop(run.key.workspaceId, "shutdown").catch(() => {}); else run.overflowStop = true;
+        return;
+      }
+      end.held.push({ stream: frame.stream as "out" | "err", bytes: frame.payload, end: frame.end }); end.heldBytes += frame.payload.length;
     }
     for (const handler of [...end.handlers]) { try { handler(frame.stream as "out" | "err", frame.payload, frame.end); } catch { /* a consumer's fault is not the guest's */ } }
     end.wake();

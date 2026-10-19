@@ -199,12 +199,24 @@ describe("the runtime window: nothing before runtime_ready, nothing lost before 
     await settle();
     expect(first.at(-1)).toBe("out:later:false"); expect(second).toEqual(["out:later"]);
   });
-  test("what is held is bounded: beyond 1 MiB before any subscriber, frames count as violations and are dropped", async () => {
-    const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { for (let i = 0; i < 5; i++) harness.launcher.last.emitRuntime("out", new Uint8Array(256 * 1024)); } } });
-    const { link } = await started(h);
-    let bytes = 0;
-    link.onData((_stream, chunk) => { bytes += chunk.length; });
-    expect(bytes).toBe(4 * 256 * 1024);
+  test("what is held is bounded and a gap is never silent: past 1 MiB before any subscriber, a later SMALLER frame is not held either, and the run is stopped as a violation", async () => {
+    // 4 x 256 KiB fill the hold to 1 MiB - 10 bytes short of the cap after the first frame trims; the reviewer's sequence: 1048566 bytes held, then an overflowing frame, then 5 bytes.
+    const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { const s = harness.launcher.last; s.emitRuntime("out", new Uint8Array(1048566)); s.emitRuntime("out", new Uint8Array(100)); s.emitRuntime("out", new Uint8Array(5)); } } });
+    const { link, running } = await started(h);
+    const got: number[] = [];
+    link.onData((_stream, chunk) => { got.push(chunk.length); });
+    expect(got).toEqual([]); // nothing is handed over with a hole in it
     expect(h.host.runtimeViolations(h.workspaceId)).toBe(1);
+    const outcome = await running.ended;
+    expect(outcome.released).toBe(true); // the guest was stopped in order (the fake stops orderly)
+    expect(h.host.activeWorkspaces()).toEqual([]);
+  });
+  test("a hold that exactly fits is delivered whole", async () => {
+    const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { const s = harness.launcher.last; s.emitRuntime("out", new Uint8Array(1048566)); s.emitRuntime("out", new Uint8Array(10)); } } });
+    const { link } = await started(h);
+    const got: number[] = [];
+    link.onData((_stream, chunk) => { got.push(chunk.length); });
+    expect(got).toEqual([1048566, 10]);
+    expect(h.host.runtimeViolations(h.workspaceId)).toBe(0);
   });
 });
