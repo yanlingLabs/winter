@@ -64,7 +64,7 @@ const sourceDirectory = (...parts: string[]) => join(import.meta.dir, "..", ".."
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile() && /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 }
-test("anti-wiring: no src file imports the ledger, it has no barrel export, no transport, and the in-memory store is the only implementation inside it", () => {
+test("anti-wiring: only the SQLite store and session-messaging.ts name the ledger (the latter by TYPE, behind an injected port); nothing constructs it", () => {
   const packages = sourceDirectory(), module = join(packages, "core", "src", "cowork", "peer-inbox.ts");
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
@@ -72,8 +72,22 @@ test("anti-wiring: no src file imports the ledger, it has no barrel export, no t
   // The SQLite store is the one other module allowed to name the ledger's types; nothing else may, and nothing may name the store.
   const sqliteStore = join(packages, "core", "src", "cowork", "peer-inbox-sqlite.ts");
   expect(sources).toContain(sqliteStore);
-  for (const file of sources.filter(candidate => candidate !== module)) {
-    const text = readFileSync(file, "utf8");
+  // WIRED BEHIND THE REFUSAL: the host messaging broker uses the ledger through an injected port (`deps.peerInbox`) that
+  // production does not supply. It may import the ledger's TYPES only; it never names a store or constructs anything.
+  const messaging = join(packages, "core", "src", "agent", "session-messaging.ts");
+  expect(sources).toContain(messaging);
+  const messagingText = readFileSync(messaging, "utf8");
+  expect([...messagingText.matchAll(/from "([^"]*peer-inbox[^"]*)"/g)].map(match => match[0])).toEqual(['from "../cowork/peer-inbox"']);
+  expect(messagingText).toMatch(/import type \{[^}]*\} from "\.\.\/cowork\/peer-inbox";/);
+  for (const forbidden of ["SqlitePeerInboxStore", "InMemoryPeerInboxStore", "peer-inbox-sqlite", "createPeerInboxMemoryState", "PEER_INBOX_LIMITS", "peerSendDigest"]) expect(`${forbidden}:${messagingText.includes(forbidden)}`).toBe(`${forbidden}:false`);
+  // Nobody constructs the ledger or its store in src: production supplies no inbox. (Each source is read once.)
+  const texts = new Map(sources.map(file => [file, readFileSync(file, "utf8")] as const));
+  for (const [file, text] of texts) {
+    expect(`${basename(file)}:${/new\s+(CoworkPeerInbox|SqlitePeerInboxStore|InMemoryPeerInboxStore)\s*\(/.test(text)}`).toBe(`${basename(file)}:false`);
+    if (basename(file) === "daemon.ts") expect(text).not.toMatch(/peerInbox|PeerInbox|peer-inbox/);
+  }
+  for (const file of sources.filter(candidate => candidate !== module && candidate !== messaging)) {
+    const text = texts.get(file)!;
     // Whole identifiers: schema.ts and db.ts legitimately name the table and its migration (migrateCoworkPeerInboxSchema).
     const ledgerNames = ["CoworkPeerInbox", "PeerInboxStore", "InMemoryPeerInboxStore", "PeerInboxRecord", "peerSendDigest", "PEER_INBOX_LIMITS", "isTerminalPeerState", "createPeerInboxMemoryState", "PeerInboxCaps", "PeerInboxAudit"];
     const needles = file === sqliteStore ? ["CoworkPeerInbox", "InMemoryPeerInboxStore", "peerSendDigest", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState"]
@@ -99,4 +113,4 @@ test("anti-wiring: no src file imports the ledger, it has no barrel export, no t
   expect(Object.keys(peerInboxModule).sort()).toEqual(["CoworkPeerInbox", "InMemoryPeerInboxStore", "PEER_INBOX_LIMITS", "createPeerInboxMemoryState", "isTerminalPeerState", "peerSendDigest"]);
   // The schema may name the table; the ledger module itself never does (the SQLite store is a separate module).
   expect(own).not.toMatch(/cowork_peer_inbox/);
-});
+}, 60_000);
