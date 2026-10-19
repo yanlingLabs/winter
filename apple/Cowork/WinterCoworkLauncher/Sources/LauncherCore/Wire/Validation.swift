@@ -39,6 +39,11 @@ enum V {
         guard case .integer(let n) = v, n >= lo, n <= hi else { throw WireFailure.bad_field }
         return n
     }
+    /// The canonical padded base64 of exactly 32 bytes (44 characters): the only spelling of a receipt MAC.
+    static func isCanonicalMac(_ s: String) -> Bool {
+        Data(base64Encoded: s).map { $0.count == 32 && $0.base64EncodedString() == s } == true
+    }
+    static func macText(_ v: JSONValue) throws -> String { guard case .string(let s) = v, isCanonicalMac(s) else { throw WireFailure.bad_field }; return s }
     static func literal(_ v: JSONValue, _ expected: String) throws { guard case .string(let s) = v, s == expected else { throw WireFailure.bad_field } }
     static func literal(_ v: JSONValue, _ expected: Int64) throws { guard case .integer(let n) = v, n == expected else { throw WireFailure.bad_field } }
     static func literal(_ v: JSONValue, _ expected: Bool) throws { guard case .bool(let b) = v, b == expected else { throw WireFailure.bad_field } }

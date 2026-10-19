@@ -49,6 +49,8 @@ public enum ReceiptStoreFailure: Error, Equatable, Sendable {
     case alreadyExists
     case ioFailed(Int32)
     case unsafeDirectory
+    /// A Class A file whose MAC does not verify under the key (forged, edited, signed under another key, or unsigned).
+    case macInvalid
 }
 
 public struct ReceiptScope: Hashable, Sendable {
@@ -67,7 +69,10 @@ public struct ReceiptScope: Hashable, Sendable {
 public protocol DurableReceiptStore: AnyObject {
     /// Returns only once the bytes are on stable storage. A second persist of the SAME bytes is fine; different bytes are `alreadyExists`.
     func persist(_ receipt: StopReceipt, scope: ReceiptScope) throws
-    func load(_ scope: ReceiptScope) throws -> StopReceipt?
+    /// The RETAINED-receipt read path: what a later launcher (or the daemon's port) reads back from a store any process of the same user can write.
+    /// A Class A receipt counts only if its MAC verifies under `key` (the installation's receipt key); a file that does not verify throws `macInvalid`.
+    /// A Class B file carries no MAC (nothing in it can release anything) and is returned as parsed.
+    func load(_ scope: ReceiptScope, key: ReceiptKey) throws -> StopReceipt?
     /// Forget the receipt of this scope (the daemon sent `receipt_retire`). Never throws for "nothing there".
     func retire(_ scope: ReceiptScope) throws
 }

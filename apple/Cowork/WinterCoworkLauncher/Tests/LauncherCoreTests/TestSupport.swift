@@ -13,6 +13,9 @@ enum Fixture {
                              workerInstanceId: "wrk-fake-ok", runtimeImageDigest: String(repeating: "ab", count: 32), memoryMiB: 768)
     static func scope(mode: String) -> Scope { var s = scope; s.workerInstanceId = "wrk-fake-\(mode)"; return s }
     static let nonce = String(repeating: "0f", count: 16)
+    /// S1's SYNTHETIC receipt key (`synthetic-receipt-key-0123456789`). A NEW object each time: the launcher zeroes the key it was given once the verdict is final.
+    static let receiptKeyBase64 = "c3ludGhldGljLXJlY2VpcHQta2V5LTAxMjM0NTY3ODk="
+    static var receiptKey: ReceiptKey { ReceiptKey(base64: receiptKeyBase64)! }
     static let homeId = "home_99999999-9999-4999-8999-999999999999"
     static let launcherInstanceId = "launcher-88888888"
     static let bootId = "0B0B0B0B-0B0B-4B0B-8B0B-0B0B0B0B0B0B"
@@ -94,7 +97,11 @@ final class InMemoryReceiptStore: DurableReceiptStore {
         records[scope] = bytes
         switch receipt { case .orderly: log.add("persist:A"); case .uncertain: log.add("persist:B") }
     }
-    func load(_ scope: ReceiptScope) throws -> StopReceipt? { try records[scope].map(StopReceipt.parse) }
+    func load(_ scope: ReceiptScope, key: ReceiptKey) throws -> StopReceipt? {
+        guard let receipt = try records[scope].map(StopReceipt.parse) else { return nil }
+        if case .orderly(let r) = receipt, !r.macVerifies(under: key) { throw ReceiptStoreFailure.macInvalid }
+        return receipt
+    }
     func retire(_ scope: ReceiptScope) throws { records[scope] = nil; retired.append(scope); log.add("retire") }
 }
 
@@ -216,7 +223,7 @@ final class SessionHarness {
         let line = try! LauncherLineCodec.serialize(message)
         session.receiveLine(FramedLine(bytes: line, rights: descriptors))
     }
-    func begin(id: String = "req-begin", homeId: String = Fixture.homeId, scope: Scope = Fixture.scope) { send(.begin(id: id, homeId: homeId, scope: scope)) }
+    func begin(id: String = "req-begin", homeId: String = Fixture.homeId, scope: Scope = Fixture.scope, receiptKey: ReceiptKey = Fixture.receiptKey) { send(.begin(id: id, homeId: homeId, scope: scope, receiptKey: receiptKey)) }
     func sendRaw(_ text: String, descriptors: [OwnedFD] = []) { session.receiveLine(FramedLine(bytes: Array(text.utf8), rights: descriptors)) }
 
     /// A timer firing, as the runtime does it: a one-shot is gone from the armed set before its handler runs.

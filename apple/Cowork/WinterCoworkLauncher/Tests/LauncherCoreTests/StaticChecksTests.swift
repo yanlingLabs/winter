@@ -50,6 +50,19 @@ final class StaticChecksTests: XCTestCase {
         XCTAssertTrue(found[0].hasPrefix("LauncherCore/Session/DirectoryReceiptStore.swift"))
     }
 
+    // MARK: the receipt key stays in memory
+
+    func testTheReceiptKeyIsNeverLoggedWrittenOrPrintedBySourceCode() {
+        // Nothing in the launcher's library prints, logs or dumps anything (the single stderr line is the argument parser's usage error)...
+        let outputs = hits(#"\bprint\(|debugPrint\(|\bdump\(|NSLog\(|os_log|Logger\(|fputs\(|fprintf\(|FileHandle\.standardError|standardOutput"#, in: Self.sources.filter { $0.path.hasPrefix("LauncherCore/") })
+        XCTAssertEqual(outputs, ["LauncherCore/Launcher/LauncherMain.swift:21"], "\(outputs)")
+        // ...the key's text has exactly two readers: its own type (the redacted forms never use it) and the L1 serializer of `begin`...
+        let reveal = hits(#"revealBase64\("#)
+        XCTAssertEqual(reveal.map { $0.split(separator: ":")[0] }.sorted(), ["LauncherCore/Wire/LauncherLines.swift", "LauncherCore/Wire/ReceiptKey.swift"], "\(reveal)")
+        // ...and nothing that holds the key writes a file other than the receipt store, which receives receipts (MAC included) and never the key.
+        XCTAssertEqual(hits(#"receiptKey|ReceiptKey"#, in: Self.sources.filter { $0.path.contains("DirectoryReceiptStore") }).count, 1, "the store only takes a key to VERIFY with (the one `load` signature)")
+    }
+
     // MARK: sole reaper, one signal path
 
     func testTheOnlySignalsAreInsideTheOwnedHandle() {

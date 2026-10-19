@@ -34,6 +34,9 @@ public enum WireLimits {
     public static let drainBudgetMs = 30_000
     public static let drainBudgetCeilingMs = 120_000
     public static let volumeRights = 2
+    /// The `v` of every L1 line and every stop receipt (text version 2, the retained-receipt MAC). The binary headers (L2 `WEV1`, mux `WMX1`) and the
+    /// bootstrap/runtime JSON inside mux frames stay at version 1: nothing in them changed.
+    public static let textVersion = 2
     /// The layered stop timeline (docs/cowork-native-worker.md, section 5, "The stop timeline"), every figure from the moment the worker is
     /// handed the DRAIN: G = the DRAIN's `budgetMs` (the guest's budget); X = libkrun's exit watchdog; the launcher kills at G + X + margin;
     /// the daemon waits a further margin. A figure is never smaller than the one before it.

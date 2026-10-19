@@ -119,7 +119,7 @@ final class RuntimeRig {
     func hello() -> Bool { daemon.next { if case .hello = $0 { true } else { nil } } != nil }
     /// begin, and the worker's pid from `begun` (nil when the begin was refused or never answered).
     func begin(id: String = "req-begin") -> (pid: Int, token: String)? {
-        daemon.send(.begin(id: id, homeId: Fixture.homeId, scope: scope))
+        daemon.send(.begin(id: id, homeId: Fixture.homeId, scope: scope, receiptKey: Fixture.receiptKey))
         return daemon.next { (line: LineToDaemon) -> (pid: Int, token: String)?? in
             if case .begun(let i, _, let pid, let token) = line, i == id { return .some((pid, token)) }
             if case .refused(let i, _) = line, i == id { return .some(nil) }
@@ -135,7 +135,7 @@ final class RuntimeRig {
         return daemon.next { if case .volumesAccepted = $0 { true } else if case .refused = $0 { false } else { nil } } ?? false
     }
     func waitForFinish(_ timeout: TimeInterval = 10) -> Bool { finished.wait(timeout: .now() + timeout) == .success }
-    func storedReceipt() -> StopReceipt? { try? store.load(ReceiptScope(scope)) }
+    func storedReceipt() -> StopReceipt? { try? store.load(ReceiptScope(scope), key: Fixture.receiptKey) }
     func processGone(_ pid: Int) -> Bool {
         for _ in 0..<200 { if kill(Int32(pid), 0) == -1 && errno == ESRCH { return true }; usleep(10_000) }
         return false
@@ -235,7 +235,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testAWorkerThatNeverReportsReadyIsKilled() throws {
         let rig = try RuntimeRig(mode: "silent") { $0.readyTimeoutMs = 300 }
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(rig.refusal(), .sandbox_failed)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertEqual(b.workerExit, .signal)
@@ -245,7 +245,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testAnImageThatFailsItsRequirementIsKilledWhileStillSuspended() throws {
         let rig = try RuntimeRig(workerRequirement: cdhashRequirementText(String(repeating: "00", count: 20)))
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(rig.refusal(), .code_identity_mismatch)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertEqual(b.workerExit, .signal, "killed by SIGKILL while stopped: it never ran")
@@ -283,7 +283,7 @@ final class RuntimeIntegrationTests: XCTestCase {
         let source = try DiskPair()
         let many = (0..<20).map { _ in open(source.urls[0].path, O_RDONLY) }
         defer { many.forEach { close($0) } }
-        XCTAssertGreaterThan(rawSendRights(rig.daemon.end.raw, Array("{\"v\":1,\"t\":\"ping\",\"id\":\"req-1\"}\n".utf8), rights: many), 0)
+        XCTAssertGreaterThan(rawSendRights(rig.daemon.end.raw, Array("{\"v\":2,\"t\":\"ping\",\"id\":\"req-1\"}\n".utf8), rights: many), 0)
         XCTAssertEqual(rig.daemon.nextFault(), .protocol_violation)
         XCTAssertFalse(rig.daemon.sees(timeout: 0.3) { if case .pong = $0 { true } else { false } }, "nothing received on that channel is acknowledged")
     }
@@ -291,7 +291,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testTheWorkerSendingDescriptorsToTheLauncherIsAViolationAndTheyAreClosed() throws {
         let rig = try RuntimeRig(mode: "rightsback")
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(rig.refusal(), .internal)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled)
@@ -410,12 +410,12 @@ final class RuntimeIntegrationTests: XCTestCase {
         let rig = try RuntimeRig(guest: guest)
         XCTAssertTrue(rig.hello())
         var wrong = rig.scope; wrong.runtimeImageDigest = String(repeating: "0", count: 64)
-        rig.daemon.send(.begin(id: "req-wrong", homeId: Fixture.homeId, scope: wrong))
+        rig.daemon.send(.begin(id: "req-wrong", homeId: Fixture.homeId, scope: wrong, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(rig.refusal(id: "req-wrong"), .code_identity_mismatch)
         // The artifacts change after the daemon pinned them: the digest it states is no longer the files'.
         try Data("tampered".utf8).write(to: URL(fileURLWithPath: guest.guestDirectory + "/kernel"))
         chmod(guest.guestDirectory + "/kernel", 0o644)
-        rig.daemon.send(.begin(id: "req-tampered", homeId: Fixture.homeId, scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-tampered", homeId: Fixture.homeId, scope: rig.scope, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(rig.refusal(id: "req-tampered"), .code_identity_mismatch)
         try Data(guest.kernelBytes).write(to: URL(fileURLWithPath: guest.guestDirectory + "/kernel"))
         chmod(guest.guestDirectory + "/kernel", 0o644)
@@ -425,7 +425,7 @@ final class RuntimeIntegrationTests: XCTestCase {
     func testAGarbageDatagramFromTheWorkerKillsIt() throws {
         let rig = try RuntimeRig(mode: "garbage")
         XCTAssertTrue(rig.hello())
-        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope))
+        rig.daemon.send(.begin(id: "req-begin", homeId: Fixture.homeId, scope: rig.scope, receiptKey: Fixture.receiptKey))
         XCTAssertEqual(rig.refusal(), .internal)
         let b = try XCTUnwrap(rig.daemon.next { if case .uncertain(let r) = $0 { r } else { nil } })
         XCTAssertEqual(b.reason, .workerKilled); XCTAssertTrue(rig.processGone(b.workerPid))
