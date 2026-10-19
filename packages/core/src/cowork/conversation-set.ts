@@ -150,6 +150,17 @@ export interface CoworkConversationSetInput {
   readonly offered: readonly string[];
   /** The provider route the door was built with. Production has none, and then nothing reaches this builder. */
   readonly route: CoworkProviderRoute;
+  /** The plan execution view's epoch (the policy machine's `epoch`): under plan, the conversation's own writable plan
+   *  scratch `/workspace/plan/<sid>/<epoch>` is mounted beside its read-only roots. Nothing passes it yet: the native
+   *  contract (`allowedView`, plan's read-only rule) and the supervisor do not admit that view, so a set carrying it is
+   *  refused on the wire (pinned). Ignored outside plan. */
+  readonly planScratchEpoch?: number;
+}
+
+/** The plan scratch guest path of one conversation at one policy epoch (`/workspace/plan/<sid>/<epoch>`, outside `.winter`). */
+export function coworkPlanScratchPath(sessionId: string, epoch: number): string {
+  if (!Number.isSafeInteger(epoch) || epoch < 0) throw new CoworkError("invalid_request");
+  return `/workspace/plan/${sessionId}/${epoch}`;
 }
 
 /** The incarnation's conversation set for ONE source-located conversation (N2: a host-query set carries exactly one). */
@@ -165,6 +176,9 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
   const root = source === undefined
     ? Object.freeze({ id: "outputs", guestPath: cwd, source: cwd, readOnly: policy === "plan" })
     : Object.freeze({ id: source.sourceId, guestPath: cwd, source: cwd, readOnly: source.access === "read-only" || policy === "plan" });
+  const planRoot = policy === "plan" && input.planScratchEpoch !== undefined
+    ? (() => { const path = coworkPlanScratchPath(binding.sessionId, input.planScratchEpoch); return Object.freeze({ id: "plan-scratch", guestPath: path, source: path, readOnly: false }); })()
+    : undefined;
   const toolClasses = coworkGuestToolClassesFor(input.offered);
   const scope: CoworkProviderRouteScope = Object.freeze({
     homeId: input.homeId, workspaceId: context.workspaceId, sessionId: binding.sessionId, backendSessionId: input.backendSessionId,
@@ -183,7 +197,7 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
       configRevision: input.configRevision, grantRevision: input.grantRevision, policyRevision: input.policyRevision }),
     ...COWORK_GUEST_IDENTITIES,
     policy,
-    roots: Object.freeze([root]),
+    roots: Object.freeze(planRoot === undefined ? [root] : [root, planRoot]),
     runtime: Object.freeze({ model: route.model, timeoutMs: COWORK_GUEST_RUNTIME_TIMEOUT_MS, toolClasses: Object.freeze(toolClasses),
       provider: Object.freeze(sorted({ scope, selection }) as Record<string, unknown>), guided: null }),
   });

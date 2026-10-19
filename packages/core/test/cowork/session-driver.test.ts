@@ -17,9 +17,12 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { COWORK_GUEST_RUNTIME_MODES } from "../../src/cowork/conversation-set";
 import { parseCoworkNativeMuxFrame, serializeCoworkNativeMuxFrame } from "../../src/cowork/native/protocol";
 import { coworkApprovalPort } from "../../src/cowork/session-door";
-import { coworkGuestPermissionAnswer, createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "../../src/cowork/session-driver";
-import type { CoworkApprovalPort, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestRun, CoworkGuestRuntimeLink, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkGuestStopOutcome } from "../../src/cowork/session-ports";
+import { coworkAcknowledgeMountedShares, coworkGuestPermissionAnswer, createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "../../src/cowork/session-driver";
+import type { CoworkApprovalPort, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestStartRequest, CoworkGuestRun, CoworkGuestRuntimeLink, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkGuestStopOutcome } from "../../src/cowork/session-ports";
 import { startWinterSession } from "../../src/runtime-sdk/winter-session";
+import { CoworkRepository } from "../../src/cowork/repository";
+import { openRuntimeStateDb } from "../../src/runtime-state/db";
+import { CoworkError } from "../../src/cowork/types";
 import { ProjectionCheckpoints } from "../../src/runtime-state/checkpoints";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
@@ -138,17 +141,19 @@ const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs" } = {}) {
+function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs"; shares?: (context: CoworkGuestConversationContext, request: CoworkGuestStartRequest) => void } = {}) {
   const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness] };
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const sessions = Array.from({ length: opts.conversations ?? 1 }, () => store.createSession("t", { mode: "code" }));
-  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}), ...(opts.location ? { location: opts.location } : {}) });
+  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}), ...(opts.location ? { location: opts.location } : {}), ...(opts.shares ? { ack: false } : {}) });
   const guests: ScriptedGuest[] = [], launched: Options[] = [], approvals = new ApprovalBroker(), questions = new QuestionBroker();
   const native: CoworkGuestStarter = {
     async start(workspaceId, request) {
       expect(workspaceId).toBe(f.workspaceId);
       const context = f.begin(`incarnation-${guests.length + 1}`);
       let set: CoworkGuestConversationSet | null;
+      // #92 N2: a v3 host reports `shares_mounted` before it asks for the set (a bootstrap fault if refused).
+      if (opts.shares) { try { opts.shares(context, request!); } catch { f.power("stopped"); throw new Error("bootstrap fault: share_mount_failed"); } }
       // The host fails the start on a refused set (a bootstrap fault); the driver must still surface ITS typed refusal.
       try { set = request!.conversations(context); } catch { f.power("stopped"); throw new Error("bootstrap fault: bad_conversations"); }
       if (set === null) throw new Error("no set");
@@ -272,6 +277,57 @@ test("D3b: a conversation whose location changed between ensure and the set is r
   expect(h.launched).toEqual([]);
 });
 
+test("#92 N2: at shares_mounted, before the set, a mounted folder source becomes ready for THIS incarnation, and the turn runs on it", async () => {
+  const h = harness({ script: reply("ok"), shares: (context, request) => {
+    expect(h.f.records.source(h.f.workspaceId, h.f.sourceId).state).toBe("preparing");
+    request.sharesMounted!(context, [{ sourceId: h.f.sourceId, revision: h.f.records.source(h.f.workspaceId, h.f.sourceId).revision }]);
+  } });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  expect(h.f.records.source(h.f.workspaceId, h.f.sourceId)).toMatchObject({ state: "ready", ackIncarnationId: "incarnation-1" });
+  await session.send("hi", "cli"); await session.idle();
+  expect(h.guests[0]!.refusals).toEqual([]);
+});
+
+test("#92 N2: without shares_mounted the unacknowledged source refuses the set; a bad report faults the boot and acknowledges nothing", async () => {
+  const none = harness({ script: reply("never"), shares: () => {} });
+  await expect((await none.drivers.ensure(none.sid)).open()).rejects.toThrow("source_unavailable");
+  for (const [name, code, report] of [
+    ["a stale revision", "stale_acknowledgment", (f: DoorFixture) => [{ sourceId: f.sourceId, revision: f.records.source(f.workspaceId, f.sourceId).revision + 1 }]],
+    ["an unknown source", "not_found", () => [{ sourceId: "source_other", revision: 1 }]],
+    ["a repeat", "invalid_request", (f: DoorFixture) => { const r = f.records.source(f.workspaceId, f.sourceId).revision; return [{ sourceId: f.sourceId, revision: r }, { sourceId: f.sourceId, revision: r }]; }],
+    ["nothing", "invalid_request", () => []],
+  ] as [string, string, (f: DoorFixture) => { sourceId: string; revision: number }[]][]) {
+    let h: ReturnType<typeof harness> | undefined;
+    h = harness({ script: reply("never"), shares: (context, request) => request.sharesMounted!(context, report(h!.f)) });
+    const error = await (await h.drivers.ensure(h.sid)).open().then(() => undefined, (caught: unknown) => caught as CoworkError);
+    // The driver surfaces ITS typed refusal, not the host's bootstrap fault.
+    expect([name, (error as CoworkError | undefined)?.code]).toEqual([name, code]);
+    expect([name, h.f.records.source(h.f.workspaceId, h.f.sourceId).state]).toEqual([name, "preparing"]);
+    expect([name, h.launched.length]).toEqual([name, 0]);
+  }
+});
+
+test("#92 N2: only a present folder source can be acknowledged by a share (a repository is never mounted as one)", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-door-n2-")), db = openRuntimeStateDb(home), records = new CoworkRepository(db);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  const made = records.create({ principalId: "fixture", requestId: "c" }, { ownership: "project", title: "t", ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" },
+    sources: [{ kind: "githubRepository", access: "read-only", label: "repo", detail: { repositoryId: "repo-1", authorityRef: "auth-1", initialRef: "main" } }] });
+  const epoch = records.beginIncarnation(made.workspaceId, "inc", records.get(made.workspaceId).configRevision), source = records.sources(made.workspaceId)[0]!;
+  const context = { workspaceId: made.workspaceId, incarnationId: "inc", leaseEpoch: epoch.leaseEpoch, guestBootId: "12345678-1234-4234-8234-123456789abc" };
+  expect(() => coworkAcknowledgeMountedShares(records, context, [{ sourceId: source.sourceId, revision: source.revision }])).toThrow("stale_acknowledgment");
+  expect(records.source(made.workspaceId, source.sourceId).state).toBe("preparing");
+});
+
+test("#92 N2: shares_mounted after the set is refused (it must precede conversations)", async () => {
+  let late: (() => void) | undefined;
+  const h = harness({ script: reply("ok"), afterSet: () => { late!(); } , shares: (context, request) => {
+    request.sharesMounted!(context, [{ sourceId: h.f.sourceId, revision: h.f.records.source(h.f.workspaceId, h.f.sourceId).revision }]);
+    late = () => expect(() => request.sharesMounted!(context, [{ sourceId: h.f.sourceId, revision: 1 }])).toThrow("recovery_required");
+  } });
+  await (await h.drivers.ensure(h.sid)).open();
+});
+
 test("D3b: under plan the outputs root is read-only and the runtime runs plan", async () => {
   const h = harness({ policy: "plan", location: "outputs", script: reply("ok") });
   const session = await h.drivers.ensure(h.sid);
@@ -296,6 +352,8 @@ test("plan view: not expressible in host-query-v1 yet. The real validator refuse
   // The driver never asks for the view: the approvals bridge sees planViewInstalled false (a plan scratch write is refused).
   const text = readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "session-driver.ts"), "utf8");
   expect(text).not.toMatch(/planViewMounted/);
+  // Nor the plan scratch root (conversation-set.ts builds it only when asked; the native wire refuses it today).
+  expect(text).not.toMatch(/planScratchEpoch/);
 });
 
 test("for every policy the host launch's mode equals the mode the guest's own map gives the set's policy: default or plan only", async () => {
@@ -495,4 +553,45 @@ test("between the runtime's exit and the incarnation's stop outcome, a send refu
   expect(h.store.read(h.sid).length).toBe(length);
   guest.terminate({ released: true, evidence: "orderly-receipt" });
   await until(() => h.drivers.get(h.sid) === undefined, "the close");
+});
+
+test("#92 N2 fix: a mixed report acknowledges nothing: no source ready, nothing published, no operation concluded", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-door-n2-mixed-")), db = openRuntimeStateDb(home), records = new CoworkRepository(db);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  const folder = { kind: "folder" as const, access: "read-write" as const, label: "f", detail: { grantRef: "grant", rootIdentity: "root" } };
+  const made = records.create({ principalId: "fixture", requestId: "c" }, { ownership: "project", title: "t", ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" }, sources: [folder, folder] });
+  const epoch = records.beginIncarnation(made.workspaceId, "inc", records.get(made.workspaceId).configRevision);
+  const [good, other] = records.sources(made.workspaceId) as [ReturnType<typeof records.source>, ReturnType<typeof records.source>];
+  const context = { workspaceId: made.workspaceId, incarnationId: "inc", leaseEpoch: epoch.leaseEpoch, guestBootId: "12345678-1234-4234-8234-123456789abc" };
+  const published = () => db.db.query("SELECT COUNT(*) AS n FROM cowork_outbox WHERE kind IN ('workspace_sources_changed','workspace_operation_changed')").get();
+  const before = published();
+  for (const [report, code] of [
+    [[{ sourceId: good.sourceId, revision: good.revision }, { sourceId: other.sourceId, revision: other.revision + 1 }], "stale_acknowledgment"],
+    [[{ sourceId: good.sourceId, revision: good.revision }, { sourceId: "source_missing", revision: 1 }], "not_found"],
+    [Array.from({ length: 13 }, (_, i) => ({ sourceId: `source_${i}`, revision: 1 })), "invalid_request"],
+  ] as [{ sourceId: string; revision: number }[], string][]) {
+    expect(() => coworkAcknowledgeMountedShares(records, context, report)).toThrow(code);
+    expect(records.sources(made.workspaceId).map(source => source.state)).toEqual(["preparing", "preparing"]);
+    expect(published()).toEqual(before);
+    expect(records.operation(made.workspaceId, made.operationId).status).toBe("pending");
+  }
+  // Both good: both ready together, and the creation concludes applied.
+  coworkAcknowledgeMountedShares(records, context, [{ sourceId: good.sourceId, revision: good.revision }, { sourceId: other.sourceId, revision: other.revision }]);
+  expect(records.sources(made.workspaceId).map(source => source.state)).toEqual(["ready", "ready"]);
+  expect(records.operation(made.workspaceId, made.operationId).status).toBe("applied");
+});
+
+test("#92 N2 fix: a report for another workspace is authority_denied; once a report is refused, the set is refused too", async () => {
+  let h: ReturnType<typeof harness> | undefined;
+  h = harness({ script: reply("never"), shares: (context, request) => request.sharesMounted!({ ...context, workspaceId: "ws_other" }, [{ sourceId: h!.f.sourceId, revision: 1 }]) });
+  await expect((await h.drivers.ensure(h.sid)).open()).rejects.toThrow("authority_denied");
+  expect(h.f.records.source(h.f.workspaceId, h.f.sourceId).state).toBe("preparing");
+  // A host that swallowed the refusal and asks for the set anyway: the driver refuses it with the first refusal.
+  let s: ReturnType<typeof harness> | undefined;
+  s = harness({ script: reply("never"), shares: (context, request) => {
+    request.sharesMounted!(context, [{ sourceId: s!.f.sourceId, revision: s!.f.records.source(s!.f.workspaceId, s!.f.sourceId).revision }]);
+    try { request.sharesMounted!(context, []); } catch { /* swallowed by a faulty host */ }
+  } });
+  await expect((await s.drivers.ensure(s.sid)).open()).rejects.toThrow("invalid_request");
+  expect([s.guests.length, s.launched.length]).toEqual([0, 0]);
 });

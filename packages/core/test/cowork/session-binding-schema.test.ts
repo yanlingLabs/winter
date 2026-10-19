@@ -23,7 +23,7 @@ const userVersion = (home: string) => { const raw = new Database(rawPath(home), 
 const columns = (db: Database) => db.query<{ name: string; notnull: number; dflt_value: string | null }, []>("PRAGMA table_info(cowork_conversations)").all();
 const tableSql = (db: Database) => db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='cowork_conversations'").get()!.sql;
 
-const V18_COLUMNS = ["session_id", "workspace_id", "project_id", "location_kind", "source_id", "relative_cwd", "policy", "restrictions_json", "revision", "state", "created_at", "backend_session_id"];
+const V18_COLUMNS = ["session_id", "workspace_id", "project_id", "location_kind", "source_id", "relative_cwd", "policy", "restrictions_json", "revision", "state", "created_at", "backend_session_id", "runtime_uid", "tool_uid", "store_state", "last_incarnation_id"]; // + v21 (#92)
 /** The table exactly as v8 created it and v17 left it. */
 const V17_TABLE = `CREATE TABLE cowork_conversations (
       session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
@@ -58,9 +58,9 @@ function rewindToV17(db: RuntimeStateDb): void {
 }
 
 test("schema 18 is current, and a fresh store has the binding columns in order with their defaults", () => {
-  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(19);
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(21);
   const db = openDb(tempHome());
-  expect(db.schemaVersion()).toBe(19);
+  expect(db.schemaVersion()).toBe(21);
   expect(columns(db.db).map(column => column.name)).toEqual(V18_COLUMNS);
   const byName = Object.fromEntries(columns(db.db).map(column => [column.name, column]));
   expect(byName.location_kind).toMatchObject({ notnull: 1, dflt_value: "'source'" });
@@ -116,7 +116,7 @@ test("a v17 store upgrades in place: rows, their dependents and the index surviv
   expect(userVersion(home)).toBe(17);
 
   const second = openDb(home);
-  expect(second.schemaVersion()).toBe(19);
+  expect(second.schemaVersion()).toBe(21);
   expect(columns(second.db).map(column => column.name)).toEqual(V18_COLUMNS);
   expect(second.db.query("SELECT session_id,workspace_id,project_id,source_id,relative_cwd,policy,restrictions_json,revision,state,created_at FROM cowork_conversations").all()).toEqual(before);
   expect(second.db.query("SELECT location_kind, backend_session_id FROM cowork_conversations").all()).toEqual([{ location_kind: "source", backend_session_id: null }]);
@@ -151,7 +151,7 @@ test("the rebuild keeps EVERY v17 constraint, judged against the v17 text itself
   const upgradedHome = tempHome(), first = openDb(upgradedHome), upgradedFixture = bound(first, "s_upgraded");
   rewindToV17(first); first.close();
   const upgraded = openDb(upgradedHome);
-  expect(upgraded.schemaVersion()).toBe(19);
+  expect(upgraded.schemaVersion()).toBe(21);
   for (const [label, db, { workspaceId, sourceId }] of [["fresh", fresh, freshFixture], ["upgraded", upgraded, upgradedFixture]] as const) {
     expect([label, foreignKeys(db.db)]).toEqual([label, v17Keys]);
     const sql = tableSql(db.db).replace(/\s+/g, " ");
@@ -178,26 +178,26 @@ test("idempotent: rewinding user_version to 17 and reopening, or calling the mig
   expect({ sql: tableSql(first.db), rows: first.db.query("SELECT * FROM cowork_conversations").all() }).toEqual(before);
   first.db.run("PRAGMA user_version=17"); first.close();
   const second = openDb(home);
-  expect(second.schemaVersion()).toBe(19);
+  expect(second.schemaVersion()).toBe(21);
   expect({ sql: tableSql(second.db), rows: second.db.query("SELECT * FROM cowork_conversations").all() }).toEqual(before);
 });
 
 test("the downgrade ladder: an empty current store rolls back to 7 and to 6 and upgrades again; a bound conversation refuses both", () => {
   const empty = tempHome();
   openDb(empty).close();
-  expect(userVersion(empty)).toBe(19);
-  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 19, to: 7 });
-  let db = openDb(empty); expect(db.schemaVersion()).toBe(19); expect(columns(db.db).map(column => column.name)).toEqual(V18_COLUMNS); db.close();
-  expect(downgradeRuntimeStateToV6(empty)).toEqual({ from: 19, to: 6 });
-  db = openDb(empty); expect(db.schemaVersion()).toBe(19); db.close();
+  expect(userVersion(empty)).toBe(21);
+  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 21, to: 7 });
+  let db = openDb(empty); expect(db.schemaVersion()).toBe(21); expect(columns(db.db).map(column => column.name)).toEqual(V18_COLUMNS); db.close();
+  expect(downgradeRuntimeStateToV6(empty)).toEqual({ from: 21, to: 6 });
+  db = openDb(empty); expect(db.schemaVersion()).toBe(21); db.close();
 
   const populated = tempHome(), withRow = openDb(populated); bound(withRow); withRow.close();
   expect(() => downgradeCoworkRuntimeStateToV7(populated)).toThrow("Cowork authority");
   expect(() => downgradeRuntimeStateToV6(populated)).toThrow("Cowork authority");
-  expect(userVersion(populated)).toBe(19);
+  expect(userVersion(populated)).toBe(21);
 
   const newer = tempHome(); openDb(newer).close();
-  const raw = new Database(rawPath(newer)); raw.run("PRAGMA user_version=20"); raw.close();
+  const raw = new Database(rawPath(newer)); raw.run("PRAGMA user_version=22"); raw.close();
   expect(() => downgradeCoworkRuntimeStateToV7(newer)).toThrow("newer-schema");
   expect(() => downgradeRuntimeStateToV6(newer)).toThrow("newer-schema");
 });
@@ -239,7 +239,7 @@ test("cowork_home_binding is Cowork authority: listed before the identity it ref
   const raw = new Database(rawPath(populated), { readonly: true });
   try { expect(raw.query("SELECT count(*) AS n FROM cowork_home_binding").get()).toEqual({ n: 1 }); } finally { raw.close(); }
   const empty = tempHome(); openDb(empty).close();
-  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 19, to: 7 });
+  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 21, to: 7 });
   const rolled = new Database(rawPath(empty), { readonly: true });
   try { expect(rolled.query("SELECT name FROM sqlite_master WHERE name='cowork_home_binding'").get()).toBeNull(); } finally { rolled.close(); }
   const again = openDb(empty); expect(bindingColumns(again.db).map(column => column.name)).toEqual(BINDING_COLUMNS);
@@ -251,7 +251,7 @@ test("a v17 store gains the table on upgrade, and a recorded binding survives a 
   expect(first.db.query("SELECT name FROM sqlite_master WHERE name='cowork_home_binding'").get()).toBeNull();
   first.close();
   const second = openDb(home);
-  expect(second.schemaVersion()).toBe(19);
+  expect(second.schemaVersion()).toBe(21);
   expect(bindingColumns(second.db).map(column => column.name)).toEqual(BINDING_COLUMNS);
   insertBinding(second.db, new CoworkRepository(second).homeIdentity());
   const before = second.db.query("SELECT * FROM cowork_home_binding").all();

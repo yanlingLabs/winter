@@ -38,7 +38,7 @@ export interface DoorFixture {
   close(): void;
 }
 
-export function doorFixture(opts: { policy?: ApprovalPolicy; toolClasses?: string[]; access?: SourceAccess; relativeCwd?: string; sessions?: readonly string[]; network?: "none" | "internet"; location?: "source" | "outputs" } = {}): DoorFixture {
+export function doorFixture(opts: { policy?: ApprovalPolicy; toolClasses?: string[]; access?: SourceAccess; relativeCwd?: string; sessions?: readonly string[]; network?: "none" | "internet"; location?: "source" | "outputs"; ack?: boolean } = {}): DoorFixture {
   const home = mkdtempSync(join(tmpdir(), "winter-door-d3-"));
   const db = openRuntimeStateDb(home), records = new CoworkRepository(db), access = opts.access ?? "read-write";
   const created = records.create({ principalId: "fixture", requestId: "create" }, { ownership: "project", title: "fixture", defaultPolicy: opts.policy ?? "ask",
@@ -65,7 +65,7 @@ export function doorFixture(opts: { policy?: ApprovalPolicy; toolClasses?: strin
     begin(incarnationId = "incarnation") {
       const epoch = records.beginIncarnation(workspaceId, incarnationId, records.get(workspaceId).configRevision);
       // An outputs fixture never acknowledges its source: nothing in N2 can.
-      if (!outputs) records.acknowledgeSource(epoch, source.sourceId, records.source(workspaceId, source.sourceId).revision, "ready");
+      if (!outputs && opts.ack !== false) records.acknowledgeSource(epoch, source.sourceId, records.source(workspaceId, source.sourceId).revision, "ready");
       return { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, guestBootId: FIXTURE_BOOT_ID };
     },
     power,

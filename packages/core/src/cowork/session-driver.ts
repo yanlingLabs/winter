@@ -19,7 +19,7 @@ import type { CoworkRepository } from "./repository";
 import { coworkGuestRuntimeChannel } from "./runtime-channel";
 import type {
   CoworkApprovalPort, CoworkGuestConversation, CoworkGuestConversationContext, CoworkGuestRun, CoworkGuestRuntimeOffer, CoworkGuestStarter,
-  CoworkGuestStopOutcome, CoworkLegSession, CoworkProviderRoute, CoworkSessionDrivers,
+  CoworkGuestStopOutcome, CoworkLegSession, CoworkMountedShare, CoworkProviderRoute, CoworkSessionDrivers,
 } from "./session-ports";
 import { CoworkError, type CapabilityCeiling, type CoworkConversation, type WorkspaceSource } from "./types";
 
@@ -70,6 +70,21 @@ export interface CoworkSessionDriverDeps {
   /** Test seam for `WINTER_SESSION_END_GRACE_MS`. */
   readonly endGraceMs?: number;
   readonly log?: (line: string) => void;
+}
+
+/**
+ * #92 N2: the guest mounted these folder shares for this incarnation. Each named source must be a present folder source of
+ * the workspace, `preparing` (the incarnation reset it), at the revision the share was prepared from; it is then
+ * acknowledged `ready` under the incarnation's CURRENT epoch. At most 12 (the contract's share limit), no repeats. Any
+ * refusal throws typed and the host faults the boot; sources already acknowledged stay so for this incarnation only.
+ */
+export function coworkAcknowledgeMountedShares(records: Pick<CoworkRepository, "refreshEpoch" | "acknowledgeMountedShares">, context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]): void {
+  if (!Array.isArray(mounted) || mounted.length < 1 || mounted.length > 12 || new Set(mounted.map(share => share?.sourceId)).size !== mounted.length) throw new CoworkError("invalid_request");
+  for (const share of mounted) {
+    if (!share || typeof share.sourceId !== "string" || !Number.isSafeInteger(share.revision) || share.revision < 1) throw new CoworkError("invalid_request");
+  }
+  // All or nothing: the repository validates every entry, then acknowledges them in one transaction.
+  records.acknowledgeMountedShares(records.refreshEpoch(context.workspaceId, context.incarnationId, context.leaseEpoch), mounted.map(share => ({ sourceId: share.sourceId, revision: share.revision })));
 }
 
 const unsupported = (): never => { throw new CoworkError("unsupported_topology"); };
@@ -148,6 +163,8 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       let admitted: Admitted | undefined, refusal: unknown;
       const conversations = (context: CoworkGuestConversationContext) => {
         try {
+          // A refused `shares_mounted` faulted this boot: no set follows it.
+          if (refusal !== undefined) throw refusal;
           if (admitted !== undefined) throw new CoworkError("recovery_required");
           if (context.workspaceId !== binding.workspaceId) throw new CoworkError("authority_denied");
           // D3b: either location; the source facts are compared only for a source conversation.
@@ -168,8 +185,16 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
           return set;
         } catch (error) { refusal = error; throw error; }
       };
+      // #92 N2: shares are acknowledged at `shares_mounted`, which precedes the set; never after it.
+      const sharesMounted = (context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]) => {
+        try {
+          if (admitted !== undefined) throw new CoworkError("recovery_required");
+          if (context.workspaceId !== binding.workspaceId) throw new CoworkError("authority_denied");
+          coworkAcknowledgeMountedShares(deps.records, context, mounted);
+        } catch (error) { refusal = error; throw error; }
+      };
       let run: CoworkGuestRun;
-      try { run = await native.start(binding.workspaceId, { conversations }); }
+      try { run = await native.start(binding.workspaceId, { conversations, sharesMounted }); }
       catch (error) { throw refusal ?? error; }
       entry.run = run;
       void run.ended.then(() => { close(entry); void entry.session.end(); }, () => { close(entry); void entry.session.end(); });
