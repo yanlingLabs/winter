@@ -123,9 +123,15 @@ for (const [name, behavior, code] of GUEST_FAILURES) {
   });
 }
 
+/** The first root of the first conversation, with `source` changed (guestPath untouched). */
+const withRootSource = (set: ReturnType<typeof guidedSet>, source: string): ReturnType<typeof guidedSet> => ({
+  ...set, conversations: set.conversations.map((conversation, index) => index > 0 ? conversation : { ...conversation, roots: conversation.roots.map((root, at) => at === 0 ? { ...root, source } : root) }),
+});
 const HOST_REFUSALS: [string, Parameters<typeof createHarness>[0] extends infer O ? NonNullable<O extends { conversations?: infer C } ? C : never> : never][] = [
   ["a second host-query conversation", twoGuidedSet],
   ["a set above the 20,480 byte ceiling", oversizedSet],
+  ["a root whose source differs from its guest path (both admitted views)", context => withRootSource(guidedSet(context), "/workspace/folders/other")],
+  ["a root whose source lies outside the admitted views", context => withRootSource(guidedSet(context), "/workspace/system/elsewhere")],
   ["a set bound to another lease epoch", context => guidedSet({ ...context, leaseEpoch: context.leaseEpoch + 1 })],
   ["a set bound to another incarnation", context => guidedSet({ ...context, incarnationId: "inc-other" })],
   ["a set whose providers name another guest boot", context => guidedSet({ ...context, guestBootId: "77777777-7777-4777-8777-777777777777" })],
