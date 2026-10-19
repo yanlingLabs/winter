@@ -11,7 +11,7 @@ import { CoworkPressureGuard } from "../native/pressure";
 import { createCoworkResourceObserver } from "../native/resource-observer";
 import { coworkNativeLedgerStopProbe, type CoworkNativeHostBoot } from "../native/stop-proof";
 import type { CoworkNativeEnvironment } from "../native-wiring";
-import { CoworkHostEnvError, assertOutsideWinterHomes, coordinationDirectory, coordinationLedgerFile, ensurePrivateDirectory, loadOrCreateInstallationId } from "./coordination";
+import { CoworkHostEnvError, assertDisjointFromHome, assertOutsideWinterHomes, coordinationDirectory, coordinationLedgerFile, ensurePrivateDirectory, loadOrCreateInstallationId } from "./coordination";
 import { createCoworkRecoverGuards, processStartToken } from "./guards";
 import { createCoworkLauncherPort, type CoworkLauncherPortOptions } from "./launcher-port";
 import { createCoworkHomeBindingStore, createCoworkLaunchJournal, createCoworkReceiptStore } from "./stores";
@@ -84,6 +84,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   const now = options.now ?? Date.now;
   const directory = coordinationDirectory(options.coordination);
   assertOutsideWinterHomes(directory);
+  assertDisjointFromHome(directory, options.home);
   ensurePrivateDirectory(directory);
   const installationId = loadOrCreateInstallationId(directory);
 
