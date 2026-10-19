@@ -256,7 +256,9 @@ describe("the shared receiver hub", () => {
       sendMessage(a, encode("x\n")); await Bun.sleep(2);
       await receiver.close(); closeDescriptor(a); closeDescriptor(b);
     }
-    await Bun.sleep(30);
+    // The count is process-wide, so another test file's late cleanup can move it for a moment. A real leak is
+    // permanent (one per round, twelve rounds), so wait for the count to settle, bounded, then demand equality.
+    for (let attempt = 0; attempt < 100 && openCount() !== before; attempt++) await Bun.sleep(20);
     expect(openCount()).toBe(before);
   });
   live("many receivers at once are served independently and each ends exactly once", async () => {

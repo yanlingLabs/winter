@@ -17,7 +17,8 @@ function kernelDead(child: ChildProcess) { expect(child.pid).toBeGreaterThan(0);
 test("real auxiliary timeout confirms owned exit before rejection and reclaims its slot", async () => {
   const root = home(); let child!: ChildProcess, exit = false;
   const launcher = ((file: string, args: readonly string[], options: SpawnOptions) => { child = spawn(file, args, options); child.once("exit", () => { exit = true; }); return child; }) as typeof spawn;
-  const runner = new OwnedGitReadCommandRunner(limits, { isolatedFixture: true, spawn: launcher });
+  // The wall must outlast spawning /usr/bin/printf on a loaded CI runner: the second run proves the slot is reclaimed, not a speed.
+  const runner = new OwnedGitReadCommandRunner({ ...limits, wallMs: 2_000 }, { isolatedFixture: true, spawn: launcher });
   await expect(runner.run(command(root, 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000);'))).rejects.toMatchObject({ code: "budget_exceeded" });
   expect(exit).toBe(true); kernelDead(child); expect(runner.retainedOwnership).toBe(0); expect(runner.measurements.uncertainStops).toBe(0);
   expect((await runner.run({ file: "/usr/bin/printf", args: ["ok"], cwd: root, env: { PATH: "/usr/bin:/bin", HOME: root } })).stdout).toBe("ok");
