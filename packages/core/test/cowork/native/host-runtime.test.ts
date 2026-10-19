@@ -211,6 +211,31 @@ describe("the runtime window: nothing before runtime_ready, nothing lost before 
     expect(outcome.released).toBe(true); // the guest was stopped in order (the fake stops orderly)
     expect(h.host.activeWorkspaces()).toEqual([]);
   });
+  test("an overflow closes the stream for good: a subscriber attaching during the deferred stop (overflow during start) receives nothing, even from later frames, and a send is refused", async () => {
+    // "late-orderly": the stop stays pending for 300 ms, so the subscriber really attaches DURING it.
+    const h = createHarness({ behavior: { stop: "late-orderly" }, onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { const s = harness.launcher.last; s.emitRuntime("out", new Uint8Array(1048566)); s.emitRuntime("out", new Uint8Array(100)); } } });
+    const { link, session, running } = await started(h);
+    const got: number[] = [];
+    link.onData((_stream, chunk) => { got.push(chunk.length); });
+    session.emitRuntime("out", new Uint8Array(5));
+    await settle();
+    expect(got).toEqual([]);
+    await expect(link.send(bytesOf("x"))).rejects.toMatchObject({ code: "closed" });
+    await running.ended;
+  });
+  test("an overflow while running with no subscriber yet closes the stream: the late subscriber and the 5 bytes behind the drop get nothing", async () => {
+    const h = createHarness({ behavior: { stop: "late-orderly" } });
+    const { link, session, running } = await started(h);
+    session.emitRuntime("out", new Uint8Array(1048566)); session.emitRuntime("out", new Uint8Array(100));
+    await settle();
+    const got: number[] = [];
+    link.onData((_stream, chunk) => { got.push(chunk.length); });
+    session.emitRuntime("out", new Uint8Array(5));
+    await settle();
+    expect(got).toEqual([]);
+    await expect(link.send(bytesOf("x"))).rejects.toMatchObject({ code: "closed" });
+    await running.ended;
+  });
   test("a hold that exactly fits is delivered whole", async () => {
     const h = createHarness({ onCheckpoint: (phase, harness) => { if (phase === "runtime-ready") { const s = harness.launcher.last; s.emitRuntime("out", new Uint8Array(1048566)); s.emitRuntime("out", new Uint8Array(10)); } } });
     const { link } = await started(h);
