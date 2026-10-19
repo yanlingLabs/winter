@@ -72,7 +72,22 @@ export class SqlitePeerInboxStore implements PeerInboxStore {
   protected beforeBodyRead(_handle: string): void {}
 
   private sweep(): void {
-    durableCoworkTransaction(this.rs, () => { this.rs.db.run("UPDATE cowork_peer_inbox SET body=NULL WHERE state IN ('delivered','refused') AND body IS NOT NULL"); });
+    this.erasing(() => durableCoworkTransaction(this.rs, () => { this.rs.db.run("UPDATE cowork_peer_inbox SET body=NULL WHERE state IN ('delivered','refused') AND body IS NOT NULL"); }));
+  }
+
+  /**
+   * Runs a body-releasing operation with `secure_delete = ON` for this connection, then restores the previous value.
+   * The pinned default (FAST) zeroes only what is cheap to zero and does NOT erase the overflow pages of a body larger
+   * than a page (measured: the tail of a 20 KB body survived a delete), so every statement that releases a body (a
+   * terminal move, the open-time sweep, a workspace purge) runs under ON, which zeroes every freed page. Scoped, not
+   * global: no other table pays for it and the shared pin in db.ts is untouched. The WAL keeps older frames of the
+   * body until the next checkpoint (see the research note); that is a checkpoint question, not a purge one.
+   */
+  private erasing<T>(operation: () => T): T {
+    const db = this.rs.db;
+    const previous = db.query<{ secure_delete: number }, []>("PRAGMA secure_delete").get()?.secure_delete ?? 2;
+    db.run("PRAGMA secure_delete = ON");
+    try { return operation(); } finally { db.run(`PRAGMA secure_delete = ${previous === 0 ? "OFF" : previous === 1 ? "ON" : "FAST"}`); }
   }
 
   append(entry: PeerInboxEntry, body: string, caps: PeerInboxCaps): PeerAppendResult {
@@ -135,7 +150,7 @@ export class SqlitePeerInboxStore implements PeerInboxStore {
     if (patch.discardedBy !== undefined) { if (patch.discardedBy !== null) checkId(patch.discardedBy); set("discarded_by", patch.discardedBy); }
     if (!Number.isFinite(patch.updatedAt)) throw new CoworkError("invalid_request");
     set("updated_at", patch.updatedAt);
-    return durableCoworkTransaction(this.rs, () => {
+    const run = () => durableCoworkTransaction(this.rs, () => {
       const current = this.row(receiptId);
       if (!current) throw new CoworkError("not_found");
       if (current.version !== expectedVersion) throw new CoworkError("revision_conflict", current.version);
@@ -145,6 +160,9 @@ export class SqlitePeerInboxStore implements PeerInboxStore {
       this.rs.db.run(`UPDATE cowork_peer_inbox SET ${sets.join(", ")}${releases}, version=version+1 WHERE receipt_id=? AND version=?`, [...args, receiptId, expectedVersion]);
       return record(this.row(receiptId)!);
     });
+    // Every update, not only the terminal one: an UPDATE rewrites the row, and a rewrite that changes its size frees the old
+    // overflow chain of a large body (offer and block do exactly that), which must be zeroed too.
+    return this.erasing(run);
   }
 
   readBody(handle: string): string | undefined {
@@ -192,7 +210,7 @@ export class SqlitePeerInboxStore implements PeerInboxStore {
          WHERE state IN ('accepted','blocked') AND sender_session_id IN (${members})`).run(now, workspaceId).changes;
       return toRecipients + fromSenders;
     };
-    return this.rs.db.inTransaction ? run() : durableCoworkTransaction(this.rs, run);
+    return this.erasing(() => this.rs.db.inTransaction ? run() : durableCoworkTransaction(this.rs, run));
   }
 
   private row(receiptId: string): Row | null {

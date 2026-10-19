@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, writeSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { SqlitePeerInboxStore } from "../../src/cowork/peer-inbox-sqlite";
@@ -330,6 +330,59 @@ test("secure_delete is pinned to FAST on every open, and freed body pages are ze
   expect(existsSync(`${rs.path}-wal`) ? readFileSync(`${rs.path}-wal`).includes(MARKER) : false).toBe(false);
 });
 
+// A body larger than a page spills into overflow pages; the pinned secure_delete=FAST does not zero those (measured), so the
+// store erases under secure_delete=ON. The tail marker sits in the LAST page of a 40 KB body.
+const HEAD = "PEER-HEAD-MARKER-3b2", TAIL = "PEER-TAIL-MARKER-9d4";
+const bigBody = () => `${HEAD}${"b".repeat(40_000)}${TAIL}`;
+const fileHas = (rs: RuntimeStateDb, needle: string): boolean => readFileSync(rs.path).includes(needle) || (existsSync(`${rs.path}-wal`) && readFileSync(`${rs.path}-wal`).includes(needle));
+const checkpoint = (rs: RuntimeStateDb) => rs.db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+
+test("a delivered large body is erased completely: no part of it, including its last page, is in the database file or the WAL after a checkpoint", () => {
+  const { rs, store } = opened();
+  put(store, 1, bigBody());
+  checkpoint(rs);
+  expect(fileHas(rs, TAIL)).toBe(true); expect(fileHas(rs, HEAD)).toBe(true); // sanity: the probe can see a stored body
+  // Offers and blocks rewrite the row (size-changing: epoch, attempts) before delivery; each rewrite frees the old chain.
+  store.update("r1", 1, { state: "accepted", attempts: 1, offered: { incarnationId: "boot-with-a-rather-long-incarnation-id", leaseEpoch: 123456 }, updatedAt: 2 });
+  store.update("r1", 2, { state: "blocked", reason: "grants", offered: null, updatedAt: 3 });
+  store.update("r1", 3, { state: "accepted", reason: null, attempts: 2, offered: { incarnationId: "boot-2", leaseEpoch: 7 }, updatedAt: 4 });
+  store.update("r1", 4, { state: "delivered", reason: null, offered: null, updatedAt: 5 });
+  checkpoint(rs);
+  expect(fileHas(rs, HEAD)).toBe(false); expect(fileHas(rs, TAIL)).toBe(false);
+  expect(rs.db.query("PRAGMA secure_delete").get()).toEqual({ secure_delete: 2 }); // the scoped ON was restored to the pinned FAST
+});
+
+test("every body-releasing path erases a large body: refusal, workspace purge of a recipient, and the open-time sweep", () => {
+  const f = workspaceFixture();
+  const doomed = f.project(), live = f.project();
+  f.bind(doomed, "s_doomed"); f.bind(live, "s_live");
+  put(f.store, 1, bigBody(), { senderSessionId: "s_live", recipientSessionId: "s_doomed" }); // purged with the recipient's workspace
+  f.rs.db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+  expect(fileHas(f.rs, TAIL)).toBe(true);
+  f.store.purgeWorkspace(doomed.workspaceId, 5);
+  checkpoint(f.rs);
+  expect(fileHas(f.rs, TAIL)).toBe(false);
+  put(f.store, 2, bigBody(), { senderSessionId: "s_live", recipientSessionId: "s_live2" });
+  f.store.update("r2", 1, { state: "refused", reason: "canceled", updatedAt: 6 });
+  checkpoint(f.rs);
+  expect(fileHas(f.rs, TAIL)).toBe(false);
+});
+
+test("the open-time sweep erases a large leaked body", () => {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  const ddl = rs.db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name='cowork_peer_inbox'").get()!.sql;
+  rs.db.run("DROP TABLE cowork_peer_inbox"); rs.db.run(ddl.replace(/,\s*CHECK\(state IN \('accepted','blocked'\) OR body IS NULL\)/, ""));
+  put(store, 1, bigBody());
+  rs.db.run("PRAGMA secure_delete = ON"); // staging only: the raw UPDATE below rewrites the row, and must not itself strand a copy
+  rs.db.run("UPDATE cowork_peer_inbox SET state='delivered' WHERE receipt_id='r1'");
+  rs.db.run("PRAGMA secure_delete = FAST");
+  checkpoint(rs); expect(fileHas(rs, TAIL)).toBe(true);
+  new SqlitePeerInboxStore(rs); // opening sweeps
+  checkpoint(rs);
+  expect(fileHas(rs, TAIL)).toBe(false);
+});
+
 // ---------------------------------------------------------------- excluded from backups, export and migration
 
 test("a backup never carries a body, a record or a counter, and the copy opens at schema 17", () => {
@@ -448,7 +501,8 @@ test("doctor restore-backup raw-copy snapshot carries no inbox body, no row, and
   expect(readFileSync(`${f.dest}-wal`).includes(MARKER)).toBe(true); // the live WAL really does hold bodies
   const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup });
   expect(result.applied).toBe(true);
-  const snapshot = /the replaced file is at (\S+)/.exec(result.detail)![1]!;
+  const snapshot = /is at (\S+db)/.exec(result.detail)![1]!;
+  expect(result.detail).toContain("a rebuilt copy of the replaced file"); // owed bodies were present, so the raw bytes were not kept and the message says so
   expect(basename(snapshot)).toMatch(/^pre-restore-/);
   for (const path of [snapshot, `${snapshot}-wal`]) if (existsSync(path)) expect(readFileSync(path).includes(MARKER)).toBe(false);
   const probe = new Database(snapshot, { readonly: true });
@@ -524,7 +578,7 @@ test("a successful scrub promotes the working copy over the snapshot and leaves 
   const seen: Array<[string, string]> = [];
   const rawWal = readFileSync(`${f.dest}-wal`);
   const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup }, { renameSnapshot: (from, to) => { seen.push([String(from), String(to)]); renameSync(from, to); } });
-  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  const snapshot = /is at (\S+db)/.exec(result.detail)![1]!;
   expect(seen[0]).toEqual([`${snapshot}.scrub`, snapshot]);
   expect(result.warning).toBeUndefined();
   expect(readdirSync(join(f.home, "runtimes", "backups")).filter(name => name.includes(".scrub"))).toEqual([]);
@@ -533,6 +587,51 @@ test("a successful scrub promotes the working copy over the snapshot and leaves 
   if (existsSync(`${snapshot}-wal`)) { expect(readFileSync(`${snapshot}-wal`)).not.toEqual(rawWal); expect(readFileSync(`${snapshot}-wal`).includes(MARKER)).toBe(false); }
   const probe = new Database(snapshot, { readonly: true });
   try { expect(probe.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" }); } finally { probe.close(); }
+});
+
+// An index-corrupt store (opens as a plain database, fails quick_check): the pre-restore copy is the corruption EVIDENCE.
+function corruptedStore(withOwedBody: boolean, delivered = false) {
+  const home = tempHome();
+  const { rs, store } = opened(home);
+  rs.db.run("CREATE TABLE probe_t(id INTEGER PRIMARY KEY, v TEXT)"); rs.db.run("CREATE INDEX probe_i ON probe_t(v)");
+  for (let i = 0; i < 400; i++) rs.db.run("INSERT INTO probe_t(v) VALUES (?)", [`value-${i}-${"q".repeat(50)}`]);
+  if (withOwedBody) put(store, 1, `${MARKER}-corrupt-store-${"c".repeat(2_000)}`);
+  if (delivered) store.update("r1", 1, { state: "delivered", reason: null, updatedAt: 2 });
+  const backup = rs.backup();
+  rs.db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+  const root = (rs.db.query("SELECT rootpage FROM sqlite_master WHERE name='probe_i'").get() as { rootpage: number }).rootpage;
+  const pageSize = (rs.db.query("PRAGMA page_size").get() as { page_size: number }).page_size;
+  const path = rs.path; rs.close();
+  const fd = openSync(path, "r+"); writeSync(fd, Buffer.alloc(pageSize - 200, 0x41), 0, pageSize - 200, pageSize * (root - 1) + 100); closeSync(fd);
+  expect((() => { const qc = new Database(path, { readonly: true }); try { return (qc.query("PRAGMA quick_check").get() as { quick_check: string }).quick_check; } finally { qc.close(); } })()).not.toBe("ok");
+  return { home, backup, path, corrupted: readFileSync(path) };
+}
+test("doctor restore-backup keeps a corrupted store's pre-restore copy BYTE-IDENTICAL (nothing is rebuilt) and says it is the replaced file", async () => {
+  const f = corruptedStore(false);
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup });
+  expect(result.applied).toBe(true);
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(readFileSync(snapshot)).toEqual(f.corrupted); // the evidence, not a VACUUMed copy
+  expect(result.warning).toBeUndefined(); expect(result.detail).not.toContain("rebuilt");
+  expect(readdirSync(join(f.home, "runtimes", "backups")).filter(name => name.includes(".scrub"))).toEqual([]);
+  const reopened = openRuntimeStateDb(f.home); cleanup.push(() => reopened.close());
+  expect(reopened.integrity().ok).toBe(true);
+});
+
+test("retained terminal records hold no body, so they do not trigger a scrub: the corrupted pre-restore copy stays byte-identical", async () => {
+  const f = corruptedStore(true, true);
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup });
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(readFileSync(snapshot)).toEqual(f.corrupted); expect(result.warning).toBeUndefined();
+});
+
+test("a corrupted store that holds an owed body and cannot be scrubbed: the raw copy is kept byte-identical and the warning names it", async () => {
+  const f = corruptedStore(true);
+  const result = await repairRuntimeState(f.home, { kind: "restore-backup", backupPath: f.backup });
+  expect(result.applied).toBe(true);
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(readFileSync(snapshot)).toEqual(f.corrupted);
+  expect(result.warning).toContain("undelivered Cowork peer messages"); expect(result.warning).toContain(snapshot);
 });
 
 test("doctor restore-backup says nothing about an unscrubbed copy when the copy was scrubbed", async () => {
