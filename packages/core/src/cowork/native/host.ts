@@ -447,6 +447,8 @@ export class CoworkNativeHost {
         // A gap is never silent. Dropping this frame while a later, smaller one is still held would hand the first subscriber bytes with a hole in the middle, so the
         // overflow ends the incarnation instead: nothing more is held or delivered, what is held is discarded, and the run is stopped as a contract violation.
         end.overflowed = true; end.violations += 1; end.held.length = 0; end.heldBytes = 0;
+        // Closed for good: a subscriber that attaches during the stop that follows must not receive later frames after bytes were dropped.
+        end.close();
         if (run.phase === "running") void this.stop(run.key.workspaceId, "shutdown").catch(() => {}); else run.overflowStop = true;
         return;
       }
@@ -461,6 +463,8 @@ export class CoworkNativeHost {
     return Object.freeze({
       send: (bytes: Uint8Array, last = false) => this.sendRuntime(run, end, bytes, last),
       onData: (handler: (stream: "out" | "err", bytes: Uint8Array, end: boolean) => void) => {
+        // An overflowed or closed stream delivers nothing to anyone, however late they attach.
+        if (end.overflowed || end.closed) return () => {};
         end.handlers.add(handler);
         if (!end.everSubscribed) {
           end.everSubscribed = true;
@@ -474,6 +478,7 @@ export class CoworkNativeHost {
   }
   private async sendRuntime(run: Run, end: RuntimeEnd, bytes: Uint8Array, last: boolean): Promise<void> {
     if (!(bytes instanceof Uint8Array)) throw new CoworkNativeHostError("protocol", "runtime bytes must be a Uint8Array");
+    if (end.overflowed || end.closed) throw new CoworkNativeHostError("closed", "the runtime stream ended");
     if (bytes.length === 0 && !last) return;
     for (let offset = 0; offset < bytes.length || (bytes.length === 0 && offset === 0); offset += RUNTIME_CHUNK_BYTES) {
       const chunk = bytes.subarray(offset, offset + RUNTIME_CHUNK_BYTES), final = last && offset + RUNTIME_CHUNK_BYTES >= bytes.length;
