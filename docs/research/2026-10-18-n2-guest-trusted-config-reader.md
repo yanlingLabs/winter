@@ -32,7 +32,7 @@ Status: source and CI only. No VM, no PID 1 execution, no supervisor run. Guided
 
 ## The image's supervisor is older than 68e57c64
 
-The image ships the supervisor pinned at SDK `7e71929d` (`sdkPin.supervisorSha256`), which accepts only `{artifacts}` under the runtime key and does not know `reader` or `guidanceDirectory`. The shape written here matches 68e57c64, not the supervisor the image runs. That is harmless today (guided is refused at boot) but must be said: before any guided activation the SDK pin has to move to a commit at or after 68e57c64 and the image be rebuilt and re-pinned. That is deliberately NOT done here; it belongs with the image work. Owner decision, recommendation: do it with the real-image build, not in this slice.
+At the time of writing the image shipped the supervisor pinned at SDK `7e71929d` (the pin has since moved to 5183d3a9, whose supervisor accepts the guided shape) (`sdkPin.supervisorSha256`), which accepts only `{artifacts}` under the runtime key and does not know `reader` or `guidanceDirectory`. The shape written here matches 68e57c64, not the supervisor the image runs. That is harmless today (guided is refused at boot) but must be said: before any guided activation the SDK pin has to move to a commit at or after 68e57c64 and the image be rebuilt and re-pinned. That is deliberately NOT done here; it belongs with the image work. Owner decision, recommendation: do it with the real-image build, not in this slice.
 
 ## Drift vector
 

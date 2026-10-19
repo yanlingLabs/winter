@@ -246,6 +246,61 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(out.is_file())
             self.assertEqual(ibr.main(["assert", str(out)]), ibr.EXIT_PINS_STALE)
 
+    def test_pins_hold_needs_exactly_the_three_keys_each_true(self):
+        for key in ibr.PINS_HOLD_KEYS:                                   # every entry, the runtime-sha one included, must be True
+            for bad in (False, None, 1, "true", 0):
+                digests = self.good()
+                digests["image"]["pinsHold"][key] = bad
+                code, details = ibr.classify(digests)
+                self.assertEqual(code, ibr.EXIT_PINS_STALE, (key, bad))
+                self.assertIn(f"pins.json {key} does not hold", details)
+                self.assertIn(f"{key}: DIFFERS", ibr.summary(digests, code, details))
+            missing = self.good()
+            del missing["image"]["pinsHold"][key]
+            self.assertEqual(ibr.classify(missing)[0], ibr.EXIT_PINS_STALE, key)
+        extra = self.good()
+        extra["image"]["pinsHold"]["somethingElse"] = True
+        self.assertEqual(ibr.classify(extra)[0], ibr.EXIT_PINS_STALE)
+        for malformed in ({}, None, [], "all"):
+            digests = self.good()
+            digests["image"]["pinsHold"] = malformed
+            self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_PINS_STALE, malformed)
+            ibr.summary(digests, *ibr.classify(digests))                 # a malformed report is summarised, never a crash
+
+    def test_reproducible_must_be_true_not_merely_truthy(self):
+        for part in ("kernel", "image"):
+            for bad in (False, None, 1, "yes", 0, [True]):
+                digests = self.good()
+                digests[part]["reproducible"] = bad
+                self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_NOT_REPRODUCIBLE, (part, bad))
+            missing = self.good()
+            del missing[part]["reproducible"]
+            self.assertEqual(ibr.classify(missing)[0], ibr.EXIT_NOT_REPRODUCIBLE, part)
+
+    def test_the_image_status_must_be_exactly_two_zero_or_three_ints(self):
+        for bad in ([False, False], [True, 0], [0], [0, 0, 0], None, "00", [0, "0"], [0.0, 0], [1, 1]):
+            digests = self.good()
+            digests["image"]["imageExitStatus"] = bad
+            self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_UNEXPECTED_STATUS, bad)
+
+    def test_a_built_kernel_must_equal_a_pinned_kernel_and_a_null_pin_still_means_new(self):
+        digests = self.good()
+        self.assertIsNone(digests["kernel"]["pinnedBefore"])             # the real kernel/pins.json is unbuilt today
+        self.assertEqual(ibr.classify(digests), (ibr.EXIT_OK, []))
+        digests["kernel"]["pinnedBefore"] = digests["kernel"]["ImageSha256"]
+        self.assertEqual(ibr.classify(digests), (ibr.EXIT_OK, []))
+        self.assertIn("match kernel/pins.json", ibr.summary(digests, ibr.EXIT_OK, []))
+        digests["kernel"]["pinnedBefore"] = "0" * 64
+        code, details = ibr.classify(digests)
+        self.assertEqual(code, ibr.EXIT_PINS_STALE)
+        self.assertIn("kernel/pins.json expectedOutputs.Image does not hold", details)
+        self.assertIn("DIFFER from kernel/pins.json", ibr.summary(digests, code, details))
+        digests["kernel"]["reproducible"] = False                        # a non-reproducible kernel still outranks a stale kernel pin
+        self.assertEqual(ibr.classify(digests)[0], ibr.EXIT_NOT_REPRODUCIBLE)
+
+    def test_report_carries_the_kernel_pin_so_the_classifier_needs_no_file(self):
+        self.assertIn("pinnedBefore", self.build()["kernel"])
+
 
 if __name__ == "__main__":
     unittest.main()

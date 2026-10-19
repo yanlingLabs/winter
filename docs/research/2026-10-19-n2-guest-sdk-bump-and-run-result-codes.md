@@ -1,10 +1,10 @@
-# N2 guest: the agent-SDK pin moves to 9c980c32, and the one run says WHY it is red
+# N2 guest: the agent-SDK pin moves to 5183d3a9, and the one run says WHY it is red
 
 Source and tests only. Nothing was built or run; the one-run image build (`cowork-guest-image-build.yml`) is still unarmed.
 
-## 1. The pin: 7e71929d to 9c980c32
+## 1. The pin: 7e71929d to 5183d3a9 (through 9c980c32)
 
-`9c980c326638489e0183d7fcddcf1a93553be0ba` is agent-sdk main after #38 (the #37 holder patch applied; holder owner-matrix run 2 passed on a real kernel). The supervisor is the one from #35: `a26dacd86b805ca47b3e4805d06af2b178eee82003ebe6c38f2aeeb85e48035d`.
+`5183d3a96b2780ab3672fa11a24dd02a80ae8968` is agent-sdk main after #39 (the supervisor host-query map: plan stays plan, every other policy runs as default, bypass is never produced; the validator is narrowed to default/plan with the fixed pair). It follows #35 (the supervisor that accepts the guided runtime block, sha a26dacd8) and #38 (the #37 holder patch). The supervisor is now `f1e124fe21dac2d3a7c94a4e7923ac2ff92e9afd9600a0dd24d7f01c8fa9e8ab`; the first bump of this PR went to 9c980c32 and the re-bump to 5183d3a9 was the same command.
 
 `bump_sdk_commit.py NEW --supervisor-sha256 SHA --sdk CHECKOUT` now moves every constant derived from the SDK commit, all or nothing:
 
@@ -22,11 +22,11 @@ The supervisor digest the reviewer passes must equal what the script reads from 
 
 ### Tests that assumed the old supervisor beyond the pin
 
-* `test_image.py`: the supervisor-shape assertion now quotes the new `runtime_artifacts` line (`{'artifacts','reader'}` for the guided profile, `{'artifacts'}` otherwise); the hard-coded commit is gone (the fixture's commit is the single source). Both checkout-gated tests pass against 9c980c32.
-* `sdk-guided-config.json` (PID 1 against the supervisor's reader and guidance checks) was derived at 68e57c64; the supervisor is byte-identical, so the drift test passes against the new checkout unchanged.
+* `test_image.py`: the supervisor-shape assertion now quotes the new `runtime_artifacts` line (`{'artifacts','reader'}` for the guided profile, `{'artifacts'}` otherwise); the hard-coded commit is gone (the fixture's commit is the single source). Both checkout-gated tests pass against 5183d3a9 (and did against 9c980c32).
+* `sdk-guided-config.json` (PID 1 against the supervisor's reader and guidance checks) was derived at 68e57c64; the reader and guidance checks in the supervisor are unchanged by #39, so the drift test passes against the new checkout unchanged. Moving the vector to a later commit is optional.
 * The guided-off chain is unchanged: the image's profile gate still refuses profile 2, the image still has no guided source, and the Cowork door still refuses. The new supervisor does accept the guided shape, so the profile gate and the missing reader launcher are now the load-bearing parts.
 
-**A further supervisor change is expected** (agent-sdk #39: plan stays plan and every other policy becomes default; the supervisor digest moves again). When it merges, the re-bump is the same command with the new head and digest; then rerun `test_image.py` and `test_guided_config.py` with `WINTER_SDK_CHECKOUT` at the new head. Only the two supervisor-text assertions in `test_image.py` could need an edit, and only if #39 touches those lines.
+**agent-sdk #39 is in this pin.** The image carries the supervisor host-query map (plan to plan, everything else to default, bypass never produced). A later agent-sdk change (the interrupt scope and root `source` checks in the guest validator) may move the runtime digest; if it does, the re-bump is the same command with the new head and digest, then rerun `test_image.py` and `test_guided_config.py` with `WINTER_SDK_CHECKOUT` at the new head.
 
 ## 2. The final check of the run now has distinct exit codes
 
@@ -41,6 +41,8 @@ The supervisor digest the reviewer passes must equal what the script reads from 
 
 Most severe wins (20 over 30 over 10). The step also appends a Markdown summary to `$GITHUB_STEP_SUMMARY` (the label, its meaning, the kernel `Image`, `vmlinux`, `initramfs.cpio`, manifest, runtime and `runtimeImageDigest`, and which pins hold), so a pins-only red reads as expected at a glance. The workflow needed no change: the step already runs the tool and the summary variable is a default step variable. Artifacts and `digests.json` are still uploaded before this step, whatever it returns.
 
+The classifier is defensive: green needs `reproducible is True` for both artifacts, an image status of exactly two ints, both 0 (3 is stale, anything else is code 30), `pinsHold` with exactly the three expected keys (`cpioSha256`, `rootManifestSha256`, `runtimeSha256`) each `is True` (a missing, extra or truthy-but-not-True entry is stale, never green), and, when `kernel/pins.json` `expectedOutputs.Image` is non-null, the built kernel `Image` equal to it (a null pin still means "new"). 28 tests; 16 mutants over `classify` and the summary, all killed.
+
 ## 3. Docs owed
 
-`docs/claude/cowork.md` and the ledgers: the image pin is agent-sdk 9c980c32 (to be re-bumped after #39); the run's result codes (0 / 10 / 20 / 30) and that a first run after an SDK bump is expected to be 10.
+`docs/claude/cowork.md` and the ledgers: the image pin is agent-sdk 5183d3a9 (post-#39); the run's result codes (0 / 10 / 20 / 30) and that a first run after an SDK bump is expected to be 10.

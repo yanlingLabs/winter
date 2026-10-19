@@ -78,16 +78,31 @@ MEANINGS = {
 }
 
 
+PINS_HOLD_KEYS = ("cpioSha256", "rootManifestSha256", "runtimeSha256")
+
+
 def classify(digests):
-    """(exit code, details). Most severe first: a non-reproducible build outranks everything, then an unexpected image.py status, then stale pins."""
+    """(exit code, details). Most severe first: a non-reproducible build outranks everything, then an unexpected image.py status, then stale pins.
+    Defensive on purpose: OK needs `reproducible is True` for both artifacts, an image status that is exactly two ints from {0, 3} that are both 0, `pinsHold` with EXACTLY the three
+    expected keys each `is True` (a missing key, an extra key or a non-True value is never green), and, when kernel/pins.json pins the kernel Image (non-null), the built Image equal to it.
+    A null kernel pin still means 'new', as before."""
     kernel, image_ = digests["kernel"], digests["image"]
-    if not kernel["reproducible"] or not image_["reproducible"]:
-        return EXIT_NOT_REPRODUCIBLE, [m for m in problems(digests) if "differ" in m and "build" in m]
-    if any(status not in (0, 3) for status in image_["imageExitStatus"]):
-        return EXIT_UNEXPECTED_STATUS, [f"image.py exited {image_['imageExitStatus']}"]
-    stale = [f"pins.json {name} does not hold" for name, held in image_["pinsHold"].items() if not held]
-    if stale or image_["imageExitStatus"] != [0, 0]:
-        return EXIT_PINS_STALE, stale or [f"image.py exited {image_['imageExitStatus']}"]
+    if kernel.get("reproducible") is not True or image_.get("reproducible") is not True:
+        return EXIT_NOT_REPRODUCIBLE, [f"the two {name} builds differ" for name, part in (("kernel", kernel), ("image", image_)) if part.get("reproducible") is not True]
+    status = image_.get("imageExitStatus")
+    if not (isinstance(status, list) and len(status) == 2 and all(type(s) is int and s in (0, 3) for s in status)):
+        return EXIT_UNEXPECTED_STATUS, [f"image.py exited {status}"]
+    stale = []
+    hold = image_.get("pinsHold")
+    if not isinstance(hold, dict) or set(hold) != set(PINS_HOLD_KEYS):
+        stale.append(f"pinsHold has keys {sorted(hold) if isinstance(hold, dict) else hold!r}, expected {sorted(PINS_HOLD_KEYS)}")
+    else:
+        stale += [f"pins.json {name} does not hold" for name in PINS_HOLD_KEYS if hold[name] is not True]
+    pinned = kernel.get("pinnedBefore")
+    if pinned is not None and pinned != kernel.get("ImageSha256"):
+        stale.append("kernel/pins.json expectedOutputs.Image does not hold")
+    if stale or status != [0, 0]:
+        return EXIT_PINS_STALE, stale or [f"image.py exited {status}"]
     return EXIT_OK, []
 
 
@@ -99,8 +114,12 @@ def summary(digests, code, details):
               f"| kernel `Image` | `{kernel['ImageSha256']}` | {kernel['reproducible']} |", f"| kernel `vmlinux` | `{kernel['vmlinuxSha256']}` | {kernel['reproducible']} |",
               f"| `initramfs.cpio` | `{image_['cpioSha256']}` | {image_['reproducible']} |", f"| root manifest | `{image_['rootManifestSha256']}` | {image_['reproducible']} |",
               f"| host-query runtime | `{image_['runtimeSha256']}` | {image_['reproducible']} |", f"| **runtimeImageDigest** | `{digests['runtimeImageDigest']}` | |", ""]
-    held = ", ".join(f"{name}: {'holds' if ok else 'DIFFERS'}" for name, ok in image_["pinsHold"].items())
-    lines += [f"pins.json: {held}", "", f"The kernel digests are new (kernel/pins.json expectedOutputs was {'unpinned' if kernel.get('pinnedBefore') is None else 'pinned'}). Nothing here has booted: gate G1 is the first boot.", ""]
+    hold = image_.get("pinsHold")
+    held = ", ".join(f"{name}: {'holds' if ok is True else 'DIFFERS'}" for name, ok in hold.items()) if isinstance(hold, dict) else "malformed"
+    pinned = kernel.get("pinnedBefore")
+    kernel_note = ("are new (kernel/pins.json expectedOutputs was unpinned)" if pinned is None
+                   else "match kernel/pins.json expectedOutputs.Image" if pinned == kernel["ImageSha256"] else "DIFFER from kernel/pins.json expectedOutputs.Image")
+    lines += [f"pins.json: {held}", "", f"The kernel digests {kernel_note}. Nothing here has booted: gate G1 is the first boot.", ""]
     return "\n".join(lines)
 
 

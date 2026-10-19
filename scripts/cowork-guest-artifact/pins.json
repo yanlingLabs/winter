@@ -87,13 +87,19 @@
       27,
       28,
       29,
-      30
+      30,
+      35,
+      38,
+      39
     ],
     "contains": [
-      "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])"
+      "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])",
+      "the supervisor that accepts the guided runtime block and the reader (agent-sdk #35; supervisor sha a26dacd8 until #39)",
+      "the #37 holder patch applied as agent-sdk #38 (linux-session-owner.c changed)",
+      "the supervisor host-query policy map and the validator narrowed to default/plan with the fixed pair (agent-sdk #39; plan stays plan, every other policy runs as default, bypass is never produced; supervisor sha f1e124fe)"
     ],
     "supervisorSha256": "f1e124fe21dac2d3a7c94a4e7923ac2ff92e9afd9600a0dd24d7f01c8fa9e8ab",
-    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) are source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests. The pin then moved to 9c980c32 (agent-sdk main after #35 and the #37 holder patch applied as #38): the supervisor is the one from #35, linux-session-owner.c and linux-tool-compartment.c changed, and expectedArtifact is STALE until the one-run build's digests are re-pinned."
+    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) are source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests. The pin then moved to 9c980c32 (agent-sdk main after #35 and the #37 holder patch applied as #38), and now to 5183d3a9 (agent-sdk main after #39): the supervisor is the post-#39 one (f1e124fe: plan stays plan, every other policy runs as default, the validator accepts only default/plan with the fixed pair), linux-session-owner.c and linux-tool-compartment.c changed since 7e71929d, and expectedArtifact is STALE until the one-run build's digests are re-pinned."
   },
   "guest": {
     "target": "aarch64-linux-musl",
