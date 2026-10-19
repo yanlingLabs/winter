@@ -333,6 +333,26 @@ jobs:
         working-directory: apple/ComputerUse/WinterBrowserHost
         run: swift test
 
+  # The Cowork launcher (apple/Cowork/WinterCoworkLauncher) is its own Swift package and the `swift` job above never built it, so its tests ran only on a developer's machine.
+  # Tests only, both configurations: the normal build, and the one with the compile-time test condition (it adds the tests that need the cdhash-pinned parent, which spawn the
+  # package's own just-built launcher and FakeWorker as children of the test host: plain non-hypervisor processes, no VM, no libkrun, no sandbox call). Everything that signs
+  # signs ad-hoc (`codesign --sign -`) in a temp directory; nothing touches a Keychain or `~/.winter*`. No bun, no workspace install: the package imports nothing but the system.
+  swift-cowork-launcher:
+    name: swift (WinterCoworkLauncher)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: WinterCoworkLauncher — swift test
+        working-directory: apple/Cowork/WinterCoworkLauncher
+        run: swift test --scratch-path "$RUNNER_TEMP/launcher-build"
+
+      - name: WinterCoworkLauncher — swift test (WINTER_COWORK_TEST_BUILD)
+        working-directory: apple/Cowork/WinterCoworkLauncher
+        run: swift test --scratch-path "$RUNNER_TEMP/launcher-build-test" -Xswiftc -DWINTER_COWORK_TEST_BUILD
+
   # Winter Phase 8d (P8d-5): the compiled-binary proofs, on the macOS runner, after the pinned
   # `winter` artifact is available — `verify:runtimes` needs it (via stageRuntimes' `winterPath`
   # rung) exactly as `test-core`/`test-cli` do, and `verify:workflow`/`verify:runtime-state` are
