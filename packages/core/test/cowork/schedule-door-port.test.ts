@@ -168,3 +168,15 @@ test("a hung door is bounded: uncertain at the injected timeout, the slot is rel
   const fast = fakeDoor(), f = fixture(fast.door, "project", 60_000); expect((await f.schedules.beginDispatch(f.row.occurrenceId, f.claim())).status).toBe("started");
   for (const bad of [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31]) expect(() => createCoworkScheduleDoorPort({ door: fast.door, scope: "s", caller: { role: "harness", connectionId: 1 }, timeoutMs: bad })).toThrow("invalid_request");
 });
+
+test("the bound's timer is always cleared: no pending handle after a fast success, a definite refusal or an uncertain failure", async () => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout, DELAY = 54_321, made: unknown[] = [], cleared = new Set<unknown>();
+  globalThis.setTimeout = ((handler: unknown, delay?: number, ...rest: unknown[]) => { const handle = (realSet as (...a: unknown[]) => unknown)(handler, delay, ...rest); if (delay === DELAY) made.push(handle); return handle; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((handle?: unknown) => { cleared.add(handle); return (realClear as (h?: unknown) => void)(handle); }) as unknown as typeof clearTimeout;
+  try {
+    for (const behavior of [{}, failing("ensure", new CoworkError("conversation_limit")), failing("send", new Error("boom"))] as Behavior[]) {
+      const d = fakeDoor(behavior), f = fixture(d.door, "project", DELAY); await f.schedules.beginDispatch(f.row.occurrenceId, f.claim());
+    }
+  } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
+  expect(made).toHaveLength(3); expect(made.filter(handle => !cleared.has(handle))).toEqual([]);
+});
