@@ -151,6 +151,14 @@ final class IslandQuietTabsTests: XCTestCase {
         XCTAssertFalse(IslandShelfTab.showsSelectionLine(selected: false, missing: false))
     }
 
+    func testAFileSaysItsNameInOneQuietLineAndTheWholeOfItWithItsActionsUnderThePointer() {
+        XCTAssertEqual(IslandShelfTab.nameLines(hovered: false), 1, "at rest: the thumbnail's caption")
+        XCTAssertEqual(IslandShelfTab.nameLines(hovered: true), 2, "under the pointer: the whole name")
+        XCTAssertFalse(IslandShelfTab.showsActions(hovered: false, missing: false), "quiet at rest")
+        XCTAssertTrue(IslandShelfTab.showsActions(hovered: true, missing: false))
+        XCTAssertTrue(IslandShelfTab.showsActions(hovered: false, missing: true), "a missing file always offers its remove")
+    }
+
     // MARK: The cost block
 
     private func modelRow(_ model: String, _ source: UsageSource, cost: Double, tokens: Double = 1_000, basis: String = "list") -> UsageModelRow {

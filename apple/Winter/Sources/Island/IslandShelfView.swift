@@ -1,11 +1,13 @@
 import AppKit
 import SwiftUI
 
-// The Winter island's Shelf tab (`docs/claude/island.md`): the files dropped on the island, as tiles with a QuickLook
-// thumbnail (the workspace icon until one arrives). Drag a tile out — to a session's composer or any app — as a file
-// URL; double-click opens it with its default app; ✕ (or the menu) takes it off the shelf without touching the file;
-// the copy button, the menu or ⌘C (a click on a tile lets the island take the keyboard for it) put its file URL on the
-// pasteboard. A file that is gone shows as missing, with its remove action.
+// The Winter island's Shelf tab (`docs/claude/island.md`): the files dropped on the island, as thumbnails floating on the
+// island's black (a QuickLook thumbnail; the workspace icon until one arrives) — no tile behind them. Each says its name
+// in one quiet line; under the pointer the thumbnail lifts, the whole name shows, white, and copy and remove appear.
+// Drag a file out — to a session's composer or any app — as a file URL; double-click opens it with its default app; ✕
+// (or the menu) takes it off the shelf without touching the file; the copy button, the menu or ⌘C (a click on a file
+// lets the island take the keyboard for it) put its file URL on the pasteboard. A file that is gone says "Missing", with
+// its remove action.
 
 struct IslandShelfTab: View {
     @ObservedObject var shelf: IslandShelfStore
@@ -13,13 +15,23 @@ struct IslandShelfTab: View {
     /// The offscreen gallery draws flat (no scroll view).
     var scrolls = true
 
-    static let columns = 4
+    static let columns = 5
+
+    /// A file's thumbnail, its side.
+    static let thumbnail: CGFloat = 48
 
     /// The selected file's mark: a short line under its name.
     static let selectionLine = CGSize(width: 22, height: 3)
 
-    /// PURE: whether a tile shows the selection's line — selected and present (a missing file says "Missing" there).
+    /// PURE: whether a file shows the selection's line — selected and present (a missing file says "Missing" there).
     static func showsSelectionLine(selected: Bool, missing: Bool) -> Bool { selected && !missing }
+
+    /// PURE: how many lines a file's name takes — one at rest (it is the thumbnail's caption), the whole of it (two)
+    /// under the pointer.
+    static func nameLines(hovered: Bool) -> Int { hovered ? 2 : 1 }
+
+    /// PURE: whether a file's copy and remove show — under the pointer; a missing file always offers its remove.
+    static func showsActions(hovered: Bool, missing: Bool) -> Bool { hovered || missing }
 
     var body: some View {
         if shelf.items.isEmpty {
@@ -42,9 +54,9 @@ struct IslandShelfTab: View {
 
     private var grid: some View {
         let items = shelf.items
-        return VStack(spacing: IslandLayout.rowGap) {
+        return VStack(spacing: 4) {
             ForEach(Array(stride(from: 0, to: items.count, by: Self.columns)), id: \.self) { start in
-                HStack(spacing: IslandLayout.rowGap) {
+                HStack(alignment: .top, spacing: 4) {
                     ForEach(start..<min(start + Self.columns, items.count), id: \.self) { i in
                         IslandShelfTile(item: items[i], shelf: shelf, thumbnails: thumbnails)
                     }
@@ -55,6 +67,7 @@ struct IslandShelfTab: View {
             }
         }
         .padding(.horizontal, IslandQuietRow.inset - 6)
+        .padding(.top, 2)
         .padding(.bottom, 14)
         .overlay(dropOutline.padding(.horizontal, 8).padding(.bottom, 8).opacity(shelf.dropTargeted ? 1 : 0))
     }
@@ -68,35 +81,47 @@ struct IslandShelfTile: View {
     var body: some View {
         let url = shelf.url(of: item.id)
         let selected = shelf.selectedId == item.id
-        // Quiet (the island's visual language): no card behind a file — its thumbnail and name. Under the pointer the
-        // thumbnail lifts from its bottom edge, the name brightens and the copy and remove buttons appear; the selected
-        // file (what ⌘C copies) is marked by a short white line under its name.
+        // No tile behind a file — its thumbnail floats. Under the pointer the thumbnail lifts from its bottom edge, the
+        // name shows whole and white, and copy and remove appear; the selected file (what ⌘C copies) is marked by a short
+        // white line under its name.
         HoverLiftReader(id: "shelf:\(item.id)") { hovered in
-            VStack(spacing: 6) {
+            VStack(spacing: 5) {
                 ZStack {
                     if let url {
                         Image(nsImage: thumbnails.image(for: url))
                             .resizable()
                             .aspectRatio(contentMode: .fit)
-                            .frame(width: 52, height: 52)
+                            .frame(width: IslandShelfTab.thumbnail, height: IslandShelfTab.thumbnail)
                             .onAppear { thumbnails.request(url) }
                     } else {
                         Image(systemName: "questionmark.folder")
                             .font(Typography.heading(.light))
                             .foregroundStyle(Theme.textMuted)
-                            .frame(width: 52, height: 52)
+                            .frame(width: IslandShelfTab.thumbnail, height: IslandShelfTab.thumbnail)
                     }
                 }
                 .hoverLiftLabel(hovered, anchor: .bottom)
+                .overlay(alignment: .topTrailing) {
+                    if IslandShelfTab.showsActions(hovered: hovered, missing: url == nil) {
+                        HStack(spacing: 4) {
+                            if url != nil {
+                                IslandShelfMiniButton(symbol: "doc.on.doc", label: "Copy \(item.name)") { shelf.copy(item.id) }
+                            }
+                            IslandShelfMiniButton(symbol: "xmark", label: "Remove \(item.name) from the shelf") { shelf.remove(item.id) }
+                        }
+                        .offset(x: 14, y: -6)
+                        .transition(.opacity)
+                    }
+                }
                 Text(item.name)
-                    .font(Typography.caption(.medium))
-                    .foregroundStyle(url == nil ? Theme.textMuted : Color.white.opacity(hovered || selected ? 1 : 0.75))
-                    .lineLimit(2)
+                    .font(Typography.tiny(.medium))
+                    .foregroundStyle(url == nil ? Theme.textMuted : (hovered ? Color.white : (selected ? Color.white.opacity(0.85) : Theme.textMuted)))
+                    .lineLimit(IslandShelfTab.nameLines(hovered: hovered))
                     .truncationMode(.middle)
                     .multilineTextAlignment(.center)
-                    .frame(height: 28, alignment: .top)
-                // The same height for every tile: the mark's slot is there whether shown or not — "Missing" for a file
-                // that is gone, else the selection's line.
+                    .fixedSize(horizontal: false, vertical: true)
+                // The mark's slot is there whether shown or not — "Missing" for a file that is gone, else the selection's
+                // line.
                 ZStack {
                     Capsule().fill(Color.white.opacity(0.75))
                         .frame(width: IslandShelfTab.selectionLine.width, height: IslandShelfTab.selectionLine.height)
@@ -108,23 +133,12 @@ struct IslandShelfTile: View {
                 }
                 .frame(height: 12)
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 6)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+            .padding(.horizontal, 4)
             .frame(maxWidth: .infinity)
-            .overlay(alignment: .topTrailing) {
-                if hovered || url == nil {
-                    HStack(spacing: 4) {
-                        if url != nil {
-                            IslandShelfMiniButton(symbol: "doc.on.doc", label: "Copy \(item.name)") { shelf.copy(item.id) }
-                        }
-                        IslandShelfMiniButton(symbol: "xmark", label: "Remove \(item.name) from the shelf") { shelf.remove(item.id) }
-                    }
-                    .padding(5)
-                    .transition(.opacity)
-                }
-            }
         }
-        .contentShape(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous))
+        .contentShape(Rectangle())
         .gesture(TapGesture(count: 2).onEnded { shelf.open(item.id) }
             .exclusively(before: TapGesture().onEnded { shelf.select(item.id) }))
         .onDrag {
@@ -148,7 +162,7 @@ struct IslandShelfTile: View {
     }
 }
 
-/// A tile's small round action (copy, remove).
+/// A file's small round action (copy, remove).
 struct IslandShelfMiniButton: View {
     let symbol: String
     let label: String
