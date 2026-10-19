@@ -11,6 +11,7 @@ import type { CoworkVolumeFilesystemAuthority, VolumeFilesystemPlan, VolumeFiles
 import type { CoworkVolumeBackup } from "../../src/cowork/volume-backup";
 import { CoworkImagePins } from "../../src/cowork/images";
 import { CoworkExports } from "../../src/cowork/exports";
+import { SqliteExportContentBinding } from "../../src/cowork/export-binding";
 import { CoworkWorkspaceExporter, type CoworkExportContentBinding, type CoworkExportImageDoor, type CoworkExportWriterPorts } from "../../src/cowork/export-writer";
 import { createCoworkWorkspaceRestorer, type CoworkRestoreApproval, type CoworkRestoreConfirmation, type CoworkRestoreIdentityPort, type CoworkRestorePorts } from "../../src/cowork/restore-bundle";
 import { CoworkLifecycleError, type CoworkLifecycleAuthority, type LifecycleFailure } from "../../src/cowork/storage-lifecycle";
@@ -131,9 +132,16 @@ export async function fixture(options: { ready?: boolean; pin?: boolean; backupF
   const checkpoints: Array<(phase: string) => void | Promise<void>> = [];
   const checkpoint = async (phase: string) => { for (const fn of checkpoints) await fn(phase); };
   const syncCheckpoint = (phase: string) => { for (const fn of checkpoints) fn(phase); };
-  // Test-side stand-in for the two `cowork_exports` columns (`content_digest`, `output_map_json`) DOOR still has to add.
-  const bound = new Map<string, { contentDigest: string; outputIds: Record<string, string> }>();
-  const binding: CoworkExportContentBinding = { record: (id, value) => { bound.set(id, { contentDigest: value.contentDigest, outputIds: { ...value.outputIds } }); }, read: id => bound.get(id) ?? null };
+  // The real binding over migration 20's tables. `bound` lets a test read or tamper with what the database holds.
+  const binding: CoworkExportContentBinding = new SqliteExportContentBinding(db);
+  const bound = {
+    get: (id: string) => binding.read(id),
+    set: (id: string, value: { contentDigest: string; outputIds: Record<string, string> }) => {
+      db.db.run("DELETE FROM cowork_export_output_ids WHERE export_id=?", [id]); db.db.run("UPDATE cowork_exports SET content_digest=? WHERE export_id=?", [value.contentDigest, id]);
+      for (const [opaque, session] of Object.entries(value.outputIds)) db.db.run("INSERT INTO cowork_export_output_ids VALUES(?,?,?)", [id, opaque, session]);
+    },
+    clear: () => { db.db.run("DELETE FROM cowork_export_output_ids"); db.db.run("UPDATE cowork_exports SET content_digest=NULL"); },
+  };
   const writerPorts: CoworkExportWriterPorts = { exports: exportsRecords, rs: db, home, images: door, binding, checkpoint };
   const confirmations: CoworkRestoreConfirmation[] = [];
   let answer: boolean | (() => boolean | Promise<boolean>) = true;

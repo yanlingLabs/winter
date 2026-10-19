@@ -1,20 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import { SqliteExportContentBinding } from "../../src/cowork/export-binding";
 import { CoworkLifecycleError } from "../../src/cowork/storage-lifecycle";
-import { PROOF, fixture, runCleanup, type Fixture } from "./export-fixture";
+import { RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
+import { COWORK_TABLES } from "../../src/cowork/schema";
+import { PROOF, fixture, runCleanup } from "./export-fixture";
 
 afterEach(runCleanup);
-// DOOR's migration 20, copied from the header of export-binding.ts: this file exercises the class against that exact DDL.
-const DDL = [
-  "ALTER TABLE cowork_exports ADD COLUMN content_digest TEXT CHECK (content_digest IS NULL OR (length(content_digest) = 64 AND content_digest NOT GLOB '*[^0-9a-f]*'))",
-  `CREATE TABLE cowork_export_output_ids (
-     export_id TEXT NOT NULL REFERENCES cowork_exports(export_id),
-     opaque_id TEXT NOT NULL CHECK (length(opaque_id) = 17 AND opaque_id GLOB 's*' AND substr(opaque_id, 2) NOT GLOB '*[^0-9a-f]*'),
-     session_id TEXT NOT NULL,
-     PRIMARY KEY (export_id, opaque_id), UNIQUE (export_id, session_id))`,
-];
+// The real tables: migration 20 (cowork/schema.ts, DOOR's #114), not a copy of its DDL.
 async function prepared() {
-  const f = await fixture(); for (const sql of DDL) f.db.db.run(sql);
+  const f = await fixture();
   const p = f.exportsRecords.prepare(f.workspaceId, PROOF);
   return { f, exportId: p.exportId, binding: new SqliteExportContentBinding(f.db) };
 }
@@ -46,4 +40,17 @@ test("the map is written with the digest or not at all", async () => {
   f.db.db.run("INSERT INTO cowork_export_output_ids VALUES(?,?,?)", [exportId, O1, "taken"]); // a stray row makes the second insert collide
   expect(() => binding.record(exportId, { contentDigest: D, outputIds: { [O1]: "session-one" } })).toThrow(); // the PRIMARY KEY collision rolls the UPDATE back
   expect(f.db.db.query<{ content_digest: string | null }, [string]>("SELECT content_digest FROM cowork_exports WHERE export_id=?").get(exportId)!.content_digest).toBeNull();
+});
+
+test("the tables are the ones migration 20 creates, and the database refuses what the class would never write", async () => {
+  const { f, exportId, binding } = await prepared();
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBeGreaterThanOrEqual(20);
+  expect(COWORK_TABLES).toContain("cowork_export_output_ids");
+  expect(f.db.db.query<{ name: string }, []>("PRAGMA table_info(cowork_exports)").all().map(column => column.name)).toContain("content_digest");
+  // The CHECKs and keys are the database's own, independent of the class's validation.
+  expect(() => f.db.db.run("UPDATE cowork_exports SET content_digest=? WHERE export_id=?", ["A".repeat(64), exportId])).toThrow();
+  expect(() => f.db.db.run("INSERT INTO cowork_export_output_ids VALUES(?,?,?)", [exportId, "s1", "x"])).toThrow();
+  expect(() => f.db.db.run("INSERT INTO cowork_export_output_ids VALUES(?,?,?)", ["export_unknown", O1, "x"])).toThrow();
+  binding.record(exportId, { contentDigest: D, outputIds: { [O1]: "session-one" } });
+  expect(() => f.db.db.run("INSERT INTO cowork_export_output_ids VALUES(?,?,?)", [exportId, O2, "session-one"])).toThrow(); // UNIQUE(export_id, session_id)
 });

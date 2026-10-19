@@ -356,7 +356,7 @@ test("a restore is not an un-archive and not an import: an archived workspace re
   await f.restorer().restore(restoreInput(exported.path));
   expect(f.repo.get(f.workspaceId).state).toBe("archived"); // restore leaves the lifecycle state alone
   const g = await fixture(); const ex = await g.exportOnce("b");
-  g.db.db.run("DELETE FROM cowork_exports WHERE workspace_id=?", [g.workspaceId]);
+  g.db.db.run("DELETE FROM cowork_export_output_ids"); g.db.db.run("DELETE FROM cowork_exports WHERE workspace_id=?", [g.workspaceId]);
   await failsWith(g.restorer().restore(restoreInput(ex.path)), "generation_unknown");
 });
 
