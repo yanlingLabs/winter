@@ -55,7 +55,8 @@ function fixture(toolClasses = ["read", "write", "execute"], defaultPolicy: Appr
   records.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: 1 }, created.workspaceId, { sessionId: "conversation", sourceId: source.sourceId, relativeCwd: "repo/subdir" }, authorityFixtureSessions("conversation"));
   let revoked = false, model = "winter-test/echo", resume = false;
   const authority = new CoworkAuthority(records, { folder: () => ({ rootIdentity: "root", writable: true, revoked }), repository: () => undefined });
-  const deps = { records, authority, identity: () => ({ backendSessionId: "backend-stable", model, resume }), bootId: () => "12345678-1234-1234-1234-123456789abc" };
+  // The native environment declares guest-compartment from the verified image pin (session door D2); without it no tool is offered.
+  const deps = { records, authority, identity: () => ({ backendSessionId: "backend-stable", model, resume }), bootId: () => "12345678-1234-1234-1234-123456789abc", readiness: ["guest-compartment"] as const };
   const wires: ReturnType<typeof scriptedChannel>[] = [];
   const supervisor = new CoworkGuestRuntimeSupervisor({ ...deps, runtimeCapability: SCRIPTED_CHANNEL_CAPABILITY, port: { open(launch) { const wire = scriptedChannel(launch); wires.push(wire); return wire.port; } } });
   const controller = new AbortController();
@@ -96,6 +97,19 @@ test("guest query options derive only from canonical launch; no host config or p
   expect(() => buildCoworkGuestQueryOptions(f.supervisor, "conversation", { ...f.callbacks, env: { HOME: f.home } } as CoworkGuestQueryCallbacks)).toThrow("invalid_request");
   expect(() => buildCoworkGuestQueryOptions(f.supervisor, "conversation", { ...f.callbacks, canUseTool: undefined } as unknown as CoworkGuestQueryCallbacks)).toThrow("invalid_request");
   expect(JSON.stringify(options)).not.toContain(f.home);
+});
+
+test("session door D2: without a declared guest-compartment the launch and the query offer no tool, and no MCP server (fail closed)", () => {
+  for (const readiness of [undefined, [], ["linux-workflow", "guest-tool-families"] as const]) {
+    const f = fixture(), wires: ReturnType<typeof scriptedChannel>[] = [];
+    const supervisor = new CoworkGuestRuntimeSupervisor({ ...f.deps, readiness, runtimeCapability: SCRIPTED_CHANNEL_CAPABILITY, port: { open(launch) { const wire = scriptedChannel(launch); wires.push(wire); return wire.port; } } });
+    cleanup.push(() => { supervisor.stop(); for (const wire of wires) { wire.finish(); wire.release(); } });
+    const options = buildCoworkGuestQueryOptions(supervisor, "conversation", f.callbacks);
+    expect([readiness, options.tools]).toEqual([readiness, []]);
+    expect(options.mcpServers).toEqual({}); expect(options.strictMcpConfig).toBe(true); expect(options.allowedTools).toEqual([]);
+    options.spawnClaudeCodeProcess!({ command: "ignored", args: [], cwd: f.home, env: {} });
+    expect(wires[0]!.launch.runtime.tools).toEqual([]);
+  }
 });
 
 test("read-only ceiling reaches the canonical port descriptor and query as exact Read visibility with no pre-approval", () => {
