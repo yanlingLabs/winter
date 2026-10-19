@@ -1,12 +1,14 @@
 // N2 S2: the pure half of the Cowork native pair's build, signing and checks — the launcher (`winter-cowork-launcher`, Swift,
 // apple/Cowork/WinterCoworkLauncher) and the VM worker (`winter-cowork-worker`, C, S3). Shared by
-// `scripts/embed-cowork-native.sh`'s test today and by the dev script and the `verify:` gate S7 adds. Unit-tested in
-// `embed-cowork-native.test.ts`. SOURCE ONLY and UNWIRED: nothing in the daemon, project.yml or release.ts uses it yet.
+// `scripts/embed-cowork-native.sh` (the Embed phase of project.yml), the release gate in `release.ts`, `dev:cowork-native` and `verify:cowork-native`.
+// Unit-tested in `embed-cowork-native.test.ts`. The feature is OFF in the daemon: shipping the pair activates nothing.
 //
 // Both binaries are nested tools the daemon spawns itself (never through LaunchServices), signed with the app's identity, the
 // hardened runtime and a STATED designated requirement. The launcher carries NO entitlements. The worker carries exactly
 // `com.apple.security.hypervisor` and nothing else (no allow-jit, no disable-library-validation, no debugger entitlement, no
 // networking entitlement: there is no NIC).
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { signedFacts } from "./dev-daemon-lib";
 
@@ -119,4 +121,112 @@ export function checkSignedNative(role: CoworkNativeRole, teamId: string | undef
     if (Buffer.from(facts.executable).includes(marker)) failures.push(`${want.name}: contains test hooks (${marker}…) — they compile only under ${COWORK_TEST_BUILD_CONDITION}`);
   }
   return failures;
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The bundle gate: what a Winter.app must hold for the pair, checked by release.ts and verify:cowork-native on the SAME function.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/** The manifest `embed-cowork-native.sh` writes after signing. Nothing in the daemon reads it. */
+export const COWORK_NATIVE_MANIFEST_RELATIVE = join("Contents", "Resources", "cowork-native-pins.json");
+export const COWORK_WORKER_PINS_FILE = join("apple", "Cowork", "WinterCoworkHVFWorker", "pins.json");
+export const COWORK_GUEST_ARTIFACT_PINS_FILE = join("scripts", "cowork-guest-artifact", "pins.json");
+
+export interface CoworkNativePins {
+  /** The libkrun archive and header the worker is linked and compiled against (the worker pins file's `libkrun` block). */
+  libkrunArchiveSha256: string;
+  libkrunHeaderSha256: string;
+  /** The whole worker pins file and the whole guest artifact pins file: any edit to either is a different set of pins. */
+  workerPinsSha256: string;
+  guestArtifactPinsSha256: string;
+}
+export interface CoworkNativeManifest {
+  formatVersion: 1;
+  launcher: { identifier: string; cdhash: string };
+  worker: { identifier: string; cdhash: string };
+  pins: CoworkNativePins;
+}
+
+export const sha256Hex = (bytes: Uint8Array | string): string => createHash("sha256").update(bytes).digest("hex");
+
+/** The pins as the repository states them right now. */
+export function readCoworkRepoPins(repo: string): CoworkNativePins {
+  const workerBytes = readFileSync(join(repo, COWORK_WORKER_PINS_FILE));
+  const libkrun = (JSON.parse(workerBytes.toString("utf8")) as { libkrun?: { archiveSha256?: unknown; headerSha256?: unknown } }).libkrun;
+  const archive = libkrun?.archiveSha256, header = libkrun?.headerSha256;
+  if (typeof archive !== "string" || typeof header !== "string") throw new Error(`${COWORK_WORKER_PINS_FILE} has no libkrun archive and header hash`);
+  return { libkrunArchiveSha256: archive, libkrunHeaderSha256: header, workerPinsSha256: sha256Hex(workerBytes), guestArtifactPinsSha256: sha256Hex(readFileSync(join(repo, COWORK_GUEST_ARTIFACT_PINS_FILE))) };
+}
+
+/** `CDHash=<40 hex>` from `codesign -dvvv` output (three v: `-dvv` omits it). */
+export function parseCdHash(codesignDvv: string): string | undefined {
+  return /^CDHash=([0-9a-f]{40})$/m.exec(codesignDvv)?.[1];
+}
+
+const HEX64 = /^[0-9a-f]{64}$/, HEX40 = /^[0-9a-f]{40}$/;
+const sameKeys = (value: object, keys: string[]): boolean => JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+
+/** Strict parse of the manifest: exactly these keys, these shapes. Null with a reason in `problems` when it is anything else. */
+export function parseCoworkNativeManifest(text: string, problems: string[]): CoworkNativeManifest | null {
+  let value: any;
+  try { value = JSON.parse(text); } catch { problems.push("the pin manifest is not JSON"); return null; }
+  const member = (v: any) => v && typeof v === "object" && sameKeys(v, ["identifier", "cdhash"]) && typeof v.identifier === "string" && HEX40.test(v.cdhash);
+  const pinKeys = ["libkrunArchiveSha256", "libkrunHeaderSha256", "workerPinsSha256", "guestArtifactPinsSha256"];
+  if (!value || typeof value !== "object" || !sameKeys(value, ["formatVersion", "launcher", "worker", "pins"]) || value.formatVersion !== 1 || !member(value.launcher) || !member(value.worker)
+    || !value.pins || typeof value.pins !== "object" || !sameKeys(value.pins, pinKeys) || pinKeys.some((key) => !HEX64.test(value.pins[key]))) {
+    problems.push("the pin manifest does not have exactly the expected shape (formatVersion 1, launcher, worker, four pin hashes)");
+    return null;
+  }
+  return value as CoworkNativeManifest;
+}
+
+export interface CoworkNativeBundleFacts {
+  /** The names directly inside Contents/Helpers/WinterCowork ([] when the directory is missing). */
+  entries: readonly string[];
+  /** Contents/Resources/cowork-native-pins.json, or null when absent. */
+  manifestText: string | null;
+  /** The CDHash `codesign -dvvv` reports for each binary in the bundle right now. */
+  liveCdhash: { launcher: string | undefined; worker: string | undefined };
+  /** `readCoworkRepoPins` of the checkout the bundle is being released from. */
+  repoPins: CoworkNativePins;
+}
+
+/**
+ * Refuses a bundle whose launcher, worker or pins do not match: the directory holds exactly the two binaries; the manifest has the exact shape and
+ * the two identifiers; the manifest's CDHashes are the live signed binaries' (a swapped or re-signed binary is a different CDHash); and every pin hash in
+ * the manifest is the repository's (the bundle was built against these libkrun inputs and these pin files, not some other set). Failure lines; empty = good.
+ */
+export function checkCoworkNativeBundle(facts: CoworkNativeBundleFacts): string[] {
+  const failures: string[] = [];
+  const want = [COWORK_NATIVE.launcher.name, COWORK_NATIVE.worker.name].sort();
+  const have = [...facts.entries].sort();
+  if (JSON.stringify(have) !== JSON.stringify(want)) failures.push(`Helpers/WinterCowork holds [${have.join(", ")}], expected exactly [${want.join(", ")}]`);
+  if (facts.manifestText === null) { failures.push("the pin manifest cowork-native-pins.json is missing"); return failures; }
+  const problems: string[] = [];
+  const manifest = parseCoworkNativeManifest(facts.manifestText, problems);
+  failures.push(...problems);
+  if (manifest === null) return failures;
+  for (const role of ["launcher", "worker"] as const) {
+    const name = COWORK_NATIVE[role].name;
+    if (manifest[role].identifier !== COWORK_NATIVE[role].identifier) failures.push(`${name}: the manifest names identifier ${manifest[role].identifier}, expected ${COWORK_NATIVE[role].identifier}`);
+    const live = facts.liveCdhash[role];
+    if (live === undefined) failures.push(`${name}: no CDHash could be read from the signed binary`);
+    else if (live !== manifest[role].cdhash) failures.push(`${name}: the signed binary's CDHash ${live} is not the manifest's ${manifest[role].cdhash} (the binary changed after it was embedded)`);
+  }
+  for (const key of Object.keys(facts.repoPins) as (keyof CoworkNativePins)[]) {
+    if (manifest.pins[key] !== facts.repoPins[key]) failures.push(`pin ${key}: the bundle was built against ${manifest.pins[key]}, the repository now says ${facts.repoPins[key]}`);
+  }
+  return failures;
+}
+
+/** The facts for a bundle on disk, by shelling out through the caller's `run` (stdout+stderr of a command). The caller is release.ts or a verify script. */
+export function readCoworkBundleFacts(input: { appContents: string; repo: string; listDirectory: (path: string) => string[]; readText: (path: string) => string | null; codesignDvvv: (path: string) => string }): CoworkNativeBundleFacts {
+  const dir = join(input.appContents, "Helpers", "WinterCowork");
+  return {
+    entries: input.listDirectory(dir),
+    manifestText: input.readText(join(input.appContents, "Resources", "cowork-native-pins.json")),
+    liveCdhash: { launcher: parseCdHash(input.codesignDvvv(join(dir, COWORK_NATIVE.launcher.name))), worker: parseCdHash(input.codesignDvvv(join(dir, COWORK_NATIVE.worker.name))) },
+    repoPins: readCoworkRepoPins(input.repo),
+  };
 }
