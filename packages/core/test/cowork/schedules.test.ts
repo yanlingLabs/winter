@@ -522,6 +522,9 @@ test("anti-wiring: the dispatch port is a type-only import of schedules.ts, has 
   expect(typesTree.statements.filter(ts.isImportDeclaration).every(statement => statement.importClause?.isTypeOnly === true)).toBe(true);
   expect(typesTree.statements.filter(ts.isImportDeclaration).map(statement => (statement.moduleSpecifier as ts.StringLiteral).text).sort()).toEqual(["./types", "@yanlinglabs/winter-protocol"]);
   // 3. No implementation of the port anywhere in src (a class implementing it, or a value annotated with it).
+  // Exactly three files may name the port type: the owner, the types module and the door port. Any other implementation would have to
+  // name it (or be a structural object, which the bans on driver verbs leave with nothing to call), so this list is the single-implementation pin.
+  expect(sources.filter(file => readFileSync(file, "utf8").includes("CoworkScheduleDispatchPort")).map(relative).sort()).toEqual([doorPort, module, owner].map(relative).sort());
   // The door port is the single permitted implementation; it is a factory returning an object literal, so it matches neither pattern.
   const implementing = sources.filter(file => /implements\s+CoworkScheduleDispatchPort|:\s*CoworkScheduleDispatchPort\s*=/.test(readFileSync(file, "utf8"))).map(relative);
   expect(implementing).toEqual([]);

@@ -25,8 +25,9 @@ One occurrence is one prompt delivered to one conversation:
 | Door outcome | Port answer | Durable result |
 | --- | --- | --- |
 | send accepted | `started`, `runRef` = the conversation's session id | `dispatching`, receipt minted |
-| `provider_unavailable`, `conversation_limit`, `cold_resume_unavailable`, `unsupported_topology`, `authority_denied`, `source_unavailable`, `not_found` from create, get/ensure or send | `not-started` | `pending` / `execution_unavailable`, token cleared |
-| `recovery_required`, any other `CoworkError`, a plain `Error`, a non-error throw, a malformed session | `uncertain` | `uncertain` / `recovery_required`, never replayed |
+| from create/get/ensure: `provider_unavailable`, `conversation_limit`, `cold_resume_unavailable`, `unsupported_topology`, `authority_denied`, `source_unavailable`, `not_found`; from `send`: ONLY the first four | `not-started` | `pending` / `execution_unavailable`, token cleared |
+| the injected `timeoutMs` passing (a hung door) | `uncertain`; a send not yet begun never begins | `uncertain`, so the slot is not held in `dispatching` |
+| `recovery_required`, `authority_denied`/`source_unavailable`/`not_found` at the send stage (they can race a queued prompt), any other `CoworkError`, a plain `Error`, a non-error throw, a malformed session | `uncertain` | `uncertain` / `recovery_required`, never replayed |
 | a session id outside the host's run-reference shape | `not-started`, BEFORE any send | `pending` |
 
 ## REVIEW NEEDED
@@ -42,7 +43,8 @@ One occurrence is one prompt delivered to one conversation:
    is not handed to the door: a fresh conversation takes the workspace's own ceiling and default policy (a schedule's saved policy
    was already required to equal it at creation). Narrowing a conversation below the workspace needs a door parameter.
 4. **Automated-turn protection** is only the client name `"schedule"`; the protection itself belongs to the driver.
-5. **No timeout** on `send`; a hung door leaves `dispatching` until `recover()`.
+5. **Timeout.** `timeoutMs` is injected (default 120 s: a cold resume may boot a guest, so it is generous, far above the 30 s drain budget, yet it frees the job's active slot as `uncertain` if the door hangs). An in-flight send cannot be cancelled, hence `uncertain`, never a replay.
+6. **The single-implementation pin** now also asserts exactly three files name the port type (owner, types module, this module). A structural object implementation that never names it is not caught by that, but it would need a driver verb to be called, and those are owner-only.
 
 ## Pin
 

@@ -6,7 +6,7 @@ import { authorityFixtureSessions } from "./committed-sessions";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { CoworkRepository } from "../../src/cowork/repository";
 import { CoworkSchedules } from "../../src/cowork/schedules";
-import { COWORK_SCHEDULE_DEFINITE_REFUSALS, createCoworkScheduleDoorPort } from "../../src/cowork/schedule-door-port";
+import { COWORK_SCHEDULE_DEFINITE_REFUSALS, COWORK_SCHEDULE_DOOR_TIMEOUT_MS, COWORK_SCHEDULE_SEND_DEFINITE_REFUSALS, createCoworkScheduleDoorPort } from "../../src/cowork/schedule-door-port";
 import type { CoworkScheduleDoor } from "../../src/cowork/schedule-door-port";
 import { CoworkError, type CoworkErrorCode } from "../../src/cowork/types";
 import type { CoworkScheduleDefinition } from "@yanlinglabs/winter-protocol";
@@ -34,13 +34,13 @@ function fakeDoor(behavior: Behavior = {}) {
   return { door, calls, session, count: (op: string) => calls.filter(call => call.op === op).length };
 }
 
-function fixture(door: CoworkScheduleDoor, target: "project" | "conversation" = "project") {
+function fixture(door: CoworkScheduleDoor, target: "project" | "conversation" = "project", timeoutMs?: number) {
   const home = mkdtempSync(join(tmpdir(), "winter-schedule-door-")); homes.push(home);
   const db = openRuntimeStateDb(home); handles.push(db); const records = new CoworkRepository(db);
   const made = records.create({ principalId: "fixture", requestId: "workspace" }, { ownership: "project", title: "Fixture", ceiling: caps, sources: [{ kind: "folder", label: "fixture", access: "read-write", detail: { grantRef: "fixture-grant", rootIdentity: "fixture-root" } }] });
   const grants = { folder: () => ({ rootIdentity: "fixture-root", writable: true, revoked: false }), repository: () => undefined };
   let time = 0; const sourceId = made.value.sources[0]!.sourceId;
-  const port = createCoworkScheduleDoorPort({ door, scope: "fixture-scope", caller: { role: "harness", connectionId: 7 } });
+  const port = createCoworkScheduleDoorPort({ door, scope: "fixture-scope", caller: { role: "harness", connectionId: 7 }, timeoutMs });
   const schedules = new CoworkSchedules(records, grants, () => time, () => "branch", undefined, port);
   let definition: CoworkScheduleDefinition = { target: { kind: "project", projectId: made.value.workspace.ownerId }, sourceId, prompt: "fixture work", timing: { kind: "recurring", spec: "every 1s" }, timezone: "UTC", savedCeiling: caps, policy: "auto", overlap: "one-active-one-pending" };
   if (target === "conversation") {
@@ -81,7 +81,10 @@ const failing = (stage: (typeof stages)[number], error: unknown): Behavior => ({
 
 test("every definite refusal, at create, ensure or send, is not-started: back to pending/execution_unavailable, and a retry reuses the same create request id", async () => {
   expect([...COWORK_SCHEDULE_DEFINITE_REFUSALS].sort()).toEqual([...definite].sort());
+  const sendDefinite: CoworkErrorCode[] = ["provider_unavailable", "conversation_limit", "cold_resume_unavailable", "unsupported_topology"];
+  expect([...COWORK_SCHEDULE_SEND_DEFINITE_REFUSALS].sort()).toEqual([...sendDefinite].sort());
   for (const code of definite) for (const stage of stages) {
+    if (stage === "send" && !sendDefinite.includes(code)) continue; // uncertain at the send stage, below
     let refuse = true; const base: Behavior = failing(stage, new CoworkError(code));
     const d = fakeDoor({ ...base, [stage]: (...args: unknown[]) => { if (refuse) return (base[stage] as (...a: unknown[]) => unknown)(...args); return stage === "create" ? { sessionId: "created-session" } : stage === "ensure" ? undefined : { seq: 1, queued: false }; } } as Behavior);
     // The retry path needs a real session from ensure; give the second attempt one.
@@ -132,4 +135,36 @@ test("anti-wiring: the door port is imported by no src file, takes only types fr
   const imports = [...readFileSync(module, "utf8").matchAll(/^import (type )?[^;]*from "([^"]+)";$/gm)].map(match => `${match[1] ? "type " : ""}${match[2]}`).sort();
   expect(imports).toEqual(["./types", "type ./schedule-dispatch", "type ./service", "type ./session-ports"]);
   const text = readFileSync(module, "utf8"); for (const forbidden of ["beginDispatch", ".handled(", ".uncertain(", "schedules\"", "Bun.", "node:", "process.env"]) expect([forbidden, text.includes(forbidden)]).toEqual([forbidden, false]);
+});
+
+test("at the send stage only the four pre-delivery refusals are definite: authority_denied, source_unavailable and not_found can race a queued prompt", async () => {
+  for (const code of ["authority_denied", "source_unavailable", "not_found"] as CoworkErrorCode[]) for (const target of ["project", "conversation"] as const) {
+    const d = fakeDoor(failing("send", new CoworkError(code))), f = fixture(d.door, target), out = await f.schedules.beginDispatch(f.row.occurrenceId, f.claim());
+    expect({ code, target, out }).toEqual({ code, target, out: { status: "uncertain" } });
+    expect(f.durable()).toMatchObject({ state: "uncertain", reason: "recovery_required" }); expect(f.schedules.claim(f.a.workspaceId, f.a.scheduleId, f.row.occurrenceId)).toBeUndefined(); expect(d.count("send")).toBe(1);
+  }
+  // The same three codes stay definite BEFORE any delivery: at create and at ensure.
+  for (const stage of ["create", "ensure"] as const) {
+    const d = fakeDoor(failing(stage, new CoworkError("not_found"))), f = fixture(d.door), out = await f.schedules.beginDispatch(f.row.occurrenceId, f.claim());
+    expect({ stage, out }).toEqual({ stage, out: { status: "not-started" } }); expect(d.count("send")).toBe(0);
+  }
+});
+
+test("a hung door is bounded: uncertain at the injected timeout, the slot is released from dispatching, and a late ensure never sends", async () => {
+  expect(COWORK_SCHEDULE_DOOR_TIMEOUT_MS).toBe(120_000);
+  for (const stage of stages) {
+    // Released late, the hung step resolves with a REAL value, so an abandoned attempt that went on to send would be seen.
+    const gate: { release?: () => void } = {}; let late: unknown = { sessionId: "created-session" };
+    const hang = () => new Promise<never>(resolve => { gate.release = () => resolve(late as never); });
+    const d = fakeDoor({ [stage]: hang } as Behavior); if (stage === "ensure") late = d.session;
+    const f = fixture(d.door, "project", 25);
+    const started = Date.now(), out = await f.schedules.beginDispatch(f.row.occurrenceId, f.claim());
+    expect({ stage, out }).toEqual({ stage, out: { status: "uncertain" } }); expect(Date.now() - started).toBeLessThan(5000);
+    expect(f.durable()).toMatchObject({ state: "uncertain", reason: "recovery_required" });
+    gate.release?.(); await new Promise(resolve => setTimeout(resolve, 20));
+    if (stage !== "send") expect(d.count("send")).toBe(0); // the abandoned attempt must not deliver after the host recorded uncertain
+    expect(d.count("send")).toBeLessThanOrEqual(1);
+  }
+  const fast = fakeDoor(), f = fixture(fast.door, "project", 60_000); expect((await f.schedules.beginDispatch(f.row.occurrenceId, f.claim())).status).toBe("started");
+  for (const bad of [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31]) expect(() => createCoworkScheduleDoorPort({ door: fast.door, scope: "s", caller: { role: "harness", connectionId: 1 }, timeoutMs: bad })).toThrow("invalid_request");
 });
