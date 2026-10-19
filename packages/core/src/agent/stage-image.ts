@@ -33,6 +33,7 @@ import { sandboxConfigFor } from "../runtime-sdk/mode-options";
 import { protectedReadDenial } from "../runtime-sdk/protected-paths";
 import { fileTokenNumbers, imageTokenNumbers } from "../sessions/model-text";
 import { sessionTmpDirPath } from "./session-tmp";
+import { AT_FDCWD, closeFd, openDirAt, unlinkAt } from "../computer-use/browser/fd-fs";
 
 export type StageImageMediaType = (typeof STAGE_IMAGE_MEDIA_TYPES)[number];
 
@@ -203,12 +204,12 @@ function nextIndex(dir: string): number {
   return max + 1;
 }
 
-/** How long a staged copy is kept (2026-10-19): `stageSessionImage` lets go of this session's staged copies
- *  older than this — by the file's own mtime, written once when it was staged — unless a message in the
- *  session's recent log still names it (`pruneStagedImages`). Nothing else ever removes the session's temp
- *  folder, and Dispatch is ONE session that lives for months: without this every pasted screenshot would stay
- *  on disk for as long as it does. Generous on purpose: a staged copy is the model's to read in its turn (or to
- *  move, to keep — `IMAGE_PATH_GUIDANCE`), and two weeks covers coming back to it. */
+/** How long a staged copy is kept in DISPATCH (2026-10-19): `stageSessionImage` lets go of the Dispatch session's
+ *  staged copies older than this — by the file's own mtime, written once when it was staged — unless a message in
+ *  the session's recent log still names it (`pruneStagedImages`). Nothing else ever removes a session's temp folder,
+ *  and Dispatch is ONE session that lives for months: without this every pasted screenshot would stay on disk for as
+ *  long as it does. A code session ends, and is never pruned. Generous on purpose: two weeks covers coming back to a
+ *  picture; the accepted trade-off past that is in images.md. */
 export const STAGED_IMAGE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** Every `images` path a `user_message` in `events` names — consumed or still owed, any thread. What
@@ -235,63 +236,94 @@ function sameRealDirectory(path: string, was: { dev: number; ino: number }): boo
   }
 }
 
+/** The directory-relative calls the prune deletes through (`computer-use/browser/fd-fs.ts`); a test may stand in. */
+export interface PruneFdCalls {
+  openDirAt(dirFd: number, name: string): number;
+  unlinkAt(dirFd: number, name: string): void;
+  closeFd(fd: number): void;
+}
+const FD_CALLS: PruneFdCalls = { openDirAt, unlinkAt, closeFd };
+
 /**
- * The bounded cleanup of a session's staged copies (2026-10-19, for Dispatch's one long-lived session; it runs for
- * every session that stages). Removes each `image_<k>.<ext>` REGULAR file directly in `imagesDir` whose mtime is
- * older than `STAGED_IMAGE_RETENTION_MS`, unless `keep()` names it — `keep` is read only when there is a candidate
- * (a bounded tail of the session's log, `stagedPathsNamedBy`), and a `keep` that throws removes nothing. Answers how
- * many it removed; NEVER throws (a stage is never refused over its cleanup) and never logs a path.
+ * The bounded cleanup of the DISPATCH session's staged copies (2026-10-19; `session.stageImage` asks for it in dispatch
+ * only). Removes each `image_<k>.<ext>` REGULAR file directly in `images/` whose mtime is older than
+ * `STAGED_IMAGE_RETENTION_MS`, unless `keep()` names it — `keep` is read only when there is a candidate (a bounded tail
+ * of the session's log, `stagedPathsNamedBy`), and a `keep` that throws removes nothing — and never the
+ * HIGHEST-numbered `image_<k>.*` in the folder: it is what `nextIndex` counts from, so as long as it stays, a pruned
+ * number is never handed out again (an old message would otherwise name a new picture). Answers how many it removed;
+ * NEVER throws (a stage is never refused over its cleanup) and never logs a path.
  *
- * `imagesDir` is HOSTILE (the module header): the daemon is unsandboxed and the session's agent can swap
- * `winter-session-<sid>` or `images/` for a symlink at any moment, which would aim an `unlink` at a same-named file
- * elsewhere. So, right before EACH unlink: both directories are re-`lstat`ed as the same real directories (dev +
- * inode) they were when listed, the candidate is re-`lstat`ed as the same regular file (dev + inode), and its
- * `realpath` is exactly `<imagesDir>/<name>`. A swap landing between those checks and the `unlink` itself — a few
- * system calls — is the residual (images.md); a symlink planted IN the folder is never followed (`lstat`, and
- * `unlink` removes a link, not its target).
+ * The folder is HOSTILE (the module header): the daemon is unsandboxed and the session's agent can swap
+ * `winter-session-<sid>` or `images/` for a symlink at any moment, which would aim a path `unlink` at a same-named file
+ * anywhere the user can write. So nothing is deleted by PATH: both folders are opened first as descriptors
+ * (`openDirAt`, O_DIRECTORY|O_NOFOLLOW — the root from its already-resolved parent, `images` relative to the root),
+ * `fstat`ed, and every delete is `unlinkAt(<images fd>, name)` — a swap after the open moves nothing it does. The
+ * listing (by path — Node has no `readdir` on a descriptor) is trusted only while both paths still `lstat` as the very
+ * directories the descriptors hold (dev + inode), checked before the listing, after it and before each delete, and a
+ * candidate only while its `lstat` is the regular file listed. A swap that beats those checks can at worst make the
+ * prune delete a same-named entry of the session's OWN `images/` folder. When the descriptor calls cannot load (not
+ * macOS on Apple silicon), nothing is pruned — there is never a fallback to deleting by path.
  */
 export function pruneStagedImages(
   root: string,
   imagesDir: string,
   keep: () => Iterable<string>,
   nowMs: number = Date.now(),
-  /** TEST-ONLY: runs right before a candidate's re-checks — the window a swap would use. */
-  hooks: { beforeUnlink?: (path: string) => void } = {},
+  hooks: {
+    /** TEST-ONLY: runs right before each `unlinkAt` — after every check, the window a swap would use. */
+    beforeUnlink?: (path: string) => void;
+    /** TEST-ONLY: stands in for the descriptor calls. */
+    fd?: PruneFdCalls;
+  } = {},
 ): number {
+  const fd = hooks.fd ?? FD_CALLS;
+  let rootFd = -1;
+  let imagesFd = -1;
+  let removed = 0;
   try {
-    const rootSt = lstatSync(root);
-    const dirSt = lstatSync(imagesDir);
-    if (rootSt.isSymbolicLink() || !rootSt.isDirectory() || dirSt.isSymbolicLink() || !dirSt.isDirectory()) return 0;
+    rootFd = fd.openDirAt(AT_FDCWD, root);
+    imagesFd = fd.openDirAt(rootFd, "images");
+    const rootSt = fstatSync(rootFd);
+    const dirSt = fstatSync(imagesFd);
+    const pathsArePinned = (): boolean => sameRealDirectory(root, rootSt) && sameRealDirectory(imagesDir, dirSt);
+    if (!pathsArePinned()) return 0;
     const cutoff = nowMs - STAGED_IMAGE_RETENTION_MS;
-    const candidates: { path: string; dev: number; ino: number }[] = [];
+    const listed: { name: string; path: string; index: number; dev: number; ino: number; old: boolean }[] = [];
+    let highest = 0;
     for (const name of readdirSync(imagesDir)) {
-      if (!NAME_RE.test(name)) continue;
+      const m = NAME_RE.exec(name);
+      if (!m) continue;
+      const index = Number(m[1]);
+      highest = Math.max(highest, index);
       const path = join(imagesDir, name);
       let st;
       try { st = lstatSync(path); } catch { continue; }
-      if (!st.isFile() || st.mtimeMs >= cutoff) continue;
-      candidates.push({ path, dev: st.dev, ino: st.ino });
+      if (!st.isFile()) continue;
+      listed.push({ name, path, index, dev: st.dev, ino: st.ino, old: st.mtimeMs < cutoff });
     }
+    if (!pathsArePinned()) return 0;
+    const candidates = listed.filter((c) => c.old && c.index !== highest);
     if (candidates.length === 0) return 0;
     let kept: Set<string>;
     try { kept = new Set(keep()); } catch { return 0; }
-    let removed = 0;
     for (const c of candidates) {
       if (kept.has(c.path)) continue;
-      hooks.beforeUnlink?.(c.path);
       // The folders moved: nothing more is removed this time.
-      if (!sameRealDirectory(root, rootSt) || !sameRealDirectory(imagesDir, dirSt)) return removed;
+      if (!pathsArePinned()) return removed;
       let st;
       try { st = lstatSync(c.path); } catch { continue; }
       if (!st.isFile() || st.dev !== c.dev || st.ino !== c.ino) continue;
-      let real: string;
-      try { real = realpathSync(c.path); } catch { continue; }
-      if (real !== c.path) continue;
-      try { unlinkSync(c.path); removed++; } catch { /* gone already, or not ours to remove */ }
+      hooks.beforeUnlink?.(c.path);
+      try { fd.unlinkAt(imagesFd, c.name); removed++; } catch { /* gone already, or not ours to remove */ }
     }
     return removed;
   } catch {
-    return 0;
+    // The descriptor calls could not load, a folder would not open as a real directory, or anything else: what was
+    // removed so far stays removed, nothing more is tried.
+    return removed;
+  } finally {
+    try { if (imagesFd >= 0) fd.closeFd(imagesFd); } catch { /* nothing to do */ }
+    try { if (rootFd >= 0) fd.closeFd(rootFd); } catch { /* nothing to do */ }
   }
 }
 
@@ -299,13 +331,15 @@ export function pruneStagedImages(
  * Stage one image for `sessionId` and return its realpath. Every input check runs first
  * (`validateStagedImage`); then the file is created safely (see the module header). The folder is
  * `sessionTmpDirPath(sessionId)` — `$WINTER_TMPDIR` or the OS temp dir, exactly `sessionTmpDir`'s.
- * With `keep`, the session's stale staged copies are let go of first (`pruneStagedImages`); the new file's
- * number is taken before that, so numbers keep climbing and a pruned name is never reused.
+ * With `keep` (Dispatch only), the session's stale staged copies are let go of first (`pruneStagedImages`, which
+ * never removes the highest-numbered one); the new file's number is taken before that, so numbers keep climbing and a
+ * pruned name is never handed out again.
  */
 export function stageSessionImage(
   input: { sessionId: string; mediaType: StageImageMediaType; dataBase64: string },
   opts: {
-    /** The staged paths the session's recent messages still name — never pruned. Absent: nothing is pruned. */
+    /** The staged paths the session's recent messages still name — never pruned. Absent (every session but
+     *  Dispatch): nothing is pruned. */
     keep?: () => Iterable<string>;
     /** TEST-ONLY: the prune's clock. */
     nowMs?: number;

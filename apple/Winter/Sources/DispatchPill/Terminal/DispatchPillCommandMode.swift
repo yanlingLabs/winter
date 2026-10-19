@@ -82,6 +82,11 @@ final class DispatchPillCommandMode: ObservableObject {
     var onScreenPathsWanted: (() -> Void)?
     /// Command mode turned ON for the draft (the pill reads the screen again then).
     var onCommandModeTurnedOn: (() -> Void)?
+    /// Whether a draft holds a LIVE attachment chip (2026-10-19, attachments in the pill) — such a draft is a message,
+    /// never a shell line (the shell would be handed the chip's marker as a word). Asked of the draft's own attachments
+    /// (`ComposerAttachmentDraft.live(in:)`), never of the character alone: a typed private-use glyph (the Apple logo,
+    /// U+F8FF; a Nerd Font icon) shares the markers' range and is only text.
+    var holdsChips: (String) -> Bool = { _ in false }
 
     /// Tab's cycle through the candidates, while it holds (`CompletionCycle`).
     @Published private(set) var cycle: CompletionCycle?
@@ -188,6 +193,11 @@ final class DispatchPillCommandMode: ObservableObject {
             publish(text: text, valid: false, ghost: nil)
             return
         }
+        if holdsChips(text) {
+            remember(text, valid: false)
+            publish(text: text, valid: false, ghost: nil)
+            return
+        }
         // An argument is being typed: the on-screen paths should be fresh for its ghost.
         if text.contains(where: \.isWhitespace) { onScreenPathsWanted?() }
         let cwd = workingDirectory()
@@ -234,6 +244,10 @@ final class DispatchPillCommandMode: ObservableObject {
     // MARK: Evaluation
 
     private func evaluate(_ text: String, ghost: Bool = true) -> CommandEvaluation {
+        if holdsChips(text) {
+            remember(text, valid: false)
+            return CommandEvaluation(valid: false, ghost: nil, candidates: nil)
+        }
         let result = Self.evaluate(text, environment: environment, workingDirectory: workingDirectory(),
                                    onScreenPaths: onScreenPaths(), ghost: ghost)
         remember(text, valid: result.valid)
@@ -243,9 +257,6 @@ final class DispatchPillCommandMode: ObservableObject {
     nonisolated static func evaluate(_ text: String, environment: CommandLineEnvironment, workingDirectory: String,
                                      onScreenPaths: [String] = [],
                                      ghost wantsGhost: Bool = true) -> CommandEvaluation {
-        // A draft holding an attachment chip (a private-use marker character) is a message, never a shell line: the
-        // shell would be handed the marker as a word (2026-10-19, attachments in the pill).
-        guard composerAttachmentMarkerIDs(in: text).isEmpty else { return CommandEvaluation(valid: false, ghost: nil, candidates: nil) }
         let snapshot = environment.snapshot()
         guard snapshot.enabled else { return CommandEvaluation(valid: false, ghost: nil, candidates: nil) }
         let context = snapshot.context(workingDirectory: workingDirectory)

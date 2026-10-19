@@ -427,10 +427,13 @@ final class DispatchPillCommandModeTests: XCTestCase {
         XCTAssertNil(mode.ghost(for: "open /tmp/x/notes.m"), "a ghost belongs to the text it was computed for")
     }
 
-    /// Attachments in the pill (2026-10-19): a draft holding a chip (a private-use marker character) is a message —
-    /// never a command, however valid the words around it, and no ghost.
-    func testADraftHoldingAnAttachmentChipIsNeverACommand() {
+    /// Attachments in the pill (2026-10-19): a draft holding a LIVE chip is a message — never a command, however valid
+    /// the words around it, and no ghost. A typed private-use glyph that is no chip (the Apple logo, U+F8FF) is text:
+    /// the line is judged exactly as it would be without the question.
+    func testADraftHoldingALiveAttachmentChipIsNeverACommandButAPrivateUseGlyphIsJustText() {
         let mode = makeMode()
+        let chips: Set<Int> = [1, 2, 3]
+        mode.holdsChips = { text in composerAttachmentMarkerIDs(in: text).contains { chips.contains($0) } }
         mode.evaluateNowForTesting("open /tmp/x/notes.md")
         XCTAssertTrue(mode.isActive(for: "open /tmp/x/notes.md"))
         for draft in ["open \(composerAttachmentMarker(1))", "open /tmp/x/notes.md \(composerAttachmentMarker(2))",
@@ -440,6 +443,15 @@ final class DispatchPillCommandModeTests: XCTestCase {
             XCTAssertFalse(mode.shouldRunOnReturn(draft), draft)
             XCTAssertNil(mode.ghost(for: draft), draft)
         }
+        // U+F8FF is in the markers' range but no chip of this draft: judged as any line is.
+        let logo = "open /tmp/x/notes.md \u{F8FF}"
+        let plain = makeMode()
+        plain.evaluateNowForTesting(logo)
+        mode.evaluateNowForTesting(logo)
+        XCTAssertEqual(mode.isActive(for: logo), plain.isActive(for: logo))
+        XCTAssertEqual(mode.ghost(for: logo), plain.ghost(for: logo))
+        mode.evaluateNowForTesting("open /tmp/x/notes.md")
+        XCTAssertTrue(mode.isActive(for: "open /tmp/x/notes.md"), "a line without a chip still runs")
     }
 
     func testTheDisplayIsStickyUntilTheNextVerdictLands() {

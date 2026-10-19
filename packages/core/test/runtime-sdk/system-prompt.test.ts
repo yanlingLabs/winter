@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatSystemPrompt } from "../../src/agent/chat-prompt";
-import { ContextAssembler, IMAGE_PATH_GUIDANCE } from "../../src/agent/context";
+import { ContextAssembler, DISPATCH_IMAGE_PATH_GUIDANCE, IMAGE_PATH_GUIDANCE } from "../../src/agent/context";
 import { dispatchSystemPrompt } from "../../src/agent/dispatch-prompt";
 import type { ResolvedStyle } from "../../src/agent/output-styles";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
@@ -72,9 +72,9 @@ function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "di
     outDir: undefined,
     workdirLess: primary === undefined,
     extraDirs: primary === undefined ? [] : [],
-    // 2026-10-19, the second deliberate departure: Dispatch takes image attachments, so its prompt carries the
-    // image-path line the engine only ever gave a base-keeping (code) prompt.
-    ...(isDispatch ? { imagePathGuidance: true } : {}),
+    // 2026-10-19, the second deliberate departure: Dispatch takes image attachments, so its prompt carries its own
+    // image-path line (the engine only ever gave a base-keeping, code, prompt one).
+    ...(isDispatch ? { imagePathGuidance: "dispatch" as const } : {}),
   });
 }
 
@@ -223,10 +223,17 @@ describe("image-path guidance (code and dispatch)", () => {
     for (const exaKeyPresent of [true, false]) {
       expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd, exaKeyPresent })).not.toContain("never move, rename or edit it");
       expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: undefined, cwd: w.cwd, exaKeyPresent, runHomeApplied: true })).not.toContain("never move, rename or edit it");
+      expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd, exaKeyPresent })).not.toContain("winter-session-…/images/");
     }
   });
 
-  test("it IS in the dispatch coordinator's prompt (dispatch takes attachments, 2026-10-19) — exactly once, after its own base", () => {
+  const DISPATCH_LINE = "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy of a pasted image, kept for about two weeks; any other image or file path is the user's own file. Read either (Read, or Bash for inspection) — anything that changes, moves or copies files routes to SpawnSession, with the path in the child's prompt.";
+
+  test("the dispatch coordinator gets ITS OWN line (2026-10-19) — exactly once, after its base, before the date; never the code line's move/copy licence", () => {
+    expect(DISPATCH_IMAGE_PATH_GUIDANCE).toBe(DISPATCH_LINE);
+    // Dispatch has no write tools and routes file changes to SpawnSession (dispatch-prompt.ts): no licence to move or copy.
+    expect(DISPATCH_LINE).not.toMatch(/may move|read or copy/);
+    expect(dispatchSystemPrompt()).toContain("Anything that CHANGES FILES routes to SpawnSession");
     const w = world();
     const prompts = [
       winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: w.cwd, cwd: w.cwd }),
@@ -234,24 +241,31 @@ describe("image-path guidance (code and dispatch)", () => {
       winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: w.cwd, outDir: join(w.home, "outputs", "d"), runHomeApplied: true }),
     ];
     for (const text of prompts) {
-      expect(text.split(LINE).length - 1).toBe(1);
+      expect(text.split(DISPATCH_LINE).length - 1).toBe(1);
+      expect(text).not.toContain(LINE);
+      expect(text).not.toContain("never move, rename or edit it");
       expect(text.startsWith("You are Winter in Dispatch mode")).toBe(true);
-      expect(text.indexOf(LINE)).toBeLessThan(text.indexOf("Today's date is"));
+      expect(text.indexOf(DISPATCH_LINE)).toBeLessThan(text.indexOf("Today's date is"));
     }
-    // The cached prefix stays put: two dispatch sessions get the same bytes up to the date line.
+    // The cached prefix stays put: two dispatch sessions get the same bytes up to the date line, and the line names
+    // no session or path.
     const s1 = w.store.createSession("global", { approvalPolicy: "auto", mode: "dispatch" });
     const s2 = w.store.createSession("global", { approvalPolicy: "auto", mode: "dispatch" });
     const a = winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: sessionTmpDir(s1) });
     const b = winterSystemPromptFor(w.assembler, { mode: "dispatch", primary: undefined, cwd: sessionTmpDir(s2) });
     expect(a.slice(0, a.indexOf("Today's date is"))).toBe(b.slice(0, b.indexOf("Today's date is")));
+    expect(DISPATCH_LINE).not.toMatch(/\$\{|s_[0-9a-f]{6}|\/tmp|winter-session-[0-9a-z_]/);
   });
 
-  test("an explicit imagePathGuidance overrides the base-slot default both ways", () => {
+  test("an explicit imagePathGuidance picks the line under either base", () => {
     const w = world();
-    expect(w.assembler.assemble({ cwd: w.cwd, basePromptOverride: "BASE", imagePathGuidance: true })).toContain(LINE);
+    expect(w.assembler.assemble({ cwd: w.cwd, basePromptOverride: "BASE", imagePathGuidance: "dispatch" })).toContain(DISPATCH_LINE);
+    expect(w.assembler.assemble({ cwd: w.cwd, basePromptOverride: "BASE", imagePathGuidance: "code" })).toContain(LINE);
     expect(w.assembler.assemble({ cwd: w.cwd, imagePathGuidance: false })).not.toContain(LINE);
     expect(w.assembler.assemble({ cwd: w.cwd, basePromptOverride: "BASE" })).not.toContain(LINE);
-    expect(w.assembler.assemble({ cwd: w.cwd })).toContain(LINE);
+    const code = w.assembler.assemble({ cwd: w.cwd });
+    expect(code).toContain(LINE);
+    expect(code).not.toContain(DISPATCH_LINE);
   });
 
   test("it is static: nothing per-message or per-session is in it, and a base-replacing output style keeps it", () => {

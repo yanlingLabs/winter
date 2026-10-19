@@ -414,6 +414,8 @@ final class DispatchPillController: ObservableObject {
         commandMode.workingDirectory = { [weak self] in
             self?.commandDirectory() ?? commandEnvironment.homeDirectory
         }
+        // A draft holding a live chip is never a shell line.
+        commandMode.holdsChips = { [weak self] text in self?.draftHoldsChips(text) ?? false }
         // A run that recorded no session adds to the transcript the way the composer sends: the pill's current
         // conversation at click time, created if there is none.
         commandRuns.onSendToCurrentConversation = { [weak self] text in
@@ -722,10 +724,12 @@ final class DispatchPillController: ObservableObject {
         Task { @MainActor in await refresh() }
     }
 
-    /// Whether `text` holds an attachment chip — a marker character, whether or not the draft still holds its
-    /// attachment (a stale one is dropped by `composerTextForSend`, never sent as a character).
+    /// Whether `text` holds a LIVE attachment chip — a marker the draft still holds an attachment for
+    /// (`ComposerAttachmentDraft.live(in:)`). Never the character alone: a typed private-use glyph (the Apple logo,
+    /// U+F8FF; a Nerd Font or Powerline icon) shares the markers' range and stays plain text — the `/` menu, the pill's
+    /// commands and shell mode all keep working on it, and it is sent unchanged.
     func draftHoldsChips(_ text: String) -> Bool {
-        !composerAttachmentMarkerIDs(in: text).isEmpty
+        !adapter.composerAttachments.live(in: text).isEmpty
     }
 
     /// A draft with chips, through the code windows' own door: the session resolved ONCE (the bound one, created as a
@@ -791,6 +795,8 @@ final class DispatchPillController: ObservableObject {
     /// The `/` menu for what is typed (`dispatchPillMenu`) — never over the picker, a pinned turn or full screen.
     var currentMenu: DispatchPillMenu? {
         guard presentation != .fullScreen, !permissionsPickerOpen, historyIndex == nil else { return nil }
+        // A draft holding a chip is a message: no `/` menu, whose pick would replace the draft and drop the chip.
+        guard !draftHoldsChips(adapter.composerDraft) else { return nil }
         return dispatchPillMenu(draft: adapter.composerDraft, currentPolicy: knownPolicy)
     }
 

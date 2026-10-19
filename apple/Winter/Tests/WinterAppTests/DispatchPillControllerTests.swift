@@ -676,6 +676,38 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(relists, 1, "a row already there is not re-listed for")
     }
 
+    func testATypedPrivateUseGlyphIsNoChipTheDraftRoutesAsBeforeAndIsSentUnchanged() async {
+        let pill = makePill()
+        let log = SenderLog()
+        var sent: [String] = []
+        pill.onSubmit = { text in sent.append(text); return true }
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.attachmentSender = sender(log)
+        pill.show()
+        // The Apple logo (⌥⇧K) is U+F8FF — the last code point of the markers' range — and no chip.
+        let draft = "ship it \u{F8FF}"
+        XCTAssertFalse(pill.draftHoldsChips(draft))
+        pill.adapter.composerDraft = draft
+        pill.submit(draft)
+        await settle { !sent.isEmpty }
+        XCTAssertEqual(sent, [draft], "sent as typed, through the plain door")
+        XCTAssertTrue(log.sent.isEmpty && log.staged.isEmpty)
+        // …and the `/` menu still opens on such a draft, exactly as without the glyph.
+        pill.adapter.composerDraft = "/\u{F8FF}"
+        XCTAssertEqual(pill.currentMenu, dispatchPillMenu(draft: "/\u{F8FF}", currentPolicy: nil))
+    }
+
+    func testNoSlashMenuOnADraftHoldingAChip() {
+        let pill = makePill()
+        pill.currentSessionRow = { self.row("dispatch") }
+        pill.show()
+        pill.adapter.composerDraft = "/"
+        XCTAssertNotNil(pill.currentMenu, "the menu, as before")
+        XCTAssertTrue(pill.adapter.attachChip(.file(path: "/tmp")))
+        XCTAssertTrue(pill.draftHoldsChips(pill.adapter.composerDraft))
+        XCTAssertNil(pill.currentMenu, "a pick would replace the draft and drop the chip")
+    }
+
     func testClearDraftDropsItsAttachments() {
         let pill = makePill()
         pill.currentSessionRow = { self.row("dispatch") }

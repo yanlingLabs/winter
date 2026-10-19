@@ -3709,11 +3709,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         assertModelAcceptsImages(meta);
         try {
           // `imagesOnSend`: this daemon takes `images` on `session.send`/`session.steer`, so the
-          // client keeps `[Image #n]` in the text and names the paths beside it. Staging first lets go of
-          // this session's stale staged copies (`pruneStagedImages`) — never one a recent message still names.
+          // client keeps `[Image #n]` in the text and names the paths beside it. In DISPATCH only — ONE session that
+          // lives for months — staging first lets go of the session's stale staged copies (`pruneStagedImages`), never
+          // one a recent message still names. A code session's copies are never pruned: it ends, and an old one's
+          // clipboard screenshots may be the only copy its thumbnails and Read have.
           const sessionId = p.sessionId;
           const keep = (): Set<string> => stagedPathsNamedBy(opts.store.readTail(sessionId, STAGED_IMAGE_KEEP_TAIL_BYTES));
-          return { path: stageSessionImage({ sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }, { keep }), imagesOnSend: true as const };
+          const staging = meta.mode === "dispatch" ? { keep } : {};
+          return { path: stageSessionImage({ sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }, staging), imagesOnSend: true as const };
         } catch (err) {
           if (err instanceof StageImageRefusal) {
             throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
