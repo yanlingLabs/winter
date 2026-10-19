@@ -714,7 +714,10 @@ test("anti-wiring, wired behind the refusal: one src importer (mode-options), wh
   // Session door D3: the Cowork driver table builds the supervisor, and nothing else in src names that table's factory.
   const COWORK_DRIVER = root("packages", "core", "src", "cowork", "session-driver.ts");
   expect(sources.filter((file) => /new\s+CoworkGuestRuntimeSupervisor\b/.test(code(file)))).toEqual([COWORK_DRIVER]);
-  expect(sources.filter((file) => file !== COWORK_DRIVER && /\bcreateCoworkSessionDrivers\b/.test(code(file)))).toEqual([]);
+  // Session door D4: the door module composes the table; nothing else in src names its factory, and nothing builds a door.
+  const COWORK_DOOR = root("packages", "core", "src", "cowork", "session-door.ts");
+  expect(sources.filter((file) => file !== COWORK_DRIVER && /\bcreateCoworkSessionDrivers\b/.test(code(file)))).toEqual([COWORK_DOOR]);
+  expect(sources.filter((file) => file !== COWORK_DOOR && /\bcreateCoworkSessionDoor\b/.test(code(file)))).toEqual([]);
   expect(existsSync(join(packages, "core", "src", "cowork", "index.ts"))).toBe(false);
   expect(readFileSync(join(packages, "core", "src", "index.ts"), "utf8")).not.toMatch(/session-profile|from "\.\/cowork/);
   const own = readFileSync(MODULE, "utf8");

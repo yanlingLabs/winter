@@ -300,7 +300,8 @@ describe("3. source pins: the switch stays off", () => {
     const namingInCode = (needle: string) => sources.filter(path => code(path).includes(needle)).map(shown).filter(name => name !== daemon).sort();
     expect(namingInCode("coworkSessions")).toEqual(["core/src/ipc/server.ts"]);
     expect(code(join(PACKAGES, "core", "src", "cowork", "session-ports.ts")).includes("coworkSessions")).toBe(false);
-    expect(naming("CoworkSessionDoor")).toEqual(["core/src/cowork/session-ports.ts", "core/src/ipc/server.ts", "protocol/src/cowork.ts"]);
+    // D4: the door module is the one implementation (its factory's return type); it names no option and is built by nothing.
+    expect(naming("CoworkSessionDoor")).toEqual(["core/src/cowork/session-door.ts", "core/src/cowork/session-ports.ts", "core/src/ipc/server.ts", "protocol/src/cowork.ts"]);
     expect(code(join(PACKAGES, "protocol", "src", "cowork.ts")).includes("CoworkSessionDoor")).toBe(false);
     // Nothing implements or constructs one: no `implements`, no `satisfies`, no `: CoworkSessionDoor =`, no cast.
     for (const path of sources) expect([shown(path), /(?:implements|satisfies|as)\s+CoworkSessionDoor\b|:\s*CoworkSessionDoor\s*=/.test(code(path))]).toEqual([shown(path), false]);
@@ -310,7 +311,9 @@ describe("3. source pins: the switch stays off", () => {
     const sources = allSources(), driver = join(PACKAGES, "core", "src", "cowork", "session-driver.ts");
     expect(sources).toContain(driver);
     // Only its own module names the factory: no daemon, server, CLI or door constructs a table before the flip (D6).
-    expect(sources.filter(path => /\bcreateCoworkSessionDrivers\b/.test(code(path))).map(shown)).toEqual(["core/src/cowork/session-driver.ts"]);
+    // D4: the door module composes the table, and only its own module names the door's factory.
+    expect(sources.filter(path => /\bcreateCoworkSessionDrivers\b/.test(code(path))).map(shown).sort()).toEqual(["core/src/cowork/session-door.ts", "core/src/cowork/session-driver.ts"]);
+    expect(sources.filter(path => /\bcreateCoworkSessionDoor\b/.test(code(path))).map(shown)).toEqual(["core/src/cowork/session-door.ts"]);
     const text = code(driver);
     // No native module, no provider broker or socket, no process, no network, no router: the route, the starter, the
     // offer and the approval port are all injected, and production injects none of them.
