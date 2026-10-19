@@ -50,7 +50,8 @@ The N2 contract is `docs/cowork-native-worker.md` plus `packages/core/src/cowork
 11. **Resume also needs the guidance load on resume:** the guided profile plus the instructions share. It is therefore ordered after shares slice SH6 and Track A, or the owner accepts a resume without guidance (O8).
 12. **Guest messaging (piece 3) needs no mux change.**
     - `host_message_send`, `host_message_list` and `host_session_stop` are runtime control requests. They already travel up OUT on runtime class 2, and their answers come back down IN.
-    - The SDK change has four parts: the profile admits `hostMessaging` and the extra tools; `allowedSubtypes` grows; the confined-guest registry gate grows; and `checkLinuxHostQueryFrame` must accept host-message answers. Today that checker DROPS them, so a guest `SendMessage` would hang.
+    - The SDK change has four parts: the profile admits `hostMessaging` and the extra tools; `allowedSubtypes` grows; the confined-guest registry gate grows; and `checkLinuxHostQueryFrame` must accept host-message answers.
+    - Today nothing hangs: the registry refuses the tool (`guest_tool_unsupported`), and the bridge refuses the subtype (`unsupported_subtype`). But the checker DROPS every non-permission answer, so once the subtype is allowed, an answer would be dropped and the call would hang until abort. GM1 must therefore change the subtypes and the checker together.
 13. **AskUserQuestion needs no new transport.** It already rides the `permission` subtype with `updatedInput.answers`, which the frame checker admits. Only the tool allowlists and the host bridge are missing, which contradicts part of DOOR's G4.
 14. **Task tools.**
     - TaskCreate, TaskGet, TaskList and TaskUpdate run in-process, with no transport. Their graph is in memory, so it is lost on cold resume (parity with Code).
@@ -63,7 +64,11 @@ The N2 contract is `docs/cowork-native-worker.md` plus `packages/core/src/cowork
     2. `inbox.ack`;
     3. then **commit**, or **discard** on `authority_denied`, a stale epoch or any ack throw.
 
-    The runtime reports undecided holds at start and the host resolves each through the ledger. That closes the window between ack and commit. With this, a revocation between push and ack delivers nothing, and a re-grant delivers exactly once.
+    The runtime reports undecided holds at start and the host resolves each through the ledger. Two ordering rules keep it exact:
+    - the driver publishes its epoch only after that reconciliation finishes;
+    - every commit and discard names its epoch, and each drain re-commits delivered-but-unconfirmed receipts before offering anything new.
+
+    With this, a revocation between push and ack delivers nothing, a re-grant delivers exactly once, and a crash or a lost answer anywhere in the sequence neither loses nor duplicates a message.
 16. **Biggest functional gap: N2 serves one host-query conversation per guest, and same-Project peers share one guest.** A guest sender's peer can therefore never run while the sender runs. Its messages stay owed until the sender's incarnation ends. Guest-to-guest messaging has real value only after the one-conversation limit is lifted (O12, a separate contract slice).
 17. **PR #84 denies SendMessage, ListAgents and Task\* as unmapped tools.** They need a class row: read-only for ListAgents and Task\*, coordination for SendMessage. That is listed as NEEDS FROM APPROVALS.
 18. **Slices.**
@@ -542,7 +547,7 @@ GM1 (profile and transport):
 - `linux-host-query-profile.ts`:
   - `tools` may be a subset of `Read, Write, Edit, Bash, SendMessage, ListAgents, AskUserQuestion, TaskCreate, TaskGet, TaskList, TaskUpdate` (the cap of four is raised accordingly).
   - Add `hostMessaging` to `configKeys`, allowed only as `true` and only with SendMessage or ListAgents present.
-  - `checkLinuxHostQueryFrame(frame, ownsPermission, ownsHostRequest)`: a `control_response` whose id `ownsHostRequest` claims is checked against the closed answer shapes (`isHostMessageSendAnswer`, `normaliseHostMessageListAnswer`). Anything else stays `drop`.
+  - `checkLinuxHostQueryFrame(frame, ownsPermission, ownsHostRequest)`: a `control_response` whose id `ownsHostRequest` claims is checked against the closed answer shapes (`isHostMessageSendAnswer`, `normaliseHostMessageListAnswer`). Anything else stays `drop`. This must land in the same change as the `allowedSubtypes` addition below: allowing the subtype without it makes every answer a drop, and the call hangs until abort.
 - `engine.ts:3036-3040`: for both host-query profiles, `allowedSubtypes` adds `host_message_send` and `host_message_list`, and `host_session_stop` only if TaskStop is ever offered.
 - `tools/registry.ts:1851`: the confined-guest allowlist becomes the same closed set. Grep, Glob, NotebookEdit, Workflow and TaskOutput keep `guestToolUnsupported`.
 - `linux-supervisor.py` `host_query_config`: `toolClasses` gains a `coordinate` class that maps to SendMessage, ListAgents and the Task\* graph tools. AskUserQuestion is always present when any prompt-capable policy is set.
@@ -551,9 +556,9 @@ GM2 (held input; 4.5) adds Winter-only host → runtime control subtypes and one
 
 | Subtype | Payload | Runtime effect | Answer |
 | --- | --- | --- | --- |
-| `host_input_hold` | `inputId` (the ledger `receiptId`), `epoch {incarnationId, leaseEpoch}`, `text`, `clientName` | refuse unless the epoch equals the admitted scope; write a held record (store-owned file, fsync, directory fsync); invisible to the model | `{held: true}`; the same id and digest → `{held: true, again: true}`; the same id and another digest → error `conflict` |
-| `host_input_commit` | `inputId` | mark the record committed (fsync); feed it into the existing host-input path (fold into the running turn at the next tool boundary, else queue, else start a turn); emit `system/host_input_committed {inputId, outcome}` | `{outcome: "folded" \| "queued" \| "started" \| "already"}`; unknown → error `unknown_input` |
-| `host_input_discard` | `inputId` | delete the held record (fsync) | `{discarded: true}`, idempotent; already committed → error `committed` |
+| `host_input_hold` | `inputId` (the ledger `receiptId`), `epoch {incarnationId, leaseEpoch}`, `text`, `clientName` | refuse unless the epoch equals the admitted scope; write a held record stamped with that epoch (store-owned file, fsync, directory fsync); invisible to the model | `{held: true}`. The same id and digest → `{held: true, again: true}`, and the record's epoch is RE-STAMPED to this hold's epoch (fsync). The same id and another digest → error `conflict` |
+| `host_input_commit` | `inputId`, `epoch` (the epoch the host acked under) | only if the record is undecided AND stamped with exactly `epoch`: mark it committed (fsync); feed it into the existing host-input path (fold into the running turn at the next tool boundary, else queue, else start a turn); emit `system/host_input_committed {inputId, outcome}` | `{outcome: "folded" \| "queued" \| "started" \| "already"}`; unknown id → error `unknown_input`; epoch mismatch → error `stale_epoch`, changing nothing |
+| `host_input_discard` | `inputId`, `epoch` (the epoch the verdict is about) | only if the record is undecided AND stamped with exactly `epoch`: delete it (fsync) | `{discarded: true}`. Idempotent for an unknown id. Epoch mismatch → `{discarded: false, reason: "restamped"}`, changing nothing. Already committed → error `committed` |
 | (runtime → host) `system/held_inputs` | `[{inputId, digest}]` | emitted once after `init`, before the first input is read; nothing held starts a turn until the host decides | none |
 
 `checkLinuxHostQueryFrame` admits exactly these three new control subtypes (closed payloads, size-bounded to the 64 KiB message cap plus the envelope). The host `Query` gains `holdInput`, `commitInput` and `discardInput`, and `clearQueuedInput` never touches held records.
@@ -577,17 +582,31 @@ This is the coordinator's requirement, and it is the ledger's own rule ("the ack
 For a Cowork recipient, the delivery becomes this:
 
 ```
-drainOnce(recipient):
-  offer   = inbox.offer(recipient, driver.coworkEpoch)                 // unchanged
-  held    = await driver.holdInput(offer.receiptId, epoch, text)       // guest: durable, invisible to the model
+drainOnce(recipient):                                                   // ONE chain per recipient (#83 already serializes it)
+  epoch = driver.coworkEpoch                                            // published only AFTER reconciliation (rule 1)
+  // Rule 2: finish what is already delivered before offering anything new (keeps FIFO, repairs lost commit answers).
+  for r in inbox.deliveredUnconfirmed(recipient), oldest first:
+      outcome = await driver.commitInput(r.receiptId, r.ackedEpoch)     // idempotent; "already" counts as confirmed
+                on throw: return                                        // nothing newer is offered past an unconfirmed commit
+      inbox.confirmCommitted(r.receiptId)
+  offer   = inbox.offer(recipient, epoch)                               // unchanged
+  held    = await driver.holdInput(offer.receiptId, epoch, text)        // guest: durable, invisible to the model
             on throw: return (stays owed; an unacked offer is offered again)
-  try     inbox.ack({receiptId, recipient, epoch})                     // THE commit point
-  catch   → await driver.discardInput(receiptId)  (best effort)        // authority_denied, stale_acknowledgment, any throw
+  try     inbox.ack({receiptId, recipient, epoch})                      // THE commit point
+  catch   → await driver.discardInput(receiptId, epoch)  (best effort)  // authority_denied, stale_acknowledgment, any throw
             return
-  outcome = await driver.commitInput(receiptId)                         // guest: into the turn
-            on throw: leave it; the runtime-start reconciliation commits it
-  record outcome for the sender's answer
+  outcome = await driver.commitInput(receiptId, epoch)                  // guest: into the turn
+            on throw: return  (rule 2 retries it on the next drain; the runtime-start reconciliation also commits it)
+  inbox.confirmCommitted(receiptId); record outcome for the sender's answer
 ```
+
+Two ordering rules make this exact. Without them, a late verdict for an old epoch could delete a record that a newer hold had just reused.
+
+1. **Reconciliation before any offer.** When a Cowork runtime starts (a new incarnation, or a relaunch), its driver does NOT publish `coworkEpoch` until the reconciliation has finished. That is: every id in `system/held_inputs` has been answered with `commit` or `discard`, carrying the epoch it was held under. Reconciliation runs inside the same per-recipient drain chain. While `coworkEpoch` is unpublished, `drainOnce` returns at once (#83 already treats an absent epoch as "stays owed"), so no new offer and no new hold can overtake a verdict.
+2. **Delivered first, and epoch-exact verdicts.**
+   - Every `commit` and `discard` names the epoch it is about. The guest acts only on a record stamped with exactly that epoch.
+   - A re-hold of the same id under a newer epoch re-stamps it. A stale discard then answers `restamped` and deletes nothing, so a message held again under the new epoch cannot be lost to an old verdict.
+   - Each drain first re-sends `commit` for this recipient's delivered-but-unconfirmed receipts, oldest first, and offers nothing newer until they are confirmed. A commit answer lost in transport while the runtime keeps running is therefore repaired at the next drain. The sender's `delivered` stays true, and the recipient's input order is the ledger's order.
 
 Why each window is safe:
 
@@ -596,17 +615,20 @@ Why each window is safe:
 | Hold fails or the guest dies before holding | accepted (offered) | nothing, or an undecided hold | re-offer under the live epoch, or reconciliation discards (not delivered) | 0 so far |
 | Authority revoked between hold and ack | blocked (authority); ack answered `authority_denied` | undecided hold | `discard` now, or reconciliation discards later; on re-grant: re-offer, hold (`again`), ack, commit | **exactly 1, after the re-grant** |
 | Ack throws for a store fault (store contract: "if it throws, none of it is visible") | accepted | undecided hold | discard; the next drain re-offers | 0, then 1 |
-| Host dies after ack, before commit | **delivered** (body deleted) | undecided hold (the body is in the guest's held record) | at the next runtime start, `system/held_inputs` → the host looks it up → delivered → commit | exactly 1 |
-| Commit sent and the guest dies before recording it | delivered | undecided hold (the commit fsync did not happen) | reconciliation → commit | exactly 1 (the commit is idempotent by id) |
-| Guest restarts with a new epoch while holding | accepted | undecided hold from the old epoch | reconciliation discards (not delivered); re-offer under the new epoch | exactly 1 |
+| Host dies after ack, before commit | **delivered** (body deleted), not commit-confirmed | undecided hold (the body is in the guest's held record) | the next drain re-commits it first (rule 2); if the runtime restarted, reconciliation commits it before any offer (rule 1) | exactly 1 |
+| Commit answer lost in transport; the runtime keeps running | delivered, not commit-confirmed | committed, or undecided if the request never arrived | the next drain re-sends `commit` with the acked epoch: `already`, or the commit happens now (rule 2) | exactly 1 (the commit is idempotent by id) |
+| Commit sent and the guest dies before recording it | delivered, not commit-confirmed | undecided hold (the commit fsync did not happen) | reconciliation → commit, before the new epoch is published | exactly 1 |
+| Guest restarts with a new epoch while holding; the ledger record is still accepted | accepted | undecided hold stamped with the old epoch | reconciliation discards it (old epoch), and only then is the new epoch published; re-offer, hold, ack and commit under the new epoch | exactly 1 |
+| A stale discard (old epoch) arrives after a re-hold under the new epoch | accepted (offered under the new epoch) | undecided hold, re-stamped to the new epoch | the discard answers `restamped` and deletes nothing; ack and commit proceed under the new epoch | exactly 1 |
 
-Two ledger additions make the reconciliation decidable (NEEDS FROM PEER-INBOX):
+Three ledger additions make the reconciliation decidable and rule 2 possible (NEEDS FROM PEER-INBOX):
 
-1. `verdict(receiptId, recipientSessionId): "commit" | "discard"`:
-   - `delivered` → commit;
-   - `accepted`, `blocked` or `refused` → discard;
-   - an unknown id → discard, but only if the record cannot have been delivered (2).
-2. A delivered receipt is not pruned until the guest confirmed the commit. This is a `commitConfirmed` marker set from the commit answer or the reconciliation, and `prune` skips delivered records without it. Otherwise a long-stopped recipient (beyond the one-day / 100-record retention) would hold an input whose verdict the host can no longer give.
+1. `verdict(receiptId, recipientSessionId): {action: "commit", ackedEpoch} | {action: "discard"}`:
+   - `delivered` → commit, with the epoch it was acked under (already recorded as the offer epoch);
+   - `accepted`, `blocked` or `refused` → discard.
+   - An unknown id cannot be delivered-but-unconfirmed, because of item 2, so it is a discard.
+2. `confirmCommitted(receiptId)` sets a `commitConfirmed` mark. `prune` skips delivered records without it. Otherwise a long-stopped recipient (beyond the one-day / 100-record retention) would hold an input whose verdict the host can no longer give.
+3. `deliveredUnconfirmed(recipientSessionId)`: delivered receipts without the mark, in ledger order. This is rule 2's work list.
 
 The body still lives on the host only while owed (the owner's 2026-10-16 decision). After the ack the only copy is the guest's held record. That record is durable on `data.ext4` by the hold's fsync, and covered by the Class A final flush on an orderly stop.
 
@@ -718,8 +740,8 @@ None of these is run by an agent. Each needs a review of the exact commit, the o
 | Contract owner (S7B) | Text version 3 for SH1 and CR1: L1 `shares` (rights allowed on `volumes` and `shares`), the refusal `shares_rejected`; L2 kinds 6 `shares` and 7 `share_revoke`; worker argv `--shares-v1`; bootstrap `shares`, `shares_mounted`, faults `share_inventory`, `share_mount_failed`, `resume_store_missing`, `fresh_store_not_empty`; conversation `runtime.continuation` and `runtime.endedGuestBoots`; vectors. Optionally `runtime_relaunch` (CR6). |
 | S7B (`native/host.ts`) | Send `shares` before `begin` and `share_revoke` on revocation; wait for `shares_mounted` before `conversations`; durably record `(workspaceId, incarnationId, leaseEpoch, guestBootId)` at `hello` and keep it after release; build `endedGuestBoots` from released incarnations; read the data volume UUID from the bootstrap receipt. |
 | DOOR (`cowork/schema.ts`, migration 18 or later) | Table definitions, sent here rather than built: `cowork_conversations` gains `runtime_uid`, `tool_uid` (allocated once at bind, distinct per workspace), `store_state` (`none`, `created`, `lost`), `store_volume_uuid`, `last_incarnation_id`. A new `cowork_guest_boots(workspace_id, incarnation_id, lease_epoch, guest_boot_id, recorded_at, ended_proof NULL, ended_at NULL)`. The `peer_inbox` record gains `commit_confirmed_at NULL`. |
-| DOOR (`repository.ts`, driver) | Call `acknowledgeSource(epoch, sourceId, revision, "ready")` at `shares_mounted`. The resume branch of `ensure` (3.2). `hostMessaging` bound to `handlerFor(binding.sessionId, incarnation)`. `holdInput`, `commitInput`, `discardInput` on the Cowork `MessagingDriverHandle`. The projector consumes `system/host_input_committed`. `COWORK_GUEST_PROFILE_TOOLS` grows to GM1's set once the pinned image carries it. |
-| PEER-INBOX (`agent/session-messaging.ts`, `cowork/peer-inbox.ts`) | `drainOnce` for a Cowork recipient: `offer`, `holdInput`, `ack`, then `commitInput`, or `discardInput` on any ack throw (4.5); never `deliverInto` for a Cowork driver. A ledger `verdict(receiptId, recipient)`. The `commitConfirmed` mark, and `prune` skipping delivered records without it. Reconciliation at runtime start. |
+| DOOR (`repository.ts`, driver) | Call `acknowledgeSource(epoch, sourceId, revision, "ready")` at `shares_mounted`. The resume branch of `ensure` (3.2). `hostMessaging` bound to `handlerFor(binding.sessionId, incarnation)`. `holdInput`, `commitInput(id, epoch)` and `discardInput(id, epoch)` on the Cowork `MessagingDriverHandle`. `coworkEpoch` published only after the runtime-start reconciliation has finished (4.5, rule 1). The projector consumes `system/host_input_committed`. `COWORK_GUEST_PROFILE_TOOLS` grows to GM1's set once the pinned image carries it. |
+| PEER-INBOX (`agent/session-messaging.ts`, `cowork/peer-inbox.ts`) | `drainOnce` for a Cowork recipient (4.5): first re-commit `deliveredUnconfirmed` oldest first; then `offer`, `holdInput`, `ack`, then `commitInput(receiptId, epoch)`, or `discardInput(receiptId, epoch)` on any ack throw. Never `deliverInto` for a Cowork driver. Ledger `verdict`, `confirmCommitted`, `deliveredUnconfirmed`, and `prune` skipping delivered records without the mark. Reconciliation at runtime start runs in the same per-recipient chain, before the driver publishes `coworkEpoch` (rule 1). |
 | APPROVALS (`runtime-sdk/cowork-approval.ts`, `approval-bridge.ts`) | Class rows: ListAgents and Task\* read-only (allow everywhere); SendMessage as `coordination` (allow everywhere). The AskUserQuestion bridge on the Cowork route with `mode: "cowork"` cards. |
 | N2 guest lane | SH6, CR3, CR5; an image re-pin to the SDK commit carrying CR2, GM1 and GM2; the optional `CONFIG_FUSE_DAX=n` fragment at the next kernel pin. |
 | libkrun lane | SH2 as patches 0024 onward in the vendored queue, with the independent review the README requires. |
