@@ -1,10 +1,10 @@
-# N2 guest: the agent-SDK pin moves to 5183d3a9, and the one run says WHY it is red
+# N2 guest: the agent-SDK pin moves to b1ea8cf3, and the one run says WHY it is red
 
 Source and tests only. Nothing was built or run; the one-run image build (`cowork-guest-image-build.yml`) is still unarmed.
 
-## 1. The pin: 7e71929d to 5183d3a9 (through 9c980c32)
+## 1. The pin: 7e71929d to b1ea8cf3 (through 9c980c32 and 5183d3a9)
 
-`5183d3a96b2780ab3672fa11a24dd02a80ae8968` is agent-sdk main after #39 (the supervisor host-query map: plan stays plan, every other policy runs as default, bypass is never produced; the validator is narrowed to default/plan with the fixed pair). It follows #35 (the supervisor that accepts the guided runtime block, sha a26dacd8) and #38 (the #37 holder patch). The supervisor is now `f1e124fe21dac2d3a7c94a4e7923ac2ff92e9afd9600a0dd24d7f01c8fa9e8ab`; the first bump of this PR went to 9c980c32 and the re-bump to 5183d3a9 was the same command.
+`b1ea8cf33b3cec7aad12a51dcef4f58905176de2` is agent-sdk main after #40 (the guest host-query interrupt admits `{}` and `{scope:"turn"}`, and host-query roots are admitted only from their own guest source). It follows #39 (5183d3a9: the supervisor host-query map, plan stays plan and every other policy runs as default, bypass never produced, validator default/plan with the fixed pair), #35 (the supervisor that accepts the guided runtime block, sha a26dacd8) and #38 (the #37 holder patch). The supervisor is now `26d1ac8937d9c2e98bf050433a309ca9e7bc74b0668d960a42dce81c7b30c5bb` (f1e124fe after #39). The bump went 9c980c32, 5183d3a9, then b1ea8cf3, each the same command.
 
 `bump_sdk_commit.py NEW --supervisor-sha256 SHA --sdk CHECKOUT` now moves every constant derived from the SDK commit, all or nothing:
 
@@ -22,11 +22,11 @@ The supervisor digest the reviewer passes must equal what the script reads from 
 
 ### Tests that assumed the old supervisor beyond the pin
 
-* `test_image.py`: the supervisor-shape assertion now quotes the new `runtime_artifacts` line (`{'artifacts','reader'}` for the guided profile, `{'artifacts'}` otherwise); the hard-coded commit is gone (the fixture's commit is the single source). Both checkout-gated tests pass against 5183d3a9 (and did against 9c980c32).
+* `test_image.py`: the supervisor-shape assertion now quotes the new `runtime_artifacts` line (`{'artifacts','reader'}` for the guided profile, `{'artifacts'}` otherwise); the hard-coded commit is gone (the fixture's commit is the single source). Both checkout-gated tests pass against b1ea8cf3 (and did against 5183d3a9 and 9c980c32).
 * `sdk-guided-config.json` (PID 1 against the supervisor's reader and guidance checks) was derived at 68e57c64; the reader and guidance checks in the supervisor are unchanged by #39, so the drift test passes against the new checkout unchanged. Moving the vector to a later commit is optional.
 * The guided-off chain is unchanged: the image's profile gate still refuses profile 2, the image still has no guided source, and the Cowork door still refuses. The new supervisor does accept the guided shape, so the profile gate and the missing reader launcher are now the load-bearing parts.
 
-**agent-sdk #39 is in this pin.** The image carries the supervisor host-query map (plan to plan, everything else to default, bypass never produced). A later agent-sdk change (the interrupt scope and root `source` checks in the guest validator) may move the runtime digest; if it does, the re-bump is the same command with the new head and digest, then rerun `test_image.py` and `test_guided_config.py` with `WINTER_SDK_CHECKOUT` at the new head.
+**agent-sdk #39 and #40 are in this pin.** The image carries the supervisor host-query map (plan to plan, everything else to default, bypass never produced). The interrupt scope and root `source` checks of #40 are in. Any later agent-sdk change that moves the runtime digest needs a re-bump is the same command with the new head and digest, then rerun `test_image.py` and `test_guided_config.py` with `WINTER_SDK_CHECKOUT` at the new head.
 
 ## 2. The final check of the run now has distinct exit codes
 
@@ -45,4 +45,4 @@ The classifier is defensive: green needs `reproducible is True` for both artifac
 
 ## 3. Docs owed
 
-`docs/claude/cowork.md` and the ledgers: the image pin is agent-sdk 5183d3a9 (post-#39); the run's result codes (0 / 10 / 20 / 30) and that a first run after an SDK bump is expected to be 10.
+`docs/claude/cowork.md` and the ledgers: the image pin is agent-sdk b1ea8cf3 (post-#40); the run's result codes (0 / 10 / 20 / 30) and that a first run after an SDK bump is expected to be 10.
