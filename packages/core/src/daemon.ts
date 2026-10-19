@@ -374,7 +374,13 @@ export function pluginToolNameParts(fullName: string): { pluginId: string; name:
   return pluginId && name ? { pluginId, name } : undefined;
 }
 
-export async function startDaemon(opts: {
+/** A Cowork boot failure as one short, secret-free token for a log line (error code or class name, never a message or path). */
+function describeCoworkBootError(error: unknown): string {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" ? code : (error as Error | undefined)?.name ?? "error";
+}
+
+async function startDaemonInner(onEmbeddedHost: (host: { shutdown(budgetMs?: number): Promise<void> }) => void, opts: {
   /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
   coworkHost?: CoworkHostPorts;
   /** Isolated clock for host schedule metadata tests. */
@@ -568,7 +574,7 @@ export async function startDaemon(opts: {
       const coworkSource = check.pristine ? inspectCoworkSource(legacyHome) : undefined;
       if (coworkSource?.present) {
         console.error(coworkSource.kind === "uninspectable"
-          ? `migration: a legacy home was found at ${legacyHome}, but it could not be checked for Cowork storage (${coworkSource.detail}) — auto-migration skipped; repair or move aside the unreadable entry, then restart to migrate`
+          ? `migration: a legacy home was found at ${legacyHome}, but it could not be checked for Cowork storage (${coworkSource.detail}) — auto-migration skipped and nothing was copied or changed; fix the entry's permissions or restore it (do not delete it: the legacy home is the rollback source), then restart — the check is repeated on every start`
           : `migration: a legacy home was found at ${legacyHome}, but it holds Cowork storage (${coworkSource.detail}) — auto-migration skipped; Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`);
       } else if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
@@ -1635,6 +1641,7 @@ export async function startDaemon(opts: {
   // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
   // frames still pass through the session store and `runtime-state.db` on the way out).
   const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), home: winterHome, log: (line) => console.error(`runtime-sdk: ${line}`) });
+  onEmbeddedHost(embeddedSessions);
   // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
   // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
   {
@@ -3031,17 +3038,21 @@ export async function startDaemon(opts: {
   const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
   const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
   coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
-  coworkService?.schedules.recover();
-  coworkService?.schedules.tick();
+  // Boot steps are best effort: a throw here (a locked or damaged Cowork table) must neither abort startup nor, later, kill the process.
+  try { coworkService?.schedules.recover(); } catch (error) { console.error(`cowork: schedule recovery failed at boot (${describeCoworkBootError(error)}); continuing`); }
+  try { coworkService?.schedules.tick(); } catch (error) { console.error(`cowork: schedule tick failed at boot (${describeCoworkBootError(error)}); continuing`); }
   // Boot-time reconcile (D1): record-and-refuse. Without an environment this only reads the records; with one it runs the host's own
   // recovery, which releases nothing on weaker evidence than an orderly receipt, a changed host boot or an owner recover.
   if (coworkNative) {
-    const boot = await coworkNative.reconcileAtBoot();
-    const held = boot.reports.filter(report => report.ownerRetained).length;
-    if (held > 0) console.error(`cowork: ${held} native workspace(s) keep their disk owner after boot (${boot.source}); nothing was released without proof`);
+    try {
+      const boot = await coworkNative.reconcileAtBoot();
+      const held = boot.reports.filter(report => report.ownerRetained).length;
+      if (held > 0) console.error(`cowork: ${held} native workspace(s) keep their disk owner after boot (${boot.source}); nothing was released without proof`);
+    } catch (error) { console.error(`cowork: native boot reconcile failed (${describeCoworkBootError(error)}); ownership kept`); }
   }
   const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;
-  coworkEvents?.start();
+  // The outbox timer exists only when a Cowork host was injected (never in production) or events are still pending.
+  coworkEvents?.start({ keepAlive: opts.coworkHost !== undefined || opts.coworkNative?.environment !== undefined });
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
@@ -3314,6 +3325,9 @@ export async function startDaemon(opts: {
       // ended (then aborted) every tracked session, so an ordinary Worker has closed by now; this bounds
       // a straggler (`EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). Its iteration's tail writes the
       // generation's end into `runtime-state.db`, which is why this is not left to process exit.
+      // A daemon with no runtime SDK still built the embedded host, and the host's storage-policy consumer is process-global: its
+      // shutdown() unregisters it synchronously (nothing is live without a runtime), so call it here too and keep stop() synchronous.
+      if (runtimeSdk === undefined) void embeddedSessions.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {});
       const winterDone = runtimeSdk === undefined
         ? undefined
         : runtimeSdk.dispose()
@@ -3334,6 +3348,14 @@ export async function startDaemon(opts: {
       return settled === undefined ? closeRest() : settled.then(closeRest);
     },
   };
+}
+
+/** Starts the daemon. A start that THROWS after the embedded host registered its (process-global) storage-policy consumer would leave that
+ *  consumer behind with no handle to stop it, so the failure path shuts the host down. */
+export async function startDaemon(opts: Parameters<typeof startDaemonInner>[1] = {}): Promise<RunningDaemon> {
+  let embedded: { shutdown(budgetMs?: number): Promise<void> } | undefined;
+  try { return await startDaemonInner(host => { embedded = host; }, opts); }
+  catch (error) { void embedded?.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {}); throw error; }
 }
 
 // Direct execution: `bun run src/daemon.ts` (also the compiled binary's `daemon run` path).

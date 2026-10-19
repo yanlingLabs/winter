@@ -15,7 +15,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CC: clang
     steps:
@@ -34,7 +34,7 @@ jobs:
           python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact/kernel -p 'test_*.py' -v
   macos:
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

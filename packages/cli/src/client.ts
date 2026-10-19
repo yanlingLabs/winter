@@ -296,6 +296,12 @@ export class WinterClient {
     const r = this.validated(SessionCreateResult, await this.request(METHODS.sessionCreate, { scope, ...opts }), METHODS.sessionCreate);
     return { sessionId: r.sessionId, trusted: r.trusted };
   }
+  /** Session door D4b: `session.create {mode: "cowork", cowork}`. The daemon derives the cwd, policy and model from the
+   *  workspace; it refuses typed (`unsupported_topology` on every production daemon, which has no door). */
+  async createCoworkSession(scope: string, cowork: { workspaceId: string; requestId: string; location: { kind: "source"; sourceId: string; relativeCwd?: string } }): Promise<{ sessionId: string; trusted: boolean }> {
+    const r = this.validated(SessionCreateResult, await this.request(METHODS.sessionCreate, { scope, mode: "cowork", cowork }), METHODS.sessionCreate);
+    return { sessionId: r.sessionId, trusted: r.trusted };
+  }
   async trustDir(path: string): Promise<boolean> {
     return this.validated(TrustDirResult, await this.request(METHODS.trustDir, { path }), METHODS.trustDir).trusted;
   }

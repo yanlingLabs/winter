@@ -6,7 +6,7 @@
 import type { ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeKind } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
-import type { RunnableSessionMode } from "../sessions/session-mode";
+import type { DrivableSessionMode, RunnableSessionMode } from "../sessions/session-mode";
 
 export type { ProtocolSdkMessage };
 
@@ -96,7 +96,8 @@ export class ProjectorRefusedError extends Error {
 export interface ProjectorDeps {
   /** The WINTER session id every produced event is stamped with. */
   sessionId: string;
-  mode: SessionMode;
+  /** "cowork" only from the Cowork session driver; nothing here branches on it (a debug field). */
+  mode: DrivableSessionMode;
   /** The store's next sequence number. Called once per PERSISTED event; transients never consume one. */
   nextSeq: () => number;
   checkpoint: CheckpointStore;

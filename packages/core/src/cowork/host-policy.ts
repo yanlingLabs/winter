@@ -45,13 +45,19 @@
 //     by a read-only tool view and content-bound host write operation, not a path-hook convention alone"
 //     (docs/cowork-spec.md, shared instructions section) and "Tool code cannot edit ... protected shared
 //     instructions" (docs/cowork-spec.md, host authority section);
-//   - `/workspace/outputs/<session-id>` and `/workspace/.winter/scratch/<session-id>` are path classes `outputs`
-//     and `scratch`. DECISION: the policy table has no cell for either (its "ordinary workspace edits" are the
-//     admitted source and Project memory; the plan paragraph only says plan's tool execution "receives ...
-//     separately scoped disposable/planning scratch", a mount fact, not a verdict), so every tool class on them is
-//     denied as `path_unclassified` under every policy until the table gets explicit cells (the spec already describes both
-//     locations; what is missing is their approval cells). They exist as classes so a
-//     caller cannot satisfy the matrix by calling them `admitted`;
+//   - `/workspace/outputs/<session-id>` and `/workspace/.winter/scratch/<session-id>` are the path classes `outputs` and
+//     `scratch`, and mean the CONVERSATION'S OWN folder only (the caller narrows: another conversation's folder and the
+//     `/workspace/outputs` root are `outside`). Owner decision 2026-10-18, from docs/cowork-spec.md ("`outputs/<session-id>` is an
+//     optional destination for user-facing deliverables"; scratch is the "Persistent conversation TMPDIR", and the contracts call
+//     "Memory and scratch ... separately writable subtrees"): Read is Allow in every policy; Write and Edit follow the SAME row as an
+//     admitted root (plan Deny, ask Ask, accept-edits/auto/bypass Allow, dont-ask only if authorized), so plan x `.winter` scratch Write/Edit
+//     is a plain Deny. Plan's own writable scratch is the separate class `planScratch` below. Bash and Workflow are pathless and never
+//     take these classes (denied as `path_unclassified`);
+//   - `planScratch` is the epoch-scoped planning scratch OUTSIDE `.winter`, `/workspace/plan/<session-id>/<epoch>` (owner decision
+//     2026-10-19; contract: "Scope scratch by conversation and policy epoch so a later auto execution cannot execute files planted in a
+//     plan scratch directory"). It means the conversation's OWN id and its CURRENT epoch only (the caller narrows; the epoch is the
+//     bridge's port, never read from the path). Read is Allow in every policy; Write and Edit are `allow-in-plan-view` under plan (the
+//     gate stays `planViewInstalled`) and Deny under every other policy (`plan_scratch_only_in_plan`). Pathless tools never take it;
 //   - the Ask in the instruction column does not depend on `alreadyAuthorized`: no reusable approval token
 //     exists for it (`CoworkInstructions.updateAgent` binds each card to the exact copied content);
 //   - the required ceiling class per tool follows `confinedToolVisibility` (guest-runtime.ts): Read needs
@@ -67,8 +73,7 @@
 //                                                           disables Linux control-state confinement or grants access to the
 //                                                           Mac.", line 78)
 //   4. effective ceiling lacks the class              deny  ("Skip ordinary prompts within grants", line 72)
-//   5. outputs / scratch path class                 deny  (no table cell: DECISION above)
-//   6. the policy table above
+//   5. the policy table above, with outputs / scratch / planScratch as described above
 //
 // ── Wiring notes (for whoever wires this; none of it is done here) ───────────────────────────────────
 //   - Two sources of truth until wiring calls `coworkHostDecision`: `CoworkInstructions.agentScope` carries its own
@@ -100,20 +105,22 @@ export const COWORK_GUEST_TOOL_CLASSES: readonly CoworkGuestToolClass[] = Object
  * What a call targets, as the HOST classified it (never the guest):
  *  - `admitted`             an admitted source root or the Project memory directory;
  *  - `shared-instructions`  the shared workspace instruction file (`/workspace/.winter/WINTER.md`);
- *  - `outputs`              `/workspace/outputs/<session-id>` (no table cell: denied, see the header DECISION);
- *  - `scratch`              `/workspace/.winter/scratch/<session-id>` (no table cell: denied, see the header DECISION);
+ *  - `outputs`              the conversation's OWN `/workspace/outputs/<session-id>` (see the header);
+ *  - `scratch`              the conversation's OWN `/workspace/.winter/scratch/<session-id>` (see the header);
+ *  - `planScratch`          the conversation's OWN `/workspace/plan/<session-id>/<current epoch>` (see the header);
  *  - `protected`            run homes, SDK stores, another conversation's store, the protected `.winter` skeleton;
  *  - `outside`              anything not admitted;
  *  - `none`                 the call names no path (Bash, Workflow), or the host could not classify one.
  */
-export type CoworkPathClass = "admitted" | "shared-instructions" | "outputs" | "scratch" | "protected" | "outside" | "none";
-export const COWORK_PATH_CLASSES: readonly CoworkPathClass[] = Object.freeze(["admitted", "shared-instructions", "outputs", "scratch", "protected", "outside", "none"] as const);
+export type CoworkPathClass = "admitted" | "shared-instructions" | "outputs" | "scratch" | "planScratch" | "protected" | "outside" | "none";
+export const COWORK_PATH_CLASSES: readonly CoworkPathClass[] = Object.freeze(["admitted", "shared-instructions", "outputs", "scratch", "planScratch", "protected", "outside", "none"] as const);
 
 export type CoworkHostReason =
   | "policy_table"          // the spec table decided
   | "unknown_policy" | "unknown_tool_class" | "unknown_path_class"
   | "explicit_deny"         // a saved explicit deny applies
-  | "path_protected" | "path_outside" | "path_unclassified" // unclassified: `none` for a file tool, or `outputs`/`scratch` (no table cell)
+  | "plan_scratch_only_in_plan" // a write to the epoch-scoped plan scratch outside plan
+  | "path_protected" | "path_outside" | "path_unclassified" // unclassified: `none` for a file tool, or `outputs`/`scratch` for a pathless tool
   | "read_only_view"        // a tool aimed at the shared instruction file: only the host write operation may edit it
   | "path_class_mismatch"   // InstructionEdit for anything but the shared instruction file
   | "ceiling";              // the effective ceiling does not grant the class (or is malformed)
@@ -203,8 +210,6 @@ export function coworkHostDecision(input: CoworkHostDecisionInput): CoworkHostDe
   if (pathClass === "outside") return DENY("path_outside");
   // 4. The effective ceiling is the grant "within" which bypass skips prompts (line 72).
   if (!ceilingHas(input.ceiling, toolClass)) return DENY("ceiling");
-  // DECISION: no table cell exists for outputs or conversation scratch (see the header), so they are denied, never guessed.
-  if (pathClass === "outputs" || pathClass === "scratch") return DENY("path_unclassified");
   const row = TABLE[policy as ApprovalPolicy];
   switch (toolClass) {
     case "Read":
@@ -213,11 +218,13 @@ export function coworkHostDecision(input: CoworkHostDecisionInput): CoworkHostDe
       return decision("allow", "policy_table");
     case "Write": case "Edit":
       if (pathClass === "shared-instructions") return DENY("read_only_view");
-      if (pathClass !== "admitted") return DENY("path_unclassified");
+      if (pathClass === "planScratch") return policy === "plan" ? decision("allow-in-plan-view", "policy_table") : DENY("plan_scratch_only_in_plan");
+      if (pathClass !== "admitted" && pathClass !== "outputs" && pathClass !== "scratch") return DENY("path_unclassified");
       return fromCell(row.edit, input.alreadyAuthorized === true);
     case "Bash": case "Workflow":
       // A shell or workflow cannot be classified by one target path; the caller passes `none` (or `admitted`).
       if (pathClass === "shared-instructions") return DENY("read_only_view");
+      if (pathClass === "outputs" || pathClass === "scratch" || pathClass === "planScratch") return DENY("path_unclassified");
       return fromCell(toolClass === "Bash" ? row.bash : row.workflow, input.alreadyAuthorized === true);
     case "InstructionEdit":
       if (pathClass !== "shared-instructions") return DENY("path_class_mismatch");

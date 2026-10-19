@@ -45,6 +45,30 @@ export const CoworkSelection = z.object({ selectionId: Id, kind: z.enum(["folder
 const NewWorkspace = z.object({ requestId: Id, ownership: z.enum(["standalone", "project"]), title: Label, selections: z.array(CoworkSelection).min(1).max(100) }).strict();
 const NewProject = NewWorkspace.omit({ ownership: true });
 const WorkspaceId = z.object({ workspaceId: Id }).strict();
+
+// ---- Cowork session door (D1 spine; docs/research/2026-10-18-cowork-session-door-design.md section 7.1) ----
+// Types only: nothing produces or accepts these yet. `session.create {mode: "cowork"}` still answers
+// `unsupported_topology` for every role (no `CoworkSessionDoor` is constructed anywhere in production).
+
+/** Relative to the bound location, the guest's own rule (`relativeCoworkPath` in core's cowork/repository.ts):
+ *  no leading `/`, no `..` segment, no backslash or NUL. */
+export const CoworkRelativeCwd = z.string().min(1).max(4096)
+  .refine(value => !value.startsWith("/") && !/[\\\0]/.test(value) && !value.split("/").includes(".."), { message: "relative cwd" });
+/** Where a conversation works. `outputs` is the conversation's own outputs location: the first-session working root
+ *  (owner decision O1, 2026-10-18), because no source can honestly become ready in N2. `source` binds a ready source. */
+export const CoworkSessionLocation = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("source"), sourceId: Id, relativeCwd: CoworkRelativeCwd.optional() }).strict(),
+  z.object({ kind: z.literal("outputs") }).strict(),
+]);
+/** `session.create`'s Cowork binding. Present exactly when `mode` is `"cowork"`; the daemon derives the cwd, policy and
+ *  model itself, so a Cowork create may carry none of `cwd`, `approvalPolicy`, `model`, `effort` or `origin`. */
+export const CoworkSessionCreate = z.object({ workspaceId: Id, location: CoworkSessionLocation, requestId: Id }).strict();
+/** A Cowork row's safe workspace reference on `session.list`. No host path, source label or grant. */
+export const CoworkSessionRef = z.object({ workspaceId: Id, projectId: Id.nullable() }).strict();
+/** The Cowork facts `session_created` carries (durable, seq 1): the binding the conversation was created with. */
+export const CoworkSessionCreatedFacts = z.object({
+  workspaceId: Id, projectId: Id.nullable(), location: z.enum(["source", "outputs"]), sourceId: Id.nullable(), policyRevision: Revision,
+}).strict().refine(value => (value.location === "source") === (value.sourceId !== null), { message: "sourceId is present exactly for a source location" });
 const WorkspaceDetailPage = WorkspaceId.extend({ cursor: Id.optional(), limit: z.number().int().min(1).max(100).default(100), expectedRevision: Revision.optional() }).strict();
 const Mutation = WorkspaceId.extend({ requestId: Id, expectedRevision: Revision });
 const ProjectId = z.object({ projectId: Id }).strict();
@@ -58,7 +82,8 @@ export const CoworkPolicyValue = z.discriminatedUnion("detailState", [
   z.object({ detailState: z.literal("summary"), detailReason: z.literal("response_limit"), policySummary: CoworkPolicySummary, detailMethod: z.literal("workspace.policy.get") }).strict(),
 ]);
 export const CoworkPolicyReceipt = receipt(CoworkPolicyValue);
-export const CoworkCapabilities = z.object({ folderPreparation: z.boolean(), repositoryPreparation: z.literal(false), provisioning: z.literal(false), execution: z.literal(false) }).strict();
+/** Session door D4b: `provisioning` and `execution` are the ports the daemon actually has (both false on every production daemon), never a constant. */
+export const CoworkCapabilities = z.object({ folderPreparation: z.boolean(), repositoryPreparation: z.literal(false), provisioning: z.boolean(), execution: z.boolean() }).strict();
 export const CoworkPreparedFolder = z.object({ selectionId: Id, kind: z.literal("folder"), label: Label, access: z.enum(["read-only", "read-write"]), state: z.literal("prepared"), expiresAt: z.string() }).strict();
 export const CoworkScheduleDefinition = z.object({
   target: z.discriminatedUnion("kind", [z.object({ kind: z.literal("conversation"), sessionId: Id }).strict(), z.object({ kind: z.literal("project"), projectId: Id }).strict()]),

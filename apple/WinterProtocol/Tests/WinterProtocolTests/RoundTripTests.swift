@@ -151,10 +151,19 @@ final class RoundTripTests: XCTestCase {
         guard case .sessionCreated(let created) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url)) else { return XCTFail("wrong case") }
         XCTAssertEqual(created.mode, "cowork")
         XCTAssertNil(created.runtimeKind)
+        // Session door D1: the additive binding facts decode field for field (the null Project and source included)…
+        XCTAssertEqual(created.cowork, SessionEvent.CoworkSessionCreatedFacts(workspaceId: "w_one", projectId: nil, location: "outputs", sourceId: nil, policyRevision: 1))
 
         let reencoded = try JSONEncoder().encode(SessionEvent.sessionCreated(created))
         let object = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
         XCTAssertEqual(object?["mode"] as? String, "cowork")
+        // …and survive the re-encode rather than being dropped.
+        let cowork = object?["cowork"] as? [String: Any]
+        XCTAssertEqual(cowork?["workspaceId"] as? String, "w_one")
+        XCTAssertEqual(cowork?["location"] as? String, "outputs")
+        XCTAssertEqual(cowork?["policyRevision"] as? Int, 1)
+        XCTAssertTrue(cowork?["projectId"] is NSNull, "projectId is nullable, not optional: the key stays, as null")
+        XCTAssertTrue(cowork?["sourceId"] is NSNull, "sourceId is nullable, not optional: the key stays, as null")
         guard case .sessionCreated(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail("wrong case") }
         XCTAssertEqual(created, redecoded)
     }

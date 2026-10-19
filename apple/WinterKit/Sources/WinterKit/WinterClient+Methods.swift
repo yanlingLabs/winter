@@ -601,8 +601,14 @@ extension WinterClient {
     /// so a caller is told. Absence is "no override"; `null` is a value the schema refuses, which is
     /// why these ride `obj`'s nil-dropping like `cwd`/`mode` and never `?? .null` (the deliberate
     /// opposite of `setModel`/`setEffort`, where a literal null IS the clear).
+    ///
+    /// Cowork session door (D1 spine): `cowork` is the conversation's workspace binding
+    /// (`CoworkSessionCreate`, packages/protocol/src/cowork.ts), sent with `mode: "cowork"` and nothing the
+    /// daemon derives itself (no `cwd`, `approvalPolicy`, `model` or `effort`). The daemon still refuses every
+    /// Cowork create with `unsupported_topology`; this only lets a future caller send the shape the door reads.
     public func createSession(scope: String, cwd: String? = nil, approvalPolicy: String? = nil, mode: String? = nil,
-                              model: String? = nil, effort: String? = nil) async throws -> (sessionId: String, trusted: Bool) {
+                              model: String? = nil, effort: String? = nil,
+                              cowork: CoworkSessionBinding? = nil) async throws -> (sessionId: String, trusted: Bool) {
         let r = try await request("session.create", params: obj([
             "scope": .string(scope),
             "cwd": cwd.map { .string($0) },
@@ -610,6 +616,7 @@ extension WinterClient {
             "mode": mode.map { .string($0) },
             "model": model.map { .string($0) },
             "effort": effort.map { .string($0) },
+            "cowork": cowork.map { $0.json },
         ]))
         guard let id = r["sessionId"]?.stringValue, let trusted = r["trusted"]?.boolValue else {
             throw RpcError(code: -3, message: "invalid result from server for session.create")
@@ -2606,5 +2613,32 @@ extension WinterClient {
                              families: families,
                              providers: providers,
                              models: models)
+    }
+}
+
+/// `session.create`'s Cowork binding (`CoworkSessionCreate` in packages/protocol/src/cowork.ts): the workspace,
+/// where the conversation works, and an idempotency id. `outputs` is the conversation's own outputs location (the
+/// first-session working root); `source` binds a ready workspace source, optionally at a relative directory.
+public struct CoworkSessionBinding: Sendable, Equatable {
+    public enum Location: Sendable, Equatable {
+        case source(sourceId: String, relativeCwd: String? = nil)
+        case outputs
+    }
+    public let workspaceId: String
+    public let location: Location
+    public let requestId: String
+    public init(workspaceId: String, location: Location, requestId: String) {
+        self.workspaceId = workspaceId; self.location = location; self.requestId = requestId
+    }
+    var json: JSONValue {
+        let location: JSONValue
+        switch self.location {
+        case .outputs: location = .object(["kind": .string("outputs")])
+        case let .source(sourceId, relativeCwd):
+            var fields: [String: JSONValue] = ["kind": .string("source"), "sourceId": .string(sourceId)]
+            if let relativeCwd { fields["relativeCwd"] = .string(relativeCwd) }
+            location = .object(fields)
+        }
+        return .object(["workspaceId": .string(workspaceId), "location": location, "requestId": .string(requestId)])
     }
 }

@@ -29,6 +29,14 @@ export interface ConversationBinding {
   sessionId: string; workspaceId: string; projectId: string | null; sourceId: string; relativeCwd: string;
   policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
 }
+/** Session door D3b: a conversation bound to its OWN outputs location (O1): no source, cwd `/workspace/outputs/<sessionId>`. */
+export interface CoworkOutputsConversation {
+  location: "outputs"; sessionId: string; workspaceId: string; projectId: string | null;
+  policy: ApprovalPolicy; restrictions: CapabilityCeiling; revision: number; state: "active" | "archived" | "deleted"; createdAt: string;
+}
+/** Session door D3b: either location, discriminated. Read only through `CoworkRepository.conversation` on the DOOR's run path;
+ *  every other reader keeps `binding()`, which refuses an outputs row (`unsupported_topology`). */
+export type CoworkConversation = (ConversationBinding & { location: "source" }) | CoworkOutputsConversation;
 export interface MutationContext {
   /** Host-derived RPC name for principal/method idempotency scope. */ method?: string;
   /** Pure host effect admission after content-bound replay and revision checks, before writes.
@@ -47,7 +55,11 @@ export type OperationStatus = "pending" | "applied" | "blocked" | "failed" | "su
 /** Superseded receipts never become applied later, including multi-source creation receipts. */
 export const isTerminalOperationStatus = (status: OperationStatus): boolean => ["applied", "failed", "superseded"].includes(status);
 export interface GuestEpoch { workspaceId: string; incarnationId: string; leaseEpoch: number; configRevision: number; grantRevision: number }
-export type CoworkErrorCode = "not_found" | "revision_conflict" | "stale_cursor" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment" | "unsupported_topology" | "response_too_large" | "file_missing" | "file_unavailable" | "stale_file" | "file_incomplete" | "schedule_limit" | "schedule_budget_exhausted";
+export type CoworkErrorCode = "not_found" | "revision_conflict" | "stale_cursor" | "request_conflict" | "last_source_required" | "source_unavailable" | "authority_denied" | "invalid_request" | "recovery_required" | "stale_acknowledgment" | "unsupported_topology" | "response_too_large" | "file_missing" | "file_unavailable" | "stale_file" | "file_incomplete" | "schedule_limit" | "schedule_budget_exhausted"
+  // Session door (D1 spine): no provider route was injected (production), refused before any row or boot; the running
+  // guest already serves its one host-query conversation (N2); the conversation's incarnation ended and cold resume
+  // (D10) is not built. Each is a refusal, never a queue or a silent fresh start.
+  | "provider_unavailable" | "conversation_limit" | "cold_resume_unavailable";
 export class CoworkError extends Error {
   constructor(readonly code: CoworkErrorCode, readonly currentRevision?: number) { super(code); this.name = "CoworkError"; }
 }

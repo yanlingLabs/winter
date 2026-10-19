@@ -10,7 +10,7 @@ STARTUP_NAMES={'sbin/init','usr/sbin/init','linuxrc','etc/inittab','init.sh','rd
 RUNTIME_ARTIFACT_PATHS={'launcher':'/opt/winter/helpers/linux-runtime-compartment','executable':'/opt/winter/runtime/winter-host-query','ownerLibrary':'/opt/winter/helpers/linux-session-owner.so'}
 RUNTIME_ARTIFACTS_PATH='opt/winter/etc/supervisor-runtime-artifacts.json'
 MAX_RUNTIME_ARTIFACT_BYTES=128*1024*1024     # the supervisor's `pinned_artifact` bound
-MAX_RUNTIME_ARTIFACTS_JSON_BYTES=4096        # WG_CONFIG_RUNTIME_ARTIFACTS_MAX in the guest's trusted_config.h
+MAX_RUNTIME_ARTIFACTS_JSON_BYTES=4096        # the image's host-query object is held to this; the guest's own bound is WG_CONFIG_RUNTIME_MAX (16384, trusted_config.h)
 
 def _no_duplicates(pairs):
     keys=[key for key,_ in pairs]

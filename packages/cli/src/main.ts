@@ -58,7 +58,7 @@ import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
 import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
-import { COWORK_CLI_USAGE, resolveCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage, type CoworkCliRoute } from "./cowork-cli";
+import { COWORK_CLI_USAGE, resolveCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage, parseCoworkSessionArgs, runCoworkSessionRoute, type CoworkCliRoute, type CoworkSessionCliRoute } from "./cowork-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
@@ -2429,6 +2429,19 @@ if (import.meta.main) {
   }
   case "workspace":
   case "project": {
+    if (cmdKey === "workspace" && process.argv[3] === "session") {
+      // Session door D4b: a Cowork conversation through session.create/session.list on the local harness connection.
+      let sessionRoute: CoworkSessionCliRoute;
+      try { sessionRoute = parseCoworkSessionArgs(process.argv.slice(3)); }
+      catch (error) { console.error(coworkErrorMessage(error)); console.error(COWORK_CLI_USAGE); process.exit(1); }
+      let client: WinterClient | undefined;
+      try {
+        client = await connect(`cli-${cmdKey}`);
+        for (const line of await runCoworkSessionRoute(client, sessionRoute)) console.log(line);
+      } catch (error) { console.error(coworkErrorMessage(error)); process.exitCode = 1; }
+      finally { client?.close(); }
+      break;
+    }
     let route: CoworkCliRoute | { help: true };
     try { route = await resolveCoworkArgs(cmdKey, process.argv.slice(3)); }
     catch (error) { console.error(coworkErrorMessage(error)); console.error(COWORK_CLI_USAGE); process.exit(1); }
@@ -3158,7 +3171,6 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  workspace --help | project --help                Cowork workspace metadata administration (creation unavailable)
   login [--api-key] [--anthropic-key] [--anthropic-console] [--exa-key]
   logout [--anthropic] [--anthropic-console] [--openai]           (bare: signs out of ChatGPT/Codex)
   credentials [list] | credentials set <providerId> | credentials remove <providerId>   every provider's API key (masked prompt)

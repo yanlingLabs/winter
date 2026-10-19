@@ -722,7 +722,10 @@ struct ShellRootView: View {
                 ShellLandingView(destination: nav.destination)
             }
         case .mode(.cowork):
-            if let model = host?.coworkWorkspaces {
+            // Unavailable while `SessionMode.cowork.isAvailable` is false: the placeholder even with a management connection
+            // (`SessionMode.coworkDetail`), so no folder picker is reachable from the "Soon" row.
+            if SessionMode.coworkDetail(available: SessionMode.cowork.isAvailable, hasWorkspaceModel: host?.coworkWorkspaces != nil) == .workspace,
+               let model = host?.coworkWorkspaces {
                 CoworkWorkspaceView(model: model)
             } else {
                 CoworkPlaceholder()
