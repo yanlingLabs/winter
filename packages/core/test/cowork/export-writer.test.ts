@@ -20,10 +20,12 @@ const record = (f: Fixture, id: string) => f.db.db.query<Record<string, any>, [s
 test("an export is a folder bundle holding exactly the whitelist: the recorded manifest bytes, an integrity index, both images and the three shared roots", async () => {
   const f = await fixture();
   const result = await f.exportOnce("my-backup");
+  const opaqueId = Object.keys(f.bound.get(result.exportId)!.outputIds)[0]!;
+  expect(opaqueId).toMatch(/^s[0-9a-f]{16}$/);
   expect(result.path).toBe(join(f.destination, "my-backup.winterworkspace"));
   expect(result.disclosure).toBe(EXPORT_PLAINTEXT_DISCLOSURE);
   expect(bundleFiles(result.path)).toEqual(["data.ext4", "env.ext4", "integrity.json", "manifest.json",
-    "shared/instructions/WINTER.md", "shared/memory/deep/er/fact.txt", "shared/memory/notes.md", "shared/outputs/s1/empty.txt", "shared/outputs/s1/report.pdf"]);
+    "shared/instructions/WINTER.md", "shared/memory/deep/er/fact.txt", "shared/memory/notes.md", `shared/outputs/${opaqueId}/empty.txt`, `shared/outputs/${opaqueId}/report.pdf`]);
   // The manifest is the RECORD, byte for byte: validateImport digests it against the row.
   const row = record(f, result.exportId);
   expect(readFileSync(join(result.path, "manifest.json"), "utf8")).toBe(row.manifest_json);
@@ -35,7 +37,7 @@ test("an export is a folder bundle holding exactly the whitelist: the recorded m
   expect(verified.integrity.exportId).toBe(result.exportId);
   expect(verified.files.size).toBe(8);
   // The database-side binding holds the digest of integrity.json and the only copy of the session ids.
-  expect(verified.integrityDigest).toBe(result.contentDigest); expect(f.bound.get(result.exportId)).toEqual({ contentDigest: result.contentDigest, outputIds: { s1: "session-one" } });
+  expect(verified.integrityDigest).toBe(result.contentDigest); expect(f.bound.get(result.exportId)).toEqual({ contentDigest: result.contentDigest, outputIds: { [opaqueId]: "session-one" } });
   for (const file of bundleFiles(result.path)) expect(file).not.toContain("session-one");
   expect(readFileSync(join(result.path, "integrity.json"), "utf8")).not.toContain("session-one");
   verified.close();
@@ -46,6 +48,19 @@ test("an export is a folder bundle holding exactly the whitelist: the recorded m
   for (const image of BUNDLE_IMAGE_FILES) { expect(listXattrs(join(result.path, image))).toEqual([]); const fd = openSync(join(result.path, image), "r"); try { expect(hasExtendedAttributes(fd)).toBe(false); } finally { closeSync(fd); } }
   expect(listXattrs(f.image("data"))).toContain(BACKUP_XATTR); // the source keeps its own
   expect(readdirSync(f.destination)).toEqual(["my-backup.winterworkspace"]);
+});
+
+test("opaque output ids are random per export: never derived from the session id, never repeated across exports", async () => {
+  const f = await fixture();
+  const first = await f.exportOnce("one"), second = await f.exportOnce("two");
+  const a = Object.keys(f.bound.get(first.exportId)!.outputIds)[0]!, b = Object.keys(f.bound.get(second.exportId)!.outputIds)[0]!;
+  expect(a).toMatch(/^s[0-9a-f]{16}$/); expect(b).toMatch(/^s[0-9a-f]{16}$/); expect(a).not.toBe(b);
+  // A scripted mint shows the mapper redraws a collision and refuses a malformed id.
+  const { OutputIdMapper } = await import("../../src/cowork/export-bundle");
+  const draws = ["s0000000000000000", "s0000000000000000", "short", "s1111111111111111"]; let n = 0;
+  const mapper = new OutputIdMapper(() => draws[n++]!);
+  expect(mapper.toBundle("one/x")).toBe("s0000000000000000/x"); expect(mapper.toBundle("two/y")).toBe("s1111111111111111/y"); expect(mapper.toBundle("one/z")).toBe("s0000000000000000/z");
+  expect(mapper.reverse).toEqual({ s0000000000000000: "one", s1111111111111111: "two" }); expect(mapper.toBundle("loose.txt")).toBe("f/loose.txt");
 });
 
 test("images are cloned where the volume allows and sparse-copied otherwise, with identical bytes and no xattrs", async () => {
@@ -278,9 +293,10 @@ test("images are read only through the pinned-descriptor door, one open per imag
 test("the walk and the index reject what a bundle may not hold", async () => {
   const f = await fixture();
   const result = await f.exportOnce("walk");
+  const oid = Object.keys(f.bound.get(result.exportId)!.outputIds)[0]!;
   const sharedFd = openDirectoryNoFollow(join(result.path, "shared"));
   try {
-    expect(walkRegularFilesAt(sharedFd, DEFAULT_BUNDLE_LIMITS).map(file => file.path)).toEqual(["instructions/WINTER.md", "memory/deep/er/fact.txt", "memory/notes.md", "outputs/s1/empty.txt", "outputs/s1/report.pdf"]);
+    expect(walkRegularFilesAt(sharedFd, DEFAULT_BUNDLE_LIMITS).map(file => file.path)).toEqual(["instructions/WINTER.md", "memory/deep/er/fact.txt", "memory/notes.md", `outputs/${oid}/empty.txt`, `outputs/${oid}/report.pdf`]);
     expect(() => walkRegularFilesAt(sharedFd, { ...DEFAULT_BUNDLE_LIMITS, files: 2 })).toThrow(CoworkLifecycleError);
     expect(() => walkRegularFilesAt(sharedFd, { ...DEFAULT_BUNDLE_LIMITS, depth: 1 })).toThrow(CoworkLifecycleError);
     expect(() => walkRegularFilesAt(sharedFd, { ...DEFAULT_BUNDLE_LIMITS, sharedBytes: 10 })).toThrow(CoworkLifecycleError);

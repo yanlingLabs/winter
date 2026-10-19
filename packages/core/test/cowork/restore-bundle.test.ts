@@ -324,14 +324,15 @@ test("authority and the recorded sizes are judged before a byte of any image is 
 
 test("opaque output ids map back to the real session folders, and an id the record does not hold is refused", async () => {
   const f = await fixture(); const exported = await f.exportOnce("backup");
-  expect(f.bound.get(exported.exportId)!.outputIds).toEqual({ s1: "session-one" });
+  const opaqueId = Object.keys(f.bound.get(exported.exportId)!.outputIds)[0]!;
+  expect(f.bound.get(exported.exportId)!.outputIds).toEqual({ [opaqueId]: "session-one" });
   f.setAnswer(true);
   f.bound.set(exported.exportId, { ...f.bound.get(exported.exportId)!, outputIds: {} });
   await failsWith(f.restorer().restore(restoreInput(exported.path)), "bundle_invalid");
-  f.bound.set(exported.exportId, { ...f.bound.get(exported.exportId)!, outputIds: { s1: "session-one" } });
+  f.bound.set(exported.exportId, { ...f.bound.get(exported.exportId)!, outputIds: { [opaqueId]: "session-one" } });
   const result = await f.restorer().restore(restoreInput(exported.path));
   expect(existsSync(join(f.dir, result.sharedName!, "outputs/session-one/report.pdf"))).toBe(true);
-  expect(existsSync(join(f.dir, result.sharedName!, "outputs/s1"))).toBe(false);
+  expect(existsSync(join(f.dir, result.sharedName!, `outputs/${opaqueId}`))).toBe(false);
 });
 
 test("a staging folder created by someone else in the moment before ours is never removed by us", async () => {

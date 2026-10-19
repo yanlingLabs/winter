@@ -19,7 +19,7 @@
  * must be the recorded, completed generation of a workspace this home owns) for authority, and on this index for integrity.
  * Binding the index needs one column (`content_digest`) and a migration; that is listed in the lane report, not done here.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
@@ -60,17 +60,23 @@ export const serializeIntegrity = (integrity: BundleIntegrity): string => canoni
 
 /**
  * `shared/outputs/<sessionId>/…` would put session ids into a bundle whose manifest deliberately omits them. The bundle names
- * each session folder `s<n>` (in sorted order) and each file directly under `outputs/` `f/<name>`; the reverse table is kept in
- * the `cowork_exports` row next to the content digest, never in the bundle.
+ * each session folder `s<16 random hex>` (minted per export, never derived from the session id, never reused) and each file
+ * directly under `outputs/` `f/<name>`; the reverse table is kept in the database next to the content digest, never in the bundle.
  */
+export const OPAQUE_OUTPUT_ID = /^s[0-9a-f]{16}$/;
 export class OutputIdMapper {
   private readonly table = new Map<string, string>();
+  private readonly used = new Set<string>();
+  constructor(private readonly mint: () => string = () => `s${randomBytes(8).toString("hex")}`) {}
   /** `rest` is the path under `outputs/`. */
   toBundle(rest: string): string {
     const parts = rest.split("/");
     if (parts.length === 1) return `f/${parts[0]}`;
     let id = this.table.get(parts[0]!);
-    if (id === undefined) { id = `s${this.table.size + 1}`; this.table.set(parts[0]!, id); }
+    if (id === undefined) {
+      do { id = this.mint(); } while (this.used.has(id) || !OPAQUE_OUTPUT_ID.test(id));
+      this.used.add(id); this.table.set(parts[0]!, id);
+    }
     return [id, ...parts.slice(1)].join("/");
   }
   /** opaque id -> session id. */
@@ -80,7 +86,7 @@ export class OutputIdMapper {
 export function outputFromBundle(rest: string, reverse: Readonly<Record<string, string>>): string | null {
   const parts = rest.split("/");
   if (parts[0] === "f") return parts.length === 2 ? parts[1]! : null;
-  const session = /^s[1-9][0-9]*$/.test(parts[0]!) ? Object.hasOwn(reverse, parts[0]!) ? reverse[parts[0]!] : undefined : undefined;
+  const session = OPAQUE_OUTPUT_ID.test(parts[0]!) && Object.hasOwn(reverse, parts[0]!) ? reverse[parts[0]!] : undefined;
   return session === undefined || parts.length < 2 ? null : [session, ...parts.slice(1)].join("/");
 }
 

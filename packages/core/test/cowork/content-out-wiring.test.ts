@@ -72,19 +72,20 @@ const rel = (file: string) => relative(packages, file);
 // ------------------------------------------------------------------------------------------------ the lane
 
 const PUBLISH = ["cowork/git/publish-service.ts", "cowork/git/publish-intake.ts"].map(abs);
-const EXPORT = ["cowork/export-writer.ts", "cowork/restore-bundle.ts", "cowork/export-bundle.ts", "cowork/export-io.ts"].map(abs);
+const EXPORT = ["cowork/export-writer.ts", "cowork/restore-bundle.ts", "cowork/export-bundle.ts", "cowork/export-io.ts", "cowork/export-binding.ts"].map(abs);
 const NEW_MODULES = [...PUBLISH, ...EXPORT];
 const ALLOWED_IMPORTERS: Record<string, string[]> = {
   [abs("cowork/git/publish-service.ts")]: [],
   [abs("cowork/git/publish-intake.ts")]: [abs("cowork/git/publish-service.ts")],
-  [abs("cowork/export-writer.ts")]: [abs("cowork/restore-bundle.ts")], // restore names the binding TYPE only
+  [abs("cowork/export-writer.ts")]: [abs("cowork/restore-bundle.ts"), abs("cowork/export-binding.ts")], // both name the binding TYPE only
   [abs("cowork/restore-bundle.ts")]: [],
-  [abs("cowork/export-bundle.ts")]: [abs("cowork/export-writer.ts"), abs("cowork/restore-bundle.ts")],
+  [abs("cowork/export-bundle.ts")]: [abs("cowork/export-writer.ts"), abs("cowork/restore-bundle.ts"), abs("cowork/export-binding.ts")],
+  [abs("cowork/export-binding.ts")]: [], // no production code builds it until migration 20 exists
   [abs("cowork/export-io.ts")]: [abs("cowork/export-bundle.ts"), abs("cowork/export-writer.ts"), abs("cowork/restore-bundle.ts")],
 };
 const LANE_SYMBOLS = ["createCoworkPublishService", "CoworkPublishPorts", "PublishBundlePort", "pullPublishBundle", "publishBundlePath", "CoworkWorkspaceExporter", "createCoworkWorkspaceRestorer",
   "CoworkExportImageDoor", "CoworkExportContentBinding", "CoworkRestoreApproval", "CoworkRestoreIdentityPort", "inspectBundle", "verifyBundle", "hashBundleFiles", "walkRegularFilesAt", "openRegularAt",
-  "renameDirect", "copyImageFile", "copyFdHashed", "stripExtendedAttributes", "hasWritableAcl", "listDirectoryAt", "openDirectoryNoFollow", "OutputIdMapper"];
+  "renameDirect", "copyImageFile", "copyFdHashed", "stripExtendedAttributes", "hasWritableAcl", "listDirectoryAt", "openDirectoryNoFollow", "OutputIdMapper", "SqliteExportContentBinding", "OPAQUE_OUTPUT_ID"];
 const GIT_DIR = abs("cowork/git") + "/";
 /** The exact import edges inside cowork/git today. Adding a new one (a new wire into the broker, the journal, ...) fails here. */
 const GIT_EDGES = [
