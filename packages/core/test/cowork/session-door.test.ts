@@ -16,7 +16,8 @@ import { COWORK_SCHEDULE_CALLER, coworkScheduleDispatchView, createCoworkSession
 import type { CoworkApprovalPort, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkSessionCreateInput } from "../../src/cowork/session-ports";
 import { CoworkError, type CoworkErrorCode } from "../../src/cowork/types";
 import { ProjectionCheckpoints } from "../../src/runtime-state/checkpoints";
-import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { downgradeCoworkRuntimeStateToV7, downgradeRuntimeStateToV6, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { COWORK_TABLES } from "../../src/cowork/schema";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 import { FIXTURE_MODEL, standinRoute } from "./session-door-fixture";
@@ -33,7 +34,7 @@ const NATIVE: CoworkGuestStarter = { start: () => { throw new Error("create must
 const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["guest-compartment"], runtimeCapability: { protocolVersion: 1, capabilities: [], supportsConfinedGuestExecution: true } };
 const APPROVALS: CoworkApprovalPort = { canUseToolFor: () => { throw new Error("create must not build a bridge"); } };
 
-function world(opts: { ownership?: "standalone" | "project"; production?: boolean; principal?: (connection: CoworkConnection) => CoworkPrincipal | undefined; schedules?: CoworkScheduleDispatchView; sources?: number } = {}) {
+function world(opts: { ownership?: "standalone" | "project"; production?: boolean; ports?: Partial<Pick<CoworkSessionDoorDeps, "route" | "native" | "offer" | "approvals">>; principal?: (connection: CoworkConnection) => CoworkPrincipal | undefined; schedules?: CoworkScheduleDispatchView; sources?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), "winter-door-d4-")), storeHome = mkdtempSync(join(tmpdir(), "winter-door-d4-store-"));
   const db: RuntimeStateDb = openRuntimeStateDb(home), records = new CoworkRepository(db), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const made = records.create({ principalId: "fixture", requestId: "create" }, { ownership: opts.ownership ?? "project", title: "fixture", defaultPolicy: "ask", ceiling: CEILING, sources: Array.from({ length: opts.sources ?? 1 }, () => FOLDER) });
@@ -41,7 +42,7 @@ function world(opts: { ownership?: "standalone" | "project"; production?: boolea
   const principalCalls: CoworkConnection[] = [];
   const deps: CoworkSessionDoorDeps = {
     records, authority, store, hub, checkpoints: new ProjectionCheckpoints(db),
-    ...(opts.production ? {} : { route: standinRoute(), native: NATIVE, offer: OFFER, approvals: APPROVALS }),
+    ...(opts.production ? {} : opts.ports ?? { route: standinRoute(), native: NATIVE, offer: OFFER, approvals: APPROVALS }),
     principal: connection => { principalCalls.push(connection); return (opts.principal ?? (() => LOCAL))(connection); },
     ...(opts.schedules ? { schedules: opts.schedules } : {}),
   };
@@ -71,6 +72,14 @@ test("production shape: with no route (or any port) create refuses provider_unav
   await refused(w.door.create(w.input(), HARNESS), "provider_unavailable");
   expect([w.reservations(), w.bindings(), w.rows().length]).toEqual([0, 0, 0]);
   expect(w.principalCalls).toEqual([]);
+  // A route alone is not enough: every port the driver needs must exist, or nothing is created.
+  for (const missing of ["native", "offer", "approvals"] as const) {
+    const ports = { route: standinRoute(), native: NATIVE, offer: OFFER, approvals: APPROVALS };
+    delete (ports as Partial<typeof ports>)[missing];
+    const partial = world({ ports });
+    await refused(partial.door.create(partial.input(), HARNESS), "provider_unavailable");
+    expect([missing, partial.reservations(), partial.rows().length]).toEqual([missing, 0, 0]);
+  }
 });
 
 test("a Project create, before any boot: the store row, its session_created facts, the binding and the reservation all name one fresh s_ id", async () => {
@@ -165,6 +174,39 @@ function requestDigestFor(w: ReturnType<typeof world>): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+test("a found binding that does not match the request is request_conflict, never answered as this request's conversation", async () => {
+  const w = world({ sources: 1 });
+  const reserved = w.records.reserveConversation({ principalId: "local", workspaceId: w.workspaceId, requestId: "req", scope: "t", requestDigest: requestDigestFor(w) }, id => w.store.hasSession(id));
+  w.store.ensureCoworkSession("t", reserved.sessionId, { approvalPolicy: "ask", model: FIXTURE_MODEL, cowork: { workspaceId: w.workspaceId, projectId: null, location: "source", sourceId: w.sourceId, policyRevision: 1 } }, id => w.records.isReservedSession(id));
+  w.records.bindConversation({ principalId: "elsewhere", requestId: "other", expectedRevision: w.records.get(w.workspaceId).configRevision }, w.workspaceId, { sessionId: reserved.sessionId, sourceId: w.sourceId, relativeCwd: "docs" }, w.store);
+  await refused(w.door.create(w.input(), HARNESS), "request_conflict");
+  expect(w.reservation(reserved.sessionId)).toMatchObject({ state: "pending" });
+});
+
+test("the repository's reservation rules, directly: a taken id is never reserved, a deleted workspace reserves nothing, and only a bound session completes or a pending one withdraws", () => {
+  // A Project id the session store already holds is skipped for the next one the minter gives.
+  const home = mkdtempSync(join(tmpdir(), "winter-door-d4-repo-")), db = openRuntimeStateDb(home);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  const ids = ["s_aaaaaaaaaaaa", "s_bbbbbbbbbbbb", "s_cccccccccccc"];
+  const records = new CoworkRepository(db, undefined, undefined, () => ids.shift()!);
+  const project = records.create({ principalId: "fixture", requestId: "p" }, { ownership: "project", title: "p", ceiling: CEILING, sources: [FOLDER] });
+  const digest = "c".repeat(64);
+  expect(records.reserveConversation({ principalId: "u", workspaceId: project.workspaceId, requestId: "r1", scope: "t", requestDigest: digest }, id => id === "s_aaaaaaaaaaaa").sessionId).toBe("s_bbbbbbbbbbbb");
+  // A standalone workspace whose one id a non-Cowork store row holds is never adopted.
+  const standalone = records.create({ principalId: "fixture", requestId: "s" }, { ownership: "standalone", title: "s", ceiling: CEILING, sources: [FOLDER] });
+  expect(standalone.value.workspace.ownerId).toBe("s_cccccccccccc");
+  expect(() => records.reserveConversation({ principalId: "u", workspaceId: standalone.workspaceId, requestId: "r2", scope: "t", requestDigest: digest }, id => id === "s_cccccccccccc")).toThrow("authority_denied");
+  // A deleted workspace reserves nothing.
+  db.db.run("UPDATE cowork_workspaces SET state='deleted' WHERE workspace_id=?", [standalone.workspaceId]);
+  expect(() => records.reserveConversation({ principalId: "u", workspaceId: standalone.workspaceId, requestId: "r3", scope: "t", requestDigest: digest }, () => false)).toThrow("authority_denied");
+  // Complete needs the binding; withdraw refuses a bound session.
+  expect(() => records.completeReservation("s_bbbbbbbbbbbb")).toThrow("authority_denied");
+  records.bindConversation({ principalId: "u", requestId: "b", expectedRevision: records.get(project.workspaceId).configRevision }, project.workspaceId, { sessionId: "s_bbbbbbbbbbbb", sourceId: project.value.sources[0]!.sourceId }, { hasCommittedSession: () => true });
+  expect(() => records.withdrawReservation("s_bbbbbbbbbbbb")).toThrow("authority_denied");
+  records.completeReservation("s_bbbbbbbbbbbb");
+  expect(db.db.query("SELECT state FROM cowork_session_reservations WHERE session_id='s_bbbbbbbbbbbb'").get()).toEqual({ state: "bound" });
+});
+
 test("a definite bind refusal leaves nothing behind: no binding, no store row, no reservation; the request can start over", async () => {
   const w = world({ sources: 2 });
   const second = w.made.value.sources[1]!.sourceId;
@@ -193,8 +235,11 @@ test("only a local user over a harness or admin connection creates; remote, plug
     [{ role: "remote", connectionId: 2 }, LOCAL], [{ role: "plugin", connectionId: 3 }, LOCAL], [HARNESS, undefined],
     [HARNESS, { kind: "paired-user", id: "phone", workspaceIds: new Set<string>(), repositoryAuthorities: new Set<string>() }],
     [HARNESS, { kind: "runtime", id: "rt", sessionId: "s", workspaceId: "w" }],
-  ] as [CoworkConnection, CoworkPrincipal | undefined][]) {
-    const w = world({ principal: () => principal });
+    [HARNESS, "paired-in-scope"],
+  ] as [CoworkConnection, CoworkPrincipal | undefined | "paired-in-scope"][]) {
+    let workspaceId = "";
+    const w = world({ principal: () => principal === "paired-in-scope" ? { kind: "paired-user", id: "phone", workspaceIds: new Set([workspaceId]), repositoryAuthorities: new Set<string>() } : principal });
+    workspaceId = w.workspaceId; // a paired user WITH this workspace in scope is still not a local user
     await refused(w.door.create(w.input(), caller), "authority_denied");
     expect([w.reservations(), w.bindings(), w.rows().length]).toEqual([0, 0, 0]);
   }
@@ -257,6 +302,7 @@ test("the schedule caller's scope: only its own reference, a dispatching occurre
   s.w.db.db.run("UPDATE cowork_schedule_occurrences SET state='dispatching' WHERE occurrence_id=? AND claim_token=?", [row.occurrenceId, token]);
   for (const [over, what] of [
     [{ requestId: "plain-request" }, "a non-schedule request id"],
+    [{ requestId: row.occurrenceId }, "the occurrence id without its schedule: prefix"],
     [{ requestId: "schedule:occurrence-unknown" }, "another occurrence"],
     [{ location: { kind: "source", sourceId: s.w.sourceId, relativeCwd: "docs" } }, "a cwd below the root"],
     [{ location: { kind: "source", sourceId: "source-other" } }, "another source"],
@@ -274,6 +320,12 @@ test("a conversation-target schedule never creates through the schedule caller; 
   const s = await scheduled({ target: "conversation" }), row = s.occurrence();
   s.w.db.db.run("UPDATE cowork_schedule_occurrences SET state='dispatching' WHERE occurrence_id=?", [row.occurrenceId]);
   await refused(s.w.door.create(s.w.input({ requestId: `schedule:${row.occurrenceId}` }), COWORK_SCHEDULE_CALLER), "authority_denied");
+  // A view that (wrongly) reports a Project dispatch on a standalone workspace still cannot create there.
+  let liarSource = "";
+  const liar = world({ ownership: "standalone", schedules: { dispatching: () => ({ sourceId: liarSource, target: "project" as const }) } });
+  liarSource = liar.sourceId;
+  await refused(liar.door.create(liar.input({ requestId: "schedule:occurrence-x", location: { kind: "source", sourceId: liar.sourceId } }), COWORK_SCHEDULE_CALLER), "authority_denied");
+  expect(liar.reservations()).toBe(0);
   const bare = world();
   await refused(bare.door.create(bare.input({ requestId: "schedule:occurrence-x" }), COWORK_SCHEDULE_CALLER), "authority_denied");
   expect([bare.reservations(), bare.principalCalls]).toEqual([0, []]);
@@ -306,6 +358,45 @@ test("the store: createSession still refuses cowork; ensureCoworkSession admits 
   expect(w.store.hasSession(sessionId)).toBe(true);
 });
 
+// ------------------------------------------------------------------------------------------------ migration 19
+test("migration 19: the reservation table is Cowork authority with its constraints; populated, it refuses both downgrades and survives them", () => {
+  expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(19);
+  expect(COWORK_TABLES).toContain("cowork_session_reservations");
+  expect(COWORK_TABLES.indexOf("cowork_session_reservations")).toBeLessThan(COWORK_TABLES.indexOf("cowork_workspaces")); // drop order: child first
+  const w = world(), insert = (sessionId: string, requestId: string, digest = "a".repeat(64), state = "pending") =>
+    w.db.db.run("INSERT INTO cowork_session_reservations VALUES(?,?,?,?,?,'t',?,0)", ["p", w.workspaceId, requestId, digest, sessionId, state]);
+  insert("s_0123456789ab", "one");
+  for (const [sessionId, requestId, digest, state, what] of [
+    ["s_0123456789ab", "two", "a".repeat(64), "pending", "a second reservation of one session id"],
+    ["s_ffffffffffff", "one", "a".repeat(64), "pending", "a second reservation of one request"],
+    ["session_x", "three", "a".repeat(64), "pending", "an id outside the store's shape"],
+    ["s_0123456789AB", "four", "a".repeat(64), "pending", "an uppercase id"],
+    ["s_0123456789abc", "five", "a".repeat(64), "pending", "a long id"],
+    ["s_aaaaaaaaaaaa", "six", "short", "pending", "a short digest"],
+    ["s_bbbbbbbbbbbb", "seven", "a".repeat(64), "done", "an unknown state"],
+  ]) expect([what, (() => { try { insert(sessionId!, requestId!, digest, state); return "inserted"; } catch { return "refused"; } })()]).toEqual([what, "refused"]);
+  expect(() => w.db.db.run("INSERT INTO cowork_session_reservations VALUES('p','w-missing','r','" + "a".repeat(64) + "','s_cccccccccccc','t','pending',0)")).toThrow();
+});
+
+test("migration 19 downgrades: an empty table rolls back with the rest; one reservation refuses both and survives", () => {
+  const empty = mkdtempSync(join(tmpdir(), "winter-door-d4-v19-")), populated = mkdtempSync(join(tmpdir(), "winter-door-d4-v19-"));
+  cleanups.push(() => { rmSync(empty, { recursive: true, force: true }); rmSync(populated, { recursive: true, force: true }); });
+  openRuntimeStateDb(empty).close();
+  expect(downgradeCoworkRuntimeStateToV7(empty)).toEqual({ from: 19, to: 7 });
+  let db = openRuntimeStateDb(empty); expect(db.schemaVersion()).toBe(19); db.close();
+  // One reservation and nothing else (foreign keys off for the fixture row): it alone must refuse the rollback.
+  db = openRuntimeStateDb(populated);
+  db.db.run("PRAGMA foreign_keys=OFF");
+  db.db.run("INSERT INTO cowork_session_reservations VALUES('p','w-gone','r',?, 's_dddddddddddd','t','pending',0)", ["b".repeat(64)]);
+  for (const table of COWORK_TABLES) if (table !== "cowork_session_reservations") expect([table, (db.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n]).toEqual([table, 0]);
+  db.close();
+  expect(() => downgradeCoworkRuntimeStateToV7(populated)).toThrow("Cowork authority");
+  expect(() => downgradeRuntimeStateToV6(populated)).toThrow("Cowork authority");
+  db = openRuntimeStateDb(populated);
+  expect((db.db.query("SELECT COUNT(*) AS n FROM cowork_session_reservations").get() as { n: number }).n).toBe(1);
+  db.close();
+});
+
 // ------------------------------------------------------------------------------------------------ pins
 const PACKAGES = join(import.meta.dir, "..", "..", "..");
 const sourcesUnder = (dir: string): string[] => readdirSync(dir, { recursive: true }).map(String).map(name => join(dir, name)).filter(path => /\.(ts|tsx|js|mjs)$/.test(path) && statSync(path).isFile());
@@ -327,4 +418,8 @@ test("pins: the door module alone calls the reservation and Cowork-row writers a
   const door = code(join(PACKAGES, "core", "src", "cowork", "session-door.ts"));
   expect(door).toMatch(/caller === COWORK_SCHEDULE_CALLER \? scheduleAuthority\(input\) : userAuthority\(input, caller\)/);
   expect(door).not.toMatch(/caller\.role === "host-schedule"|role === COWORK_SCHEDULE_CALLER\.role/);
+  // A wire caller is always a fresh object literal the server builds per request, so it can never BE the schedule caller.
+  const server = code(join(PACKAGES, "core", "src", "ipc", "server.ts"));
+  const calls = [...server.matchAll(/door\.create\(\{[\s\S]*?\},\s*(\{[^}]*\})\);/g)].map(match => match[1]);
+  expect(calls).toEqual(['{ role: socket.data.authedRole ?? "unknown", connectionId: socket.data.connId }']);
 });

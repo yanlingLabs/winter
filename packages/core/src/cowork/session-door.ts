@@ -25,8 +25,8 @@ import { CoworkError } from "./types";
  *   4. the binding, created or found (`CoworkRepository.bindConversation`); then the reservation is marked bound.
  * A crash between any two steps leaves a state the next attempt of the same request resumes from, so a retry never mints a
  * second conversation. A DEFINITE bind refusal (nothing bound) withdraws the store row and then the reservation, so the
- * request starts over cleanly. The body runs synchronously after the route check: two concurrent creates in this process
- * cannot interleave, so a race resolves to one conversation.
+ * request starts over cleanly. A race on one request resolves to one conversation: the body runs synchronously (no await,
+ * so two creates in this process do not interleave), and even interleaved each step finds what the other wrote.
  */
 
 /**
@@ -155,7 +155,7 @@ export function createCoworkSessionDoor(deps: CoworkSessionDoorDeps): CoworkSess
   };
 
   return {
-    // Synchronous after its first line: no await, so no interleaving with another create in this process.
+    // Synchronous: no await, so no interleaving with another create in this process.
     create: async (input, caller) => create(input, caller),
     drivers,
   };
