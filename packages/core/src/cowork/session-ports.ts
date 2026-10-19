@@ -163,9 +163,16 @@ export type CoworkGuestStopOutcome =
   | { readonly released: true; readonly evidence: "orderly-receipt" | "new-boot" | "owner-recover" }
   | { readonly released: false; readonly reason: string };
 
+/** One folder share the guest reports mounted (#92 section 2.5, `shares_mounted`): the source it backs, at the revision the
+ *  host's `shares` records were prepared from. Host-mapped from the share tag; never a guest-supplied id. */
+export interface CoworkMountedShare { readonly sourceId: string; readonly revision: number }
 /** What a start is handed: the incarnation's conversation set, asked once at `mounted`. */
 export interface CoworkGuestStartRequest {
   conversations(context: CoworkGuestConversationContext): CoworkGuestConversationSet | null;
+  /** #92 N2: at the guest's `shares_mounted` (contract text version 3), BEFORE `conversations`. Each mounted folder source
+   *  becomes honestly `ready` for THIS incarnation (`acknowledgeSource`). Throws typed to fault the boot. No native host
+   *  calls it before the v3 contract exists (S7B), so today it is never invoked. */
+  sharesMounted?(context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]): void;
 }
 /** The runtime class (2) for one conversation. Today the native host drops runtime frames ("no consumer in this slice");
  *  S7B adds this link. */
