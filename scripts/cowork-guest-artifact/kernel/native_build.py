@@ -139,11 +139,11 @@ def check_inputs(downloads):
     check_pinned_file(HERE / PINS["fragment"]["file"], PINS["fragment"]["sha256"])
 
 
-def verify_signatures(downloads, kernel_tar):
-    """The kernel signature is over the DECOMPRESSED tar; the compiler's is over the archive as downloaded."""
+def verify_signatures(downloads, kernel_tar, toolchain_tar):
+    """Both signatures are over the DECOMPRESSED tar (kernel.org signs the .tar, not the .tar.xz; run 39323466135 showed the xz stream does not verify)."""
     downloads = Path(downloads)
     gpg_verify(downloads / ARCHIVES["kernel"][1], kernel_tar, downloads / ARCHIVES["kernel"][2], {PINS["kernel"]["signerFingerprint"]})
-    gpg_verify(downloads / ARCHIVES["toolchain"][1], downloads / ARCHIVES["toolchain"][0], downloads / ARCHIVES["toolchain"][2],
+    gpg_verify(downloads / ARCHIVES["toolchain"][1], toolchain_tar, downloads / ARCHIVES["toolchain"][2],
                {PINS["toolchain"]["signerFingerprint"], PINS["toolchain"]["primaryFingerprint"]})
 
 
@@ -163,16 +163,18 @@ def build(downloads, work, out):
     check_inputs(downloads)
     work.mkdir(parents=True)
     out.mkdir(parents=True)
-    tar = work / "linux-6.18.35.tar"
-    with open(tar, "wb") as handle:
-        subprocess.run(["xz", "-dc", str(downloads / ARCHIVES["kernel"][0])], check=True, stdout=handle)
-    verify_signatures(downloads, tar)
+    tar, llvm_tar = work / "linux-6.18.35.tar", work / "llvm-20.1.8-aarch64.tar"
+    for target, key in ((tar, "kernel"), (llvm_tar, "toolchain")):
+        with open(target, "wb") as handle:
+            subprocess.run(["xz", "-dc", str(downloads / ARCHIVES[key][0])], check=True, stdout=handle)
+    verify_signatures(downloads, tar, llvm_tar)
     source_root, llvm_root, output = work / "src", work / "llvm", work / "output"
     for folder in (source_root, llvm_root, output):
         folder.mkdir()
     subprocess.run(["tar", "-xf", str(tar), "-C", str(source_root)], check=True)
     tar.unlink()
-    subprocess.run(["tar", "-xJf", str(downloads / ARCHIVES["toolchain"][0]), "-C", str(llvm_root)], check=True)
+    subprocess.run(["tar", "-xf", str(llvm_tar), "-C", str(llvm_root)], check=True)
+    llvm_tar.unlink()
     source = source_root / "linux-6.18.35"
     llvm_bin = llvm_root / "llvm-20.1.8-aarch64" / "bin"
     if not source.is_dir() or not (llvm_bin / "clang").is_file():
