@@ -210,3 +210,92 @@ test("pins: no src module supplies a host's provisioning or execution port (the 
   // The approvals adapter is defined in the door module and called by no src module (only a door composition will).
   expect(naming(/(?<!function )\bcoworkApprovalPort\(/)).toEqual([]);
 });
+
+// ------------------------------------------------------------------------------------------------ D4c: provision after COMMIT
+function provisioned(answer: (call: number) => Promise<{ status: "applied" | "failed"; reason?: string }>) {
+  const calls: { workspaceId: string; operationId: string; committed: boolean }[] = [];
+  let svc: CoworkWorkspaceService | undefined, records: CoworkRepository | undefined;
+  const provisioning: CoworkProvisioningPort = {
+    available: () => true, admit: () => {},
+    provision: async (workspaceId, operationId) => {
+      // Called after COMMIT: the operation is already durable and readable outside any transaction.
+      calls.push({ workspaceId, operationId, committed: !records!.rs.db.inTransaction && records!.operation(workspaceId, operationId).status === "pending" });
+      return answer(calls.length);
+    },
+  };
+  const made = service({ provisioning });
+  svc = made.svc; records = made.records;
+  const status = (workspaceId: string, operationId: string) => records!.operation(workspaceId, operationId).status;
+  return { svc, records, calls, status };
+}
+const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+
+test("D4c: a creation with S7B's port runs provision once after COMMIT; `applied` leaves the operation pending for the guest's acknowledgment", async () => {
+  const p = provisioned(async () => ({ status: "applied" }));
+  const receipt = create(p.svc, "one");
+  await settle();
+  expect(p.calls).toEqual([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId, committed: true }]);
+  expect(p.status(receipt.workspaceId, receipt.operationId)).toBe("pending");
+});
+
+test("D4c: `failed` concludes the creation's operation failed, terminal and announced; the port's reason text is never kept", async () => {
+  const p = provisioned(async () => ({ status: "failed", reason: "secret-detail-from-port" }));
+  const receipt = create(p.svc, "one");
+  await settle();
+  expect(p.records.operation(receipt.workspaceId, receipt.operationId)).toMatchObject({ status: "failed", terminal: true });
+  const outbox = p.records.rs.db.query("SELECT kind, payload_json FROM cowork_outbox WHERE operation_id=? AND kind='workspace_operation_changed'").all(receipt.operationId) as { payload_json: string }[];
+  expect(outbox.map(row => JSON.parse(row.payload_json))).toEqual([{ operationId: receipt.operationId, status: "failed", terminal: true }]);
+  const dump = JSON.stringify(p.records.rs.db.query("SELECT * FROM cowork_operations").all()) + JSON.stringify(p.records.rs.db.query("SELECT * FROM cowork_outbox").all());
+  expect(dump.includes("secret-detail")).toBe(false);
+  // Concluded: a replay of the same create does not drive it again.
+  create(p.svc, "one"); await settle();
+  expect(p.calls.length).toBe(1);
+});
+
+test("D4c: a throw or a malformed answer is uncertain (pending); resumeProvisioning and a replay drive it again, one drive at a time", async () => {
+  let release!: () => void;
+  const answers: (() => Promise<{ status: "applied" | "failed" }>)[] = [
+    async () => { throw new Error("transport reset"); },
+    async () => ({ status: "weird" as never }),
+    () => new Promise(resolve => { release = () => resolve({ status: "applied" }); }),
+  ];
+  const p = provisioned(async call => answers[call - 1]!());
+  const receipt = create(p.svc, "one");
+  await settle();
+  expect(p.status(receipt.workspaceId, receipt.operationId)).toBe("pending");
+  await p.svc.resumeProvisioning();
+  expect([p.calls.length, p.status(receipt.workspaceId, receipt.operationId)]).toEqual([2, "pending"]);
+  // A third drive hangs; a replay and a resume during it join it instead of starting another.
+  const resumed = p.svc.resumeProvisioning();
+  await settle();
+  create(p.svc, "one");
+  void p.svc.resumeProvisioning();
+  await settle();
+  expect(p.calls.length).toBe(3);
+  release(); await resumed;
+  expect(p.status(receipt.workspaceId, receipt.operationId)).toBe("pending");
+});
+
+test("D4c: without the port nothing is provisioned and resumeProvisioning does nothing (every production host)", async () => {
+  const { svc, records } = service();
+  await svc.resumeProvisioning();
+  expect(records.pendingCreations()).toEqual([]);
+  const ported = service({ provisioning: { available: () => true, admit: () => {}, provision: async () => ({ status: "applied" }) } });
+  const receipt = create(ported.svc, "x");
+  expect(ported.records.pendingCreations()).toEqual([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId }]);
+});
+
+test("D4c: a replay alone re-drives an uncertain creation; a concluded one leaves the pending list; only a creation can fail this way", async () => {
+  let first = true;
+  const p = provisioned(async () => { if (first) { first = false; throw new Error("uncertain"); } return { status: "failed" }; });
+  const receipt = create(p.svc, "one");
+  await settle();
+  expect(p.records.pendingCreations()).toEqual([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId }]);
+  create(p.svc, "one"); await settle();
+  expect(p.calls.length).toBe(2);
+  expect(p.status(receipt.workspaceId, receipt.operationId)).toBe("failed");
+  expect(p.records.pendingCreations()).toEqual([]);
+  // A non-creation operation (a title update) is never concluded by a provisioning answer.
+  const update = p.svc.call(HARNESS, "workspace.update", { workspaceId: receipt.workspaceId, requestId: "rename", expectedRevision: 1, title: "renamed" });
+  expect(() => p.records.failCreationProvisioning(receipt.workspaceId, update.operationId)).toThrow("not_found");
+});

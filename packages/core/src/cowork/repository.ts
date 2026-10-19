@@ -181,9 +181,26 @@ export class CoworkRepository {
     if (!row) throw new CoworkError("not_found");
     return { operationId, status: row.status, terminal: isTerminalOperationStatus(row.status), receipt: JSON.parse(row.result_json) };
   }
-  private concludeOperation(workspaceId: string, operationId: string, status: "applied" | "superseded", supersededBy?: string): void {
+  private concludeOperation(workspaceId: string, operationId: string, status: "applied" | "superseded" | "failed", supersededBy?: string): void {
     const changed = this.run("UPDATE cowork_operations SET status=?,updated_at=? WHERE workspace_id=? AND operation_id=? AND status='pending'", status, this.now(), workspaceId, operationId);
     if (changed.changes) this.publish(workspaceId, operationId, "workspace_operation_changed", { operationId, status, terminal: true, ...(supersededBy ? { supersededBy } : {}) });
+  }
+  /** Session door D4c: workspace and Project creations whose operation is still pending, i.e. the ones whose post-COMMIT
+   *  provisioning may never have run or finished (a crash between the commit and `provision`). Oldest first, bounded. */
+  pendingCreations(limit = 1000): { workspaceId: string; operationId: string }[] {
+    return this.all("SELECT workspace_id, operation_id FROM cowork_operations WHERE status='pending' AND method IN ('workspace.create','project.create') AND workspace_id IS NOT NULL ORDER BY created_at, operation_id LIMIT ?", Math.max(1, Math.min(10_000, Math.floor(limit))))
+      .map(row => ({ workspaceId: row.workspace_id, operationId: row.operation_id }));
+  }
+  /** Session door D4c: the provisioning port answered `failed` for a creation: its operation concludes `failed` (terminal),
+   *  durably, with a `workspace_operation_changed`. Only a pending creation operation; idempotent. The port's reason text is
+   *  never kept. */
+  failCreationProvisioning(workspaceId: string, operationId: string): void {
+    durableCoworkTransaction(this.rs, () => {
+      const row = this.one("SELECT method, status FROM cowork_operations WHERE workspace_id=? AND operation_id=?", id(workspaceId), id(operationId));
+      if (!row || !["workspace.create", "project.create"].includes(row.method)) throw new CoworkError("not_found");
+      if (row.status !== "pending") return;
+      this.concludeOperation(workspaceId, operationId, "failed");
+    });
   }
   /** Exact immutable receipt lookup only; caller must reauthorize live workspace/grants. */
   replay<T>(context: MutationContext, method: string, scope: string, legacyInput?: () => unknown): MutationReceipt<T> | undefined {
