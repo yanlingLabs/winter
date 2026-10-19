@@ -59,6 +59,10 @@ export interface CoworkHostApprovalInput {
   readonly source: Readonly<WorkspaceSource>;
   /** The conversation's effective ceiling at admission (`CoworkAuthority.effectiveCapabilities`). */
   readonly ceiling: Readonly<CapabilityCeiling>;
+  /** The plan execution view is MOUNTED for this incarnation: read-only roots AND a scratch view separate from (or scoped to
+   *  the policy epoch of) the writable one (APPROVALS #84's NEED). No slice mounts it yet, so the driver passes nothing and
+   *  `planViewInstalled` is false: plan's `allow-in-plan-view` calls are refused, never run in a writable view. */
+  readonly planViewMounted?: boolean;
 }
 
 const refused = (): Promise<never> => Promise.reject(new CoworkError("unsupported_topology"));
@@ -68,13 +72,13 @@ export function coworkApprovalPortsFor(input: CoworkHostApprovalInput): CoworkHo
   const root = coworkGuestCwdFor(binding, source);
   const ceiling: CapabilityCeiling = { toolClasses: [...input.ceiling.toolClasses], hostServices: [...input.ceiling.hostServices], connectors: [...input.ceiling.connectors], network: input.ceiling.network };
   const machine = new CoworkPolicyTransitionMachine({ policy: binding.policy, ceiling }, { closeAdmission: refused, drain: refused, installView: refused });
-  const plan = coworkGuestPolicyFor(binding.policy) === "plan";
+  const plan = coworkGuestPolicyFor(binding.policy) === "plan" && input.planViewMounted === true;
   const identity = Object.freeze({ workspaceId: binding.workspaceId, sourceRevision: source.revision });
   return Object.freeze({
     identity: () => identity,
     snapshot: () => machine.snapshot(),
     classifyPath: (absolutePath: string) => coworkClassifyGuestPath(absolutePath, { sessionId: binding.sessionId, root }),
-    // The guest runs `plan` exactly when the conversation set says so, and then every root is mounted read-only.
+    // True only under plan AND with the plan view mounted (see `planViewMounted`).
     planViewInstalled: () => plan,
   });
 }

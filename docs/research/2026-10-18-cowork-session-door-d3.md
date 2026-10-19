@@ -202,3 +202,11 @@ Mutations: 53 mutants, 52 killed. They cover:
 - the write-once repository (2).
 
 The one survivor is equivalent: the driver's outputs-row check (owner decision 4).
+
+## Coordinator follow-up (2026-10-19)
+
+- **The plan view is gated on a mount (APPROVALS #84's NEED).** `planViewInstalled` is true only under plan AND with the plan view mounted (`planViewMounted`): read-only roots plus a scratch view separate from, or scoped to the epoch of, the writable one. No slice mounts that view yet, so the driver passes nothing, and plan's in-view calls (plan x Bash) are refused, never run in a writable view. The mount itself is owed by D4/D3b together with the guest lane. Mutation: dropping the gate is killed by `approval-ports.test.ts`.
+- **Accepted:**
+  - the port adapter (`mode: "cowork"`, in D4, after #84 widens `CanUseToolDeps.mode`);
+  - cutting answers to the closed shape;
+  - the interrupt refusal, which stays typed until the agent SDK lane accepts `{scope: "turn"}`.

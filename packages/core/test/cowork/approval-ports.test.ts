@@ -53,7 +53,9 @@ test("the ports: identity is the workspace and source revision; the machine is s
     const ceiling = f.authority.effectiveCapabilities("conversation"), ports = coworkApprovalPortsFor({ binding, source, ceiling });
     expect(ports.identity()).toEqual({ workspaceId: f.workspaceId, sourceRevision: source.revision });
     expect(ports.snapshot()).toEqual({ phase: "stable", effective: { policy, ceiling: { ...ceiling, toolClasses: [...ceiling.toolClasses].sort() } }, epoch: 0, admission: "open" });
-    expect(ports.planViewInstalled()).toBe(policy === "plan");
+    // No plan view is mounted yet (the epoch-scoped scratch is a later slice): never installed, even under plan.
+    expect(ports.planViewInstalled()).toBe(false);
+    expect(coworkApprovalPortsFor({ binding, source, ceiling, planViewMounted: true }).planViewInstalled()).toBe(policy === "plan");
     expect(ports.classifyPath("/workspace/folders/grant/repo/a")).toBe("admitted");
     expect(ports.classifyPath("/workspace/folders/grant/a")).toBe("outside");
     expect(Object.isFrozen(ports)).toBe(true);
