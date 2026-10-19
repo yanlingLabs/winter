@@ -1,6 +1,7 @@
 import AppKit
 import Charts
 import SwiftUI
+import WinterCUPresentation
 import WinterKit
 
 /// The Usage window (`docs/claude/usage.md`): drawn entirely by Winter in the pill material, like a detached session
@@ -159,9 +160,19 @@ struct UsageWindowContent: View {
     // MARK: plans
 
     private func plans(now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "codex", reading: model.summary?.codexPlan, now: now))
-            UsagePlanSlotCard(slot: UsagePresentation.slot(provider: "claude-code", reading: model.summary?.claudeCodePlan, now: now))
+        // Codex, Claude Code, Antigravity — only the apps on this Mac; one title column for every line.
+        let slots = UsagePresentation.plans(model.summary).filter { UsagePresentation.showsSlot($0.reading) }
+            .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
+        let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) }, compact: false)
+        return VStack(alignment: .leading, spacing: 18) {
+            ForEach(slots) { slot in
+                VStack(alignment: .leading, spacing: 6) {
+                    UsagePlanSlotCard(slot: slot, titleWidth: titleWidth)
+                    if slot.id == "claude-code", let line = UsagePresentation.statsHistoryLine(before: model.summary?.claudeCodeStatsBefore) {
+                        Text(line).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                    }
+                }
+            }
         }
     }
 
@@ -185,7 +196,7 @@ struct UsageWindowContent: View {
 
     private var sourcesRow: some View {
         HStack(spacing: 8) {
-            ForEach(UsageSource.allCases, id: \.self) { s in
+            ForEach(UsageSource.allCases.filter { UsagePresentation.showsToggle($0, summary: model.summary) }, id: \.self) { s in
                 let on = model.sources.contains(s)
                 let cost = model.series?.bySource[s]?.costUsd ?? 0
                 Button { model.toggle(s) } label: {
@@ -301,8 +312,8 @@ struct UsageWindowContent: View {
                             num(r.totals.cacheRead)
                             num(r.totals.cacheWrite)
                             HStack(spacing: 4) {
-                                if !UsagePresentation.basisMark(r.costBasis).isEmpty {
-                                    Text(UsagePresentation.basisMark(r.costBasis)).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                                if !UsagePresentation.basisMark(r).isEmpty {
+                                    Text(UsagePresentation.basisMark(r)).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
                                 }
                                 Text(r.costBasis == "unknown" ? "—" : UsagePresentation.cost(r.totals.costUsd))
                                     .font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white)
@@ -312,6 +323,14 @@ struct UsageWindowContent: View {
                 }
                 Text("“est.” — a list-price estimate: what the same tokens would cost on the API (a subscription isn’t billed per token).")
                     .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                if rows.contains(where: { $0.costBasis == "reported" }) {
+                    Text("“reported” — the cost OpenCode itself recorded for those tokens.")
+                        .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                }
+                if rows.contains(where: { $0.totals.syntheticRecords > 0 }) {
+                    Text("* includes days from Claude Code’s /stats, kept after its transcripts were deleted: daily totals split by each model’s overall mix, so the cache split and cost are estimates.")
+                        .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
+                }
             }
         }
         .padding(16)
@@ -377,7 +396,18 @@ struct UsageWindowContent: View {
             UsageSwitchRow(on: model.summary?.trackClaudeCode ?? true, text: "Claude Code — its transcripts and its own /usage report") { v in
                 Task { await model.setTrack(claudeCode: v) }
             }
-            Text("Only numbers, model names and times are kept — never what was said, never a path or a project name. Winter never reads either app’s sign-in.")
+            // Only when the daemon reports the switch (an older one has neither: the switch would do nothing).
+            if let on = model.summary?.trackAntigravity {
+                UsageSwitchRow(on: on, text: "Antigravity — its own /usage report") { v in
+                    Task { await model.setTrack(antigravity: v) }
+                }
+            }
+            if let on = model.summary?.trackOpencode {
+                UsageSwitchRow(on: on, text: "OpenCode — its own stats: tokens and cost per model") { v in
+                    Task { await model.setTrack(opencode: v) }
+                }
+            }
+            Text("Only numbers, model names and times are kept — never what was said, never a path or a project name. Winter never reads any of these apps’ sign-in.")
                 .font(Typography.tiny()).foregroundStyle(Theme.textMuted)
         }
     }
@@ -433,12 +463,19 @@ struct UsageTile: View {
     }
 }
 
-/// The plan lines' colours (user 2026-10-18): Codex green, Claude Code Claude's own clay.
+/// The plan lines' colours (user 2026-10-18): Codex green, Claude Code Claude's own clay, Antigravity Google blue.
 enum UsagePlanColor {
     static let codex = Color(red: 0.063, green: 0.639, blue: 0.498)
     static let claudeCode = Color(red: 0.851, green: 0.467, blue: 0.341)
+    static let antigravity = Color(red: 0.259, green: 0.522, blue: 0.957)
 
-    static func of(provider: String) -> Color { provider == "codex" ? codex : claudeCode }
+    static func of(provider: String) -> Color {
+        switch provider {
+        case "codex": return codex
+        case "antigravity": return antigravity
+        default: return claudeCode
+        }
+    }
 }
 
 /// A plan's slot (user 2026-10-18): the plan's name, then one LINE per window filling left to right with what is LEFT
@@ -447,16 +484,40 @@ enum UsagePlanColor {
 struct UsagePlanSlotCard: View {
     let slot: UsagePlanSlot
     var compact = false
+    /// The lines' title column (`UsagePresentation.titleColumnWidth`, shared by every slot of a block); nil = this slot's own.
+    var titleWidth: CGFloat? = nil
+    @State private var localHover = false
+
+    /// The header's grow under the pointer — the lines' title grow (user 2026-10-18: the app's name and its plan grow
+    /// too, keeping their distance from the lines: it grows from its bottom edge and the card takes the height).
+    static func headerScale(hovered: Bool) -> CGFloat { UsagePlanLine.titleScale(hovered: hovered) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+        // The pointer over ANY part of a plan — its header or a line — opens all of it: the island's own pointer (its
+        // panels are never key), or the window's hover.
+        IslandPointerReader { islandHovered in
+            card(hovered: islandHovered || localHover)
+        }
+        .onHover { localHover = $0 }
+    }
+
+    private func card(hovered: Bool) -> some View {
+        let titleFont = compact ? Typography.caption(.semibold) : Typography.label(.semibold)
+        let grow = Self.headerScale(hovered: hovered)
+        return VStack(alignment: .leading, spacing: compact ? 5 : 8) {
             HStack(spacing: 6) {
-                Text(slot.title).font(compact ? Typography.caption(.semibold) : Typography.label(.semibold)).foregroundStyle(Color.white)
-                if let plan = slot.planType {
-                    Text(plan).font(Typography.tiny(.semibold)).foregroundStyle(Theme.textMuted)
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Capsule().fill(Color.white.opacity(0.08)))
+                HStack(spacing: 6) {
+                    Text(slot.title).font(titleFont).foregroundStyle(Color.white)
+                    if let plan = slot.planType {
+                        Text(plan).font(Typography.tiny(.semibold)).foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                    }
                 }
+                .scaleEffect(grow, anchor: .bottomLeading)
+                // The grown header's room: above it (the card grows, the lines stay where they are under it) and after it.
+                .padding(.top, hovered ? (compact ? 2 : 3) : 0)
+                .padding(.trailing, hovered ? 16 : 0)
                 Spacer(minLength: 8)
                 if !slot.sourceLine.isEmpty {
                     Text(slot.sourceLine).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
@@ -466,44 +527,148 @@ struct UsagePlanSlotCard: View {
                 Text(empty).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(slot.rings) { ring in
-                    UsagePlanLine(ring: ring, color: UsagePlanColor.of(provider: slot.id), compact: compact)
-                }
+                UsagePlanLineGroup(rings: slot.rings, color: UsagePlanColor.of(provider: slot.id), compact: compact,
+                                   titleWidth: titleWidth ?? UsagePresentation.titleColumnWidth(slot.rings.map(\.title), compact: compact),
+                                   hovered: hovered)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .animation(HoverGrowth.animation, value: hovered)
     }
 }
 
-/// One window as a line: its name, the bar (what is LEFT, from the left), "66% left", and when it resets.
+/// One plan's lines, hovered together (user 2026-10-18): the pointer anywhere on its card opens them all.
+struct UsagePlanLineGroup: View {
+    let rings: [UsagePlanRing]
+    let color: Color
+    var compact = false
+    /// The title column; nil = the floor (52 pt compact, 72 in the window).
+    var titleWidth: CGFloat? = nil
+    /// Its card is under the pointer (`UsagePlanSlotCard`).
+    var hovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+            ForEach(rings) { ring in
+                UsagePlanLine(ring: ring, color: color, compact: compact, hovered: hovered, titleWidth: titleWidth)
+            }
+        }
+    }
+}
+
+/// One window as a line: its name and the bar (what is USED, from the left); under the pointer, the used and left shares.
 struct UsagePlanLine: View {
     let ring: UsagePlanRing
     let color: Color
     var compact = false
+    /// Its plan's group is under the pointer (`UsagePlanLineGroup`).
+    var hovered = false
+    /// The title column (`UsagePresentation.titleColumnWidth`); nil = the floor (52 pt compact, 72 in the window).
+    var titleWidth: CGFloat? = nil
+
+    /// The line at rest and under the pointer (user 2026-10-18: just the line; on hover it thickens, lengthens a little
+    /// and shows the used share inside the fill and what is left at the track's end).
+    static func thickness(compact: Bool, hovered: Bool) -> CGFloat {
+        hovered ? (compact ? 14 : 16) : (compact ? 5 : 7)
+    }
+
+    /// How much longer the line is under the pointer, half on each end: twice every panel's hover grow (≈19 pt) —
+    /// with the title's grow, the row reads as lifting toward the viewer (user 2026-10-18: "a 3D hover").
+    static func lengthGrowth(hovered: Bool) -> CGFloat { hovered ? HoverGrowth.points * 2 : 0 }
+
+    /// The title's grow under the pointer, from its leading edge.
+    static func titleScale(hovered: Bool) -> CGFloat { hovered ? 1.12 : 1 }
+
+    /// The gap between the title column and the track.
+    static func titleGap(compact: Bool) -> CGFloat { compact ? 8 : 12 }
+
+    /// The narrowest a figure's slot is ("100%" in the tiny face plus its inset): the used one never squeezes below it
+    /// (it then runs past a short fill), and the left one is dropped when the grey left over is shorter.
+    static func figureSlot(compact: Bool) -> CGFloat { compact ? 30 : 34 }
+
+    /// Where the reset words go inside a hovered line: the grey after the fill (before the left figure), else the fill
+    /// (before the used figure), else nowhere (they stay in the VoiceOver label).
+    enum ResetPlacement: Equatable { case grey, fill, none }
+
+    /// About how wide the reset words are in the tiny face (≈ 5.4 pt a character at 10 pt) plus their gap.
+    static func resetWidth(_ words: String?) -> CGFloat { words.map { CGFloat($0.count) * 5.4 + 10 } ?? 0 }
+
+    /// PURE: where the figures go on a track `width` wide — the used one glued to the fill's END, inside it (its slot
+    /// never narrower than `figureSlot`); the left one at the track's end, only when the grey left over fits it; the
+    /// reset words where they fit whole (`ResetPlacement`).
+    static func figureLayout(width: CGFloat, fraction: Double, compact: Bool, resetWidth: CGFloat = 0)
+        -> (usedSlot: CGFloat, showsLeft: Bool, reset: ResetPlacement) {
+        let fill = width * CGFloat(min(1, max(0, fraction)))
+        let slot = figureSlot(compact: compact)
+        let usedSlot = min(width, max(fill, slot))
+        let showsLeft = width - usedSlot >= slot
+        let reset: ResetPlacement
+        if resetWidth <= 0 { reset = .none }
+        else if showsLeft && width - usedSlot - slot >= resetWidth { reset = .grey }
+        else if usedSlot - slot >= resetWidth { reset = .fill }
+        else { reset = .none }
+        return (usedSlot, showsLeft, reset)
+    }
+
+    /// PURE: the two hover figures — used (inside the fill) and left (at the track's end) — always summing to 100.
+    static func percents(_ fraction: Double) -> (used: Int, left: Int) {
+        let used = Int((min(1, max(0, fraction)) * 100).rounded())
+        return (used, 100 - used)
+    }
 
     var body: some View {
-        let pct = Int((min(1, max(0, ring.fraction)) * 100).rounded())
-        HStack(spacing: compact ? 8 : 12) {
-            Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(0.85)).lineLimit(1)
-                .frame(width: compact ? 52 : 72, alignment: .leading)
+        let used = min(1, max(0, ring.fraction))
+        let pct = Self.percents(ring.fraction)
+        let height = Self.thickness(compact: compact, hovered: hovered)
+        return HStack(spacing: Self.titleGap(compact: compact)) {
+            Text(ring.title).font(Typography.tiny(.medium)).foregroundStyle(Color.white.opacity(hovered ? 1 : 0.85)).lineLimit(1)
+                .scaleEffect(Self.titleScale(hovered: hovered), anchor: .leading)
+                .frame(width: titleWidth ?? (compact ? 52 : 72), alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.08))
                     Capsule().fill(ring.stale ? Color(nsColor: .systemGray) : color)
-                        .frame(width: max(ring.fraction > 0 ? 4 : 0, proxy.size.width * min(1, max(0, ring.fraction))))
+                        .frame(width: max(used > 0 ? height : 0, proxy.size.width * used))
+                    if hovered {
+                        // A lighter weight than the titles: the figures sit in the line, they do not shout.
+                        let layout = Self.figureLayout(width: proxy.size.width, fraction: used, compact: compact,
+                                                       resetWidth: Self.resetWidth(ring.resetsHover))
+                        ZStack(alignment: .leading) {
+                            HStack(spacing: 0) {
+                                if layout.reset == .fill, let words = ring.resetsHover {
+                                    Text(words).foregroundStyle(Color.white.opacity(0.85)).padding(.leading, 6)
+                                }
+                                Spacer(minLength: 4)
+                                Text("\(pct.used)%").foregroundStyle(Color.white).padding(.trailing, 6)
+                            }
+                            .frame(width: layout.usedSlot)
+                            if layout.showsLeft {
+                                HStack(spacing: 8) {
+                                    if layout.reset == .grey, let words = ring.resetsHover {
+                                        Text(words).foregroundStyle(Color.white.opacity(0.6))
+                                    }
+                                    Text("\(pct.left)%").foregroundStyle(Color.white.opacity(0.6))
+                                }
+                                .padding(.trailing, 6)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            }
+                        }
+                        .font(Typography.tinyDigits(.regular))
+                        .lineLimit(1)
+                        .transition(.opacity)
+                    }
                 }
             }
-            .frame(height: compact ? 5 : 7)
+            .frame(height: height)
+            .padding(.horizontal, -Self.lengthGrowth(hovered: hovered) / 2)
             .opacity(ring.stale ? 0.6 : 1)
-            Text("\(pct)% left").font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white).lineLimit(1)
-                .frame(width: compact ? 58 : 70, alignment: .trailing)
-            if let r = compact ? ring.resetsShort : ring.resets {
-                Text(r).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                    .frame(width: compact ? 70 : 130, alignment: .leading)
-            }
         }
+        .frame(height: Self.thickness(compact: compact, hovered: true))
+        .contentShape(Rectangle())
+        .animation(HoverGrowth.animation, value: hovered)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(ring.title): \(pct)% left\(ring.resets.map { ", \($0)" } ?? "")")
+        .accessibilityLabel("\(ring.title): \(pct.used)% used, \(pct.left)% left\(ring.resets.map { ", \($0)" } ?? "")")
     }
 }
 
