@@ -24,6 +24,17 @@ function fixture() {
   const bookmark = Buffer.from("host-bookmark").toString("base64");
   return { base, folder, control, host, options, bookmark, prepare: () => host.prepare(local, 1, bookmark, "Fixture", "read-write"), target: (path: string) => { target = path; }, now: (value: number) => { now = value; }, scopes: () => scopes };
 }
+describe("the sweep timer is lazy", () => {
+  test("no timer exists until a selection does, and it clears itself when the last one expires", () => {
+    const f = fixture();
+    const timerOf = () => (f.host as unknown as { timer?: unknown }).timer;
+    expect(timerOf()).toBeUndefined(); // a daemon that never prepares a folder never owns a timer
+    f.prepare(); expect(timerOf()).toBeDefined();
+    f.now(1_000); (f.host as unknown as { sweep(): void }).sweep(); // past the 100 ms ttl: dropped
+    expect(timerOf()).toBeUndefined();
+  });
+});
+
 describe("Mac folder preparation authority", () => {
   test("opaque grant resolves through existing adapter without paths or readiness", () => {
     const f = fixture(), prepared = f.prepare(), selection = f.host.selection(local, 1, prepared.selectionId)!;

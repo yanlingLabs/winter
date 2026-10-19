@@ -239,9 +239,11 @@ export class SessionMessaging {
       if (error instanceof CoworkError && error.code === "not_found") return meta.mode !== "cowork";
       if (!this.authorityReadFaultLogged) {
         this.authorityReadFaultLogged = true;
-        this.log("session_authority_unavailable: canonical conversation records could not be read; refusing agent session access");
+        this.log("session_authority_unavailable: canonical conversation records could not be read; Cowork sessions are hidden until they can be");
       }
-      return false;
+      // Messaging does not depend on the Cowork tables: only a row that CLAIMS to be Cowork degrades (hidden / refused). A Code or Dispatch
+      // row stays listed and reachable, so a fault in tables no production daemon fills cannot take down ordinary messaging.
+      return meta.mode !== "cowork";
     }
   }
 

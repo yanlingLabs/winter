@@ -196,6 +196,26 @@ test("real IPC replay/live and history enforce current remote workspace scope af
   expect(client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type))).toHaveLength(before);
 });
 
+test("a failing scope lookup skips that event for the phone and keeps it connected; events resume when the lookup recovers", async () => {
+  const f = fixture(); f.pump().drain();
+  const tokens = new TokenAuthority(new FileSecretStore(join(f.home, "fixture-secrets.json"))), keys = await tokens.ensureTokens();
+  const socketPath = join(f.home, "fixture.sock"), service = f.service();
+  let broken = false;
+  const real = service.requireSessionRead.bind(service);
+  (service as unknown as { requireSessionRead: typeof real }).requireSessionRead = ((...args: Parameters<typeof real>) => { if (broken) throw new Error("SQLITE_BUSY"); return real(...args); }) as typeof real;
+  const server = startIpcServer({ socketPath, serverVersion: "fixture", tokens, store: f.store, hub: f.hub, cowork: service, coworkEvents: f.pump() });
+  cleanups.push(() => server.stop());
+  const client = await Client.open(socketPath, keys.remote);
+  expect((await client.request("session.attach", { sessionId: f.sessions[0]!, fromSeq: 0 })).error).toBeUndefined();
+  const count = () => client.events.filter(event => HOST_WORKSPACE_EVENT_TYPES.has(event.type)).length;
+  broken = true; f.update("during-fault"); f.pump().drain();
+  expect((await client.request("session.history", { sessionId: f.sessions[0]! }).catch(() => ({ error: "disconnected" }))).error ?? undefined).not.toBe("disconnected");
+  const during = count();
+  broken = false; f.update("after-fault"); f.pump().drain();
+  await client.request("session.history", { sessionId: f.sessions[0]! });
+  expect(count()).toBeGreaterThan(during); // still attached: the fault cost one event, not the connection
+});
+
 test("session index rebuild replays display events without recreating or widening canonical bindings/policy", () => {
   const f = fixture(); f.pump().drain(); f.update("index-rebuild");
   const binding = f.records.binding(f.sessions[0]!), policy = f.records.policy(f.workspaceId);
@@ -278,7 +298,7 @@ test("more than 100 pending changes stay ordered across bounded passes and prune
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox_deliveries WHERE session_id=? AND state='delivered'").get(f.sessions[0]!)!.n).toBe(100);
   expect(f.db.db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM cowork_outbox WHERE workspace_id=?").get(f.workspaceId)!.n).toBe(103); // unbound creation/source ACK/operation ACK + latest100 receipts
   f.reopen(); expect(f.pump().drain()).toEqual({ delivered: 0, blocked: 0, deferred: 0, pruneBlocked: 0 });
-});
+}, 60_000); // explicit timeout: seconds of real SQL work, which the 5 s default cannot bound under load
 
 test("a failed live conversation backs off without appending duplicates or suppressing another conversation", () => {
   const f = fixture(true); f.pump().drain(); f.update("backoff");
@@ -382,10 +402,35 @@ test("actual SQL pruning failure is separate from successful delivery and does n
   expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 1 });
   f.db.db.run("DROP TRIGGER fixture_prune_failure"); f.update("prune-recovered");
   expect(pump.drain()).toEqual({ delivered: 1, blocked: 0, deferred: 0, pruneBlocked: 0 });
-});
+}, 60_000); // explicit timeout: seconds of real SQL work, which the 5 s default cannot bound under load
 
 bunTest.skipIf(process.platform === "darwin" && process.arch === "arm64")("unsupported host refuses Cowork log flush explicitly without a native flush fallback", () => {
   const f = fixture();
   expect(() => f.store.flushLog(f.sessions[0]!)).toThrow("unsupported_topology");
   expect(f.store.lastSeq(f.sessions[0]!)).toBe(1);
 });
+
+test("start() arms no timer without an injected host or pending work; keepAlive and pending work arm it, and it stops itself when idle", async () => {
+  const f = fixture(); f.pump().drain();
+  const timerOf = (p: unknown) => (p as { timer?: unknown }).timer;
+  const quiet = f.pump(); quiet.start(); expect(timerOf(quiet)).toBeUndefined();
+  const hosted = f.pump(); hosted.start({ keepAlive: true }); expect(timerOf(hosted)).toBeDefined(); hosted.stop(); expect(timerOf(hosted)).toBeUndefined();
+  const busy = f.pump(); let pending = true;
+  (busy as unknown as { hasPending(): boolean }).hasPending = () => pending;
+  busy.start(); expect(timerOf(busy)).toBeDefined();
+  pending = false; await Bun.sleep(1300); expect(timerOf(busy)).toBeUndefined(); // the tick found nothing owed and stopped itself
+}, 15_000);
+
+test("a failing delivery pass never throws out of start() or the timer tick", async () => {
+  const f = fixture(); f.pump().drain();
+  const errors: string[] = []; const real = console.error; console.error = (...a: unknown[]) => { errors.push(a.join(" ")); };
+  try {
+    f.db.db.run("BEGIN"); // drain refuses to run inside a caller transaction (recovery_required)
+    const pump = f.pump();
+    expect(() => pump.start({ keepAlive: true })).not.toThrow();
+    await Bun.sleep(1300); // at least one timer tick under the same refusal: the process must survive it
+    pump.stop();
+    f.db.db.run("ROLLBACK");
+  } finally { console.error = real; }
+  expect(errors.filter(e => e.startsWith("cowork: workspace event delivery failed"))).toHaveLength(1); // logged once, not every second
+}, 15_000);

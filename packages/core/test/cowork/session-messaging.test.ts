@@ -153,18 +153,23 @@ test("session-index mode cannot downgrade a canonical guest binding to host auth
   expect(f.sent).toEqual([]); expect(f.ensured).toEqual([]);
 });
 
-test("canonical record failures never fall back to broad host authority", async () => {
-  const f = fixture(), host = f.session("code"), target = f.session("code");
+test("a fault reading the Cowork tables degrades only Cowork rows: Code sessions stay listed and reachable", async () => {
+  const f = fixture(), host = f.session("code"), target = f.session("code"), guest = f.session("cowork");
   const logs: string[] = [];
   const unavailable = new SessionMessaging({ ...f.deps, log: line => logs.push(line), cowork: {
     binding: () => { throw new Error("canonical store unavailable"); },
     project: (id) => f.records.project(id), get: (id) => f.records.get(id),
   } });
-  expect((await unavailable.handlerFor(host).send({ to: target, message: "hello", messageId: "record-error" }, { signal: new AbortController().signal })).status).toBe("not_found");
-  expect(unavailable.list(host).sessions).toEqual([]);
-  expect(unavailable.mayList(host, target)).toBe(false);
-  expect(unavailable.mayList(host, host)).toBe(false);
-  expect((await unavailable.stop(host, { id: target })).status).toBe("not_found");
-  expect(f.sent).toEqual([]); expect(f.ensured).toEqual([]); expect(f.stopped).toEqual([]);
+  // Ordinary messaging does not depend on the Cowork tables.
+  expect((await unavailable.handlerFor(host).send({ to: target, message: "hello", messageId: "record-ok" }, { signal: new AbortController().signal })).status).not.toBe("not_found");
+  expect(f.sent.map(m => m.id)).toEqual([target]);
+  expect(unavailable.list(host).sessions.map(row => row.address)).toEqual([`session:${target}`]);
+  expect(unavailable.mayList(host, target)).toBe(true);
+  expect(unavailable.mayList(host, host)).toBe(true);
+  // A row that claims to be Cowork is hidden and never contacted, in both directions, and never gains host authority.
+  expect((await unavailable.handlerFor(host).send({ to: guest, message: "hello", messageId: "record-error" }, { signal: new AbortController().signal })).status).toBe("not_found");
+  expect(unavailable.mayList(host, guest)).toBe(false);
+  expect((await unavailable.stop(host, { id: guest })).status).toBe("not_found");
+  expect(f.stopped).toEqual([]);
   expect(logs).toHaveLength(1); expect(logs[0]).toContain("session_authority_unavailable");
 });

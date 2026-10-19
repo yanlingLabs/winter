@@ -43,6 +43,16 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(SessionMode.sidebarOrder.filter { !$0.isAvailable }, [.cowork])
     }
 
+    /// While Cowork is unavailable its row shows the placeholder even when a management connection (a workspace model) exists, so the
+    /// workspace view's folder picker is unreachable. The view returns only with the flip.
+    func testCoworkRowShowsThePlaceholderWhileUnavailable() {
+        XCTAssertFalse(SessionMode.cowork.isAvailable)
+        XCTAssertEqual(SessionMode.coworkDetail(available: SessionMode.cowork.isAvailable, hasWorkspaceModel: true), .placeholder)
+        XCTAssertEqual(SessionMode.coworkDetail(available: SessionMode.cowork.isAvailable, hasWorkspaceModel: false), .placeholder)
+        XCTAssertEqual(SessionMode.coworkDetail(available: true, hasWorkspaceModel: true), .workspace)
+        XCTAssertEqual(SessionMode.coworkDetail(available: true, hasWorkspaceModel: false), .placeholder)
+    }
+
     /// The wire's `mode` string (`SessionSummary.mode`) maps onto the sidebar's rows; an absent or
     /// unknown mode reads as `.code` (the daemon omits `mode` for plain code sessions).
     func testSessionModeFromWireString() {
