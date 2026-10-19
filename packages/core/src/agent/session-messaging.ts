@@ -49,6 +49,15 @@
 //     human; it can answer with SendMessage to the sender's id. Not followed. (The Mac renders the wrapper
 //     as "From session …", never raw.)
 //
+// COWORK PEERS GO THROUGH THE DURABLE PEER INBOX (docs/research/2026-10-18-cowork-peer-inbox-wiring.md). A SendMessage
+// between two Cowork sessions of one Project is not pushed straight into the target: it is ACCEPTED by the receipt
+// ledger (`cowork/peer-inbox.ts`, persisted before any answer, the body kept only while owed), then DELIVERED by
+// `drainCoworkInbox` -- offer under the recipient driver's epoch, push through the same `deliverInto` (steer into a
+// running turn, queue behind the daemon's own queue, resume a stopped one), and only then ACK, which deletes the
+// body. An unacked offer is offered again (at-least-once). The inbox is an injected port (`deps.peerInbox`) that
+// production does not supply while no Cowork session can exist; without it a Cowork pair fails closed. Code and
+// Dispatch sessions never touch it: their path below is unchanged.
+//
 // ONE DELIVERY PER MESSAGE ID. A request is deduped on (caller, its runtime incarnation, runtime message
 // id, target, text) for a
 // while (`DELIVERY_DEDUPE_TTL_MS`): a re-sent request gets the first one's answer (in flight or settled),
@@ -64,6 +73,7 @@ import { renderAttributedTurn } from "../runtime-sdk/messaging";
 import { isSessionReplaced } from "../runtime-sdk/session-replaced";
 import { mayContactCoworkPeer, type CoworkMessagingRecords, type CoworkPeerOperation } from "../cowork/messaging-authority";
 import { CoworkError } from "../cowork/types";
+import type { CoworkPeerInbox, PeerEpoch } from "../cowork/peer-inbox";
 
 /** The `clientName` a SendMessage delivery lands under in the target (`DispatchChildren`'s observer reads it). */
 export const MESSAGING_CLIENT_NAME = "messaging";
@@ -96,11 +106,21 @@ export interface MessagingDriverHandle {
   interrupt?(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
   /** Messages queued behind the running turn (`WinterSession.pendingSends`). Optional on a test double. */
   readonly pendingSends?: readonly string[];
+  /** A COWORK driver only: the recipient workspace's guest incarnation and lease epoch this driver was started under.
+   *  The peer inbox fences every offer and ack on it. Absent (a Code/Dispatch driver, or a Cowork driver that has no
+   *  epoch yet): nothing is offered and the message stays owed. */
+  readonly coworkEpoch?: PeerEpoch;
 }
+
+/** The slice of the receipt ledger this file uses. Not supplied by production while Cowork is refused. */
+export type SessionMessagingPeerInbox = Pick<CoworkPeerInbox, "accept" | "lookup" | "owed" | "settle" | "offer" | "ack" | "block">;
 
 export interface SessionMessagingDeps {
   /** Canonical host DB bindings, never runtime-supplied workspace/project fields. */
   cowork?: CoworkMessagingRecords;
+  /** The durable same-Project peer inbox (receipt ledger over its SQLite store). Absent: a Cowork-to-Cowork send is
+   *  refused as unavailable and nothing is delivered. */
+  peerInbox?: SessionMessagingPeerInbox;
   store: {
     /** Throws for an unknown session. */
     meta(sessionId: string): { mode?: string; archived?: boolean; origin?: string; parentSessionId?: string; approvalPolicy?: string };
@@ -155,6 +175,10 @@ export class SessionMessaging {
   private authorityReadFaultLogged = false;
   /** (caller, message id, target, text digest) → the delivery's answer, in flight or settled. */
   private readonly deliveries = new Map<string, { at: number; answer: Promise<SendAnswer> }>();
+  /** Cowork: the tail of each recipient's drain chain (one drain at a time per recipient). */
+  private readonly drains = new Map<string, Promise<unknown>>();
+  /** Cowork: how a receipt was delivered by a drain of this process (for the sender's answer), bounded. */
+  private readonly coworkOutcomes = new Map<string, { queued: boolean; steered: boolean; behind: number; resumed: boolean }>();
 
   constructor(private readonly deps: SessionMessagingDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -247,14 +271,14 @@ export class SessionMessaging {
     }
     const prior = this.deliveries.get(key);
     if (prior !== undefined && at - prior.at <= DELIVERY_DEDUPE_TTL_MS) return prior.answer;
-    const answer = this.deliver(callerSessionId, request, signal);
+    const answer = this.deliver(callerSessionId, request, signal, incarnation);
     this.deliveries.set(key, { at, answer });
     // A delivery that never left the daemon (refused before anything ran, or cancelled) may be tried again.
     void answer.then((a) => { if (a.status === "unavailable" && a.retryable === true) this.deliveries.delete(key); });
     return answer;
   }
 
-  private async deliver(callerSessionId: string, request: HostMessageSendRequest, signal: AbortSignal | undefined): Promise<SendAnswer> {
+  private async deliver(callerSessionId: string, request: HostMessageSendRequest, signal: AbortSignal | undefined, incarnation = ""): Promise<SendAnswer> {
     const notDelivered = (why: string): SendAnswer => ({ status: "unavailable", reason: `${why}; nothing was delivered`, retryable: true });
     // A function, not a narrowed field: the signal can abort during the awaits below.
     const cancelled = (): boolean => signal?.aborted === true;
@@ -270,6 +294,8 @@ export class SessionMessaging {
       return refused(`session '${targetId}' is archived — the user hid it, and a message never brings it back; only the user can restore it`);
     }
     if (request.message.trim() === "") return refused("the message is empty — write the session what you want it to do");
+    // A Cowork-to-Cowork pair (the only pair `mayContact` lets through when either end is Cowork) goes through the durable inbox.
+    if (caller.mode === "cowork" && target.mode === "cowork") return this.deliverViaPeerInbox(callerSessionId, targetId, request, signal, incarnation);
 
     // Dispatch following up its OWN child: plain text (the child's delegate-user), followed and woken.
     const ownChild = caller.mode === "dispatch" && target.origin === "dispatch-child" && target.parentSessionId === callerSessionId;
@@ -357,6 +383,133 @@ export class SessionMessaging {
       note,
       ...(notify !== undefined ? { notify } : {}),
     };
+  }
+
+  // ---- Cowork: the durable peer inbox ------------------------------------------------------------------------
+
+  /** Accept (persist) first, then deliver what is owed to the recipient, then answer truthfully: delivered only if THIS
+   *  message was acknowledged by the recipient, otherwise queued under its receipt. Never throws. */
+  private async deliverViaPeerInbox(callerSessionId: string, targetId: string, request: HostMessageSendRequest, signal: AbortSignal | undefined, incarnation: string): Promise<SendAnswer> {
+    const inbox = this.deps.peerInbox;
+    const notDelivered = (why: string): SendAnswer => ({ status: "unavailable", reason: `${why}; nothing was delivered`, retryable: true });
+    if (inbox === undefined) return { status: "unavailable", reason: "the Cowork peer inbox is not available; nothing was delivered", retryable: false };
+    if (this.draining) return notDelivered("Winter is shutting down");
+    // A restarted sender's message ids restart too: without its runtime incarnation a replay would be swallowed as a retry.
+    if (incarnation === "") return refused("the sender's runtime identity is unknown; a Cowork message cannot be accepted without it");
+    if (signal?.aborted === true) return notDelivered("the sender was interrupted");
+    let receiptId: string;
+    try {
+      const accepted = inbox.accept({ senderSessionId: callerSessionId, senderIncarnation: incarnation, sendId: request.messageId, recipientSessionId: targetId, text: encodePeerEnvelope(request) });
+      if (accepted.outcome === "refused") {
+        switch (accepted.reason) {
+          case "not_found": return { status: "not_found", reason: `no reachable Winter session '${targetId}'` };
+          case "recipient_archived": return refused(`session '${targetId}' is archived — a message never brings it back; only the user can restore it`);
+          default: return { status: "unavailable", reason: `session '${targetId}' cannot take more messages right now (${accepted.reason}); nothing was accepted`, retryable: true };
+        }
+      }
+      receiptId = accepted.receipt.receiptId;
+    } catch (err) {
+      const code = err instanceof CoworkError ? err.code : undefined;
+      if (code === "invalid_request") return refused("the message cannot be accepted (too large or malformed)");
+      if (code === "request_conflict") return refused("this message id was already used for a different message");
+      this.log(`accepting a Cowork peer message from ${callerSessionId} to ${targetId} failed (${code ?? (err instanceof Error ? err.name : "error")})`);
+      return notDelivered("the peer inbox could not persist the message");
+    }
+    // Accepted: the daemon owes delivery from here on. A later failure leaves the receipt owed, never "not delivered".
+    await this.drainCoworkInbox(targetId);
+    let state: string, reason: string | null = null;
+    try { const receipt = inbox.lookup({ senderSessionId: callerSessionId, senderIncarnation: incarnation, sendId: request.messageId }); state = receipt?.state ?? "accepted"; reason = receipt?.reason ?? null; }
+    catch { state = "accepted"; }
+    const title = this.titleOf(targetId);
+    const named = title === undefined ? `session ${targetId}` : `session ${targetId} ("${title}")`;
+    const notOwn = `not one of your children, so you will not be told when it finishes; it can answer you with SendMessage to ${callerSessionId}.`;
+    const notify = request.notifyWhenIdle === true ? { refused: "Winter sessions send no idle notice" } : undefined;
+    // Authority was lost between accept and delivery: the sender learns only the uniform answer; the record stays parked and visible.
+    if (state === "blocked" && reason === "authority") return { status: "not_found", reason: `no reachable Winter session '${targetId}'` };
+    if (state === "refused") return refused(`the message ${receiptId} was ended (${reason ?? "refused"}) before it was delivered`);
+    if (state !== "delivered") {
+      return { status: "queued", note: `${named} cannot take the message right now: the daemon holds it as receipt ${receiptId} and delivers it, in order, when the session is running again (it is not lost).`, ...(notify !== undefined ? { notify } : {}) };
+    }
+    const sent = this.coworkOutcomes.get(receiptId);
+    const note = sent?.steered
+      ? `${named} is working right now: it reads your message after its current tool call, as part of the turn it is running (or as its next turn, if that turn ends first). It is ${notOwn}`
+      : sent !== undefined && sent.behind > 0
+        ? `${named} is working right now and has ${sent.behind} message${sent.behind === 1 ? "" : "s"} queued ahead of yours, so yours runs after ${sent.behind === 1 ? "it" : "them"}, in order, once its current turn ends. It is ${notOwn}`
+        : `${named} is ${notOwn}`;
+    return { status: sent?.steered ? "delivered" : sent?.queued ? "queued" : sent?.resumed ? "resumed_and_delivered" : "delivered", note, ...(notify !== undefined ? { notify } : {}) };
+  }
+
+  /**
+   * Deliver what the peer inbox owes `recipientSessionId`, oldest first, one at a time (a chain per recipient, so two
+   * concurrent drains never offer the same head twice). Each message is offered under the recipient DRIVER's epoch,
+   * pushed through `deliverInto` (the steer / queue / resume rules above) and only then acknowledged, which deletes its
+   * body. Stops at the first message that cannot be delivered, leaving it (and everything behind it) owed. This is what
+   * the workspace start and the daemon boot must call for every Cowork conversation so owed messages survive a
+   * restart; it is a no-op without a peer inbox. Never throws.
+   */
+  drainCoworkInbox(recipientSessionId: string): Promise<void> {
+    const previous = this.drains.get(recipientSessionId) ?? Promise.resolve();
+    const run = previous.then(() => this.drainOnce(recipientSessionId)).catch((err) => {
+      this.log(`draining the Cowork peer inbox of ${recipientSessionId} failed (${err instanceof Error ? err.name : "error"})`);
+    });
+    this.drains.set(recipientSessionId, run);
+    void run.then(() => { if (this.drains.get(recipientSessionId) === run) this.drains.delete(recipientSessionId); });
+    return run;
+  }
+
+  private async drainOnce(recipientId: string): Promise<void> {
+    const inbox = this.deps.peerInbox;
+    if (inbox === undefined) return;
+    let replacedOnce = false;
+    for (let delivered = 0; delivered < COWORK_DRAIN_MAX; delivered++) {
+      if (this.draining) return;
+      // Park or end what authority no longer allows, then: nothing runnable owed (empty, archived recipient, revoked pair) wakes nothing.
+      try { inbox.settle(recipientId); if (inbox.owed(recipientId).runnable === 0) return; } catch { return; }
+      let driver: MessagingDriverHandle | undefined, resumed = false;
+      try {
+        const live = this.deps.sessions.get(recipientId);
+        resumed = live === undefined || (live.state !== undefined && live.state !== "live");
+        driver = live ?? await this.deps.sessions.ensure(recipientId);
+      } catch { return; }
+      // The fence is the DRIVER's epoch, never a re-read of the database: a driver from a previous incarnation cannot ack.
+      const epoch = driver?.coworkEpoch;
+      if (driver === undefined || epoch === undefined || this.draining) return;
+      let offer: ReturnType<SessionMessagingPeerInbox["offer"]>;
+      try { offer = inbox.offer(recipientId, epoch); } catch { return; } // stale epoch or a store fault: stays owed
+      if (offer === undefined) return;
+      const envelope = parsePeerEnvelope(offer.body);
+      if (envelope === undefined) { try { inbox.block(offer.receipt.receiptId, epoch, "recovery"); } catch { /* stays owed */ } return; }
+      let policy: string | undefined;
+      try { policy = this.deps.store.meta(offer.receipt.senderSessionId).approvalPolicy; } catch { policy = undefined; }
+      const text = renderAttributedTurn({
+        messageId: offer.receipt.sendId,
+        from: buildSessionAddress(offer.receipt.senderSessionId),
+        fromGeneration: 0,
+        to: buildSessionAddress(recipientId),
+        toGeneration: 0,
+        body: envelope.message,
+        ...(envelope.summary !== undefined ? { summary: envelope.summary } : {}),
+        notifyWhenIdle: envelope.notifyWhenIdle,
+        // From the receipt, so a re-offer after a restart renders the same frame.
+        createdAt: offer.receipt.acceptedAt,
+        expiresAt: offer.receipt.acceptedAt,
+        hopCount: 0,
+        senderPermissionClass: senderClassOf(policy),
+      }, { winterSessionId: recipientId });
+      let sent: { queued: boolean; steered: boolean; behind: number };
+      try { sent = await deliverInto(driver, text); }
+      catch (err) {
+        // The recipient's runtime was replaced while the push was in flight: nothing was taken, so offer it ONCE more under the
+        // successor (the offer re-checks authority and the successor's epoch first), as the Code path does.
+        if (isSessionReplaced(err) && !replacedOnce) { replacedOnce = true; delivered--; continue; }
+        this.log(`delivering a Cowork peer message to ${recipientId} failed (${err instanceof Error ? err.name : "error"}); it stays owed`);
+        return;
+      }
+      try { inbox.ack({ receiptId: offer.receipt.receiptId, recipientSessionId: recipientId, epoch }); }
+      catch (err) { this.log(`acknowledging a Cowork peer message to ${recipientId} failed (${err instanceof CoworkError ? err.code : "error"}); it stays owed`); return; }
+      this.coworkOutcomes.set(offer.receipt.receiptId, { ...sent, resumed });
+      while (this.coworkOutcomes.size > DELIVERY_DEDUPE_MAX) this.coworkOutcomes.delete(this.coworkOutcomes.keys().next().value as string);
+    }
   }
 
   /** `TaskStop` on a session id: interrupt its running turn and clear what was queued behind it. Never throws. */
@@ -455,4 +608,24 @@ function refusalText(err: unknown): string {
     return typeof code === "string" && !err.message.includes(code) ? `${err.message} (${code})` : err.message;
   }
   return String(err);
+}
+
+/** At most this many owed messages are delivered by one drain (a runaway guard; the rest stay owed for the next). */
+const COWORK_DRAIN_MAX = 1_024;
+
+/** What the peer inbox stores for one Cowork message: the text AND the fields the model later sees, versioned. The
+ *  rendered frame is never stored (it carries timestamps), so a retry digests to the same bytes and a restart loses
+ *  neither `summary` nor `notifyWhenIdle`. */
+interface PeerEnvelope { v: 1; message: string; summary?: string; notifyWhenIdle: boolean }
+function encodePeerEnvelope(request: HostMessageSendRequest): string {
+  const envelope: PeerEnvelope = { v: 1, message: request.message, ...(request.summary !== undefined ? { summary: request.summary } : {}), notifyWhenIdle: request.notifyWhenIdle === true };
+  return JSON.stringify(envelope);
+}
+function parsePeerEnvelope(body: string): PeerEnvelope | undefined {
+  try {
+    const value = JSON.parse(body) as Partial<PeerEnvelope> | null;
+    if (value !== null && typeof value === "object" && value.v === 1 && typeof value.message === "string" && value.message.trim() !== ""
+      && (value.summary === undefined || typeof value.summary === "string") && typeof value.notifyWhenIdle === "boolean") return value as PeerEnvelope;
+  } catch { /* damaged */ }
+  return undefined;
 }
