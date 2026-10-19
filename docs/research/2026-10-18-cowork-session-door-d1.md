@@ -11,7 +11,7 @@ Owner decisions applied (2026-10-18): O1 (the first session binds to its own out
 | `CoworkRelativeCwd`, `CoworkSessionLocation` (`source` with an optional relative cwd, or `outputs`), `CoworkSessionCreate`, `CoworkSessionRef`, `CoworkSessionCreatedFacts` | `packages/protocol/src/cowork.ts` |
 | `SessionCreateParams.cowork` (optional, NOT a refinement), the `session.list` row's `cowork` reference | `packages/protocol/src/methods.ts` |
 | `session_created.cowork` (durable on seq 1; still outside `HISTORY_EVENT_TYPES`) | `packages/protocol/src/events.ts`, fixture `session_created_with_cowork_mode` |
-| Swift: `SessionCreated.cowork` (nil encodes as an explicit null), `createSession(..., cowork:)` with `CoworkSessionBinding` | `apple/WinterProtocol`, `apple/WinterKit` |
+| Swift: `SessionCreated.cowork` (a nil binding is omitted from the encoding, never written as null), `createSession(..., cowork:)` with `CoworkSessionBinding` | `apple/WinterProtocol`, `apple/WinterKit` |
 | `provider_unavailable`, `conversation_limit`, `cold_resume_unavailable` | `CoworkErrorCode`, `packages/core/src/cowork/types.ts` |
 | The ports (types only): `CoworkSessionDoor`, `CoworkSessionDrivers`, `CoworkLegSession`, `CoworkProviderRoute`, `CoworkApprovalPort`, `CoworkProvisioningPort`, the structural native seams (`CoworkGuestRun`, `CoworkGuestRuntimeLink`, `CoworkGuestConversationSet`, ...) | `packages/core/src/cowork/session-ports.ts` |
 | `CoworkHostPorts.provisioning?` (type only; `requireProvisioning` is unchanged) | `packages/core/src/cowork/service.ts` |
@@ -80,3 +80,25 @@ Both differences need an owner decision.
 - No `CoworkSessionDoor` implementation, no driver, no provider route, no tool list (D2/D3).
 - No producer of `session_created.cowork` or the list row's `cowork`.
 - No `daemon.ts` change (S7B owns the pass-through, the shutdown order and the composition).
+
+## Review fixes (2026-10-19)
+
+The DOOR review rejected D1 at `863e1496`. One commit fixes it:
+
+- **HIGH: a sync import could author a Cowork binding.** A paired phone may call `sync.push`, and its batch check accepted a chat `session_created` that carried `cowork`. Since D1 that field is parsed, stored and broadcast. Now `sync.push` refuses any pushed `session_created` that carries `cowork`, at any seq, and `SessionStore.appendSynced` refuses it too, whether in the parsed event or in the raw line. The test sits beside the existing "sync imports cannot author host workspace authority events" pin. The protocol comment and design section 7.1 now say that `session_created.cowork` is a display fact: consumers check the `cowork_conversations` row, never the log field alone.
+- **MEDIUM: the rebuild tests could not see a lost constraint.** The upgrade test compared the rebuilt table with the same DDL text, so dropping a foreign key or a CHECK went unnoticed. A new test judges against the v17 text itself. For both a fresh store and an upgraded one, it checks that:
+  - the foreign key list equals v17's;
+  - every v17 CHECK clause is present;
+  - a bad policy, a bad state, a zero revision, a dangling source and a dangling workspace are each refused.
+- **LOW:**
+  - The binding-beside-another-mode refusal now has a no-door test, so it is shown to hold on every production daemon.
+  - `cowork_home_binding` is write-once in the schema: triggers abort an UPDATE, a DELETE and a second INSERT, including `OR REPLACE`. S7B's store only reads and inserts. The table text is exported as `COWORK_HOME_BINDING_TABLE`, so S7B's `COWORK_HOME_BINDING_DDL` can be pinned equal to it once both have merged.
+  - A nil `SessionCreated.cowork` is omitted from the Swift encoding, not written as null. The wording above is corrected.
+  - The doc comment that had drifted away from `coworkSessionUnsupported` in `ipc/server.ts` is back on it.
+
+Mutations: the reviewer's surviving mutants are now killed. A3 is killed by the no-door test, and A4–A7 by the v17-constraint test. Of the 9 new mutants, 8 are killed. They cover:
+- the sync and `appendSynced` refusals;
+- each trigger, and the triggers never being installed;
+- a dropped revision CHECK.
+
+The one survivor was a raw-key clause in `sync.push`, which turned out to be equivalent: a `cowork` key that is not a valid binding already fails the schema. The clause is removed. `appendSynced` keeps its raw-line check, because its raw line and its parsed event are separate inputs.
