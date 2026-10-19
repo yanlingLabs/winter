@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import type { SessionApprovalPolicy } from "../agent/gate";
+import type { ApprovalBroker } from "../agent/approvals";
+import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
+import type { QuestionBroker } from "../agent/questions";
+import { canUseToolFor, type BridgeLogger, type CanUseToolDeps } from "../runtime-sdk/approval-bridge";
 import type { SessionStore } from "../sessions/store";
 import type { CoworkAuthority, CoworkPrincipal } from "./authority";
 import type { CoworkRepository } from "./repository";
@@ -7,7 +10,7 @@ import { relativeCoworkPath } from "./repository";
 import type { CoworkSchedules } from "./schedules";
 import type { CoworkConnection } from "./service";
 import { createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "./session-driver";
-import type { CoworkSessionCreateInput, CoworkSessionDoor } from "./session-ports";
+import type { CoworkApprovalPort, CoworkSessionCreateInput, CoworkSessionDoor } from "./session-ports";
 import { CoworkError } from "./types";
 
 /*
@@ -66,6 +69,21 @@ export function coworkScheduleDispatchView(schedules: Pick<CoworkSchedules, "lis
       }
       return undefined;
     },
+  };
+}
+
+/**
+ * The approval port a door composition supplies (APPROVALS #84's bridge, `mode: "cowork"`): one bridge per incarnation, the
+ * conversation's host ports as its `cowork` dependency, so every decision but AskUserQuestion comes from the Cowork host
+ * policy matrix. Built by nothing in production (the door is not constructed there).
+ */
+export function coworkApprovalPort(deps: { readonly approvals: ApprovalBroker; readonly questions: QuestionBroker; readonly gate: PermissionGate; readonly log?: BridgeLogger; readonly coworkBashReview?: CanUseToolDeps["coworkBashReview"] }): CoworkApprovalPort {
+  return {
+    canUseToolFor: input => canUseToolFor({
+      sessionId: input.sessionId, mode: "cowork", policy: input.binding.policy as SessionApprovalPolicy, approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
+      cwd: input.cwd, emit: input.emit, turnOrigin: input.turnOrigin, cowork: input.cowork,
+      ...(deps.log === undefined ? {} : { log: deps.log }), ...(deps.coworkBashReview === undefined ? {} : { coworkBashReview: deps.coworkBashReview }),
+    }),
   };
 }
 
