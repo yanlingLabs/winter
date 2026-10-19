@@ -73,6 +73,12 @@ class StandinLinuxTests(unittest.TestCase):
         self.proc_entry(101, [4242] * 4, comm=COMM)
         self.assertEqual(self.scan(), "ambiguous")
 
+    def test_the_locator_hands_back_a_pidfd_and_refuses_when_the_process_changed_before_the_recheck(self):
+        # The fake /proc lists this test process (the tool's parent), a live pid, so pidfd_open succeeds.
+        self.proc_entry(os.getpid(), [4242] * 4, exe=EXE)
+        self.assertEqual(self.run_tool("find", self.dir / "proc", 4242, EXE, COMM, 0), ["pidfd"])
+        self.assertEqual(self.run_tool("find", self.dir / "proc", 4242, EXE, COMM, 1), ["refused"])
+
     def test_every_one_of_the_four_uids_must_equal_the_runtime_uid(self):
         for position in range(4):
             uids = [4242] * 4

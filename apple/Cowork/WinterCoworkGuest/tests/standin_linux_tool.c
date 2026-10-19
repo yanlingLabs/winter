@@ -14,13 +14,31 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static char changed_status[512];
+/* Rewrites the runtime's /proc status to another uid: the process "changed" between the scan and the pidfd re-check. */
+static void change_the_process(void) {
+    FILE *f = fopen(changed_status, "w");
+    if (f) { fputs("Name:\tx\nUmask:\t0022\nUid:\t0\t0\t0\t0\nGid:\t1\t1\t1\t1\n", f); fclose(f); }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     const char *command = argv[1];
     if (!strcmp(command, "scan") && argc == 6) {
         int pid = 0;
         int r = wg_standin_scan_proc(argv[2], (uint32_t)strtoul(argv[3], NULL, 10), argv[4], argv[5], &pid);
-        if (r == 1) printf("found %d\n", pid); else printf("%s\n", r == 0 ? "none" : "ambiguous");
+        if (r == 1) printf("found %d\n", pid); else if (r == 0) printf("none\n"); else if (r == -1) printf("ambiguous\n"); else printf("unexpected %d\n", r);
+        return 0;
+    }
+    if (!strcmp(command, "find") && argc == 7) {
+        /* find PROC UID EXE COMM CHANGE: the real op_find_runtime over a fake /proc whose one entry is this process's PARENT (the test), so pidfd_open succeeds. */
+        wg_standin_paths.proc_root = argv[2]; wg_standin_paths.runtime_exe = argv[4]; wg_standin_paths.runtime_comm = argv[5];
+        snprintf(changed_status, sizeof changed_status, "%s/%d/status", argv[2], (int)getppid());
+        if (argv[6][0] == '1') wg_standin_after_pidfd_open = change_the_process;
+        struct wg_standin_ops ops;
+        wg_standin_linux_ops(&ops, -1);
+        int r = ops.find_runtime(NULL, (uint32_t)strtoul(argv[3], NULL, 10));
+        if (r >= 3) printf("pidfd\n"); else printf("%s\n", r == -1 ? "refused" : r == 0 ? "again" : "unexpected");
         return 0;
     }
     if (!strcmp(command, "admit") && argc == 2) {

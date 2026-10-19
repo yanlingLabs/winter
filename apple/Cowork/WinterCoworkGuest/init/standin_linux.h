@@ -26,6 +26,9 @@ extern struct wg_standin_paths wg_standin_paths;
 
 /* How many processes in `proc_root` have real, effective, saved and filesystem uid `uid` AND are the runtime (exe link equals `exe` or process name equals `comm`).
  * 1 with *pid set when exactly one; 0 when none; -1 when more than one or a /proc entry could not be read consistently. */
+/* Test seam: called (when set) between opening the runtime's pidfd and re-checking that the process is still the runtime. NULL in the image; tests/standin_linux_tool.c sets it
+ * to change the process entry at exactly that point, so the guard against a reused pid is exercised deterministically. */
+extern void (*wg_standin_after_pidfd_open)(void);
 int wg_standin_scan_proc(const char *proc_root, uint32_t uid, const char *exe, const char *comm, int *pid);
 /* One message on a SOCK_SEQPACKET channel: the byte 'I' carrying exactly one SCM_RIGHTS descriptor. 0 = sent. */
 int wg_standin_send_admission(int channel, int pidfd);

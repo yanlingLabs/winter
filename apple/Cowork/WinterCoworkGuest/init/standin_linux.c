@@ -110,6 +110,8 @@ int wg_standin_scan_proc(const char *proc_root, uint32_t uid, const char *exe, c
     return found;
 }
 
+void (*wg_standin_after_pidfd_open)(void) = NULL;
+
 static int op_find_runtime(void *ctx, uint32_t uid) {
     (void)ctx;
     const struct wg_standin_paths *p = &wg_standin_paths;
@@ -117,6 +119,7 @@ static int op_find_runtime(void *ctx, uint32_t uid) {
     if (found <= 0) return found;
     int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
     if (pidfd < 0) return 0;        /* it left between the scan and the open: look again */
+    if (wg_standin_after_pidfd_open) wg_standin_after_pidfd_open();
     /* a pid can be reused between the scan and the open: what the descriptor refers to must still be the runtime */
     if (process_matches(p->proc_root, pid, uid, p->runtime_exe, p->runtime_comm) != 1) { close(pidfd); return -1; }
     return pidfd;
