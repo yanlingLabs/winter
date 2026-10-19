@@ -460,7 +460,24 @@ export class CoworkRepository {
     return { workspaceId, incarnationId, leaseEpoch, configRevision: current.configRevision, grantRevision: current.grantRevision };
   }
   acknowledgeSource(epoch: GuestEpoch, sourceId: string, revision: number, state: "ready" | "detached"): void {
+    durableCoworkTransaction(this.rs, () => this.acknowledgeWithin(epoch, sourceId, revision, state));
+  }
+  /**
+   * #92 N2: the folder shares a guest reported at `shares_mounted`, acknowledged ALL OR NOTHING. Every entry is validated
+   * first (a present folder source, `preparing`, at the reported revision), then all are acknowledged in ONE transaction:
+   * a report with any bad entry leaves every source as it was, publishes nothing and concludes no operation.
+   */
+  acknowledgeMountedShares(epoch: GuestEpoch, shares: readonly { readonly sourceId: string; readonly revision: number }[]): void {
     durableCoworkTransaction(this.rs, () => {
+      for (const share of shares) {
+        const source = this.source(epoch.workspaceId, share.sourceId);
+        if (source.kind !== "folder" || source.desired !== "present" || source.state !== "preparing" || source.revision !== share.revision) throw new CoworkError("stale_acknowledgment");
+      }
+      for (const share of shares) this.acknowledgeWithin(epoch, share.sourceId, share.revision, "ready");
+    });
+  }
+  private acknowledgeWithin(epoch: GuestEpoch, sourceId: string, revision: number, state: "ready" | "detached"): void {
+    {
       const current = this.get(epoch.workspaceId), selected = this.source(epoch.workspaceId, sourceId);
       if (!["starting", "running"].includes(current.power) || current.incarnationId !== epoch.incarnationId || current.leaseEpoch !== epoch.leaseEpoch || current.configRevision !== epoch.configRevision || current.grantRevision !== epoch.grantRevision || selected.revision !== revision) throw new CoworkError("stale_acknowledgment");
       if (selected.state === state && selected.ackRevision === revision && selected.ackIncarnationId === epoch.incarnationId) return;
@@ -470,7 +487,7 @@ export class CoworkRepository {
       this.run("UPDATE cowork_sources SET state=?,ack_revision=revision,ack_incarnation_id=?,restart_required=0,reason=NULL,updated_at=? WHERE source_id=?", state, epoch.incarnationId, this.now(), sourceId);
       this.publish(epoch.workspaceId, operationId, "workspace_sources_changed", { sourceId, sourceRevision: revision, state, incarnationId: epoch.incarnationId });
       if (!this.one("SELECT 1 FROM cowork_sources WHERE operation_id=? AND state NOT IN ('ready','detached') LIMIT 1", operationId)) this.concludeOperation(epoch.workspaceId, operationId, "applied");
-    });
+    }
   }
   /** Membership predicate only; publication still requires current ready source/write authority. */
   githubOnly(workspaceId: string): boolean {
