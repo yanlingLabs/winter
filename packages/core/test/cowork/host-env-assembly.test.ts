@@ -155,6 +155,22 @@ describe("through the wiring", () => {
     expect(owners(h)).toEqual([null, null]);
     expect(wiring.activeWorkspaces()).toEqual([]);
   });
+  test("a pressure halt before the host is bound is reported UNCONFIRMED; once bound (and the guests stopped) it is confirmed", async () => {
+    const h = createHarness(), w = world(); withBindingTable(h);
+    const full = { read: () => ({ filesystemId: "fs-full", typeName: "apfs", blockBytes: 4096, totalBytes: 500 * 1024 ** 3, availableBytes: 1024 }) };
+    const unbound = createCoworkNativeProductionEnvironment(options(h, w, { space: full }));
+    const before = await unbound.pressure.evaluate();
+    expect(before.blocked.length).toBeGreaterThan(0);
+    expect(before.haltUnconfirmed.length).toBe(before.blocked.length);
+    unbound.close?.();
+    const h2 = createHarness(), w2 = world(); withBindingTable(h2);
+    const bound = createCoworkNativeProductionEnvironment(options(h2, w2, { space: full }));
+    bound.bindHost?.({ activeWorkspaces: () => [], stop: async () => ({ released: true }) });
+    const after = await bound.pressure.evaluate();
+    expect(after.blocked.length).toBeGreaterThan(0);
+    expect(after.haltUnconfirmed).toEqual([]);
+    bound.close?.();
+  });
   test("the pressure timer starts with the first start and the close hook clears it; closing twice is harmless", async () => {
     const h = createHarness(), w = world(); withBindingTable(h);
     const prod = createCoworkNativeProductionEnvironment(options(h, w));

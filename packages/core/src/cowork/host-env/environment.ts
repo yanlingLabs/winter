@@ -65,6 +65,8 @@ export interface CoworkNativeProductionEnvironment extends CoworkNativeEnvironme
   /** The one probes object the ledger, the host boot and the stop-receipt check all use. */
   readonly probes: AdmissionProbes;
   readonly ledger: CoworkAdmissionLedger;
+  /** The disk-pressure guard the ledger's resource observation reads (exposed for tests and diagnostics). */
+  readonly pressure: CoworkPressureGuard;
   readonly homeId: string;
   readonly installationId: string;
   readonly receiptDirectory: string;
@@ -146,7 +148,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   return {
     launcher, admission: ledger, backup: timeMachineVolumeBackup, hostBoot, daemon, receipts, journal,
     guards: ({ volumes }) => createCoworkRecoverGuards({ journal, processes: adapters.processes, bootId: () => probes.hostIdentity()?.bootId ?? null, home: canonicalHome, ownersHeld: workspaceId => volumes.records(workspaceId).some(volume => volume.owner !== null) }),
-    probes, ledger, homeId, installationId, receiptDirectory, journalDirectory,
+    probes, ledger, pressure: guard, homeId, installationId, receiptDirectory, journalDirectory,
     bindHost(host) { halt = async () => { const outcomes = await Promise.all(host.activeWorkspaces().map(workspaceId => host.stop(workspaceId, "shutdown").then(outcome => outcome.released, () => false))); return outcomes.every(Boolean); }; },
     async prepareStart() {
       await guard.evaluate();
