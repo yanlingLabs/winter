@@ -587,10 +587,29 @@ export const IslandWatchItemSchema = z.object({
   expiresAt: z.number().int().nonnegative(),
   session: IslandActivitySessionFacts,
 });
+/** A plan alarm that just fired (`docs/claude/usage.md`): the island's notification pill. No session behind it. */
+export const IslandUsageAlarmItemSchema = z.object({
+  /** The alarm's own id (it fires once). */
+  id: z.string().min(1),
+  provider: z.enum(["codex", "claude-code", "antigravity"]),
+  windowKey: z.string().min(1),
+  /** The window's kind, scope and length, so the client names it as its plan lines do. */
+  kind: z.string().min(1),
+  scope: z.string().optional(),
+  windowMinutes: z.number().optional(),
+  thresholdPercent: z.number().int().min(1).max(100),
+  /** The used share (0…100) that met it. */
+  usedPercent: z.number(),
+  /** Epoch ms. */
+  resetsAt: z.number().optional(),
+  /** Epoch ms: when it fired. */
+  at: z.number().int().nonnegative(),
+});
 export const IslandActivityResult = z.object({
   computerUse: z.array(IslandComputerUseItemSchema),
   results: z.array(IslandResultItemSchema),
   watches: z.array(IslandWatchItemSchema),
+  usageAlarms: z.array(IslandUsageAlarmItemSchema),
 });
 /** The daemon → island-client notification: the island's activity may have changed — ask `island.activity` again. */
 export const ISLAND_ACTIVITY_CHANGED_NOTIFICATION = "island.activityChanged";
@@ -649,6 +668,28 @@ export const UsageSetTrackingParams = z.object({
   codex: z.boolean().optional(), claudeCode: z.boolean().optional(), antigravity: z.boolean().optional(), opencode: z.boolean().optional(),
 });
 export const UsageSubscriptionsRemoveParams = z.object({ id: z.string().min(1).max(64) });
+/** The user's one-shot plan alarms: a plan, one of its windows by its STABLE key (the plan reading's `windowKey` — its
+ *  kind and scope), a whole-percent threshold. A fired alarm is deleted. `set` answers the alarm (one already set for the
+ *  same window and threshold is answered instead) and the whole list; `list` and `remove` the list. */
+export const UsageAlarmProviderSchema = z.enum(["codex", "claude-code", "antigravity"]);
+export const UsageAlarmsListParams = z.object({});
+export const UsageAlarmsSetParams = z.object({
+  provider: UsageAlarmProviderSchema,
+  windowKey: z.string().trim().min(1).max(120),
+  thresholdPercent: z.number().int().min(1).max(100),
+});
+export const UsageAlarmsRemoveParams = z.object({ id: z.string().min(1).max(64) });
+/** A fired alarm's notice was acknowledged — dismissed, opened, or shown its full time: the daemon forgets it (until
+ *  then `island.activity` lists it, across restarts). */
+export const UsageAlarmsAckParams = z.object({ id: z.string().min(1).max(64) });
+export const UsageAlarmSchema = z.object({
+  id: z.string(),
+  provider: UsageAlarmProviderSchema,
+  windowKey: z.string(),
+  thresholdPercent: z.number().int(),
+  /** Epoch ms. */
+  createdAt: z.number(),
+});
 
 /** The island's Usage tab: what the daemon already knows about usage and limits, nothing estimated. `windows` — the
  *  latest report per provider and window kind (each tagged with its `provider`) since the daemon started; `subscription` — Winter's background jobs' subscription
@@ -3552,6 +3593,10 @@ export const METHODS = {
   usageSubscriptionsSet: "usage.subscriptions.set",
   usageSubscriptionsRemove: "usage.subscriptions.remove",
   usageSetTracking: "usage.setTracking",
+  usageAlarmsList: "usage.alarms.list",
+  usageAlarmsSet: "usage.alarms.set",
+  usageAlarmsRemove: "usage.alarms.remove",
+  usageAlarmsAck: "usage.alarms.ack",
   // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
   computerUseStatus: "computerUse.status",
   computerUseRequestPermission: "computerUse.requestPermission",

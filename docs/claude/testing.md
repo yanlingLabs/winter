@@ -27,7 +27,7 @@ A temp `WINTER_HOME`, no `WINTER_PROFILE`, a random `WINTER_KEYCHAIN_SERVICE=com
 
 ## Compiled-artifact gates
 
-Each builds a real binary; none runs under `bun test`: `verify:workflow` (sandboxed workflow worker on `dist/winter-core`), `verify:automation-worker` (sandboxed ComputerV2 worker), `verify:runtime-state`, `verify:runtimes` (the Release bundle's embedded runtimes), `verify:embedded` (one EMBEDDED chat turn, a Worker from `compile:core`'s 2nd entrypoint — `compile:core` is a `packages/cli` script), `verify:computer-helper` (the helper's `dist/dev` signature + a test build's handshake on a temp home), `verify:headless-helper` ([headless](./headless.md)).
+Each builds a real binary; none runs under `bun test`: `verify:workflow` (sandboxed workflow worker on `dist/winter-core`), `verify:automation-worker` (sandboxed ComputerV2 worker; CI's `verify` job runs it beside `verify:workflow`, `verify:runtime-state` and `verify:runtimes` — the worker loads the whole graph, so a module throwing at load breaks every ComputerV2 call), `verify:runtime-state`, `verify:runtimes` (the Release bundle's embedded runtimes), `verify:embedded` (one EMBEDDED chat turn, a Worker from `compile:core`'s 2nd entrypoint — `compile:core` is a `packages/cli` script), `verify:computer-helper` (the helper's `dist/dev` signature + a test build's handshake on a temp home), `verify:headless-helper` ([headless](./headless.md)).
 
 ## Swift
 
