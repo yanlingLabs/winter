@@ -125,6 +125,11 @@ export class CoworkRepository {
     if (row.location_kind !== "source" && row.location_kind !== "outputs") throw new CoworkError("recovery_required");
     return row.location_kind;
   }
+  /** A bound conversation's safe workspace reference (`session.list`'s `cowork` field): ids only, never a path, label or grant. */
+  conversationRef(sessionId: string): { workspaceId: string; projectId: string | null } | undefined {
+    const row = this.one("SELECT workspace_id, project_id FROM cowork_conversations WHERE session_id=?", id(sessionId));
+    return row ? { workspaceId: row.workspace_id, projectId: row.project_id } : undefined;
+  }
   /** The guest runtime's durable backend identity for a conversation (G9), or null before its first guest start. */
   conversationBackend(sessionId: string): string | null {
     const row = this.one("SELECT backend_session_id FROM cowork_conversations WHERE session_id=?", id(sessionId));

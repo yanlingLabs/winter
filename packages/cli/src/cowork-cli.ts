@@ -1,4 +1,4 @@
-import { COWORK_RPC, COWORK_INSTRUCTION_MAX_BYTES, type CoworkMethod, type CoworkParams, type CoworkResult, type CoworkWorkspace, type CoworkWorkspacePolicy } from "@yanlinglabs/winter-protocol";
+import { COWORK_RPC, COWORK_INSTRUCTION_MAX_BYTES, CoworkSessionCreate, type CoworkMethod, type CoworkParams, type CoworkResult, type CoworkWorkspace, type CoworkWorkspacePolicy } from "@yanlinglabs/winter-protocol";
 import { constants, openSync, closeSync, fstatSync, statSync, readSync } from "node:fs";
 import { resolve } from "node:path";
 import type { WinterClient } from "./client";
@@ -21,8 +21,11 @@ export const COWORK_CLI_USAGE = `usage:
   winter workspace instructions get|provenance <workspaceId> [--json]
   winter workspace instructions update <workspaceId> --instruction-revision N --digest SHA256 (--content TEXT | --stdin | --content-file FILE) --request-id ID [--allow-empty] [--json]
   winter workspace operation get <workspaceId> <operationId> [--json]
+  winter workspace session create <workspaceId> --source ID [--cwd RELATIVE] --request-id ID [--json]
+  winter workspace session list <workspaceId> [--json]
 
-Creation is unavailable. Source provisioning is gated by the daemon; add commands
+Creation is unavailable. A Cowork conversation is created with session create and then
+used by its session id (winter -p, attach); every production daemon refuses it today. Source provisioning is gated by the daemon; add commands
 accept an existing opaque host selection ID. This CLI does not issue selections.
 Guidance input accepts one content source, at most ${COWORK_INSTRUCTION_MAX_BYTES} UTF-8 bytes with no NUL.
 --stdin reads to EOF; --stdin and --content-file keep guidance text out of argv.
@@ -250,6 +253,39 @@ export function formatCoworkResult(route: CoworkCliRoute, result: CoworkCliResul
   if ("sources" in result) return [...(result.sources.length ? result.sources.map(source => `${source.sourceId}: ${visible(source.label)} · ${source.state} · ${source.desired} · ${source.access}`) : ["(no sources on this page)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
   if ("sourceId" in result) return [`${result.sourceId}: ${visible(result.label)} · ${result.state} · ${result.desired} · ${result.access}; source revision: ${result.revision}`];
   throw new Error("Unsupported Cowork result");
+}
+
+/** Session door D4b: `winter workspace session create|list`. Not a Cowork RPC: `session.create {mode: "cowork"}` and a
+ *  `session.list` filtered by the row's workspace reference. Strict like the rest: no default request id or scope guess. */
+export type CoworkSessionCliRoute =
+  | { kind: "session-create"; scope: string; workspaceId: string; requestId: string; location: { kind: "source"; sourceId: string; relativeCwd?: string }; json: boolean }
+  | { kind: "session-list"; workspaceId: string; json: boolean };
+export function parseCoworkSessionArgs(args: string[]): CoworkSessionCliRoute {
+  const { flags, positions } = argumentsOf(args);
+  const [verb, sub, workspaceId] = positions;
+  if (verb !== "session" || positions.length !== 3 || !workspaceId) throw new Error("Unexpected or missing positional arguments");
+  const allowed = sub === "create" ? ["--source", "--cwd", "--request-id"] : sub === "list" ? [] : undefined;
+  if (allowed === undefined) throw new Error("Unknown workspace session command");
+  for (const flag of Object.keys(flags)) if (flag !== "--json" && !allowed.includes(flag)) throw new Error(`Unsupported option ${flag}`);
+  const json = flags["--json"] === true;
+  if (sub === "list") return { kind: "session-list", workspaceId, json };
+  const sourceId = flags["--source"], requestId = flags["--request-id"], cwd = flags["--cwd"];
+  if (typeof sourceId !== "string") throw new Error("--source is required");
+  if (typeof requestId !== "string") throw new Error("--request-id is required");
+  const location = { kind: "source" as const, sourceId, ...(typeof cwd === "string" ? { relativeCwd: cwd } : {}) };
+  const checked = CoworkSessionCreate.safeParse({ workspaceId, requestId, location });
+  if (!checked.success) throw new Error(`Invalid arguments: ${checked.error.issues.map(issue => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")}`);
+  return { kind: "session-create", scope: "global", workspaceId, requestId, location, json };
+}
+export async function runCoworkSessionRoute(client: Pick<WinterClient, "createCoworkSession" | "listSessions">, route: CoworkSessionCliRoute): Promise<string[]> {
+  if (route.kind === "session-create") {
+    const created = await client.createCoworkSession(route.scope, { workspaceId: route.workspaceId, requestId: route.requestId, location: route.location });
+    return route.json ? [JSON.stringify({ sessionId: created.sessionId }, null, 2)] : [`Cowork conversation ${created.sessionId} in ${route.workspaceId}`];
+  }
+  type Row = { sessionId: string; title?: string | null; cowork?: { workspaceId: string; projectId: string | null } };
+  const rows = ((await client.listSessions()).sessions as Row[]).filter((row: Row) => row.cowork?.workspaceId === route.workspaceId);
+  if (route.json) return [JSON.stringify({ sessions: rows.map((row: Row) => ({ sessionId: row.sessionId, projectId: row.cowork!.projectId, title: row.title ?? null })) }, null, 2)];
+  return rows.length ? rows.map((row: Row) => `${row.sessionId}${row.title ? ` · ${visible(row.title)}` : ""}`) : ["(no Cowork conversations)"];
 }
 
 export function coworkErrorMessage(error: unknown): string {

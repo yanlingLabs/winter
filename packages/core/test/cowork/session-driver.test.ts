@@ -16,9 +16,9 @@ import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { COWORK_GUEST_RUNTIME_MODES } from "../../src/cowork/conversation-set";
 import { parseCoworkNativeMuxFrame, serializeCoworkNativeMuxFrame } from "../../src/cowork/native/protocol";
+import { coworkApprovalPort } from "../../src/cowork/session-door";
 import { coworkGuestPermissionAnswer, createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "../../src/cowork/session-driver";
 import type { CoworkApprovalPort, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestRun, CoworkGuestRuntimeLink, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkGuestStopOutcome } from "../../src/cowork/session-ports";
-import { canUseToolFor } from "../../src/runtime-sdk/approval-bridge";
 import { startWinterSession } from "../../src/runtime-sdk/winter-session";
 import { ProjectionCheckpoints } from "../../src/runtime-state/checkpoints";
 import { SessionHub } from "../../src/sessions/hub";
@@ -160,11 +160,8 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
       return guest.run;
     },
   };
-  const port: CoworkApprovalPort = {
-    // The APPROVALS lane's real bridge with the DOOR's ports (its adapter is a NEEDS: the bridge's `mode` type has no "cowork").
-    canUseToolFor: input => canUseToolFor({ sessionId: input.sessionId, mode: "code", policy: input.binding.policy, approvals, questions, gate: new PermissionGate(), cwd: input.cwd,
-      emit: input.emit, log: { info() {}, error() {} }, cowork: input.cowork, turnOrigin: input.turnOrigin }),
-  };
+  // The APPROVALS lane's real bridge through the door's own adapter (`mode: "cowork"`, D4b).
+  const port: CoworkApprovalPort = coworkApprovalPort({ approvals, questions, gate: new PermissionGate(), log: { info() {}, error() {} } });
   const deps: CoworkSessionDriverDeps = {
     records: f.records, authority: f.authority, store, hub, checkpoints: new ProjectionCheckpoints(f.db),
     ...(opts.production ? {} : { route: opts.route ?? standinRoute(), native, offer, approvals: port }),

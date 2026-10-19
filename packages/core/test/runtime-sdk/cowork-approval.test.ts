@@ -603,7 +603,11 @@ test("wired behind the refusal: only the bridge reaches the projection, producti
   // Cowork driver (cowork/session-driver.ts) never imports the bridge; it calls the injected `CoworkApprovalPort`, which
   // production never supplies.
   const constructing = sources.filter(file => basename(file) !== "approval-bridge.ts" && /from "[^"]*approval-bridge"/.test(readFileSync(file, "utf8")) && readFileSync(file, "utf8").includes("canUseToolFor({"));
-  expect(constructing.map(file => file.slice(packages.length + 1))).toEqual([join("core", "src", "runtime-sdk", "session-driver.ts")]);
+  // Session door D4b: the door's `coworkApprovalPort` adapter (#84's `mode: "cowork"`) is the one other constructor, and only
+  // a door composition calls it; nothing in src constructs a door (session-door.test.ts pins that).
+  expect(constructing.map(file => file.slice(packages.length + 1)).sort()).toEqual([join("core", "src", "cowork", "session-door.ts"), join("core", "src", "runtime-sdk", "session-driver.ts")]);
+  const doorText = readFileSync(join(packages, "core", "src", "cowork", "session-door.ts"), "utf8");
+  expect(doorText.slice(doorText.indexOf("canUseToolFor({"), doorText.indexOf("canUseToolFor({") + 400)).toMatch(/mode: "cowork"/);
   expect(readFileSync(join(packages, "core", "src", "cowork", "session-driver.ts"), "utf8")).not.toMatch(/approval-bridge|cowork-approval/);
   // The door still refuses.
   expect(isUnrunnableSessionMode("cowork")).toBe(true); expect(runnableModeOf("cowork")).toBeUndefined();
