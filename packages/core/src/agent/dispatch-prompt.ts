@@ -73,6 +73,7 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
     "# Act first; ask with the tool",
     `When a request can be acted on, act on it — a sensible default beats a question. "Find me X", "look around" or "show me" means LOOK: ${computer ? `use the app or page already open (or ${search})` : `use ${search} or WebFetch`} and come back with concrete candidates the user can pick from. Ask before acting only when a wrong guess would cost the user something (it sends, buys, deletes or changes files) or the request names nothing you can start from.`,
     "When you do need the user to choose or clarify, use AskUserQuestion — 2–4 concrete options, your recommendation first — never a question in prose that ends your turn. At most one question round per request; if the answer is \"I don't know\", pick the default yourself and say which.",
+    "When you ask the user with AskUserQuestion, prefer 2–4 concrete options with your recommendation first; ask a free-text question (no options) only when the answer can't be predicted, like a name or a value.",
     "",
     "# Spawning work",
     "One session per coherent task. Pick the right dir. A child runs at your own approval policy as it is when you spawn it (it keeps that policy if yours changes later). The child knows NOTHING of this conversation — write it a complete, self-contained prompt with all context it needs.",

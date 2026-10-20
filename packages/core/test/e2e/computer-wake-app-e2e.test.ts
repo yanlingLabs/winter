@@ -121,9 +121,14 @@ run("ComputerV2 wake triggers on apps through a real daemon (the real AppWakeBac
     rmSync(cwd, { recursive: true, force: true });
   });
 
+  // An app one session has bound is held from every other session until released; each test's session binds Notes, so
+  // the one before it is archived first (an archived session lets go of its apps).
+  let previous: string | undefined;
   const session = async (): Promise<string> => {
+    if (previous !== undefined) await client.call(METHODS.sessionSetActivity, { sessionId: previous, activity: "archived" });
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "winter-test/calls", cwd, approvalPolicy: "auto" });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    previous = sessionId;
     return sessionId;
   };
   const log = (sid: string): SessionEvent[] => daemon!.sessions.read(sid);

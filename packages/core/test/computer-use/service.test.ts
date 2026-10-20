@@ -585,6 +585,19 @@ describe("ComputerV2: locks, timeouts and cancellation", () => {
     expect(w.fake.calls("work.lift").at(-1)).toEqual({ pids: [502], reason: "message" });
   }, 30_000);
 
+  macOnly("an archived session lets go of its apps (nobody can message it to ask)", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')", { sessionId: "s_old" });
+    expect(text(await w.run("try { await apps.open('Notes') } catch (e) { print(e.name) }", { sessionId: "s_new" }))).toContain("TargetBusy");
+    w.svc.sessionArchived("s_old");
+    expect(w.fake.calls("target.release").map((c) => c.targetId)).toEqual(["t1"]);
+    expect(w.fake.calls("work.lift")).toContainEqual({ pids: [501], reason: "archived" });
+    expect(text(await w.run("await apps.open('Notes'); print('ok')", { sessionId: "s_new" }))).toContain("ok");
+    // Brought back, its old handle says why it is no longer bound.
+    const stale = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_old" });
+    expect(text(stale)).toContain("TargetLost this session let go of Notes when it was archived");
+  }, 30_000);
+
   macOnly("a timeout cancels the in-flight primitive (Cancelled) and the runtime survives", async () => {
     const w = world();
     const r = await w.run("const x = 7\nawait sleep(30000)", { timeoutMs: 1_000 });

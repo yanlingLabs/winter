@@ -1916,6 +1916,15 @@ export class ComputerV2Service {
 
   // ── holds: an app a session has bound is held from every other agent until released ─────────────────────────────
 
+  /** The user archived the session: it lets go of every app it holds. An archived session can't be messaged, so no
+   *  other agent could ask it to release one, and it runs no turn until the user brings it back. Its worker and
+   *  variables stay (the idle end takes them); a handle it kept reads "TargetLost" at its next run. */
+  sessionArchived(sessionId: string): void {
+    const state = this.sessions.get(sessionId);
+    if (state === undefined || state.active !== undefined) return;
+    this.releaseTargets(sessionId, state, [...state.targets.values()], "archived");
+  }
+
   /** Another session that holds this app (a target of it bound and not let go), if any. */
   holderOf(bundleId: string, exceptSession: string): string | undefined {
     const want = bundleId.toLowerCase();
@@ -1956,7 +1965,7 @@ export class ComputerV2Service {
 
   /** Lets go of these targets (`lost` = `reason`): the helper releases each, and the user's work mark lifts on every app no
    *  session holds any more. The names released, once each. */
-  private releaseTargets(sessionId: string, state: SessionState, targets: TargetInfo[], reason: "released" | "turn_ended"): string[] {
+  private releaseTargets(sessionId: string, state: SessionState, targets: TargetInfo[], reason: "released" | "turn_ended" | "archived"): string[] {
     const names: string[] = [];
     const pids = new Set<number>();
     for (const t of targets) {
@@ -2253,6 +2262,7 @@ export function targetLostMessage(name: string, reason: string): string {
   switch (reason) {
     case "released": return `${name} was released (apps.release) — bind it again with apps.open() if you need it`;
     case "turn_ended": return `Dispatch let go of ${name} when its last turn ended — bind it again with apps.open()`;
+    case "archived": return `this session let go of ${name} when it was archived — bind it again with apps.open()`;
     case "app_quit": return `${name} quit — open it again with apps.open()`;
     case "window_closed": return `${name}'s window closed — call apps.open or useWindow to pick another`;
     case "helper_restart": return `Winter Computer Use restarted, so ${name} is no longer bound — bind it again with apps.open()`;

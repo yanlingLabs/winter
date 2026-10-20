@@ -410,6 +410,7 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
         expect(text).toContain("\"Find me X\", \"look around\" or \"show me\" means LOOK");
         expect(text).toContain("use AskUserQuestion — 2–4 concrete options, your recommendation first — never a question in prose that ends your turn");
         expect(text).toContain("At most one question round per request; if the answer is \"I don't know\", pick the default yourself and say which.");
+        expect(text).toContain("When you ask the user with AskUserQuestion, prefer 2–4 concrete options with your recommendation first; ask a free-text question (no options) only when the answer can't be predicted, like a name or a value.");
         // It names the search tool the session HAS.
         expect(text).toContain(exaKeyPresent ? "Search" : "WebSearch");
         if (exaKeyPresent) expect(text).not.toContain("WebSearch");

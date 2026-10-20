@@ -581,6 +581,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     sessionArchived(sessionId) {
       wakeRegistry.sessionEnded(sessionId);
       browsers.sessionArchived(sessionId);
+      // …and the apps it holds: nobody can message an archived session to ask it to release one.
+      svc.sessionArchived(sessionId);
     },
     observe(event) {
       diffBases.observe(event);
