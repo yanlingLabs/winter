@@ -1045,7 +1045,47 @@ final class DispatchPillController: ObservableObject {
 
     /// The swiped-to turn's preview, or nil at the composer.
     var turnPreview: DispatchPillTurnPreview? {
-        historyIndex.flatMap { dispatchPillTurnPreview(exchanges: session.state.exchanges, index: $0) }
+        historyIndex.flatMap {
+            dispatchPillTurnPreview(exchanges: session.state.exchanges, index: $0, replyText: { [unowned self] in
+                self.memoizedReplyText($0)
+            })
+        }
+    }
+
+    /// The pinned reply read as plain words (`dispatchPillReplyText`), by the raw reply — every view update asks.
+    private var replyTextMemo: [String: String] = [:]
+    /// A reply's estimated laid-out height (`dispatchPillPreviewReplyHeight`), by its plain text.
+    private var replyHeightMemo: [String: CGFloat] = [:]
+    private static let replyMemoCapacity = 16
+
+    private func memoizedReplyText(_ raw: String) -> String {
+        if let known = replyTextMemo[raw] { return known }
+        if replyTextMemo.count >= Self.replyMemoCapacity { replyTextMemo.removeAll(keepingCapacity: true) }
+        let text = dispatchPillReplyText(raw)
+        replyTextMemo[raw] = text
+        return text
+    }
+
+    private func memoizedReplyHeight(_ text: String) -> CGFloat {
+        if let known = replyHeightMemo[text] { return known }
+        if replyHeightMemo.count >= Self.replyMemoCapacity { replyHeightMemo.removeAll(keepingCapacity: true) }
+        let height = dispatchPillPreviewReplyHeight(text)
+        replyHeightMemo[text] = height
+        return height
+    }
+
+    /// The pinned reply's height: as its view laid it out once it has, else the estimate.
+    private func previewReplyHeight(_ reply: String) -> CGFloat {
+        previewReplyLayout.flatMap { $0.reply == reply ? $0.height : nil } ?? memoizedReplyHeight(reply)
+    }
+
+    /// The pinned reply is taller than the pill may grow (`dispatchPillPreviewCeiling`): it scrolls inside. Only then
+    /// is it in a scroll view — a scroll view takes the click a short reply leaves to the pill (`exitPreview`).
+    var previewReplyScrolls: Bool {
+        guard presentation == .expanded, let preview = turnPreview else { return false }
+        let whole = dispatchPillPreviewHeight(reply: preview.reply, ceiling: .greatestFiniteMagnitude,
+                                              measuredReplyHeight: previewReplyHeight(preview.reply))
+        return whole > dispatchPillPreviewCeiling(visibleFrame: lockedVisibleFrame)
     }
 
     /// The text field's height inside the bar for the current target.
@@ -1058,10 +1098,62 @@ final class DispatchPillController: ObservableObject {
         return max(1, composer - DispatchPillMetrics.composerVerticalPadding)
     }
 
-    /// The pinned turn's height, or nil when no turn is pinned (the composer shows).
+    /// The working plume is drawn: the compact pill over a running turn (or a sent message's turn on its way,
+    /// `showsTurnRunning`), with no card and no mode picker on it. True from the instant Enter compresses the pill —
+    /// the plume starts with the compress (user, 2026-10-20: "the plume may start as soon as I press Enter").
+    var plumeVisible: Bool {
+        presentation == .compact && showsTurnRunning && !(cardShowsOnPill && frontCard != nil) && !permissionsPickerOpen
+    }
+
+    /// The plume's view stays mounted (hidden when not `plumeVisible`) for as long as a turn runs and the pill is not
+    /// full screen: opening the typing pill for a steer and sending it never starts a new plume.
+    var plumeMounted: Bool { presentation != .fullScreen && showsTurnRunning }
+
+    /// The pinned turn's height, or nil when no turn is pinned (the composer shows): its WHOLE reply, up to
+    /// `dispatchPillPreviewCeiling` (past it the reply scrolls inside the pill).
     private var previewHeight: CGFloat? {
         guard presentation == .expanded, let preview = turnPreview else { return nil }
-        return dispatchPillPreviewHeight(reply: preview.reply)
+        return dispatchPillPreviewHeight(reply: preview.reply, ceiling: dispatchPillPreviewCeiling(visibleFrame: lockedVisibleFrame),
+                                         measuredReplyHeight: previewReplyHeight(preview.reply))
+    }
+
+    /// The pinned reply's height as its own view laid it out (the measure `previewHeight` trusts over its estimate).
+    private var previewReplyLayout: (reply: String, height: CGFloat)?
+
+    /// `ExpandedPillTurnPreview` laid its reply out: size the pill to exactly it.
+    func previewReplyLaidOut(_ reply: String, height: CGFloat) {
+        if let known = previewReplyLayout, known.reply == reply, abs(known.height - height) <= 0.5 { return }
+        previewReplyLayout = (reply, height)
+        if presentation == .expanded, turnPreview?.reply == reply { retargetMain() }
+    }
+
+    /// Where a click on a scrolling pinned reply went down (canvas coordinates), while it may still be a click.
+    private var replyClickDown: CGPoint?
+    /// How far the pointer may move between down and up for it to stay a click.
+    static let replyClickSlop: CGFloat = 4
+
+    /// See `installMonitors`: a click (not a scroll or a drag) on a scrolling pinned reply leaves the pinned turn.
+    func trackReplyClick(_ event: NSEvent) {
+        guard event.window === panel, isVisible, previewReplyScrolls, !cardShowsOnPill else {
+            replyClickDown = nil
+            return
+        }
+        let local = CGPoint(x: event.locationInWindow.x, y: panel.frame.height - event.locationInWindow.y)
+        switch event.type {
+        case .leftMouseDown:
+            replyClickDown = dispatchPillReplyClickArea(canvasSize: canvas.size, mainSize: morph.size).contains(local)
+                ? local : nil
+        case .leftMouseDragged:
+            if let down = replyClickDown, hypot(local.x - down.x, local.y - down.y) > Self.replyClickSlop {
+                replyClickDown = nil
+            }
+        case .leftMouseUp:
+            defer { replyClickDown = nil }
+            guard let down = replyClickDown, hypot(local.x - down.x, local.y - down.y) <= Self.replyClickSlop else { return }
+            DispatchQueue.main.async { [weak self] in self?.exitPreview() }
+        default:
+            break
+        }
     }
 
     /// A click on a pinned turn (and Esc there): back to the composer, keyboard included.
@@ -1586,6 +1678,10 @@ final class DispatchPillController: ObservableObject {
         canvas.size = size
         let frame = dispatchPillPanelFrame(canvasSize: size, visibleFrame: lockedVisibleFrame)
         panel.setFrame(frame, display: false)
+        // Laid out AT ONCE for the new frame: the content is centred in a canvas whose width just changed, and left to
+        // the next pass it sat off by half that change (122 pt at the compress's settle) for a moment while the panel
+        // had already moved — the whole pill, plume included, jumped sideways and back.
+        hosting?.layoutSubtreeIfNeeded()
     }
 
     // MARK: - Blur while the shape changes (the AppKit composer's half)
@@ -1631,6 +1727,8 @@ final class DispatchPillController: ObservableObject {
 
     var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
     var composerTextViewForTesting: NSTextView? { composerView?.documentView as? NSTextView }
+    /// The pinned reply's height as its view laid it out (nil until it has).
+    var previewReplyLaidOutHeightForTesting: CGFloat? { previewReplyLayout?.height }
     /// The bar's look as `DispatchPillComposerBar` derives it now (`dispatchPillBarLook`).
     var barLookForTesting: DispatchPillBarLook {
         dispatchPillBarLook(expanded: presentation == .expanded, running: showsTurnRunning, draft: adapter.composerDraft,
@@ -1644,9 +1742,13 @@ final class DispatchPillController: ObservableObject {
     private func startSpring() {
         guard springTimer == nil else { return }
         lastSpringTick = CACurrentMediaTime()
-        springTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        // `.common` modes, as the pill's other timers: a menu or a drag tracking elsewhere in the app must not hold the
+        // spring back.
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.springTick() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        springTimer = timer
     }
 
     private func cancelSpring() {
@@ -1785,6 +1887,15 @@ final class DispatchPillController: ObservableObject {
             let result = self.swipeRecognizer.handle(event)
             result.performAcceptedFeedback { self.handleSwipe($0) }
             return result.consumesScroll ? nil : event
+        }) { monitors.append(m) }
+
+        // A click on a SCROLLING pinned reply: the scroll view takes the click before the pill's tap gesture can, so the
+        // click is judged here — down and up on the reply with no drag between (a scroll, a drag of the scroller, is
+        // not a click) leaves the pinned turn, as a click on a short reply does. Events pass on untouched.
+        if let m = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp],
+                                                    handler: { [weak self] event in
+            self?.trackReplyClick(event)
+            return event
         }) { monitors.append(m) }
 
         // Click outside — another app (global: mouse events need no Accessibility permission)…

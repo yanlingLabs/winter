@@ -116,7 +116,7 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(frame.minY + DispatchPillMetrics.shadowPad, visible.minY + DispatchPillMetrics.dockGap)
         XCTAssertTrue(pill.panelAcceptsKeyForTesting, "a summon takes the keyboard — it is for typing")
         XCTAssertGreaterThan(pill.keyAssertionCountForTesting, 0)
-        XCTAssertEqual(pill.monitorCountForTesting, 6, "Esc, swipe, click-outside ×2, mouse gate ×2")
+        XCTAssertEqual(pill.monitorCountForTesting, 7, "Esc, swipe, a scrolling reply's click, click-outside ×2, mouse gate ×2")
     }
 
     func testHideRemovesTheMonitorsAndOrdersOut() {
@@ -1042,8 +1042,9 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(pill.historyIndex, 2)
         XCTAssertEqual(pill.presentation, .expanded)
         XCTAssertEqual(pill.turnPreview?.prompt, "three")
-        XCTAssertEqual(pill.morph.target.height, dispatchPillPreviewHeight(reply: "c"),
-                       "the pinned turn shows alone, at its own height")
+        XCTAssertEqual(pill.morph.target.height,
+                       dispatchPillPreviewHeight(reply: "c", ceiling: dispatchPillPreviewCeiling(visibleFrame: visible)),
+                       accuracy: 2, "the pinned turn shows alone, at its own height")
         pill.handleSwipe(.right)
         XCTAssertEqual(pill.historyIndex, 1)
         pill.handleSwipe(.left)
@@ -1105,7 +1106,9 @@ final class DispatchPillControllerTests: XCTestCase {
         waitUntil { pill.presentation == .expanded }
         XCTAssertEqual(pill.historyIndex, 1, "the newest turn is pinned")
         XCTAssertEqual(pill.turnPreview?.reply, "All green.")
-        XCTAssertEqual(pill.morph.target.height, dispatchPillPreviewHeight(reply: "All green."))
+        XCTAssertEqual(pill.morph.target.height,
+                       dispatchPillPreviewHeight(reply: "All green.", ceiling: dispatchPillPreviewCeiling(visibleFrame: visible)),
+                       accuracy: 2)
     }
 
     func testAReplyLeavesADraftAlone() {

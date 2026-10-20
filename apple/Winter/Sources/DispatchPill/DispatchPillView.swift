@@ -63,6 +63,8 @@ struct DispatchPillView: View {
                 } else {
                     DispatchPillComposerBar(controller: controller, adapter: adapter, commandMode: controller.commandMode)
                 }
+            } underlay: {
+                DispatchPillPlumeUnderlay(controller: controller, adapter: adapter)
             }
         }
         // A slight grow under the pointer — the whole stack, anchored at the pill's bottom edge, so the floating
@@ -100,10 +102,22 @@ struct DispatchPillView: View {
 /// While the shape changes, everything inside is blurred by how far the spring still has to travel
 /// (`dispatchPillMorphBlur`), sharpening as it settles — so content never reads as snapping into
 /// place ahead of, or behind, the shape around it.
-struct DispatchPillShell<Content: View>: View {
+struct DispatchPillShell<Content: View, Underlay: View>: View {
     @ObservedObject var morph: DispatchPillMorphModel
     var tracksAnimatedWidth = true
     @ViewBuilder let content: Content
+    /// Drawn UNDER the content, inside the shape and clipped by it at every frame, but never blurred by the morph: the
+    /// working plume (`DispatchPillPlumeUnderlay`), which lays itself out once at its final place and lets the
+    /// shrinking shape reveal it.
+    @ViewBuilder let underlay: Underlay
+
+    init(morph: DispatchPillMorphModel, tracksAnimatedWidth: Bool = true, @ViewBuilder content: () -> Content,
+         @ViewBuilder underlay: () -> Underlay) {
+        self.morph = morph
+        self.tracksAnimatedWidth = tracksAnimatedWidth
+        self.content = content()
+        self.underlay = underlay()
+    }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: dispatchPillCornerRadius(height: morph.size.height),
@@ -120,10 +134,49 @@ struct DispatchPillShell<Content: View>: View {
                               dispatchPillContentBlur(visibility: visibility)))
             // Clipped to the morphing shape itself at every frame — nothing inside ever draws past its edge.
             .clipShape(shape)
+            // Under the (blurred) content and over the black: the plume, clipped by the shape, never blurred. It fades
+            // with a content swap like the rest (`visibility`), but sharp.
+            .background {
+                underlay
+                    .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
+                    .opacity(visibility)
+                    .clipShape(shape)
+            }
             .background(shape.fill(Color.black))
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
             .compositingGroup()
             .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
+    }
+}
+
+/// The working plume, under the pill's content (`DispatchPillShell.underlay`). Laid out ONCE, at the compact pill's
+/// size and where the compact pill will be — centred, its nozzle where the compact stop button comes to rest — so the
+/// spring never lays it out again: the shape shrinks around it and its clip reveals it, and every puff stays where it
+/// is on screen. Not blurred by the morph (the shell blurs only its content). Mounted for as long as a turn runs
+/// (`plumeMounted`) and shown only on the compact working pill (`plumeVisible`), so the typing pill over a steer
+/// hides it and sending the steer shows the same plume again. It starts with Enter's compress and fades in quickly.
+struct DispatchPillPlumeUnderlay: View {
+    @ObservedObject var controller: DispatchPillController
+    @ObservedObject var adapter: FieldStateAdapter
+
+    var body: some View {
+        let visible = controller.plumeVisible
+        ZStack(alignment: .bottom) {
+            if controller.plumeMounted {
+                CompactPillWorking(thrown: controller.plumeThrows, repeating: controller.plumeRepeatingThrows)
+                    .frame(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
+                    .contentShape(Rectangle())
+                    .onTapGesture { controller.openComposer() }
+                    .allowsHitTesting(visible)
+                    .animation(.easeOut(duration: visible ? DispatchPillMetrics.plumeFadeIn : 0.25)) {
+                        $0.opacity(visible ? 1 : 0)
+                    }
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: DispatchPillMetrics.plumeFadeIn)),
+                        removal: .opacity.animation(.easeOut(duration: 0.25))))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 }
 
@@ -242,7 +295,8 @@ struct DispatchPillComposerBar: View {
             // A pinned turn shows ALONE — no composer. The composer stays mounted underneath,
             // invisible, so typing still lands in it (and the first keystroke leaves the turn).
             if let preview {
-                ExpandedPillTurnPreview(preview: preview)
+                ExpandedPillTurnPreview(preview: preview, scrolls: controller.previewReplyScrolls,
+                                        onReplyHeight: { controller.previewReplyLaidOut(preview.reply, height: $0) })
                     .contentShape(Rectangle())
                     .onTapGesture { controller.exitPreview() }
                     .transition(.opacity.animation(.easeOut(duration: 0.2)))
@@ -294,16 +348,8 @@ struct DispatchPillComposerBar: View {
             .padding(.leading, DispatchPillMetrics.leadingPadding)
             .padding(.trailing, DispatchPillMetrics.trailingPadding)
             .frame(maxHeight: .infinity)
-            // Under the row, so the stop button sits on the plume's nozzle.
-            .background(alignment: .bottom) {
-                if working {
-                    CompactPillWorking(thrown: controller.plumeThrows, repeating: controller.plumeRepeatingThrows)
-                        .frame(height: DispatchPillMetrics.pillHeight)
-                        .contentShape(Rectangle())
-                        .onTapGesture { controller.openComposer() }
-                        .transition(.opacity.animation(.easeOut(duration: 0.25)))
-                }
-            }
+            // The plume is not here: it is the shell's underlay (`DispatchPillPlumeUnderlay`), under this row — the
+            // stop button comes to rest on its nozzle — and outside the morph's blur.
         }
     }
 
@@ -406,13 +452,28 @@ func dispatchPillBarLook(expanded: Bool, running: Bool, draft: String, cardShown
                                placeholder: placeholder)
 }
 
-/// A pinned turn's height for `reply`, measured at the composer's own face (the size every line of
-/// the turn is drawn at).
-func dispatchPillPreviewHeight(reply: String) -> CGFloat {
+/// A pinned turn's height for `reply`, laid out whole at the preview's text width and the composer's own face (the
+/// size every line of the turn is drawn at), up to `ceiling`. `measuredReplyHeight` is the reply's own laid-out height
+/// once the view has reported it (`DispatchPillController.previewReplyLaidOut`); until then it is measured here.
+func dispatchPillPreviewHeight(reply: String, ceiling: CGFloat, measuredReplyHeight: CGFloat? = nil) -> CGFloat {
     let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
-    let width = ceil((reply as NSString).size(withAttributes: [.font: font]).width)
-    return dispatchPillPreviewHeight(replyWidth: width,
-                                     lineHeight: ceil(NSLayoutManager().defaultLineHeight(for: font)))
+    return dispatchPillPreviewHeight(replyHeight: measuredReplyHeight ?? dispatchPillPreviewReplyHeight(reply),
+                                     lineHeight: ceil(NSLayoutManager().defaultLineHeight(for: font)),
+                                     ceiling: ceiling)
+}
+
+/// The reply's height laid out at `previewTextWidth` in the composer's face — every line, wrapped.
+func dispatchPillPreviewReplyHeight(_ reply: String) -> CGFloat {
+    let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
+    let storage = NSTextStorage(string: reply.isEmpty ? " " : reply, attributes: [.font: font])
+    let layout = NSLayoutManager()
+    let container = NSTextContainer(size: CGSize(width: DispatchPillMetrics.previewTextWidth,
+                                                 height: .greatestFiniteMagnitude))
+    container.lineFragmentPadding = 0
+    layout.addTextContainer(container)
+    storage.addLayoutManager(layout)
+    layout.ensureLayout(for: container)
+    return ceil(layout.usedRect(for: container).height)
 }
 
 /// The draft's single-line width at the composer's own face — what `dispatchPillAccessoryButtonsVisible`
