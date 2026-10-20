@@ -1,6 +1,9 @@
 """Offline checks of native_build.py's pure parts and of ci-build.json. Builds nothing, downloads nothing, needs no network."""
-import calendar, json, shutil, subprocess, tempfile, time, unittest
+import calendar, json, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+
+# Under `python3 -I` neither the script's folder nor the working directory is on sys.path: the sibling modules one level up (image_build_report) are reached by an explicit insert.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import native_build as nb
 from test_kernel_pins import PINS, HERE, effective_config, parse_config
