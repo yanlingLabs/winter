@@ -176,10 +176,10 @@
   ],
   "afterBuildVerify": "Every requiredSymbols entry must resolve to exactly the stated value in the .config that olddefconfig writes (a silently dropped symbol is a failure, as in build_crypto.py verify_config), and every mustBeAbsentFromTheBuild symbol must be unset or n.",
   "expectedOutputs": {
-    "Image": "d61d3150cb2e55fd0000b883e843502caada1de3b46654bd3ab021dd8baedabd",
-    "vmlinux": "aeb86d500bf8cf01a0f6c1cb051fd9c7247ddbab3865a5d615846becfe848940",
+    "Image": null,
+    "vmlinux": null,
     "resolvedConfig": "d90bc753c0ba158e30732082ac06ded23d948111ce857ab8a5956bc3a5a9534e",
-    "note": "Built twice by the one-run image build (run 39406043639, trigger cowork/guest-image-build-2) with identical receipts: Image 21209600 bytes. Never booted: gate G1 is the first boot."
+    "note": "resolvedConfig is stable across runs (runs 39406043639 and 39471145301). Image and vmlinux are NOT: those two runs gave different digests because the kernel was built under a different random work path each run (the path is embedded). Both builds INSIDE a run agree because they share the path. The workflow now builds at the fixed path $RUNNER_TEMP/winter-kernel-work; the next build reports the digests to pin. Never booted: gate G1 is the first boot."
   },
   "bootVerified": false,
   "observedInTheBase": {

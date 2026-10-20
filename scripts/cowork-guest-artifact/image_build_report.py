@@ -61,7 +61,9 @@ def problems(digests):
     if not digests["kernel"]["reproducible"]:
         out.append("the two kernel builds differ")
     pinned_kernel = digests["kernel"]["pinnedBefore"]
-    if pinned_kernel is not None and pinned_kernel != digests["kernel"]["ImageSha256"]:
+    if pinned_kernel is None:
+        out.append("the kernel Image is not pinned yet (kernel/pins.json expectedOutputs.Image)")
+    elif pinned_kernel != digests["kernel"]["ImageSha256"]:
         out.append("the built kernel is not the pinned kernel (kernel/pins.json expectedOutputs.Image)")
     if not digests["image"]["reproducible"]:
         out.append("the two image builds differ")

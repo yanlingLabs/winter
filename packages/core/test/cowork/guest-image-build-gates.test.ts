@@ -11,7 +11,7 @@ const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const WORKFLOWS_DIR = join(ROOT, ".github", "workflows");
 const WORKFLOW_NAME = "cowork-guest-image-build.yml";
 const WORKFLOW_PATH = `.github/workflows/${WORKFLOW_NAME}`;
-const TRIGGER_BRANCH = "cowork/guest-image-build-3";
+const TRIGGER_BRANCH = "cowork/guest-image-build-4";
 const REPOSITORY = "yanlingLabs/winter";
 const SDK_REPOSITORY = "yanlingLabs/winter-agent-sdk";
 const ARTIFACT_DIR = "scripts/cowork-guest-artifact";
@@ -19,7 +19,7 @@ const ZERO_HEAD = "0".repeat(40);
 // The two actions, by the commit the repository's other workflows already use.
 const ACTIONS: Record<string, string> = { "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262", "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02" };
 // Branches that name other workflows or work branches: never reusable as this trigger.
-const USED_BRANCHES = ["cowork/guest-image-build", "cowork/guest-image-build-2", "cowork/n2-guest-image-build", "cowork/n2-guest-boot", "cowork/n2-guest-trusted-config-reader", "cowork/output-integration"];
+const USED_BRANCHES = ["cowork/guest-image-build", "cowork/guest-image-build-2", "cowork/guest-image-build-3", "cowork/n2-guest-image-build", "cowork/n2-guest-boot", "cowork/n2-guest-trusted-config-reader", "cowork/output-integration"];
 
 /** The arming guard, line for line. It runs before any builder code is used and refuses unless REVIEWED_HEAD is an ancestor of the pushed commit AND the whole difference
  * is the one REVIEWED_HEAD line of this workflow. */
@@ -99,7 +99,7 @@ const curlLine = (url: string, dest: string, size: number) => `curl --fail --loc
 const sumLine = (sha: string, dest: string) => `printf '%s  %s\\n' "$${sha}" "$image_work/${dest}" | sha256sum --check --strict -`;
 
 const S = ARTIFACT_DIR;
-const NATIVE = `python3 -I -S -B ${S}/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work"`;
+const NATIVE = (work: string) => `python3 -I -S -B ${S}/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "${work}"`;
 const IMAGE = (n: number) => `python3 -I -S -B ${S}/image.py --out "$IMAGE_WORK/artifact/build-${n}" --sdk origins/sdk --builder origins/builder --zig-archive "$IMAGE_WORK/downloads/zig.tar.xz" --bun-base "$IMAGE_WORK/tools/bun" || image_status_${n}=$?`;
 const REPORT = `python3 -I -S -B ${S}/image_build_report.py report --kernel-1 "$IMAGE_WORK/kernel-1" --kernel-2 "$IMAGE_WORK/kernel-2" --image-1 "$IMAGE_WORK/artifact/build-1" --image-2 "$IMAGE_WORK/artifact/build-2" --status-1 "$IMAGE_STATUS_1" --status-2 "$IMAGE_STATUS_2" --out "$IMAGE_WORK/digests.json"`;
 const COLLECT = `python3 -I -S -B ${S}/image_build_report.py collect --kernel "$IMAGE_WORK/kernel-1" --image "$IMAGE_WORK/artifact/build-1" --out "$IMAGE_WORK/publish"`;
@@ -123,8 +123,9 @@ function reviewedLines(ctx: Context): Set<string> {
     `sudo apt-get install -y --no-install-recommends ${packages}`,
     `dpkg-query -W ${packages} > "$IMAGE_WORK/host-packages.txt"`,
     "pnpm install --frozen-lockfile --ignore-scripts",
-    "kernel_work=\"$IMAGE_WORK/kernel-work\"",
-    `${NATIVE} --out "$IMAGE_WORK/kernel-1"`, `${NATIVE} --out "$IMAGE_WORK/kernel-2"`, "rm -rf \"$kernel_work\"",
+    "kernel_work=\"$RUNNER_TEMP/winter-kernel-work\"",
+    "kernel_work_b=\"$RUNNER_TEMP/winter-kernel-work-b\"", "test \"$kernel_work\" != \"$kernel_work_b\"",
+    `${NATIVE("$kernel_work")} --out "$IMAGE_WORK/kernel-1"`, "rm -rf \"$kernel_work\"", `${NATIVE("$kernel_work_b")} --out "$IMAGE_WORK/kernel-2"`, "rm -rf \"$kernel_work_b\"",
     `python3 -I -S -B ${S}/packages.py --out "$IMAGE_WORK/artifact"`,
     "image_status_1=0", "image_status_2=0", IMAGE(1), IMAGE(2),
     "test \"$image_status_1\" = 0 || test \"$image_status_1\" = 3", "test \"$image_status_2\" = 0 || test \"$image_status_2\" = 3",
@@ -252,7 +253,7 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   flagCheck("kernel/native_build.py", `python3 -I -S -B ${S}/kernel/native_build.py`, ["--downloads", "--work", "--out"]);
   flagCheck("image.py", `python3 -I -S -B ${S}/image.py`, ["--out", "--sdk", "--builder", "--zig-archive", "--bun-base"]);
   if (lines.filter((l) => l.includes("native_build.py")).length !== 2 || lines.filter((l) => l.includes("/image.py")).length !== 2) bad("the kernel and the image are each built exactly twice");
-  if (!lines.includes("rm -rf \"$kernel_work\"") || lines.filter((l) => l === "rm -rf \"$kernel_work\"").length !== 2) bad("the kernel work folder is removed after each build so the second build starts fresh at the same path");
+  if (lines.filter((l) => l === "rm -rf \"$kernel_work\"").length !== 1 || lines.filter((l) => l === "rm -rf \"$kernel_work_b\"").length !== 1) bad("each kernel work folder is removed after its build, and the two builds use different work paths");
   const kernelAt = lines.findIndex((l) => l.includes("native_build.py")), imageAt = lines.findIndex((l) => l.includes("/image.py"));
   if (!(kernelAt >= 0 && imageAt > kernelAt)) bad("order must be kernel builds, then image builds");
 
@@ -405,7 +406,8 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["the stand-in image creeps in", sub("      - name: Fetch the pinned inputs as bounded data", "      - name: Fetch the pinned inputs as bounded data (and the stand-in)"), "the stand-in image or a provider is part of this workflow"],
   ["a provider socket creeps in", sub("          install -m 0755", "          printf x > provider.sock\n          install -m 0755"), "the stand-in image or a provider is part of this workflow"],
   ["the kernel is built once", sub(/          python3 -I -S -B scripts\/cowork-guest-artifact\/kernel\/native_build\.py[^\n]*kernel-2"\n/, ""), "the kernel and the image are each built exactly twice"],
-  ["the kernel work folder is not removed", sub('          rm -rf "$kernel_work"\n          python3', "          python3"), "the kernel work folder is removed after each build so the second build starts fresh at the same path"],
+  ["the kernel work folder is not removed", sub('          rm -rf "$kernel_work"\n          python3', "          python3"), "each kernel work folder is removed after its build, and the two builds use different work paths"],
+  ["both kernel builds use the same work path", sub('--work "$kernel_work_b"', '--work "$kernel_work"'), "unreviewed command line"],
   ["the image is built once", sub(/          image_status_2=0\n          python3 -I -S -B scripts\/cowork-guest-artifact\/image\.py[^\n]*\n/, ""), "the kernel and the image are each built exactly twice"],
   ["image.py gets a flag it does not have", sub("--bun-base \"$IMAGE_WORK/tools/bun\" || image_status_1", "--bun-base \"$IMAGE_WORK/tools/bun\" --extra x || image_status_1"), "image.py is run with flags"],
   ["native_build gets a flag it does not have", sub("--out \"$IMAGE_WORK/kernel-1\"", "--out \"$IMAGE_WORK/kernel-1\" --network"), "native_build.py is run with flags"],
