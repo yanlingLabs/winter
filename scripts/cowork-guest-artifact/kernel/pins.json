@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "status": "pinned-unbuilt",
+  "status": "built-reproduced-unbooted",
   "decision": "D6 (recommended): a reproducible build from the cached Apple/Kata base config WITHOUT the crypto fragment. Nothing here was built, booted or run.",
   "kernel": {
     "version": "6.18.35",
@@ -178,8 +178,8 @@
   "expectedOutputs": {
     "Image": null,
     "vmlinux": null,
-    "resolvedConfig": null,
-    "note": "unbuilt: the first reviewed build records these"
+    "resolvedConfig": "d90bc753c0ba158e30732082ac06ded23d948111ce857ab8a5956bc3a5a9534e",
+    "note": "resolvedConfig is stable across runs (runs 39406043639 and 39471145301). Image and vmlinux are NOT: those two runs gave different digests because the kernel was built under a different random work path each run (the path is embedded). Both builds INSIDE a run agree because they share the path. The workflow now builds at the fixed path $RUNNER_TEMP/winter-kernel-work; the next build reports the digests to pin. Never booted: gate G1 is the first boot."
   },
   "bootVerified": false,
   "observedInTheBase": {

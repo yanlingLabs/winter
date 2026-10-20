@@ -139,13 +139,25 @@ class ReportTests(unittest.TestCase):
     def test_all_pins_holding_and_all_builds_agreeing_is_clean(self):
         digests = self.build()
         digests["image"]["pinsHold"] = {key: True for key in digests["image"]["pinsHold"]}
+        digests["kernel"]["pinnedBefore"] = digests["kernel"]["ImageSha256"]            # the pinned kernel is the built one
         self.assertEqual(ibr.problems(digests), [])
+        digests["kernel"]["pinnedBefore"] = None
+        self.assertIn("the kernel Image is not pinned yet (kernel/pins.json expectedOutputs.Image)", ibr.problems(digests))
+        digests["kernel"]["pinnedBefore"] = "0" * 64
+        self.assertIn("the built kernel is not the pinned kernel (kernel/pins.json expectedOutputs.Image)", ibr.problems(digests))
+
+    def test_a_package_lock_that_is_not_the_pinned_one_is_reported_with_its_digest_and_turns_the_run_red(self):
+        digests = self.build()
+        self.assertIn("packageLockSha256", digests["image"])
+        self.assertIs(digests["image"]["pinsHold"]["packageLockSha256"], False)          # the fixture receipt carries no lock digest
+        self.assertIn("pins.json packageLockSha256 does not hold", ibr.problems(digests))
 
     def test_collect_copies_exactly_the_published_files_under_the_installed_names_and_refuses_an_existing_folder(self):
         self.build()
         (self.dir / "i1" / "elf-dependencies.json").write_text("{}")
         (self.dir / "i1" / "size-breakdown.json").write_text("{}")
         (self.dir / "i1" / "cpio-verification.json").write_text("{}")
+        (self.dir / "i1" / "packages.lock.json").write_text("{}")
         (self.dir / "k1" / "Image").write_bytes(b"image")
         (self.dir / "k1" / "resolved.config").write_bytes(b"config")
         ibr.collect(self.dir / "k1", self.dir / "i1", self.dir / "publish")

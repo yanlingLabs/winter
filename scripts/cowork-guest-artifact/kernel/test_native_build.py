@@ -1,6 +1,9 @@
 """Offline checks of native_build.py's pure parts and of ci-build.json. Builds nothing, downloads nothing, needs no network."""
-import calendar, json, shutil, subprocess, tempfile, time, unittest
+import calendar, json, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+
+# Under `python3 -I` neither the script's folder nor the working directory is on sys.path: the sibling modules one level up (image_build_report) are reached by an explicit insert.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import native_build as nb
 from test_kernel_pins import PINS, HERE, effective_config, parse_config
@@ -76,6 +79,42 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(set(env) - set(PINS["environment"]), {"SOURCE_DATE_EPOCH", "KBUILD_BUILD_TIMESTAMP", "HOME"})
 
 
+class PathIndependenceTests(unittest.TestCase):
+    """The kernel must not carry the runner's work path: run 39471145301 differed from run 39406043639 only by the random work folder."""
+    WORK = "/runner-temp/winter-kernel-work"
+
+    def test_the_build_passes_file_debug_and_macro_prefix_maps_for_the_work_folder_to_c_and_assembly(self):
+        env = nb.build_environment("/w/llvm/bin", self.WORK)
+        for key in ("KCFLAGS", "KAFLAGS"):
+            self.assertEqual(env[key].split(), [f"-ffile-prefix-map={self.WORK}=.", f"-fdebug-prefix-map={self.WORK}=.", f"-fmacro-prefix-map={self.WORK}=."])
+
+    def test_the_identity_values_are_fixed_and_the_pinned_ones_are_unchanged(self):
+        env = nb.build_environment("/w/llvm/bin", self.WORK)
+        self.assertEqual((env["KBUILD_BUILD_USER"], env["KBUILD_BUILD_HOST"]), ("cowork-fixture", "isolated"))
+        self.assertEqual(env["KBUILD_BUILD_TIMESTAMP"], nb.CI["kbuildBuildTimestamp"])
+        self.assertEqual(env["SOURCE_DATE_EPOCH"], nb.CI["sourceDateEpoch"])
+        for key, value in PINS["environment"].items():
+            if key != "PATH":
+                self.assertEqual(env[key], value)
+
+    def test_the_build_function_hands_its_own_work_folder_to_the_environment(self):
+        import inspect
+        self.assertIn("build_environment(str(llvm_bin), work)", inspect.getsource(nb.build))
+
+    def test_the_workflow_builds_at_one_fixed_work_path(self):
+        text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
+        self.assertIn('kernel_work="$RUNNER_TEMP/winter-kernel-work"', text)
+
+    def test_the_two_kernel_builds_use_different_work_paths_and_must_still_agree_byte_for_byte(self):
+        text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
+        self.assertIn('kernel_work_b="$RUNNER_TEMP/winter-kernel-work-b"', text)
+        self.assertIn('test "$kernel_work" != "$kernel_work_b"', text)
+        self.assertIn('--work "$kernel_work" --out "$IMAGE_WORK/kernel-1"', text)
+        self.assertIn('--work "$kernel_work_b" --out "$IMAGE_WORK/kernel-2"', text)
+        import image_build_report as ibr
+        self.assertIn("the two kernel builds differ", ibr.problems({"kernel": {"reproducible": False, "pinnedBefore": "0" * 64, "ImageSha256": "0" * 64}, "image": {"reproducible": True, "imageExitStatus": [0, 0], "pinsHold": {}}}))
+
+
 class CiBuildPinTests(unittest.TestCase):
     def test_the_open_environment_values_are_pinned_and_agree_with_each_other(self):
         ci = nb.CI
@@ -89,9 +128,9 @@ class CiBuildPinTests(unittest.TestCase):
         self.assertGreaterEqual(ci["jobs"], 1)
         self.assertEqual(ci["installedKernel"]["buildOutput"], "arch/arm64/boot/Image")
 
-    def test_the_recipe_stays_unbuilt_and_unverified_until_a_reviewed_run_fills_it(self):
-        self.assertEqual(PINS["status"], "pinned-unbuilt")
-        self.assertEqual(nb.CI["status"], "unrun")
+    def test_the_recipe_is_built_and_reproduced_once_and_still_unbooted(self):
+        self.assertEqual(PINS["status"], "built-reproduced-unbooted")
+        self.assertEqual(nb.CI["status"], "run-once-reproduced")
         self.assertFalse(PINS["bootVerified"])
 
     def test_the_host_packages_are_build_tools_only(self):
