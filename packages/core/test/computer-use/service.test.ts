@@ -285,6 +285,29 @@ describe("ComputerV2: apps.open opens documents without activating the opener", 
     expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["https://example.com"] });
   }, 30_000);
 
+  // Live 2026-10-20: Chrome made window 187200 for a URL, then showed the URL as a tab of 187195 — the bind of 187200
+  // failed "this app has no window 187200" though the URL had opened.
+  macOnly("an opened URL whose window is gone already binds the app's main window instead of failing", async () => {
+    const w = openWorld();
+    const chrome = { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 508, running: true };
+    w.fake.apps.push(chrome);
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.google.Chrome", name: "Google Chrome", path: "/Applications/Google Chrome.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 508 }, windowID: 187200 });
+    w.fake.handlers["target.bind"] = (p) => {
+      if (p.window === 187200) throw new FakeHelperError("invalid_params", "this app has no window 187200");
+      (w.fake as unknown as { targets: Map<string, unknown> }).targets.set("t9", chrome);
+      return { targetId: "t9", app: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 508 }, window: { id: 187195, title: "Inbox", frame: [0, 0, 800, 600] } };
+    };
+    const r = await w.run("const page = await apps.open('https://example.com')");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("target.bind").map((c) => c.window)).toEqual([187200, undefined]);
+    expect(text(r)).toContain("opened example.com in Google Chrome (in the background)");
+    // Any other bind failure is still the open's failure.
+    w.fake.handlers["target.bind"] = () => { throw new FakeHelperError("invalid_params", "no app com.google.Chrome"); };
+    const r2 = await w.run("await apps.open('https://example.com')");
+    expect(r2.isError).toBe(true);
+  }, 30_000);
+
   test("isDocumentTarget: files and URLs open, an app name or .app bundle binds", () => {
     expect(isDocumentTarget("/tmp/report.pdf")).toBe(true);
     expect(isDocumentTarget("~/Downloads/a.csv")).toBe(true);

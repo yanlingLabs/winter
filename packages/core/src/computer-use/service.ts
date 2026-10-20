@@ -936,8 +936,16 @@ export class ComputerV2Service {
     this.live(ctx);
     ctx.builder.daemonLine(`opened ${target.split("/").pop()} in ${res.app.name} (in the background)`);
     // Bind the opener's document window; the per-app grant from the card above means bind does not re-ask.
-    return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet,
-      ...(res.windowID === undefined ? {} : { window: res.windowID }) }, metric);
+    if (res.windowID === undefined) return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet }, metric);
+    try {
+      return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet, window: res.windowID }, metric);
+    } catch (err) {
+      // The window the open saw is gone already (Chrome makes one for a URL, then shows the URL as a tab of an existing
+      // window — live 2026-10-20): the URL did open, so the app's main window is bound instead of failing the open.
+      if (!openedWindowGone(err, res.windowID)) throw err;
+      this.live(ctx);
+      return await this.bind(ctx, { app: res.app.bundleId, known: app, quiet }, metric);
+    }
   }
 
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
@@ -2140,6 +2148,11 @@ function elementLine(e: { ref: number; role: string; name?: string; value?: stri
 /** What the model reads for a target that is gone, in the words of what happened to it: the helper's observed
  *  `reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown` — apple/ComputerUse/PROTOCOL.md) or the
  *  daemon's own `once` (an "Allow once" binding released after its call). */
+/** The helper's answer that the window an open named is not there (`this app has no window <id>`, invalid_params). */
+export function openedWindowGone(err: unknown, windowId: number): boolean {
+  return err instanceof HelperRpcError && err.code === "invalid_params" && err.message.includes(`has no window ${windowId}`);
+}
+
 export function targetLostMessage(name: string, reason: string): string {
   switch (reason) {
     case "app_quit": return `${name} quit — open it again with apps.open()`;

@@ -100,6 +100,7 @@ public final class CUCore: @unchecked Sendable {
             privateCaptureOverride = { _, _ in nil }  // never the window server's capture from a unit test
             pressSettleMs = 0
             webPressWatchMs = 0
+            openedWindowSettleMs = 0
             menuSettleMs = 0
             selectionHoldMs = 0
             blipReadMs = 0
@@ -243,16 +244,34 @@ public final class CUCore: @unchecked Sendable {
             let deadline = clock.nowMs() + windowWaitMs
             while clock.nowMs() < deadline {
                 let now = CUBindWait.realWindows(sys.windows(pid: app.processIdentifier))
-                if let fresh = now.map(\.id).first(where: { !before.contains($0) }) { return fresh }
+                if let fresh = now.map(\.id).first(where: { !before.contains($0) }) {
+                    // Looked at again a moment later: Chrome makes a window for a URL, then shows the URL as a tab of an
+                    // existing window and closes it (live 2026-10-20: the bind failed "this app has no window 187200").
+                    if openedWindowSettleMs > 0 { try? await clock.sleep(ms: openedWindowSettleMs) }
+                    return confirmOpenedWindow(fresh, pid: app.processIdentifier)
+                }
                 try? await clock.sleep(ms: 60)
             }
-            // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
-            return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
+            // None new (the app showed the doc in an existing window, or none has appeared): the main one.
+            return confirmOpenedWindow(nil, pid: app.processIdentifier)
         }()
         noteGuardianAfterglow(app.processIdentifier, raise: true)  // its window is up: it may still activate now
         let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
                                bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
         return OpenDocumentsResult(app: bound, windowID: windowID)
+    }
+
+    /// The window an open found, checked again: still there and a standard (document) window — else the app's main window
+    /// (accessibility's), else its front real window; nil when it has none.
+    func confirmOpenedWindow(_ id: UInt32?, pid: pid_t) -> UInt32? {
+        let server = sys.windows(pid: pid)
+        let real = CUBindWait.realWindows(server)
+        let axWindows = CUAXWindows.list(pid: pid, ax: ax, server: server)
+        if let id, real.contains(where: { $0.id == id }), axWindows.first(where: { $0.id == id })?.standard ?? true { return id }
+        if let id { CULog.bind.notice("open: window \(id, privacy: .public) is gone or not a document window — the app's main window instead") }
+        let realIds = Set(real.map(\.id))
+        if let main = axWindows.first(where: { $0.main && $0.standard && realIds.contains($0.id) }) { return main.id }
+        return real.map(\.id).first
     }
 
     // MARK: - binding
@@ -831,6 +850,8 @@ public final class CUCore: @unchecked Sendable {
 
     /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
+    /// How long after a new window appears for an open it is looked at again (`confirmOpenedWindow`). 0 in test cores.
+    var openedWindowSettleMs: Double = 300
 
     /// The background reopen for an app running with zero windows: LaunchServices' open of the running app with
     /// activates:false sends it the reopen event, and it opens its default window — no raw Apple Event, no ⌘N.
