@@ -141,6 +141,8 @@ class ReportTests(unittest.TestCase):
         digests["image"]["pinsHold"] = {key: True for key in digests["image"]["pinsHold"]}
         digests["kernel"]["pinnedBefore"] = digests["kernel"]["ImageSha256"]            # the pinned kernel is the built one
         self.assertEqual(ibr.problems(digests), [])
+        digests["kernel"]["pinnedBefore"] = None
+        self.assertIn("the kernel Image is not pinned yet (kernel/pins.json expectedOutputs.Image)", ibr.problems(digests))
         digests["kernel"]["pinnedBefore"] = "0" * 64
         self.assertIn("the built kernel is not the pinned kernel (kernel/pins.json expectedOutputs.Image)", ibr.problems(digests))
 

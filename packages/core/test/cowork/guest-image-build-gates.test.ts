@@ -11,7 +11,7 @@ const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const WORKFLOWS_DIR = join(ROOT, ".github", "workflows");
 const WORKFLOW_NAME = "cowork-guest-image-build.yml";
 const WORKFLOW_PATH = `.github/workflows/${WORKFLOW_NAME}`;
-const TRIGGER_BRANCH = "cowork/guest-image-build-3";
+const TRIGGER_BRANCH = "cowork/guest-image-build-4";
 const REPOSITORY = "yanlingLabs/winter";
 const SDK_REPOSITORY = "yanlingLabs/winter-agent-sdk";
 const ARTIFACT_DIR = "scripts/cowork-guest-artifact";
@@ -19,7 +19,7 @@ const ZERO_HEAD = "0".repeat(40);
 // The two actions, by the commit the repository's other workflows already use.
 const ACTIONS: Record<string, string> = { "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262", "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02" };
 // Branches that name other workflows or work branches: never reusable as this trigger.
-const USED_BRANCHES = ["cowork/guest-image-build", "cowork/guest-image-build-2", "cowork/n2-guest-image-build", "cowork/n2-guest-boot", "cowork/n2-guest-trusted-config-reader", "cowork/output-integration"];
+const USED_BRANCHES = ["cowork/guest-image-build", "cowork/guest-image-build-2", "cowork/guest-image-build-3", "cowork/n2-guest-image-build", "cowork/n2-guest-boot", "cowork/n2-guest-trusted-config-reader", "cowork/output-integration"];
 
 /** The arming guard, line for line. It runs before any builder code is used and refuses unless REVIEWED_HEAD is an ancestor of the pushed commit AND the whole difference
  * is the one REVIEWED_HEAD line of this workflow. */
@@ -123,7 +123,7 @@ function reviewedLines(ctx: Context): Set<string> {
     `sudo apt-get install -y --no-install-recommends ${packages}`,
     `dpkg-query -W ${packages} > "$IMAGE_WORK/host-packages.txt"`,
     "pnpm install --frozen-lockfile --ignore-scripts",
-    "kernel_work=\"$IMAGE_WORK/kernel-work\"",
+    "kernel_work=\"$RUNNER_TEMP/winter-kernel-work\"",
     `${NATIVE} --out "$IMAGE_WORK/kernel-1"`, `${NATIVE} --out "$IMAGE_WORK/kernel-2"`, "rm -rf \"$kernel_work\"",
     `python3 -I -S -B ${S}/packages.py --out "$IMAGE_WORK/artifact"`,
     "image_status_1=0", "image_status_2=0", IMAGE(1), IMAGE(2),

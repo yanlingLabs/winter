@@ -64,16 +64,16 @@
     "ca-certificates"
   ],
   "builderCommit": "180d3effd7ddbb9406aeea0912f76c78ef20cf75",
-  "packageLockSha256": "b0127b7a8f1fa2f8b2a06236cef26e1f1b297bacf9d70e800440df8747d93252",
+  "packageLockSha256": "c6eb4ea58479afc740e3f3b1286afd8e175c91a0876d7cdc8a66df07ca85755e",
   "expectedArtifact": {
-    "runtimeSha256": "c13918b426d62615640280df47d8e1b4602cddb486c20e4ce15942d635472217",
-    "cpioSha256": "90ac299e8dfbc023af1e02999d9fb30b10555fbd57f37da30a67020501f9a241",
-    "rootManifestSha256": "22d863cb4a370c3fa16eab99c0a28389b3d4c665560583e8445e857e74a201a4",
+    "runtimeSha256": "e0c6ed04bad3563336b90748e0f23dcf4f31a4601927cdaac97bbc95fbeddec5",
+    "cpioSha256": "511059532d9e0a35504f9fcc90cf6cd1740169231a805162bfb6fe20359a7bd4",
+    "rootManifestSha256": "ac58670175e4c741f29e45e7ba367ac9cd4cc12d0552bffa5335ded9620c6722",
     "helperBinarySha256": {
-      "file-worker.c": "f26932e539aac05448de0ab6d346b5fb5fd653580a9d938ea2086cd82f6f29cc",
+      "file-worker.c": "7526bb029c0d336988fbe0b3d2b3dbcb7aba48e8d41448e80b93531d7d2f2f08",
       "linux-runtime-compartment.c": "40049e5cb751d720a20dc957aaabb66a8ab74710ad5039d8f26448139278534a",
-      "linux-session-owner.c": "0ca42e9f22fdccfb3a67b74434c5c4a34e225169e728fa1b495dd1d4fc49df42",
-      "linux-tool-compartment.c": "c0316ffc4fab7e0a5da2cc667dae583eff27ea3a636d011f0bec29a5185869cd",
+      "linux-session-owner.c": "baae4781ef94f2eb54aeb78889261a9025f1246f7e8a6ac1df5b7a32c7a68348",
+      "linux-tool-compartment.c": "0159815a88a60f3005a4bcad96d46b6166c7667ea24bb0b94d13d75f2547299b",
       "process-worker.c": "f63d9212c01e60930a956a87806a7240ab8dd98ed9de9d2ac1bfbd6b2dd91a16"
     }
   },
@@ -150,12 +150,12 @@
       "sourceSha256": "95457d8f6ff256257b3b211e0201c64a4ed0b575aac6a9f933b3178b823b0d76",
       "target": "aarch64-linux-gnu.2.36",
       "path": "/opt/winter/helpers/linux-session-owner.so",
-      "binarySha256": "0ca42e9f22fdccfb3a67b74434c5c4a34e225169e728fa1b495dd1d4fc49df42"
+      "binarySha256": "baae4781ef94f2eb54aeb78889261a9025f1246f7e8a6ac1df5b7a32c7a68348"
     },
     "executable": {
       "entry": "scripts/guest-host-query/runtime.ts",
       "path": "/opt/winter/runtime/winter-host-query",
-      "sha256": "c13918b426d62615640280df47d8e1b4602cddb486c20e4ce15942d635472217"
+      "sha256": "e0c6ed04bad3563336b90748e0f23dcf4f31a4601927cdaac97bbc95fbeddec5"
     }
   },
   "pnpm": {
