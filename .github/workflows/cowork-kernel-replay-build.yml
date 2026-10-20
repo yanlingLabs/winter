@@ -1,0 +1,33 @@
+name: Build Cowork kernel replay review artifacts
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'spikes/cowork-filesystem-bootstrap/**'
+      - '.github/workflows/cowork-kernel-replay-build.yml'
+permissions:
+  contents: read
+jobs:
+  build-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build exact native artifacts without executing them
+        run: python3 -I -S -B spikes/cowork-filesystem-bootstrap/build_kernel_replay.py --out out/kernel-replay-linux-review
+      - name: Verify unprivileged admission and protocol cases
+        run: |
+          python3 -I -S -B spikes/cowork-filesystem-bootstrap/test_stage_kernel_replay.py
+          python3 -I -S -B spikes/cowork-filesystem-bootstrap/test_kernel_replay.py
+      - name: Record artifact identity for independent review
+        run: |
+          sha256sum out/kernel-replay-linux-review/build.json
+          file out/kernel-replay-linux-review/kernel-journal-replay out/kernel-replay-linux-review/fixture-loop-replay
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-replay-linux-review
+          path: out/kernel-replay-linux-review/
+          if-no-files-found: error
+          retention-days: 7

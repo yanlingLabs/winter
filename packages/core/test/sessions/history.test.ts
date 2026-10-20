@@ -26,7 +26,7 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 15 persisted foldable types", () => {
+  test("the allowlist is exactly the 20 persisted content/control types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
@@ -40,6 +40,7 @@ describe("readHistoryPage", () => {
         "question_asked", "question_resolved", "tool_call", "tool_result", "turn_completed", "user_message",
         // The thinking pill (2026-10-05): the persisted block only; its live half is transient.
         "thinking_block",
+        "workspace_sources_changed", "workspace_policy_changed", "workspace_operation_changed", "workspace_metadata_changed", "workspace_instructions_changed",
         // ComputerV2 wake triggers (2026-10-12): the armed/ended pair (flat, bounded strings; never the model's note).
         "wake_armed", "wake_ended",
       ].sort(),

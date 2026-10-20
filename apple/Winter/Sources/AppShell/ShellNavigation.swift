@@ -17,8 +17,8 @@ import Foundation
 /// The Dashboard is reached from the bottom account-style row, NOT a fifth session-like row.
 /// `ShellDestination` below is where that distinction lives.
 ///
-/// Cowork is a reserved UI mode, not a supported daemon session: `session.create` excludes it
-/// and `SpawnSession` pre-flight-rejects it. Its landing is the "Coming soon" shell (Task 5),
+/// Cowork is a reserved UI mode, not a supported daemon session: `session.create` recognises the
+/// value but refuses it (`unsupported_topology`) and `SpawnSession` pre-flight-rejects it. Its landing is the "Coming soon" shell (Task 5),
 /// not a functional session list.
 enum SessionMode: String, CaseIterable, Identifiable, Sendable {
     case code, dispatch, cowork, chat
@@ -50,6 +50,14 @@ enum SessionMode: String, CaseIterable, Identifiable, Sendable {
         case .code, .dispatch, .chat: return true
         case .cowork: return false
         }
+    }
+
+    /// What the Cowork row's detail pane shows. While Cowork is unavailable (`isAvailable == false`, today) it is ALWAYS the placeholder,
+    /// even with a management connection: the workspace view can open a folder picker, which must not be reachable from a row that
+    /// says "Soon". The workspace view returns with the flip.
+    enum CoworkDetail: Equatable { case workspace, placeholder }
+    static func coworkDetail(available: Bool, hasWorkspaceModel: Bool) -> CoworkDetail {
+        available && hasWorkspaceModel ? .workspace : .placeholder
     }
 
     /// chatgpt-ui T1 (spec §1): Chats directly under the New chat action row, then the working

@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "note": "Sender and receiver apply the same rule per conversation: the sum of runtime IN payload bytes sent since the last OUT or ERR byte received stays at or below limitBytes (the guest relay's IN ring is 4 MiB and an overflow stops the whole guest). `refusedAt` is the index of the first step that breaks it (the sender must not send it; the receiver refuses it as oversize).",
+  "limitBytes": 1048576,
+  "cases": [
+    {
+      "name": "four-chunks-fill-exactly-one-mebibyte",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "a-fifth-chunk-without-an-answer-is-refused",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        },
+        {
+          "stream": "in",
+          "bytes": 262144
+        }
+      ],
+      "refusedAt": 4
+    },
+    {
+      "name": "one-byte-over-the-limit-is-refused",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        }
+      ],
+      "refusedAt": 1
+    },
+    {
+      "name": "an-out-frame-clears-the-count",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 10
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "an-err-frame-clears-the-count",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "err",
+          "bytes": 10
+        },
+        {
+          "stream": "in",
+          "bytes": 524288
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "answering-late-is-too-late",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        },
+        {
+          "stream": "out",
+          "bytes": 10
+        }
+      ],
+      "refusedAt": 1
+    },
+    {
+      "name": "the-count-restarts-after-each-answer",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 614400
+        },
+        {
+          "stream": "out",
+          "bytes": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 614400
+        },
+        {
+          "stream": "out",
+          "bytes": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 614400
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "two-chunks-then-more-than-the-rest",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 614400
+        },
+        {
+          "stream": "in",
+          "bytes": 512000
+        }
+      ],
+      "refusedAt": 1
+    }
+  ]
+}

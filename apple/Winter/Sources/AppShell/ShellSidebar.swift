@@ -722,8 +722,14 @@ struct ShellRootView: View {
                 ShellLandingView(destination: nav.destination)
             }
         case .mode(.cowork):
-            // Needs no host — there is nothing here to attach, list, or create.
-            CoworkPlaceholder()
+            // Unavailable while `SessionMode.cowork.isAvailable` is false: the placeholder even with a management connection
+            // (`SessionMode.coworkDetail`), so no folder picker is reachable from the "Soon" row.
+            if SessionMode.coworkDetail(available: SessionMode.cowork.isAvailable, hasWorkspaceModel: host?.coworkWorkspaces != nil) == .workspace,
+               let model = host?.coworkWorkspaces {
+                CoworkWorkspaceView(model: model)
+            } else {
+                CoworkPlaceholder()
+            }
         case .dashboard:
             // Task 7: needs no host either — `DashboardSurface` attaches to nothing, it only reads
             // `dashboardWiring`'s injected closures (mirrors `.mode(.cowork)`'s own "no host"

@@ -1,0 +1,118 @@
+{
+  "note": "What the pinned SDK supervisor's parse_arguments does with each command line, derived by importing the pinned file (no root, nothing started) and calling it. PID 1's two command lines must be among the accepted ones. Regenerate with tests/regenerate when sdkCommit moves.",
+  "sdkCommit": "7e71929d0231be2d77645bfa47ee2b550f3add22",
+  "supervisorPath": "packages/runtime/src/guest/linux-supervisor.py",
+  "supervisorSha256": "2c5be1e8b2cf30956ae14f3ca02224db52aeb4387c2eac22ceceb49a875ceaa8",
+  "accepted": [
+    {
+      "argv": [
+        "--trusted-config-fd",
+        "3"
+      ],
+      "result": [
+        3,
+        null
+      ]
+    },
+    {
+      "argv": [
+        "--trusted-config-fd",
+        "3",
+        "--runtime-ports-fds",
+        "4,5,6"
+      ],
+      "result": [
+        3,
+        [
+          4,
+          5,
+          6
+        ]
+      ]
+    },
+    {
+      "argv": [
+        "--trusted-config-fd",
+        "7",
+        "--runtime-ports-fds",
+        "4,5,6"
+      ],
+      "result": [
+        7,
+        [
+          4,
+          5,
+          6
+        ]
+      ]
+    }
+  ],
+  "refused": [
+    [],
+    [
+      "--runtime-ports-fds",
+      "4,5,6"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "4,5"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "4,5,5"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "3,5,6"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "04,5,6"
+    ],
+    [
+      "--runtime-ports-fds",
+      "4,5,6",
+      "--trusted-config-fd",
+      "3"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "4,5,6",
+      "--x"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "0,5,6"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "4,5,6,7"
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      ""
+    ],
+    [
+      "--trusted-config-fd",
+      "3",
+      "--runtime-ports-fds",
+      "4,5,3"
+    ]
+  ]
+}

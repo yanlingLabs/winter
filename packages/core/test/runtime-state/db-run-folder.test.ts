@@ -46,11 +46,10 @@ function rewindToV6(h: string): void {
 }
 
 describe("runtime-state schema v7 (WS-21)", () => {
-  test("a fresh store is v7 and accepts run-folder; an unknown kind is still refused", () => {
+  test("a fresh store includes v7 and accepts run-folder; an unknown kind is still refused", () => {
     const h = home();
     const rs = openRuntimeStateDb(h);
-    expect(RUNTIME_STATE_SCHEMA_VERSION).toBe(7);
-    expect(rs.schemaVersion()).toBe(7);
+    expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
     insertSession(rs.db, "s_1", "run-folder", "/h/cache/runs/r1");
     expect(() => insertSession(rs.db, "s_2", "somewhere-else")).toThrow();
     expect(rs.integrity().tables).toContain("run_root_quarantine");
@@ -74,7 +73,7 @@ describe("runtime-state schema v7 (WS-21)", () => {
     }
 
     const rs = openRuntimeStateDb(h);
-    expect(rs.schemaVersion()).toBe(7);
+    expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
     const ids = rs.db.query<{ id: string }, []>("SELECT winter_session_id AS id FROM runtime_sessions ORDER BY id").all().map((r) => r.id);
     expect(ids).toEqual(["s_a", "s_b"]);
     expect(rs.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM runtime_generations").get()!.n).toBe(3);
@@ -101,7 +100,7 @@ describe("runtime-state schema v7 (WS-21)", () => {
     first.db.run("PRAGMA user_version = 6");
     first.close();
     const rs = openRuntimeStateDb(h);
-    expect(rs.schemaVersion()).toBe(7);
+    expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
     expect(rs.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM runtime_generations").get()!.n).toBe(1);
     expect(rs.db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     rs.close();
@@ -120,7 +119,7 @@ describe("runtime-state schema v7 (WS-21)", () => {
 // Review I3 (controller ruling): an older build (0.116.0) opens a v7 store as `newer-schema` and runs with
 // its runtime spine OFFLINE — so `winter migrate --sdk-home --rollback` steps the store back to v6.
 describe("downgradeRuntimeStateToV6", () => {
-  test("v7 → v6: run-folder kinds cleared, the v6 CHECK back, the quarantine table gone, rows and FKs intact", () => {
+  test("current unused schema → v6: run-folder kinds cleared, the v6 CHECK back, the quarantine table gone, rows and FKs intact", () => {
     const h = home();
     const rs = openRuntimeStateDb(h);
     insertSession(rs.db, "s_rf", "run-folder", "/h/cache/runs/r1");
@@ -128,7 +127,7 @@ describe("downgradeRuntimeStateToV6", () => {
     insertGeneration(rs.db, "s_rf", 1);
     rs.db.run("INSERT INTO run_root_quarantine (root, recorded_at) VALUES ('/h/cache/runs/q', 't')");
     rs.close();
-    expect(downgradeRuntimeStateToV6(h)).toEqual({ from: 7, to: 6 });
+    expect(downgradeRuntimeStateToV6(h)).toEqual({ from: RUNTIME_STATE_SCHEMA_VERSION, to: 6 });
     const raw = new Database(dbPath(h));
     try {
       expect(raw.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(6);
@@ -142,7 +141,7 @@ describe("downgradeRuntimeStateToV6", () => {
     } finally { raw.close(); }
     // this build re-upgrades it on its next open
     const again = openRuntimeStateDb(h);
-    expect(again.schemaVersion()).toBe(7);
+    expect(again.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
     again.close();
   });
 

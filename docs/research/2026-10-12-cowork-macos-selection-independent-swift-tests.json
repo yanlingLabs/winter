@@ -1,0 +1,5 @@
+{
+  "commit": "55eb17eed0f7d76014d18364e32d81e86a9aaad0",
+  "exitCode": 0,
+  "command": "swift test --package-path apple/WinterKit --scratch-path <test-temp>/build --jobs 2 --filter Cowork(Client|WorkspaceModel)Tests"
+}

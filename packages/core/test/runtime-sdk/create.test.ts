@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeSdk, type RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -19,6 +19,8 @@ import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
 import { EmbeddedRuntimeUnavailable, type EmbeddedSessionHost } from "../../src/runtime-sdk/embedded";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
+import { registerHostStorageFences } from "../../src/runtime-sdk/host-storage-fence";
+import { HostCodeUnavailable, HostCodeExecutionService } from "../../src/runtime-sdk/host-code-broker";
 
 const DAY_MS = 86_400_000;
 
@@ -52,6 +54,16 @@ afterEach(async () => {
 function withRuntimes(runtimes: Omit<NonNullable<Settings["runtimes"]>, "handoff"> & { handoff?: NonNullable<Settings["runtimes"]>["handoff"] }): Settings {
   return { schemaVersion: 2, runtimes: { handoff: { crossRuntime: false }, ...runtimes } } as unknown as Settings;
 }
+
+test("active retained storage preserves Code when no optional worker/bridge broker is installed",async()=>{
+  mkdirSync(join(home,"cowork"));
+  const coordination=mkdtempSync(join(tmpdir(),"winter-create-floor-coordination-"));
+  const unregister=registerHostStorageFences(home,{coordinationDir:coordination,coworkStorageActive:true});
+  try {
+    const handle=await createWinterRuntimeSdk(deps({codeExecution:new HostCodeExecutionService(home,null)}));handles.push(handle);
+    expect(handle.spawnHookFor("code")).not.toBeInstanceOf(HostCodeUnavailable);
+  } finally {unregister();rmSync(coordination,{recursive:true,force:true});}
+});
 
 function deps(extra: Partial<WinterRuntimeSdkDeps> = {}): WinterRuntimeSdkDeps {
   return {
@@ -234,6 +246,30 @@ function recordingEmbeddedHost(): EmbeddedSessionHost & { spawned: unknown[] } {
 }
 
 describe("spawnHookFor — P8b-1's one topology site", () => {
+  test("active Cowork refuses embedded topology and a previously captured spawn closure before old host code is called", async () => {
+    const embedded = recordingEmbeddedHost();
+    const { handle } = await build({ embedded });
+    const captured = handle.spawnHookFor("chat") as { spawnClaudeCodeProcess: (o: unknown) => unknown };
+    mkdirSync(join(home, "cowork"));
+    const coordination = mkdtempSync(join(tmpdir(), "winter-embedded-topology-coordination-"));
+    const unregister = registerHostStorageFences(home, { coordinationDir: coordination, coworkStorageActive: true });
+    try {
+      for (const mode of ["chat", "dispatch"] as const) {
+        expect(handle.spawnHookFor(mode)).toBeInstanceOf(EmbeddedRuntimeUnavailable);
+      }
+      expect(() => captured.spawnClaudeCodeProcess({ command: "winter-embedded", args: [], cwd: home, env: {} })).toThrow("embedded-host-floor-unavailable");
+      expect(embedded.spawned).toHaveLength(0);
+    } finally { unregister(); rmSync(coordination, { recursive: true, force: true }); }
+  });
+
+  test("captured embedded spawn refuses an explicit host floor requirement even when storage is inactive", async () => {
+    const embedded = recordingEmbeddedHost();
+    const { handle } = await build({ embedded });
+    const hook = handle.spawnHookFor("dispatch") as { spawnClaudeCodeProcess: (o: unknown) => unknown };
+    expect(() => hook.spawnClaudeCodeProcess({ command: "winter-embedded", args: [], cwd: home, env: {}, requireHostFloor: true })).toThrow("embedded-host-floor-unavailable");
+    expect(embedded.spawned).toHaveLength(0);
+  });
+
   test("an explicit WINTER_RUNTIME_EXECUTABLE that is missing on disk ⇒ the typed refusal, never a throw and never a fallback", async () => {
     // P9a fix wave (M1 class): "nothing configured" is no longer a refusal in a tree where the
     // platform package is installed (the ladder's last rung finds it), so the deterministic refusal

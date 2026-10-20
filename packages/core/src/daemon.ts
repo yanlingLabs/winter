@@ -1,3 +1,9 @@
+import { createCoworkSessionDeletionHook, CoworkWorkspaceEvents } from "./cowork/workspace-events";
+import { createMacCoworkHost } from "./cowork/mac-host";
+import { coworkNativeProductionEnvironment } from "./cowork/native-activation";
+import { createCoworkNativeWiring, type CoworkNativeWiring, type CoworkNativeWiringOptions } from "./cowork/native-wiring";
+import { CoworkRepository } from "./cowork/repository";
+import { CoworkWorkspaceService, type CoworkHostPorts } from "./cowork/service";
 import { join } from "node:path";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -5,6 +11,7 @@ import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./wi
 import { acquireLock, type Lock } from "./lock";
 import { keychainService, resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
+import { inspectCoworkSource } from "./migration/cowork-exclusion";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
@@ -16,6 +23,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
+import { isUnrunnableStoredMode } from "./sessions/session-mode";
 import { CallThreads } from "./sessions/call-threads";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
@@ -95,6 +103,7 @@ import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
 import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
+import { advanceAuthorityRevision, authorityRevision } from "./authority-revision";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
@@ -186,6 +195,8 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
+  /** N2 S7: the inert native worker host wiring (`undefined` without the runtime spine). Nothing reaches it from an RPC. */
+  coworkNative?: CoworkNativeWiring;
   /**
    * P8b Task 5: THE ONE Winter runtime handle — the router `createRuntimeSdk` built, the spawn
    * hook every Winter session's `Options` takes its executable from, and the tracked-query registry
@@ -278,7 +289,7 @@ export interface RunningDaemon {
  *  through, so the approval card's summary reads it off this closure's own parameter instead of
  *  a synchronous set/get side-channel (the former `peripheralClassHint` map) that only stayed
  *  race-safe because nothing ever awaited between the set and the card emit. */
-function buildLeasePolicy(deps: {
+export function buildLeasePolicy(deps: {
   store: SessionStore;
   approvals: ApprovalBroker;
   hub: SessionHub;
@@ -308,6 +319,9 @@ function buildLeasePolicy(deps: {
     // stale-row test (packages/core/test/peripheral/e2e.test.ts) that GRANTS instead of denying
     // without this `mode` check.
     if (meta.mode === "chat") return "denied";
+    // A stored `cowork` row (or any mode that is not a runnable one) can run nothing, so it never holds a lease
+    // either — whatever its policy says.
+    if (isUnrunnableStoredMode(meta.mode)) return "denied";
     if (meta.approvalPolicy === "plan") return "denied";
     if (meta.approvalPolicy === "auto") return "granted";
 
@@ -361,7 +375,20 @@ export function pluginToolNameParts(fullName: string): { pluginId: string; name:
   return pluginId && name ? { pluginId, name } : undefined;
 }
 
-export async function startDaemon(opts: {
+/** A Cowork boot failure as one short, secret-free token for a log line (error code or class name, never a message or path). */
+function describeCoworkBootError(error: unknown): string {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" ? code : (error as Error | undefined)?.name ?? "error";
+}
+
+async function startDaemonInner(onEmbeddedHost: (host: { shutdown(budgetMs?: number): Promise<void> }) => void, opts: {
+  /** Explicit host-only fixture/native authority ports; never read from settings or RPC. */
+  coworkHost?: CoworkHostPorts;
+  /** Isolated clock for host schedule metadata tests. */
+  coworkScheduleNow?: () => number;
+  /** Host-only injection of the native worker host's environment (N2 S7). Production passes none: the host is then never built and the
+   * Cowork service keeps its refusing default. Never read from a setting, an RPC or an environment variable. */
+  coworkNative?: Pick<CoworkNativeWiringOptions, "environment" | "imagePins">;
   home?: string;
   secrets?: SecretStore;
   server?: Partial<Pick<IpcServerOptions, "helloTimeoutMs" | "maxConnections" | "preAuthMaxLine">>;
@@ -387,7 +414,7 @@ export async function startDaemon(opts: {
   agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string }; refresh?: (next: Settings, secrets: SecretStore, settingsPath?: string) => Promise<boolean>; quota?: SubscriptionQuotaSource } | null;
   /** TEST ONLY (WS-23 review round 1): extra deps for the embedded-session host — a fixture Worker entry,
    *  or the `onLifecycle` observer a test uses to prove no two engines ever overlap on one session. */
-  embeddedHost?: Omit<EmbeddedSessionHostDeps, "log">;
+  embeddedHost?: Omit<EmbeddedSessionHostDeps, "log" | "home">;
   /**
    * Phase 9c Migration B (WS-16 §18) — TEST SEAM for the boot hook below. Passing this object AT
    * ALL is what turns migration on for a caller that ALSO supplies its own `secrets`: without it, a
@@ -543,7 +570,14 @@ export async function startDaemon(opts: {
       console.error(`migration: ${home} is not the default home for the ${profile} profile — auto-migration skipped; run \`winter migrate --from ${legacyHome}\` to migrate it by hand`);
     } else {
       const check = describeHomePristineness(home);
-      if (check.pristine) {
+      // Cowork storage in the legacy source is never auto-copied (`migration/cowork-exclusion.ts`): skip
+      // with one line, like a non-pristine home, rather than refusing to boot.
+      const coworkSource = check.pristine ? inspectCoworkSource(legacyHome) : undefined;
+      if (coworkSource?.present) {
+        console.error(coworkSource.kind === "uninspectable"
+          ? `migration: a legacy home was found at ${legacyHome}, but it could not be checked for Cowork storage (${coworkSource.detail}) — auto-migration skipped and nothing was copied or changed; fix the entry's permissions or restore it (do not delete it: the legacy home is the rollback source), then restart — the check is repeated on every start`
+          : `migration: a legacy home was found at ${legacyHome}, but it holds Cowork storage (${coworkSource.detail}) — auto-migration skipped; Cowork storage moves only through a coordinated, quiescent migration that this build does not provide`);
+      } else if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
         // Fix wave C3 (P9c-17, Critical): most per-item failures are already absorbed inside
         // `runMigrationB` itself (a single Keychain item never aborts the run — see
@@ -768,6 +802,8 @@ export async function startDaemon(opts: {
     ...(linkedRouterSupportsRunHome() ? { recovery: { deferClaudeResumeSweep: true } } : {}),
   });
   const runtime = runtimeStateOnline(runtimeState);
+  const coworkRecords = runtime ? new CoworkRepository(runtime.db) : undefined;
+  const onStoredSessionDeleted = createCoworkSessionDeletionHook(coworkRecords, runtime?.onSessionDeleted);
 
   // session-activity-hygiene T6 (spec §2): the empty-session reaper's boot sweep — once, here,
   // right after store/hub exist and before anything can attach to anything. Catches sessions left
@@ -777,10 +813,10 @@ export async function startDaemon(opts: {
   // its own try/catch anyway (the same caution this file already gives other best-effort boot steps,
   // e.g. the settings load above) even though `reapEmptySessions` is designed to never throw.
   //
-  // P8a Task 12: `onDelete` takes the reaped session's runtime state with it (WS-16 §16). Undefined
-  // when the spine could not be opened — there are no runtime rows to remove in that case.
+  // The shared deletion hook removes runtime state and canonical Cowork fanout before
+  // drivers exist. With an unavailable spine both hook legs are absent/no-op.
   try {
-    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home, onDelete: runtime?.onSessionDeleted });
+    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home, onDelete: onStoredSessionDeleted });
   } catch (err) {
     console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
   }
@@ -1491,6 +1527,10 @@ export async function startDaemon(opts: {
       // management surface with its own hub/store would read every attached session as idle.
       sessions: {
         store,
+        mayList: (callerId, targetId) => {
+          if (!sessionMessaging) throw Object.assign(new Error("session_authority_unavailable: session messaging is starting; retry shortly"), { code: "session_authority_unavailable", retryable: true });
+          return sessionMessaging.mayList(callerId, targetId);
+        },
         derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
         turnStartedAt: (sid) => winterDrivers.get(sid)?.turnStartedAt,
         working: (sid) => signalsDeriver?.(sid).working ?? (winterDrivers.get(sid)?.turnRunning ?? false),
@@ -1533,6 +1573,7 @@ export async function startDaemon(opts: {
     // on what "this session's working directories" means.
     office: {
       office: {
+        home: winterHome,
         dispatch: (cmd) => panelCommands.dispatch(cmd),
         harnesses: (sid) => hub.attachedHarnesses(sid),
         dirsOf: (sid) => store.dirs(sid),
@@ -1545,7 +1586,7 @@ export async function startDaemon(opts: {
     // the `web` server left earlier, with the 2026-09-18 ruling.
     // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
     // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
-    lsp: { lsp: () => lspManager ?? undefined },
+    lsp: { home: winterHome, lsp: () => lspManager ?? undefined },
     // P8c integration round 2: the `external` capability server's real source
     // (`capabilities/external.ts`'s own header names the design). `sharedRegistry` is the SAME
     // `ToolRegistry` `tool.register` (ipc/server.ts) writes `plugin__<pluginId>__<name>` rows into
@@ -1610,7 +1651,8 @@ export async function startDaemon(opts: {
   // Worker each (`runtime-sdk/embedded.ts`). Owned HERE rather than by the runtime handle, because
   // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
   // frames still pass through the session store and `runtime-state.db` on the way out).
-  const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), log: (line) => console.error(`runtime-sdk: ${line}`) });
+  const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), home: winterHome, log: (line) => console.error(`runtime-sdk: ${line}`) });
+  onEmbeddedHost(embeddedSessions);
   // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
   // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
   {
@@ -2112,6 +2154,7 @@ export async function startDaemon(opts: {
     ...(runHomeDeps === undefined ? {} : { runHome: runHomeDeps }),
     // WS-21 (spec §4.3): a card offers "in this project" only for a trusted project.
     isTrusted: (dir) => trustStore.isTrusted(dir),
+    hostAuthorityRevision: () => [trustStore.authorityRevision(), authorityRevision(winterHome)],
     profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,
@@ -2245,6 +2288,7 @@ export async function startDaemon(opts: {
   // `session.list` and ListSessions use (`activityDeriver`, published by the IPC server below — read live).
   sessionMessaging = new SessionMessaging({
     store,
+    cowork: runtime ? new CoworkRepository(runtime.db) : undefined,
     derive: (row, sid, nowMs) => activityDeriver?.(row, sid, nowMs),
     working: (sid) => signalsDeriver?.(sid).working ?? false,
     sessions: { get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) },
@@ -2257,7 +2301,7 @@ export async function startDaemon(opts: {
    *  could exist, so it keeps the bare records hook. */
   const onSessionDeleted = (sessionId: string): void => {
     void winterDrivers.evict(sessionId);
-    runtime?.onSessionDeleted(sessionId);
+    onStoredSessionDeleted(sessionId);
     // ComputerV2: the session's automation worker ends with it, and the helper releases its targets.
     computerUseRuntime.service.endSession(sessionId);
   };
@@ -2750,7 +2794,7 @@ export async function startDaemon(opts: {
     // engine to hot-apply against (same "agent disabled" boundary the rest of this gate follows).
     const apply = makeApply({
       // THE atomic swap — a single synchronous assignment, first thing every apply does (T4).
-      setLiveSettings: (s) => { settings = liveSettingsView(s); },
+      setLiveSettings: (s) => { settings = liveSettingsView(s); advanceAuthorityRevision(winterHome); },
       registry,
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
@@ -2808,6 +2852,7 @@ export async function startDaemon(opts: {
     });
     settingsWatcher = new SettingsWatcher({
       path: dirs.settingsPath,
+      onChangeObserved: () => advanceAuthorityRevision(winterHome),
       load: loadSettings,
       apply,
       log: (msg) => console.error(`settings-watcher: ${msg}`),
@@ -2828,6 +2873,7 @@ export async function startDaemon(opts: {
   };
   const sdkSettingsWatcher = new SettingsWatcher<Record<string, unknown>>({
     path: sdkSettingsPath(winterHome),
+    onChangeObserved: () => advanceAuthorityRevision(winterHome),
     load: loadSdkFileStrict,
     // The memory importer's hot trigger moved with `memory.enabled`: it re-runs on exactly an
     // `autoMemoryEnabled` false→true flip (claude's default is ON, so only an explicit `false` is off).
@@ -2851,6 +2897,7 @@ export async function startDaemon(opts: {
   });
   const sdkGlobalConfigWatcher = new SettingsWatcher<Record<string, unknown>>({
     path: sdkGlobalConfigPath(winterHome),
+    onChangeObserved: () => advanceAuthorityRevision(winterHome),
     load: loadSdkFileStrict,
     apply: () => {},
     watch: watchViaParentDir,
@@ -2885,8 +2932,10 @@ export async function startDaemon(opts: {
   // P8b Task 17: a routine fires as a NEW code session through the driver table (fix wave F9: the
   // runner's engine branch is gone with the engine).
   const routineRunner = makeDaemonRoutineRunner({ store, hub, winter: winterDrivers });
+  let coworkService: CoworkWorkspaceService | undefined;
   const routineScheduler = makeRoutineScheduler({
     store: routineStore,
+    hostTick: () => coworkService?.schedules.tick(),
     runner: routineRunner,
     audit: (line) => routinesAudit.append(line),
     maxConcurrent: () => settings?.routines?.maxConcurrent,
@@ -2991,9 +3040,37 @@ export async function startDaemon(opts: {
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
+  // N2 S7: the native worker host's wiring. INERT: building it builds no host, process, socket, timer or file (the host appears on the
+  // first start a caller asks for, from an injected environment that production never has). The Cowork service gets it as its
+  // `native` port only when a caller injected an environment, so the production service refuses exactly as before.
+  // The production environment comes ONLY through the activation seam (cowork/native-activation.ts), which answers undefined until the owner flips it.
+  const nativeEnvironment = opts.coworkNative?.environment ?? (runtime ? coworkNativeProductionEnvironment(() => ({ home: winterHome, db: runtime.db, records: coworkRecords!, env: process.env })) : undefined);
+  const coworkNative: CoworkNativeWiring | undefined = runtime
+    ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative, ...(nativeEnvironment ? { environment: nativeEnvironment } : {}) }) : undefined;
+  const coworkNativePort = nativeEnvironment ? coworkNative : undefined;
+  const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
+  const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
+  coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
+  // Boot steps are best effort: a throw here (a locked or damaged Cowork table) must neither abort startup nor, later, kill the process.
+  try { coworkService?.schedules.recover(); } catch (error) { console.error(`cowork: schedule recovery failed at boot (${describeCoworkBootError(error)}); continuing`); }
+  try { coworkService?.schedules.tick(); } catch (error) { console.error(`cowork: schedule tick failed at boot (${describeCoworkBootError(error)}); continuing`); }
+  // Boot-time reconcile (D1): record-and-refuse. Without an environment this only reads the records; with one it runs the host's own
+  // recovery, which releases nothing on weaker evidence than an orderly receipt, a changed host boot or an owner recover.
+  if (coworkNative) {
+    try {
+      const boot = await coworkNative.reconcileAtBoot();
+      const held = boot.reports.filter(report => report.ownerRetained).length;
+      if (held > 0) console.error(`cowork: ${held} native workspace(s) keep their disk owner after boot (${boot.source}); nothing was released without proof`);
+    } catch (error) { console.error(`cowork: native boot reconcile failed (${describeCoworkBootError(error)}); ownership kept`); }
+  }
+  const coworkEvents = coworkService ? new CoworkWorkspaceEvents(coworkService.records, store, hub) : undefined;
+  // The outbox timer exists only when a Cowork host was injected (never in production) or events are still pending.
+  coworkEvents?.start({ keepAlive: opts.coworkHost !== undefined || opts.coworkNative?.environment !== undefined });
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
+    cowork: coworkService,
+    coworkEvents,
     tokens: authority,
     store,
     hub,
@@ -3192,6 +3269,7 @@ export async function startDaemon(opts: {
     tokens,
     registry: sharedRegistry,
     runtimeState,
+    coworkNative,
     runtimeSdk,
     embedded: embeddedSessions,
     sessions: store,
@@ -3213,13 +3291,18 @@ export async function startDaemon(opts: {
       // after the children drained and before the store closes).
       // Before anything else: no session is created, resumed or (re)opened from here on, and an open
       // already under way refuses just before its spawn — no runtime child can outlive this daemon.
+      coworkService?.beginShutdown(); // close durable schedule claims before draining anything
+      // N2 S7: stop every live native guest. `undefined` (no await, no timer) when none was ever started, so the no-guest stop is unchanged;
+      // otherwise bounded by the contract's host wait, and settled below BEFORE the store and the runtime close.
+      const guestsDrained = coworkNative?.beginShutdown();
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       computerUseRuntime.wakes.beginShutdown(); // no wake resumes a session either: its trigger stays in wakes.json for the next boot
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
-      server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
+      coworkEvents?.stop();
+      server.stop(); coworkService?.close(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
@@ -3255,6 +3338,9 @@ export async function startDaemon(opts: {
       // ended (then aborted) every tracked session, so an ordinary Worker has closed by now; this bounds
       // a straggler (`EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). Its iteration's tail writes the
       // generation's end into `runtime-state.db`, which is why this is not left to process exit.
+      // A daemon with no runtime SDK still built the embedded host, and the host's storage-policy consumer is process-global: its
+      // shutdown() unregisters it synchronously (nothing is live without a runtime), so call it here too and keep stop() synchronous.
+      if (runtimeSdk === undefined) void embeddedSessions.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {});
       const winterDone = runtimeSdk === undefined
         ? undefined
         : runtimeSdk.dispose()
@@ -3271,9 +3357,18 @@ export async function startDaemon(opts: {
       };
       // Synchronous when there is no Winter handle — `stop()`'s existing contract for every pre-8b
       // caller is unchanged (everything but the runtime drain has already happened on return).
-      return winterDone === undefined ? closeRest() : winterDone.then(closeRest);
+      const settled = winterDone === undefined ? guestsDrained : guestsDrained === undefined ? winterDone : Promise.all([winterDone, guestsDrained]).then(() => undefined);
+      return settled === undefined ? closeRest() : settled.then(closeRest);
     },
   };
+}
+
+/** Starts the daemon. A start that THROWS after the embedded host registered its (process-global) storage-policy consumer would leave that
+ *  consumer behind with no handle to stop it, so the failure path shuts the host down. */
+export async function startDaemon(opts: Parameters<typeof startDaemonInner>[1] = {}): Promise<RunningDaemon> {
+  let embedded: { shutdown(budgetMs?: number): Promise<void> } | undefined;
+  try { return await startDaemonInner(host => { embedded = host; }, opts); }
+  catch (error) { void embedded?.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS).catch(() => {}); throw error; }
 }
 
 // Direct execution: `bun run src/daemon.ts` (also the compiled binary's `daemon run` path).

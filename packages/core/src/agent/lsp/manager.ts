@@ -122,7 +122,7 @@ export class LspManager {
   // next clientFor() after a rejection gets a fresh attempt rather than replaying the failure.
   private readonly inFlight = new Map<string, Promise<LspClient>>();
 
-  constructor(cfg: LspManagerCfg = {}) {
+  constructor(private readonly cfg: LspManagerCfg = {}) {
     this.idleShutdownMs = cfg.idleShutdownMs ?? 300_000;
     this.serverCommands = { ...DEFAULT_SERVER_COMMANDS, ...cfg.serverCommands };
     this.scheduler = cfg.scheduler ?? DEFAULT_SCHEDULER;

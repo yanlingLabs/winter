@@ -1,0 +1,23 @@
+{
+  "sourceCommit": "71d950b0740e4e9646f116cada21f77139f27740",
+  "command": [
+    "bun",
+    "test",
+    "packages/core/test/cowork/volumes.test.ts"
+  ],
+  "exitCode": 0,
+  "version": "1.3.14",
+  "vmStarted": false,
+  "workerStarted": false,
+  "liveHomeAccessed": false,
+  "globalBackupSettingsChanged": false,
+  "temporaryItemBackupTestRun": true,
+  "files": {
+    "packages/core/src/cowork/volumes.ts": "c0d9be0e366dbd5374279805878c92b5036b0208b12b5ce2665d1e7abf5d3337",
+    "packages/core/src/cowork/volume-fs.ts": "fdfb494e0d42974748ca01b3044dadbdd3ff45c29b208768de961a8ee5ccf07b",
+    "packages/core/src/cowork/volume-backup.ts": "26629a8a01148c2b1958c0a279161fe3ba575515ad73492623b9dd2a641ef0ac",
+    "packages/core/test/cowork/volumes.test.ts": "4bd732954336f308eedc7c4f123dd15270e04460090ec9c65a87b2f9db8c4289"
+  },
+  "temporaryDependencyLinksRemoved": true,
+  "reviewHarnessPostTestError": "Python reporting wrapper reused its subprocess variable during link cleanup; final redundant exit assertion raised AttributeError after successful test result and receipt write. Tests exited 0; no test rerun needed."
+}

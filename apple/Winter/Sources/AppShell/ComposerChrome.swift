@@ -1,4 +1,5 @@
 import SwiftUI
+import WinterKit
 
 /// How far a composer control dims while its own RPC is out — the one "busy" treatment the composer
 /// has, shared so a second busy control cannot pick a different number.
@@ -94,6 +95,10 @@ struct ComposerContext {
     /// The live session's working folder, shown as a chip beside the approval mode in the
     /// permissions row (2026-09-17). `nil` → no chip.
     var workingDirectory: String? = nil
+    /// The Cowork composer's wiring (session door, design 7.9), or `nil` from any surface that is not the
+    /// new-chat page. Only `CoworkComposerChrome` reads it. Even when present, the strip it produces shows
+    /// the original placeholders until `CoworkComposerModel.isOpen` — see `CoworkComposerStripSwitch`.
+    var cowork: CoworkComposerWiring? = nil
 }
 
 // MARK: - The permissions row (mac-chat-parity Task 6, spec §4)
@@ -179,6 +184,9 @@ struct ComposerStrip {
     enum Kind: Equatable {
         /// Cowork's two unwired chips (working folder, approval mode) plus the announcement.
         case coworkPlaceholders
+        /// Cowork's chips behind the gate (design 7.9): the placeholders above while Cowork is closed, the live
+        /// folder and approval chips once it is open. Only a surface that wired a `CoworkComposerWiring` gets it.
+        case coworkChips
         /// The approval-policy row (mac-chat-parity Task 6, spec §4) — code's and dispatch's band.
         /// Carries what it shows and offers; see `ComposerPermissionsRow` for why on the case.
         case permissions(ComposerPermissionsRow)
@@ -469,7 +477,7 @@ struct ComposerPolicyChip: View {
 
 /// **Cowork's composer is a named slot, not a built one.**
 ///
-/// `SessionMode.isAvailable == false`, `session.create` excludes Cowork, and `SpawnSession`
+/// `SessionMode.isAvailable == false`, `session.create` refuses Cowork (`unsupported_topology`), and `SpawnSession`
 /// pre-flight-rejects its reserved argument. Supported create paths cannot produce a live Cowork
 /// session; string-based row/chrome handling remains future-compatible. The new-chat page lets
 /// its segment preview this design while `newChatSendBlockedReason` refuses to send.
@@ -487,10 +495,21 @@ struct CoworkComposerChrome: ComposerChrome {
 
     func makeControlRowAccessory() -> AnyView? { AnyView(ComposerModeSegment(context: context)) }
 
+    /// While the gate is closed the model/effort chip stays (it is today's behavior and the page lets the
+    /// segment preview Cowork); once open it goes, because the door refuses `model` and `effort` beside a Cowork
+    /// binding: the host derives both, and a pick that create would refuse must not be offered.
+    var showsModelControl: Bool { !(MainActor.assumeIsolated { context.cowork?.model.isOpen } ?? false) }
+
     func makeStrip() -> ComposerStrip? {
-        ComposerStrip(kind: .coworkPlaceholders,
-                      height: newChatComposerStripHeight,
-                      content: AnyView(CoworkComposerStrip(announcement: context.announcement)))
+        guard let wiring = context.cowork else {
+            return ComposerStrip(kind: .coworkPlaceholders,
+                                 height: newChatComposerStripHeight,
+                                 content: AnyView(CoworkComposerStrip(announcement: context.announcement)))
+        }
+        return ComposerStrip(kind: .coworkChips,
+                             height: newChatComposerStripHeight,
+                             content: AnyView(CoworkComposerStripSwitch(model: wiring.model, wiring: wiring,
+                                                                        announcement: context.announcement)))
     }
 }
 

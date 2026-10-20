@@ -1,0 +1,4 @@
+
+> winter-monorepo@ typecheck:core <workspace>/.worktrees/guest-supervisor
+> tsc --noEmit -p packages/core
+

@@ -1,0 +1,6 @@
+{
+  "commit": "b0c2ca58a16aca5492c4e1ac30a82ccac91d1525",
+  "exitCode": 0,
+  "command": "swift test --package-path apple/WinterKit --scratch-path <test-temp>/build --jobs 2 --filter Cowork(Client|WorkspaceModel)Tests",
+  "scope": "scripted client/model tests; no app/daemon/VM launch"
+}

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +41,29 @@ function baseDeps(overrides: Partial<MigrateCommandDeps> = {}): { deps: MigrateC
   };
   return { deps, lines, errLines };
 }
+
+describe("winter migrate --cowork-schema --rollback", () => {
+  test("only removes unused Cowork tables, preserving the SDK layout and v7 records", async () => {
+    const home = tempDir(), rs = openRuntimeStateDb(home);
+    rs.db.run("INSERT INTO run_root_quarantine(root,recorded_at,detail_json) VALUES('/retained/run','now','{}')"); rs.close();
+    const { deps, lines } = baseDeps({ home, argv: ["--cowork-schema", "--rollback", "--yes"] });
+    expect(await runMigrateCommand(deps)).toBe(0);
+    expect(lines.join("\n")).toContain("rolled back to v7");
+    const raw = new Database(join(home, "runtimes/runtime-state.db"), { readonly: true });
+    try { expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 7 }); expect(raw.query("SELECT root FROM run_root_quarantine").get()).toEqual({ root: "/retained/run" }); }
+    finally { raw.close(); }
+  });
+  test("refuses a running daemon, malformed flags, and any populated Cowork authority", async () => {
+    const live = baseDeps({ argv: ["--cowork-schema", "--rollback", "--yes"], isDaemonLockHeld: () => true });
+    expect(await runMigrateCommand(live.deps)).toBe(1); expect(live.errLines.join("\n")).toContain("daemon is running");
+    const malformed = baseDeps({ argv: ["--cowork-schema", "--sdk-home", "--rollback", "--yes"] });
+    expect(await runMigrateCommand(malformed.deps)).toBe(1);
+    const home = tempDir(), rs = openRuntimeStateDb(home);
+    rs.db.run("INSERT INTO cowork_home_identity VALUES(1,'home-one','now')"); rs.close();
+    const populated = baseDeps({ home, argv: ["--cowork-schema", "--rollback", "--yes"] });
+    expect(await runMigrateCommand(populated.deps)).toBe(1); expect(populated.errLines.join("\n")).toContain("cowork-data-present");
+  });
+});
 
 describe("winter migrate — --status", () => {
   test("prints 'none' when the home has never migrated", async () => {

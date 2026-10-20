@@ -1,0 +1,27 @@
+{
+  "reviewedOriginalHead": "1d9cc881",
+  "reviewedFixHead": "f46f162711fe444650bb7fd900a00fce5905136d",
+  "base": "3eb4d229",
+  "sourceSha256": {
+    "packages/core/src/cowork/guest-runtime.ts": "edc5aad8023eeb29064999211ca7137a4e5161e846acefe86a40227a18c8dc29",
+    "packages/core/test/cowork/guest-runtime.test.ts": "5dace4c0e8b757a517b6c8d8ea1533c83fccd78a0cf743b58eb56e2854a2441a"
+  },
+  "focusedTestsPassed": 93,
+  "expectations": 975,
+  "suiteCount": 5,
+  "coreTypecheckPassed": true,
+  "diffCheckPassed": true,
+  "actualSdkRefusalCheckout": "bbab87d9a748c57ff80e1f28cce2c8972c249a34",
+  "installedQuerySdkVersion": "0.0.53",
+  "originalActualQueryReproducerObserved": true,
+  "originalBlockerResolved": true,
+  "remainingSourceBlockers": [],
+  "vmStarted": false,
+  "nativeWorkerStarted": false,
+  "productionGuestExecutionVerified": false,
+  "sdkCompleteConfinementEnabled": false,
+  "productionPortRegistered": false,
+  "dependencyLinksOnly": true,
+  "packagePinsChanged": false,
+  "implementationEditedByReviewer": false
+}

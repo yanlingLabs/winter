@@ -1,0 +1,123 @@
+$ bun test packages/core/test/cowork/volume-filesystem.test.ts packages/core/test/cowork/volumes.test.ts packages/core/test/cowork/repository.test.ts packages/core/test/cowork/admission.test.ts packages/core/test/runtime-state/db-run-folder.test.ts
+bun test v1.3.14 (0d9b296a)
+
+packages/core/test/runtime-state/db-run-folder.test.ts:
+(pass) runtime-state schema v7 (WS-21) > a fresh store includes v7 and accepts run-folder; an unknown kind is still refused [17.16ms]
+(pass) runtime-state schema v7 (WS-21) > migrating a v6 store with generations: rows kept, the child FK still names runtime_sessions and still binds [21.34ms]
+(pass) runtime-state schema v7 (WS-21) > re-running v7 over an already-v7 table (a rewound user_version) changes nothing [12.53ms]
+(pass) runtime-state schema v7 (WS-21) > the connection's foreign keys are back ON after the migration [17.17ms]
+(pass) downgradeRuntimeStateToV6 > current unused schema → v6: run-folder kinds cleared, the v6 CHECK back, the quarantine table gone, rows and FKs intact [15.99ms]
+(pass) downgradeRuntimeStateToV6 > already v6, or no store: nothing to do [9.68ms]
+
+packages/core/test/cowork/admission.test.ts:
+(pass) construction requires explicit isolated path and all probes; no production fallback [0.59ms]
+(pass) canonical prepared home registration persists across handles and checks DB origin plus observed filesystem identity [5.28ms]
+(pass) copied homes, aliases, directory replacement and copied DB identity cannot register or activate [3.83ms]
+(pass) a copied home's origin machine or installation is refused even when the ledger is initially empty [1.64ms]
+(pass) a filesystem identity change after admission remains uncertain and blocks reuse [4.43ms]
+(pass) homes may neither contain nor sit inside the external coordination directory [1.59ms]
+(pass) reservations compete through the global SQLite ledger across handles and homes [4.89ms]
+(pass) pressure, unknown/null probes and expired/future observations refuse rather than silently over-admit [3.89ms]
+(pass) PID reuse, expired heartbeat, dead or unknown owner keep uncertain reservations and capacity [16.53ms]
+(pass) owner nonce and process-start bindings cannot be changed, including by a reused PID [4.17ms]
+(pass) heartbeats restore only heartbeat-interrupted accounting; explicit uncertainty needs separate recovery [4.95ms]
+(pass) release requires exact owner/workspace/epoch and trusted confirmed-stop receipt; release never proves disk ownership [4.74ms]
+(pass) a changed boot token alone preserves uncertainty; only a trusted same-host prior-boot end observation releases admission [4.44ms]
+(pass) explicit local relocation requires authorization, a matching revision and no active or uncertain owner [5.14ms]
+(pass) copied ledger bytes or host identity changes cannot establish a second coordination domain [4.72ms]
+(pass) host-machine changes cannot reclaim old reservations using a claimed boot transition [3.94ms]
+(pass) integer accounting refuses malformed and oversized commitments with no partial owner/reservation rows [4.20ms]
+(pass) simultaneous independent Bun processes cannot over-reserve the shared ledger [119.45ms]
+(pass) sleep and backward clocks preserve each accounting phase across independent handles [58.49ms]
+(pass) a harder owner uncertainty cannot be overwritten by a later heartbeat gap [5.89ms]
+(pass) backward time alone cannot release admission but cannot invalidate a genuine exact stop proof [4.99ms]
+(pass) v1 ledger migrates without inventing a prior phase for legacy uncertainty [9.22ms]
+
+packages/core/test/cowork/volumes.test.ts:
+(pass) plan has no filesystem effect; materialization produces bounded sparse private unformatted images [15.17ms]
+(pass) geometry, purpose, format and mandatory controller authority refuse without file effects [11.36ms]
+(pass) a cold reopen retains exact volume IDs and writable owner until native stop proof [25.06ms]
+(pass) permission, replacement, geometry, directory identity and hardlink drift refuse without repair [12.50ms]
+(pass) geometry drift and malformed ownership refuse while data remains intact [10.09ms]
+(pass) symlinks never follow through image or backing directory [10.82ms]
+(pass) unknown existing images are preserved when exclusive creation refuses [8.11ms]
+(pass) lost exclusion blocks future open; partial allocation retries its pinned virgin inode [10.78ms]
+(pass) crash at creation-intent never loses or replaces an existing file [9.50ms]
+(pass) crash at image-created never loses or replaces an existing file [8.64ms]
+(pass) crash at backup-excluded never loses or replaces an existing file [9.97ms]
+(pass) crash at image-sized never loses or replaces an existing file [10.09ms]
+(pass) backup path replacement during exclusion refuses; recorded old inode remains preserved [8.85ms]
+(pass) current schema upgrades an old host-only v7 home; empty downgrade preserves native state and populated volumes refuse [30.58ms]
+(pass) real tmutil adapter excludes only disposable images, with sticky metadata preserved on rename [2418.95ms]
+(pass) directory creation crash and nested effect transactions fail closed without automatic adoption [11.01ms]
+(pass) v8 authority upgrades without reidentifying a workspace, and a genuinely empty v8 rollback remains supported [20.38ms]
+(pass) outer claim/open rollback cannot publish an uncommitted owner or writable descriptor [19.43ms]
+(pass) outer release/claim/open rollback cannot restore one owner beside another writable descriptor [17.87ms]
+(pass) failed transaction completion closes an opened descriptor without retaining a local handle [21.78ms]
+(pass) named backup helpers stay outside writer transactions while pinned checks run inside [12.43ms]
+(pass) open revalidates exclusion after external backup check and closes its pending descriptor [11.44ms]
+(pass) open revalidates replacement after external backup check and closes its pending descriptor [11.97ms]
+(pass) open revalidates owner after external backup check and closes its pending descriptor [11.08ms]
+(pass) sticky exclusion parses bounded plist strings across equivalent binary encodings [0.75ms]
+
+packages/core/test/cowork/repository.test.ts:
+(pass) canonical identity, creation receipt and source authority persist across independent handles [8.80ms]
+(pass) creation requires a source and rolls back the whole operation on invalid selection [7.74ms]
+(pass) concurrent revisions prevent two clients removing the final sources; revocation always narrows [11.48ms]
+(pass) temporary folder loss/removal never enables GitHub-only publication before confirmed detachment [9.17ms]
+(pass) stale callback cannot resurrect a revoked source or cross workspace ownership [8.55ms]
+(pass) standalone reserves one immutable conversation identity; Project bindings share files but preserve policy [8.58ms]
+(pass) outbox fanout survives reopen; receipt retry neither duplicates change nor alters result [8.51ms]
+(pass) authority rechecks live grants, rejects paired folder grants and cross-workspace peer access [8.78ms]
+(pass) relative cwd rejects absolute paths and traversal rather than normalizing them into authority [0.07ms]
+(pass) legacy rollback refuses any populated Cowork authority without deleting records [9.96ms]
+(pass) revocation cannot resurrect a source already selected for removal [8.83ms]
+(pass) outbox preserves commit order when timestamps tie and random change IDs sort backward [8.56ms]
+(pass) source readiness commits a durable notification and duplicate acknowledgment is inert [8.31ms]
+(pass) live controller refresh is explicit, while superseded callbacks and owners stay fenced [10.02ms]
+(pass) revocation narrows archived workspaces and supersedes pending source operations [7.82ms]
+(pass) a revoked source cannot justify removing the last usable or preparing replacement [8.59ms]
+(pass) GitHub-only membership alone never authorizes publication to a disconnected repository [8.50ms]
+(pass) read-only GitHub credentials permit local checkout work but cannot authorize publication [8.08ms]
+(pass) empty current-schema rollback to v7 preserves run-home metadata and refuses populated Cowork state [10.04ms]
+(pass) multi-source supersession emits one durable terminal receipt and later source readiness cannot revive it [10.43ms]
+
+packages/core/test/cowork/volume-filesystem.test.ts:
+(pass) formatting is a consumed pair intent; mandatory protected receipt alone confirms both ready [17.56ms]
+(pass) absent native filesystem port refuses intent and ready admission without effects [10.95ms]
+(pass) writable descriptor exposure before consumed intent destroys virgin format eligibility [20.19ms]
+(pass) crash after format intent commit survives reopen with owner held and never retries [13.66ms]
+(pass) new owner must probe ready volumes; stale old receipt never acknowledges fresh incarnation [16.74ms]
+(pass) mismatched receipt filesystemUUID preserves formatting owner and never acknowledges readiness [12.44ms]
+(pass) mismatched receipt creationId preserves formatting owner and never acknowledges readiness [12.42ms]
+(pass) mismatched receipt identity preserves formatting owner and never acknowledges readiness [12.88ms]
+(pass) mismatched receipt capacityBytes preserves formatting owner and never acknowledges readiness [12.02ms]
+(pass) mismatched receipt flushConfirmed preserves formatting owner and never acknowledges readiness [12.97ms]
+(pass) mismatched receipt owner preserves formatting owner and never acknowledges readiness [12.04ms]
+(pass) mismatched receipt extra preserves formatting owner and never acknowledges readiness [12.07ms]
+(pass) outer transactions cannot erase consumed format intent or confirmed readiness [10.81ms]
+(pass) schema9 migration preserves identity and owner but never invents virgin or UUID provenance [16.53ms]
+(pass) drift after a ready receipt refuses readiness without replacing or repairing an image [12.57ms]
+(pass) malformed canonical journal and ready-without-receipt refuse as recovery, not autoformat [11.26ms]
+(pass) current bootstrap authority denial cannot consume a virgin intent [11.29ms]
+
+ 90 pass
+ 0 fail
+ 731 expect() calls
+Ran 90 tests across 5 files. [3.55s]
+
+$ python3 -I -S spikes/cowork-filesystem-bootstrap/test_bootstrap.py
+test_actual_pair_formats_then_probe_only_preserves_bytes_and_uuid (__main__.LinuxFilesystemTests.test_actual_pair_formats_then_probe_only_preserves_bytes_and_uuid) ... skipped 'explicit Linux disposable fixture only'
+test_failed_helper_retains_one_shot_and_partial_bytes_without_retry (__main__.LinuxFilesystemTests.test_failed_helper_retains_one_shot_and_partial_bytes_without_retry) ... skipped 'explicit Linux disposable fixture only'
+test_unknown_second_disk_preflights_pair_before_first_write (__main__.LinuxFilesystemTests.test_unknown_second_disk_preflights_pair_before_first_write) ... skipped 'explicit Linux disposable fixture only'
+test_untrusted_stale_envelope_denied_before_any_disk_effect (__main__.LinuxFilesystemTests.test_untrusted_stale_envelope_denied_before_any_disk_effect) ... skipped 'explicit Linux disposable fixture only'
+test_wrong_expected_uuid_is_probe_refusal_without_repair (__main__.LinuxFilesystemTests.test_wrong_expected_uuid_is_probe_refusal_without_repair) ... skipped 'explicit Linux disposable fixture only'
+test_authenticator_is_mandatory (__main__.ProtocolTests.test_authenticator_is_mandatory) ... ok
+test_closed_plan_and_independent_volume_uuid (__main__.ProtocolTests.test_closed_plan_and_independent_volume_uuid) ... ok
+test_fd_identity_capacity_mode_and_nonzero_refusal (__main__.ProtocolTests.test_fd_identity_capacity_mode_and_nonzero_refusal) ... ok
+test_non_linux_refuses_before_authentication_or_helper (__main__.ProtocolTests.test_non_linux_refuses_before_authentication_or_helper) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.114s
+
+OK (skipped=5)

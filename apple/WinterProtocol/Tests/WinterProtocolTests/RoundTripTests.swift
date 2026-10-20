@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 88, "expected 88 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 94, "expected 94 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -138,6 +138,34 @@ final class RoundTripTests: XCTestCase {
         XCTAssertNil(without.runtimeKind)
         XCTAssertNil(without.providerId)
         XCTAssertNil(without.modelRef)
+    }
+
+    /// Cowork (session door) — `mode` is a free `String?` on this side, so `"cowork"` needs no new Swift type:
+    /// the recognised-but-unrunnable mode must survive a decode and a re-encode verbatim (a client that
+    /// dropped it, or read it as an unknown value, would show a stored Cowork log as a Code session).
+    /// CONTENT, not just the fixture count: the sibling fixtures carry `dispatch` and no mode at all.
+    func testSessionCreatedCarriesTheCoworkModeVerbatim() throws {
+        guard let url = Bundle.module.url(forResource: "session_created_with_cowork_mode", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing session_created_with_cowork_mode.json fixture")
+        }
+        guard case .sessionCreated(let created) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url)) else { return XCTFail("wrong case") }
+        XCTAssertEqual(created.mode, "cowork")
+        XCTAssertNil(created.runtimeKind)
+        // Session door D1: the additive binding facts decode field for field (the null Project and source included)…
+        XCTAssertEqual(created.cowork, SessionEvent.CoworkSessionCreatedFacts(workspaceId: "w_one", projectId: nil, location: "outputs", sourceId: nil, policyRevision: 1))
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.sessionCreated(created))
+        let object = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual(object?["mode"] as? String, "cowork")
+        // …and survive the re-encode rather than being dropped.
+        let cowork = object?["cowork"] as? [String: Any]
+        XCTAssertEqual(cowork?["workspaceId"] as? String, "w_one")
+        XCTAssertEqual(cowork?["location"] as? String, "outputs")
+        XCTAssertEqual(cowork?["policyRevision"] as? Int, 1)
+        XCTAssertTrue(cowork?["projectId"] is NSNull, "projectId is nullable, not optional: the key stays, as null")
+        XCTAssertTrue(cowork?["sourceId"] is NSNull, "sourceId is nullable, not optional: the key stays, as null")
+        guard case .sessionCreated(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail("wrong case") }
+        XCTAssertEqual(created, redecoded)
     }
 
     /// The reviewing pill (2026-10-08): the TRANSIENT `tool_review_progress` variant — its own case, not

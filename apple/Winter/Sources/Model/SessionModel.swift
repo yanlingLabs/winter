@@ -572,7 +572,19 @@ struct Exchange: Equatable {
     }
 }
 
+/// Host metadata only. No field in this fold enables execution or declares a mounted view effective.
+struct CoworkWorkspaceMetadata: Equatable {
+    var revision: Int = 0
+    var sources: [String: SessionEvent.WorkspaceSourceChange] = [:]
+    var instructions: SessionEvent.WorkspaceInstructionsChanged?
+    var policy: SessionEvent.WorkspacePolicyChanged?
+    var operations: [String: SessionEvent.WorkspaceOperationChanged] = [:]
+    var refetchRequired: Bool = false
+}
+
 struct OrbSessionState: Equatable {
+    var coworkWorkspaces: [String: CoworkWorkspaceMetadata] = [:]
+
     var status: OrbStatus = .disconnected // until markConnected() — M2 contract
     var tasks: [TaskItem] = []
     /// Live child threads of the CURRENT main turn (2e-ii) — pruned wholesale when the main turn
@@ -827,6 +839,35 @@ enum SessionReducer {
     /// (up to 200 items) because the caller still held the old value — per event, for thousands of events.
     static func reduceInPlace(_ s: inout OrbSessionState, _ event: SessionEvent) {
         switch event {
+        case .workspaceSourcesChanged(let v):
+            var metadata = s.coworkWorkspaces[v.workspaceId] ?? CoworkWorkspaceMetadata()
+            metadata.revision = max(metadata.revision, v.workspaceRevision)
+            for source in v.sources { metadata.sources[source.sourceId] = source }
+            if v.phase == "refetch" { metadata.refetchRequired = true }
+            s.coworkWorkspaces[v.workspaceId] = metadata
+        case .workspacePolicyChanged(let v):
+            var metadata = s.coworkWorkspaces[v.workspaceId] ?? CoworkWorkspaceMetadata()
+            metadata.revision = max(metadata.revision, v.workspaceRevision)
+            metadata.policy = v
+            metadata.refetchRequired = true // canonical ceiling/detail remains an explicit read
+            s.coworkWorkspaces[v.workspaceId] = metadata
+        case .workspaceOperationChanged(let v):
+            var metadata = s.coworkWorkspaces[v.workspaceId] ?? CoworkWorkspaceMetadata()
+            metadata.revision = max(metadata.revision, v.workspaceRevision)
+            metadata.operations[v.operationId] = v
+            s.coworkWorkspaces[v.workspaceId] = metadata
+        case .workspaceInstructionsChanged(let v):
+            var metadata = s.coworkWorkspaces[v.workspaceId] ?? CoworkWorkspaceMetadata()
+            metadata.revision = max(metadata.revision, v.workspaceRevision)
+            metadata.instructions = v
+            metadata.refetchRequired = true // instruction text remains an explicit bounded read
+            s.coworkWorkspaces[v.workspaceId] = metadata
+        case .workspaceMetadataChanged(let v):
+            var metadata = s.coworkWorkspaces[v.workspaceId] ?? CoworkWorkspaceMetadata()
+            metadata.revision = max(metadata.revision, v.workspaceRevision)
+            metadata.refetchRequired = true
+            s.coworkWorkspaces[v.workspaceId] = metadata
+
         case .harnessAttached(let v): // gate-feedback-1 FIX A — see `attachedClients`'s doc.
             s.attachedClients.append(v.clientName)
         case .harnessDetached(let v):

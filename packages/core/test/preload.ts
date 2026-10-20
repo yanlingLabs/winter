@@ -7,6 +7,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LEGACY_HOME_ENV } from "../src/legacy-names";
+// Cowork fences can inspect file identity to reject hard-link aliases. Inject the coordination root
+// before any fence is constructed so even metadata checks never probe the production user ledger.
+process.env.WINTER_COWORK_COORDINATION_DIR = mkdtempSync(join(tmpdir(), "winter-test-cowork-coordination-"));
 // Hermetic guard: tests must never touch the user's real ~/.config/git/ignore
 // (global-gitignore.ts resolves its default path from XDG_CONFIG_HOME).
 process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "winter-test-xdg-"));
@@ -65,3 +68,16 @@ process.env.WINTER_LOGIN_SHELL_PATH = "off";
   writeFileSync(gitConfig, "[user]\n\tname = winter-test\n\temail = winter-test@example.invalid\n");
   process.env.GIT_CONFIG_GLOBAL = gitConfig;
 }
+
+// Guard (test-infra/fence-consumer-leak): the host-storage policy-consumer set is process-global, and a consumer left registered over a
+// closed store makes every later `refreshHostStoragePolicies()` in the same process throw. Whoever registers one (a session-driver
+// table, an embedded host, a daemon) must unregister it before the file ends.
+import { afterAll } from "bun:test";
+import { hostStoragePolicyConsumerCount, hostStoragePolicyConsumerOrigins } from "../src/runtime-sdk/host-storage-fence";
+// Compiled-fixture children (`bun run fixture.ts`) load this preload outside the test runner, where `afterAll` throws: skip them.
+try {
+  afterAll(() => {
+    const left = hostStoragePolicyConsumerCount();
+    if (left > 0) throw new Error(`${left} host-storage policy consumer(s) left registered at the end of a test file; stop every daemon / drivers / embedded host the file creates. Registered from: ${hostStoragePolicyConsumerOrigins().join(" ; ")}`);
+  });
+} catch { /* not inside the test runner */ }

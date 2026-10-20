@@ -1,3 +1,8 @@
+import type { CoworkWorkspaceEvents } from "../cowork/workspace-events";
+import { COWORK_RPC, COWORK_REMOTE_METHODS, type CoworkMethod } from "@yanlinglabs/winter-protocol";
+import { CoworkWorkspaceService } from "../cowork/service";
+import { CoworkError } from "../cowork/types";
+import type { CoworkSessionDoor, CoworkSessionDrivers } from "../cowork/session-ports";
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
 import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
@@ -89,6 +94,7 @@ import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
+import { COWORK_SESSION_UNSUPPORTED_CODE, COWORK_SESSION_UNSUPPORTED_MESSAGE, isUnrunnableSessionMode, isUnrunnableStoredMode, unrunnableModeMessage } from "../sessions/session-mode";
 import { isSessionReplaced, withReplacementRetry } from "../runtime-sdk/session-replaced";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
@@ -230,6 +236,12 @@ export interface InternalSessionCreateInput {
 export type InternalSessionCreator = (input: InternalSessionCreateInput) => Promise<{ sessionId: string; trusted: boolean }>;
 
 export interface IpcServerOptions {
+  cowork?: CoworkWorkspaceService;
+  coworkEvents?: CoworkWorkspaceEvents;
+  /** Cowork session door (D1 spine): THE single activation switch for Cowork sessions. Absent — every production daemon
+   *  today, since nothing in `daemon.ts` constructs one — `session.create {mode: "cowork"}` keeps answering
+   *  `unsupported_topology` for every role, before anything else. Only code can pass it (tests; the flip, D6). */
+  coworkSessions?: CoworkSessionDoor;
   socketPath: string;
   serverVersion: string;
   tokens: TokenAuthority;
@@ -628,9 +640,30 @@ export function deferMintSweep(run: () => void): () => void {
 
 class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
 
+/** Session door (D1): what a Cowork `session.create` may NOT carry beside its binding — the daemon derives the cwd, the
+ *  policy (the workspace default) and the model (the provider route) itself, and `origin` is not a Cowork concept yet. */
+const COWORK_HOST_DERIVED_CREATE_FIELDS = ["cwd", "approvalPolicy", "model", "effort", "origin"] as const;
+
+/** The refusal a door gives the recognised-but-unrunnable `cowork` session mode: INVALID_PARAMS with
+ *  `{ code: "unsupported_topology" }`, the shape of the `Cowork unavailable` answer `COWORK_RPC` methods give
+ *  a daemon without the Cowork service (`sessions/session-mode.ts`). */
+function coworkSessionUnsupported(storedMode?: string): RpcFailure {
+  return new RpcFailure(ERR.INVALID_PARAMS, storedMode === undefined ? COWORK_SESSION_UNSUPPORTED_MESSAGE : unrunnableModeMessage(storedMode), { code: COWORK_SESSION_UNSUPPORTED_CODE });
+}
+
 /** P8b Task 16: a `WinterLegRefusal` (or the driver's own typed errors) as the RPC error a client
  *  can branch on. Anything else is rethrown untouched. */
-function rpcFromWinterRefusal(err: unknown): never {
+export function rpcFromWinterRefusal(err: unknown): never {
+  // A store-level Cowork refusal (`SessionStore.createSession` on a mode nothing can run) is the numeric RPC error
+  // with the string code in `data.code`, like every other refusal here — never an uncaught Error that reaches
+  // the client as INTERNAL. Same shape `COWORK_RPC` gives a `CoworkError`.
+  if (err instanceof CoworkError) {
+    throw new RpcFailure(
+      err.code === "authority_denied" ? ERR.UNAUTHORIZED : ERR.INVALID_PARAMS,
+      err.code === COWORK_SESSION_UNSUPPORTED_CODE ? COWORK_SESSION_UNSUPPORTED_MESSAGE : "Cowork request refused",
+      { code: err.code, ...(err.currentRevision === undefined ? {} : { currentRevision: err.currentRevision }) },
+    );
+  }
   if (err instanceof WinterLegRefusal) {
     // Client-actionable refusals, in the same shape as `session_predates_winter_leg` (the caller can
     // fix its own input — configure a credential, pick a servable model, repair a transcript) rather
@@ -638,6 +671,8 @@ function rpcFromWinterRefusal(err: unknown): never {
     // official leg created whose transcript cannot move to the Winter leg as it stands.
     // `session_cwd_unavailable`: the session's own working directory is gone — the user restores it
     // or starts a new session, so it is theirs to fix, not a daemon fault.
+    // `unsupported_topology`: a stored `cowork` session — a recognised mode nothing can run; the same
+    // INVALID_PARAMS + `data.code` `session.create` gives it, so one client branch covers both doors.
     // `session_replaced` (`runtime-sdk/session-replaced.ts`): nothing was done and repeating the request
     // succeeds -- RETRY, never INTERNAL. The send doors already retried once before it got here.
     if (isSessionReplaced(err)) {
@@ -645,7 +680,7 @@ function rpcFromWinterRefusal(err: unknown): never {
     }
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
       || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused"
-      || err.code === "session_cwd_unavailable";
+      || err.code === "session_cwd_unavailable" || err.code === "unsupported_topology";
     // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
     // several distinct situations, and `"no-credential"` is the one a client should render as "you
     // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
@@ -744,6 +779,7 @@ const PLUGIN_ALLOWED_METHODS = new Set<string>([
 // edit to one side that isn't matched on the other fails the parity test rather than silently
 // letting the two allowlists diverge.
 export const REMOTE_ALLOWED_METHODS = new Set<string>([
+  ...COWORK_REMOTE_METHODS,
   METHODS.hello, METHODS.sessionList, METHODS.sessionAttach, METHODS.sessionSend,
   METHODS.sessionDispatch, METHODS.approvalRespond, METHODS.askUserRespond,
   METHODS.sessionInterrupt, METHODS.engineActivity,
@@ -819,13 +855,15 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
  *
  *  Chat mode Slice C lifted chat into this set — the phone now gets its own chat surface. Dispatch
  *  has been reachable since Phase 7 (the phone drives the shared dispatch session via
- *  `session.dispatch`, itself REMOTE_ALLOWED_METHODS-listed). Nothing today has a wire-expressible
- *  `mode` outside this set (`SessionCreateParams.mode`'s zod enum stays three-valued), but this is
- *  written as an ALLOWLIST — not "everything except chat" — on purpose: a future Mac/apps-only mode
- *  (e.g. a cowork surface) needs ZERO edits here to stay Mac-local; it's excluded simply by not
- *  being one of these three. remote-chat-gate.test.ts proves this with a synthetic cowork-shaped
- *  row written directly to the store (no protocol/session.create support exists for it — that's the
- *  point: refusal is the gate's default, not an opt-in list of blocked modes to maintain). */
+ *  `session.dispatch`, itself REMOTE_ALLOWED_METHODS-listed). The one wire-expressible `mode` outside
+ *  this set is `cowork` (`SESSION_MODES` recognises it; `session.create` refuses it for every role with
+ *  `unsupported_topology`, so no row carries it today). This is written as an ALLOWLIST — not
+ *  "everything except chat" — on purpose: a Mac/apps-only mode needs ZERO edits here to stay
+ *  Mac-local; it's excluded simply by not being one of these three. Cowork stays excluded until its
+ *  per-record and parameter gates exist (docs/cowork-host-protocol.md, "Producer/consumer and release
+ *  checklist": "Add Cowork to the separate remote-eligible session-mode set only after…").
+ *  remote-chat-gate.test.ts proves it with a synthetic cowork-shaped row written directly to the
+ *  store — refusal is the gate's default, not an opt-in list of blocked modes to maintain. */
 // Winter Phase 8d (Task 4.4 fix round 1): exported so `packages/core/scripts/capability-matrix.ts`
 // reads this SAME set for its ios-remote surface-reachability row instead of a duplicated literal
 // — the capability matrix is a Winter-repo-internal consumer (no dependency-direction problem, the
@@ -842,8 +880,10 @@ export const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"
  *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
  *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too;
  *  provider-correctness T4 added session.setEffort beside it. */
-function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
+function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string, cowork?: CoworkWorkspaceService, connectionId = 0): void {
   if (role !== "remote") return;
+  try { cowork?.requireSessionRead({ role, connectionId }, sessionId); }
+  catch { throw new RpcFailure(ERR.UNAUTHORIZED, "Workspace access denied"); }
   let mode: string | undefined;
   try { mode = store.meta(sessionId).mode; } catch { return; } // unknown id → let the handler's own error win
   const effectiveMode = mode ?? "code";
@@ -1430,6 +1470,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     return { sessionId, trusted };
   }
 
+  /** Session door D4b: a stored Cowork row's driver table, ONLY when a door was passed (tests only until the flip). Without
+   *  one this is undefined and every Cowork refusal below stays exactly as it was. The stored mode only routes: the
+   *  door's drivers re-read the host binding, which alone is authority (a row with no binding refuses there). */
+  function coworkDriversOf(sessionId: string): CoworkSessionDrivers | undefined {
+    const door = opts.coworkSessions;
+    if (door === undefined) return undefined;
+    let stored: string | undefined;
+    try { stored = opts.store.meta(sessionId).mode; } catch { return undefined; }
+    return stored === "cowork" ? door.drivers : undefined;
+  }
+
   /** P8c-14: `session.send`/`session.interrupt`/`session.compact` gate on this BEFORE resuming —
    *  a leg the driver table can actually run a turn on, never `"engine"` (P8b-22's own refusal)
    *  and never `undefined` (no record at all). Widened from a bare `=== "winter"` string check the
@@ -1458,6 +1509,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  stays the answer exactly as before 8b. */
   function refuseIfPredatesWinterLeg(sessionId: string): void {
     if (opts.winter === undefined) return;
+    // A stored `cowork` row (a recognised mode nothing can run) is refused as exactly that — before the
+    // record-less "phone-owned session" answer below, whose advice (start a new session) would be wrong for it.
+    let stored: string | undefined;
+    try { stored = opts.store.meta(sessionId).mode; } catch { /* unknown id: the handler's own not-found wins */ }
+    if (isUnrunnableStoredMode(stored)) throw coworkSessionUnsupported(stored);
     const leg = opts.winter.legOf(sessionId);
     if (leg === undefined) {
       throw new RpcFailure(
@@ -2001,10 +2057,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       },
       drain(socket) {
         socket.data?.writer?.onDrain();
+        if (socket.data) opts.cowork?.watches.flush(socket.data.connId);
       },
       close(socket) {
         if (!socket.data) return; // rejected at cap before data was set (sentinel null)
         connections--;
+        opts.cowork?.closeConnection(socket.data.connId);
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
@@ -2156,9 +2214,66 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       throw new RpcFailure(ERR.UNAUTHORIZED, `remote role may not call ${method}`);
     }
 
+    if (Object.hasOwn(COWORK_RPC, method)) {
+      if (!opts.cowork) throw new RpcFailure(ERR.INVALID_PARAMS, "Cowork unavailable", { code: "unsupported_topology" });
+      try {
+        const connection = { role: socket.data.authedRole, connectionId: socket.data.connId };
+        if (method === "workspace.watch") return opts.cowork.watch(connection, params ?? {}, { send(frame) {
+          // Workspace frames have their own notification identity; never route through session/$system.
+          const bytes = encodeLine({ jsonrpc: "2.0", method: "workspace.watch", params: frame });
+          if (bytes.length > 256 * 1024) return "oversize";
+          const writer = socket.data.writer;
+          if (frame.phase !== "ended" && writer.bufferedBytes > 128 * 1024) return "blocked";
+          return writer.enqueue(bytes) ? "sent" : "closed";
+        } });
+        const result = opts.cowork.call(connection, method as CoworkMethod, params ?? {});
+        opts.coworkEvents?.drain();
+        opts.coworkEvents?.rearm(); // work still owed after the inline drain re-arms an idle outbox timer (never arms a daemon with nothing pending)
+        return result;
+      }
+      catch (error) {
+        if (error instanceof CoworkError) throw new RpcFailure(error.code === "authority_denied" ? ERR.UNAUTHORIZED : ERR.INVALID_PARAMS, "Cowork request refused", { code: error.code, ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }) });
+        if (error instanceof z.ZodError) throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
+        throw new RpcFailure(ERR.INTERNAL, "Cowork operation unavailable", { code: "recovery_required" });
+      }
+    }
     switch (method) {
       case METHODS.sessionCreate: {
         const p = parseParams(SessionCreateParams, params);
+        // Cowork (session door): `mode: "cowork"` is RECOGNISED on the wire so it can be answered with a typed
+        // refusal, and refused for EVERY role — local, harness, plugin and remote alike — before anything
+        // else: no cwd/approval handling, no model resolution, no `assertAvailable`, no store row, no run
+        // folder, no runtime child, no broadcast. Nothing can run a Cowork session yet (docs/cowork-status.md),
+        // so there is no Cowork-specific parameter to inspect here. This is also the type-level gate: past this
+        // line `p.mode` can no longer be "cowork", which is what lets it flow into
+        // `InternalSessionCreateInput.mode` ("code" | "chat") below. Adding Cowork to the remote-eligible
+        // modes is a separate step that waits for its per-record and parameter gates
+        // (docs/cowork-host-protocol.md, "Producer/consumer and release checklist").
+        if (isUnrunnableSessionMode(p.mode)) {
+          // Session door (D1 spine): with NO door — every production daemon — this is still the first and only answer, for
+          // every role and whatever else the request carries, exactly as before (a binding that is present but malformed fails the
+          // schema above first, like an unknown mode). With a door (tests only until the flip):
+          // a paired caller stays refused (cowork is outside REMOTE_ELIGIBLE_SESSION_MODES until its per-record gates
+          // exist), the binding must be present, and nothing the daemon derives itself may ride beside it. `approvalPolicy`
+          // carries a zod `.default("ask")`, so it is judged on the RAW params, as the remote rule below does.
+          const door = opts.coworkSessions;
+          if (!door || socket.data.authedRole === "remote") throw coworkSessionUnsupported();
+          const raw = params !== null && typeof params === "object" ? params as Record<string, unknown> : {};
+          if (!p.cowork || COWORK_HOST_DERIVED_CREATE_FIELDS.some((key) => raw[key] !== undefined)) {
+            throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
+          }
+          const binding = p.cowork;
+          try {
+            const created = await door.create({ scope: p.scope, workspaceId: binding.workspaceId, requestId: binding.requestId,
+              location: binding.location.kind === "outputs" ? { kind: "outputs" }
+                : { kind: "source", sourceId: binding.location.sourceId, ...(binding.location.relativeCwd === undefined ? {} : { relativeCwd: binding.location.relativeCwd }) } },
+            { role: socket.data.authedRole ?? "unknown", connectionId: socket.data.connId });
+            // A Cowork conversation has no host project to trust: its cwd is a guest location, never a Mac directory.
+            return { sessionId: created.sessionId, trusted: false };
+          } catch (err) { rpcFromWinterRefusal(err); }
+        }
+        // A Cowork binding beside any other mode is a malformed request, never ignored.
+        if (p.cowork !== undefined) throw new RpcFailure(ERR.INVALID_PARAMS, "Invalid Cowork request", { code: "invalid_request" });
         // Dispatch (Phase 7): the singleton dispatch session is minted ONLY by session.dispatch's
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
@@ -2166,9 +2281,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Chat mode Slice C: a remote (phone) caller may now mint a chat session too — the daemon
         // supplies cwd (homedir(), just below) and coerces approvalPolicy to "chat" (also below)
         // exactly as it always has for local/harness callers; the phone sends `mode` only. A mode
-        // that stays Mac-local for remote (REMOTE_ELIGIBLE_SESSION_MODES above) has nothing to
-        // reject HERE because it isn't wire-expressible in SessionCreateParams' mode enum at all —
-        // there is no third "unlisted mode" branch to write.
+        // that stays Mac-local for remote (REMOTE_ELIGIBLE_SESSION_MODES above) has nothing more to
+        // reject HERE: the one such mode on the wire, `cowork`, was refused for every role at the top of
+        // this case — there is no third "unlisted mode" branch to write.
         // SP3.4 hardening: the phone never picks a working directory or approval policy — the
         // spec's "the phone does not browse the Mac's filesystem" is enforced here, not just
         // convention. Local/harness callers are unchanged. Checked against the RAW wire params
@@ -2270,7 +2385,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const providerId = opts.records?.get(s.sessionId)?.providerId;
           // ComputerV2 wake triggers (2026-10-12): the "waiting for you" mark — how many triggers the session has armed.
           const wakesArmed = opts.computerUse?.wakesArmed?.(s.sessionId) ?? 0;
-          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}) };
+          // Session door D4b: a Cowork row's safe workspace reference, from the host binding (never the log's display fact).
+          // A row whose reference cannot be read lists without it: one bad row never fails the whole list.
+          let cowork: { workspaceId: string; projectId: string | null } | undefined;
+          if (s.mode === "cowork") { try { cowork = opts.cowork?.records.conversationRef(s.sessionId); } catch { cowork = undefined; } }
+          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }), ...(wakesArmed > 0 ? { wakesArmed } : {}), ...(cowork === undefined ? {} : { cowork }) };
           if (!participatesInActivity(s.mode)) return { ...s, signals, ...rowFields };
           const dirs = opts.store.dirs(s.sessionId);
           return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...rowFields };
@@ -2281,7 +2400,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // is daemon-side, not phone-side, and why the set is an allowlist rather than a
         // `mode !== "chat"` special case.
         return socket.data.authedRole === "remote"
-          ? { sessions: sessions.filter((s) => REMOTE_ELIGIBLE_SESSION_MODES.has(s.mode ?? "code")) }
+          ? { sessions: sessions.filter((s) => {
+            if (!REMOTE_ELIGIBLE_SESSION_MODES.has(s.mode ?? "code")) return false;
+            try { opts.cowork?.requireSessionRead({ role: "remote", connectionId: socket.data.connId }, s.sessionId); return true; }
+            catch { return false; }
+          }) }
           : { sessions };
       }
       case METHODS.sessionDispatch: {
@@ -2317,7 +2440,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionAttach: {
         const p = parseParams(SessionAttachParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // This `deliver` is the ONE event path to a remote-role connection: `harnessConns` (the
         // session_created / session_titled / plugin_tile_updated broadcast set) admits role
         // "harness" only, and plugin pushes need a plugin-role hello. So the remote policy below
@@ -2339,6 +2462,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // then bound the serialized size. Harness/admin connections are untouched — they
             // still receive every event byte-identically.
             if (remoteFilter !== undefined) {
+              // Check current canonical scope before every frame, including replay after revoke.
+              try {
+                opts.cowork?.requireSessionRead({ role: "remote", connectionId: socket.data.connId }, p.sessionId,
+                  "workspaceId" in event ? event.workspaceId : undefined);
+                if ("workspaceId" in event && !opts.cowork) return true;
+              } catch { return true; } // skip THIS event (fail closed for the frame) but keep the phone connected: `false` would drop the client on a transient lookup error
+
               const allowed = remoteFilter(event);
               // Filtered, not failed: return `true` so hub.attach's replay loop keeps going and
               // still advances its lastSeq past this event. `false` means "this client is dead"
@@ -2399,7 +2529,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionHistory: {
         const p = parseParams(SessionHistoryParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         try {
           return readHistoryPage(opts.store, { sessionId: p.sessionId, beforeSeq: p.beforeSeq, limit: p.limit });
         } catch (e) {
@@ -2409,7 +2539,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSend: {
         const p = parseParams(SessionSendParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         if (!socket.data.hubClient) throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
         // Code-mode image input: `text` is stored as written (`[Image #n]` placeholders); only the
         // model is given the paths. Checked before any resume, import or append.
@@ -2419,6 +2549,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
         // under this client's name exactly as `hub.send` would, then begins the turn (P8b-5).
+        // Session door D4b: a Cowork conversation runs on the door's drivers (only when a door exists). Same attachment
+        // check first; images and files were already refused above (they are Code-only).
+        const coworkSend = coworkDriversOf(p.sessionId);
+        if (coworkSend !== undefined) {
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
+          try {
+            const session = coworkSend.get(p.sessionId) ?? await coworkSend.ensure(p.sessionId);
+            return { seq: (await session.send(p.text, socket.data.clientName)).seq };
+          } catch (err) { rpcFromWinterRefusal(err); }
+        }
         if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           // The attachment check FIRST (the same condition and message `hub.send` throws for), so a
           // client attached elsewhere can never trigger a resume-spawn that is then refused.
@@ -2476,6 +2618,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionSteerParams, params);
         const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
         const files = checkedFileRefs(p.sessionId, p.text, p.files, socket.data.authedRole, images?.length ?? 0);
+        // A Cowork steer reaches only a LIVE driver: `send` is the one door that may start a guest, so a steer never boots one.
+        const coworkSteer = coworkDriversOf(p.sessionId);
+        if (coworkSteer !== undefined) {
+          const live = coworkSteer.get(p.sessionId);
+          if (live === undefined) return { ok: true, injected: false };
+          try { return { ok: true, injected: (await live.steer(p.text)).injected }; } catch (err) { rpcFromWinterRefusal(err); }
+        }
         {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
@@ -2490,7 +2639,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
+        // Session door D4b: a Cowork conversation's interrupt is its driver's (which refuses typed until the guest carries one);
+        // nothing live means nothing was running, and nothing is started to say so.
+        const coworkInterrupt = coworkDriversOf(p.sessionId);
+        if (coworkInterrupt !== undefined) {
+          const live = coworkInterrupt.get(p.sessionId);
+          if (live === undefined) return { ok: true, wasRunning: false };
+          try { return { ok: true, ...(await live.interrupt()) }; } catch (err) { rpcFromWinterRefusal(err); }
+        }
         // P8b Task 16: only a LIVE driver has anything to interrupt; a resumable Winter session has
         // no child, so the answer is "nothing was running" without spawning one to say so.
         {
@@ -2514,7 +2671,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // renewal. `watch: false` is never refused: stopping must always work.
         const p = parseParams(SessionMirrorParams, params);
         if (!p.watch) return { ok: true, mirror: false };
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         try { opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
         // Only the session this connection is attached to — the phone's Gateway connection follows its attach,
         // so a mirror can never be watched for a session the phone is not looking at.
@@ -2533,7 +2690,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // 2026-10-07: the session compacts ITSELF. `/compact [instructions]` goes through the session's own
         // driver exactly as a typed message would — queued behind a running turn, an idle session resumed
         // for it — and the runtime runs it as its built-in command (never a model turn; the model never sees
@@ -2541,6 +2698,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // text typed into the Mac's composer. The outcome lands in the log as a `continuity_warning`
         // (`compacted` / `compaction_failed`, projector/index.ts). Until 0.0.4's carry this was a typed
         // `not_supported_on_winter_leg`; the runtime has had the built-in all along.
+        // A Cowork conversation cannot compact (the host-query guest refuses slash text): refused typed, with a door too.
+        if (coworkDriversOf(p.sessionId) !== undefined) throw coworkSessionUnsupported("cowork");
         if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           const instructions = p.instructions?.trim() ?? "";
           const text = instructions.length > 0 ? `/compact ${instructions}` : "/compact";
@@ -3082,6 +3241,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                   code: !disallowedByMode.code.has(childName),
                   dispatch: !disallowedByMode.dispatch.has(childName),
                   chat: !disallowedByMode.chat.has(childName),
+                  // No `cowork` key, deliberately: Cowork is recognised but not runnable
+                  // (`sessions/session-mode.ts`), so no tool is registered for it (pinned by
+                  // `session-mode.test.ts`) and a `false` would read in the Mac Library tab as "withheld in
+                  // cowork" on every row — an absent mode is how that tab knows the daemon said nothing.
                 },
               };
             });
@@ -3433,7 +3596,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.approvalRespond: {
         const p = parseParams(ApprovalRespondParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // SP-approvals Task 5: BEFORE resolving, look up the pending approval's stored options via
         // Task 4's `pendingMeta` — a non-consuming read (see its own doc comment), so this lookup
         // can never itself count as an answer for the `resolve()` call right below. Gated on
@@ -3728,12 +3891,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
         // approval cards it missed in the replay window). No broker (agent disabled) → no pending.
         const p = parseParams(ApprovalListParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return { pending: opts.broker?.list(p.sessionId) ?? [] };
       }
       case METHODS.askUserRespond: {
         const p = parseParams(AskUserRespondParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return opts.questions?.respond(p.sessionId, p.callId, p.answers, socket.data.clientName, p.notes) ?? { ok: true, alreadyResolved: true };
       }
       case METHODS.taskList: {
@@ -3813,6 +3976,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // NOT_FOUND below, not a confusing immunity error that implies the session exists.
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        // A stored `cowork` (or otherwise unrunnable) row has no policy to choose: refused like `session.setModel`,
+        // before any write, so the column stays exactly as it was.
+        if (isUnrunnableStoredMode(targetMode)) throw coworkSessionUnsupported(targetMode);
         if (targetMode === "chat") {
           throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions have a fixed policy and cannot be changed — chat never asks permissions");
         }
@@ -3902,9 +4068,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // display/data-hygiene hole rather than reopening the pin.
       case METHODS.sessionSetModel: {
         const p = parseParams(SessionSetModelParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        // A stored `cowork` (or otherwise unrunnable) row has no model to choose. Refused HERE, not only in
+        // `planAndApplySwitch`: that is wired only when the daemon has a handoff, and without it the store write
+        // below would stamp the column. Before `resolveModelSelection`, so nothing is resolved either.
+        if (isUnrunnableStoredMode(targetMode)) throw coworkSessionUnsupported(targetMode);
         if (targetMode === "dispatch" && p.model !== null) {
           throw new RpcFailure(ERR.INVALID_PARAMS, dispatchPinMessage(liveSettingsFor(opts)));
         }
@@ -4014,13 +4184,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // effect on what the session actually runs).
       case METHODS.sessionSetEffort: {
         const p = parseParams(SessionSetEffortParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         // Read ONCE, regardless of null-ness (the dispatch check below needs the mode even for a
         // clear attempt). An unknown sessionId leaves this undefined and is left to
         // `store.setEffort` to report — that keeps NOT_FOUND coming from one place regardless of
         // which branch below ran (and is why none of them may refuse on an absent meta).
         let sessionMeta: { model?: string; mode?: string } | undefined;
         try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
+        // A stored `cowork` (or otherwise unrunnable) row has no effort to choose: refused like `session.setModel`,
+        // before validation or any write. An unknown id leaves `sessionMeta` undefined and is not refused here.
+        if (isUnrunnableStoredMode(sessionMeta?.mode)) throw coworkSessionUnsupported(sessionMeta?.mode);
         if (sessionMeta?.mode === "dispatch" && p.effort !== null) {
           throw new RpcFailure(ERR.INVALID_PARAMS, dispatchPinMessage(liveSettingsFor(opts)));
         }
@@ -4083,7 +4256,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // parsing and the remote gate.
       case METHODS.sessionSetActivity: {
         const p = parseParams(SessionSetActivityParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         const res = setSessionActivity(setActivityDeps, p.sessionId, p.activity);
         if (!res.ok) {
           throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
@@ -4099,7 +4272,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // FOUND first, participation, locked, denylist, remove-primary) lives once, in `set-dirs.ts`.
       case METHODS.sessionSetDirs: {
         const p = parseParams(SessionSetDirsParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         const res = setSessionDirs(setDirsDeps, p.sessionId, p.op, p.path);
         if (!res.ok) {
           throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
@@ -4126,12 +4299,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.syncPull: {
         const p = parseParams(SyncPullParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return syncPull(opts.store, p);
       }
       case METHODS.syncPush: {
         const p = parseParams(SyncPushParams, params);
-        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId, opts.cowork, socket.data.connId);
         return syncPush({
           store: opts.store,
           buffers: syncBuffers,
@@ -4342,6 +4515,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        // A stored `cowork` (or otherwise unrunnable) row has no workflows to list: its cwd and policy are not
+        // a Code session's to borrow (see `workflow.run`).
+        if (isUnrunnableStoredMode(meta.mode)) throw coworkSessionUnsupported(meta.mode);
         const cwd = p.cwd ?? meta.cwd;
         const running = opts.workflows?.list(p.sessionId) ?? [];
         const saved = opts.workflowStore?.list(cwd) ?? [];
@@ -4355,6 +4531,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        // A stored `cowork` (or otherwise unrunnable) row must not host a workflow: `launch` spawns agents
+        // that create CODE child sessions with this row's cwd and approval policy — a Cowork conversation
+        // would run host Code through the back door. Refused before the script is resolved or anything launches.
+        if (isUnrunnableStoredMode(meta.mode)) throw coworkSessionUnsupported(meta.mode);
         if (!opts.workflows) throw new RpcFailure(ERR.INTERNAL, "workflows are not available on this server (no WorkflowRuntime configured)");
         let source: string;
         if (p.name) {
@@ -5297,7 +5477,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // would run against a store its owner closes right after this returns — see `pendingReaps`).
       for (const cancel of pendingReaps) cancel();
       pendingReaps.clear();
-      enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true);
+      enforcement.stop(); mcpOAuthDoors?.dispose(); opts.cowork?.close(); server.stop(true);
     },
   };
 }

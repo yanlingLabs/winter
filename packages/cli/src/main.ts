@@ -58,6 +58,7 @@ import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
 import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
+import { COWORK_CLI_USAGE, resolveCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage, parseCoworkSessionArgs, runCoworkSessionRoute, type CoworkCliRoute, type CoworkSessionCliRoute } from "./cowork-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
@@ -2426,6 +2427,36 @@ if (import.meta.main) {
     c.close();
     break;
   }
+  case "workspace":
+  case "project": {
+    if (cmdKey === "workspace" && process.argv[3] === "session") {
+      // Session door D4b: a Cowork conversation through session.create/session.list on the local harness connection.
+      let sessionRoute: CoworkSessionCliRoute;
+      try { sessionRoute = parseCoworkSessionArgs(process.argv.slice(3)); }
+      catch (error) { console.error(coworkErrorMessage(error)); console.error(COWORK_CLI_USAGE); process.exit(1); }
+      let client: WinterClient | undefined;
+      try {
+        client = await connect(`cli-${cmdKey}`);
+        for (const line of await runCoworkSessionRoute(client, sessionRoute)) console.log(line);
+      } catch (error) { console.error(coworkErrorMessage(error)); process.exitCode = 1; }
+      finally { client?.close(); }
+      break;
+    }
+    let route: CoworkCliRoute | { help: true };
+    try { route = await resolveCoworkArgs(cmdKey, process.argv.slice(3)); }
+    catch (error) { console.error(coworkErrorMessage(error)); console.error(COWORK_CLI_USAGE); process.exit(1); }
+    if ("help" in route) { console.log(COWORK_CLI_USAGE); break; }
+    // Use the existing local harness connection. Input resolution/help never opens a socket, and no
+    // picker, grant resolution, provisioning or execution fallback is performed by the CLI.
+    let client: WinterClient | undefined;
+    try {
+      client = await connect(`cli-${cmdKey}`);
+      const result = await runCoworkRoute(client, route);
+      for (const line of formatCoworkResult(route, result)) console.log(line);
+    } catch (error) { console.error(coworkErrorMessage(error)); process.exitCode = 1; }
+    finally { client?.close(); }
+    break;
+  }
   case "watch": {
     const sessionId = process.argv[3];
     if (!sessionId) { console.error("usage: winter watch <sessionId>"); process.exit(1); }
@@ -3146,6 +3177,7 @@ if (import.meta.main) {
   provider | provider-smoke [--prompt <text>]
   init                                            generate/update WINTER.md by surveying the project
   migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
+  migrate --cowork-schema --rollback [--home <dir>] [--yes]  roll back unused Cowork tables to v7; keep the SDK layout
   migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust] [--model <providerId>/<modelId>]   headless agent turn (asks for tool approval unless --auto/--plan; --model picks this one session's model; \`winter model\` lists them)`);
   }

@@ -12,13 +12,15 @@ import { ApprovedProjectRules } from "../agent/approved-project-rules";
 import { repoRootFor } from "../agent/memory-dir";
 import { SavedAnswerRefused, saveAnswerInProject } from "../agent/saved-answers";
 import { localScopeKeyFor } from "../runtime-sdk/run-home-input";
+import { homeFenceFor } from "../runtime-sdk/home-fence";
+import { homeFenceTarget } from "../runtime-sdk/control-plane";
 
 export const WINTER_INSTRUCTIONS_FILE = "WINTER.md";
 export const WINTER_PROJECT_DIR = ".winter";
 
 export class ProjectMigrationRefused extends Error {
   constructor(
-    public readonly code: "both_exist" | "nothing_to_migrate",
+    public readonly code: "both_exist" | "nothing_to_migrate" | "control_storage",
     message: string,
   ) {
     super(message);
@@ -108,6 +110,7 @@ function localRulesFile(root: string): string[] {
 }
 
 export function planProjectMigration(dir: string, opts: { winterHome?: string } = {}): ProjectMigrationPlan {
+  assertProjectContent(dir, opts.winterHome);
   const legacyInstructions = join(dir, LEGACY_INSTRUCTIONS_FILE);
   const winterInstructions = join(dir, WINTER_INSTRUCTIONS_FILE);
   const legacyDir = join(dir, LEGACY_PROJECT_DIR);
@@ -170,6 +173,11 @@ export function planProjectMigration(dir: string, opts: { winterHome?: string } 
 /** Executes a plan from `planProjectMigration`. Throws `ProjectMigrationRefused("nothing_to_migrate")`
  *  for an empty plan (nothing here to convert) rather than silently succeeding. */
 export function runProjectMigration(plan: ProjectMigrationPlan): { skippedRules: string[] } {
+  assertProjectContent(plan.dir, plan.winterHome);
+  for (const step of plan.steps) {
+    assertProjectContent(step.from, plan.winterHome);
+    assertProjectContent(step.to, plan.winterHome);
+  }
   const skippedRules: string[] = [];
   if (plan.steps.length === 0) {
     throw new ProjectMigrationRefused("nothing_to_migrate", `nothing to migrate in ${plan.dir} — no ${LEGACY_INSTRUCTIONS_FILE} or ${LEGACY_PROJECT_DIR} found`);
@@ -203,4 +211,15 @@ export function runProjectMigration(plan: ProjectMigrationPlan): { skippedRules:
     }
   }
   return { skippedRules };
+}
+
+/** This command converts explicit project content; host backing/control paths are never a project.
+ * Recheck execution as well as preview so a saved plan cannot redirect a target through a new link. */
+function assertProjectContent(path: string, home?: string): void {
+  // The CLI supplies its owning home. Library-only previews without one must never probe the user's
+  // default/live home; registered coordinator homes still bind via the common fence registry.
+  const full = homeFenceFor(home ?? process.env.WINTER_HOME ?? "/nonexistent-winter-home");
+  const storage = { dirs: [...(full.coworkRoots ?? []), ...(full.readDirs ?? []), ...(full.coordinationDir ? [full.coordinationDir] : [])], files: [], segments: [],
+    coworkRoots: full.coworkRoots, coordinationDir: full.coordinationDir, controlEntries: full.controlEntries, readDirs: full.readDirs };
+  if (homeFenceTarget(path, process.cwd(), storage)) throw new ProjectMigrationRefused("control_storage", "migrate-project cannot rename or rewrite Cowork backing storage or host coordination; select explicit project content in its owning filesystem");
 }

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { assertDaemonPathAccess, readDaemonTextFile } from "../../runtime-sdk/daemon-path-fence";
 import type { LspManager } from "./manager";
 import { languageForPath } from "./manager";
 import type { LspDiagnostic } from "./client";
@@ -89,6 +89,7 @@ function formatBlock(displayPath: string, diags: LspDiagnostic[]): string {
 }
 
 export interface AutoDiagnosticsOpts {
+  home?: string;
   lsp: LspManager;
   toolName: string; // one of AUTO_DIAG_TOOL_NAMES ("Edit"/"Write"/"NotebookEdit") — anything else returns "" immediately
   toolInput: unknown; // the hook's already-decoded `tool_input` (PostToolUseHookInput.tool_input)
@@ -133,9 +134,11 @@ export async function autoDiagnosticsSuffix(opts: AutoDiagnosticsOpts): Promise<
     const language = languageForPath(filePath);
     if (!language) return ""; // extension has no configured language server (e.g. .ipynb, .md)
     const abs = resolveWithinAny(opts.roots, filePath); // the SAME fence the write/edit itself was held to
+    assertDaemonPathAccess(opts.home, abs, "/");
+    assertDaemonPathAccess(opts.home, opts.cwd, "/");
     if (opts.signal?.aborted) return ""; // already interrupted — don't even cold-spawn a server
     const client = await raceAbort(opts.lsp.clientFor(opts.cwd, language), opts.signal); // may cold-spawn; bounded by startTimeoutMs
-    const text = readFileSync(abs, "utf8");
+    const text = readDaemonTextFile(opts.home, abs);
     // Bounded by DIAG_TUNING[language] AND raced against the turn's abort — an interrupt resolves
     // "" promptly (raceAbort's rejection lands in this function's never-fail catch below) instead
     // of riding out the full settle/timeout window.

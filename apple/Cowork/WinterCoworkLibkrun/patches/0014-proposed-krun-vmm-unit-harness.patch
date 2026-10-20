@@ -1,0 +1,102 @@
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 21f2705..4d00269 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -3253,10 +3253,15 @@ pub extern "C" fn krun_enable_cowork_block_fixture_reclaim(ctx_id:u32)->i32 {
+  use super::*;
+  fn disk()->BlockDeviceConfig{BlockDeviceConfig{block_id:"fixture".into(),cache_type:CacheType::Writeback,disk_image_path:"/NO-OPEN-fixture-only".into(),disk_image_format:ImageType::Raw,is_disk_read_only:false,direct_io:false,sync_mode:SyncMode::Full}}
+  fn fixture()->u32{let id=CTX_IDS.fetch_add(1,Ordering::SeqCst) as u32;let mut cfg=ContextConfig::default();cfg.vmr.cowork_fixture_reclaim=true;cfg.vmr.cowork_guarded_block=true;cfg.vsock_config=VsockConfig::Disabled;cfg.vmr.disable_implicit_console=true;cfg.vmr.serial_consoles.push(SerialConsoleConfig{input_fd:-1,output_fd:-1});cfg.vmr.external_kernel=Some(ExternalKernel::default());cfg.vmr.set_vm_config(&VmConfig{vcpu_count:Some(2),mem_size_mib:Some(768),..Default::default()}).unwrap();cfg.block_cfgs.push(disk());assert!(cowork_validate_profile(&cfg).is_ok());CTX_MAP.lock().unwrap().insert(id,cfg);id}
+- #[test]fn cowork_admission_public_gpu_setters_rejected_before_any_vm(){
++ #[test]#[ignore = "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"]fn cowork_admission_public_gpu_setters_rejected_before_any_vm(){
+   for option in 0..3{let id=fixture();let status=unsafe{match option{0=>krun_set_gpu_options(id,1),1=>krun_set_gpu_options2(id,1,8*1024*1024*1024),_=>krun_set_gpu_render_server_fd(id,1)}};assert_eq!(status,0);assert_eq!(krun_start_enter(id),-libc::EINVAL);assert_eq!(krun_free_ctx(id),0);}
+  }
+- #[test]fn cowork_admission_normalized_gpu_resources_rejected(){
++ // Start-free companion of the two ignored tests above: the same refusals through the pure validator.
++ #[test]fn cowork_admission_public_gpu_setters_rejected_by_validator_without_any_start(){
++  for option in 0..3{let id=fixture();let status=unsafe{match option{0=>krun_set_gpu_options(id,1),1=>krun_set_gpu_options2(id,1,8*1024*1024*1024),_=>krun_set_gpu_render_server_fd(id,1)}};assert_eq!(status,0);
++   {let map=CTX_MAP.lock().unwrap();assert!(cowork_validate_profile(map.get(&id).unwrap()).is_err());}assert_eq!(krun_free_ctx(id),0);}
++ }
++ #[test]#[ignore = "calls krun_start_enter (admission refusal only, before any VM); the source-only phase never calls krun_start_enter"]fn cowork_admission_normalized_gpu_resources_rejected(){
+   for option in 0..3{let id=fixture();{let mut map=CTX_MAP.lock().unwrap();let cfg=map.get_mut(&id).unwrap();match option{0=>cfg.vmr.set_gpu_virgl_flags(1),1=>cfg.vmr.set_gpu_shm_size(8*1024*1024*1024),_=>cfg.vmr.set_gpu_render_server_fd(1)};assert!(cowork_validate_profile(cfg).is_err());}assert_eq!(krun_start_enter(id),-libc::EINVAL);assert_eq!(krun_free_ctx(id),0);}
+  }
+  #[test]fn cowork_admission_rejected_disks_never_invoke_actual_construction_callback(){
+diff --git a/src/vmm/src/macos/vstate.rs b/src/vmm/src/macos/vstate.rs
+index 2ff29bd..7e42d73 100644
+--- a/src/vmm/src/macos/vstate.rs
++++ b/src/vmm/src/macos/vstate.rs
+@@ -619,7 +619,7 @@ enum VcpuEmulation {
+ mod tests {
+     #[cfg(target_arch = "x86_64")]
+     use crossbeam_channel::RecvTimeoutError;
+-    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
++    use std::sync::Arc;
+     #[cfg(target_arch = "x86_64")]
+     use std::time::Duration;
+ 
+@@ -628,6 +628,11 @@ mod tests {
+     use devices::legacy::VcpuList;
+     use vm_memory::{GuestAddress, GuestMemoryMmap};
+ 
++    // Stored by `Vcpu::new_aarch64` and only read when a vCPU runs under Hypervisor.framework
++    // (`set_initial_state`). The unit tests never run a vCPU, so a fixed value replaces the
++    // host query the builder performs.
++    const TEST_IPA_SIZE: u32 = 36;
++
+     // Auxiliary function being used throughout the tests.
+     // Does NOT create a real HVF VM — Vcpu::new_aarch64 and most vcpu methods
+     // work without one, keeping tests free from the one-VM-per-process limit.
+@@ -635,7 +640,8 @@ mod tests {
+         let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), mem_size)]).unwrap();
+         let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+         let vcpu_list = Arc::new(VcpuList::new(1));
+-        let vcpu = Vcpu::new_aarch64(1, GuestAddress(0), None, exit_evt, vcpu_list, false).unwrap();
++        let vcpu = Vcpu::new_aarch64(1, TEST_IPA_SIZE, GuestAddress(0), None, exit_evt, vcpu_list, false)
++            .unwrap();
+         (vcpu, gm)
+     }
+ 
+@@ -647,9 +653,13 @@ mod tests {
+         assert!(vcpu.mmio_bus.is_some());
+     }
+ 
++    // Creates a real Hypervisor.framework VM (`hv_vm_create`) through `Vm::new`. Never run in the
++    // source-only phase; run it only at an owner-approved native gate.
+     #[test]
++    #[ignore = "creates a Hypervisor.framework VM (hv_vm_create); runs only at an owner-approved native gate"]
+     fn test_vm_memory_init() {
+-        let mut vm = Vm::new(false).expect("Cannot create new vm");
++        let mut arch_mem_info = arch::ArchMemoryInfo::default();
++        let mut vm = Vm::new(&mut arch_mem_info, false).expect("Cannot create new vm");
+ 
+         // Use a realistic guest physical address; hv_vm_map rejects GPA 0.
+         let gm = GuestMemoryMmap::from_ranges(&[(
+@@ -669,6 +679,7 @@ mod tests {
+         let vcpu_list = Arc::new(VcpuList::new(1));
+         let mut vcpu = Vcpu::new_aarch64(
+             0,
++            TEST_IPA_SIZE,
+             GuestAddress(0),
+             None,
+             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+@@ -682,6 +693,7 @@ mod tests {
+         let vcpu_list = Arc::new(VcpuList::new(2));
+         let mut vcpu = Vcpu::new_aarch64(
+             1,
++            TEST_IPA_SIZE,
+             GuestAddress(0),
+             None,
+             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index 5443a86..bc6b0e9 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -452,6 +452,9 @@ mod tests {
+             virtio_consoles: Vec::new(),
+             kernel_console: None,
+             dhcp_client: false,
++            // Every cowork field (fixture opt-ins, workspace pair, runtime port, trace) stays at
++            // its disabled default, so a field added later cannot break this fixture again.
++            ..Default::default()
+         }
+     }
+ 

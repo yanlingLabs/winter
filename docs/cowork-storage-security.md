@@ -1,11 +1,97 @@
-# Cowork private storage confidentiality
+# Cowork private storage
 
-Status: product decision recorded 2026-10-11; implementation and validation open.
-The independent reviewer relayed the user's choice, **"Encrypt at rest"**, for
-private VM data. The alternatives were a documented fence-only boundary or
-blocking Code escapes while Cowork storage exists. Neither was selected.
+Status: first-version scope changed directly by the user on 2026-10-12.
+**Separate per-workspace encryption is deferred for the first version.** This
+supersedes the earlier encryption-before-activation requirement. The accepted
+tradeoff is weaker protection against direct same-user reads and copied images.
+VM isolation, selected-folder boundaries, host credential custody and active RAM
+return remain required.
 
-## Required boundary
+## First-version boundary and gates
+
+Private data/environment images contain plaintext guest filesystems. FileVault,
+when enabled on the host volume, protects offline access to that volume; it does
+not protect a copied image, an unencrypted backup destination, or reads by an
+already authorized process on the unlocked Mac. Check and report host protection
+rather than claiming FileVault is enabled on every installation. The product and
+escape approval copy must say that images are plaintext and approved escaped
+commands run as the user and may read them. Selected folders, shared instructions,
+memory, outputs and host transcripts also remain plaintext.
+[Apple's FileVault boundary](https://support.apple.com/guide/security/sec4c6dc1b6e/web)
+
+Create workspace/volume directories as 0700 and images as 0600. Every admission
+and image open checks current owner, exact modes, no-follow file identity and
+recorded device/inode; refuse drift instead of silently repairing permissions.
+One confirmed worker owns a writable volume. Uncertain termination retains that
+ownership. Manifest/imported descriptors cannot grant authority: validate against
+canonical host records and the authenticated launch request, binding workspace,
+volume, incarnation and runtime image. Preserve existing data on recovery errors.
+
+The first-version [raw backing-image primitive](cowork-raw-volumes.md) now records
+volume geometry, creation/file identity and durable native-owner bindings in
+runtime-state schema 9 and verifies sticky backup exclusions. It allocates only
+unformatted sparse files; authenticated production worker wiring, filesystem
+formatting and guest readiness remain open. It does not enable provisioning.
+
+The first-version merge gates include protected Cowork/image/socket paths in the
+ONE existing Bash sandbox's denyRead/denyWrite lists, Read/Glob/Grep and write-tool
+path checks, and write-shaped escape denials. These guard enrolled Winter routes;
+they do not constrain arbitrary same-user processes or approved escaped reads.
+Keep ordinary Code, hooks, LSP and third-party tool behavior, with no extra outer
+floor or injected sandbox-disabling flags. Purpose-built worker/bridge sandboxes
+and guest tool compartments remain enforced boundaries.
+
+Activation has an explicit residual: live policy updates cover subsequent file
+checks and newly launched sandboxed commands, not commands already running with
+an earlier sandbox profile. A pre-existing Dispatch Bash command or background
+task may therefore read Cowork files created after provisioning. Native Code's
+idle/restart boundary reduces this window but does not stop background tasks that
+outlive the turn. First-version activation does not claim to revoke those
+processes or scrub their prior context; retaining live host sessions accepts this
+window alongside the same-user and approved-escape residuals above.
+
+Exclude private images and their backing-store paths from automatic Time Machine
+backup at creation, and verify the exclusion before activation. Use the supported
+sticky item exclusion (`tmutil addexclusion` without `-p`), which travels
+with the file and does not require root. Reapply and verify it whenever an image
+is created or replaced; tests inject disposable paths and never change the
+user's backup settings. Offer an explicit quiescent export/restore path instead of
+claiming a live sparse-image copy is consistent. Shared instructions, memory and
+outputs remain eligible for the user's normal backups; they are plaintext and
+backup protection depends on the destination. Preserve that choice on relocation.
+[Apple backup encryption guidance](https://support.apple.com/guide/mac-help/mh21241/mac)
+
+Each volume record has an explicit format/version (initially `raw-ext4-v1`),
+identity, purpose and geometry. Unknown formats refuse. A later encrypted format
+requires an explicit recorded conversion with recovery/rollback and adequate disk
+space; never reinterpret an existing raw image or silently replace its data.
+No crypto kernel, storage-key broker, LUKS unlock, key rotation or encrypted-volume
+benchmark blocks the first version. Preserve their existing research and fixtures
+for the deferred work below.
+
+The stream channel's first-version purpose is guest control/runtime transport,
+with an authenticated workspace/incarnation binding and bounded framing. There is
+no guest disk-key delivery in this version. Its lifetime follows admitted control
+sessions; one-shot key-delivery rules apply only to the deferred encrypted boot
+path, not ordinary control messages. Provider/GitHub/MCP credentials stay in host
+brokers; plaintext disk images are not permission to persist those secrets there.
+
+## Owner decisions, 2026-10-16
+
+These record owner rulings for slices that are not built yet. They add to, and do not replace, the 2026-10-12 first-version decision above.
+
+- **Owner decision 2026-10-16 — what belongs to a workspace.** The owner treats a workspace's own state (its memory directory, temp directory, scratch and VM disks) as temporary. It is removed only by the explicit, confirmed workspace delete (not built yet); the reapers, the cleaner and retention archive without removing anything, consistent with the Scratch-and-outputs rule in the [specification](cowork-spec.md). Connected Mac folders and GitHub repositories are not part of the workspace and are never cleared. Archiving is a state flip that deletes nothing, so automatic archive from the reapers, the cleaner, creation rollbacks and the event drain is acceptable.
+- **Owner decision 2026-10-16 — workspace delete.** Deleting a workspace removes everything that belongs to it: both VM disks (`data.ext4`, `env.ext4`) plus the workspace's shared guidance, memory and outputs. It runs only after a confirmation that lists what will be removed and offers an export first, and it follows the existing stop and ownership checks. Connected Mac folders and GitHub remotes are never touched. A GitHub-backed workspace's clone lives on `data.ext4`, so the confirmation must warn when that clone has unpushed commits or uncommitted changes.
+- **Owner decision 2026-10-16 — export format.** An export is a `.winterworkspace` folder bundle. The bundle is plaintext, as the disclosure above already requires. The intended implementation, which is not part of the decision: the closed manifest (the shape `cowork/exports.ts` records) plus sparse-copied images, cloned with APFS `clonefile` where the volume allows.
+- **Owner decision 2026-10-16 — backups.** VM disks stay excluded from Time Machine, confirming the 2026-10-12 decision. Export is the backup path.
+
+## Deferred encrypted-storage design
+
+The remainder records the earlier design and its future acceptance requirements.
+It is preserved research, not a first-version activation gate or implemented
+confidentiality claim.
+
+## Deferred confidentiality boundary
 
 Private writable VM data and environment images are encrypted at rest. Reading
 their host backing files as the same macOS user must yield ciphertext. Keys
@@ -77,9 +163,20 @@ transport remain implementation decisions requiring evidence.
 
 ## Proposed key and launch mechanism
 
-A tiny separately signed native broker is the proposed sole Keychain master-key
-custodian. It derives domain-separated workspace/volume keys using canonical
-home, workspace, volume, creation and key-version identities. It launches a
+A tiny separately signed native broker is the proposed sole Keychain wrapping-key
+custodian. Each private volume receives a random data-encryption key (DEK),
+wrapped under the broker's key-encryption key (KEK). Canonical home, workspace,
+volume, creation, purpose, explicit format ID, exact key length/layout and
+wrapping-version identities are authenticated
+as associated data; they do not determine the disk key. In particular, home path,
+device and inode changes after an approved move or restore must not change the
+DEK. An explicitly authorized relocation preserves the logical home ID and
+re-seals the same DEK with the reconciled path/device/inode. A transfer to a
+different Winter home is a separate operation requiring explicit authority.
+KEK rotation re-wraps existing DEKs, with a new wrapping version; it does
+not re-encrypt disk contents. Existing volume identities cannot be silently
+re-provisioned. Durable record/KEK transactions, rollback protection and recovery
+must be validated before this mechanism is enabled. It launches a
 fixed verified worker and sends only that worker's material over a one-shot
 inherited private descriptor; close it before guest/tool execution. Workers
 have no Keychain access, generic key-request interface or sibling-volume access.
@@ -99,13 +196,33 @@ protocol is an implementation gate, not solved by the proposed process diagram.
 Worker compromise may expose its own live workspace/key, never another's key or
 the broker master. Keep library validation and refuse debugger/unsandboxed paths.
 
-The first block-format candidate is guest LUKS2 with authenticated dm-integrity,
-using an immutable bootstrap and pinned kernel/userspace. It is not yet selected
-or validated; existing probe kernels disable `CONFIG_MD` and require a new
-profile. Authenticated LUKS2 support has compatibility/maturity constraints, and
-sector integrity does not prevent replay of previously valid ciphertext.
+The selected **bounded fixture candidate**, following the 2026-10-12 independent
+review, is guest LUKS2 `aes/xts-random` + `hmac(sha256)` with authenticated
+dm-integrity sectors and journal mode. Its 96-byte native random volume material
+is AES data key32, AES tweak key32 and HMAC key 32; the AES halves must differ.
+It is not a passphrase or a derivation from an existing 32-byte key. The synthetic
+native broker supports the explicit versioned 96-byte profile alongside its
+retained 32-byte fixture profile, wraps all bytes under the 32-byte KEK with full
+identity AAD, and uses a strict version 2 worker frame. Unknown formats/lengths,
+old frames, cross-format relocation and duplicate provisioning refuse. This is
+volatile synthetic custody/descriptor evidence, not production Keychain custody
+or encrypted I/O. Existing anonymous 32-byte serialized identities/frames are
+rejected rather than silently assigned a new meaning; durable migration is open.
+
+The crypto-capable comparison kernel and neutral cryptsetup 2.8.8 toolset have
+been built; the kernel remains unbooted. Immutable guest bootstrap, exact
+header/geometry/generation authentication without TOCTOU, real encrypted
+read/write/crash/recovery behavior and crypto I/O during active reclaim remain
+gates. Authenticated LUKS2 support is experimental, and sector integrity does
+not prevent replay of previously valid ciphertext. The review's conservative
+1 TiB key-generation exposure budget is a proposal, **not an adopted production
+limit**; lifetime accounting and replacement-volume migration still require
+review and implementation. Relocation and KEK rotation preserve exact DEK bytes,
+format and any future consumed budget; they are not fresh disk-key generations.
+[Independent candidate review](research/2026-10-12-cowork-encryption-format-review.md),
+[synthetic native broker](../apple/Cowork/WinterCoworkKeyBroker/README.md).
 [dm-crypt](https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/dm-crypt.html),
-[cryptsetup authenticated-encryption status](https://gitlab.com/cryptsetup/cryptsetup/-/blob/master/docs/v2.8.0-ReleaseNotes)
+[cryptsetup authenticated-encryption status](https://gitlab.com/cryptsetup/cryptsetup/-/raw/v2.8.8/man/cryptsetup.8.adoc)
 
 ## Helper, recovery and acceptance
 
@@ -123,7 +240,7 @@ mechanism, with identity reconciliation and no plaintext key export. A missing
 key or unreachable old owner remains visible recovery state. The existing
 single-writer and uncertain-termination rules still apply to encrypted volumes.
 
-Before enabling Cowork, prove real encrypted read/write/cold restore, key absence
+Before enabling the later encrypted-volume format, prove real encrypted read/write/cold restore, key absence
 from Core/tool memory inputs and serialized state, direct same-user ciphertext
 reads, helper authentication, denied generic decryption, tamper/missing-key
 refusals, crash consistency, and export/backup recovery. Use disposable keys,

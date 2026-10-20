@@ -1,6 +1,11 @@
 import Foundation
 
 public enum SessionEvent: Codable, Equatable, Sendable {
+    case workspaceSourcesChanged(WorkspaceSourcesChanged)
+    case workspacePolicyChanged(WorkspacePolicyChanged)
+    case workspaceOperationChanged(WorkspaceOperationChanged)
+    case workspaceInstructionsChanged(WorkspaceInstructionsChanged)
+    case workspaceMetadataChanged(WorkspaceMetadataChanged)
     case sessionCreated(SessionCreated)
     case harnessAttached(HarnessAttached)
     case harnessDetached(HarnessDetached)
@@ -71,6 +76,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         // Dispatch (Phase 7 durability follow-up): carried so a full index.db rebuild can restore
         // the dispatch-singleton invariant (see events.ts's SessionCreatedEvent doc comment).
         // Additive/optional — pure Codable synthesis, no Discriminator/decode/encode changes.
+        // Cowork (session door): `"cowork"` is now a recognised value (`SESSION_MODES` in events.ts),
+        // carried verbatim like `"dispatch"`/`"chat"`. No Winter creates one yet — `session.create` refuses it
+        // with `unsupported_topology` — and the app's `SessionMode.cowork.isAvailable` stays false.
         public let mode: String?
         // Winter Phase 8c (P8c-5): the runtime annotation — same additive-optional shape as `mode`
         // above, so no Discriminator/decode/encode change here either. `runtimeKind` is a closed
@@ -81,6 +89,32 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let runtimeKind: String?
         public let providerId: String?
         public let modelRef: String?
+        // Cowork session door (D1 spine): the binding a Cowork conversation was created with
+        // (`CoworkSessionCreatedFacts`, packages/protocol/src/cowork.ts). Additive/optional like `mode`, so pure
+        // Codable synthesis again; nothing produces it yet because no Winter creates a Cowork session.
+        public let cowork: CoworkSessionCreatedFacts?
+    }
+
+    /// `session_created.cowork`: workspace, Project (nil for a standalone workspace), location kind
+    /// (`"source"` or `"outputs"`, a `String` like every enum-ish field here), source (nil for outputs) and the
+    /// policy revision. Ids only: no host path, label or grant.
+    public struct CoworkSessionCreatedFacts: Codable, Equatable, Sendable {
+        public let workspaceId: String
+        public let projectId: String?
+        public let location: String
+        public let sourceId: String?
+        public let policyRevision: Int
+
+        /// Explicit `null`s: the TS schema has `projectId`/`sourceId` nullable, NOT optional, so a re-encode
+        /// must keep the keys (synthesized encoding would omit them for nil).
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(workspaceId, forKey: .workspaceId)
+            try c.encode(projectId, forKey: .projectId)
+            try c.encode(location, forKey: .location)
+            try c.encode(sourceId, forKey: .sourceId)
+            try c.encode(policyRevision, forKey: .policyRevision)
+        }
     }
 
     public struct HarnessAttached: Codable, Equatable, Sendable {
@@ -1135,7 +1169,107 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let deadlineMs: Int
     }
 
+    public struct WorkspaceSourceChange: Codable, Equatable, Sendable {
+        public let sourceId: String
+        public let sourceRevision: Int
+        public let desired: String
+        public let state: String
+        public let ackRevision: Int?
+        public let restartRequired: Bool
+        public let reason: String?
+        private enum CodingKeys: String, CodingKey { case sourceId, sourceRevision, desired, state, ackRevision, restartRequired, reason }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(sourceId, forKey: .sourceId)
+            try c.encode(sourceRevision, forKey: .sourceRevision)
+            try c.encode(desired, forKey: .desired)
+            try c.encode(state, forKey: .state)
+            try c.encode(ackRevision, forKey: .ackRevision)
+            try c.encode(restartRequired, forKey: .restartRequired)
+            try c.encode(reason, forKey: .reason)
+        }
+    }
+    public struct WorkspaceSourcesChanged: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let workspaceId: String
+        public let workspaceChangeId: String
+        public let operationId: String
+        public let workspaceRevision: Int
+        public let sources: [WorkspaceSourceChange]
+        public let phase: String
+    }
+    public struct WorkspacePolicyChanged: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let workspaceId: String
+        public let workspaceChangeId: String
+        public let operationId: String
+        public let workspaceRevision: Int
+        public let policyRevision: Int?
+        public let defaultRevision: Int?
+        public let publicationRevision: Int?
+        public let defaultPolicy: String?
+        public let publication: String?
+        public let phase: String
+    }
+    public struct WorkspaceOperationChanged: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let workspaceId: String
+        public let workspaceChangeId: String
+        public let operationId: String
+        public let workspaceRevision: Int
+        public let status: String
+        public let terminal: Bool
+        public let supersededBy: String?
+    }
+    public struct WorkspaceInstructionsChanged: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let workspaceId: String
+        public let workspaceChangeId: String
+        public let operationId: String
+        public let workspaceRevision: Int
+        public let instructionRevision: Int
+        public let digest: String?
+        public let refreshState: String
+        private enum CodingKeys: String, CodingKey { case seq, sessionId, ts, workspaceId, workspaceChangeId, operationId, workspaceRevision, instructionRevision, digest, refreshState }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(seq, forKey: .seq)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(ts, forKey: .ts)
+            try c.encode(workspaceId, forKey: .workspaceId)
+            try c.encode(workspaceChangeId, forKey: .workspaceChangeId)
+            try c.encode(operationId, forKey: .operationId)
+            try c.encode(workspaceRevision, forKey: .workspaceRevision)
+            try c.encode(instructionRevision, forKey: .instructionRevision)
+            try c.encode(digest, forKey: .digest)
+            try c.encode(refreshState, forKey: .refreshState)
+        }
+    }
+    public struct WorkspaceMetadataChanged: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let workspaceId: String
+        public let workspaceChangeId: String
+        public let operationId: String
+        public let workspaceRevision: Int
+        public let change: String
+    }
+
     private enum Discriminator: String, Codable {
+        case workspace_sources_changed
+        case workspace_policy_changed
+        case workspace_operation_changed
+        case workspace_instructions_changed
+        case workspace_metadata_changed
         case session_created
         case harness_attached
         case harness_detached
@@ -1204,6 +1338,11 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: TypeKey.self)
         switch try c.decode(Discriminator.self, forKey: .type) {
+        case .workspace_sources_changed: self = .workspaceSourcesChanged(try WorkspaceSourcesChanged(from: decoder))
+        case .workspace_policy_changed: self = .workspacePolicyChanged(try WorkspacePolicyChanged(from: decoder))
+        case .workspace_operation_changed: self = .workspaceOperationChanged(try WorkspaceOperationChanged(from: decoder))
+        case .workspace_instructions_changed: self = .workspaceInstructionsChanged(try WorkspaceInstructionsChanged(from: decoder))
+        case .workspace_metadata_changed: self = .workspaceMetadataChanged(try WorkspaceMetadataChanged(from: decoder))
         case .session_created:      self = .sessionCreated(try SessionCreated(from: decoder))
         case .harness_attached:     self = .harnessAttached(try HarnessAttached(from: decoder))
         case .harness_detached:     self = .harnessDetached(try HarnessDetached(from: decoder))
@@ -1270,6 +1409,26 @@ public enum SessionEvent: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         switch self {
+        case .workspaceSourcesChanged(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workspace_sources_changed.rawValue, forKey: .type)
+        case .workspacePolicyChanged(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workspace_policy_changed.rawValue, forKey: .type)
+        case .workspaceOperationChanged(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workspace_operation_changed.rawValue, forKey: .type)
+        case .workspaceInstructionsChanged(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workspace_instructions_changed.rawValue, forKey: .type)
+        case .workspaceMetadataChanged(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workspace_metadata_changed.rawValue, forKey: .type)
         case .sessionCreated(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)

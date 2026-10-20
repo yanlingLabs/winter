@@ -208,6 +208,19 @@ test("code cells carry the global read-allow list AND the two web built-ins; dis
   }
 });
 
+// Merge of main's Dispatch allow rules with the Cowork refusals: a stored cowork mode is never a runnable mode, so
+// it must never be handed the Dispatch (or Code) allow rules - it is refused or carries no allow list at all.
+test("a cowork mode gets none of the Dispatch or Code allow rules", () => {
+  for (const policy of ["dont-ask", "ask", "auto"] as const) {
+    let allow: readonly string[] | undefined;
+    let threw = false;
+    try { allow = buildWinterOptions(optionsInput({ mode: "cowork" as never, policy })).permissions?.allow; } catch { threw = true; }
+    // Either outcome is a refusal; neither may be skipped, so a future change cannot pass this vacuously.
+    expect(threw || allow === undefined).toBe(true);
+    if (!threw) expect(allow).toBeUndefined();
+  }
+});
+
 // The allow list must never be able to out-vote the fence. Both runtimes evaluate deny BEFORE allow
 // (the Winter SDK's evaluator header spells the stage order; claude's is the same), so what this
 // pins is that the deny list is still THERE, in the same block, in every cell that has an allow.

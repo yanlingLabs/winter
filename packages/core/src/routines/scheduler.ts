@@ -45,6 +45,8 @@ export function makeRoutineScheduler(deps: {
   audit: (line: object) => void;
   maxConcurrent?: () => number | undefined;
   now?: () => number;
+  /** Share the daemon timer with durable workspace metadata; never use the Code runner. */
+  hostTick?: () => void;
 }): { tick(): Promise<void>; start(intervalMs?: number): void; stop(): void; runningCount(): number } {
   const now = deps.now ?? (() => Date.now());
   const inFlight = new Set<string>();
@@ -90,6 +92,7 @@ export function makeRoutineScheduler(deps: {
 
   async function tick(): Promise<void> {
     try {
+      try { deps.hostTick?.(); } catch (error) { console.error("[cowork schedules] metadata tick failed"); }
       const due = deps.store.due(now());
       const cap = deps.maxConcurrent?.();
       const toFire: Routine[] = [];

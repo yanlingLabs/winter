@@ -22,23 +22,23 @@ Sanitize inherited descriptors, `/proc` visibility, Unix sockets, launch environ
 
 ## Host storage authority, fences and migration
 
-The user's subsequent [encrypted-at-rest decision](cowork-storage-security.md)
-sets the confidentiality bar for private VM disks. Keys belong only to a signed
-storage/key helper, not `winter-core`. Keep the canonical runtime-state DB;
-integrity-protect the broker/worker-consumed manifest, workspace/volume identity
-and key version. Plaintext records alone cannot authorize launch or key release.
-Path floors and IPC restrictions are defense in depth, not a universal boundary
-against same-user delegated services. Preserve ordinary Code escape behavior
-under its existing approval policy; the rejected alternative was blocking all
-escapes while Cowork storage exists. Ciphertext deletion/corruption remains a
-detectable denial of service, and plaintext shared files/authorized copies are
-outside the disk guarantee.
+The user's 2026-10-12 [first-version storage decision](cowork-storage-security.md)
+defers per-workspace encryption. Private images are plaintext, with owner/mode
+and file-identity checks, explicit format/version and backup exclusion. FileVault
+protects the host volume offline when enabled; approved escaped commands and
+other same-user processes may read images. Keep canonical host authority and
+authenticated worker admission. Path controls are required for enrolled Winter
+tools, not a universal same-user confidentiality boundary. Do not reintroduce
+an outer native Code floor or block normal approved escapes.
 
 Canonical Workspace, Project, Source, trust, publication-policy and Delegation records live in new versioned tables in `<WINTER_HOME>/runtimes/runtime-state.db`, with its normal protected SQLite sidecars. `cowork/workspaces/<id>/manifest.json` is a versioned storage/export descriptor, not a second authority store: record workspace/volume identity, relative owned storage locations, image/runtime digests and checkpoint/export generation. A manifest or imported export can never grant access, trust a source or change policy. Validate it against the host database and owned storage roots before attaching anything; a mismatch is recovery-required. Schema upgrades preserve authority, and unsupported downgrades refuse rather than recreate empty permissive state.
 
 Extend the existing single host-fence definition to include every participating Winter home's Cowork tree and the fixed coordination directory. Derive the Mac shell sandbox denial, Write/Edit/Notebook/path rules and escape floor from that definition; do not maintain separate drifting lists. Winter-mediated raw writes, rename/replacement, deletion and chmod are denied under every policy, including auto/accept-edits/bypass. Winter-mediated Read/Glob/Grep and sandboxed-shell reads of manifests, authority/control records and volume files are also denied; approved metadata/artifact/export services provide bounded views. This describes covered routes, not an assertion that arbitrary delegated same-user services cannot access their files. Apply read fences separately from write fences, while preserving authorized reads of shared content. Approved user/host broker operations are separate from agent file tools. Include other dev/custom homes, and reject or exclude control storage from selected source roots. Owner-only file modes alone do not constrain same-user host agents. [Current fence composition](../packages/core/src/runtime-sdk/home-fence.ts#L32), [sandbox source list](../packages/core/src/runtime-sdk/mode-options.ts#L915)
 
-For escape matching, distinguish nested classes: the whole Cowork tree is write-fenced; path-anchored manifest, volume and authority/control paths are denied on any mention, while `shared/**` remains write-fenced so authorized reads are not swallowed by a blanket any-mention parent match. Use explicit precedence for narrower control entries; do not ban every unrelated file named `manifest.json`. Protect ancestor operations and aliases that could replace/move a fenced root, not only direct descendants. Keep this floor on Winter-owned file and directly launched process routes, including ordinary permission bypass, and refuse a route that falsely claims to apply it. Do not present that local floor as prevention of arbitrary delegated same-user execution; the encryption decision replaces that stronger claim. Add adversarial tests for scripts/computed paths, alternate homes, symlinks/hard links and ancestor rename. [Current prefix handling](../packages/core/src/runtime-sdk/home-fence.ts#L50), [current path comparison](../packages/core/src/runtime-sdk/control-plane.ts#L160)
+Accepted native-host policy, updated 2026-10-12: native Code and third-party tools receive no persistent pre-applied Cowork floor. Sandboxed Bash places Cowork backing/control/socket roots in its existing sandbox denyRead/denyWrite arrays, using one profile and each tool's normal sandbox semantics. Never inject disable-sandbox, no-sandbox, GPU or LSP compatibility overrides. Approved escapes retain normal approval behavior and no Seatbelt; their Cowork denial is static and write-shaped, protecting direct writes, aliases and ancestor replacement/move for integrity. It is not confidentiality against scripts, computed paths, other applications or arbitrary same-user execution. Existing Core/SDK file path checks deny sensitive controls and volumes while retaining approved shared-artifact reads. Real outer floors remain only on intentionally Winter-owned Cowork workers/bridges; private images remain plaintext for the first version, with the explicitly accepted same-user and copied-image residual.
+
+Storage activation requires policy acknowledgments, not artificial descendant debt from ordinary host children. Compare the effective path descriptor with the last completed acknowledgment: an unchanged repeated registration or new workspace beneath stable roots must leave ordinary running Code intact. Fresh filesystem membership before registration is not an acknowledgment; a new participating-home root still requires refresh. Path-policy idempotence does not replace separate workspace/source/approval authority updates. The installed SDK cannot live-refresh captured sandbox settings: hold Code queues, let the current turn finish and recreate the logical incarnation/run home with unchanged session/backend identity and regenerated sandbox/path policy, then replay held work. This does not require a daemon restart or claim third-party descendants stopped. Existing embedded Workers must close before new storage is admitted; show activation pending/blocked if closure or policy refresh is uncertain. Chat/Dispatch remain refused under active storage until complete file/context coverage is independently accepted. New SDK live-policy controls require their own acknowledgment and propagation tests before replacing this fallback.
+
 
 Migration B / `winter migrate` may copy the whole Cowork storage tree and canonical DB only through a coordinated quiescent migration of the source and destination homes. Check both homes' daemon/admission/workspace ownership, stop confirmed guests, checkpoint or use the SQLite backup API, and preserve IDs, volume bytes, shared files, dirty work and policy records. Bind the canonical DB snapshot, volumes and shared files to one migration generation. Stopped guests do not freeze direct user writes to host-backed data: take a consistent snapshot or establish quiescence, otherwise retry/refuse. Preserve valid user symlink content under explicit safe copy semantics or refuse visibly; never silently discard it. Cowork-aware classification preserves arbitrary shared artifacts even when named index.db or ending in .db-wal/.db-shm. Skip only identified disposable sockets/handles/process claims and reproducible caches, plus SQLite sidecars after obtaining a valid DB snapshot. Do not reuse blanket filename skips or treat omission of WAL/SHM as a consistent database backup. Keep a crash-safe migration journal and apply the same checks to resume/rollback and automatic boot migration. Revalidate folder/bookmark access at the destination; never transfer invalid OS authority by assumption. [Migration B classification](../packages/core/src/migration/migrate-b.ts#L246), [CLI migration entry](../packages/cli/src/commands/migrate.ts)
 
@@ -46,16 +46,19 @@ Migration C explicitly excludes Cowork topology from host-cwd canonicalization, 
 
 The [host data and protocol contract](cowork-host-protocol.md) specifies canonical records and the local/remote operations that can change them. No raw file import or synced session event is an authority-writing substitute for those methods.
 
-Migration and backup also preserve encrypted bytes, integrity metadata and
-opaque key identities. A copied home does not copy Keychain authority. Restore
-requires available keys or an explicitly authorized wrapped-key recovery path;
-missing keys leave a locked/recovery-required workspace. No silent plaintext
-export, plaintext temporary volume or decrypted host mount is an acceptable
-migration shortcut.
+First-version migrations preserve plaintext volume bytes, explicit format and
+identity records, owner-only permissions and backup exclusions. Private images
+are excluded from automatic Time Machine backup; shared instructions/memory/
+outputs remain eligible for normal user backups. Explicit exports require a
+consistent quiescent generation and disclose that exported images are plaintext.
+Future encrypted formats must preserve ciphertext/key identity and enforce their
+own key-recovery rules; they are not first-version prerequisites.
 
 ## Approval policies
 
 Cowork supports `plan`, `dont-ask`, `ask`, `accept-edits`, `auto` and `bypass`, with `auto` as the ordinary starting policy. The Project has a grant/capability ceiling and a default policy; each conversation records its own policy. Effective authority intersects current Project grants, conversation restrictions, operation-specific approvals and saved schedule/delegation bounds. These policies are not a linear privilege ranking.
+
+Accepted product decision, 2026-10-12: Cowork retains Code's `bypass` behavior. `permissionModeFor("bypass")` maps to guest `bypassPermissions`, with `allowDangerouslySkipPermissions: true` and no ordinary approval prompts. Do not remove this policy for Cowork or add a Cowork-specific warning. Mandatory VM/tool views, admitted roots, hidden stores/run homes, host credential custody and device/proc restrictions remain enforced with the permission gate disabled; the approval policy does not grant additional filesystem or host authority.
 
 The following defaults apply after hard denials and explicit applicable rules:
 
@@ -208,3 +211,7 @@ Apply an automatic disk-pressure guard to every backing filesystem, including ho
 Deleting a standalone conversation does not silently destroy its workspace. Detach/archive its workspace for explicit later deletion/export; show retained dirty repos, data and disk usage. Empty-session reapers, runtime retention and model-driven session cleanup may not delete Cowork volumes or shared Project data. Workspace deletion is a separate explicit destructive operation after stop/ownership checks; selected Mac folders and their prior edits are never deleted by it.
 
 Keep mutable volumes, host-shared workspace files and manifests eligible for normal backup by default. Do not silently exclude the only durable SDK state. Provide a consistent export of stopped/checkpointed volumes plus manifest, shared-file snapshot and required image/runtime digests, bound to one recorded export generation, then prove dirty-work and parent/subagent restoration. Stopping the guest does not freeze direct user writes to host-backed files: obtain a consistent filesystem snapshot or establish quiescence for capture; retry/refuse the export if consistency cannot be established. Live copies are crash-consistent at best unless coordinated; selected external Mac folders have their own backups and are not rolled back with the guest. Exclude only reproducible caches after reacquisition is proven. Measure sparse-image transfer/storage on supported backup destinations; neither whole-image recopy nor efficient changed-block backup is established by this research. [Apple Time Machine overview](https://support.apple.com/en-gb/104984)
+
+*Updated 2026-10-16 per the 2026-10-12 storage decision ([storage contract](cowork-storage-security.md)): the first sentence of the paragraph above ("Keep mutable volumes, host-shared workspace files and manifests eligible for normal backup by default. Do not silently exclude the only durable SDK state.") is superseded for private images. `data.ext4` and `env.ext4` are excluded from automatic Time Machine backup (a sticky item exclusion, verified at creation and on every admission), while host-shared workspace files and manifests remain eligible. Because Time Machine will not hold an image, the consistent quiescent export described there is the way to preserve the SDK state, and exported images are plaintext. The remainder of the paragraph is unchanged.*
+
+*Owner decision 2026-10-16 (recorded in the [storage contract](cowork-storage-security.md#owner-decisions-2026-10-16)): workspace deletion removes both VM disks and the workspace's shared guidance, memory and outputs, only after a confirmation that lists them and offers an export first, and it never touches connected Mac folders or GitHub remotes (a GitHub-backed clone lives on `data.ext4`, so the confirmation warns about unpushed commits or uncommitted changes). The consistent export above is a `.winterworkspace` folder bundle (the owner's decision; the closed manifest plus sparse-copied images, cloned where possible, is the intended implementation). Archiving deletes nothing, so automatic archive is acceptable.*

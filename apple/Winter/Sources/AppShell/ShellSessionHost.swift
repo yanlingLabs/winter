@@ -286,6 +286,18 @@ final class ShellSessionHost: ObservableObject {
     /// `nil` (additive, defaulted) in every test that doesn't drive a roster verb or the create flow.
     private let managementClient: WinterClient?
 
+    /// Safe metadata management on the existing non-attaching connection. No execution door.
+    let coworkWorkspaces: CoworkWorkspaceModel?
+
+    /// The Cowork composer's choices and create-then-send sequence (session door, design 7.9). It issues no
+    /// request while `SessionMode.cowork.isAvailable` is false, which it is today. `nil` without a management
+    /// connection, like `coworkWorkspaces`.
+    let coworkComposer: CoworkComposerModel?
+
+    /// The attached Cowork conversation's workspace facts (power, sources) for its window's notes. Reads
+    /// nothing while Cowork is off.
+    let coworkSessionWindow: CoworkSessionWindowModel?
+
     /// app-shell T4: per-session in-flight/refusal bookkeeping for roster verbs issued from a
     /// LANDING list — keyed by sessionId, unlike `attachment.adapter`'s single-session fields
     /// (`activityChangeInFlight`/`activityRefusal`), because a landing can have several rows'
@@ -373,6 +385,9 @@ final class ShellSessionHost: ObservableObject {
         self.directory = directory
         self.hub = hub
         self.managementClient = managementClient
+        self.coworkWorkspaces = managementClient.map { CoworkWorkspaceModel(client: $0) }
+        self.coworkComposer = managementClient.map { CoworkComposerModel(modeAvailable: { SessionMode.cowork.isAvailable }, client: $0) }
+        self.coworkSessionWindow = managementClient.map { CoworkSessionWindowModel(modeAvailable: { SessionMode.cowork.isAvailable }, client: $0) }
         self.outputsWatcher = outputsWatcher
         let previousOnChange = outputsWatcher?.onChange
         outputsWatcher?.onChange = { [weak self] sessionId, files in
@@ -392,6 +407,11 @@ final class ShellSessionHost: ObservableObject {
         // subscribe with the empty state, which prunes nothing.
         panelStore.$tabs
             .sink { [weak self] tabs in self?.prunePanelTabModelsOnSessionChange(shownTabs: tabs) }
+            .store(in: &cancellables)
+        // The Cowork composer's choices re-render the pages that observe this host (the new-chat page reads
+        // the model's gate for its send reason and its model chip). Silent until Cowork opens.
+        coworkComposer?.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
 
@@ -2386,6 +2406,10 @@ final class ShellSessionHost: ObservableObject {
     /// reproduces that exact contract rather than silently overturning it.
     @Published var newChatDraft: String = ""
 
+    /// A mode another door asked the new-chat page to open on (`/spawn` asks for Cowork). The page takes it
+    /// once and clears it; `nil` leaves the page on its own segment.
+    @Published var newChatRequestedMode: SessionMode?
+
     /// mac-chat-parity T7 (spec §5): the new-chat page's HELD model, and `newChatEffort` below its
     /// effort — the pick made before any session exists.
     ///
@@ -2686,6 +2710,40 @@ final class ShellSessionHost: ObservableObject {
             } catch {
                 self.newChatCreate = .failed(newChatUnreachableMessage)
             }
+        }
+    }
+
+    /// The Cowork twin of `sendFirstChatMessage` (design 7.9): create the workspace, then the Cowork session,
+    /// park the typed text as the first message and hand the new id to `onCreated`. Everything after the create
+    /// is the chat flow's own: navigation attaches, and `deliverPendingFirstMessage` sends.
+    ///
+    /// **Unreachable while Cowork is off.** `CoworkComposerModel.start` checks `SessionMode.cowork.isAvailable`
+    /// before it sends anything and fails with the reason, which lands in `newChatCreate` as the same visible
+    /// failure line a chat create uses: no `workspace.create`, no `session.create`, no navigation. Unlike the
+    /// chat flow it holds no model or effort and sends no approval policy; the door refuses all three beside a
+    /// Cowork binding and derives them itself.
+    func sendFirstCoworkMessage(_ text: String, onCreated: @escaping (String) -> Void) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard newChatCreate != .creating else { return }
+        guard let composer = coworkComposer else {
+            newChatCreate = .failed(newChatUnreachableMessage)
+            return
+        }
+        newChatCreate = .creating
+        let epoch = newChatPageEpoch
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let started = await composer.start(draft: trimmed) else {
+                let reason: String
+                if case .failed(let message) = composer.phase { reason = message } else { reason = "Cowork couldn't start this conversation." }
+                composer.dismissFailure()
+                self.newChatCreate = .failed(reason)
+                return
+            }
+            self.pendingFirstMessages[started.sessionId] = trimmed
+            self.newChatCreate = .idle
+            if epoch == self.newChatPageEpoch { onCreated(started.sessionId) }
         }
     }
 
@@ -4026,6 +4084,12 @@ struct ShellSessionView: View {
             // (`host.openOutputFile`).
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
+                    // Cowork session door (design 7.9): a Cowork conversation's notes sit above its transcript.
+                    // `coworkBannerApplies` is false for every other mode, so no other session sees a change.
+                    if let row = directory.rows.first(where: { $0.sessionId == host.attachedSessionId }),
+                       coworkBannerApplies(to: row), let window = host.coworkSessionWindow {
+                        CoworkSessionBanner(model: window, row: row)
+                    }
                     // 2026-09-19: runs up under the titlebar band (`topBleed`), so the transcript
                     // scrolls beneath it and fades instead of stopping at a hard line.
                     ShellTopBleedReader { topBleed in

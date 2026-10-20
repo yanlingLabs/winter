@@ -13,6 +13,8 @@ export interface SettingsWatcherDeps<T = Settings> {
   // returns Promise<void> (its drain gate awaits — e.g. a CU-disable drain up to 10s). The
   // watcher awaits it, so a rejection is caught and prevSnapshot advances only after it resolves.
   apply: (prev: T | null, next: T) => void | Promise<void>;
+  /** Invalidate authority synchronously before debounce coalesces revoke-and-restore edits. */
+  onChangeObserved?: () => void;
   debounceMs?: number; // default 150
   watch?: (path: string, cb: () => void) => { close(): void }; // injectable fs.watch seam for tests
   log?: (msg: string) => void;
@@ -28,6 +30,7 @@ export class SettingsWatcher<T = Settings> {
   private readonly load: (path: string) => T;
   private readonly apply: (prev: T | null, next: T) => void | Promise<void>;
   private readonly debounceMs: number;
+  private readonly onChangeObserved?: () => void;
   private readonly watchFn: (path: string, cb: () => void) => { close(): void };
   private readonly log: (msg: string) => void;
 
@@ -46,6 +49,7 @@ export class SettingsWatcher<T = Settings> {
     this.load = deps.load;
     this.apply = deps.apply;
     this.debounceMs = deps.debounceMs ?? 150;
+    this.onChangeObserved = deps.onChangeObserved;
     this.watchFn =
       deps.watch ??
       ((p, cb) => {
@@ -83,6 +87,7 @@ export class SettingsWatcher<T = Settings> {
 
   private onFsEvent(): void {
     if (this.stopped) return;
+    this.onChangeObserved?.();
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.onDebounced(), this.debounceMs);
     this.timer.unref?.();

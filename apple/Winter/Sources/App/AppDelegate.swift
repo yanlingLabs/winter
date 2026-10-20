@@ -480,6 +480,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a child approval floating above the pill after Dispatch's turn ended could never be answered.
     private func wireDispatchPill(_ pill: DispatchPillController, model: AppModel) {
         pill.currentSessionId = { [weak model] in model?.focusedSessionId }
+        // `/spawn`: nil (so the pill says "not available yet") unless Cowork's availability constant is on.
+        pill.onSpawnCowork = dispatchPillCoworkSpawn(modeAvailable: SessionMode.cowork.isAvailable) { [weak self] in
+            self?.openCoworkComposer()
+        }
         // `/permissions`: the picker marks the mode the directory reports for the bound session and
         // sets a new one through the same `session.setPolicy` the orb's ⋯ picker uses.
         pill.currentPolicy = { [weak model] in
@@ -648,6 +652,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `testNewChatNoOpsWithoutAppModel`'s posture, unchanged).
     func newChat() {
         summonAppWindow(navigatingTo: .newChat)
+    }
+
+    /// `/spawn`'s door (only wired while Cowork is available): the new-chat page, on its Cowork segment.
+    func openCoworkComposer() {
+        summonAppWindow(navigatingTo: .newChat)
+        appWindow?.host?.newChatRequestedMode = .cowork
     }
 
     /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes

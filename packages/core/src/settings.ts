@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { advanceAuthorityRevision } from "./authority-revision";
 import { z } from "zod";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
@@ -1931,6 +1932,7 @@ export function saveSettings(path: string, s: Settings): void {
   const mergedParsed = Settings.safeParse(merged);
   if (!mergedParsed.success) throw readableSettingsParseError(path, mergedParsed.error, "write refused after merging with the on-disk file");
   writeFileSync(path, JSON.stringify(merged, null, 2) + "\n");
+  advanceAuthorityRevision(path);
 }
 
 /** Parse a settings file to a raw object for OVERLAY merging (no zod, no migration) — absent/torn → null. */

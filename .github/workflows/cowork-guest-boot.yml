@@ -1,0 +1,49 @@
+name: Cowork guest boot (N2 S5, unprivileged)
+# Source-only checks of the guest's PID 1, relay and bootstrap helper, and of the artifact scripts and kernel pins.
+# No root, no mount, no loop device, no container, no VM, no package installation, no network. The ext4 tools used are the
+# ones already on the runner, against regular files in a temporary directory.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apple/Cowork/WinterCoworkGuest/**'
+      - 'scripts/cowork-guest-artifact/**'
+      - 'packages/core/test/cowork/guest-boot-anti-wiring.test.ts'
+      - '.github/workflows/cowork-guest-boot.yml'
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CC: clang
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: "Require a C compiler and the system ext4 tools (nothing is installed)"
+        run: command -v clang && command -v mke2fs && command -v dumpe2fs && command -v e2fsck
+      - name: "Bootstrap logic, including the real e2fsprogs oracle on regular-file images"
+        run: python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/bootstrap -p 'test_*.py' -v
+      - name: "Native C modules, relay process, state machine and source hygiene (sanitizers)"
+        run: python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_*.py' -v
+      - name: "Artifact scripts and kernel pins"
+        run: |
+          python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact -p 'test_*.py' -v
+          python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact/kernel -p 'test_*.py' -v
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: "Bootstrap logic (the e2fsprogs oracle is skipped here: there is no Linux)"
+        run: python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/bootstrap -p 'test_*.py' -v
+      - name: "Native C modules, relay process, state machine and source hygiene (sanitizers)"
+        run: python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_*.py' -v
+      - name: "Artifact scripts and kernel pins"
+        run: |
+          python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact -p 'test_*.py' -v
+          python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact/kernel -p 'test_*.py' -v

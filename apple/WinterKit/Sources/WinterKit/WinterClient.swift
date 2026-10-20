@@ -399,6 +399,11 @@ extension SessionEvent {
     /// Uniform accessors across all variants (Swift analog of the TS Base fields).
     public var seq: Int {
         switch self {
+        case .workspaceSourcesChanged(let v): return v.seq
+        case .workspacePolicyChanged(let v): return v.seq
+        case .workspaceOperationChanged(let v): return v.seq
+        case .workspaceInstructionsChanged(let v): return v.seq
+        case .workspaceMetadataChanged(let v): return v.seq
         case .sessionCreated(let v): return v.seq
         case .harnessAttached(let v): return v.seq
         case .harnessDetached(let v): return v.seq
@@ -466,6 +471,11 @@ extension SessionEvent {
     /// Uniform sessionId accessor across all variants (sibling of `seq`).
     public var sessionId: String {
         switch self {
+        case .workspaceSourcesChanged(let v): return v.sessionId
+        case .workspacePolicyChanged(let v): return v.sessionId
+        case .workspaceOperationChanged(let v): return v.sessionId
+        case .workspaceInstructionsChanged(let v): return v.sessionId
+        case .workspaceMetadataChanged(let v): return v.sessionId
         case .sessionCreated(let v): return v.sessionId
         case .harnessAttached(let v): return v.sessionId
         case .harnessDetached(let v): return v.sessionId

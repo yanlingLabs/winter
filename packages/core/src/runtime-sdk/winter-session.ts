@@ -100,16 +100,18 @@ import type { NewSessionEvent, SessionEvent, UserMessageFileRef, UserMessageImag
 import { modelTextOf } from "../sessions/model-text";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
-import { asInitFrame, asResultFrame } from "../projector/conversation";
+import { asAssistantFrame, asInitFrame, asResultFrame } from "../projector/conversation";
 import { ALLOWED_TRANSITIONS, type RuntimeSessionState } from "../runtime-state/records";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttachment } from "./messaging";
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
 import { CAPABILITY_PLAIN_NAMES, permissionModeFor, toolSurfaceViolations } from "./mode-options";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import type { DrivableSessionMode } from "../sessions/session-mode";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 import { clearQueuedInput, hostInputFoldedCount, runtimeFolds } from "./fold";
+import type { HostCodeGeneration } from "./host-code-broker";
 
 /**
  * WS-21 (spec §3.1): the per-run folder an incarnation's `Options` carry as `runtime.runHome` — the
@@ -227,7 +229,9 @@ export interface WinterSessionDeps {
   /** The BACKEND uuid allocated by the creation transaction: `Options.sessionId` on a fresh start,
    *  `Options.resume` afterwards, the messaging address, the name of the child's transcript. */
   backendSessionId: string;
-  mode: SessionMode;
+  /** A Cowork conversation's driver (cowork/session-driver.ts) passes "cowork": the only mode beyond the runnable three,
+   *  admitted here and nowhere in the Options/prompt/tool/run-home builders (sessions/session-mode.ts). */
+  mode: DrivableSessionMode;
   runtime: WinterRuntimeSdk;
   /** `Options` for ONE incarnation. Re-reads the session's LIVE facts (model, effort, policy) and
    *  re-resolves the spawn hook, so a `session.setModel` while resumable is honoured on resume. May
@@ -263,7 +267,10 @@ export interface WinterSessionDeps {
   append: (event: NewSessionEvent) => SessionEvent;
   /** Broadcast one TRANSIENT (the hub's `broadcastTransient`). Never persisted. */
   broadcast: (event: NewSessionEvent) => void;
-  messaging: {
+  /** The router's directory attach. REQUIRED for every runnable mode (the constructor refuses without it); a Cowork
+   *  conversation passes none: its `attach` takes only the router's run modes, and same-Project messaging reaches a Cowork
+   *  conversation through the host peer inbox instead (session door design section 3). */
+  messaging?: {
     /** Task 12's door. */
     attach: typeof attachWinterSession;
     /** Attachment facts beyond the pinned four, read at attach time (title, cwd, selection…). */
@@ -371,7 +378,7 @@ export function unconsumedUserMessages(events: readonly SessionEvent[]): string[
 export interface WinterSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  readonly mode: DrivableSessionMode;
   readonly state: WinterSessionState;
   /** The 8a generation of the current (or last) incarnation; 0 before the first opens. */
   readonly generation: number;
@@ -497,8 +504,11 @@ export class WinterSessionEnded extends Error {
 interface Incarnation extends WinterIncarnation {
   queue: HostPromptQueue;
   projector: Projector;
+  /** Live child lineage for progress only; never authority and never reused by another incarnation. */
+  childParents: Map<string, string>;
   query: Query;
   done: Promise<void>;
+  hostCode?: HostCodeGeneration;
   /** WS-21: the run home this incarnation runs on (settled when it ends), when the router applies them. */
   runHome: RunHome | undefined;
   /** WS-25: the MCP servers this incarnation was configured with (`sessionMcpServersOf`). */
@@ -529,7 +539,7 @@ export function startWinterSession(deps: WinterSessionDeps): WinterSession {
 class WinterSessionImpl implements WinterSession {
   readonly sessionId: string;
   readonly backendSessionId: string;
-  readonly mode: SessionMode;
+  readonly mode: DrivableSessionMode;
   private stateValue: WinterSessionState = "resumable";
   private inc: Incarnation | undefined;
   private lastDone: Promise<void> = Promise.resolve();
@@ -586,6 +596,7 @@ class WinterSessionImpl implements WinterSession {
   private heldForHandoff = 0;
 
   constructor(private readonly deps: WinterSessionDeps) {
+    if (deps.mode !== "cowork" && deps.messaging === undefined) throw new TypeError(`a ${deps.mode} session needs the router's messaging attach`);
     this.sessionId = deps.sessionId;
     this.backendSessionId = deps.backendSessionId;
     this.mode = deps.mode;
@@ -1055,6 +1066,7 @@ class WinterSessionImpl implements WinterSession {
       let queue: HostPromptQueue;
       let projector: Projector;
       let query: Query;
+      let hostCode: HostCodeGeneration | undefined;
       try {
         // The daemon may have begun stopping while this open awaited its options: refuse BEFORE the spawn,
         // so no runtime child is started into a daemon that is going away (`beginShutdown`).
@@ -1068,8 +1080,11 @@ class WinterSessionImpl implements WinterSession {
         shape = { generation, resume, abort };
         queue = (this.deps.queue ?? createHostPromptQueue)();
         projector = this.deps.projector(shape);
+        // Native Code follows its canonical SDK permissions/hooks and own Bash sandbox.
+        // Active Cowork storage never enrolls it in a persistent host process floor/broker.
         query = this.deps.runtime.sdk.query({ prompt: queue, options });
       } catch (err) {
+        hostCode?.dispose();
         this.pendingMcpServerNames = [];
         await disposeFailedRunHome(runHome, (line) => this.log(line));
         if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
@@ -1092,7 +1107,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)) };
+      const inc: Incarnation = { ...shape, queue, projector, childParents: new Map(), query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)), hostCode };
       this.inc = inc;
       this.pendingMcpServerNames = [];
       this.gen = generation;
@@ -1190,7 +1205,7 @@ class WinterSessionImpl implements WinterSession {
           }
           throw err;
         }
-        this.emit(batch);
+        this.emit(batch, msg);
         if (asResultFrame(msg) !== undefined) this.onResult(inc);
         else {
           const folded = hostInputFoldedCount(msg);
@@ -1212,6 +1227,7 @@ class WinterSessionImpl implements WinterSession {
         if (!this.ending) this.log(`the winter child for ${this.sessionId} stopped: ${cls.code}`);
       }
     } finally {
+      inc.hostCode?.dispose();
       // The thinking pill: a reasoning block the child left open (no `end`, no terminal, no throw) is
       // persisted now rather than lost — empty in the ordinary case.
       try { this.emit(inc.projector.closeOpenThinking()); } catch { /* bounded: the store may be closed */ }
@@ -1396,10 +1412,22 @@ class WinterSessionImpl implements WinterSession {
     }).seq;
   }
 
-  private emit(batch: ProjectedBatch): void {
+  private emit(batch: ProjectedBatch, message?: ProtocolSdkMessage): void {
+    const incarnation = this.inc;
+    const hostCode = incarnation?.hostCode?.protectedStorage ? incarnation.hostCode : undefined;
+    const assistant = hostCode === undefined || message === undefined ? undefined : asAssistantFrame(message);
+    const runtimeNames = new Map<string, string>();
+    for (const block of assistant?.message.content ?? []) {
+      if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") runtimeNames.set(block.id, block.name);
+    }
+    let hostRejected = false;
     for (const e of batch.persist) {
+      // Admission cannot erase the projected evidence, including the rest of this same batch.
       this.safeAppend(e);
       this.relayChild(e);
+      if (hostCode && !hostRejected) {
+        try { hostCode.observe(e, e.type === "tool_call" ? runtimeNames.get(e.callId) : undefined); } catch { hostRejected = true; }
+      }
     }
     for (const e of batch.broadcast) {
       try { this.deps.broadcast(e); } catch (err) { this.log(`broadcast failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`); }
@@ -1408,6 +1436,15 @@ class WinterSessionImpl implements WinterSession {
       // child streaming a long answer with no tool call past the window was killed as "stalled";
       // the engine's window was reset by every provider frame. Deltas feed it now.
       this.relayChild(e);
+    }
+    if (hostRejected && incarnation !== undefined) {
+      this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD,
+        code: "host_execution_refused", message: "Host Code admission refused the projected call; its event batch was retained" });
+      // Close authority immediately; process teardown runs after every event in this batch is kept.
+      incarnation.hostCode?.dispose();
+      queueMicrotask(() => {
+        if (this.inc === incarnation) void this.end().catch(() => this.log("host Code teardown failed"));
+      });
     }
   }
 
@@ -1418,14 +1455,27 @@ class WinterSessionImpl implements WinterSession {
     if (sink === undefined) return;
     const threadId = (e as { threadId?: string }).threadId;
     if (threadId === undefined || threadId === MAIN_THREAD) return;
+    const parents = this.inc?.childParents;
     try {
+      let progress: string | undefined = threadId;
       if (e.type === "thread_started") {
-        const t = e as { threadId: string; agentType: string; prompt: string; description?: string };
+        const t = e as { threadId: string; parentThreadId: string; agentType: string; prompt: string; description?: string };
+        parents?.set(t.threadId, t.parentThreadId);
         sink.started({ threadId: t.threadId, agentType: t.agentType, prompt: t.prompt, ...(t.description === undefined ? {} : { description: t.description }) });
+        progress = t.parentThreadId;
       } else if (e.type === "thread_completed") {
+        progress = parents?.get(threadId);
+        parents?.delete(threadId);
         sink.completed(threadId, (e as { stopReason: string }).stopReason);
-      } else {
-        sink.progress(threadId);
+      }
+      // A parent waiting for its grandchild is still making progress. Newer SDKs preserve
+      // the immediate child's wire thread instead of flattening nested frames onto a parent.
+      // Visit each known ancestor once; malformed cycles cannot hold the daemon event loop.
+      const visited = new Set<string>();
+      while (progress !== undefined && progress !== MAIN_THREAD && !visited.has(progress)) {
+        visited.add(progress);
+        sink.progress(progress);
+        progress = parents?.get(progress);
       }
     } catch (err) {
       this.log(`child roster relay failed for ${this.sessionId} (${e.type}): ${err instanceof Error ? err.name : "unknown"}`);
@@ -1446,8 +1496,12 @@ class WinterSessionImpl implements WinterSession {
 
   private attachMessaging(inc: Incarnation): void {
     if (inc.attachment !== undefined) return;
+    // A Cowork conversation never enters the router's directory: same-Project messaging reaches it through the host peer
+    // inbox, and the router's run modes do not include it (session door design section 3).
+    const messaging = this.deps.messaging;
+    if (this.mode === "cowork" || messaging === undefined) return;
     try {
-      inc.attachment = this.deps.messaging.attach(this.deps.runtime, {
+      inc.attachment = messaging.attach(this.deps.runtime, {
         sessionId: this.sessionId,
         backendSessionId: this.backendSessionId,
         query: inc.query,
@@ -1456,7 +1510,7 @@ class WinterSessionImpl implements WinterSession {
         generation: inc.generation,
         status: () => (this.inFlight > 0 ? "running" : "idle"),
         log: (line) => this.log(line),
-        ...(this.deps.messaging.facts?.() ?? {}),
+        ...(messaging.facts?.() ?? {}),
       });
     } catch (err) {
       this.log(`messaging attach failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`);

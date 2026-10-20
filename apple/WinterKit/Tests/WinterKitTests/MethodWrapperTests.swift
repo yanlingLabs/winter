@@ -66,6 +66,55 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(created.sessionId, "s_chat")
     }
 
+    /// Cowork (session door): the protocol RECOGNISES `cowork`, so the value rides `session.create` verbatim —
+    /// and the daemon refuses it for every role with the Cowork `unsupported_topology` error, which must
+    /// surface as a typed `RpcError` (never a decode failure, never a silently-created session). Nothing in
+    /// the app asks for it today (`SessionMode.cowork.isAvailable == false`); this pins the client half so a
+    /// future caller meets the refusal as data.
+    func testCreateSessionCoworkIsSentVerbatimAndTheTypedRefusalSurfaces() async throws {
+        let (client, t) = try await connected()
+
+        async let create = client.createSession(scope: "global", mode: "cowork")
+        let request = decodeLine(try await waitForSent(t, count: 2)[1])
+        XCTAssertEqual(request["method"] as? String, "session.create")
+        XCTAssertEqual((request["params"] as? [String: Any])?["mode"] as? String, "cowork")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(request["id"] as! Int),"error":{"code":-32602,"message":"Cowork unavailable","data":{"code":"unsupported_topology"}}}"#)
+        do {
+            _ = try await create
+            XCTFail("a refused create must not return a session")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.code, -32602)
+            XCTAssertEqual(error.message, "Cowork unavailable")
+            XCTAssertEqual(error.data?["code"]?.stringValue, "unsupported_topology")
+        }
+    }
+
+    /// Session door D1: the Cowork binding rides `session.create` as the protocol's `CoworkSessionCreate` object,
+    /// beside `mode: "cowork"` and nothing else the daemon derives. Both location kinds, field for field.
+    func testCreateSessionSendsTheCoworkBindingVerbatim() async throws {
+        let (client, t) = try await connected()
+        async let outputs = client.createSession(scope: "global", mode: "cowork",
+                                                 cowork: CoworkSessionBinding(workspaceId: "w_one", location: .outputs, requestId: "r_one"))
+        let first = decodeLine(try await waitForSent(t, count: 2)[1])
+        let params = first["params"] as? [String: Any]
+        XCTAssertEqual(params?["mode"] as? String, "cowork")
+        XCTAssertNil(params?["cwd"]); XCTAssertNil(params?["approvalPolicy"]); XCTAssertNil(params?["model"])
+        let binding = params?["cowork"] as? [String: Any]
+        XCTAssertEqual(binding?["workspaceId"] as? String, "w_one")
+        XCTAssertEqual(binding?["requestId"] as? String, "r_one")
+        XCTAssertEqual(binding?["location"] as? [String: String], ["kind": "outputs"])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(first["id"] as! Int),"error":{"code":-32602,"message":"Cowork unavailable","data":{"code":"unsupported_topology"}}}"#)
+        _ = try? await outputs
+
+        async let source = client.createSession(scope: "global", mode: "cowork",
+                                                cowork: CoworkSessionBinding(workspaceId: "w_one", location: .source(sourceId: "src_one", relativeCwd: "app/web"), requestId: "r_two"))
+        let second = decodeLine(try await waitForSent(t, count: 3)[2])
+        let location = ((second["params"] as? [String: Any])?["cowork"] as? [String: Any])?["location"] as? [String: String]
+        XCTAssertEqual(location, ["kind": "source", "sourceId": "src_one", "relativeCwd": "app/web"])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(second["id"] as! Int),"error":{"code":-32602,"message":"Cowork unavailable","data":{"code":"unsupported_topology"}}}"#)
+        _ = try? await source
+    }
+
     /// mac-chat-parity T7 (spec §5): `model`/`effort` are additive to `createSession` — the
     /// new-chat page's pre-session choice, **stamped at create** rather than set after it. The
     /// create-then-set alternative leaves a window in which a turn fired immediately after the

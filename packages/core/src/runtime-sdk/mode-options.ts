@@ -19,9 +19,12 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
+import { hostStorageReadPatterns, hostStorageWriteRoots, type HostStorageFenceOptions } from "./host-storage-fence";
 import { providerFor, testProviderNameFor } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import type { CapabilityServerKey } from "../capabilities/names";
+import { coworkOfferedTools, coworkProfileWithheldTools, type CoworkGuestProfile, type CoworkGuestProfileTool, type CoworkToolInputs } from "../cowork/session-profile";
 
 /**
  * **The six Winter policies → Winter's `PermissionMode`** (P8b-7, AMENDED by the whole-branch
@@ -587,6 +590,7 @@ export function controlPlaneDenyRules(home: string): string[] {
   // else — recorded so this form is not re-investigated.
   const claudeResumeStaging = fsRootAnchored([join(lit(tmpdir()), `${RESUME_STAGING_PREFIX}*`), "**"].join("/"));
   const targets = [
+    ...hostStorageWriteRoots(home).flatMap((root) => [fsRootAnchored(lit(root)), fsRootAnchored(`${lit(root)}/**`)]),
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
     // (`controlPlaneFileTarget`'s own doc: "the agent must NEVER write ANY
     // `<any>/.winter/permissions.local.json`, whichever project owns it").
@@ -652,6 +656,7 @@ export function controlPlaneDenyRules(home: string): string[] {
   const stagingRoot = join(lit(tmpdir()), `${RESUME_STAGING_PREFIX}*`);
   const runFolders = [lit(homeCacheDir(home)), "runs", "*"].join("/");
   const readTargets = [
+    ...hostStorageReadPatterns(home).map(({ root, tail }) => fsRootAnchored(`${lit(root)}/${tail}`)),
     fsRootAnchored([lit(join(home, "run")), "**"].join("/")),
     fsRootAnchored([lit(join(home, "runtimes")), "**"].join("/")),
     // WS-21 (spec §7.1, reads): the user's MCP servers (a stdio server's `env` may carry a key) and the
@@ -664,7 +669,7 @@ export function controlPlaneDenyRules(home: string): string[] {
     ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([stagingRoot, f].join("/"))),
     fsRootAnchored([stagingRoot, "backups", "**"].join("/")),
   ];
-  return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
+  return [...new Set([...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))])];
 }
 
 /**
@@ -917,7 +922,7 @@ export function projectScopeAllowRulesFor(cwd: string, deps: {
  * trust record, agent definitions, the user's three control-plane files and the shared runtime home's
  * settings, MCP servers, agents and plugins.
  */
-export function selfGrantDenyWrite(home: string): string[] {
+export function selfGrantDenyWrite(home: string, options?: HostStorageFenceOptions): string[] {
   return [
     join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
     trustRecordFile(home), join(home, "agents"),
@@ -927,6 +932,7 @@ export function selfGrantDenyWrite(home: string): string[] {
     // would put daemon-worded text into another session's turn) and the recently-used apps.
     join(home, "computer-use"),
     ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+    ...hostStorageWriteRoots(home, options),
   ];
 }
 
@@ -969,7 +975,7 @@ function projectSandboxDenyWrite(cwd: string): string[] {
   return [...new Set(out)];
 }
 
-export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
+export function sandboxConfigFor(home: string, cwd?: string | null, options?: HostStorageFenceOptions): SandboxSettingsConfig {
   return {
     enabled: true,
     filesystem: {
@@ -1022,7 +1028,7 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // `sdk/projects` is deliberately absent: a subpath deny there would take the memory directories
       // (which stay allowlisted) with it — its fence is the escape floor's and the path fence hook's.
       denyWrite: [...new Set([
-        ...selfGrantDenyWrite(home),
+        ...selfGrantDenyWrite(home, options),
         // Review I7: the PROTECTED paths (spec §7.2) — a write has to go through a tool and its card, so
         // Bash may not write them at all. A separate list, never part of `selfGrantDenyWrite`: that one
         // feeds the write-tool fence's HARD deny (`homeFencedDirs`), which would swallow the card.
@@ -1038,7 +1044,11 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // would be expressible in `childSandboxConfigFor`'s form since both runtimes read the glob grammar —
       // R.3 I-4 — but that row is not added there): the deny rules and the path fence hook carry them
       // (DECISION 12).
-      denyRead: [join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json")],
+      denyRead: [...new Set([join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json"),
+        ...hostStorageReadPatterns(home, options).filter(({ tail }) => tail === "**").map(({ root }) => root),
+        // Cowork backing/control/socket trees belong in this ONE ordinary Bash profile.
+        // File tools separately retain their narrow shared-artifact read exception.
+        ...hostStorageWriteRoots(home, options)])],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
@@ -1088,7 +1098,8 @@ export function childSandboxConfigFor(home: string, cwd?: string | null, extraDi
     filesystem: {
       ...fs,
       ...(fs.denyWrite === undefined ? {} : { denyWrite: [...new Set([...fs.denyWrite.map(escapeSandboxGlobPath), ...anyDepth])] }),
-      ...(fs.denyRead === undefined ? {} : { denyRead: fs.denyRead.map(escapeSandboxGlobPath) }),
+      ...(fs.denyRead === undefined ? {} : { denyRead: [...fs.denyRead.map(escapeSandboxGlobPath),
+        ...hostStorageReadPatterns(home).filter(({ tail }) => tail !== "**").map(({ root, tail }) => `${escapeSandboxGlobPath(root)}/${tail}`)] }),
     },
   };
 }
@@ -1144,6 +1155,55 @@ export function toolSurfaceViolations(initTools: readonly string[], allowed: rea
   if (allowed === undefined) return [];
   const ok = new Set(allowed);
   return initTools.filter((name) => !ok.has(name) && !plainNames.has(name) && !name.startsWith("mcp__"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Cowork (session door D2): the guest's tool surface. WIRED BEHIND THE REFUSAL: only the guest runtime supervisor
+// (cowork/guest-runtime.ts) calls `coworkToolsFor`, nothing in src constructs a supervisor, and
+// `session.create {mode: "cowork"}` still answers `unsupported_topology` in production. Cowork never enters
+// `toolsFor` or CAPABILITY_TOOL_MODES, which stay typed for the three runnable modes.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** No daemon capability server is built for a Cowork incarnation: session-profile lists every key as unbuilt in v1,
+ *  and the host-query guest refuses a non-empty `mcpServers`. */
+export const COWORK_CAPABILITY_SERVERS: readonly CapabilityServerKey[] = Object.freeze([]);
+
+export interface CoworkGuestToolInputs extends CoworkToolInputs {
+  /** The guest runtime profile the pinned image runs. Its cap is folded into `withheldTools`. */
+  readonly profile: CoworkGuestProfile;
+}
+
+/**
+ * **The ONE normalisation the prompt facts and the tool list both start from** (design 4.2): the profile's cap and
+ * its Edit rule folded into `withheldTools`, and no MCP server (strict and empty; `COWORK_CAPABILITY_SERVERS`).
+ * A prompt built from `{...coworkGuestToolInputs(input), ...}` names exactly the tools `coworkToolsFor(input)` offers.
+ */
+export function coworkGuestToolInputs(input: CoworkGuestToolInputs): CoworkToolInputs {
+  const { profile, ...rest } = input;
+  return { ...rest, exposure: { ...rest.exposure, mcpServers: false }, withheldTools: coworkProfileWithheldTools(profile, rest.withheldTools ?? []) };
+}
+
+/** The tools a Cowork guest incarnation is offered, sorted: `coworkOfferedTools` over the normalised inputs, so always
+ *  within the profile's set. Empty until the host declares `guest-compartment`. */
+export function coworkToolsFor(input: CoworkGuestToolInputs): CoworkGuestTool[] {
+  // Within the profile's set by construction: the normalisation withholds every tool the profile does not carry.
+  return coworkOfferedTools(coworkGuestToolInputs(input)) as CoworkGuestTool[];
+}
+/** A tool a Cowork guest launch can name (the profile's own set). `confinedToolVisibility` takes only these, so a stale
+ *  caller passing ceiling classes or another tool name fails at compile time, not just at run time. */
+export type CoworkGuestTool = CoworkGuestProfileTool;
+
+/** The canonical live Code permission fields, shared by runtime launch and trusted host admission. */
+export function codePermissionsFor(input: {
+  home: string; policy: SessionApprovalPolicy; userAllow?: readonly string[]; userDeny?: readonly string[];
+  persistedAllow?: readonly string[]; runHomeApplied?: boolean;
+}): NonNullable<Options["permissions"]> {
+  return {
+    allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES,
+      ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])],
+    deny: permissionDenyRulesFor(input.home, input.userDeny),
+    disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
+  };
 }
 
 /**
@@ -1249,7 +1309,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       //    same as claude's headless mode applying its settings files' `permissions.allow`.
       // WS-21: on a run-home incarnation the SAVED rules reach the child through the run folder's own
       // settings tiers (user, trusted project, local), so only Winter's fixed rules are stated here.
-      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])] } : {}),
+      ...(input.mode === "code" ? { allow: codePermissionsFor(input).allow } : {}),
       // Dispatch respects its policy like code (user ruling 2026-10-17), so its `dont-ask` must not lose the
       // reads and web reads code keeps under that mode: the same fixed rules, for the one read tool it HAS
       // (`Read`; Glob/Grep are not dispatch's) and the two web built-ins. Never the user's saved rules.

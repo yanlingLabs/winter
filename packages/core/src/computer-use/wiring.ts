@@ -16,6 +16,8 @@ import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { isHumanTurnOrigin } from "../sessions/turn-origins";
 import { turnOriginIndexFor } from "../sessions/turn-origin-index";
+import { runnableModeOf } from "../sessions/session-mode";
+import { AutomationFailure } from "./errors";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseHeadlessEnabledFrom, computerUseLegacyComputerFrom,
   computerUseMirrorFrom, computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, computerUseWakesFrom, computerUseWebMcpFrom, loadSettings, saveSettings,
@@ -171,6 +173,16 @@ export interface ComputerUseRuntime {
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
+/** The `mode` of the facts `ComputerPolicy` judges a session by, from the stored column (absent = code, as
+ *  everywhere). A stored `cowork` row — or any other string that is not a runnable mode — is REFUSED here:
+ *  `NotAllowed`, which the policy and the helper's own callers already treat as a plain refusal, never read as
+ *  Code by a `: "code"` default, so a computer-use call on such a row's behalf has no policy facts at all. */
+export function computerPolicyModeOf(stored: string | undefined): "code" | "dispatch" | "chat" {
+  const mode = runnableModeOf(stored);
+  if (mode === undefined) throw new AutomationFailure("NotAllowed", "computer use is not available in this session");
+  return mode;
+}
+
 /**
  * THE DESKTOP SWITCH, refused (user ruling 2026-10-10, 5a): the session whose desktop-switch refusals an event lifts —
  * a HUMAN-origin `user_message` (never `messaging`, `dispatch` or `dispatch-wake`, nor the projector's own echo); the
@@ -296,7 +308,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     emit: (sessionId, event: NewSessionEvent) => { deps.hub.append(sessionId, event); },
     session: (sessionId) => {
       const meta = deps.store.meta(sessionId);
-      const mode = meta.mode === "chat" || meta.mode === "dispatch" ? meta.mode : "code";
+      const mode = computerPolicyModeOf(meta.mode);
       return { policy: meta.approvalPolicy, mode, ...(meta.origin === undefined ? {} : { origin: meta.origin }), ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }) };
     },
     turnOrigin: (sessionId) => turnOriginIndexFor(deps.hub, deps.store).origin(sessionId),

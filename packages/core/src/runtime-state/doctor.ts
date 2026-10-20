@@ -22,7 +22,7 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, SYNCED_SESSION_ID_RE } from "../sessions/store";
-import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
+import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailableError, scrubExcludedTables, type RuntimeStateDb } from "./db";
 import { ALLOWED_TRANSITIONS, RuntimeSessionRecords } from "./records";
 import { RuntimeLeases, type LeaseRow } from "./leases";
 import { rollbackMemoryKeyMigration } from "./migrations/memory-keys";
@@ -92,6 +92,8 @@ export type RepairOp =
 export interface RepairResult {
   applied: boolean;
   detail: string;
+  /** Set when the repair left something the operator must know about (restore-backup: an unscrubbed pre-restore copy). */
+  warning?: string;
 }
 
 export const DAEMON_RUNNING_REFUSAL = "daemon is running; stop it first";
@@ -273,7 +275,7 @@ export async function diagnoseRuntimeState(home: string, deps: { tmpDirOf?: (ses
     if (!(e instanceof RuntimeStateUnavailableError)) throw e;
     // §14: an authoritative store that is missing or corrupt refuses runtime resume/routing — and
     // NOTHING further is inferred from the rebuildable index, so this is the only finding returned.
-    if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Winter; this build will not open it`, repairable: [] }];
+    if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Winter; this build will not open it. To go back to an older Winter, first run "winter migrate --cowork-schema --rollback" with the NEWER Winter's CLI (daemon stopped), then install the older one`, repairable: [] }];
     if (e.reason === "missing") {
       // A home that has never run a daemon has no `runtimes/` at all, and therefore no backups
       // either — offering `restore-backup` there sends the operator hunting for a file that cannot
@@ -595,7 +597,7 @@ export function latestRecoveryAttempts(home: string): RecoveryAttemptSummary[] {
  * trace in exactly the broken-home state the verb exists for. Unlike the recovery path, a message is
  * safe to carry here: nothing on this path ever touches a message body or a transcript body.
  */
-export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore; tmpDirOf?: (sessionId: string) => string } = {}): Promise<RepairResult> {
+export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore; tmpDirOf?: (sessionId: string) => string; /** test seam: the rename that promotes a scrubbed pre-restore copy */ renameSnapshot?: typeof renameSync } = {}): Promise<RepairResult> {
   try {
     // EVERY repair refuses while the daemon holds the lock, not just `restore-backup` (whole-branch
     // review, M3). This function is exported on the package barrel, so the CLI's own probe is not
@@ -614,7 +616,7 @@ export async function repairRuntimeState(home: string, op: RepairOp, deps: { sto
       case "detach-backend":
         return detachBackend(home, op.winterSessionId);
       case "restore-backup":
-        return restoreBackup(home, op.backupPath);
+        return restoreBackup(home, op.backupPath, deps.renameSnapshot ?? renameSync);
       case "memory-keys-rollback":
         return repairMemoryKeysRollback(home);
       case "adopt-legacy-session":
@@ -879,7 +881,37 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  the source must live in THIS home's backup directory (realpath'd, so a symlink cannot point out
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
-function restoreBackup(home: string, backupPath: string): RepairResult {
+/** True when the (copied) store holds an owed peer-message body. Read-only; throws when the copy cannot be inspected. */
+/** Can a copy we could not open still hold owed peer-message rows? SQLite stores a table's name in plain text in the schema pages, so a file that
+ *  never mentions `cowork_peer_inbox` has no such table and therefore no owed message. A file that does mention it, or that cannot be read, is
+ *  treated as "may hold" (fail toward the warning). Reads in bounded chunks with an overlap so a name split across chunks is still seen. */
+function mayMentionPeerInbox(path: string): boolean {
+  const needle = Buffer.from("cowork_peer_inbox"), chunk = 1 << 20;
+  let fd: number | undefined;
+  if (!existsSync(path)) return false; // an absent sidecar holds nothing
+  try {
+    fd = openSync(path, "r");
+    let tail: Buffer = Buffer.alloc(0), position = 0;
+    for (;;) {
+      const buffer = Buffer.alloc(chunk), read = readSync(fd, buffer, 0, chunk, position);
+      if (read <= 0) return false;
+      position += read;
+      const haystack = Buffer.concat([tail, buffer.subarray(0, read)]);
+      if (haystack.includes(needle)) return true;
+      tail = haystack.subarray(Math.max(0, haystack.length - (needle.length - 1)));
+    }
+  } catch { return true; } finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
+}
+
+function hasOwedPeerBodies(path: string): boolean {
+  const db = new Database(path, { readonly: true });
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cowork_peer_inbox'").get()) return false;
+    return db.query("SELECT 1 FROM cowork_peer_inbox WHERE body IS NOT NULL LIMIT 1").get() != null;
+  } finally { db.close(); }
+}
+
+function restoreBackup(home: string, backupPath: string, promote: typeof renameSync = renameSync): RepairResult {
   // The lock probe moved up to `repairRuntimeState`, which now gates EVERY op — it is kept here as
   // well because this is the one irreversible repair, and a future caller reaching it directly must
   // not be the exception (M3).
@@ -895,6 +927,8 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
     return { applied: false, detail: `backup is outside ${backupsDir}` };
   }
   if (!real.startsWith(`${realBackups}/`)) return { applied: false, detail: `backup is outside ${backupsDir}: ${backupPath}` };
+  // A `.tmp` is a backup still being written (or abandoned by a crash) before its inbox exclusion was proven.
+  if (real.endsWith(".tmp")) return { applied: false, detail: `backup is not complete: ${backupPath}` };
 
   let probe: Database | undefined;
   try {
@@ -936,6 +970,12 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
    *  `VACUUM INTO` reads THROUGH the connection, so its output already contains every committed
    *  frame — that door represents them all. */
   let sidecarsCaptured = true;
+  /** The byte-copy snapshot could not be opened and scrubbed, so it was kept as the raw copy it is. */
+  let keptUnscrubbed = false;
+  /** The snapshot is a REBUILT copy (owed peer messages removed), not the replaced file's bytes. */
+  let rebuiltSnapshot = false;
+  /** The snapshot was scrubbed and promoted, but a leftover could not be cleaned up. */
+  let cleanupWarning: string | undefined;
   if (existsSync(dest)) {
     try {
       const current = openRuntimeStateDb(home, { readonly: true });
@@ -976,6 +1016,40 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
         for (const suffix of ["", "-wal", "-shm"]) rmSync(`${snapshot}${suffix}`, { force: true });
         snapshot = undefined;
       }
+      // THE RAW COPY ABOVE IS THE CORRUPTION EVIDENCE and it is kept BYTE-FOR-BYTE unless it holds owed peer-message bodies.
+      // (An earlier revision always scrubbed an openable copy; the scrub VACUUMs, so a corrupted file came back as a rebuilt,
+      // smaller, healthy-looking file that the message still called "the replaced file".) Now: inspect a WORKING copy
+      // read-only. No owed body -> nothing to scrub, the raw copy stays as it is and is the replaced file. Owed bodies
+      // present -> "excluded from backups" applies, so scrub the working copy and promote it over the snapshot by one atomic
+      // rename; the original bytes are NOT kept (they hold message bodies) and the message says the copy is a rebuilt one.
+      // OWNER DECISION (2026-10-18): when the working copy cannot be inspected or scrubbed, whether or not it has a valid
+      // SQLite header, the raw copy is KEPT byte-for-byte and the restore RUNS (it may be the user's only good data); the
+      // result then says plainly that it is unscrubbed and may hold undelivered Cowork peer messages, and where it is.
+      if (snapshot !== undefined) {
+        const work = `${snapshot}.scrub`, sidecars = ["-wal", "-shm", "-journal"];
+        const dropWork = () => { for (const suffix of ["", ...sidecars]) rmSync(`${work}${suffix}`, { force: true }); };
+        let promoted = false;
+        try {
+          for (const suffix of ["", ...sidecars]) if (existsSync(`${snapshot}${suffix}`)) copyFileSync(`${snapshot}${suffix}`, `${work}${suffix}`);
+          if (hasOwedPeerBodies(work)) {
+            scrubExcludedTables(work);
+            // THE ATOMIC STEP: a rename over the existing path. Until it succeeds the raw copy is untouched; if anything above
+            // or this rename throws, only the working copy is deleted and the raw copy stays (keptUnscrubbed, warning shown).
+            promote(work, snapshot);
+            promoted = true;
+            // The scrubbed main file is now the snapshot. Its old sidecars describe the RAW copy and must not sit beside it;
+            // the scrub checkpointed, so the working copy normally has none, and any it does have belong with it.
+            for (const suffix of sidecars) rmSync(`${snapshot}${suffix}`, { force: true });
+            for (const suffix of sidecars) if (existsSync(`${work}${suffix}`)) promote(`${work}${suffix}`, `${snapshot}${suffix}`);
+            rebuiltSnapshot = true;
+          } else dropWork();
+        } catch {
+          dropWork();
+          // After the rename the snapshot IS the scrubbed copy, whatever failed later: report that, not "unscrubbed".
+          keptUnscrubbed = !promoted && existsSync(snapshot);
+          if (promoted) { rebuiltSnapshot = true; cleanupWarning = `the pre-restore copy ${snapshot} was scrubbed, but removing its stale write-ahead sidecars failed; delete ${snapshot}-wal, ${snapshot}-shm and ${snapshot}-journal by hand if they exist`; }
+        }
+      }
     }
   }
 
@@ -1005,9 +1079,13 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
   for (const suffix of ["-wal", "-shm"]) {
     if (existsSync(`${real}${suffix}`)) copyFileSync(`${real}${suffix}`, `${dest}${suffix}`);
   }
+  const warning = keptUnscrubbed && snapshot && (mayMentionPeerInbox(snapshot) || mayMentionPeerInbox(`${snapshot}-wal`))
+    ? `the pre-restore copy ${snapshot} could not be opened to clear it, so it was kept as the raw copy and may contain undelivered Cowork peer messages (message bodies); protect or delete it accordingly`
+    : cleanupWarning;
   return {
     applied: true,
-    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}`,
+    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? (rebuiltSnapshot ? `a rebuilt copy of the replaced file, without its owed Cowork peer messages (the original bytes held them and were not kept), is at ${snapshot}` : `the replaced file is at ${snapshot}`) : "there was no file to replace"}${warning ? `. WARNING: ${warning}` : ""}`,
+    ...(warning ? { warning } : {}),
   };
 }
 

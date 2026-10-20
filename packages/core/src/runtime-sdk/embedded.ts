@@ -1,3 +1,6 @@
+import { embeddedHostPathProtection, embeddedFileProtectionSupported, embeddedContextProtectionSupported, type EmbeddedHostPathProtection, type EmbeddedProtectionCapability } from "./embedded-path-protection";
+import * as embeddedHostApi from "@yanlinglabs/winter-agent-runtime/embedded-host";
+import { hostStorageFloorDescriptor, registerHostStoragePolicyConsumer } from "./host-storage-fence";
 // WS-23 (ruling R1): CHAT AND DISPATCH RUN THE WINTER RUNTIME EMBEDDED — one Bun Worker per session,
 // inside `winter-core`. Code sessions keep the spawned `winter` binary (`executable.ts`'s ladder).
 //
@@ -36,11 +39,12 @@ import { EMBEDDED_KILL_GRACE_MS, spawnEmbeddedWorker, type EmbeddedWorkerProcess
 import { RUNTIME_VERSION } from "@yanlinglabs/winter-agent-runtime/version";
 import { WORKFLOW_WORKER_BRIDGE_FLAG } from "@yanlinglabs/winter-agent-runtime/workflow-worker";
 import { REQUIRED_WINTER_AGENT_SDK } from "./versions";
+import type { RunnableSessionMode } from "../sessions/session-mode";
 
 /** The modes that run embedded. Dispatch's CHILD sessions are code sessions, so they stay subprocesses. */
 export const EMBEDDED_MODES = ["chat", "dispatch"] as const;
 
-export function runsEmbedded(mode: "code" | "dispatch" | "chat"): boolean {
+export function runsEmbedded(mode: RunnableSessionMode): boolean {
   return (EMBEDDED_MODES as readonly string[]).includes(mode);
 }
 
@@ -150,6 +154,10 @@ export interface EmbeddedSessionHost {
    * `terminate()` follows after a grace; `exited` settles when the Worker closes; `pid` is `null`.
    */
   spawn(options: SpawnRuntimeOptions): SpawnedRuntimeProcess;
+  /** True only for a versioned SDK contract covering both file tools and context readers. */
+  supportsProtectedPaths?(): boolean;
+  /** Trusted host control: acknowledge subsequent file checks; false means context remains uncovered. */
+  refreshProtectedPaths?(): Promise<boolean>;
   /** The backend session ids (the runtime config's `sessionId`) that have a live Worker, oldest first. */
   live(): string[];
   /**
@@ -168,6 +176,12 @@ export interface EmbeddedLifecycleEvent {
 }
 
 export interface EmbeddedSessionHostDeps {
+  /** Trusted daemon home. Optional only for standalone transport fixtures. */
+  home?: string;
+  /** Trusted integration seam. Production detects the installed namespace capability. */
+  hostPathProtectionCapability?: EmbeddedProtectionCapability;
+  /** Synthetic reviewed-contract seam. Production uses the independently accepted Core version. */
+  acceptedContextCoverageVersion?: number;
   log?: (line: string) => void;
   /** Observer for tests (WS-23 review I-2): every engine start and every Worker close, in order. */
   onLifecycle?: (event: EmbeddedLifecycleEvent) => void;
@@ -256,9 +270,33 @@ function sessionIdOf(args: readonly string[]): string {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+export function installedEmbeddedProtectionCapability(): EmbeddedProtectionCapability | undefined {
+  const api = embeddedHostApi as unknown as Record<string, unknown>;
+  if (api.HOST_CODE_PROTECTION_CONTRACT_VERSION !== 1 || api.HOST_CODE_PROTECTION_CAPABILITY !== "host-code-path-protection-v1") return undefined;
+  const coverage = api.HOST_CODE_PROTECTION_COVERAGE as EmbeddedProtectionCapability["coverage"] | undefined;
+  if (!coverage || !Array.isArray(coverage.fileTools)) return undefined;
+  return { contractVersion: 1, capability: "host-code-path-protection-v1", coverage };
+}
+type ProtectedWorker = EmbeddedWorkerProcess & { updateHostCodeProtection?(policy: EmbeddedHostPathProtection): Promise<number> };
+type ProtectedWorkerOptions = SpawnEmbeddedWorkerOptions & { hostCodeProtection?: EmbeddedHostPathProtection };
+
 
 export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): EmbeddedSessionHost {
   const log = deps.log ?? ((): void => {});
+  const capability = deps.hostPathProtectionCapability ?? installedEmbeddedProtectionCapability();
+  const fileProtection = embeddedFileProtectionSupported(capability);
+  const contextProtection = embeddedContextProtectionSupported(capability, deps.acceptedContextCoverageVersion);
+  let policyRevision = 0, policyKey: string | undefined;
+  const currentPolicy = (): EmbeddedHostPathProtection | undefined => {
+    if (!deps.home || !fileProtection) return undefined;
+    const paths = embeddedHostPathProtection(deps.home, 0);
+    const key = JSON.stringify([paths.denyReadPaths, paths.denyWritePaths]);
+    if (key !== policyKey) {
+      if (policyRevision === Number.MAX_SAFE_INTEGER) throw new EmbeddedRuntimeUnavailable("host path-policy revision exhausted");
+      policyRevision++; policyKey = key;
+    }
+    return Object.freeze({ ...paths, revision: policyRevision });
+  };
   const live = new Map<EmbeddedWorkerProcess, string>();
   // WS-23 review I-2: the NEWEST Worker per backend session. Every Worker shares this process's pid,
   // so the transcript lease (pid-stamped, same-pid re-entrant) cannot keep two incarnations of one
@@ -268,8 +306,43 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
   const newest = new Map<string, EmbeddedWorkerProcess>();
   let spawned = 0;
   let shuttingDown: Promise<void> | undefined;
+  const refreshProtectedPaths = async (): Promise<boolean> => {
+    const policy = currentPolicy();
+    if (!policy) return false;
+    await Promise.all([...live.keys()].map(async proc => {
+      const update = (proc as ProtectedWorker).updateHostCodeProtection;
+      if (typeof update !== "function") throw new EmbeddedRuntimeUnavailable("embedded host path-policy channel unavailable");
+      const applied = await update.call(proc, policy);
+      if (applied !== policy.revision) throw new EmbeddedRuntimeUnavailable("embedded host path-policy acknowledgment mismatched");
+    }));
+    return contextProtection;
+  };
+  const unregisterStoragePolicyConsumer = deps.home ? registerHostStoragePolicyConsumer(async () => {
+    if (!Object.values(hostStorageFloorDescriptor(deps.home!)).some(paths => paths.length)) return;
+    const procs = [...live.keys()];
+    if (await refreshProtectedPaths()) return; // complete accepted coverage: no abort/reincarnation
+    // Partial/older SDK context readers remain uncovered. The live file-policy acknowledgment
+    // never substitutes for their actual closure; no storage is provisioned before this settles.
+    for (const proc of procs) proc.kill();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(procs.map(proc => proc.exited)),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EmbeddedRuntimeUnavailable("embedded storage policy transition remains pending; existing Workers have not closed")), 1000); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  }) : () => {};
 
+  const assertUnprotectedSpawn = (options: SpawnRuntimeOptions): void => {
+    // Core must enforce this itself: the installed older SDK may silently ignore new flags.
+    // Full embedded containment remains an explicit unavailable topology, without binary fallback.
+    if ((options as { requireHostFloor?: boolean }).requireHostFloor || options.command === "/usr/bin/sandbox-exec" ||
+      (deps.home && Object.values(hostStorageFloorDescriptor(deps.home)).some(paths => paths.length) && !contextProtection)) {
+      throw new EmbeddedRuntimeUnavailable("protected Cowork storage requires complete embedded file/context policy coverage; this embedded host is unavailable");
+    }
+  };
   const workerProcess = (options: SpawnRuntimeOptions): EmbeddedWorkerProcess => {
+    assertUnprotectedSpawn(options);
     const sessionId = sessionIdOf(options.args);
     const worker = ++spawned;
     const prior = newest.get(sessionId);
@@ -280,20 +353,29 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
       log(`embedded session ${sessionId}: a new incarnation arrived while the previous Worker was still running — ending it before the new one starts`);
       prior!.kill();
     }
-    const proc = (deps.spawnWorker ?? spawnEmbeddedWorker)({
+    const workflowWorkerCommand = (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)();
+    assertUnprotectedSpawn(options); // recheck after host preparation, at the actual SDK use point
+    const policy = currentPolicy();
+    const needsBootstrapAck = !!policy && contextProtection && !!deps.home && Object.values(hostStorageFloorDescriptor(deps.home)).some(paths => paths.length);
+    let releaseBootstrap!: () => void;
+    const bootstrap = needsBootstrapAck ? new Promise<void>(resolve => { releaseBootstrap = resolve; }) : undefined;
+    const startAfter = bootstrap ? Promise.all([bootstrap, predecessorExited ?? Promise.resolve()]) : predecessorExited;
+    const prepared: ProtectedWorkerOptions = {
       workerEntry: deps.workerEntry ?? embeddedWorkerEntry(),
       spawn: options,
-      workflowWorkerCommand: (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)(),
+      workflowWorkerCommand,
       killGraceMs: deps.killGraceMs ?? EMBEDDED_KILL_GRACE_MS,
-      ...(predecessorExited !== undefined ? { startAfter: predecessorExited } : {}),
-    });
+      ...(startAfter !== undefined ? { startAfter } : {}),
+      ...(policy ? { hostCodeProtection: policy } : {}),
+    };
+    const proc = (deps.spawnWorker ?? spawnEmbeddedWorker)(prepared);
     live.set(proc, sessionId);
     newest.set(sessionId, proc);
     const onLifecycle = deps.onLifecycle;
     if (onLifecycle !== undefined) {
       // Registered AFTER spawnEmbeddedWorker's own continuation, so `start` is reported once it is sent.
-      if (predecessorExited === undefined) onLifecycle({ backendSessionId: sessionId, event: "start", worker });
-      else void predecessorExited.then(() => onLifecycle({ backendSessionId: sessionId, event: "start", worker }));
+      if (startAfter === undefined) onLifecycle({ backendSessionId: sessionId, event: "start", worker });
+      else void startAfter.then(() => { if (live.has(proc)) onLifecycle({ backendSessionId: sessionId, event: "start", worker }); });
     }
     void proc.exited.then((exit) => {
       // WS-24: FIRST, before the registry lets go of it -- whatever the Worker left running is killed
@@ -311,10 +393,27 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
       // this log (it can carry a provider's error text).
       if (exit.code !== 0) log(`embedded session ${sessionId} ended (code ${exit.code ?? "none"}${exit.signal !== null ? `, ${exit.signal}` : ""})`);
     });
+    if (needsBootstrapAck) {
+      const update = (proc as ProtectedWorker).updateHostCodeProtection;
+      if (typeof update !== "function") {
+        proc.kill(); proc.terminate();
+        throw new EmbeddedRuntimeUnavailable("embedded host path-policy bootstrap channel unavailable");
+      }
+      void Promise.resolve().then(() => update.call(proc, policy!)).then(revision => {
+        if (revision !== policy!.revision) throw new Error("mismatched host path-policy bootstrap acknowledgment");
+        releaseBootstrap();
+      }).catch(() => {
+        // Never reject startAfter: the SDK resumes after a rejected predecessor. Keep this
+        // bootstrap unresolved and close the inert Worker, so no uncovered engine can start.
+        log("embedded host path-policy bootstrap refused"); proc.kill(); proc.terminate();
+      });
+    }
     return proc;
   };
 
   return {
+    supportsProtectedPaths: () => contextProtection,
+    refreshProtectedPaths,
     spawn(options: SpawnRuntimeOptions): SpawnedRuntimeProcess {
       if (shuttingDown !== undefined) {
         // `create.ts`'s `trackQuery` already aborts a session started during shutdown; this is the
@@ -328,6 +427,7 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
     },
     shutdown(budgetMs: number = EMBEDDED_SHUTDOWN_BUDGET_MS): Promise<void> {
       if (shuttingDown !== undefined) return shuttingDown;
+      unregisterStoragePolicyConsumer();
       shuttingDown = (async () => {
         const procs = [...live.keys()];
         if (procs.length === 0) return;

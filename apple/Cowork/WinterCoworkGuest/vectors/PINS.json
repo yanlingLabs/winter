@@ -1,0 +1,34 @@
+{
+  "files": {
+    "bootstrap-order.json": {
+      "sha256": "36be531467c3ceb9d91f0f2cefb02ec40fba324878a021fe5247317a3c389ca4",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sourcePath": "packages/core/test/cowork/native/vectors/bootstrap-order.json",
+      "sourceRepository": "yanlingLabs/winter"
+    },
+    "mux-frames.json": {
+      "sha256": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sourcePath": "packages/core/test/cowork/native/vectors/mux-frames.json",
+      "sourceRepository": "yanlingLabs/winter"
+    },
+    "runtime-flow.json": {
+      "sha256": "c72950ed10d800447bb17bf14a6a076ddf995e4f9d4e2de968c8a218452727b7",
+      "sourceBranch": "cowork/n2-host-adapter",
+      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sourcePath": "packages/core/test/cowork/native/vectors/runtime-flow.json",
+      "sourceRepository": "yanlingLabs/winter"
+    },
+    "sdk-guided-config.json": {
+      "derivedBy": "apple/Cowork/WinterCoworkGuest/tests/derive_guided_config_fixture.py",
+      "note": "Derived from the agent SDK supervisor at the pinned commit, not copied from the contract; regenerate with the script and update this hash in the same change.",
+      "sdkCommit": "68e57c646f23feba09b00c78d05d8c80d6f2962d",
+      "sdkRepository": "yanlingLabs/winter-agent-sdk",
+      "sha256": "eb5a4a28c34b97bd4a2ef9c197826f8e66a828ef65cd9135face68fbb282ce55"
+    }
+  },
+  "formatVersion": 1,
+  "note": "The three S1 golden vectors are byte-identical copies of the contract branch (the guest copies the contract, never the other way round; edit nothing here, re-copy from the contract branch and update the pin in the same change). sdk-guided-config.json is not a contract file: it is derived from the agent SDK supervisor (see its entry)."
+}

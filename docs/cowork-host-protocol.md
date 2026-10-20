@@ -6,19 +6,19 @@ Status: proposed specification, 2026-10-11. This is the gate-3/4 planning contra
 
 Workspace, Project, Source, Delegation, trust/policy and durable transition/outbox records live in new versioned tables in `<WINTER_HOME>/runtimes/runtime-state.db`. Extend the existing runtime/session/lease/mailbox store; do not create an independently authoritative JSON manifest or session-index copy. The schema version must reject incompatible older writers. The admission ledger is the explicit cross-home exception described below. [Existing durable records](../packages/core/src/runtime-state/db.ts#L35)
 
-The subsequent [private-storage decision](cowork-storage-security.md) requires
-ciphertext for direct reads of private VM disks and integrity-protected records
-consumed by the key/launch broker or worker. It does not require encryption of
-ordinary grants/source IDs/policy or a helper-backed runtime-state database.
-Keep this canonical DB and its transaction/outbox invariants. Plaintext records
-alone cannot release keys or admit launches: require an authenticated daemon
-request plus the broker's sealed workspace/volume identity and key-version state.
-Storage descriptors carry only opaque key/format references, never key material.
+The current [first-version storage decision](cowork-storage-security.md) defers
+separate workspace encryption. Private images are plaintext. Keep canonical DB
+transaction/outbox authority and authenticated worker admission; imported
+manifests or descriptors cannot authorize a launch. Volume records explicitly
+name the format/version, file identity, owner/mode and backup policy. Key references
+are absent for `raw-ext4-v1`; a future encrypted-format conversion adds opaque key
+references under its own reviewed custody and recovery protocol, never raw keys.
 
 | Record | Required fields and invariants |
 | --- | --- |
 | `HomeIdentity` | Host-only immutable `homeId` in versioned runtime-state DB metadata, canonical location and schema version; distinct from daemon instance/PID. Relocation preserves it. Copying a home cannot create a second valid owner; a separately authorized clone/import needs a new home identity and explicit provenance/identity reconciliation, otherwise it is refused. |
 | `Workspace` | `workspaceId`, ownership kind (`standalone` or `project`), owner session/project ID, title, retained/archive/delete state, `configRevision`, `grantRevision`, `instructionRevision`, canonical `policyId`, image/environment/runtime digests, owned storage references, verified backing status and last durable checkpoint. Durable identity is separate from guest incarnation, disk lease epoch and current VM power. |
+| `Volume` | Host-only `volumeId`, `workspaceId`, purpose (`data` or `environment`), explicit `formatId`/`formatVersion` (first version `raw-ext4-v1`), geometry, owned relative location, recorded device/inode/owner/mode, backup exclusion, current ownership/generation and recovery state. First-version key reference is absent. Unknown formats refuse; future encryption is an explicit journaled conversion, never reinterpretation or replacement of existing data. |
 | `Project` | `projectId`, exactly one `workspaceId`, title/archive state, a reference to its workspace's canonical policy record (default approval policy, capability ceiling, publication policy and revisions), never a second mutable copy. Defaults initialize new conversations; a later default-policy edit does not silently change existing conversations. Ceiling/source restrictions still revalidate existing work. |
 | `WorkspacePolicy` | `policyId`, `workspaceId`, default approval policy, capability ceiling, publication policy and independent revisions. Shared by the owning Project view or standalone workspace; authoritative values exist once. The ordinary initial default is auto for both ownership kinds. |
 | `ProjectMembership` | `sessionId`, `projectId`, `workspaceId`, joined time and active/archive/delete state. A conversation's workspace binding is immutable. Creating a Project conversation adds membership; archiving/deleting updates membership without deleting workspace data. Moving an existing conversation to another workspace requires a separately designed migration and is unsupported here. |
@@ -40,6 +40,15 @@ Bind `homeId` in that external ledger to the registered canonical home location,
 
 Mutating methods carry a stable `requestId` and applicable expected revision. Scope idempotency to the authenticated principal, method and workspace, and bind the normalized request digest; reusing an ID with different sources, targets, authority or export arguments returns conflict rather than a prior unrelated success. Check canonical identity, role and current grants before preparing effects. Stale revisions return a typed conflict with current safe revision; retrying the same request returns its recorded operation, not a duplicate clone, push, revoke or export. Persist desired state and an operation/outbox entry transactionally, then perform guest/network work and acknowledge effective state separately. A DB commit does not imply a live mount, completed revocation or successful clone.
 
+Superseding a pending operation commits a terminal `superseded` status and an
+ordered `workspace_operation_changed` notification for the original operation ID,
+including its replacement ID, in the same transaction. A multi-source operation
+stays terminal even if its unaffected sources finish later. Retried mutation
+receipts remain immutable; current status is separately queryable. Source access
+labels distinguish local checkout edits from remote publication authority: a
+read-write checkout with a read-only GitHub credential is presented as local edits
+only until the publication broker authorizes its action.
+
 A standalone workspace atomically reserves/mints its sole owning conversation ID during creation; `session.create` may bind only that reservation, and additional conversation bindings are rejected. Project conversations instead bind to the Project workspace through membership. Creating a workspace selects at least one initial source in the same admission operation; it may be preparing but cannot run dependent tasks until ready. Source removal checks the minimum-source/replacement invariant in one transaction. Security revocation can make the last retained source unavailable. Immediately close new admission and revoke affected host broker authority on narrowing. Pending/effective transition state records draining old tool handles, installing narrower execution views and confirming share removal; it never permits old broker authority to remain usable while cleanup waits. Current source/GitHub-only publication predicates include preparing/unavailable/removing sources as specified in the main document.
 
 The creation-only rule applies specifically to default approval policy. Publication-policy changes apply to existing conversations too: the broker enforces a narrower policy immediately, and generated publication guidance refreshes at the next safe turn/steer boundary or before a resumed turn. Broadening still requires current authority and never retroactively executes a blocked push. Emit the changed policy revision to every affected conversation.
@@ -57,6 +66,9 @@ Introduce one daemon-side `assertRemoteMayUseWorkspace` gate, analogous to the e
 | New methods | Request/result outline | Paired-client decision |
 | --- | --- | --- |
 | `workspace.list`, `workspace.get` | Paged safe records, source counts/states, VM/operation state, revisions | Allow; omit backing paths/bookmarks and other homes |
+| `workspace.capabilities.get` | Safe projection of preparation, provisioning and execution support; unsupported facilities remain false | Local-only initially; no authority inferred from display capabilities |
+| `workspace.selection.prepareFolder` | Bounded Mac bookmark, label/access and request ID; opaque prepared selection and expiry | Local-only authenticated user/control principal; never paired/plugin/runtime |
+| `workspace.selection.revoke` | Opaque selection and request ID, scoped to issuing principal/connection | Local-only; replay cannot recreate or renew a grant |
 | `workspace.create` | Ownership, title, initial source selections; returns preparing workspace/operation | Allow repository-only creation within admitted account/repository authority; folder creation local-only |
 | `workspace.update` | Title/display properties with expected revision; never arbitrary policy/storage patch | Allow |
 | `workspace.archive`, `workspace.restore` | ID/revision; return pending/effective lifecycle | Allow; restore never restores revoked grants or deleted backing |
@@ -70,14 +82,35 @@ Introduce one daemon-side `assertRemoteMayUseWorkspace` gate, analogous to the e
 | `workspace.source.addRepository` | Canonical repository/account selection, initial ref, expected revision | Allow within already admitted GitHub account/broker authority |
 | `workspace.source.remove`, `workspace.source.revoke` | Source ID/revision; detach versus security revocation; durable operation receipt | Allow authority narrowing; minimum-source rule applies only to ordinary remove |
 | `workspace.source.setAccess`, `workspace.source.setTrust` | Typed source access/executable trust changes and configuration digest | Local-only initially; agent cannot self-approve |
+| `workspace.schedule.create`, `workspace.schedule.list`, `workspace.schedule.cancel`, `workspace.schedule.status` | Canonical workspace/session or Project target, saved policy/capability ceiling, one-shot/recurring intent and timezone; durable occurrence status and blocked reasons. No cwd, host path or reusable credential | Local-only metadata initially. All four paired allowlist mirrors deny; no guest Cron bridge or native/query dispatch is admitted by metadata acceptance |
 | `workspace.instructions.get`, `workspace.instructions.provenance` | Shared guidance bytes/revision and admitted source/import provenance | Allow bounded reads; provenance uses source/location IDs and relative guest paths, with Mac import roots/bookmarks redacted |
 | `workspace.instructions.update` | Content/digest plus expected instruction revision, explicit user operation | Local-only initially; agent edits use content-bound approval service |
 | `session.retarget` | Session, source/location ID, relative path and expected source revision | Allow inside an already authorized ready workspace; guest validates cwd, no grant creation |
 | `workspace.delegation.list`, `workspace.delegation.revoke` | Safe scope summaries or narrowing by ID/revision | Allow |
 | `workspace.delegation.create` | Sender/target scope, operations, expiry and explicit user authorization | Local-only initially |
+| `workspace.output.list` | Canonical opaque conversation-output location inventory, paginated; never directory file listing or discovery | Local-only source slice initially; all four paired mirrors exclude |
 | `workspace.file.list`, `workspace.file.stat`, `workspace.file.read`, `workspace.file.readRange` | Location ID/relative path, size/range bounds, explicit wake permission when needed | Allow within admitted workspace; no raw Mac paths, no hidden reads of SDK/control stores |
 | `workspace.export.create`, `workspace.export.status`, `workspace.export.read` | Generation-bound export job and bounded artifact/chunk handles | Allow user-facing export without raw authority DB/bookmarks or selected external-folder contents; host destination path/export-import authority stays local |
 | `workspace.watch`, `workspace.watch.renew`, `workspace.watch.detach` | Authorized workspace IDs/revisions; peer-bound subscription ID, lease and bounded snapshot/change frames | Allow; explicit Gateway subscription handling, snapshot/refetch on reconnect, no reliance on `$system` replay |
+
+2026-10-14 source slice: Mac-local bounded `workspace.instructions.get`,
+`workspace.instructions.provenance` and `workspace.instructions.update` now have
+canonical backing identity, revision/digest and actual content-bound ApprovalBroker
+source handling. Current paired mirrors still exclude these methods; guest owner
+and reader refresh remain unwired. The provenance result reports workspace alias
+only and source discovery unavailable. Initialization is trusted host provisioning,
+never a missing-file RPC seed. See [guidance source evidence](research/2026-10-14-cowork-workspace-instructions-source.md).
+
+2026-10-14 output-read source slice: local `workspace.output.list` returns canonical
+opaque location records only. Local `workspace.file.stat/read/readRange` read
+recorded host-backed conversation outputs while stopped, with expected location
+revision and file generation plus decoded chunks at most256 KiB. Reads never
+initialize, recreate, enroll, wake or provision. Filesystem directory listing,
+guest-only files, memory and exports remain unimplemented here. All four paired
+mirrors still exclude these methods; Swift request/DTO source is not consumer or
+native validation. See [output-read source boundaries](cowork-output-reads.md).
+
+Folder preparations are ephemeral and do not count as workspace sources. They bind the authenticated local principal and issuing connection, expire on a monotonic deadline, and release held descriptors/scope on revocation, disconnect or stop. A bookmark is location evidence, not proof of a UI gesture or signed-client identity. Re-resolve and revalidate the current protected roots, access and held directory identity before consumption. Exact request replay preserves identity/expiry; an expired or revoked preparation is not minted again. Schema11 implements atomic consumption into protected, source-bound durable folder grants. Source creation/addition commits the bookmark, exact root identity, home/workspace/source/issuing principal and opaque selection together with the desired source and operation/outbox. Only then is ephemeral scope released; disconnect/restart does not revoke an accepted source. Current bookmark/root/access/protected-policy validation is mandatory on every durable lookup, and removal/revocation tombstones the grant in the source transaction. Retrying old successful create/add requests rechecks current authority and never recreates revoked grants. New client-input digests have an explicit version. Schema10 receipts are replayable only when the supplied original selection can still be freshly resolved/current-authorized and the exact old normalized host payload matches; lost legacy selection inputs are refused rather than inferred from a receipt. Actual native provisioning remains required and refused by the default host; preparation or durable acceptance alone never marks a source ready. See [durable grant implementation evidence](research/2026-10-12-cowork-durable-folder-grants.md). The implemented preparation scope is recorded in [Mac selection acceptance](research/2026-10-12-cowork-macos-selection-independent-review.md).
 
 New GitHub sign-in/token setup and local host-capability grants are separate Mac user surfaces; repository selection does not imply account-wide publication authority. An export reader receives only its admitted artifact, not arbitrary backing-file access. Local import/migration and full-authority backup are not remotely exposed by these methods.
 
@@ -108,6 +141,7 @@ Extend `SessionEvent` deliberately using the existing `{seq, sessionId, ts}` env
 | Extended `session_created` | Durable Cowork mode, workspace/project/location identity and initial policy revision | Preserve safe live/replay stream-control visibility; keep excluded from HISTORY_EVENT_TYPES as today; missing canonical binding blocks resume |
 | `workspace_sources_changed` | Durable source IDs, membership/readiness/reasons, revision and `restartRequired`; no host roots | Include safe control history and live paired stream for affected conversations |
 | `workspace_policy_changed` | Durable requested/effective policy/ceiling/publication revision and pending transition | Include safe history/live; no approval secrets |
+| `workspace_operation_changed` | Durable operation ID, pending/applied/blocked/failed/superseded status, terminal flag and optional replacement ID | Include safe control history/live for affected conversations; workspace watches also receive it without requiring a conversation |
 | `workspace_instructions_changed` | Durable provenance/revision/digest/refresh state, not full guidance text | Include safe history/live; content via bounded read |
 | `session_location_changed` | Durable source/location/relative cwd and revision | Include safe history/live |
 | `cowork_recovery_required` | Durable reason, workspace/incarnation and operation IDs; no arbitrary raw error | Include safe history/live |

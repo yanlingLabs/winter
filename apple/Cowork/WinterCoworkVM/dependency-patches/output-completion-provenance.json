@@ -1,0 +1,22 @@
+{
+  "revision": "bc994b88df46207fad7775b0eabc51947e315881",
+  "archiveUrl": "https://codeload.github.com/apple/containerization/tar.gz/bc994b88df46207fad7775b0eabc51947e315881",
+  "archiveSha256": "94a9deedeaa8cf50869ea86b995e1c3cf133d9787c0733b140938ea992a1343e",
+  "patchSha256": "35c1aa41927e138ca30e68458fa76aa6e6f1fa93972f2e0a29262d4e8f37f061",
+  "files": {
+    "Sources/Containerization/LinuxProcess.swift": {
+      "upstreamSha256": "2da52ab72e422e2e74b7db0fe77bc701a65f74654ce05927696f630fa6214cc0",
+      "patchedSha256": "5ad693b275baba43c963dcd7c0eb9bc334ff87fe468a9a0006fc2e04115055c4"
+    },
+    "Sources/Containerization/ProcessOutputCompletion.swift": {
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "patchedSha256": "83354c97457ce67740942cdc976efdf0ff22a77e7ceaab0d8443c66af1d30c8b"
+    },
+    "Tests/ContainerizationTests/ProcessOutputCompletionTests.swift": {
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "patchedSha256": "528bdad400b6df47b1dbc46f0ebd11c92f1fa4adb7f6c768b36d4eda5d9782be"
+    }
+  },
+  "status": "compiled_patched_profile_tracker7_native37_no_real_guest",
+  "sourceTreeSha256": "812a8b6c38acfc87f1abb1ff6f96110de912d09a769f27f73bd86ef228f680dc"
+}

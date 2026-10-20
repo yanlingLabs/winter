@@ -231,6 +231,20 @@ describe("session_spawn: the spawn", () => {
     expect(t.childUpdates()).toEqual([]);
   });
 
+  // Cowork (session door): `cowork` is now a recognised session MODE on the wire, and `SpawnSession`'s reserved
+  // `type: "cowork"` argument stays refused — a dispatch child is a code session, and recognising the mode
+  // does not make it spawnable. Refused before the store, the leg or a child is touched.
+  test("SpawnSession type 'cowork' is still refused: no row, no creation transaction, no child, no update", async () => {
+    const t = setup();
+    const before = t.store.list().length;
+    const err = await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", type: "cowork" }).then(() => undefined, (e: Error) => e);
+    expect(err?.message).toBe("type 'cowork' is not yet available — use 'code'.");
+    expect(t.created).toEqual([]);
+    expect(t.store.list()).toHaveLength(before);
+    expect(t.store.childrenOf(t.dispatchId)).toEqual([]);
+    expect(t.childUpdates()).toEqual([]);
+  });
+
   test("a refused creation transaction is the tool's error, naming the typed code", async () => {
     const t = setup();
     t.refuse(new WinterLegRefusal("winter_executable_unavailable", "no winter runtime executable resolves"));

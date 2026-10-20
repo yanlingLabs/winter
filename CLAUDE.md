@@ -6,7 +6,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository. This 
 
 Winter is a macOS-native AI assistant: a TypeScript/Bun daemon (`winter-core`) plus a native Swift menu-bar app. They speak JSON-RPC 2.0 over NDJSON on a Unix socket (`<WINTER_HOME>/run/core.sock`; default home `~/.winter`). The daemon is the single source of truth; every client — CLI, Mac app, phone — is a view over its event stream.
 
-**The daemon runs no agent loop of its own.** Every session is a runtime child driven through the router (`@yanlinglabs/winter-runtime-sdk`) on the Winter agent runtime — the only leg; every model runs on it, Claude included. Code sessions spawn the `winter` binary; chat and dispatch run it EMBEDDED in `winter-core`, one Bun Worker per session. Session modes are `code`, `dispatch`, `chat`. **Cowork is not an implemented session mode** — see [docs/cowork-status.md](docs/cowork-status.md). The daemon owns everything around the child: IPC, event-sourced session storage, settings, approvals, the capability tools it hands the child over MCP, the hooks, and the SDK-message→`SessionEvent` projector.
+**The daemon runs no agent loop of its own.** Every session is a runtime child driven through the router (`@yanlinglabs/winter-runtime-sdk`) on the Winter agent runtime — the only leg; every model runs on it, Claude included. Code sessions spawn the `winter` binary; chat and dispatch run it EMBEDDED in `winter-core`, one Bun Worker per session. Session modes are `code`, `dispatch`, `chat`. **Cowork is not an implemented session mode** — the protocol names it (`SESSION_MODES`) but `session.create` refuses it for every role (`unsupported_topology`) and no runtime-facing type can hold it; see [docs/cowork-status.md](docs/cowork-status.md). The daemon owns everything around the child: IPC, event-sourced session storage, settings, approvals, the capability tools it hands the child over MCP, the hooks, and the SDK-message→`SessionEvent` projector.
 
 ## Commands
 
@@ -70,6 +70,7 @@ Plain links, not `@` imports — read the file whose area you are about to touch
 | [usage.md](docs/claude/usage.md) | Before touching usage and cost tracking: `packages/core/src/usage/`, the projector's `onTurnUsage`, `usage.*`, `settings.usage`, reading the user's Codex/Claude Code/Antigravity/OpenCode usage or plans, `apple/Winter/Sources/Usage/`. |
 | [testing.md](docs/claude/testing.md) | Before running or writing tests, a verify gate, the live computer-use suite, or anything reading daemon logs/temp dirs. |
 | [release.md](docs/claude/release.md) | Before bumping a version, writing release notes or cutting a release. |
+| [cowork.md](docs/claude/cowork.md) | Before touching `packages/core/src/cowork/**`, `packages/protocol/src/cowork.ts`, `apple/Cowork/**`, host-storage-fence or home-fence cowork roots, `refreshForStorage`, or the `workspace.*` / `project.*` methods and events. |
 
 Other references: `winter-vs-cc-tools.md` (repo root, the live tool comparison with Claude Code), `apple/ComputerUse/PROTOCOL.md` (the helper's wire contract), `apple/ComputerUse/WinterBrowserHost/PROTOCOL.md` (Winter for Chrome's).
 
@@ -82,3 +83,4 @@ Other references: `winter-vs-cc-tools.md` (repo root, the live tool comparison w
 - `packages/core/src/providers/codex-config.ts` self-identifies as `originator: "winter"` — a deliberate ToS decision; do not revert it to a first-party value.
 - Version strings are generated; edit only `VERSION`, through the bump/sync scripts.
 - The Sparkle public key in `apple/Winter/project.yml` (`SUPublicEDKey`) is the production key; the private half exists only in the login Keychain — never committed anywhere.
+- Ordinary Code, plugin hooks, LSP and third-party MCP tools get no outer Cowork Seatbelt; each tool's own sandbox is unchanged, and Cowork fences only through the existing `sandboxConfigFor` deny arrays ([cowork.md](docs/claude/cowork.md)).

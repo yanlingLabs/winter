@@ -1,11 +1,14 @@
+import { CoworkError } from "../cowork/types";
+import { fullSyncInstructionFd } from "../cowork/instruction-fullsync";
 import { Database } from "bun:sqlite";
-import { appendFileSync, closeSync, existsSync, openSync, readSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { openSync, closeSync, fstatSync, readSync, constants, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
+import { HOST_WORKSPACE_EVENT_TYPES, SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
+import { isUnrunnableSessionMode, type RunnableSessionMode } from "./session-mode";
 import { outdirPath } from "./outdir";
 import { BashEditPairer, bashCommandOf } from "./bash-edits";
 import { removeSessionDiffs } from "../diffs/store";
@@ -205,6 +208,13 @@ function isSessionDirs(x: unknown): x is SessionDirs {
 
 export class SessionStore {
   private db: Database;
+  private readonly hostAuthorityEpochs = new Map<string, number>();
+  hostAuthorityRevision(sessionId: string): number {
+    return this.hostAuthorityEpochs.get(sessionId) ?? 0;
+  }
+  private advanceHostAuthority(sessionId: string): void {
+    this.hostAuthorityEpochs.set(sessionId, this.hostAuthorityRevision(sessionId) + 1);
+  }
   /** working-directories T1: session ids already warned about a malformed `dirs` column, this
    *  store instance's lifetime — see `dirs()`'s doc comment for why this is what makes "log once"
    *  true without a second `dirs`-column write path. */
@@ -501,7 +511,10 @@ export class SessionStore {
     // is the CALLER's job, exactly as it is for `model`: which levels a model accepts is provider
     // knowledge, and only `session.create`'s handler knows the session's mode (the tier gate).
     opts: {
-      cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat";
+      // `RunnableSessionMode`, NOT the protocol's wider `SessionMode`: a Cowork session cannot be minted here
+      // (type-level) and `cowork` smuggled past the type is refused below, before the scope directory, the
+      // row or the log exist (`sessions/session-mode.ts`).
+      cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: RunnableSessionMode;
       parentSessionId?: string; model?: string; effort?: string;
       // Winter Phase 8c (P8c-5): the seq-1 `session_created`'s runtime annotation. EVENT-ONLY —
       // no index column, no reset-on-rebuild concern (unlike `mode` above): a row is never queried
@@ -512,6 +525,9 @@ export class SessionStore {
       runtimeKind?: "claude-agent" | "winter-agent"; providerId?: string; modelRef?: string;
     } = {},
   ): string {
+    // Defence in depth behind `session.create`'s own refusal: no store write, no directory, no log for a mode
+    // nothing can run. A future Cowork door will mint its sessions through its own transaction.
+    if (isUnrunnableSessionMode(opts.mode)) throw new CoworkError("unsupported_topology");
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
     mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
@@ -541,6 +557,49 @@ export class SessionStore {
       ...(opts.modelRef ? { modelRef: opts.modelRef } : {}),
     });
     return sessionId;
+  }
+
+  /**
+   * Session door D4: a Cowork conversation's index row and its seq-1 `session_created` (with the binding's display facts),
+   * under the id the host's reservation holds. Resumable and idempotent, never a second row:
+   *  - no row: admitted only when `reserved(sessionId)` (the runtime-state reservation) says so; then INSERT and append;
+   *  - a row that is NOT a Cowork row of this scope: `authority_denied` (a Code row whose id collides is never adopted);
+   *  - a Cowork row whose `session_created` never landed (a crash between the INSERT and the append; `recoverAll` keeps
+   *    such a row with `last_seq` 0): the append runs now, once; a log that already has lines is `recovery_required`;
+   *  - a committed Cowork row of this scope: nothing to do.
+   * The row stores no cwd and no directories: the binding's location is the conversation's only working directory.
+   * Only `cowork/session-door.ts` calls it (pinned); `createSession` keeps refusing `mode: "cowork"`.
+   */
+  ensureCoworkSession(scope: string, sessionId: string, opts: { approvalPolicy: SessionApprovalPolicy; model: string; cowork: NonNullable<Extract<NewSessionEvent, { type: "session_created" }>["cowork"]> }, reserved: (sessionId: string) => boolean): void {
+    if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
+    if (!/^s_[0-9a-f]{12}$/.test(sessionId)) throw new CoworkError("invalid_request");
+    const row = this.db.query("SELECT scope, mode, last_seq FROM sessions WHERE session_id = ?").get(sessionId) as { scope: string; mode: string | null; last_seq: number } | null;
+    if (row !== null) {
+      if (row.mode !== "cowork" || row.scope !== scope) throw new CoworkError("authority_denied");
+      if (row.last_seq >= 1) return;
+      const path = this.logPath(scope, sessionId);
+      if (existsSync(path) && readFileSync(path, "utf8").length > 0) throw new CoworkError("recovery_required");
+      mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
+    } else {
+      if (reserved(sessionId) !== true) throw new CoworkError("authority_denied");
+      mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
+      this.db.run(
+        "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model, effort, dirs) VALUES (?, ?, ?, 0, NULL, ?, NULL, 'cowork', NULL, ?, NULL, '[]')",
+        [sessionId, scope, Date.now(), opts.approvalPolicy, opts.model],
+      );
+    }
+    this.append(sessionId, { type: "session_created", sessionId, scope, mode: "cowork", cowork: opts.cowork });
+  }
+
+  /** Session door D4: removes a Cowork row whose binding was definitely refused (nothing bound), so its request starts over.
+   *  `bound` is the host's own answer; a bound row is never removed here. Only `cowork/session-door.ts` calls it (pinned). */
+  withdrawCoworkSession(sessionId: string, bound: (sessionId: string) => boolean): void {
+    const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as { scope: string; mode: string | null } | null;
+    if (row === null) return;
+    if (row.mode !== "cowork" || bound(sessionId) !== false) throw new CoworkError("authority_denied");
+    const path = this.logPath(row.scope, sessionId);
+    if (existsSync(path)) unlinkSync(path);
+    this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
   }
 
   append(sessionId: string, input: EventInput): SessionEvent {
@@ -656,6 +715,29 @@ export class SessionStore {
     return row.last_seq;
   }
 
+  /** Cowork-only ACK prerequisite. Reuses the reviewed Darwin owned-FD primitive;
+   * ordinary session append behavior is unchanged. Completed OS flush requests are
+   * not proof of storage hardware behavior after power loss. */
+  flushLog(sessionId: string): void {
+    if (process.platform !== "darwin" || process.arch !== "arm64") throw new CoworkError("unsupported_topology");
+    const row = this.db.query("SELECT scope FROM sessions WHERE session_id=?").get(sessionId) as { scope: string } | null;
+    if (!row) throw new Error("unknown session");
+    const path = this.logPath(row.scope, sessionId);
+    const directory = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    let file: number | undefined;
+    try {
+      file = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const directoryStat = fstatSync(directory), fileStat = fstatSync(file);
+      const uid = process.getuid?.();
+      if (!directoryStat.isDirectory() || !fileStat.isFile() || fileStat.nlink !== 1 ||
+          (uid !== undefined && (directoryStat.uid !== uid || fileStat.uid !== uid)) || directoryStat.dev !== fileStat.dev) {
+        throw new Error("workspace log flush refused");
+      }
+      fullSyncInstructionFd(file);
+      fullSyncInstructionFd(directory);
+    } finally { if (file !== undefined) closeSync(file); closeSync(directory); }
+  }
+
   read(sessionId: string, fromSeq = 0): SessionEvent[] {
     const row = this.db.query("SELECT scope FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string } | null;
@@ -737,7 +819,8 @@ export class SessionStore {
   }
 
   setCwd(sessionId: string, cwd: string): void {
-    this.db.run("UPDATE sessions SET cwd = ? WHERE session_id = ?", [cwd, sessionId]);
+    const result = this.db.run("UPDATE sessions SET cwd = ? WHERE session_id = ?", [cwd, sessionId]);
+    if (result.changes) this.advanceHostAuthority(sessionId);
   }
 
   /** working-directories T1 (design doc §1/§4): the session's ordered `SessionDir[]` set, with the
@@ -801,6 +884,7 @@ export class SessionStore {
   setDirsRaw(sessionId: string, dirs: SessionDirs): void {
     const res = this.db.run("UPDATE sessions SET dirs = ? WHERE session_id = ?", [JSON.stringify(dirs), sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+    this.advanceHostAuthority(sessionId);
   }
 
   /** Deterministic on an unknown session: throws so the IPC server can map it to NOT_FOUND
@@ -808,6 +892,7 @@ export class SessionStore {
   setApprovalPolicy(sessionId: string, policy: SessionApprovalPolicy): void {
     const res = this.db.run("UPDATE sessions SET approval_policy = ? WHERE session_id = ?", [policy, sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+    this.advanceHostAuthority(sessionId);
   }
 
   /** Chat Slice D task 1: per-session model override — `model: null` CLEARS it (falls back to the
@@ -907,6 +992,19 @@ export class SessionStore {
     return this.logPath(row.scope, sessionId);
   }
 
+  /** Trusted binding adapter: autocommitted session creation plus its initial event
+   * must precede a canonical Cowork bind. A caller transaction/empty sync row is not ready. */
+  hasCommittedSession(sessionId: string): boolean {
+    if (this.db.inTransaction) return false;
+    const row = this.db.query<{ last_seq: number }, [string]>("SELECT last_seq FROM sessions WHERE session_id=?").get(sessionId);
+    return row !== null && row.last_seq >= 1;
+  }
+
+  /** Index existence after constructor recovery; never inferred from a missing/unreadable log. */
+  hasSession(sessionId: string): boolean {
+    return this.db.query("SELECT 1 FROM sessions WHERE session_id=?").get(sessionId) !== null;
+  }
+
   meta(sessionId: string): {
     sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
     origin?: string; mode?: string; parentSessionId?: string; model?: string; effort?: string;
@@ -997,7 +1095,7 @@ export class SessionStore {
     const cutoff = nowMs - EMPTY_SESSION_GRACE_MS;
     const rows = this.db.query(
       `SELECT session_id FROM sessions
-       WHERE first_message IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')`,
+       WHERE first_message IS NULL AND created_at <= ? AND (mode IS NULL OR mode NOT IN ('dispatch','cowork'))`,
     ).all(cutoff) as { session_id: string }[];
     const candidates: string[] = [];
     for (const { session_id: sessionId } of rows) {
@@ -1037,7 +1135,7 @@ export class SessionStore {
   cleanerCandidateIds(createdBeforeMs: number): string[] {
     return (this.db.query(
       `SELECT session_id FROM sessions
-       WHERE judged IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')
+       WHERE judged IS NULL AND created_at <= ? AND (mode IS NULL OR mode NOT IN ('dispatch','cowork'))
        ORDER BY created_at`,
     ).all(createdBeforeMs) as { session_id: string }[]).map((r) => r.session_id);
   }
@@ -1121,6 +1219,10 @@ export class SessionStore {
       | { scope: string; mode: string | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     if (row.mode === "dispatch") throw new Error(`refusing to delete the dispatch session: ${sessionId}`);
+    // A Cowork conversation's row is half of a binding the host's runtime-state store holds (session door D4): deleting it
+    // here would leave that binding pointing at nothing. Neither the reaper, the cleaner nor a user delete removes one until
+    // the Cowork delete slice owns both halves; the session door alone withdraws an UNBOUND row (`withdrawCoworkSession`).
+    if (row.mode === "cowork") throw new CoworkError("unsupported_topology");
     const path = this.logPath(row.scope, sessionId);
     if (existsSync(path)) unlinkSync(path);
     this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
@@ -1200,6 +1302,12 @@ export class SessionStore {
     const expectedFirst = row.last_seq + 1;
     for (let i = 0; i < entries.length; i++) {
       const { raw, event } = entries[i]!;
+      const line = JSON.parse(raw) as Record<string, unknown>;
+      if (HOST_WORKSPACE_EVENT_TYPES.has(event.type) || HOST_WORKSPACE_EVENT_TYPES.has(line?.type as string)) throw new Error("appendSynced: host workspace events are not importable");
+      // A Cowork binding (`session_created.cowork`) is host workspace authority too: only the daemon's own create writes it.
+      if ((event.type === "session_created" && event.cowork !== undefined) || (line?.type === "session_created" && line !== null && Object.hasOwn(line, "cowork"))) {
+        throw new Error("appendSynced: a session_created carrying a Cowork binding (host workspace authority) is not importable");
+      }
       if (event.sessionId !== sessionId) throw new Error(`event ${i} belongs to session ${event.sessionId}, not ${sessionId}`);
       if (event.seq !== expectedFirst + i) throw new Error(`event ${i} has seq ${event.seq}, expected ${expectedFirst + i}`);
       if (raw.includes("\n")) throw new Error(`event ${i} raw line contains a newline`); // would forge extra log lines

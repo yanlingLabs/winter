@@ -1,3 +1,5 @@
+import { protectedHostStorageFences } from "./home-fence";
+import { assertDaemonPathAccess, readDaemonTextFile } from "./daemon-path-fence";
 // Phase 8c Lane 3, Tasks 3.2-3.4 — the Winter-leg `Options.hooks` wiring, gated on the P8c-7
 // measurement (`test/runtime-sdk/hooks-measure.e2e.test.ts`: measured = YES — a real spawned
 // `winter` child round-trips `PreToolUse`/`PostToolUse` callbacks through the wrapper's stdio
@@ -66,7 +68,7 @@ import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
 import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
-import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
+import { controlPlaneDenialMessage, controlPlaneTargetForCall, homeFenceTarget, hostStorageReadTarget } from "./control-plane";
 import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
 import { baseName, COMMAND_PREFIXES, inPlaceFiles, nestedCommandStrings, quotedOperatorsAsText, shellSegments, shellWords } from "./shell-words";
 export { shellSegments } from "./shell-words";
@@ -465,10 +467,11 @@ const WRITE_ONLY_DIR_VARIABLES: readonly string[] = [
  */
 function floorNeedles(home: string): FloorNeedle[] {
   const prefixes = homePrefixes(home);
+  const coordinationRoots = new Set(protectedHostStorageFences(home).coordinationDirs);
   const out = new Map<string, boolean>();
   for (const p of [...homeFencedDirs(home), ...homeFencedFiles(home)]) {
     const r = relative(home, p);
-    const writeOnly = isHomeWriteOnly(r);
+    const writeOnly = isHomeWriteOnly(r) || p.endsWith("/cowork") || coordinationRoots.has(p);
     const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
       ? [p.toLowerCase()]
       : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
@@ -892,7 +895,7 @@ const GIT_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(["status", "log", "dif
 const DESTINATION_VERBS: ReadonlySet<string> = new Set(["cp", "mv", "ln", "install", "rsync"]);
 
 /** One normalised segment's write targets (words), per `bashProtectedWriteHit`'s rules. */
-function segmentWriteTargets(seg: string): string[] {
+function segmentWriteTargets(seg: string, includeMovedSources = false): string[] {
   const targets: string[] = [];
   // Output redirects: the word after the operator; an fd dup (`>&1`, `>&-`) names no file.
   const redirect = /(?:\d*|&)>{1,2}\|?(&?)\s*([^\s<>&|;()]*)/g;
@@ -940,6 +943,7 @@ function segmentWriteTargets(seg: string): string[] {
       for (const w of rest) {
         if (w.startsWith("-")) { if (operands.length > 0) optionAfterOperand = true; } else operands.push(w);
       }
+      if (verb === "mv" && includeMovedSources) return [...targets, ...operands];
       const last = operands.length === 0 ? [] : [operands[operands.length - 1]!];
       for (let j = 0; j < rest.length; j += 1) {
         const w = rest[j]!;
@@ -963,7 +967,7 @@ function segmentWriteTargets(seg: string): string[] {
         if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
         const sub: string[] = [];
         for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== "\\;" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
-        targets.push(...segmentWriteTargets(sub.join(" ")));
+        targets.push(...segmentWriteTargets(sub.join(" "), includeMovedSources));
       }
       return targets;
     }
@@ -1073,6 +1077,14 @@ function escapeFloorHitIn(command: string, home: string | undefined, cwd?: strin
   }
   if (home === undefined || home.length === 0) return undefined;
   const bareHome = home.replace(/\/+$/, "");
+  const storageFence = homeFenceFor(bareHome);
+  // Approved escapes retain ordinary host execution. Cowork mentions are inspected only in
+  // write-shaped positions for integrity; encrypted disks/helper custody own confidentiality.
+  // Actual destructive targets include ancestors; a cd/du/find operand is not itself a write.
+  const storageOnly = { ...storageFence, dirs: [...(storageFence.coworkRoots ?? []), ...(storageFence.coordinationDir ? [storageFence.coordinationDir] : [])], files: [], segments: [] };
+  for (const segment of shellSegments(c)) for (const target of segmentWriteTargets(segment,true)) {
+    if (homeFenceTarget(target,cwd ?? "/",storageOnly)) return "Cowork control storage or host coordination";
+  }
   for (const { needle, writeOnly } of floorNeedles(bareHome)) {
     let at = c.indexOf(needle);
     while (at >= 0) {
@@ -1433,6 +1445,7 @@ function fileDiffPreToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pen
     pending.delete(pre.tool_use_id);
     try {
       const abs = resolveWithinAny(readRootsOf(deps.roots, deps.tmpDir), rawPath);
+      assertDaemonPathAccess(deps.home, abs, "/");
       let before = "";
       try {
         const st = statSync(abs);
@@ -1441,7 +1454,7 @@ function fileDiffPreToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pen
         // the cap is still read as "utf8" and diffed as text (same as the retired engine's
         // `diff-report.ts`/`fs-write.ts` never special-cased binary content either); a genuinely
         // binary target just produces a noisy/garbled patch rather than a wrong one.
-        before = readFileSync(abs, "utf8");
+        before = readDaemonTextFile(deps.home, abs);
       } catch {
         before = ""; // missing/unreadable → "" (new-file Write, or a target that never resolves)
       }
@@ -1470,7 +1483,7 @@ function fileDiffPostToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pe
     if (!snapshot || !deps.home) return allow();
     try {
       const abs = resolveWithinAny(readRootsOf(deps.roots, deps.tmpDir), snapshot.path);
-      const after = readFileSync(abs, "utf8");
+      const after = readDaemonTextFile(deps.home, abs);
       const { patch, added, removed } = computeLineDiff(snapshot.before, after);
       if (added === 0 && removed === 0) return allow(); // no-op — no chip, no patch file
       const diffId = mintDiffId();
@@ -1497,6 +1510,7 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
     if (!AUTO_DIAG_TOOL_NAMES.has(post.tool_name)) return allow();
     const suffix = await autoDiagnosticsSuffix({
       lsp: mgr,
+      home: deps.home,
       toolName: post.tool_name,
       toolInput: post.tool_input,
       cwd: post.cwd,

@@ -18,6 +18,11 @@ const fixtures: Record<string, unknown> = {
   // Winter Phase 8c (P8c-5): the runtime annotation fields extend this SAME canonical fixture
   // (never a second one — the Swift round-trip test pins the exact fixture COUNT, and
   // `session_created_with_mode` just below already covers the old/additive-field shape).
+  "workspace_sources_changed": { ...base, type: "workspace_sources_changed", workspaceId: "w_one", workspaceChangeId: "change_one", operationId: "op_one", workspaceRevision: 4, phase: "requested", sources: [{ sourceId: "source_one", sourceRevision: 2, desired: "present", state: "unavailable", ackRevision: null, restartRequired: true, reason: "access_revoked" }] },
+  "workspace_policy_changed": { ...base, type: "workspace_policy_changed", workspaceId: "w_one", workspaceChangeId: "change_two", operationId: "op_two", workspaceRevision: 5, policyRevision: 2, defaultRevision: 2, publicationRevision: 1, defaultPolicy: "plan", publication: "manual", phase: "metadata" },
+  "workspace_operation_changed": { ...base, type: "workspace_operation_changed", workspaceId: "w_one", workspaceChangeId: "change_three", operationId: "op_one", workspaceRevision: 5, status: "superseded", terminal: true, supersededBy: "op_two" },
+  "workspace_instructions_changed": { ...base, type: "workspace_instructions_changed", workspaceId: "w_one", workspaceChangeId: "change_five", operationId: "op_five", workspaceRevision: 7, instructionRevision: 2, digest: "a".repeat(64), refreshState: "current" },
+  "workspace_metadata_changed": { ...base, type: "workspace_metadata_changed", workspaceId: "w_one", workspaceChangeId: "change_four", operationId: "op_four", workspaceRevision: 6, change: "display" },
   "session_created": {
     ...base, type: "session_created", scope: "global",
     runtimeKind: "winter-agent", providerId: "openai", modelRef: "openai/gpt-5.6-sol",
@@ -26,6 +31,15 @@ const fixtures: Record<string, unknown> = {
   // shape — a dedicated fixture (distinct from session_created.json above) so Swift round-trips
   // one carrying it, mirroring approval_requested_with_reviewer_reason's with/without pattern.
   "session_created_with_mode": { ...base, type: "session_created", scope: "global", mode: "dispatch" },
+  // Cowork (session door): `cowork` is a RECOGNISED mode on the same additive field. Nothing creates a
+  // Cowork session (`session.create` refuses it), but a stored log, a replayed stream or a newer daemon can
+  // carry one, so Swift must decode and re-encode the value rather than drop or reject it.
+  // Session door D1: the SAME fixture also carries the additive `cowork` binding facts (no new fixture — the Swift
+  // round-trip test pins the exact count), so Swift decodes and re-encodes the nested object rather than dropping it.
+  "session_created_with_cowork_mode": {
+    ...base, type: "session_created", scope: "global", mode: "cowork",
+    cowork: { workspaceId: "w_one", projectId: null, location: "outputs", sourceId: null, policyRevision: 1 },
+  },
   "harness_attached": { ...base, type: "harness_attached", clientName: "orb" },
   "harness_detached": { ...base, type: "harness_detached", clientName: "orb" },
   "user_message": { ...base, type: "user_message", threadId: "main", text: "héllo \"world\" — done ✓", clientName: "cli-1" },

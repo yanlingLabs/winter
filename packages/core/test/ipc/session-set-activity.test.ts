@@ -520,7 +520,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
   });
 
   // A cowork-shaped session — mode written straight to the store, the idiom
-  // remote-chat-gate.test.ts established (there is no session.create or wire support for "cowork",
+  // remote-chat-gate.test.ts established (`session.create` refuses "cowork", so it cannot be minted,
   // deliberately). Cowork is on T2's participation allowlist, so a LOCAL caller must be able to set
   // its activity: this is the only end-to-end proof that the allowlist's second member works.
   function makeCoworkSession(store: SessionStore): string {

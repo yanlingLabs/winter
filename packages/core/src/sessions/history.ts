@@ -2,7 +2,7 @@ import { COMPUTER_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winte
 import type { SessionStore } from "./store";
 import { computerWakePhoneLine } from "./wake-phone-line";
 
-/** The persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+/** Persisted content, ComputerV2 wake and safe host control (workspace) event types history is allowed to return. Allowlist, never a
  *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
  *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
  *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
@@ -37,6 +37,7 @@ import { computerWakePhoneLine } from "./wake-phone-line";
  *  this file's 200-event default page size (some cacheable content is the overwhelming case) and
  *  harmless even so -- a stalled re-fetch of the same page, never a crash or data loss. */
 export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
+  "workspace_sources_changed", "workspace_policy_changed", "workspace_operation_changed", "workspace_metadata_changed", "workspace_instructions_changed",
   "user_message",
   "assistant_message",
   "turn_completed",

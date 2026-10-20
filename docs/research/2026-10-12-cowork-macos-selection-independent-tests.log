@@ -1,0 +1,352 @@
+bun test v1.3.14 (0d9b296a)
+
+test/cowork/folder-selections.test.ts:
+(pass) Mac folder preparation authority > opaque grant resolves through existing adapter without paths or readiness [7.35ms]
+(pass) Mac folder preparation authority > principal and connection are both mandatory, remote/runtime cannot prepare [0.90ms]
+(pass) Mac folder preparation authority > expiry/disconnect and shutdown release scopes and descriptors [1.48ms]
+(pass) Mac folder preparation authority > protected root, descendant, ancestor and symlink alias refuse [0.65ms]
+(pass) Mac folder preparation authority > replacement, relocation and new protected-root registration revoke lookup [1.30ms]
+(pass) Mac folder preparation authority > directory replacement during intake refuses before publishing without FD leaks [0.79ms]
+(pass) Mac folder preparation authority > existing host-selection adapter binds current connection and retains provisioning refusal [0.65ms]
+(pass) Mac folder preparation authority > bounded requests reject raw paths, invalid access and expose no paired methods [1.43ms]
+(pass) Mac folder preparation authority > actual Mac bookmark producer resolves only the disposable directory [1639.94ms]
+(pass) Mac folder preparation authority > request replay preserves grant and expiry, conflicting or expired replay never regrants [0.98ms]
+(pass) Mac folder preparation authority > production native resolver rejects a base64 path or malformed bookmark [0.45ms]
+
+test/ipc/cowork-workspace-api.test.ts:
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc/run/browser.sock
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9iZujc/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > host fixture create, effective acknowledgment, policy, source removal/revocation, operation and cold reload [85.36ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-53Ybxb/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-53Ybxb/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-53Ybxb": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-53Ybxb": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-53Ybxb/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-53Ybxb/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > paired scope filters lists, checks every record and source parent, and rechecks revocation [40.29ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-PnFZkz/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-PnFZkz/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-PnFZkz": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-PnFZkz": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-PnFZkz/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-PnFZkz/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > paired missing and out-of-scope identifiers have the same refusal [30.31ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-Ogf87a/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-Ogf87a/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-Ogf87a": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-Ogf87a": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-Ogf87a/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-Ogf87a/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > every paired route rejects a missing principal before malformed params [26.48ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ch4upv/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ch4upv/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ch4upv": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ch4upv": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ch4upv/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ch4upv/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > typed canonical policy setters enforce the host ceiling and scope idempotency to the RPC method [30.17ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-jseiLO/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-jseiLO/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-jseiLO": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-jseiLO": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-jseiLO/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-jseiLO/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > response budget rejects a mutation before commit and bounded pages preserve scoped cursors [32.58ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5gE1GI/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5gE1GI/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5gE1GI": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5gE1GI": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5gE1GI/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5gE1GI/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > production create stays blocked and raw grant/path/authority inputs never become host selections [26.13ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-cEiMaw/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-cEiMaw/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-cEiMaw": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-cEiMaw": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-cEiMaw/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-cEiMaw/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > small source receipts cannot commit an unreadable aggregate; admitted lifecycle changes stay readable [116.98ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-48Yri8/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-48Yri8/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-48Yri8": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-48Yri8": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-48Yri8/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-48Yri8/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > capability expansion reserves aggregate and list envelopes, not only its policy receipt [32.28ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-x5vpCh/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-x5vpCh/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-x5vpCh": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-x5vpCh": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-x5vpCh/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-x5vpCh/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > legacy oversized records remain discoverable with explicit summaries and scoped paged recovery [50.91ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-XJ9dHr/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-XJ9dHr/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-XJ9dHr": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-XJ9dHr": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-XJ9dHr/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-XJ9dHr/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > scoped source pages preserve complete details and refuse stale configuration cursors [38.81ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-s5rwlw/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-s5rwlw/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-s5rwlw": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-s5rwlw": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-s5rwlw/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-s5rwlw/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > detach acknowledgment invalidates content cursors instead of silently skipping a remaining source [30.31ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-nk4asx/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-nk4asx/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-nk4asx": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-nk4asx": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-nk4asx/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-nk4asx/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > detail cursors are bound to their workspace and detail kind before offsets are interpreted [27.89ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9a6qBS/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9a6qBS/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9a6qBS": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9a6qBS": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9a6qBS/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-9a6qBS/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > oversized legacy policies permit network and publication narrowing without discarding unrelated capabilities [46.44ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ZZhdtg/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ZZhdtg/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ZZhdtg": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ZZhdtg": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ZZhdtg/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-ZZhdtg/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > sequential legacy ceiling narrowing replays its original exact receipt before expansion admission [34.51ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5tMmCy/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5tMmCy/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5tMmCy": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5tMmCy": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5tMmCy/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-5tMmCy/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > legacy maximum-width source details page by serialized bytes and every source remains recoverable [37.80ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-DHmXRx/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-DHmXRx/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-DHmXRx": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-DHmXRx": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-DHmXRx/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-DHmXRx/run/browser.sock
+(pass) Cowork workspace API through a real isolated daemon and Unix RPC > a full workspace fitting by one byte still needs space for the single-entry Project list envelope [39.75ms]
+settings split: copied permissions.allow (the Computer default) into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-fAqmdQ/sdk
+builtin skills: computer-use seeded into <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-fAqmdQ/sdk/skills/computer-use/SKILL.md
+runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt
+credentials: openai absent, codex-oauth absent
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-fAqmdQ": using "com.winter.core.test-isolated" instead of "com.winter.core"
+runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked
+[keychain] WINTER_KEYCHAIN_SERVICE override honoured for non-default home "<user-temp>/T/winter-test-6bUAMb/winter-cowork-api-fAqmdQ": using "com.winter.core.test-isolated" instead of "com.winter.core"
+winter-core 0.124.0 listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-fAqmdQ/run/core.sock
+[browser-host] listening on <user-temp>/T/winter-test-6bUAMb/winter-cowork-api-fAqmdQ/run/browser.sock
+(pass) Mac selection RPCs enforce local authenticated roles, protected roots and disconnect cleanup [29.69ms]
+
+../protocol/test/methods.test.ts:
+(pass) SessionAttachParams > fromSeq defaults to 0 when omitted [0.17ms]
+(pass) lastSeq nonnegative > SessionListResult rejects negative lastSeq [0.53ms]
+(pass) lastSeq nonnegative > SessionAttachResult rejects negative lastSeq [0.10ms]
+(pass) scope regex > "abc-" rejected (trailing hyphen) [0.18ms]
+(pass) scope regex > "a" accepted (single char)
+(pass) scope regex > "a--b" accepted (consecutive interior hyphens are fine)
+(pass) scope regex > 41-char scope accepted [0.02ms]
+(pass) scope regex > 42-char scope rejected [0.03ms]
+(pass) agent method schemas > approval.respond params/result [0.15ms]
+(pass) agent method schemas > session.create accepts optional cwd (absolute) and approvalPolicy [0.07ms]
+(pass) agent method schemas > session.create accepts optional origin; session.list rows carry it (both optional, older shapes still parse) [0.08ms]
+(pass) agent method schemas > session.list rows carry an optional title (values already flow; this declares them) [0.02ms]
+(pass) agent method schemas > session.history params/result schemas [0.64ms]
+(pass) directory method schemas > session.addDir / session.setCwd params [0.14ms]
+(pass) SessionCreateResult.trusted > SessionCreateResult carries trusted [0.07ms]
+(pass) daemon.trustDir > daemon.trustDir params/result + method string [0.14ms]
+(pass) cwd '/' rejection > cwd '/' is rejected for create and setCwd (whole-fs guard) [0.04ms]
+(pass) bg.* method schemas > bg.* method schemas [0.24ms]
+(pass) session.steer / session.interrupt schemas > session.steer / session.interrupt schemas [0.22ms]
+(pass) session.compact schema > session.compact params/result + method string [0.26ms]
+(pass) skills.list schema > skills.list params/result + method string [0.30ms]
+(pass) skills.list schema > SkillMetaSchema.author is optional, round-trips when present (phase 5c Task 3) [0.02ms]
+(pass) skills.list schema > SkillMetaSchema admits source 'builtin' and optional claudeFormat; SkillsListResult parses a mixed list [0.03ms]
+(pass) skills.read/write/delete schemas (Phase 5c Task 3) > METHODS carries all three verbs
+(pass) skills.read/write/delete schemas (Phase 5c Task 3) > skills.read params: name required, cwd optional; result is {skill} with body [0.30ms]
+(pass) skills.read/write/delete schemas (Phase 5c Task 3) > skills.write params require name/description/body, no cwd/scope; result is empty [0.13ms]
+(pass) skills.read/write/delete schemas (Phase 5c Task 3) > skills.delete params: name only, no cwd/scope; result is empty [0.07ms]
+(pass) plugin schema: McpServerStatusSchema plugin-source widening > McpServerStatusSchema.source is widened to include "plugin" [0.16ms]
+(pass) ask_user.respond / task.list schemas > ask_user.respond params/result + method string [0.26ms]
+(pass) ask_user.respond / task.list schemas > ask_user.respond params accept optional notes, keyed like answers [0.03ms]
+(pass) ask_user.respond / task.list schemas > task.list params/result + method string [0.34ms]
+(pass) plan.respond / session.setPolicy schemas > ApprovalPolicy accepts plan; plan.respond + session.setPolicy params parse [0.22ms]
+(pass) plan.respond / session.setPolicy schemas > plan.respond params/result + method string [0.04ms]
+(pass) plan.respond / session.setPolicy schemas > session.setPolicy params/result + method string [0.12ms]
+(pass) plan.respond / session.setPolicy schemas > SessionListResult rows carry an optional approvalPolicy; older shapes without it still parse [0.05ms]
+(pass) plan.respond / session.setPolicy schemas > the row's approvalPolicy admits the internal chat value the setter's enum rejects [0.06ms]
+(pass) plan.respond / session.setPolicy schemas > an empty approvalPolicy is refused [0.04ms]
+(pass) session.setModel schema (Chat Slice D Task 1) > params: sessionId required non-empty, model is a nullable string (both string and null accepted) [0.43ms]
+(pass) session.setModel schema (Chat Slice D Task 1) > result is empty; METHODS carries the verb [0.02ms]
+(pass) session.create / session.list carry an optional per-session model (Chat Slice D Task 1) > SessionCreateParams accepts an optional model, absent by default [0.05ms]
+(pass) session.create / session.list carry an optional per-session model (Chat Slice D Task 1) > SessionListResult rows carry an optional model; older shapes without it still parse [0.03ms]
+(pass) session.setEffort schema (provider-correctness T4) > params: sessionId required non-empty, effort is a nullable string (both string and null accepted) [0.13ms]
+(pass) session.setEffort schema (provider-correctness T4) > the value is bounded but NOT enumerated — an unknown slug parses here and is refused by the daemon [0.04ms]
+(pass) session.setEffort schema (provider-correctness T4) > result is empty; METHODS carries the verb [0.02ms]
+(pass) session.setEffort schema (provider-correctness T4) > SessionListResult rows carry an optional effort; older shapes without it still parse [0.02ms]
+(pass) per-session effort ingress shapes (provider-correctness T6) > SyncPushParams.meta carries an optional effort, bounded by SESSION_EFFORT_MAX_CHARS [0.29ms]
+(pass) per-session effort ingress shapes (provider-correctness T6) > SyncPushParams.meta.effort is bounded but NOT enumerated — the tier drop is a handler rule [0.02ms]
+(pass) per-session effort ingress shapes (provider-correctness T6) > SessionCreateParams accepts an optional effort, absent by default [0.05ms]
+(pass) peripheral lease + dashboard read methods > METHODS carries the six peripheral verbs + four dashboard read methods [0.02ms]
+(pass) peripheral lease + dashboard read methods > peripheral.lease params/result: class enum + grant/held/no_provider/denied variants [0.54ms]
+(pass) peripheral lease + dashboard read methods > peripheral.renew / peripheral.release params/result [0.28ms]
+(pass) peripheral lease + dashboard read methods > peripheral.advertise / peripheral.revoke / peripheral.respond params/result [0.35ms]
+(pass) peripheral lease + dashboard read methods > daemon.status / quota.state shapes [0.31ms]
+(pass) peripheral lease + dashboard read methods > trust.list / trust.remove params/result [0.12ms]
+(pass) thread.list schema > thread.list params/result + method string [0.22ms]
+(pass) thread.send / agent.stop (child-transcript-view T1) > METHODS carries both verbs
+(pass) thread.send / agent.stop (child-transcript-view T1) > thread.send params: sessionId/agent/text all required non-empty [0.12ms]
+(pass) thread.send / agent.stop (child-transcript-view T1) > thread.send result: delivered is queued|resumed, agentId round-trips [0.09ms]
+(pass) thread.send / agent.stop (child-transcript-view T1) > agent.stop params: sessionId/agent required non-empty [0.06ms]
+(pass) thread.send / agent.stop (child-transcript-view T1) > agent.stop result: status is the full AgentStatus enum (running included, though the handler never returns it) [0.08ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > METHODS carries the six plugin verbs [0.02ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > plugin.register params/result [0.06ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > tool.register params/result: parameters optional, registeredAs required in result [0.23ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > tool.register name charset (final-review Fix 3): alphanumeric + single -/_ separators only — no __, no leading/trailing _, no other punctuation [0.11ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > shortcut.register params/result: description/default optional, id required [0.13ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > tile.update params/result: tile is an opaque record [0.06ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > provider.register params/result: reserved-minimal, info is an opaque record [0.06ms]
+(pass) plugin verbs (Phase 4b Task 1, spec §3) > plugin.toolResult params/result: mirrors peripheral.respond's shape minus alreadyResolved [0.06ms]
+(pass) plugins.contrib (Phase 4d Task 1, spec §6/§7 — read surface for PluginContribRegistry, NOT a plugin-role verb) > METHODS carries it
+(pass) plugins.contrib (Phase 4d Task 1, spec §6/§7 — read surface for PluginContribRegistry, NOT a plugin-role verb) > PluginsContribParams is empty; PluginsContribResult wraps an array of entries [0.13ms]
+(pass) plugins.contrib (Phase 4d Task 1, spec §6/§7 — read surface for PluginContribRegistry, NOT a plugin-role verb) > PluginContribEntrySchema: pluginId required, shortcuts/tile/provider all optional [0.07ms]
+(pass) plugin.revokeToken (Phase 4b Task 2, spec §3 — harness-role admin verb, NOT one of the six plugin verbs) > METHODS carries it; params require a non-empty pluginId; result is a plain ok [0.05ms]
+(pass) plugin.restart (final-review Fix 1 — restart rider, recovers a circuit-open plugin; harness/admin role like plugins.list, NOT one of the six plugin verbs) > METHODS carries it; params require a non-empty pluginId; result is a plain ok [0.06ms]
+(pass) hardware.request / hardware.respond (Phase 4c Task 1, spec §5) > METHODS carries both verbs
+(pass) hardware.request / hardware.respond (Phase 4c Task 1, spec §5) > hardware.request params: verb required, argsJson optional [0.09ms]
+(pass) hardware.request / hardware.respond (Phase 4c Task 1, spec §5) > hardware.request result: success|unknown_verb|consent_denied|no_provider|timeout|provider_error union [0.31ms]
+(pass) hardware.request / hardware.respond (Phase 4c Task 1, spec §5) > hardware.respond params/result: mirrors peripheral.respond's shape minus alreadyResolved, same precedent as plugin.toolResult [0.07ms]
+(pass) shortcut.invoke / tile.action (Phase 4d Task 2, spec §6/§7 — harness→plugin push) > METHODS carries both verbs
+(pass) shortcut.invoke / tile.action (Phase 4d Task 2, spec §6/§7 — harness→plugin push) > shortcut.invoke params: pluginId + shortcutId both required non-empty [0.10ms]
+(pass) shortcut.invoke / tile.action (Phase 4d Task 2, spec §6/§7 — harness→plugin push) > tile.action params: pluginId + actionId both required non-empty [0.09ms]
+(pass) shortcut.invoke / tile.action (Phase 4d Task 2, spec §6/§7 — harness→plugin push) > shortcut.invoke / tile.action result: ok | not_connected | unknown_plugin union [0.09ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > METHODS carries all four verbs [0.01ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > RoutineSchema mirrors the store's Routine shape and rejects policy "ask" [0.34ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > routines.create params: spec + prompt required; policy/cwd optional; policy "ask" rejected at the wire schema [0.34ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > routines.create result: {routine} [0.07ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > routines.list params/result [0.07ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > routines.update params: patch is enabled?/spec?/prompt?/policy? only (no cwd — narrower than the store's own patch shape) [0.43ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > routines.update result: {routine} [0.03ms]
+(pass) routines RPCs (Phase 5 routines T3, design doc §3) > routines.delete params/result [0.12ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > METHODS carries all five verbs [0.02ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > MemoryFactMetaSchema/MemoryFactSchema mirror the store's shapes [0.19ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > MemoryAuditLineSchema: sessionId/description optional, omitted when absent [0.17ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > memory.list params require scope, cwd optional + absolute [0.16ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > memory.read params require scope + name; result is {fact} [0.13ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > memory.write params: type defaults to 'user' when omitted; result is empty [0.15ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > memory.delete params/result [0.04ms]
+(pass) memory RPCs (Phase 5b Task 3, design doc §4) > memory.audit params: limit optional nonnegative; result is {lines} [0.13ms]
+(pass) ApprovalPolicy — 6 modes (SP-policies) > all six parse [0.02ms]
+(pass) ApprovalPolicy — 6 modes (SP-policies) > unknown mode rejected [0.02ms]
+(pass) ApprovalPolicy — 6 modes (SP-policies) > default is ask [0.04ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > METHODS carries all four verbs [0.02ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > WorkflowRunViewSchema mirrors WorkflowRunView (workflows/types.ts) field-for-field; rejects a bogus status [0.30ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > WorkflowSavedSchema: name/description/source, all required strings [0.10ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > workflow.list params: sessionId required, cwd optional; result is {running, saved} [0.17ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > workflow.run params: sessionId required; name/script/args all optional (exactly-one-of is handler-enforced, not the wire schema); result is {runId, status:'running'} [0.19ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > workflow.stop params/result: runId required; result is {ok:true, stopped} [0.12ms]
+(pass) workflow RPCs (CC-parity phase 3, Track C Task C2) > workflow.get params/result: runId required; result is {run: WorkflowRunView} [0.07ms]
+(pass) sync.config schema (provider-correctness T3) > sync.config params are empty; the result carries the catalogue and the effort [0.30ms]
+(pass) sync.config schema (provider-correctness T3) > models/defaultEffort are REQUIRED on the wire — the daemon always states them [0.08ms]
+(pass) sync.config schema (provider-correctness T3) > an empty catalogue and an unset effort are VALID — that is the never-synced answer [0.02ms]
+(pass) sync.config schema (provider-correctness T3) > a catalogue row needs a tag-shaped id, a providerId, a displayName AND an efforts array — no half rows [0.20ms]
+(pass) sync.config schema (provider-correctness T3) > clientEfforts is REQUIRED — a daemon that offers no tiers says `[]`, it never stays silent [0.06ms]
+(pass) sync.config schema (provider-correctness T3) > a client tier must be a non-empty string, like every other level on this wire [0.08ms]
+(pass) sync.config schema (provider-correctness T3) > provider is REQUIRED and NON-EMPTY — the one field with no 'I have none' sentinel [0.09ms]
+(pass) sync.config schema (provider-correctness T3) > the shape C1 exists for: a BYOK Mac states its provider beside an empty catalogue and a foreign slug [0.02ms]
+(pass) sync.config schema (provider-correctness T3) > efforts ride per model, and rows may legitimately disagree [0.03ms]
+(pass) sync.config schema (provider-correctness T3) > MIRROR TRIPWIRE — the field set is pinned; changing it means editing two Swift files by hand [0.02ms]
+(pass) PanelTabSchema (diff-tabs Task 7 fix round 1 — the mirror-staleness pin) > diffId is a DECLARED field — parse retains it (an undeclared key would be silently stripped) [0.13ms]
+(pass) PanelOpenTabParams diffId/kind pairing (fix-wave 2026-08-14, Item 1) > diffId present with kind "web" is refused; kind "diff" with no diffId still parses (the reverse is NOT required) [0.22ms]
+(pass) ProviderConfigureParams (WS-20: the anthropic auth-mode arm is gone) > the anthropic arm no longer parses at all [0.13ms]
+(pass) ProviderConfigureParams (WS-20: the anthropic auth-mode arm is gone) > the original openai-compatible arm still parses, unchanged [0.07ms]
+(pass) ProviderConfigureParams (WS-20: the anthropic auth-mode arm is gone) > a params object naming no arm's discriminant is refused [0.02ms]
+(pass) provider.login / provider.loginCode / provider.logout (O5, P10a-6) > provider.login params/result [0.10ms]
+(pass) provider.login / provider.loginCode / provider.logout (O5, P10a-6) > provider.login refuses a provider/kind this phase does not support [0.03ms]
+(pass) provider.login / provider.loginCode / provider.logout (O5, P10a-6) > provider.loginCode carries the one-time code and nothing else required [0.09ms]
+(pass) provider.login / provider.loginCode / provider.logout (O5, P10a-6) > provider.logout params shape matches provider.login's [0.02ms]
+(pass) provider.status (O5, P10a-3); WS-20: auth is gone, effective gains "both" > the anthropic block's three fields parse with the pinned enum [0.10ms]
+(pass) provider.status (O5, P10a-3); WS-20: auth is gone, effective gains "both" > a stray auth field is silently stripped — the key no longer exists on this schema [0.02ms]
+(pass) provider.status (O5, P10a-3); WS-20: auth is gone, effective gains "both" > effective accepts both/api-key/console/none; rejects junk [0.04ms]
+(pass) versions.get bundle records (Minor 5a, WS-23) > both records survive a real parse — not silently stripped [0.47ms]
+(pass) versions.get bundle records (Minor 5a, WS-23) > each record's schema is REQUIRED — omitting it refuses rather than silently stripping [0.06ms]
+(pass) versions.get bundle records (Minor 5a, WS-23) > the pre-WS-23 schema-1 runtimes record is refused, and each record is independently optional [0.03ms]
+(pass) versions.get bundle records (Minor 5a, WS-23) > bundle: null still parses (nothing staged) [0.01ms]
+(pass) SettingsSetSkillDeniedParams.name (Minor 5d) > accepts real skill-shaped names (lowercase alnum + dash) [0.07ms]
+(pass) SettingsSetSkillDeniedParams.name (Minor 5d) > refuses a name carrying `)` — cannot inject rule-grammar structure into Skill(<name>) [0.03ms]
+(pass) SettingsSetSkillDeniedParams.name (Minor 5d) > refuses whitespace, uppercase, and over-length names [0.04ms]
+(pass) WS-21 method schemas > mcp.add/remove/get gain scope (default local) and an optional cwd [0.78ms]
+(pass) WS-21 method schemas > the plugin methods are named like claude's CLI verbs, and plugin.enable/disable keep their keys [0.06ms]
+(pass) WS-21 method schemas > plugin params mirror Contract B (spec + scope, default user) [0.30ms]
+(pass) WS-21 method schemas > plugin results mirror Contract B's InstalledPlugin / PluginListing / MarketplaceInfo [0.72ms]
+(pass) session.send / session.steer images, session.stageImage imagesOnSend > images is optional on both; each entry is a positive n and a bounded, non-empty path [0.28ms]
+(pass) session.send / session.steer images, session.stageImage imagesOnSend > stageImage's imagesOnSend is optional (an older daemon omits it) and only ever true [0.08ms]
+
+ 171 pass
+ 0 fail
+ 1124 expect() calls
+Ran 171 tests across 3 files. [2.72s]

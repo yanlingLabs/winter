@@ -19,6 +19,7 @@
 ## Migration C (old layout to `sdk/`)
 - `migration/migrate-c.ts`, for a home with real `projects/` or `skills/`: `MIGRATION_C_PHASE1` at the boot hook after the lock and settings load (preflight refuses BOOT on a live lease, an unexpected `sdk/`, an unreconcilable official working copy or unconvertible plugins; moved dirs leave relative compatibility links), `MIGRATION_C_PHASE2` at the late site through the router (official roots, transcript re-key, archive, done).
 - Only the profile's default home migrates itself; another old-layout home refuses `sdk_home_migration_required` until `winter migrate --sdk-home [--home <dir>] [--resume|--rollback|--status] [--yes]` (daemon stopped); a half-migrated one refuses `sdk_home_half_migrated` until `--resume`/`--rollback`. `--status` is always allowed and never acts; `--rollback` never reverts what the user did after the upgrade.
+- Migration C never moves, copies or removes Cowork storage: preflight and resume also refuse while a Cowork workspace is not `stopped` or a volume still records a writable owner (the runtime-state rewrites already exclude Cowork-bound sessions), and a manifest that names a `cowork/` path refuses resume, phase 2 and rollback. [cowork.md](./cowork.md#storage-lifecycle-records-and-guards-only).
 - Stored model tags are never rewritten: `runtime-sdk/model-tag.ts` `canonicalModelTag` resolves a catalog rename ON READ (live settings view, runtime-state row decoders, `ModelTagSchema`'s transform), only when the old tag no longer resolves and the new one does.
 
 ## Saved answers

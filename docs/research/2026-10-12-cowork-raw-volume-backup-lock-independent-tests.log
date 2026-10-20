@@ -1,0 +1,33 @@
+bun test v1.3.14 (0d9b296a)
+
+packages/core/test/cowork/volumes.test.ts:
+(pass) plan has no filesystem effect; materialization produces bounded sparse private unformatted images [41.28ms]
+(pass) geometry, purpose, format and mandatory controller authority refuse without file effects [11.59ms]
+(pass) a cold reopen retains exact volume IDs and writable owner until native stop proof [22.33ms]
+(pass) permission, replacement, geometry, directory identity and hardlink drift refuse without repair [12.99ms]
+(pass) geometry drift and malformed ownership refuse while data remains intact [10.32ms]
+(pass) symlinks never follow through image or backing directory [10.02ms]
+(pass) unknown existing images are preserved when exclusive creation refuses [8.54ms]
+(pass) lost exclusion blocks future open; partial allocation retries its pinned virgin inode [10.26ms]
+(pass) crash at creation-intent never loses or replaces an existing file [9.04ms]
+(pass) crash at image-created never loses or replaces an existing file [8.94ms]
+(pass) crash at backup-excluded never loses or replaces an existing file [10.15ms]
+(pass) crash at image-sized never loses or replaces an existing file [9.94ms]
+(pass) backup path replacement during exclusion refuses; recorded old inode remains preserved [8.67ms]
+(pass) v9 upgrades an old host-only v7 home; empty downgrade preserves native state and populated volumes refuse [27.85ms]
+(pass) real tmutil adapter excludes only disposable images, with sticky metadata preserved on rename [2422.03ms]
+(pass) directory creation crash and nested effect transactions fail closed without automatic adoption [8.34ms]
+(pass) v8 authority upgrades without reidentifying a workspace, and a genuinely empty v8 rollback remains supported [16.51ms]
+(pass) outer claim/open rollback cannot publish an uncommitted owner or writable descriptor [13.75ms]
+(pass) outer release/claim/open rollback cannot restore one owner beside another writable descriptor [22.67ms]
+(pass) failed transaction completion closes an opened descriptor without retaining a local handle [20.57ms]
+(pass) named backup helpers stay outside writer transactions while pinned checks run inside [12.35ms]
+(pass) open revalidates exclusion after external backup check and closes its pending descriptor [10.44ms]
+(pass) open revalidates replacement after external backup check and closes its pending descriptor [9.45ms]
+(pass) open revalidates owner after external backup check and closes its pending descriptor [9.79ms]
+(pass) sticky exclusion parses bounded plist strings across equivalent binary encodings [0.83ms]
+
+ 25 pass
+ 0 fail
+ 333 expect() calls
+Ran 25 tests across 1 file. [2.77s]

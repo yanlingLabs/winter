@@ -18,6 +18,439 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceChangeId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_sources_changed"
+        },
+        "sources": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sourceId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+              },
+              "sourceRevision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "desired": {
+                "type": "string",
+                "enum": [
+                  "present",
+                  "removed"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "preparing",
+                  "ready",
+                  "unavailable",
+                  "removing",
+                  "detached"
+                ]
+              },
+              "ackRevision": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "restartRequired": {
+                "type": "boolean"
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "access_revoked",
+                      "source_unavailable"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "sourceId",
+              "sourceRevision",
+              "desired",
+              "state",
+              "ackRevision",
+              "restartRequired",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "requested",
+            "acknowledged",
+            "refetch"
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "workspaceId",
+        "workspaceChangeId",
+        "operationId",
+        "workspaceRevision",
+        "type",
+        "sources",
+        "phase"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceChangeId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_policy_changed"
+        },
+        "policyRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "defaultRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "publicationRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "defaultPolicy": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "dont-ask",
+            "ask",
+            "accept-edits",
+            "auto",
+            "bypass"
+          ]
+        },
+        "publication": {
+          "type": "string",
+          "enum": [
+            "github-only-feature-branches",
+            "manual"
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "const": "metadata"
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "workspaceId",
+        "workspaceChangeId",
+        "operationId",
+        "workspaceRevision",
+        "type",
+        "phase"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceChangeId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_operation_changed"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applied",
+            "blocked",
+            "failed",
+            "superseded"
+          ]
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "supersededBy": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "workspaceId",
+        "workspaceChangeId",
+        "operationId",
+        "workspaceRevision",
+        "type",
+        "status",
+        "terminal"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceChangeId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_metadata_changed"
+        },
+        "change": {
+          "type": "string",
+          "enum": [
+            "created",
+            "display",
+            "lifecycle",
+            "conversation-bound"
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "workspaceId",
+        "workspaceChangeId",
+        "operationId",
+        "workspaceRevision",
+        "type",
+        "change"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceChangeId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+        },
+        "workspaceRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_instructions_changed"
+        },
+        "instructionRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refreshState": {
+          "type": "string",
+          "enum": [
+            "current",
+            "refresh-required",
+            "unavailable"
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "workspaceId",
+        "workspaceChangeId",
+        "operationId",
+        "workspaceRevision",
+        "type",
+        "instructionRevision",
+        "digest",
+        "refreshState"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "type": {
           "type": "string",
           "const": "session_created"
@@ -31,7 +464,8 @@
           "enum": [
             "code",
             "dispatch",
-            "chat"
+            "chat",
+            "cowork"
           ]
         },
         "runtimeKind": {
@@ -48,6 +482,57 @@
         "modelRef": {
           "type": "string",
           "minLength": 1
+        },
+        "cowork": {
+          "type": "object",
+          "properties": {
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+            },
+            "projectId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "location": {
+              "type": "string",
+              "enum": [
+                "source",
+                "outputs"
+              ]
+            },
+            "sourceId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "policyRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "workspaceId",
+            "projectId",
+            "location",
+            "sourceId",
+            "policyRevision"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

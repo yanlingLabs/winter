@@ -193,7 +193,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
         const rec = { session, detached: 0, refreshed: 0 };
         attachments.push(rec);
         return { address: `winter-agent:session:${session.backendSessionId}`, ready: Promise.resolve(), refresh: () => { rec.refreshed++; }, detach: () => { rec.detached++; } };
-      }) as unknown as WinterSessionDeps["messaging"]["attach"],
+      }) as unknown as NonNullable<WinterSessionDeps["messaging"]>["attach"],
     },
     records: {
       bumpGeneration: () => ({ generation: ++h.records.generation }),
@@ -392,6 +392,15 @@ describe("startWinterSession — one incarnation", () => {
     expect(h.attachments[0]!.session).toMatchObject({ sessionId: "s_x", backendSessionId: "be-x", mode: "chat", generation: 1 });
     expect(h.attachments[0]!.session.query).toBe(h.q() as unknown as Query);
     expect(h.attachments[0]!.session.status?.()).toBe("idle");
+  });
+
+  test("a Cowork session given the router's messaging still never attaches it: its system/init records the facts and attaches nothing", async () => {
+    const h = harness({ mode: "cowork" });
+    await h.session.open();
+    h.q().emit(init(h.q().options, ["Read"]));
+    await h.settled();
+    expect(h.session.init).toEqual({ sessionId: "be-x", model: "winter-test/echo", tools: ["Read"] });
+    expect(h.attachments).toHaveLength(0);
   });
 
   test("send: user_message (the client's name), then beginTurn's turn_started, then the push; the result closes the turn", async () => {
@@ -837,6 +846,81 @@ describe("startWinterSession — one incarnation", () => {
       rs.close();
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  test("nested child progress keeps its waiting ancestors alive but not an unrelated child", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-nested-stall-"));
+    const rs = openRuntimeStateDb(home);
+    let next = 1, now = 0;
+    const pending = new Map<number, { fn: () => void; at: number }>();
+    const timers = {
+      set(fn: () => void, ms: number): unknown { const id = next++; pending.set(id, { fn, at: now + ms }); return id; },
+      clear(handle: unknown): void { pending.delete(handle as number); },
+    };
+    const advance = (ms: number) => {
+      const target = now + ms;
+      while (true) {
+        const due = [...pending].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (due === undefined) break;
+        pending.delete(due[0]); now = due[1].at; due[1].fn();
+      }
+      now = target;
+    };
+    let h: Harness | undefined;
+    try {
+      const registry = createPersistedChildren({ store: new RuntimeChildren(rs), profiles: new ChildProfiles(home), providerId: () => "openai", timers, now: () => now, stallTimeoutMs: () => 1000 });
+      h = harness({ children: childrenSinkFor(registry, "s_x", () => {}) });
+      await h.session.open(); h.q().emit(init(h.q().options)); await h.session.send("nested work", "cli");
+      h.q().emit({ type: "assistant", message: { content: [
+        { type: "tool_use", id: "parent", name: "Agent", input: { prompt: "delegate" } },
+        { type: "tool_use", id: "unrelated", name: "Agent", input: { prompt: "go quiet" } },
+      ] } });
+      h.q().emit({ type: "assistant", parent_tool_use_id: "parent", message: { content: [
+        { type: "tool_use", id: "grandchild", name: "Agent", input: { prompt: "work" } },
+      ] } });
+      await h.settled();
+      expect(seen(h, "thread_started").find((e) => "threadId" in e && e.threadId === "grandchild")).toMatchObject({ parentThreadId: "parent" });
+      for (let window = 0; window < 10; window++) {
+        advance(900);
+        // Both persisted content and transient deltas carry the GRANDCHILD's immediate id.
+        h.q().emit(window % 2 === 0
+          ? { type: "assistant", parent_tool_use_id: "grandchild", message: { content: [{ type: "text", text: `work ${window}` }] } }
+          : { type: "stream_event", parent_tool_use_id: "grandchild", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `work ${window}` } }, uuid: `nested-${window}`, session_id: "be-x" });
+        await h.settled();
+        expect(registry.get("parent", "s_x")?.status).toBe("running");
+        expect(registry.get("grandchild", "s_x")?.status).toBe("running");
+      }
+      expect(now).toBe(9000);
+      expect(registry.get("unrelated", "s_x")?.status).toBe("timeout");
+      expect(pending.size).toBe(2);
+      h.q().emit({ type: "user", parent_tool_use_id: "parent", message: { content: [{ type: "tool_result", tool_use_id: "grandchild", content: "done" }] } });
+      await h.settled();
+      expect(registry.get("grandchild", "s_x")?.status).toBe("completed");
+      // A completed child's late frame cannot keep its former ancestor alive.
+      advance(900);
+      h.q().emit({ type: "assistant", parent_tool_use_id: "grandchild", message: { content: [{ type: "text", text: "late" }] } });
+      await h.settled();
+      advance(200);
+      expect(registry.get("parent", "s_x")?.status).toBe("timeout");
+      expect(pending.size).toBe(0);
+    } finally {
+      await h?.session.end(); rs.close(); rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed child lineage cycles relay progress once per thread without hanging", async () => {
+    const progress: string[] = [];
+    const h = harness({ children: { started() {}, completed() {}, progress: (id) => { progress.push(id); } } });
+    try {
+      await h.session.open(); h.q().emit(init(h.q().options)); await h.session.send("cycle", "cli");
+      for (const [id, parent] of [["outer", "inner"], ["inner", "outer"]]) {
+        h.q().emit({ type: "assistant", parent_tool_use_id: parent, message: { content: [{ type: "tool_use", id, name: "Agent", input: { prompt: "malformed lineage" } }] } });
+      }
+      await h.settled(); progress.length = 0;
+      h.q().emit({ type: "stream_event", parent_tool_use_id: "inner", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "progress" } }, uuid: "cycle-delta", session_id: "be-x" });
+      await h.settled();
+      expect(progress).toEqual(["inner", "outer"]);
+    } finally { await h.session.end(); }
   });
 
   // WS-23 (reasoning-state, decision 5): `compact` reaches a LIVE child's `Query.compact` (the SDK's
@@ -1782,4 +1866,23 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
     expect(h.session.turnRunning).toBe(false);
     expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
+});
+
+test("unprotected Code receives no extra hook and never consults Cowork observation", async () => {
+  let q!: FakeQuery, observed = 0;
+  const runtime = {
+    sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => (q = new FakeQuery(prompt, options)) as unknown as Query }, trackQuery() {}, untrack() {},
+    codeExecution: { enroll: ({ options }: { options: Options }) => ({ options, generationId: "ordinary", protectedStorage: false,
+      observe() { observed++; throw new Error("unprotected observer must be unreachable"); }, noteHook() {}, async completeHook() {}, dispose() {} }) },
+  } as unknown as WinterRuntimeSdk;
+  const h = harness({ runtime, mode: "code" }); await h.session.open(); expect(q.options.hooks).toBeUndefined();
+  q.emit(init(q.options, ["Bash"])); await h.settled(); await h.session.send("ordinary task", "fixture");
+  q.emit({ type: "assistant", uuid: "ordinary-batch", session_id: "be-x", message: { content: [
+    { type: "tool_use", id: "ordinary-call", name: "Bash", input: { command: "fixture" } }, { type: "text", text: "ordinary output" },
+  ] } });
+  await h.settled();
+  expect(observed).toBe(0);
+  expect(h.events.some(event => event.type === "tool_call" && event.callId === "ordinary-call")).toBe(true);
+  expect(h.events.some(event => event.type === "agent_error" && event.code === "host_execution_refused")).toBe(false);
+  q.end(); await h.session.done;
 });

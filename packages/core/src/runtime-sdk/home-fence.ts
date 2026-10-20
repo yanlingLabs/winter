@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { CONTROL_PLANE_FILENAMES, type HomeFence } from "./control-plane";
 import { selfGrantDenyWrite } from "./mode-options";
+import { COWORK_CONTROL_ENTRIES, protectedHostStorageFences, type HostStorageFenceOptions } from "./host-storage-fence";
+export * from "./host-storage-fence";
 
 /**
  * **What no agent may write under Winter's home — ONE list, three fences** (whole-branch review,
@@ -29,11 +31,11 @@ import { selfGrantDenyWrite } from "./mode-options";
  *  - `<home>/cache` — wholesale: the run folders and the router's quarantine live there (WS-21), and
  *    nothing legitimate writes the cache through a tool.
  */
-export function homeFencedDirs(home: string): string[] {
+export function homeFencedDirs(home: string, options?: HostStorageFenceOptions): string[] {
   // The sandbox's SELF-GRANT list — never its protected-path entries (review I7: those are a card for a
   // write tool, and this list is the write-tool fence's hard deny).
   // LITERAL real paths, never `childSandboxConfigFor`'s `[[]` glob spelling (C-1): both consumers compare real paths.
-  const fromSandbox = selfGrantDenyWrite(home);
+  const fromSandbox = selfGrantDenyWrite(home, options);
   return [...new Set([...fromSandbox, join(home, "agents"), join(home, "cache")])];
 }
 
@@ -49,7 +51,7 @@ export function homeFencedDirs(home: string): string[] {
  * lies under one (`isHomeWriteOnly`). The escape floor matches one only as a whole path segment
  * (`<home>/computer-use-notes.txt` is not `<home>/computer-use`), a glob after it still counting.
  */
-export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins", "sdk/plugins", "computer-use"];
+export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins", "sdk/plugins", "computer-use", "cowork"];
 
 /** Whether a fenced path, relative to `<home>`, is one the escape floor refuses in a write-shaped
  *  position only. */
@@ -73,6 +75,9 @@ export const PROJECT_FENCED_SEGMENTS: readonly string[] = [".winter/agents/"];
  *  (`controlPlaneFileTarget` + `homeFencedFiles`). */
 export const ESCAPE_FENCED_FILENAMES: readonly string[] = [...CONTROL_PLANE_FILENAMES, "trust.json", ".winter.json"];
 
-export function homeFenceFor(home: string): HomeFence {
-  return { dirs: homeFencedDirs(home), files: homeFencedFiles(home), segments: PROJECT_FENCED_SEGMENTS };
+export function homeFenceFor(home: string, options?: HostStorageFenceOptions): HomeFence {
+  const active = protectedHostStorageFences(home, options);
+  return { dirs: homeFencedDirs(home, options), files: homeFencedFiles(home), segments: PROJECT_FENCED_SEGMENTS,
+    coworkRoots: active.homes.map((h) => join(h, "cowork")), coordinationDir: active.coordinationDirs[0],
+    readDirs: [...active.homes.flatMap((h) => [join(h, "runtimes"), join(h, "run")]), ...active.coordinationDirs], controlEntries: COWORK_CONTROL_ENTRIES };
 }

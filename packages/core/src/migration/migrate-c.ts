@@ -33,7 +33,7 @@
 // router keeps `reconcileRootForRecovery` for exactly this and for boot recovery.
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
@@ -49,6 +49,7 @@ import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
 import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
 import { settingsSplitMarkerPath, splitSettingsToSdk } from "./settings-split";
 import { legacyPluginDirNames } from "../plugins/convert-legacy";
+import { isCoworkStorageRel, resolvesIntoCoworkStorage } from "./cowork-exclusion";
 
 export type MigrationCStep = "preflight" | "reconcile-official-roots" | "move-dirs" | "copy-files"
   | "split-settings" | "convert-plugins" | "runtime-state" | "rekey-transcripts" | "archive" | "done";
@@ -288,11 +289,73 @@ function leaseProblem(home: string, probe: LeaseProbe | undefined): string | und
   }
 }
 
+/**
+ * docs/cowork-execution-contracts.md, "Host storage authority, fences and migration" (Migration C): Cowork
+ * ownership that is live or not provably stopped refuses the migration. Migration C never touches Cowork
+ * storage (its moves are the fixed `SDK_COMPAT_LINKS`, and `hostRuntimePredicate` keeps guest sessions out
+ * of every runtime-state rewrite), so this is the contract's blanket rule rather than a conflict with a
+ * specific step: a workspace that is not `stopped`, or a volume that still records a writable owner, is
+ * uncertain ownership and nothing moves until it is resolved.
+ */
+function coworkOwnershipProblem(home: string): string | undefined {
+  if (!existsSync(join(home, "runtimes", "runtime-state.db"))) return undefined;
+  let rs;
+  try { rs = openRuntimeStateDb(home, { readonly: true }); } catch (err) {
+    return `runtime-state.db cannot be read (${(err as Error).name}) — Cowork ownership cannot be checked; repair it first (\`winter doctor\`)`;
+  }
+  try {
+    const has = (table: string): boolean => rs.db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table) !== null;
+    if (has("cowork_workspaces")) {
+      const live = rs.db.query<{ workspace_id: string; power: string }, []>("SELECT workspace_id, power FROM cowork_workspaces WHERE power != 'stopped' ORDER BY workspace_id LIMIT 1").get();
+      if (live) return `Cowork workspace ${live.workspace_id} is not provably stopped (${live.power}) — stop it, or let its owner be recovered, before migrating`;
+    }
+    if (has("cowork_volumes")) {
+      const owned = rs.db.query<{ workspace_id: string }, []>("SELECT workspace_id FROM cowork_volumes WHERE owner_json IS NOT NULL ORDER BY workspace_id LIMIT 1").get();
+      if (owned) return `Cowork workspace ${owned.workspace_id} still records a writable disk owner — its stop must be confirmed before migrating`;
+    }
+    return undefined;
+  } catch (err) {
+    return `Cowork ownership cannot be read (${(err as Error).name}) — repair runtime-state.db first (\`winter doctor\`)`;
+  } finally {
+    rs.close();
+  }
+}
+
+/**
+ * The same contract, for the data-driven half: a resumed or rolled-back run moves what its on-disk manifest
+ * names. A manifest that names a path under `cowork/` (hand-edited, or written by a future bug) is refused
+ * before a single rename — Migration C never moves, copies or removes Cowork storage.
+ */
+export function coworkManifestProblem(m: MigrationCManifest): string | undefined {
+  const rel = (p: string): string => {
+    const clean = normalize(isAbsolute(p) ? relative(m.home, p) : p);
+    return clean.split(sep).join("/");
+  };
+  // Every field a later step turns into a rename/removal target: the move lists, the archive and backup
+  // locations, the reconciled roots, and the transcript keys and names the re-key step joins under sdk/projects.
+  const named = [
+    ...m.moved.flatMap((e) => [e.from, e.to]), ...(m.displaced ?? []).flatMap((e) => [e.from, e.to]),
+    ...(m.moving === undefined ? [] : [m.moving.from, m.moving.to]), ...m.links, ...m.copied, ...m.archived.flatMap((e) => [e.from, e.to]),
+    m.archiveDir, ...Object.values(m.backups ?? {}).filter((p): p is string => typeof p === "string"), ...m.reconciled.map((r) => r.root),
+    ...(m.rekeyed ?? []).flatMap((e) => [e.from, e.to].flatMap((key) => [["sdk", "projects", key].join(sep), ...e.entries.map((name) => ["sdk", "projects", key, name].join(sep))])),
+  ];
+  const outside = (p: string): boolean => { const r = rel(p); return r === ".." || r.startsWith("../"); };
+  // Lexical first, then through the filesystem: relative paths are appended to the recorded home WITHOUT `join` (which would
+  // collapse `..` before the kernel could apply it to a symlink's target), so a symlinked parent (`innocent` ->
+  // `cowork/workspaces/ws`, `innocent/../ws2/...`) or a case-different spelling (`COWORK/...`) is still Cowork storage.
+  const cowork = named.find((p) => typeof p === "string" && (isCoworkStorageRel(rel(p)) || resolvesIntoCoworkStorage(m.home, isAbsolute(p) ? p : `${m.home}${sep}${p}`)));
+  if (cowork !== undefined) return `its manifest names Cowork storage (${cowork}); a migration never moves, copies or removes it`;
+  const escaped = named.find((p) => typeof p === "string" && outside(p));
+  return escaped === undefined ? undefined : `its manifest names a path outside the home (${escaped})`;
+}
+
 /** Why phase 1 cannot run on this home, or `undefined`. Every check that can refuse runs BEFORE the
  *  first byte moves. */
 export function migrationCPreflightProblem(home: string, deps: Pick<MigrationCDeps, "reconcileAvailable" | "convertLegacyPlugins" | "probe">): string | undefined {
   const lease = leaseProblem(home, deps.probe);
   if (lease !== undefined) return lease;
+  const cowork = coworkOwnershipProblem(home);
+  if (cowork !== undefined) return cowork;
   const sdk = sdkPreflightProblem(home);
   if (sdk !== undefined) return sdk;
   if (!deps.reconcileAvailable) {
@@ -412,7 +475,7 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
   try {
     const records = new RuntimeSessionRecords(rs);
     const rows = rs.db.query<{ id: string; kind: string; backend: string; key: string }, []>(
-      "SELECT winter_session_id AS id, runtime_kind AS kind, backend_session_id AS backend, transcript_project_key AS key FROM runtime_sessions WHERE backend_session_id IS NOT NULL ORDER BY winter_session_id",
+      `SELECT winter_session_id AS id, runtime_kind AS kind, backend_session_id AS backend, transcript_project_key AS key FROM runtime_sessions WHERE backend_session_id IS NOT NULL AND ${hostRuntimePredicate(rs.db)} ORDER BY winter_session_id`,
     ).all();
     for (const row of rows) {
       let entry = m.rekeyed.find((e) => e.sessionId === row.id);
@@ -446,6 +509,16 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
   } finally { rs.close(); }
   if (moved > 0) log(`migration C: ${moved} session transcript(s) re-keyed to the canonical cwd`);
   return { moved, notMoved: collisions };
+}
+
+/** Cowork store keys and /workspace paths belong to the guest; host cwd canonicalization never owns
+ * them. Old rollback stores predate Cowork; a v8 store missing its binding table is corrupt, not empty. */
+function hostRuntimePredicate(db: Database): string {
+  const exists = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cowork_conversations'").get();
+  if (exists) return "NOT EXISTS (SELECT 1 FROM cowork_conversations cc WHERE cc.session_id = runtime_sessions.winter_session_id)";
+  const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+  if (version >= 8) throw new MigrationCRefused("sdk_home_migration_refused", "Cowork conversation bindings are missing from the runtime-state database; host migration cannot classify guest sessions safely");
+  return "1=1";
 }
 
 /**
@@ -491,6 +564,10 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
   if (state.kind === "parsed" && state.manifest.status !== "rolled-back") {
     m = state.manifest;
     if (m.status === "complete") return m;
+    const manifestProblem = coworkManifestProblem(m);
+    if (manifestProblem !== undefined) throw new MigrationCRefused("sdk_home_half_migrated", `Migration C cannot resume: ${manifestProblem}`);
+    const ownership = coworkOwnershipProblem(home);
+    if (ownership !== undefined) throw new MigrationCRefused("sdk_home_migration_refused", `Migration C refused: ${ownership}`);
   } else {
     if (!isOldLayout(home)) throw new MigrationCRefused("nothing_to_resume", `${home} is not in the old layout — nothing to migrate`);
     const problem = migrationCPreflightProblem(home, deps);
@@ -647,13 +724,14 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
         const oldPrefix = `${join(home, "projects")}/`;
         const newPrefix = `${join(sdkHomeFor(home), "projects")}/`;
         const roots = officialRoots(home);
-        const rewritten = rs.db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [newPrefix, oldPrefix.length + 1, oldPrefix.length, oldPrefix]).changes;
+        const hostOnly = hostRuntimePredicate(rs.db);
+        const rewritten = rs.db.run(`UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ? AND ${hostOnly}`, [newPrefix, oldPrefix.length + 1, oldPrefix.length, oldPrefix]).changes;
         let cleared = 0;
         for (const root of roots) {
           const like = `${root}%`;
-          cleared += rs.db.run("UPDATE runtime_generations SET config_dir = NULL WHERE config_dir LIKE ?", [like]).changes;
-          cleared += rs.db.run("UPDATE runtime_generations SET local_write_root = NULL, local_write_root_kind = NULL WHERE local_write_root LIKE ?", [like]).changes;
-          cleared += rs.db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root LIKE ?", [like]).changes;
+          cleared += rs.db.run(`UPDATE runtime_generations SET config_dir = NULL WHERE config_dir LIKE ? AND winter_session_id IN (SELECT winter_session_id FROM runtime_sessions WHERE ${hostOnly})`, [like]).changes;
+          cleared += rs.db.run(`UPDATE runtime_generations SET local_write_root = NULL, local_write_root_kind = NULL WHERE local_write_root LIKE ? AND winter_session_id IN (SELECT winter_session_id FROM runtime_sessions WHERE ${hostOnly})`, [like]).changes;
+          cleared += rs.db.run(`UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root LIKE ? AND ${hostOnly}`, [like]).changes;
         }
         detail = { backendRootsRewritten: rewritten, staleConfigDirRowsCleared: cleared };
       } finally { rs.close(); }
@@ -729,6 +807,8 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
     throw new MigrationCRefused("nothing_to_resume", "Migration C phase 2 needs a completed phase 1");
   }
   const m = state.manifest;
+  const manifestProblem = coworkManifestProblem(m);
+  if (manifestProblem !== undefined) throw new MigrationCRefused("sdk_home_half_migrated", `Migration C cannot finish: ${manifestProblem}`);
   const done = (step: MigrationCStep): boolean => m.steps.some((s) => s.step === step);
   const record = (step: MigrationCStep, status: "done" | "skipped", detail?: Record<string, unknown>): void => {
     m.steps.push({ step, status, at: now().toISOString(), ...(detail === undefined ? {} : { detail }) });
@@ -826,6 +906,7 @@ function rawRuntimeState(home: string, fn: (db: Database) => void): void {
   const db = new Database(path);
   try {
     db.run("PRAGMA busy_timeout = 5000");
+    db.run("PRAGMA secure_delete = FAST"); // every writable runtime-state handle zeroes freed pages (peer-message bodies)
     db.transaction(() => fn(db))();
   } finally { db.close(); }
 }
@@ -853,6 +934,8 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
   if (state.kind === "unreadable") throw new MigrationCRefused("nothing_to_rollback", `${migrationCManifestPath(home)} does not parse — nothing can be rolled back from it`);
   const m = state.manifest;
   if (m.status === "rolled-back") throw new MigrationCRefused("nothing_to_rollback", "Migration C was already rolled back");
+  const manifestProblem = coworkManifestProblem(m);
+  if (manifestProblem !== undefined) throw new MigrationCRefused("sdk_home_migration_refused", `Migration C rollback refused: ${manifestProblem} — nothing was restored`);
 
   // Round 3, minor 1: the schema step FIRST — before any archive restore or `backend_root` reversal — so
   // a store that cannot step back (a newer build's schema, a broken reference) refuses the rollback with
@@ -911,7 +994,7 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
     rawRuntimeState(home, (db) => {
       const sdkPrefix = `${join(sdkHomeFor(home), "projects")}/`;
       const oldPrefix = `${join(home, "projects")}/`;
-      db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
+      db.run(`UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ? AND ${hostRuntimePredicate(db)}`, [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
     });
   }
   // copy-files → the copies moved aside (a user edit to one after the upgrade is kept, not lost)

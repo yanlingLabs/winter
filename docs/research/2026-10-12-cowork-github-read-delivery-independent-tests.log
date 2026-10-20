@@ -1,0 +1,33 @@
+bun test v1.3.14 (0d9b296a)
+
+test/cowork/git/read-authority.test.ts:
+(pass) canonical preparation authority is revision/incarnation/repository-bound and leaves source preparing [46.45ms]
+(pass) account/source revocation during host resolution cannot revive readiness or accept late ACK [64.33ms]
+(pass) runtime reads require actual ready ACK, active binding, explicit source scope and effective capability [27.44ms]
+(pass) restoring scope contents at a later revision does not restore prior read authority [32.27ms]
+(pass) read completion does not invent a guest ACK; SecretStore await rechecks canonical revocation [27.90ms]
+(pass) final synchronous scope cannot return stale workspace or mutable account authority [82.81ms]
+(pass) final scope resolution cannot return a stopped worker even with unchanged source revisions [66.58ms]
+(pass) task source scope changes at final snapshot cannot reuse its earlier grant [51.45ms]
+(pass) final transport authority cut never releases bytes after the worker stops in final scope resolution [58.21ms]
+(pass) REVIEW final scope await cannot authorize a stopped workspace [36.28ms]
+(pass) REVIEW final transport recheck refuses stop during final scope await [52.01ms]
+(pass) REVIEW upload body owns a snapshot even when caller supplies Buffer [54.21ms]
+(pass) REVIEW SYNC-CONTRACT final scope await cannot authorize a stopped workspace [65.01ms]
+(pass) REVIEW SYNC-CONTRACT final transport recheck refuses stop during final scope await [55.69ms]
+(pass) REVIEW queued stop must precede refusal or follow the synchronous result copy [56.67ms]
+
+test/cowork/git/read-transport.test.ts:
+(pass) production read entry refuses before credential/packet/network work until sandboxed parser admission exists [0.14ms]
+(pass) only canonical host metadata determines destination/auth; guest URLs/headers are never forwarded [0.38ms]
+(pass) redirects/status/type/encoding, credential reflection and credential-bearing exceptions fail safely [0.34ms]
+(pass) body/packet/object expansion bounds reject before guest delivery [3.33ms]
+(pass) mid-stream revoke closes the admitted read without delivering partial bytes [1.35ms]
+(pass) stalled revision change, cancellation, duration and concurrent admission are bounded [18.95ms]
+(pass) real Git clone + incremental fetch through private fake upstream keep credentials/helpers out of guest [438.16ms]
+(pass) Buffer input is an owned snapshot; caller mutation during secret lookup cannot alter validated POST [0.63ms]
+
+ 23 pass
+ 0 fail
+ 96 expect() calls
+Ran 23 tests across 2 files. [1432.00ms]

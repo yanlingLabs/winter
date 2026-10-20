@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+  "sdkCommit": "7e71929d0231be2d77645bfa47ee2b550f3add22",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -12,7 +12,11 @@
   },
   "zig": {
     "version": "0.14.1",
-    "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa"
+    "archiveSha256": "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa",
+    "archiveUrl": "https://ziglang.org/download/0.14.1/zig-aarch64-macos-0.14.1.tar.xz",
+    "linuxArchiveSha256": "f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b",
+    "linuxArchiveUrl": "https://ziglang.org/download/0.14.1/zig-aarch64-linux-0.14.1.tar.xz",
+    "note": "Both are the official ziglang.org archives (the digests equal the ones in ziglang.org/download/index.json for 0.14.1). The macOS one is what the local pins were made with; the Linux one is what the one-run image build uses. image.py accepts either; whether the two hosts produce byte-identical outputs is exactly what that run records."
   },
   "keys": [
     {
@@ -62,13 +66,96 @@
   "builderCommit": "180d3effd7ddbb9406aeea0912f76c78ef20cf75",
   "packageLockSha256": "b0127b7a8f1fa2f8b2a06236cef26e1f1b297bacf9d70e800440df8747d93252",
   "expectedArtifact": {
-    "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
-    "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
-    "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+    "runtimeSha256": "c13918b426d62615640280df47d8e1b4602cddb486c20e4ce15942d635472217",
+    "cpioSha256": "90ac299e8dfbc023af1e02999d9fb30b10555fbd57f37da30a67020501f9a241",
+    "rootManifestSha256": "22d863cb4a370c3fa16eab99c0a28389b3d4c665560583e8445e857e74a201a4",
     "helperBinarySha256": {
-      "file-worker.c": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2",
-      "linux-tool-compartment.c": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1",
-      "process-worker.c": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156"
+      "file-worker.c": "f26932e539aac05448de0ab6d346b5fb5fd653580a9d938ea2086cd82f6f29cc",
+      "linux-runtime-compartment.c": "40049e5cb751d720a20dc957aaabb66a8ab74710ad5039d8f26448139278534a",
+      "linux-session-owner.c": "0ca42e9f22fdccfb3a67b74434c5c4a34e225169e728fa1b495dd1d4fc49df42",
+      "linux-tool-compartment.c": "c0316ffc4fab7e0a5da2cc667dae583eff27ea3a636d011f0bec29a5185869cd",
+      "process-worker.c": "f63d9212c01e60930a956a87806a7240ab8dd98ed9de9d2ac1bfbd6b2dd91a16"
     }
+  },
+  "sdkPin": {
+    "previousCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+    "intermediateCommits": [
+      "093fb3ead915d967e8a01b358abdbcc39a76f447"
+    ],
+    "mainAt": "7e71929d0231be2d77645bfa47ee2b550f3add22",
+    "mergedPullRequests": [
+      27,
+      28,
+      29,
+      30
+    ],
+    "contains": [
+      "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])"
+    ],
+    "supervisorSha256": "2c5be1e8b2cf30956ae14f3ca02224db52aeb4387c2eac22ceceb49a875ceaa8",
+    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) are source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests."
+  },
+  "guest": {
+    "target": "aarch64-linux-musl",
+    "zig": "0.14.1",
+    "programs": {
+      "init": {
+        "binarySha256": "dede7fd9ddc9eb954c29cb989b689e059f6f3b223618c4f66a392f13aee6f498",
+        "sourceSha256": "231aeafe9276ff5251c5a92efdf522f807805aa3807b28d0f01247c1d597b913"
+      },
+      "winter-guest-relay": {
+        "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",
+        "sourceSha256": "a48cfea696d832294419dc274c065027c14c928aedc5170e7775ce31d0c8dadb"
+      }
+    },
+    "scripts": {
+      "guest_bootstrap.py": {
+        "sha256": "24c035e88771ff5efb010b6ac028e8815e4a932952e4c4bd875aef3f74909fc1"
+      }
+    },
+    "scriptPaths": {
+      "guest_bootstrap.py": "bootstrap/guest_bootstrap.py"
+    },
+    "buildCommand": "python3 -I -S -B apple/Cowork/WinterCoworkGuest/build.py --zig <pinned zig> --out <fresh directory>"
+  },
+  "previousExpectedArtifact": {
+    "sdkCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
+    "expectedArtifact": {
+      "runtimeSha256": "4eee5d4ce741b5e6aab0e8345f067d4fb9c08cdbb1c5b0a0aef22d36b3000c08",
+      "cpioSha256": "83abcaf8807966b8ae293c10bae4059ffc450076d68d7eb871fd5faf40e522e3",
+      "rootManifestSha256": "2a14c91bd7c6cabf331dfa4fbb879a7a12939455526ad346f7d993844279d114",
+      "helperBinarySha256": {
+        "file-worker.c": "8fc771e368d0023ac4a15c598e746ca4ebf01d8be7c4fcb56a01645ecc7260f2",
+        "linux-tool-compartment.c": "8e25216ed26f59da65c8ac01de758631e7cc7e871994175da74ceb9cdb3bc2d1",
+        "process-worker.c": "ea0cec51eafa0b8e320b8629d0e8009d9d50e83061f7e01f7dea490998baf156"
+      }
+    }
+  },
+  "runtimeArtifacts": {
+    "launcher": {
+      "source": "linux-runtime-compartment.c",
+      "sourceSha256": "fcb90dba8cf9552b9c10cde4012603ac9471b03f31a09bc408667257f65842fa",
+      "target": "aarch64-linux-musl",
+      "path": "/opt/winter/helpers/linux-runtime-compartment",
+      "binarySha256": "40049e5cb751d720a20dc957aaabb66a8ab74710ad5039d8f26448139278534a"
+    },
+    "ownerLibrary": {
+      "source": "linux-session-owner.c",
+      "sourceSha256": "c149d451eaa79442dfd41e9375c891ae8c9a06135d2cfc85851bcc8b5ce51fd8",
+      "target": "aarch64-linux-gnu.2.36",
+      "path": "/opt/winter/helpers/linux-session-owner.so",
+      "binarySha256": "0ca42e9f22fdccfb3a67b74434c5c4a34e225169e728fa1b495dd1d4fc49df42"
+    },
+    "executable": {
+      "entry": "scripts/guest-host-query/runtime.ts",
+      "path": "/opt/winter/runtime/winter-host-query",
+      "sha256": "c13918b426d62615640280df47d8e1b4602cddb486c20e4ce15942d635472217"
+    }
+  },
+  "pnpm": {
+    "version": "10.34.6",
+    "url": "https://github.com/pnpm/pnpm/releases/download/v10.34.6/pnpm-linux-arm64",
+    "sha256": "5e18e460aec11c0d39b345a732fbbdee0811354f6f384e2da230c6438ae2137c",
+    "note": "The official standalone Linux ARM64 binary (the digest equals the one GitHub publishes for the release asset). Used only to provision the SDK's locked dependencies, with --frozen-lockfile --ignore-scripts, in the one-run image build; the SDK's own CI uses pnpm 10."
   }
 }

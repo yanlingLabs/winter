@@ -1,0 +1,9 @@
+
+> winter-monorepo@ typecheck:core <workspace>/.worktrees/guest-supervisor
+> tsc --noEmit -p packages/core
+
+packages/core/test/cowork/guest-runtime.test.ts(317,147): error TS2322: Type 'CapabilityCeiling | { readonly toolClasses: readonly ["read"]; readonly hostServices: string[]; readonly connectors: string[]; readonly network: "none" | "internet"; }' is not assignable to type 'CapabilityCeiling | undefined'.
+  Type '{ readonly toolClasses: readonly ["read"]; readonly hostServices: string[]; readonly connectors: string[]; readonly network: "none" | "internet"; }' is not assignable to type 'CapabilityCeiling'.
+    Types of property 'toolClasses' are incompatible.
+      The type 'readonly ["read"]' is 'readonly' and cannot be assigned to the mutable type 'string[]'.
+ ELIFECYCLE  Command failed with exit code 2.

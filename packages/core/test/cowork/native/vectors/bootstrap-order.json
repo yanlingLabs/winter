@@ -1,0 +1,466 @@
+{
+  "version": 1,
+  "note": "`events` is one incarnation's bootstrap-class messages in arrival order (`down` host to guest, `up` guest to host). `result` is coworkNativeBootstrapOrder: the first message that breaks the order, or ok. \"Once per incarnation\" is enforced by the two ends (host sender, guest), never by the stateless frame parser.",
+  "cases": [
+    {
+      "name": "full-sequence",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "name": "no-conversation-set",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "name": "bootstrap-fault-after-hello",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "up",
+          "t": "fault"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fault-answering-the-set",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "up",
+          "t": "fault"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "name": "conversations-before-mounted",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 4,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "conversations-before-ready",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 3,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "conversations-without-any-plan",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 1,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "second-conversation-set",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 7,
+        "reason": "second_conversations"
+      }
+    },
+    {
+      "name": "second-set-before-the-answer",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 6,
+        "reason": "second_conversations"
+      }
+    },
+    {
+      "name": "runtime-ready-without-a-set",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 5,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "runtime-ready-before-mounted",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 4,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "duplicate-runtime-ready",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 7,
+        "reason": "duplicate_runtime_ready"
+      }
+    },
+    {
+      "name": "plan-before-hello",
+      "events": [
+        {
+          "dir": "down",
+          "t": "plan"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 0,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "mounted-travelling-down",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "down",
+          "t": "mounted"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 4,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "fault-before-hello",
+      "events": [
+        {
+          "dir": "up",
+          "t": "fault"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 0,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "unknown-message",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "reboot"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 1,
+        "reason": "out_of_order"
+      }
+    }
+  ]
+}

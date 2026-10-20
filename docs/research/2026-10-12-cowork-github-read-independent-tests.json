@@ -1,0 +1,7 @@
+{
+  "commit": "a242e538984bf328f89830530cf69449d948ec1c",
+  "exitCode": 1,
+  "command": "bun test test/cowork/git/read-authority.test.ts test/cowork/git/read-transport.test.ts",
+  "independentProbes": "three expectations appended only in disposable frozen checkout",
+  "dependencies": "output-integration installed packages; reviewed local protocol override"
+}

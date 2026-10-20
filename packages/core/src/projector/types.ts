@@ -6,11 +6,13 @@
 import type { ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeKind } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
+import type { DrivableSessionMode, RunnableSessionMode } from "../sessions/session-mode";
 
 export type { ProtocolSdkMessage };
 
-/** `code` | `dispatch` | `chat` — the same three the session store records (`sessions/store.ts`). */
-export type SessionMode = "code" | "dispatch" | "chat";
+/** `code` | `dispatch` | `chat` — the modes that can run (`sessions/session-mode.ts`'s `RunnableSessionMode`);
+ *  the protocol's recognised-but-unrunnable `cowork` never reaches a projector. */
+export type SessionMode = RunnableSessionMode;
 
 /** The projector's logging surface. Structural and tiny on purpose: `packages/core` has no Logger
  *  type, every module logs through `console`, and a projector that took one would drag a new
@@ -94,7 +96,8 @@ export class ProjectorRefusedError extends Error {
 export interface ProjectorDeps {
   /** The WINTER session id every produced event is stamped with. */
   sessionId: string;
-  mode: SessionMode;
+  /** "cowork" only from the Cowork session driver; nothing here branches on it (a debug field). */
+  mode: DrivableSessionMode;
   /** The store's next sequence number. Called once per PERSISTED event; transients never consume one. */
   nextSeq: () => number;
   checkpoint: CheckpointStore;

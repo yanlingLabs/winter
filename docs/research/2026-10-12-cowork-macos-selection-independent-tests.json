@@ -1,0 +1,8 @@
+{
+  "commit": "55eb17eed0f7d76014d18364e32d81e86a9aaad0",
+  "exitCode": 0,
+  "command": "bun test test/cowork/folder-selections.test.ts test/ipc/cowork-workspace-api.test.ts ../protocol/test/methods.test.ts",
+  "dependencies": "temporary links to output-integration installed packages; winter-protocol explicitly targets reviewed checkout",
+  "initialAttempt": "missing dependencies, no tests executed",
+  "scope": "isolated fixture registry/bookmark/local IPC tests; no app or VM launch"
+}

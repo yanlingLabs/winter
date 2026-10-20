@@ -49,6 +49,11 @@ describe("projector/event-coverage: the relocated exhaustiveness maps", () => {
     // about the call reaches the stream) and one to the host's push path. A history type that is
     // `false` here AND absent from this table is the failure this test exists to catch.
     const NON_PROJECTOR_PRODUCERS: Partial<Record<string, string>> = {
+      workspace_sources_changed: "cowork/workspace-events.ts — daemon durable outbox",
+      workspace_policy_changed: "cowork/workspace-events.ts — daemon durable outbox",
+      workspace_operation_changed: "cowork/workspace-events.ts — daemon durable outbox",
+      workspace_instructions_changed: "cowork/workspace-events.ts — daemon durable outbox",
+      workspace_metadata_changed: "cowork/workspace-events.ts — daemon durable outbox",
       user_message: "the host's push path (P8b-5) — ipc/server.ts's session.send / the Winter prompt queue",
       approval_requested: "runtime-sdk/approval-bridge.ts (Task 8), plus daemon.ts:143-213 for peripheral leases",
       approval_resolved: "runtime-sdk/approval-bridge.ts (Task 8), plus daemon.ts:143-213",

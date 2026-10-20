@@ -1,0 +1,23 @@
+bun test v1.3.14 (0d9b296a)
+
+test/cowork/git/read-authority.test.ts:
+140 |   try { result = await transport.read({ ...f.caller, sessionId: "session" }, f.request); } catch (e) { error = e; } finally { Buffer.from = from; }
+141 |   expect(f.records.get(f.caller.workspaceId).power).toBe("stopped");
+142 |   if (result !== undefined) {
+143 |     // read() builds its final owned result via Buffer.from(resultBytes) immediately before return.
+144 |     // A queued stop after that synchronous cut cannot retract already completed bytes.
+145 |     expect(copyPower).toBe("starting");
+                            ^
+error: expect(received).toBe(expected)
+
+Expected: "starting"
+Received: "stopped"
+
+      at <anonymous> (<frozen-checkout>/packages/core/test/cowork/git/read-authority.test.ts:145:23)
+(fail) REVIEW queued stop must precede refusal or follow the synchronous result copy [78.22ms]
+
+ 0 pass
+ 9 filtered out
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [245.00ms]

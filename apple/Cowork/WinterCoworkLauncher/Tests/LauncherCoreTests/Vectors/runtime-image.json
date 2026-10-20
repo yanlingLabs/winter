@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "note": "runtimeImageDigest = SHA-256 of the 64 bytes SHA-256(kernel) || SHA-256(initramfs.cpio), each the RAW 32 byte digest. Nothing else is covered.",
+  "positive": [
+    {
+      "name": "kernel-and-initramfs",
+      "kernelSha256": "579c9bec1854fb64dfdf550940f795e5f70bdd3e4e2deee455077a0ac0239c64",
+      "initramfsSha256": "0b080f207e0153bac62c6bce707d8a10255e8a261a4af38970a4236235799dc2",
+      "runtimeImageDigest": "51b8c13eca0709aae6396cd6e4c8e6aa8bcc6cf3515cee5f9cd574deebb2642b"
+    },
+    {
+      "name": "order-matters",
+      "kernelSha256": "0b080f207e0153bac62c6bce707d8a10255e8a261a4af38970a4236235799dc2",
+      "initramfsSha256": "579c9bec1854fb64dfdf550940f795e5f70bdd3e4e2deee455077a0ac0239c64",
+      "runtimeImageDigest": "a69940bef12669aee222ba42a1c62c398e528b4ece49c5d60f2b593429f90c00"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { authorityFixtureSessions } from "../cowork/committed-sessions";
 // WS-21 L3.7 (spec §8): Migration C on a fixture home in the old layout — a Winter-leg session, an
 // official-leg session whose `claude-config` working copy holds one extra trailing entry, a subagent,
 // memory, provider-state, the moved settings keys, and a DeepSeek tag in provider.model, pins and
@@ -13,8 +14,9 @@ import {
   MigrationCRefused, finishMigrationC, isOldLayout, migrationCCompletePath, migrationCManifestPath, migrationCState,
   planMigrationC, recordLazyRekey, rollbackMigrationC, runMigrationC,
 } from "../../src/migration/migrate-c";
-import { openRuntimeStateDb } from "../../src/runtime-state/db";
+import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
 import { RuntimeSessionRecords } from "../../src/runtime-state/records";
+import { CoworkRepository } from "../../src/cowork/repository";
 import { convertLegacyPluginsForMigration } from "../../src/plugins/convert-legacy";
 import { readSdkGlobalConfig, readSdkSettings } from "../../src/sdk-files";
 import { canonicalModelTag, setCatalogKeysForTests } from "../../src/runtime-sdk/model-tag";
@@ -716,7 +718,7 @@ describe("rollback", () => {
   test("the v7→v6 step runs first: a store that cannot step back refuses typed, with NOTHING undone", async () => {
     const { home, key } = fixture();
     await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
-    { const db = new Database(join(home, "runtimes", "runtime-state.db")); db.run("PRAGMA user_version = 8"); db.close(); } // a newer build's store
+    { const db = new Database(join(home, "runtimes", "runtime-state.db")); db.run(`PRAGMA user_version = ${RUNTIME_STATE_SCHEMA_VERSION + 1}`); db.close(); } // a newer build's store
     await expect(rollbackMigrationC(home, { log: () => {} })).rejects.toMatchObject({ name: "MigrationCRefused", code: "sdk_home_migration_refused" });
     expect(existsSync(join(home, "permissions"))).toBe(false);                                  // the archive not restored
     expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(true);                     // move-dirs not reversed
@@ -823,6 +825,33 @@ describe("round 3: the bulk canonical-cwd re-key", () => {
     const rs = openRuntimeStateDb(home);
     try { return rs.db.query<{ k: string; b: string; h: string }, [string]>("SELECT transcript_project_key AS k, backend_root AS b, transcript_health AS h FROM runtime_sessions WHERE winter_session_id = ?").get(sid)!; } finally { rs.close(); }
   };
+  test("Cowork bindings exclude guest transcript keys and backend roots from host canonicalization", async () => {
+    const { home, moving, colliding, rawKey, canonKey } = symlinkedFixture();
+    const rs = openRuntimeStateDb(home);
+    const repo = new CoworkRepository(rs);
+    const created = repo.create({ principalId: "fixture", requestId: "create" }, {
+      ownership: "project", title: "migration fixture", sources: [{ kind: "folder", label: "fixture", access: "read-write", detail: { grantRef: "grant_fixture", rootIdentity: "root_fixture" } }],
+      ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" },
+    });
+    const workspace = created.value.workspace, source = created.value.sources[0]!;
+    const epoch = repo.beginIncarnation(workspace.workspaceId, "fixture_incarnation", created.revision);
+    repo.acknowledgeSource(epoch, source.sourceId, source.revision, "ready");
+    repo.bindConversation({ principalId: "fixture", requestId: "bind", expectedRevision: created.revision }, workspace.workspaceId, { sessionId: moving, sourceId: source.sourceId }, authorityFixtureSessions(moving));
+    rs.db.run("UPDATE cowork_workspaces SET power='stopped' WHERE workspace_id=?", [workspace.workspaceId]);
+    const beforeBinding = repo.binding(moving);
+    const beforeRoot = join(home, "projects", rawKey);
+    rs.close();
+    const volume = join(home, "cowork/workspaces", workspace.workspaceId, "data.ext4");
+    write(volume, "fixture guest volume, dirty repositories and SDK store identities");
+    const m = await runMigrationC(home, deps({ reconcile: async () => "clean" }));
+    expect(row(home, moving)).toMatchObject({ k: rawKey, b: beforeRoot, h: "clean" });
+    expect(m.rekeyed?.some(entry => entry.sessionId === moving)).toBe(false);
+    expect(row(home, colliding).b).toBe(join(home, "sdk/projects", rawKey));
+    expect(readFileSync(volume, "utf8")).toBe("fixture guest volume, dirty repositories and SDK store identities");
+    const after = openRuntimeStateDb(home);
+    try { expect(new CoworkRepository(after).binding(moving)).toEqual(beforeBinding); } finally { after.close(); }
+    expect(canonKey).not.toBe(rawKey);
+  });
 
   test("moves the transcript, sidecars and subagents to the canonical key, re-points the record, records the move — after the reconcile", async () => {
     const { home, moving, rawKey, canonKey } = symlinkedFixture();

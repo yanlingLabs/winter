@@ -1,3 +1,4 @@
+import { advanceAuthorityRevision } from "../authority-revision";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { hasShellHazards } from "./shell-scan";
@@ -341,6 +342,7 @@ function writeFileAtomic(path: string, content: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, content);
   renameSync(tmp, path);
+  advanceAuthorityRevision(path);
 }
 
 function statOrNull(path: string): Stats | null {

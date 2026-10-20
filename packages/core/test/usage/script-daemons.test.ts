@@ -54,6 +54,7 @@ const NO_DAEMON_OF_ITS_OWN: Record<string, string> = {
   "scripts/release.test.ts": "tests the release's helpers; boots none",
   "scripts/release-lib.test.ts": "tests the release's helpers; boots none",
   "scripts/rename/codemod.test.ts": "the rename codemod's fixtures (strings)",
+  "scripts/embed-cowork-native.test.ts": "tests the Cowork native embed script's helpers; names winter-core as a string, boots none",
 };
 
 /** Every script file (any language this repo writes them in), tests included. */

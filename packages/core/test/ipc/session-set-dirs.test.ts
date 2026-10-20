@@ -178,7 +178,7 @@ describe("session.setDirs (working-directories T3)", () => {
 
   // A cowork-shaped session — mode written straight to the store, the idiom
   // session-set-activity.test.ts (and remote-chat-gate.test.ts before it) established: there is no
-  // session.create/wire support for "cowork", deliberately.
+  // `session.create` refusal of "cowork" (it cannot be minted), deliberately.
   function makeCoworkSession(store: SessionStore): string {
     const id = store.createSession("global");
     (store as any).db.run("UPDATE sessions SET mode = ? WHERE session_id = ?", ["cowork", id]);

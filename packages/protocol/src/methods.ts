@@ -1,3 +1,4 @@
+import { COWORK_METHODS, CoworkSessionCreate, CoworkSessionRef } from "./cowork";
 import { z } from "zod";
 // `SessionActivity` is defined in ./events (not here, where its first consumer `SessionListResult`
 // lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
@@ -5,7 +6,7 @@ import { z } from "zod";
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
 import { NDJSON_MAX_LINE_BYTES } from "./ndjson";
-import { SessionEvent, UserMessageImageRef, UserMessageFileRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
+import { SessionEvent, SessionModeSchema, UserMessageImageRef, UserMessageFileRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -177,7 +178,12 @@ export const SessionCreateParams = z.object({
   // axis; passing "code" is a no-op.
   // Chat Mode Slice A: "chat" added — additive, NOT a singleton (many chat sessions may exist).
   // The handler rejects it for remote callers only (Mac-local for this slice).
-  mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Cowork (session door): "cowork" is wire-expressible so the daemon can answer it with a TYPED refusal
+  // instead of a generic schema error, and the handler refuses it for EVERY role (local, harness, remote,
+  // plugin) before any model resolution, row, run folder or child: `{code: "unsupported_topology"}`, the
+  // same error the Cowork workspace doors give while the host integration gates are closed. Nothing can
+  // create or run a Cowork session yet; docs/cowork-host-protocol.md adds the workspace binding later.
+  mode: SessionModeSchema.optional(),
   // Chat Slice D Task 1: an optional per-session model override, stamped at creation time —
   // additive/optional so every existing caller (CLI, WinterKit, the phone) that never sends it is
   // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
@@ -193,6 +199,13 @@ export const SessionCreateParams = z.object({
   // `model` — it does not ride `session_created` and resets to absent on a full index rebuild.
   // Bounded — see SESSION_EFFORT_MAX_CHARS.
   effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
+  // Cowork session door (D1 spine): the conversation's workspace binding — present exactly when `mode` is "cowork".
+  // NOT a schema refinement on purpose: while no session door exists the daemon answers a `mode: "cowork"` request
+  // with its typed `unsupported_topology` refusal whether or not a binding is present (every client today sends
+  // none), so the presence rule and the host-derived-fields rule (no cwd/approvalPolicy/model/effort/origin beside it
+  // — `approvalPolicy` carries a `.default("ask")`, so that one is checked on the RAW params) live in ipc/server.ts,
+  // AFTER that refusal. A binding that is present but malformed fails this schema first, like an unknown mode.
+  cowork: CoworkSessionCreate.optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -233,6 +246,10 @@ export const SessionListResult = z.object({
     // every session created before this field existed, or created without one.
     origin: z.string().optional(),
     mode: z.string().optional(),            // "dispatch" for the singleton; absent = code
+    // Cowork session door (D1 spine): a Cowork row's workspace reference (`workspaceId`, `projectId` or null for a
+    // standalone workspace). Declared ahead of its producer, which lands with the creation door; absent on every row
+    // today, since no Cowork session can be created. Never a host path, label or grant.
+    cowork: CoworkSessionRef.optional(),
     parentSessionId: z.string().optional(), // set on dispatch children
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.
@@ -1537,8 +1554,6 @@ export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuer: 
  */
 export const CapabilitiesListParams = z.object({});
 
-export const SessionModeSchema = z.enum(["code", "dispatch", "chat"]);
-
 /** One capability tool's static facts (`capabilities/names.ts`'s `WINTER_CAPABILITY_TOOLS`,
  *  mirrored exactly) plus its LIVE per-mode exposure — whether the child actually gets this tool in
  *  each mode TODAY, derived by calling `runtime-sdk/mode-options.ts`'s `disallowedToolsFor` (never
@@ -1558,7 +1573,12 @@ export const CapabilityToolInfoSchema = z.object({
    *  to). `true` is the older "every mode" spelling, still valid. Absent means loaded up front. */
   deferred: z.union([z.literal(true), z.array(SessionModeSchema)]).optional(),
   /** Per-mode: whether the child is actually handed this tool today (`!disallowedToolsFor(mode).includes(name)`). */
-  exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean() }),
+  exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean(),
+    /** Optional and NEVER emitted today: Cowork is recognised but not runnable (`SESSION_MODES`), there is no
+     *  Cowork tool surface to describe, and a `false` here would make the Mac Library tab render every tool as
+     *  "withheld in cowork" (an absent mode means "the daemon said nothing" to it). Declared so a future daemon
+     *  that does describe a Cowork surface is a schema-valid answer, not so this one says anything. */
+    cowork: z.boolean().optional() }),
 });
 
 export const CapabilityServerInfoSchema = z.object({
@@ -3549,6 +3569,7 @@ export const PanelReadDiffResult = z.object({
 });
 
 export const METHODS = {
+  ...COWORK_METHODS,
   hello: "protocol.hello",
   sessionCreate: "session.create",
   sessionList: "session.list",

@@ -1,0 +1,298 @@
+import { COWORK_RPC, COWORK_INSTRUCTION_MAX_BYTES, CoworkSessionCreate, type CoworkMethod, type CoworkParams, type CoworkResult, type CoworkWorkspace, type CoworkWorkspacePolicy } from "@yanlinglabs/winter-protocol";
+import { constants, openSync, closeSync, fstatSync, statSync, readSync } from "node:fs";
+import { resolve } from "node:path";
+import type { WinterClient } from "./client";
+
+export const COWORK_CLI_USAGE = `usage:
+  winter workspace|project [list] [--limit N] [--cursor TOKEN] [--json]
+  winter workspace|project get <id> [--json]
+  winter workspace|project update <id> --title TEXT --revision N --request-id ID [--json]
+  winter workspace source list <workspaceId> [--limit N] [--cursor TOKEN] [--revision N] [--json]
+  winter workspace source get <workspaceId> <sourceId> [--json]
+  winter workspace source remove|revoke <workspaceId> <sourceId> --revision N --request-id ID [--json]
+  winter workspace source add-folder|add-repository <workspaceId> --selection-id ID --revision N --request-id ID [--json]
+  winter workspace policy get <workspaceId> [--limit N] [--cursor TOKEN] [--revision N] [--json]
+  winter workspace|project policy set-default <id> --policy POLICY --revision N --request-id ID [--json]
+  winter workspace policy set-publication <workspaceId> --publication manual|github-only-feature-branches --revision N --request-id ID [--json]
+  winter workspace policy set-ceiling <workspaceId> --ceiling-json JSON --revision N --request-id ID [--json]
+  winter workspace schedule list <workspaceId> [--limit N] [--cursor TOKEN] [--json]
+  winter workspace schedule create <workspaceId> --definition-json JSON --request-id ID [--json]
+  winter workspace schedule status|cancel <workspaceId> <scheduleId> [--revision N] [--json]
+  winter workspace instructions get|provenance <workspaceId> [--json]
+  winter workspace instructions update <workspaceId> --instruction-revision N --digest SHA256 (--content TEXT | --stdin | --content-file FILE) --request-id ID [--allow-empty] [--json]
+  winter workspace operation get <workspaceId> <operationId> [--json]
+  winter workspace session create <workspaceId> --source ID [--cwd RELATIVE] --request-id ID [--json]
+  winter workspace session list <workspaceId> [--json]
+
+Creation is unavailable. A Cowork conversation is created with session create and then
+used by its session id (winter -p, attach); every production daemon refuses it today. Source provisioning is gated by the daemon; add commands
+accept an existing opaque host selection ID. This CLI does not issue selections.
+Guidance input accepts one content source, at most ${COWORK_INSTRUCTION_MAX_BYTES} UTF-8 bytes with no NUL.
+--stdin reads to EOF; --stdin and --content-file keep guidance text out of argv.
+Zero-byte --stdin/--content-file input is refused (a failed producer would blank the guidance) unless --allow-empty; --content "" clears it explicitly.
+POLICY: plan|dont-ask|ask|accept-edits|auto|bypass.`;
+
+export interface CoworkCliRoute { method: CoworkMethod; params: CoworkParams<CoworkMethod>; json: boolean }
+export type CoworkCliResult = CoworkResult<CoworkMethod>;
+type Flags = Record<string, string | true>;
+const visible = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200e\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+function argumentsOf(args: string[]): { flags: Flags; positions: string[] } {
+  const flags: Flags = {}, positions: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index]!;
+    if (!argument.startsWith("--")) { positions.push(argument); continue; }
+    const equals = argument.indexOf("="), word = equals < 0 ? argument : argument.slice(0, equals);
+    const inline = equals < 0 ? undefined : argument.slice(equals + 1);
+    if (Object.hasOwn(flags, word)) throw new Error(`Duplicate option ${word}`);
+    if (word === "--json" || word === "--stdin" || word === "--allow-empty") {
+      if (inline !== undefined) throw new Error(`${word} does not accept a value`);
+      flags[word] = true; continue;
+    }
+    const value = inline ?? args[++index];
+    if (value === undefined || (inline === undefined && value.startsWith("--"))) throw new Error(`Missing value for ${word}`);
+    flags[word] = value;
+  }
+  return { flags, positions };
+}
+
+/** Strict pre-connection parsing: no grants, silently ignored options or invented defaults. */
+export function parseCoworkArgs(surface: "workspace" | "project", args: string[]): CoworkCliRoute | { help: true } {
+  if (args.length === 1 && ["--help", "-h", "help"].includes(args[0]!)) return { help: true };
+  const { flags, positions } = argumentsOf(args);
+  const [verb = "list", sub, id, extra] = positions;
+  let method: CoworkMethod, params: Record<string, unknown>, allowed: string[];
+  const identity = (value?: string) => surface === "project" ? { projectId: value } : { workspaceId: value };
+  const number = (flag: string) => {
+    const value = flags[flag];
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${flag} must be a positive integer`);
+    return Number(value);
+  };
+  const page = () => ({ cursor: flags["--cursor"], limit: number("--limit"), expectedRevision: number("--revision") });
+  const mutation = () => ({ requestId: flags["--request-id"], expectedRevision: number("--revision") });
+  const arity = (count: number) => { if (positions.length !== count) throw new Error("Unexpected or missing positional arguments"); };
+  if (verb === "list") {
+    if (positions.length > 1) throw new Error("list takes no positional arguments");
+    method = surface === "project" ? "project.list" : "workspace.list";
+    params = { cursor: flags["--cursor"], limit: number("--limit") }; allowed = ["--cursor", "--limit"];
+  } else if (verb === "get") {
+    arity(2); method = surface === "project" ? "project.get" : "workspace.get"; params = identity(sub); allowed = [];
+  } else if (verb === "update") {
+    arity(2); method = surface === "project" ? "project.update" : "workspace.update"; params = { ...identity(sub), ...mutation(), title: flags["--title"] }; allowed = ["--title", "--revision", "--request-id"];
+  } else if (verb === "source" && surface === "workspace") {
+    allowed = sub === "list" ? ["--cursor", "--limit", "--revision"] : sub === "get" ? [] : ["--revision", "--request-id"];
+    if (sub === "list") { arity(3); method = "workspace.source.list"; params = { workspaceId: id, ...page() }; }
+    else if (sub === "get") { arity(4); method = "workspace.source.get"; params = { workspaceId: id, sourceId: extra }; }
+    else if (sub === "remove" || sub === "revoke") { arity(4); method = sub === "revoke" ? "workspace.source.revoke" : "workspace.source.remove"; params = { workspaceId: id, sourceId: extra, ...mutation() }; }
+    else if (sub === "add-folder" || sub === "add-repository") {
+      arity(3); method = sub === "add-folder" ? "workspace.source.addFolder" : "workspace.source.addRepository"; params = { workspaceId: id, selectionId: flags["--selection-id"], ...mutation() }; allowed.push("--selection-id");
+    } else throw new Error("Unknown workspace source command");
+  } else if (verb === "policy") {
+    allowed = sub === "get" ? ["--cursor", "--limit", "--revision"] : ["--revision", "--request-id"];
+    arity(3);
+    if (sub === "get" && surface === "workspace") { method = "workspace.policy.get"; params = { workspaceId: id, ...page() }; }
+    else if (sub === "set-default") { method = surface === "project" ? "project.setDefaultPolicy" : "workspace.setDefaultPolicy"; params = { ...identity(id), ...mutation(), defaultPolicy: flags["--policy"] }; allowed.push("--policy"); }
+    else if (sub === "set-publication" && surface === "workspace") { method = "workspace.setPublicationPolicy"; params = { workspaceId: id, ...mutation(), publication: flags["--publication"] }; allowed.push("--publication"); }
+    else if (sub === "set-ceiling" && surface === "workspace") {
+      method = "workspace.setCapabilityCeiling"; let ceiling: unknown;
+      try { ceiling = JSON.parse(String(flags["--ceiling-json"])); } catch { throw new Error("--ceiling-json must contain a complete capability ceiling JSON object"); }
+      params = { workspaceId: id, ...mutation(), ceiling }; allowed.push("--ceiling-json");
+    } else throw new Error("Unknown workspace/Project policy command; use workspace policy get with the workspace ID for details");
+  } else if (verb === "schedule" && surface === "workspace") {
+    if (sub === "list") { arity(3); method = "workspace.schedule.list"; params = { workspaceId: id, cursor: flags["--cursor"], limit: number("--limit") }; allowed = ["--cursor", "--limit"]; }
+    else if (sub === "create") {
+      arity(3); method = "workspace.schedule.create"; let definition: unknown;
+      try { definition = JSON.parse(String(flags["--definition-json"])); } catch { throw new Error("--definition-json must contain a complete schedule definition"); }
+      params = { workspaceId: id, requestId: flags["--request-id"], definition }; allowed = ["--definition-json", "--request-id"];
+    } else if (sub === "status") { arity(4); method = "workspace.schedule.status"; params = { workspaceId: id, scheduleId: extra }; allowed = []; }
+    else if (sub === "cancel") { arity(4); method = "workspace.schedule.cancel"; params = { workspaceId: id, scheduleId: extra, expectedRevision: number("--revision") }; allowed = ["--revision"]; }
+    else throw new Error("Unknown workspace schedule command");
+  } else if (verb === "instructions" && surface === "workspace") {
+    arity(3);
+    if (sub === "get" || sub === "provenance") {
+      method = sub === "get" ? "workspace.instructions.get" : "workspace.instructions.provenance";
+      params = { workspaceId: id }; allowed = [];
+    } else if (sub === "update") {
+      method = "workspace.instructions.update"; params = { workspaceId: id, requestId: flags["--request-id"], expectedInstructionRevision: number("--instruction-revision"), expectedDigest: flags["--digest"], content: flags["--content"] };
+      allowed = ["--request-id", "--instruction-revision", "--digest", "--content"];
+    } else throw new Error("Unknown workspace instructions command");
+  } else if (verb === "operation" && sub === "get" && surface === "workspace") {
+    arity(4); method = "workspace.operation.get"; params = { workspaceId: id, operationId: extra }; allowed = [];
+  } else if (verb === "create") throw new Error("Cowork creation is unavailable; production provisioning and host selection issuance remain gated");
+  else throw new Error("Unknown workspace/Project command");
+  for (const flag of Object.keys(flags)) if (flag !== "--json" && !allowed.includes(flag)) throw new Error(`Unsupported option ${flag}`);
+  const result = COWORK_RPC[method].params.safeParse(params);
+  if (!result.success) throw new Error(`Invalid arguments: ${result.error.issues.map(issue => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")}`);
+  return { method, params: result.data, json: flags["--json"] === true };
+}
+
+function guidanceText(bytes: Uint8Array): string {
+  if (bytes.byteLength > COWORK_INSTRUCTION_MAX_BYTES) throw new Error(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+  let content: string;
+  try { content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { throw new Error("Shared guidance input is not valid UTF-8"); }
+  if (content.includes("\0")) throw new Error("Shared guidance input contains NUL bytes");
+  return content;
+}
+/** A refusal whose fixed text is safe to show; any other read failure is reduced to a generic message plus its errno code. */
+class GuidanceInputError extends Error {}
+const errnoSuffix = (error: unknown) => { const code = (error as { code?: unknown } | null)?.code; return typeof code === "string" && /^E[A-Z0-9_]{1,31}$/.test(code) ? ` (${code})` : ""; };
+function guidanceFile(path: string): Uint8Array {
+  if (!path || path.includes("\0") || path.endsWith("/")) throw new GuidanceInputError("--content-file must name a regular file");
+  let fd: number | undefined;
+  try {
+    const selected = resolve(path), initial = statSync(selected);
+    if (!initial.isFile()) throw new GuidanceInputError("--content-file must name a regular file");
+    if (initial.size > COWORK_INSTRUCTION_MAX_BYTES) throw new GuidanceInputError(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+    fd = openSync(selected, constants.O_RDONLY | constants.O_NONBLOCK);
+    const held = fstatSync(fd);
+    if (!held.isFile()) throw new GuidanceInputError("--content-file must name a regular file");
+    if (held.size > COWORK_INSTRUCTION_MAX_BYTES) throw new GuidanceInputError(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+    // Bound actual descriptor reads too: a file can grow after either stat.
+    const buffer = Buffer.alloc(COWORK_INSTRUCTION_MAX_BYTES + 1); let used = 0;
+    while (used < buffer.length) { const count = readSync(fd, buffer, used, buffer.length - used, null); if (count === 0) break; used += count; }
+    if (used > COWORK_INSTRUCTION_MAX_BYTES) throw new GuidanceInputError(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+    return buffer.subarray(0, used);
+  } catch (error) {
+    if (error instanceof GuidanceInputError) throw error;
+    // The errno code (ENOENT, EACCES, ...) is the only detail: never the path or any content.
+    throw new Error(`Could not read shared guidance content file${errnoSuffix(error)}`);
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
+async function guidanceStdin(stdin: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const buffer = Buffer.alloc(COWORK_INSTRUCTION_MAX_BYTES); let used = 0;
+  try {
+    for await (const chunk of stdin) {
+      if (!(chunk instanceof Uint8Array)) throw new GuidanceInputError("Shared guidance stdin must supply raw bytes");
+      if (chunk.byteLength > COWORK_INSTRUCTION_MAX_BYTES - used) throw new GuidanceInputError(`Shared guidance input exceeds ${COWORK_INSTRUCTION_MAX_BYTES} bytes`);
+      buffer.set(chunk, used); used += chunk.byteLength;
+    }
+  } catch (error) {
+    if (error instanceof GuidanceInputError) throw error;
+    throw new Error("Could not read shared guidance from stdin");
+  }
+  return buffer.subarray(0, used);
+}
+
+/** Resolve optional private content inputs completely BEFORE connecting. The
+ * canonical RPC keeps its caller's revision/digest/replay ID. Never place resolved
+ * file/stdin content into argv, logs or a deferred route that can send empty data. */
+export async function resolveCoworkArgs(surface: "workspace" | "project", args: string[], input: { stdin?: AsyncIterable<Uint8Array>; terminal?: boolean; hint?: (line: string) => void } = {}): Promise<CoworkCliRoute | { help: true }> {
+  if (args.length === 1 && ["--help", "-h", "help"].includes(args[0]!)) return parseCoworkArgs(surface, args);
+  const { flags, positions } = argumentsOf(args);
+  if (!Object.hasOwn(flags, "--stdin") && !Object.hasOwn(flags, "--content-file")) {
+    if (Object.hasOwn(flags, "--allow-empty")) throw new Error("--allow-empty is only valid with --stdin or --content-file");
+    return parseCoworkArgs(surface, args);
+  }
+  if (surface !== "workspace" || positions[0] !== "instructions" || positions[1] !== "update") throw new Error("--stdin and --content-file are only supported for workspace instructions update");
+  if (["--content", "--stdin", "--content-file"].filter(flag => Object.hasOwn(flags, flag)).length !== 1) throw new Error("Choose exactly one of --content, --stdin or --content-file");
+  const metadata = [...positions, ...Object.entries(flags).filter(([name]) => name !== "--stdin" && name !== "--content-file" && name !== "--allow-empty")
+    .map(([name, value]) => value === true ? name : `${name}=${value}`), "--content="];
+  const route = parseCoworkArgs(surface, metadata);
+  if ("help" in route || route.method !== "workspace.instructions.update") throw new Error("Invalid shared guidance input command");
+  // Invalid revisions/digests/request IDs/extra flags have already refused here,
+  // before any stdin/file input or connection is touched.
+  let bytes: Uint8Array;
+  if (flags["--stdin"] === true) {
+    // A terminal would otherwise sit silent until Ctrl-D. The hint never carries input.
+    if (input.terminal ?? (input.stdin === undefined && process.stdin.isTTY === true)) (input.hint ?? ((line: string) => console.error(line)))("Reading shared guidance from stdin; end with Ctrl-D.");
+    bytes = await guidanceStdin(input.stdin ?? process.stdin);
+  } else bytes = guidanceFile(String(flags["--content-file"]));
+  // A failed producer (`false | winter ... --stdin`) must not blank the guidance; a deliberate clear says so.
+  if (bytes.byteLength === 0 && flags["--allow-empty"] !== true) throw new Error("Shared guidance input is empty; pass --allow-empty to clear the guidance deliberately");
+  const params = COWORK_RPC["workspace.instructions.update"].params.parse({ ...route.params, content: guidanceText(bytes) });
+  return { ...route, params };
+}
+
+export async function runCoworkRoute(client: Pick<WinterClient, "cowork">, route: CoworkCliRoute): Promise<CoworkCliResult> {
+  return client.cowork(route.method, route.params);
+}
+
+function policyLines(policy: CoworkWorkspacePolicy) {
+  return [`Default policy: ${policy.defaultPolicy}`, `Publication policy: ${policy.publication}`, `Network ceiling: ${policy.ceiling.network}`,
+    `Tool classes: ${visible(JSON.stringify(policy.ceiling.toolClasses))}`, `Host services: ${visible(JSON.stringify(policy.ceiling.hostServices))}`, `Connectors: ${visible(JSON.stringify(policy.ceiling.connectors))}`];
+}
+function workspaceLines(value: CoworkWorkspace): string[] {
+  const lines = [`${value.workspaceId} · ${value.ownership} ${value.ownerId} · ${visible(value.title)}`, `State: ${value.state}; power: ${value.power}; configuration revision: ${value.configRevision}`, `Automatic publication default: ${value.automaticPublication ? "enabled" : "disabled"}`];
+  if (value.detailState === "summary") {
+    lines.push(`Details: summary (${value.detailReason}); ${value.sourceCount} source(s)`, `Default policy: ${value.policySummary.defaultPolicy}; publication: ${value.policySummary.publication}; network: ${value.policySummary.network}`,
+      `Capability details omitted; counts: ${JSON.stringify(value.policySummary.capabilityCounts)}`, `Read details: winter workspace source list ${value.workspaceId}; winter workspace policy get ${value.workspaceId} --revision ${value.policySummary.revision}`);
+  } else lines.push("Details: complete", ...policyLines(value.policy), ...value.sources.map(source => `Source ${source.sourceId}: ${visible(source.label)} · ${source.state} · ${source.desired} · ${source.access}`));
+  return lines;
+}
+
+export function formatCoworkResult(route: CoworkCliRoute, result: CoworkCliResult): string[] {
+  if (route.json) return [JSON.stringify(result, null, 2)];
+  if ("schedules" in result) return [...result.schedules.map(value => `${value.scheduleId}: ${value.state}; revision ${value.revision}; next due ${value.nextDue ?? "none"}`), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
+  if ("schedule" in result) return [`${result.schedule.scheduleId}: ${result.schedule.state}; guest execution ${result.execution}`, ...result.occurrences.map(value => `${value.occurrenceId}: ${value.state}; blocked ${value.reason ?? "none"}; missed ${value.missedCount}`)];
+  if ("scheduleId" in result) return [`Schedule ${result.scheduleId}: ${result.state}; revision ${result.revision}; metadata recorded; guest execution unavailable`];
+  if ("digest" in result) {
+    const lines = [`Shared guidance revision ${result.instructionRevision}; SHA-256 ${result.digest}; ${result.bytes} byte(s); ${result.refreshState}`];
+    if ("contentBase64" in result) lines.push(visible(Buffer.from(result.contentBase64, "base64").toString("utf8")));
+    if ("sourceDiscovery" in result) lines.push(`Source discovery: ${result.sourceDiscovery}`, ...result.entries.map(entry => `${entry.kind}: ${entry.guestPath}; SHA-256 ${entry.digest}`));
+    return lines;
+  }
+  if ("workspaces" in result) return [...(result.workspaces.length ? result.workspaces.flatMap(workspaceLines) : ["(no workspaces)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
+  if ("projects" in result) return [...(result.projects.length ? result.projects.flatMap(project => workspaceLines(project.workspace)) : ["(no Projects)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
+  if ("workspace" in result) return workspaceLines(result.workspace);
+  if ("ownership" in result) return workspaceLines(result);
+  if ("operationId" in result) {
+    if ("value" in result) {
+      const lines = [`Operation ${result.operationId} recorded at configuration revision ${result.revision}; guest effects are not confirmed`, `Check: winter workspace operation get ${result.workspaceId} ${result.operationId}`], value = result.value;
+      if ("digest" in value) lines.push(`Shared guidance revision ${value.instructionRevision}; SHA-256 ${value.digest}; ${value.refreshState}`);
+      else if ("detailState" in value && value.detailState === "summary") lines.push(`Policy details: summary (${value.detailReason}); publication: ${value.policySummary.publication}; network: ${value.policySummary.network}`, `Capability details omitted; counts: ${JSON.stringify(value.policySummary.capabilityCounts)}`, `Read: winter workspace policy get ${result.workspaceId} --revision ${value.policySummary.revision}`);
+      else if ("ceiling" in value) lines.push(...policyLines(value));
+      else if ("sourceId" in value) lines.push(`Source ${value.sourceId}: ${value.state} · ${value.desired}`);
+      else if ("title" in value) lines.push(`Title: ${visible(value.title)}`);
+      return lines;
+    }
+    return [`Operation ${result.operationId}: ${result.status}; terminal: ${result.terminal}; configuration revision: ${result.revision}`];
+  }
+  if ("entries" in result) return [`Policy ${result.policy.policyId}; revision: ${result.policy.revision}; default: ${result.policy.defaultPolicy}; publication: ${result.policy.publication}; network: ${result.policy.network}`, `Capability counts: ${JSON.stringify(result.policy.capabilityCounts)}`, ...result.entries.map(entry => `${entry.kind}: ${visible(entry.name)}`), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
+  if ("sources" in result) return [...(result.sources.length ? result.sources.map(source => `${source.sourceId}: ${visible(source.label)} · ${source.state} · ${source.desired} · ${source.access}`) : ["(no sources on this page)"]), ...(result.nextCursor ? [`Next cursor: ${result.nextCursor}`] : [])];
+  if ("sourceId" in result) return [`${result.sourceId}: ${visible(result.label)} · ${result.state} · ${result.desired} · ${result.access}; source revision: ${result.revision}`];
+  throw new Error("Unsupported Cowork result");
+}
+
+/** Session door D4b: `winter workspace session create|list`. Not a Cowork RPC: `session.create {mode: "cowork"}` and a
+ *  `session.list` filtered by the row's workspace reference. Strict like the rest: no default request id or scope guess. */
+export type CoworkSessionCliRoute =
+  | { kind: "session-create"; scope: string; workspaceId: string; requestId: string; location: { kind: "source"; sourceId: string; relativeCwd?: string }; json: boolean }
+  | { kind: "session-list"; workspaceId: string; json: boolean };
+export function parseCoworkSessionArgs(args: string[]): CoworkSessionCliRoute {
+  const { flags, positions } = argumentsOf(args);
+  const [verb, sub, workspaceId] = positions;
+  if (verb !== "session" || positions.length !== 3 || !workspaceId) throw new Error("Unexpected or missing positional arguments");
+  const allowed = sub === "create" ? ["--source", "--cwd", "--request-id"] : sub === "list" ? [] : undefined;
+  if (allowed === undefined) throw new Error("Unknown workspace session command");
+  for (const flag of Object.keys(flags)) if (flag !== "--json" && !allowed.includes(flag)) throw new Error(`Unsupported option ${flag}`);
+  const json = flags["--json"] === true;
+  if (sub === "list") return { kind: "session-list", workspaceId, json };
+  const sourceId = flags["--source"], requestId = flags["--request-id"], cwd = flags["--cwd"];
+  if (typeof sourceId !== "string") throw new Error("--source is required");
+  if (typeof requestId !== "string") throw new Error("--request-id is required");
+  const location = { kind: "source" as const, sourceId, ...(typeof cwd === "string" ? { relativeCwd: cwd } : {}) };
+  const checked = CoworkSessionCreate.safeParse({ workspaceId, requestId, location });
+  if (!checked.success) throw new Error(`Invalid arguments: ${checked.error.issues.map(issue => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")}`);
+  return { kind: "session-create", scope: "global", workspaceId, requestId, location, json };
+}
+export async function runCoworkSessionRoute(client: Pick<WinterClient, "createCoworkSession" | "listSessions">, route: CoworkSessionCliRoute): Promise<string[]> {
+  if (route.kind === "session-create") {
+    const created = await client.createCoworkSession(route.scope, { workspaceId: route.workspaceId, requestId: route.requestId, location: route.location });
+    return route.json ? [JSON.stringify({ sessionId: created.sessionId }, null, 2)] : [`Cowork conversation ${created.sessionId} in ${route.workspaceId}`];
+  }
+  type Row = { sessionId: string; title?: string | null; cowork?: { workspaceId: string; projectId: string | null } };
+  const rows = ((await client.listSessions()).sessions as Row[]).filter((row: Row) => row.cowork?.workspaceId === route.workspaceId);
+  if (route.json) return [JSON.stringify({ sessions: rows.map((row: Row) => ({ sessionId: row.sessionId, projectId: row.cowork!.projectId, title: row.title ?? null })) }, null, 2)];
+  return rows.length ? rows.map((row: Row) => `${row.sessionId}${row.title ? ` · ${visible(row.title)}` : ""}`) : ["(no Cowork conversations)"];
+}
+
+export function coworkErrorMessage(error: unknown): string {
+  const data = (error as { rpc?: { data?: { code?: unknown; currentRevision?: unknown } } } | null)?.rpc?.data;
+  const code = typeof data?.code === "string" ? data.code : undefined;
+  const revision = typeof data?.currentRevision === "number" && Number.isSafeInteger(data.currentRevision) && data.currentRevision > 0 ? data.currentRevision : undefined;
+  const note = code === "unsupported_topology" ? "Provisioning is blocked by the host integration gates." : code === "stale_cursor" ? "Visible details changed; restart pagination without --cursor." : code === "revision_conflict" ? `Refresh the record and retry with its current revision${revision === undefined ? "." : ` (${revision}).`}` : code === "request_conflict" ? "This request ID already records different arguments; use its original arguments or a new request ID for a new change." : code === "authority_denied" ? "Current host authority refused the request." : undefined;
+  const message = error instanceof Error ? error.message : "Cowork command failed";
+  return `${visible(message)}${code ? ` [${visible(code)}]` : ""}${note ? ` ${note}` : ""}`;
+}
