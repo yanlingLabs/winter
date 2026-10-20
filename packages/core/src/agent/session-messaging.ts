@@ -477,13 +477,23 @@ export class SessionMessaging {
    * restart; it is a no-op without a peer inbox. Never throws.
    */
   drainCoworkInbox(recipientSessionId: string): Promise<void> {
-    const previous = this.drains.get(recipientSessionId) ?? Promise.resolve();
-    const run = previous.then(() => this.drainOnce(recipientSessionId)).catch((err) => {
+    return this.runInRecipientChain(recipientSessionId, () => this.drainOnce(recipientSessionId)).catch((err) => {
       this.log(`draining the Cowork peer inbox of ${recipientSessionId} failed (${err instanceof Error ? err.name : "error"})`);
     });
-    this.drains.set(recipientSessionId, run);
-    void run.then(() => { if (this.drains.get(recipientSessionId) === run) this.drains.delete(recipientSessionId); });
-    return run;
+  }
+
+  /**
+   * Runs `work` in the recipient's drain chain: after every drain or chained job already queued for that recipient, and before any later one. The
+   * held-input reconcile uses it (`coworkHeldInputReconciler`'s `chain`) so no drain interleaves with it. A throw rejects HERE (the chain itself
+   * carries on). Used by nothing in production: only a composition that supplies a held-input gate calls it.
+   */
+  runInRecipientChain(recipientSessionId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.drains.get(recipientSessionId) ?? Promise.resolve();
+    const result = previous.then(() => work());
+    const tail = result.catch(() => undefined);
+    this.drains.set(recipientSessionId, tail);
+    void tail.then(() => { if (this.drains.get(recipientSessionId) === tail) this.drains.delete(recipientSessionId); });
+    return result;
   }
 
   private async drainOnce(recipientId: string): Promise<void> {

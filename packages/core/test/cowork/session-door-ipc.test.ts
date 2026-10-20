@@ -465,6 +465,8 @@ test("pins (structural): no src module supplies the N3 cold-resume or the N4 hel
   // owner applies the cold-resume owner patch (the unmodified native owner refuses a resume record).
   expect(portNameWrites(["coldResume", "heldInput", "ownerPatchApplied"])).toEqual([
     "core/src/agent/session-messaging.ts PropertySignature readonly heldInput?: CoworkHeldInputVerbs;",
+    // b4: the gated composition seam NAMES the driver dep's type (a type reference, not a write); no production source imports it (peer-inbox-composition.test.ts pins that).
+    "core/src/cowork/peer-inbox-composition.ts LiteralType \"heldInput\"",
     "core/src/cowork/session-driver.ts PropertyAssignment heldInput: coworkHeldInputVerbs(queryNow, () => handle.cowor",
     "core/src/cowork/session-driver.ts PropertySignature readonly coldResume?: { readonly ownerPatchApplied: true };",
     "core/src/cowork/session-driver.ts PropertySignature readonly heldInput?: { readonly enabled: true; /** Design ru",
