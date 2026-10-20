@@ -11,7 +11,7 @@ export const BASE_PROMPT = [
   "You operate inside a session working directory; file tool paths are relative to it.",
   "Use the tools to accomplish the user's request, then reply with a concise summary.",
   // CC-parity (user directive 2026-07-10): route decisions the user must make THROUGH the tool.
-  "When you need the user to choose between options or clarify something you cannot resolve from the request, the code, or sensible defaults, ALWAYS ask via the ask_user tool with structured options — never pose the question as prose and stop. (This is about HOW to ask, not WHETHER: if you can proceed on a sensible default, just proceed.)",
+  "When you need the user to choose between options or clarify something you cannot resolve from the request, the code, or sensible defaults, ALWAYS ask via the ask_user tool — never pose the question as prose and stop. Prefer 2–4 concrete options with your recommendation first; ask a free-text question (no options) only when the answer can't be predicted, like a name or a value. (This is about HOW to ask, not WHETHER: if you can proceed on a sensible default, just proceed.)",
 ].join(" ");
 
 /** The prompt half of the `ultra` tier (provider-correctness T5) — injected into the base region by

@@ -386,13 +386,26 @@ export const QuestionOptionSchema = z.object({
   // older-shaped questions without a preview still parse.
   preview: z.string().optional(),
 });
+/** The longest `Question.placeholder` on the wire — the daemon clamps a longer one, never refuses it. */
+export const QUESTION_PLACEHOLDER_MAX = 80;
 export const QuestionSchema = z.object({
   // `header` is the ≤12-char chip shown above a question in multi-question cards. OPTIONAL since
   // Slice B1: chat's `AskQuestion` emits a deliberately simplified card (question + labels + Other,
   // no chip, no per-option description, no notes), and a header-less question is a genuinely
   // different SHAPE — not a rendering trick. Absent ⟹ simplified card; see PendingCards.swift.
   question: z.string().min(1), header: z.string().min(1).max(12).optional(),
-  options: z.array(QuestionOptionSchema).min(2).max(4), multiSelect: z.boolean(),
+  // Free-text questions (2026-10-20): NO options (absent or `[]`) is a question answered by typing
+  // alone; 2–4 options are a menu, always with a free-text box under it. Exactly one option is still
+  // refused (a menu of one is not a choice). The daemon always EMITS the key (`[]` for none): a
+  // shipped Swift client decodes `options` as a required array, and an empty one degrades to its
+  // Other field — an absent key would fail its decode.
+  options: z.array(QuestionOptionSchema).max(4)
+    .refine((options) => options.length !== 1, { message: "options must be empty (a free-text question) or hold 2-4 entries" })
+    .default([]),
+  multiSelect: z.boolean(),
+  // The free-text box's hint (2026-10-20), optional/additive. Capped at 80 characters by the daemon
+  // before it ever reaches a log.
+  placeholder: z.string().min(1).max(QUESTION_PLACEHOLDER_MAX).optional(),
 });
 export const TaskSchema = z.object({
   id: z.string().min(1), subject: z.string().min(1),

@@ -484,11 +484,33 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// chip. `nil` is the signal for "simplified": no chip, no per-option descriptions, no
         /// notes affordance (see PendingCards.swift).
         public let header: String?
+        /// Empty = a FREE-TEXT question (2026-10-20): no menu, the user types the answer. A menu (2–4)
+        /// always gets a free-text box under it too. The daemon always sends the key (`[]` for none);
+        /// an absent key decodes as `[]` all the same.
         public let options: [QuestionOption]
         public let multiSelect: Bool
-        public init(question: String, header: String? = nil, options: [QuestionOption], multiSelect: Bool) {
+        /// The free-text box's hint (≤ 80 characters, daemon-clamped). Optional/additive — absent in
+        /// older-shaped payloads.
+        public let placeholder: String?
+        public init(question: String, header: String? = nil, options: [QuestionOption] = [], multiSelect: Bool,
+                    placeholder: String? = nil) {
             self.question = question; self.header = header; self.options = options; self.multiSelect = multiSelect
+            self.placeholder = placeholder
         }
+
+        private enum CodingKeys: String, CodingKey { case question, header, options, multiSelect, placeholder }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            question = try c.decode(String.self, forKey: .question)
+            header = try c.decodeIfPresent(String.self, forKey: .header)
+            options = try c.decodeIfPresent([QuestionOption].self, forKey: .options) ?? []
+            multiSelect = try c.decode(Bool.self, forKey: .multiSelect)
+            placeholder = try c.decodeIfPresent(String.self, forKey: .placeholder)
+        }
+
+        /// No menu: the question is answered by typing alone.
+        public var isFreeText: Bool { options.isEmpty }
     }
 
     public struct Task: Codable, Equatable, Sendable {

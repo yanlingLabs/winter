@@ -179,10 +179,13 @@ final class InteractionCardTests: XCTestCase {
         XCTAssertEqual(resolvedAnswer(for: commas, answer: "a, b"), .options([0]))
     }
 
-    /// A partial match is free text, not a half-marked set: "bash, sudo" names one real option and
-    /// one that does not exist, and guessing which half to honour would misreport the record.
-    func testAPartiallyMatchingAnswerIsFreeTextNotAHalfMarkedSet() {
-        XCTAssertEqual(resolvedAnswer(for: toolsQuestion, answer: "bash, sudo"), .freeText("bash, sudo"))
+    /// Free-text questions (2026-10-20): a multiple-choice question's typed text JOINS its picks, labels first
+    /// (`questionAnswers`), so "bash, sudo" on one is the pick "bash" and the typed "sudo" — read back as exactly
+    /// that. A typed part that comes BEFORE a label is no such shape: free text, whole, as before.
+    func testAMultipleChoiceAnswerOfLabelsThenTextIsPicksAndText() {
+        XCTAssertEqual(resolvedAnswer(for: toolsQuestion, answer: "bash, sudo"), .optionsAndText([0], "sudo"))
+        XCTAssertEqual(resolvedAnswer(for: toolsQuestion, answer: "bash, write, sudo, doas"), .optionsAndText([0, 2], "sudo, doas"))
+        XCTAssertEqual(resolvedAnswer(for: toolsQuestion, answer: "sudo, bash"), .freeText("sudo, bash"))
     }
 
     /// No entry for this question in the answers dict — reachable on an `.ended` card, and on a
