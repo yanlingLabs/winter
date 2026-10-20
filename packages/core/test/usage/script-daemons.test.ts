@@ -49,7 +49,7 @@ const NO_DAEMON_OF_ITS_OWN: Record<string, string> = {
   "scripts/cu-live/build.ts": "compiles and signs winter-core-live; runs it never",
   "scripts/verify-automation-worker-compiled.ts": "runs only the `__automation-worker` route (a worker, no daemon)",
   "scripts/verify-workflow-compiled.ts": "runs only the `__workflow-worker` route (a worker, no daemon)",
-  "scripts/verify-fd-receiver-compiled.ts": "runs only the `__fd-receiver-probe` and `__host-code-adapter-probe` routes of the compiled binary (no daemon)",
+  "scripts/verify-fd-receiver-compiled.ts": "runs only the `__fd-receiver-probe`, `__host-code-adapter-probe` and `__host-env-lazy-probe` routes of the compiled binary (no daemon)",
   "scripts/verify-runtimes-compiled.ts": "runs only `__runtimes-probe` (resolves the bundled runtimes, no daemon)",
   "scripts/release.ts": "builds, signs and notarizes winter-core; runs only `__keychain-ffi-probe` (an ffi check, no daemon)",
   "scripts/release.test.ts": "tests the release's helpers; boots none",

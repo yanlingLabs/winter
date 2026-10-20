@@ -269,7 +269,8 @@ test("N2 S7B part 1: the production environment is built only through the activa
   const hostEnvImporters = [...allSources, ...scriptSources].filter(file => !isHostEnv(file) && specifiersOf(readFileSync(file, "utf8")).some(specifier => /(^|\/)host-env(\/|$)/.test(specifier))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
   expect(hostEnvImporters).toEqual(["packages/core/src/cowork/native-activation.ts"]);
   const activationImporters = [...allSources, ...scriptSources].filter(file => file !== ACTIVATION && specifiersOf(readFileSync(file, "utf8")).some(specifier => /(^|\/)native-activation(\.ts|\.js)?$/.test(specifier))).map(file => relative(repositoryRoot, file).split(sep).join("/"));
-  expect(activationImporters).toEqual(["packages/core/src/daemon.ts"]);
+  // The daemon, plus the compiled-binary probe (`__host-env-lazy-probe`), which only loads the lazy module to prove it resolves in the built binary and builds nothing.
+  expect([...activationImporters].sort()).toEqual(["packages/cli/src/fd-receiver-probe.ts", "packages/core/src/daemon.ts"]);
   // 2. the daemon calls the seam lazily (a thunk), so nothing about the environment is read while it is off
   expect(readFileSync(join(packages, "core", "src", "daemon.ts"), "utf8")).toContain("coworkNativeProductionEnvironment(() => ({");
   // 3. the seam answers undefined, with the thunk never called
