@@ -22,12 +22,16 @@ export interface CoworkNativeActivationContext {
   readonly home: string; readonly db: RuntimeStateDb; readonly records: CoworkRepository;
   readonly env: Readonly<Record<string, string | undefined>>;
 }
+/** The one lazy load of the host-env graph: nothing under host-env/ is loaded until the seam is on and the environment is built. A literal path, so the compiled binary bundles it
+ *  (`winter-core __host-env-lazy-probe` proves the require resolves inside the built binary; it loads the module, builds nothing and reads no home). */
+export function loadCoworkHostEnvironmentModule(): typeof import("./host-env/environment") {
+  return require("./host-env/environment") as typeof import("./host-env/environment");
+}
 export function coworkNativeProductionEnvironment(context: () => CoworkNativeActivationContext): (() => CoworkNativeEnvironment) | undefined {
   if (!COWORK_NATIVE_ENVIRONMENT_ACTIVATED) return undefined;
   const { home, db, records, env } = context();
   return () => {
-    // Lazy on purpose: nothing under host-env/ is loaded until the seam is on and the environment is built.
-    const hostEnv = require("./host-env/environment") as typeof import("./host-env/environment");
+    const hostEnv = loadCoworkHostEnvironmentModule();
     return hostEnv.createCoworkNativeProductionEnvironment({ home, db, records, coordination: { env, homeDirectory: homedir() }, executablePath: process.execPath, ...(env.WINTER_PROFILE === "dev" ? { launcherIdentifier: hostEnv.COWORK_LAUNCHER_DEV_IDENTIFIER } : {}) });
   };
 }
