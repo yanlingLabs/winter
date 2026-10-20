@@ -23,13 +23,10 @@ final class CUActScope {
     /// a count that moved since means they worked in it during the act — even if they have left it since (the review of
     /// round 17, M1).
     let workMarksAtStart: Int
-    /// The session holds the app in front by the user's consent (`requestForeground`): their work mark stops nothing.
-    let held: Bool
-    init(pid: pid_t, appName: String, workMarksAtStart: Int = 0, held: Bool = false) {
+    init(pid: pid_t, appName: String, workMarksAtStart: Int = 0) {
         self.pid = pid
         self.appName = appName
         self.workMarksAtStart = workMarksAtStart
-        self.held = held
     }
 
     private static let key = "WinterCUCore.actScope"
@@ -56,7 +53,8 @@ final class CUActWriteGuard: @unchecked Sendable {
         guard let scope = CUActScope.current, let core else { return true }
         if let owner, owner != scope.pid, !core.sys.isContentProcess(owner, of: scope.pid) { return true }  // another app's: a restore
         if scope.stopped != nil { return false }
-        if scope.held { return true }
+        // (A granted requestForeground is no exemption here: the grant lifted the mark that was there then
+        // (`holdForegroundNow`), so what this sees is the user's work since — which stops the act like any other.)
         guard core.userIsWorking(in: scope.pid) || core.workMarks(scope.pid) != scope.workMarksAtStart else { return true }
         if scope.stopped == nil {
             scope.stopped = what()
@@ -166,7 +164,7 @@ extension CUCore {
     /// reaches `t`, and the act ends refused (`user_working`) — its own sentence kept when it said so itself (a burst's
     /// "typed N of M"), the guard's otherwise.
     func withActWriteGuard<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
-        let scope = CUActScope(pid: t.pid, appName: t.appName, workMarksAtStart: workMarks(t.pid), held: holdsForeground(t))
+        let scope = CUActScope(pid: t.pid, appName: t.appName, workMarksAtStart: workMarks(t.pid))
         let outer = CUActScope.swap(scope)
         defer { _ = CUActScope.swap(outer) }
         let result: T

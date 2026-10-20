@@ -53,7 +53,14 @@ extension CUCore {
             return true
         }
         let at = clock.nowSeconds()
-        guardianLock.withLock { guardianCore.exempt(t.pid, until: at + Self.holdForegroundMaxSeconds, now: at) }
+        // The user's yes on the card is their go-ahead in this app: the work mark it had THEN lifts. Work of theirs in it
+        // after this marks it anew and stops the agent, in an act or between (the review of 2026-10-20: an exemption for
+        // the whole hold let the agent go on while they typed into the app mid-act).
+        let lifted = guardianLock.withLock { () -> Bool in
+            guardianCore.exempt(t.pid, until: at + Self.holdForegroundMaxSeconds, now: at)
+            return guardianCore.liftUserWork(t.pid)
+        }
+        if lifted { CULog.guardian.notice("the user's work mark on \(t.appName, privacy: .public) lifted (their yes to requestForeground)") }
         if sys.frontmostPid() != t.pid {
             noteGuardianCause(t.pid, raise: true)
             _ = sys.activate(pid: t.pid)

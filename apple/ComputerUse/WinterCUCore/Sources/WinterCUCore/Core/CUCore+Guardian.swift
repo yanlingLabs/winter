@@ -564,7 +564,7 @@ extension CUCore {
     /// The work mark alone (no Secure Event Input evidence — an act's own typing changes the text): for the checks INSIDE
     /// an act already in flight, before each focus placement, key and paste.
     func refuseIfUserWorkMarked(_ t: CUTarget) throws {
-        guard !holdsForeground(t), userIsWorking(in: t.pid) else { return }
+        guard userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): the user started working in it while the act ran — stopped")
         throw CUError.refused(.userWorking, Self.userWorkingWords(t.appName))
     }
@@ -575,8 +575,8 @@ extension CUCore {
         "the user is working in \(app) right now — ask the user to switch away from \(app) for a moment, or to say go ahead (their next message lets you act)"
     }
 
-    /// The user let the agent go ahead in these apps (`work.lift`, from the daemon: their message to the session, or the
-    /// session releasing the app): each one's work mark lifts — until they work in it anew.
+    /// The user let the agent go ahead in these apps (`work.lift`, from the daemon: the user's own message to a session
+    /// that was refused there — never a session releasing the app): each one's work mark lifts — until they work in it anew.
     public func workLift(_ p: WorkLiftParams) async throws -> WorkLiftResult {
         let lifted = guardianLock.withLock { p.pids.filter { guardianCore.liftUserWork($0) } }
         for pid in lifted { CULog.guardian.notice("the user's work mark on \(self.appName(pid), privacy: .public) lifted (\(p.reason ?? "the daemon", privacy: .public))") }
@@ -631,9 +631,9 @@ extension CUCore {
         case .none:
             break
         }
-        // A granted requestForeground card is the user's yes for this run: their mark does not stop it (the secure-input
-        // rules above still do).
-        guard !holdsForeground(t), userIsWorking(in: t.pid) else { return }
+        // A granted requestForeground card lifted the mark that was there when the user said yes (`holdForegroundNow`);
+        // their work in the app since marks it anew and stops the agent here as anywhere (the review of 2026-10-20).
+        guard userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, Self.userWorkingWords(t.appName))
     }

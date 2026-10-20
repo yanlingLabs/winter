@@ -1329,8 +1329,9 @@ public struct CUFocusGuardianCore: Sendable {
         }
     }
 
-    /// The user let the agent go ahead (their message to the session, or the session releasing the app): their work mark
-    /// on `app` — landed or pending — lifts, until they work in it anew. Whether there was one.
+    /// The user let the agent go ahead (their message to a session refused there, or their yes to its requestForeground —
+    /// never an agent releasing the app): their work mark on `app` — landed or pending — lifts, until they work in it anew.
+    /// Whether there was one.
     public mutating func liftUserWork(_ app: pid_t) -> Bool {
         var lifted = false
         if userWorkingApp == app { userWorkingApp = nil; lifted = true }

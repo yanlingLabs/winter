@@ -308,16 +308,48 @@ final class PointClickTests: XCTestCase {
         _ = await expectUserWorking { try await self.click([600, 600]) }
     }
 
-    func testAGrantedRequestForegroundActsDespiteTheMark() async throws {
+    /// The review of 2026-10-20: the yes to requestForeground covers the mark the app had THEN — never work of theirs after.
+    func testAGrantedRequestForegroundLiftsTheMarkItHadButNewWorkStillStopsTheAgent() async throws {
         world(browser: false)
         sys.front = pid
         core.testUserInput(pid: pid, switching: false)
         _ = await expectUserWorking { try await self.click([600, 600]) }
         XCTAssertTrue(core.holdForegroundNow(target).front)
         try await click([600, 600])
-        XCTAssertEqual(downs.count, 1, "the user's yes on the card, for this run")
-        core.releaseHeldForeground(sessionId: "s")
+        XCTAssertEqual(downs.count, 1, "the user's yes on the card lifted the mark it had")
+        // They work in it again, the hold still on: refused at the act's start.
+        core.testUserInput(pid: pid, switching: false)
         _ = await expectUserWorking { try await self.click([600, 600]) }
+        XCTAssertEqual(downs.count, 1)
+        core.releaseHeldForeground(sessionId: "s")
+    }
+
+    func testAGrantedRequestForegroundStillStopsAnActWhenTheUserWorksInItMidAct() throws {
+        world(browser: false)
+        sys.front = pid
+        core.testUserInput(pid: pid, switching: false)
+        XCTAssertTrue(core.holdForegroundNow(target).front)
+        XCTAssertThrowsError(try core.withActWriteGuard(target) {
+            core.poster.post(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!, pid: pid, route: .publicPid, authenticate: false)
+            core.testUserInput(pid: pid, switching: false)  // they type into it while the act runs
+            core.poster.post(CGEvent(keyboardEventSource: nil, virtualKey: 1, keyDown: true)!, pid: pid, route: .publicPid, authenticate: false)
+        }) { e in XCTAssertEqual((e as? CUError)?.data?["reason"], .string("user_working")) }
+        XCTAssertEqual(poster.entries.map(\.keycode), [0], "the key before their work went; the one after did not")
+        core.releaseHeldForeground(sessionId: "s")
+    }
+
+    /// The review of 2026-10-20: a release never lifts the mark — a target released and bound again finds it still there.
+    func testTheMarkOutlastsAReleaseAndANewBindingOfTheApp() async throws {
+        world(browser: false)
+        sys.front = pid
+        core.testUserInput(pid: pid, switching: false)
+        _ = try await core.targetRelease(TargetReleaseParams(targetId: "t1"))
+        target = CUTarget(id: "t1", sessionId: "s2", pid: pid, bundleId: "com.example.browser", appName: "Browser",
+                          isChromium: false, mirror: false, windowID: 77, windowTitle: "Page")
+        core.registerForTesting(target, windowElement: window)
+        target.refs.beginGeneration()
+        _ = await expectUserWorking { try await self.click([600, 600]) }
+        XCTAssertEqual(downs.count, 0)
     }
 
     // MARK: why the make-key step declined
